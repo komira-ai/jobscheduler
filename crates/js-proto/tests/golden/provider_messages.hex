@@ -17,6 +17,10 @@ MountResponse: 0a 11 2f 73 72 76 2f 74 69 65 72 2f 6a 6f 62 2d 31 2f 32
 ReleaseRequest: 0a 14 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02
 # ReleaseResponse: no fields
 ReleaseResponse: 
+# CheckRequest: source
+CheckRequest: 0a 14 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 18 02
+# CheckResponse: lost "tree-lost"
+CheckResponse: 0a 09 74 72 65 65 2d 6c 6f 73 74
 # SweepRequest: agent "host-1", keep "js.job-1" and "js.job-2"
 SweepRequest: 0a 06 68 6f 73 74 2d 31 12 08 6a 73 2e 6a 6f 62 2d 31 12 08 6a 73 2e 6a 6f 62 2d 32
 # SweepResponse: released 5

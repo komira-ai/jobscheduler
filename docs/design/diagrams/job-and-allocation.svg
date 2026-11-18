@@ -71,7 +71,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="20" y="250" class="t-m" text-anchor="start">a refusal is an answer, not a state:</text>
 <text x="20" y="266" class="t-m" text-anchor="start">nothing is recorded</text>
 <path d="M290,96 L290,82 L95,82 L95,96" class="ln-o" marker-end="url(#job-and-allocation-ao)"/>
-<text x="192" y="77" class="t-m lbl" text-anchor="middle">whole-host prepare failed: back to queued, the only requeue</text>
+<text x="192" y="77" class="t-m lbl" text-anchor="middle">whole-host prepare failed: back to queued (a requeue)</text>
 <text x="820" y="246" class="t-m" text-anchor="start">Lost: the provider says the host is absent,</text>
 <text x="820" y="262" class="t-m" text-anchor="start">or the host came back and does not list the job.</text>
 <text x="410" y="246" class="t-m" text-anchor="start">codes: no-capacity, start-timeout,</text>

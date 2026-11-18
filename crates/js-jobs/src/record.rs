@@ -334,8 +334,9 @@ impl JobState {
 
 /// Whether a job may move from `from` to `to`: [`crate::JobStore::transition`] makes the
 /// moves to a state that has not ended, [`crate::JobStore::end_job`] the moves to an end.
-/// Placement (queued to placed) and the requeue after a failed whole-host prepare (placed to
-/// queued) have operations of their own and are not moves here.
+/// Placement (queued to placed), the requeue after a failed whole-host prepare (placed to
+/// queued) and the requeue of a running job whose tree was lost (running to queued) have
+/// operations of their own and are not moves here.
 pub(crate) fn may_move(from: JobState, to: JobState) -> bool {
     use JobState::{Cancelled, FailedToStart, Lost, Placed, Queued, Running, Starting};
     use StartFailure::{
@@ -407,6 +408,11 @@ pub struct JobRecord {
     /// count by [`crate::JobStore::fail_prepare_with`], and kept while the job is queued, so the
     /// bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
+    /// How many times the job was queued again because a mount provider lost its tree, counted
+    /// by [`crate::JobStore::requeue_lost_tree`] and kept while the job is queued. It is its own
+    /// count: a lost tree is not a failed prepare. At most [`crate::TREE_LOST_REQUEUES`] of
+    /// them. `0` on a row that never had one.
+    pub lost_trees: u32,
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,

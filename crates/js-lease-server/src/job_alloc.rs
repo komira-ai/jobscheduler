@@ -3,7 +3,9 @@
 //! An allocation is freed only when the host confirms the job's container is gone
 //! ([`Freed::HostConfirmed`]) or the provider reads the host absent
 //! ([`Freed::ProviderAbsent`]). A host that is only silent frees nothing: unknown is not
-//! absent. Every path that frees is in this module: [`free_allocation`], which records why
+//! absent. A job sent back to queued when its run ended without its input
+//! ([`js_jobs::JobStore::requeue_lost_tree`]) is confirmed the same way as an ended job, and
+//! its allocation is freed as exited. Every path that frees is in this module: [`free_allocation`], which records why
 //! in the allocation's row from the job's end, [`answer_retired`], which ends a cancelled
 //! job and frees its allocation in the same commit ([`cancel_and_free`] is that end, which a
 //! whole-host job whose host has left `preparing` takes too, [`crate::job_whole`]), and
@@ -43,8 +45,10 @@ pub(crate) enum Freed {
 /// releasing becomes freed in one commit, with the reason the job's end gives it. An
 /// allocation already freed is returned as it is, unwritten: the first reason stands.
 ///
-/// A host's confirmation frees only an allocation whose job has ended or was asked to
-/// cancel, since a job still meant to run is not gone because its host stopped listing it;
+/// A host's confirmation frees only an allocation whose job has ended, was asked to cancel or
+/// was sent back to queued after its run ended ([`js_jobs::JobStore::requeue_lost_tree`], freed
+/// as [`EndReason::Exited`]), since a job still meant to run is not gone because its host
+/// stopped listing it;
 /// a provider's absence frees whatever the job's state (the job is then lost, which its own
 /// path commits).
 ///
@@ -62,7 +66,11 @@ pub(crate) fn free_allocation<S: Store, I: IdSource>(
     let reason = match freed {
         Freed::ProviderAbsent => EndReason::HostAbsent,
         Freed::HostConfirmed => match &job {
-            Some(job) if !job.state.is_ended() & !job.cancel_requested => {
+            Some(job)
+                if !job.state.is_ended()
+                    & !job.cancel_requested
+                    & (job.state != JobState::Queued) =>
+            {
                 return Err(JobStoreError::NotReleasable { id: id.clone() });
             }
             Some(job) => reason_of(job),
@@ -80,8 +88,8 @@ pub(crate) fn free_allocation<S: Store, I: IdSource>(
 ///
 /// - a job with a cancel intent that has not ended becomes cancelled and its allocation
 ///   freed in one commit, so the host is not left booked and the job is never started after;
-/// - a job that has ended (a start timeout, say) has its allocation freed, as on any
-///   confirmation.
+/// - a job that has ended (a start timeout, say), or that was sent back to queued after its
+///   run ended, has its allocation freed, as on any confirmation.
 ///
 /// Anything else (an id the store does not know, an allocation freed or on another host, a
 /// job neither ended nor asked to cancel) is left as it is: nothing is revived or made.
@@ -100,7 +108,7 @@ pub(crate) fn answer_retired<S: Store, I: IdSource>(
     let Some(job) = job.filter(|_| allocation.as_ref().is_some_and(held_here)) else {
         return Ok(());
     };
-    if job.state.is_ended() {
+    if job.state.is_ended() | (job.state == JobState::Queued) {
         free_allocation(store, id, Freed::HostConfirmed)?;
     } else if job.cancel_requested {
         cancel_and_free(store, &job)?;
@@ -131,8 +139,9 @@ pub(crate) fn cancel_and_free<S: Store, I: IdSource>(
 /// section 6.3, section 8 rows 28, 41 and 42): a job that has not ended becomes lost and its
 /// allocation is freed for [`Freed::ProviderAbsent`] in one commit, with the allocation's usage
 /// history row, whatever the job's cancel intent (lost wins: no host report exists, and the
-/// record keeps the intent). A job that has ended, or whose row was deleted at its retention
-/// end, keeps what it has and only its allocation is freed ([`free_allocation`]). Returns the
+/// record keeps the intent). A job that has ended, one that was sent back to queued and waits to
+/// be placed again, or one whose row was deleted at its retention end, keeps what it has and
+/// only its allocation is freed ([`free_allocation`]). Returns the
 /// job this call made lost, if it made one.
 ///
 /// # Errors
@@ -141,7 +150,9 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
     store: &JobStore<S, I>,
     id: &JobId,
 ) -> Result<Option<JobRecord>, JobStoreError> {
-    let live = store.get_job(id)?.filter(|job| !job.state.is_ended());
+    let live = store
+        .get_job(id)?
+        .filter(|job| !job.state.is_ended() & (job.state != JobState::Queued));
     let Some(job) = live else {
         free_allocation(store, id, Freed::ProviderAbsent)?;
         return Ok(None);
@@ -276,10 +287,10 @@ fn reason_of(job: &JobRecord) -> EndReason {
                 Some(ResultReason::Exit | ResultReason::InputFailed) | None => EndReason::Exited,
             }
         }
+        // Sent back to queued after its run ended: the container exited and was released.
+        JobState::Queued => EndReason::Exited,
         // Not ended, with a cancel asked for: the stop is what ends it.
-        JobState::Queued | JobState::Placed | JobState::Starting | JobState::Running => {
-            EndReason::Cancelled
-        }
+        JobState::Placed | JobState::Starting | JobState::Running => EndReason::Cancelled,
     }
 }
 

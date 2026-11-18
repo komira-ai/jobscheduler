@@ -4,8 +4,9 @@
 // layer or mount names a provider and a ref only that provider reads; the agent asks the
 // provider to begin making the tree as soon as it has the job (Prepare), asks for its
 // directory while it readies the container (Mount), tells it when the job's file system
-// is taken apart (Release), and, once it has started, gives up every source of its own
-// that it did not take back from before (Sweep).
+// is taken apart (Release), asks whether it lost a source while the job used it (Check),
+// and, once it has started, gives up every source of its own that it did not take back
+// from before (Sweep).
 //
 // The file stands alone: it imports nothing, so a provider in another repository copies it
 // as it is. It grows only by additions: a field number is never reused or renumbered, a
@@ -26,6 +27,11 @@
 // - Release of a source the provider does not know succeeds, and so does one that arrives
 //   while the source's Prepare is still being answered: the provider ends what the Prepare
 //   began. It answers within 5 seconds.
+// - Check answers whether the provider lost the source while its run used it, and answers
+//   within 5 seconds. A source the provider does not know was not lost. The agent asks it
+//   after a job that did not succeed has ended, once for each provider source of the job,
+//   before Release. A provider from before Check answers UNIMPLEMENTED, which the agent
+//   reads as not lost.
 // - The provider keeps its own collection of sources (a lifetime each): an agent's record
 //   of a run can be lost with its host, and Sweep is the agent's way to catch up, not the
 //   only one.
@@ -42,6 +48,8 @@ service MountProvider {
   rpc Mount(MountRequest) returns (MountResponse);
   // Gives up what the provider holds for a source.
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Answers whether the provider lost a source while its run used it.
+  rpc Check(CheckRequest) returns (CheckResponse);
   // Releases every source of an agent except those of the runs it keeps.
   rpc Sweep(SweepRequest) returns (SweepResponse);
 }
@@ -108,6 +116,21 @@ message ReleaseRequest {
 
 // The answer to Release: the source is given up.
 message ReleaseResponse {}
+
+// Check: whether a source was lost while its run used it.
+message CheckRequest {
+  // The source.
+  Source source = 1;
+}
+
+// The answer to Check.
+message CheckResponse {
+  // Empty when the source was not lost, or the provider does not know it. Otherwise why the
+  // provider lost it, a code of at most 64 bytes: `tree-lost` when the tree cannot be read
+  // whole (a part of it is gone from every copy); the agent then reports the job's input
+  // failed with that code, and the job runs again.
+  string lost = 1;
+}
 
 // Sweep: release an agent's sources of every run it does not keep.
 message SweepRequest {

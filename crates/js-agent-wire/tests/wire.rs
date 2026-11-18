@@ -88,6 +88,7 @@ fn refusal_codes_snapshot() {
         refusal::HOST_PORT_REMAP_UNSUPPORTED_HERE,
         refusal::INPUT_UNREADABLE,
         refusal::HOST_PORT_LOST,
+        refusal::TREE_LOST,
     ];
     assert_eq!(
         codes.join(" "),
@@ -104,7 +105,7 @@ fn refusal_codes_snapshot() {
          tree-unsupported-here outputs-unsupported-here too-many-inputs-here cwd-in-tree \
          input-not-allowed input-unavailable provider-refused rootfs-unsupported-here \
          mount-target-unsupported-here host-port-remap-unsupported-here input-unreadable \
-         host-port-lost"
+         host-port-lost tree-lost"
     );
 }
 

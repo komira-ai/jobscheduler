@@ -6,6 +6,11 @@
 //! - **A run's sources** are remembered when its start is admitted (`providing`) and taken
 //!   off the map at `Stage::Scratch`, once its file system is taken apart, into the
 //!   releases that are owed.
+//! - **A check** is asked of every source of a run that did not succeed, once, when the run has
+//!   ended and before its result is built: the result waits until each source is answered. A
+//!   source the provider says it lost makes the result's `input_failure`; one whose check fails
+//!   is read as not lost, with a `provider-check-failed` finding. It is asked before the
+//!   release, which comes with the run's cleanup after the result.
 //! - **A release** is asked of the provider at every step until it answers, for a minute
 //!   after the run ended. Then the sources left are named in a `provider-release-failed`
 //!   finding and left to the provider's own collection. It never taints the host, and it
@@ -20,6 +25,8 @@
 //!   are released now, and its record removed.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use js_agent_wire::refusal;
 
 use super::Lifecycle;
 use super::job::Stage;
@@ -82,6 +89,9 @@ pub(super) struct Attached {
     runs: BTreeMap<String, Vec<Source>>,
     /// The releases that are owed.
     leaving: Vec<Leaving>,
+    /// The checks answered so far for the runs that wait for them, by run id and source
+    /// index: the cause the provider lost the source for, or none.
+    checked: BTreeMap<String, BTreeMap<u32, Option<String>>>,
 }
 
 impl Attached {
@@ -97,6 +107,7 @@ impl Attached {
             sweeps: BTreeMap::new(),
             runs: BTreeMap::new(),
             leaving: Vec::new(),
+            checked: BTreeMap::new(),
         }
     }
 
@@ -125,10 +136,83 @@ impl Attached {
         self.runs.insert(run_id.to_owned(), sources);
     }
 
+    /// Whether the release of sources of the run `run_id` is still owed.
+    pub(super) fn owes(&self, run_id: &str) -> bool {
+        self.leaving.iter().any(|leave| leave.run_id == run_id)
+    }
+
+    /// Asks each provider whether it lost a source of the run `run_id` while the run used
+    /// it, once for each source, and answers `None` while some source is not answered (asked
+    /// again at the next step). Then it answers the cause of the loss, when a provider lost
+    /// a source (`tree-lost` before any other, else the first source's), and `Some(None)`
+    /// when none did or the run holds no source. A check that is refused or fails counts as
+    /// not lost and is reported once, as a loss is.
+    pub(super) fn check(
+        &mut self,
+        run_id: &str,
+        events: &mut Vec<Event>,
+    ) -> Option<Option<String>> {
+        let Self {
+            providers,
+            runs,
+            checked,
+            ..
+        } = self;
+        let Some(sources) = runs.get(run_id) else {
+            return Some(None);
+        };
+        let answered = checked.entry(run_id.to_owned()).or_default();
+        let unanswered: Vec<&Source> = sources
+            .iter()
+            .filter(|source| !answered.contains_key(&source.index))
+            .collect();
+        for source in unanswered {
+            let call = ProviderCall::Check {
+                run_id: run_id.to_owned(),
+                index: source.index,
+            };
+            let finding = |kind, message: String| {
+                Event::Finding(Finding {
+                    run_id: Some(run_id.to_owned()),
+                    code: kind,
+                    message: format!("{} source {}: {message}", source.provider, source.index),
+                })
+            };
+            let lost = match providers.ask(&source.provider, &call) {
+                ProviderAnswer::Pending => continue,
+                ProviderAnswer::Done(None) => None,
+                ProviderAnswer::Done(Some(cause)) => {
+                    let message = format!("lost while the run used it: {cause}");
+                    events.push(finding(code::PROVIDER_SOURCE_LOST, message));
+                    Some(cause)
+                }
+                ProviderAnswer::Refused(why) | ProviderAnswer::Unavailable(why) => {
+                    let message = format!("not checked, read as not lost: {why}");
+                    events.push(finding(code::PROVIDER_CHECK_FAILED, message));
+                    None
+                }
+            };
+            answered.insert(source.index, lost);
+        }
+        if answered.len() < sources.len() {
+            return None;
+        }
+        let answered = checked.remove(run_id).unwrap_or_default();
+        Some(
+            answered
+                .into_values()
+                .flatten()
+                .min_by_key(|cause| cause != refusal::TREE_LOST),
+        )
+    }
+
     /// The run `run_id` has ended and its file system is taken apart: its sources, when it
     /// holds any, are to be released. A run is taken once, so a cleanup that goes through
     /// the same step again owes nothing twice.
     pub(super) fn leave(&mut self, run_id: &str, now_ms: u64) {
+        // A check a run left unfinished (it was cancelled while its check was out) is dropped
+        // with it.
+        self.checked.remove(run_id);
         if let Some(left) = self.runs.remove(run_id) {
             self.leaving.push(Leaving {
                 run_id: run_id.to_owned(),
@@ -143,8 +227,18 @@ impl Attached {
     /// sources left, its record removed, and dropped.
     fn release(&mut self, state: &StateRoot, now_ms: u64, events: &mut Vec<Event>) {
         let Self {
-            providers, leaving, ..
+            providers,
+            leaving,
+            runs,
+            ..
         } = self;
+        // A run with the same id that was admitted since (a job queued again and placed on
+        // this host) has written its own record, which stays.
+        let forget = |run_id: &str| {
+            if !runs.contains_key(run_id) {
+                provider_record::remove(state, run_id);
+            }
+        };
         leaving.retain_mut(|leave| {
             let run_id = leave.run_id.as_str();
             leave.left.retain(|source| {
@@ -160,7 +254,7 @@ impl Attached {
             let late = now_ms.saturating_sub(leave.since_ms) >= RELEASE_GIVE_UP_MS;
             match (leave.left.is_empty(), late) {
                 (true, _) => {
-                    provider_record::remove(state, run_id);
+                    forget(run_id);
                     false
                 }
                 (false, true) => {
@@ -178,7 +272,7 @@ impl Attached {
                             left.join(", ")
                         ),
                     }));
-                    provider_record::remove(state, run_id);
+                    forget(run_id);
                     false
                 }
                 (false, false) => true,

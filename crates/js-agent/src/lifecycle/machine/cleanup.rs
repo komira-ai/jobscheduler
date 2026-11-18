@@ -1,6 +1,8 @@
 //! A job's end: watching a running container, and taking a finished job through the
 //! cleanup in order.
 
+use js_agent_wire::Outcome;
+
 use super::Lifecycle;
 use super::job::{
     Cause, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint, input_failure,
@@ -23,6 +25,7 @@ impl Lifecycle {
             config,
             taint,
             blind_wait,
+            providers,
             ..
         } = self;
         let blind_wait_ms = u64::try_from(blind_wait.as_millis()).unwrap_or(u64::MAX);
@@ -117,6 +120,16 @@ impl Lifecycle {
                 // A result read back from the state root is the one to send: the exit of a
                 // container taken over after the agent had reported it makes no second.
                 if !job.silent && job.result.is_none() {
+                    // A job that did not succeed waits for its providers to say whether
+                    // they lost a source while it ran, before the release comes with the
+                    // cleanup. A step that has no answer yet asks again at the next.
+                    let lost = if how == Outcome::Succeeded {
+                        None
+                    } else if let Some(cause) = providers.check(&job.run_id, events) {
+                        cause
+                    } else {
+                        return;
+                    };
                     let mut result = job.report(how, status, cause_detail(cause));
                     // The container is still there: it is removed in the next stage. A log
                     // that cannot be read costs the result its tail and nothing else. What the
@@ -130,7 +143,8 @@ impl Lifecycle {
                         job.logs = runtime.logs_report(&id);
                     }
                     job.result = Some(result);
-                    job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));
+                    job.input_failure =
+                        input_failure(job.cause, how, lost.as_deref(), runtime.input_failure(&id));
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
                     });

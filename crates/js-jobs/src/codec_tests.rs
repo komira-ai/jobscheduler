@@ -72,6 +72,7 @@ pub(super) fn full_job() -> JobRecord {
             ),
             (HostId::new("host-c").expect("a host"), Exclusion::ForLife),
         ]),
+        lost_trees: 1,
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -110,6 +111,7 @@ pub(super) fn bare_job() -> JobRecord {
         client: None,
         failed_prepares: 0,
         prepare_bars: BTreeMap::new(),
+        lost_trees: 0,
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -468,6 +470,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_LOGS,
         job_whole_tag::FAILED_PREPARES,
         job_whole_tag::PREPARE_BARS,
+        job_whole_tag::LOST_TREES,
     ] {
         row = without(&row, tag);
     }
@@ -476,6 +479,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
     assert_eq!(job.client, None, "a row before clients were named has none");
     assert_eq!(job.failed_prepares, 0, "a row before prepares were counted");
     assert_eq!(job.prepare_bars, BTreeMap::new(), "and before they barred");
+    assert_eq!(job.lost_trees, 0, "and before lost trees were counted");
     assert_eq!(
         job.result,
         Some(JobResult {

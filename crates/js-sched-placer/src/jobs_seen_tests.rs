@@ -440,3 +440,35 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
         1
     );
 }
+
+/// Asserts that a job sent back to the queue while its host still removes its last container
+/// (a lost tree, `JobStore::requeue_lost_tree`) is not tried by a pass until that allocation is
+/// freed, and that the first pass after the free places it again. It catches a pass that tries
+/// such a job, whose placement the held allocation refuses, counting a failed write on every
+/// pass until the host confirms the container gone.
+#[test]
+fn a_job_queued_again_is_not_tried_until_its_last_allocation_is_freed() {
+    let rig = Rig::new();
+    let both = Offered::both();
+    let cores = js_types::Resources::new(1000, 1 << 30, 0, None).unwrap();
+    rig.tables.submit_with("again", Needs::Shape(cores), 600);
+    rig.ran(&both, &["again"]);
+    let id = JobId::parse("again").unwrap();
+    let jobs = &rig.tables.jobs;
+    jobs.transition(&id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    jobs.transition(&id, JobState::Starting, JobState::Running)
+        .unwrap();
+    let note = js_types::QueueNote {
+        code: js_types::QueueCode::WaitingForCapacity,
+        detail: "a mount provider lost the job's input tree".to_owned(),
+        event: Some(js_types::JobEventKind::Requeued),
+        host: Some(host("a")),
+        attempt: false,
+    };
+    jobs.requeue_lost_tree(&id, note).unwrap();
+    rig.ran(&both, &[]);
+    assert_eq!(*rig.failures.0.lock().unwrap(), 0, "a pass tried the job");
+    jobs.free(&id, js_jobs::EndReason::Exited).unwrap();
+    rig.ran(&both, &["again"]);
+}

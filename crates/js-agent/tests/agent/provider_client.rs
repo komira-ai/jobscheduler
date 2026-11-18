@@ -126,6 +126,13 @@ fn release(run_id: &str, index: u32) -> ProviderCall {
     }
 }
 
+fn check(run_id: &str, index: u32) -> ProviderCall {
+    ProviderCall::Check {
+        run_id: run_id.to_owned(),
+        index,
+    }
+}
+
 fn sweep(keep: &[&str]) -> ProviderCall {
     ProviderCall::Sweep {
         keep: keep.iter().map(|run_id| (*run_id).to_owned()).collect(),
@@ -584,6 +591,14 @@ fn a_call_the_provider_holds_is_unavailable_at_its_bound() {
             },
         ),
         (
+            Kind::Check,
+            check("r1", 0),
+            CallBounds {
+                check: small,
+                ..defaults
+            },
+        ),
+        (
             Kind::Sweep,
             sweep(&[]),
             CallBounds {
@@ -603,7 +618,7 @@ fn a_call_the_provider_holds_is_unavailable_at_its_bound() {
 }
 
 /// Asserts that the bounds a client is given by default are the contract's: 10 s for a
-/// prepare, 30 s for a mount, 5 s for a release and 30 s for a sweep. It catches a bound
+/// prepare, 30 s for a mount, 5 s for a release, 5 s for a check and 30 s for a sweep. It catches a bound
 /// that drifts from the design.
 #[test]
 fn the_default_bounds_are_the_contracts() {
@@ -613,6 +628,7 @@ fn the_default_bounds_are_the_contracts() {
             prepare: Duration::from_secs(10),
             mount: Duration::from_secs(30),
             release: Duration::from_secs(5),
+            check: Duration::from_secs(5),
             sweep: Duration::from_secs(30),
         }
     );
@@ -675,6 +691,10 @@ fn the_provider_sees_the_agents_id_the_prefixed_run_the_index_the_ref_and_the_mo
     expected.push(Seen::Release(pb::ReleaseRequest {
         source: source("js.run-a", 4),
     }));
+    settle(&mut rig.client, NAME, &check("run-a", 5));
+    expected.push(Seen::Check(pb::CheckRequest {
+        source: source("js.run-a", 5),
+    }));
     settle(&mut rig.client, NAME, &sweep(&["run-b", "run-c"]));
     expected.push(Seen::Sweep(pb::SweepRequest {
         agent: HOST.to_owned(),
@@ -735,5 +755,75 @@ fn a_sweep_leaves_another_agents_sources_alone() {
     assert_eq!(
         settle(&mut second, NAME, &mount("r1", 0)),
         ProviderAnswer::Done(Some(mount_path("host-b", "js.r1", 0)))
+    );
+}
+
+/// Asserts that a check of a source the provider lost is answered with the cause the
+/// provider gave, as its own text, and that a check of a source it did not lose, and of one
+/// it does not know, is `Done(None)`; and that the lost source is named by its run and index
+/// alone, so another index of the same run is not lost. Catches a check whose cause is
+/// dropped, and an empty answer read as a lost source.
+#[test]
+fn a_check_answers_the_cause_of_a_lost_source_and_nothing_for_any_other() {
+    let mut rig = rig("pc-check");
+    assert_eq!(
+        settle(
+            &mut rig.client,
+            NAME,
+            &prepare("r1", 0, "k", MountMode::ReadOnly)
+        ),
+        ProviderAnswer::Done(None)
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &check("r1", 0)),
+        ProviderAnswer::Done(None)
+    );
+    rig.fake.lose("js.r1", 0, "tree-lost");
+    assert_eq!(
+        settle(&mut rig.client, NAME, &check("r1", 0)),
+        ProviderAnswer::Done(Some("tree-lost".to_owned()))
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &check("r1", 1)),
+        ProviderAnswer::Done(None)
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &check("unknown", 0)),
+        ProviderAnswer::Done(None)
+    );
+}
+
+/// Asserts that a check is `Pending` while the provider holds it, and that a check answered
+/// is handed over once. Catches a check that shares the flight of another kind of call for
+/// the same run and index.
+#[test]
+fn a_check_is_a_call_of_its_own_beside_a_release_of_the_same_source() {
+    let mut rig = rig("pc-check-key");
+    rig.fake.hold(Kind::Release);
+    assert_eq!(
+        rig.client.ask(NAME, &release("r1", 0)),
+        ProviderAnswer::Pending
+    );
+    assert_eq!(
+        settle(&mut rig.client, NAME, &check("r1", 0)),
+        ProviderAnswer::Done(None)
+    );
+    rig.fake.unhold(Kind::Release);
+}
+
+/// Asserts that a check sent to a provider from before `Check` (the fake answers it
+/// `UNIMPLEMENTED`, as the generated stub does) is `Unavailable`, as any failure other than a
+/// refusal, so that the agent can tell it from a source that was not lost. Catches an
+/// `UNIMPLEMENTED` reply read as a lost source or as a refusal of the job.
+#[test]
+fn a_check_a_provider_does_not_implement_is_unavailable() {
+    let mut rig = rig("pc-check-old");
+    rig.fake.leave_out_check();
+    assert_unavailable(&settle(&mut rig.client, NAME, &check("r1", 0)), "");
+    assert_eq!(
+        rig.fake.requests(),
+        [Seen::Check(pb::CheckRequest {
+            source: source("js.r1", 0),
+        })]
     );
 }

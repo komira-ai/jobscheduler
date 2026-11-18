@@ -26,6 +26,7 @@ mod duties;
 mod ending;
 mod hosts;
 mod index;
+mod lost;
 mod marks;
 mod queue;
 mod status;
@@ -35,6 +36,7 @@ mod written;
 
 pub use index::Backfill;
 
+pub use lost::TREE_LOST_REQUEUES;
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
@@ -337,6 +339,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             client,
             failed_prepares: 0,
             prepare_bars: BTreeMap::new(),
+            lost_trees: 0,
             queue: QueueTrail::default(),
             carried: Carried::default(),
             start_failure_detail: None,
@@ -441,8 +444,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not in
     /// `expected`; [`JobStoreError::IllegalTransition`] for a move the design does not name
-    /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`]
-    /// and [`JobStore::place`] do) and for a move to an end, which only
+    /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`],
+    /// [`JobStore::requeue_lost_tree`] and [`JobStore::place`] do) and for a move to an end, which only
     /// [`JobStore::end_job`] makes; [`JobStoreError::Stale`]; as for any read and write.
     pub fn transition(
         &self,
@@ -480,7 +483,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(moved)
     }
 
-    /// The one requeue (design section 5.4): a placed whole-host job whose prepare failed goes
+    /// The requeue of a failed prepare (design section 5.4; [`JobStore::requeue_lost_tree`] is
+    /// the requeue of a running job): a placed whole-host job whose prepare failed goes
     /// back to queued, with no host, and its allocation is freed with
     /// [`EndReason::FailedPrepare`] in the same transaction (no container was made, so there
     /// is nothing for the host to confirm). Its next placement gets a new allocation id. The

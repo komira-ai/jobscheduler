@@ -5,7 +5,8 @@
 //! Pass 1 (the placement walk over the open hosts) reaches [`Outcome::Waiting`],
 //! [`Outcome::WholeHost`] and [`Outcome::Placed`]; pass 2 (the acquire of a machine, with its
 //! failover) reaches [`Outcome::Refused`] and [`Outcome::Launched`]; a failed whole-host prepare
-//! reaches [`Outcome::Requeued`]. A pass-2 reason outlives pass 1's "nothing is free": a job
+//! reaches [`Outcome::Requeued`], and a mount provider's loss of a running job's tree reaches
+//! [`Outcome::TreeLost`]. A pass-2 reason outlives pass 1's "nothing is free": a job
 //! that shows [`QueueCode::QuotaBackoff`], [`QueueCode::FailingOver`] or
 //! [`QueueCode::WaitingForMachine`] keeps it through
 //! [`Outcome::Waiting`], and through an [`Outcome::WholeHost`] with no host being emptied for
@@ -51,6 +52,12 @@ pub enum Outcome {
     /// A failed whole-host prepare on `host` sent the placed job back to the queue.
     Requeued {
         /// The host whose prepare failed.
+        host: HostId,
+    },
+    /// A mount provider on `host` lost the tree of the running job, which went back to the
+    /// queue to run again.
+    TreeLost {
+        /// The host whose provider lost the tree.
         host: HostId,
     },
 }
@@ -110,6 +117,17 @@ pub fn note(outcome: &Outcome, current: QueueCode) -> Option<QueueNote> {
                 code: QueueCode::WaitingForWholeHost,
                 detail: format!(
                     "the whole-host prepare on host {host} failed; the job is queued again"
+                ),
+                event: Some(Kind::Requeued),
+                host: Some(host.clone()),
+                attempt: false,
+            });
+        }
+        Outcome::TreeLost { host } => {
+            return Some(QueueNote {
+                code: QueueCode::WaitingForCapacity,
+                detail: format!(
+                    "a mount provider on host {host} lost the job's input tree; the job is queued again"
                 ),
                 event: Some(Kind::Requeued),
                 host: Some(host.clone()),

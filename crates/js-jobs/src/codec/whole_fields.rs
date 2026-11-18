@@ -5,7 +5,9 @@
 //! A job row gains the count of its failed prepares ([`job_whole_tag::FAILED_PREPARES`], a
 //! `u32`, written when above zero) and the hosts those prepares keep it off
 //! ([`job_whole_tag::PREPARE_BARS`], a map of host to exclusion in the encoding of a mark's
-//! exclusions, written when it holds any). An allocation row gains the instant the agent must
+//! exclusions, written when it holds any), and the count of the times a mount provider's loss
+//! of its tree sent it back to the queue ([`job_whole_tag::LOST_TREES`], a `u32`, written when
+//! above zero). An allocation row gains the instant the agent must
 //! have reported the host ready ([`alloc_whole_tag::PREPARE_DEADLINE`], a time) and the
 //! placement's own wall limit ([`alloc_whole_tag::WALL_LIMIT_SECS`], a `u64`), each written when
 //! set.
@@ -26,6 +28,9 @@ pub(crate) mod job_whole_tag {
     /// The hosts those prepares keep the job off (map of text to a kind byte and, but for a
     /// kind of 2, a time).
     pub const PREPARE_BARS: u16 = 46;
+    /// How many times a mount provider's loss of the job's tree queued it again (u32). Its
+    /// number follows the highest tag of the job row (58, in `rootfs_fields`).
+    pub const LOST_TREES: u16 = 59;
 }
 
 /// The tags a whole-host placement adds to an allocation row, after the ones of `alloc_tag`.
@@ -54,6 +59,14 @@ pub(super) fn put_job(row: &mut Writer, job: &JobRecord) {
     if !job.prepare_bars.is_empty() {
         row.put(t::PREPARE_BARS, exclusions_value(&job.prepare_bars));
     }
+    if job.lost_trees > 0 {
+        row.put(t::LOST_TREES, job.lost_trees.to_be_bytes());
+    }
+}
+
+/// The count of lost-tree requeues of a job row: zero when it has none.
+pub(super) fn take_lost_trees(fields: &mut Fields) -> Result<u32, DecodeError> {
+    Ok(fields.opt(job_whole_tag::LOST_TREES, u32_of)?.unwrap_or(0))
 }
 
 /// The failed-prepare count and the prepare bars of a job row: zero and none when it has

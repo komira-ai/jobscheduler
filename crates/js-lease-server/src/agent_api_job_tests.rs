@@ -329,3 +329,55 @@ async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.beat(&agent).await.is_ok());
 }
+
+/// A host that lists a job ended with the input failure `tree-lost` has its job sent back to
+/// queued over the heartbeat route: the result is accepted, the allocation releases, the next
+/// beat (the host dropped the acknowledged job) frees it, and once the job is placed again its
+/// start comes under a new allocation id. Catches a lost tree that ends the job at the route,
+/// and a requeued job whose old allocation is never freed.
+#[tokio::test]
+async fn a_tree_lost_result_over_the_route_requeues_the_job() {
+    let mut rig = rig("tree_lost_route", true);
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let id = rig.place("job-a", "host-a");
+    let first = rig.allocation(&id).allocation_id.to_string();
+    agent.hold("job-a", &first, HeldState::ExitedUnacked);
+    agent.end_naming(
+        "job-a",
+        (Outcome::Failed, Some(1)),
+        (None, Some(js_agent_wire::refusal::TREE_LOST)),
+    );
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply.job_acks[0].ack, Ack::Accepted);
+    assert_eq!(
+        rig.states(&id),
+        (JobState::Queued, AllocationStep::Releasing)
+    );
+    agent.take(&reply);
+    rig.beat(&agent).await.unwrap();
+    assert_eq!(rig.states(&id), (JobState::Queued, AllocationStep::Freed));
+    assert_eq!(
+        rig.allocation(&id).end_reason,
+        Some(EndReason::Exited),
+        "the first run's allocation is freed as exited"
+    );
+
+    rig.jobs
+        .place(
+            &id,
+            js_types::HostId::new("host-a").unwrap(),
+            super::job_rig::BOOKED,
+        )
+        .unwrap();
+    let next = rig.allocation(&id).allocation_id.to_string();
+    assert_ne!(next, first);
+    let reply = rig.beat(&agent).await.unwrap();
+    let sent = starts(&reply);
+    assert_eq!(
+        sent.iter()
+            .map(|spec| spec.allocation_id.as_str())
+            .collect::<Vec<_>>(),
+        [next.as_str()]
+    );
+}

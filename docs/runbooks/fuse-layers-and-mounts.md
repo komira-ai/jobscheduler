@@ -287,6 +287,7 @@ in CI measures it.
 | `mv: can't rename '/out/result.part': I/O error` or `Device or resource busy` | the upload did not finish within `fs.put.commit_deadline_secs`; the file stays staged, and the same `mv` may be tried again while the job runs |
 | `mv` fails `File exists` | the key was committed before with other bytes: use a new nonce |
 | The job fails and its result has `input_failure: input-unreadable` | a source no longer answered after the job ended (`ENOTCONN`, `EIO`, `ESTALE`): `tierstore fs` went away under the job |
+| The job is queued again: its events show `REQUEUED` naming the host, and the agent's findings show `provider-check-failed` or `provider-source-lost` | the mount provider's `Check` after a failed job said the source's tree was lost (`tree-lost`: a part of it is gone from every copy), and the job runs again, at most twice more; `provider-check-failed` means the provider did not answer `Check`, which counts as not lost. A third loss ends the job `FAILED`, `INPUT_FAILED`, `input_failure: tree-lost` |
 | The agent exits at start naming a root | `tierstore fs` was not mounted when the agent started |
 
 ## 6. Results

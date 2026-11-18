@@ -132,4 +132,13 @@ pub mod code {
     /// read, or named a provider this agent was not given (either is removed, its sources left
     /// to the provider's own collection), or the directory of records could not be listed.
     pub const PROVIDER_RECORD_FAILED: &str = "provider-record-failed";
+    /// A mount provider did not answer the check of a source of a run that did not succeed
+    /// (it refused, was unreachable, did not know the call, or did not answer in its bound):
+    /// the source is read as not lost and the result is built without the provider's verdict.
+    /// Reported once for each source.
+    pub const PROVIDER_CHECK_FAILED: &str = "provider-check-failed";
+    /// A mount provider said it lost a source while the run used it; the message names the
+    /// source and carries the provider's cause. The result's `input_failure` is `tree-lost`
+    /// for that cause and `input-unreadable` for any other.
+    pub const PROVIDER_SOURCE_LOST: &str = "provider-source-lost";
 }

@@ -110,7 +110,8 @@ pub struct JobResult {
     /// does not upload live logs, or a build from before them).
     pub logs: Option<LogLengths>,
     /// With [`ResultReason::InputFailed`], the agent's code of the input that failed
-    /// (`input-unreadable`, `host-port-lost`); `None` otherwise.
+    /// (`input-unreadable`, `host-port-lost`, and `tree-lost` once the job was queued again as
+    /// often as it may be); `None` otherwise.
     pub input_failure: Option<String>,
 }
 
@@ -454,6 +455,7 @@ mod tests {
             client: None,
             failed_prepares: 0,
             prepare_bars: std::collections::BTreeMap::new(),
+            lost_trees: 0,
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
             start_failure_detail: None,

@@ -48,7 +48,8 @@ pub enum JobEventKind {
     FailingOver,
     /// The job was placed on a host.
     Placed,
-    /// A failed whole-host prepare sent the placed job back to the queue.
+    /// The job was sent back to the queue to run again: a failed whole-host prepare sent the
+    /// placed job back, or a mount provider lost the tree of the running job.
     Requeued,
     /// A machine was launched for the job.
     WaitingForMachine,

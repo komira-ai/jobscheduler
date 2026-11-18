@@ -712,6 +712,48 @@ fn a_freed_job_that_cannot_be_read_teaches_nothing() {
     assert_eq!(size(engine.sizes(), &next), (2000, 4 * GIB));
 }
 
+/// Asserts that an allocation freed for a job that went back to the queue, with no result (a
+/// mount provider lost its tree while it ran), teaches nothing: the class stays cold, whether
+/// the pass sees the allocation freed or a start replays the store. Catches a run recorded for
+/// a job that has no result, which would size the class from a run that never ended.
+#[test]
+fn a_freed_allocation_of_a_job_queued_again_teaches_nothing() {
+    let tables = Tables::new();
+    let placer = placer();
+    submit(&tables, "again", "build");
+    let id = JobId::parse("again").unwrap();
+    let (_, row) = tables.jobs.place(&id, host("a"), booked(1, 1)).unwrap();
+    placer.learn_freed(&tables.jobs, std::slice::from_ref(&row));
+    tables
+        .jobs
+        .transition(&id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    tables
+        .jobs
+        .transition(&id, JobState::Starting, JobState::Running)
+        .unwrap();
+    let note = js_types::QueueNote {
+        code: js_types::QueueCode::WaitingForCapacity,
+        detail: "a mount provider lost the job's input tree".to_owned(),
+        event: Some(js_types::JobEventKind::Requeued),
+        host: Some(host("a")),
+        attempt: false,
+    };
+    let (again, _) = tables.jobs.requeue_lost_tree(&id, note).unwrap();
+    assert_eq!(again.state, JobState::Queued);
+    tables.jobs.free(&id, EndReason::Exited).unwrap();
+    placer.learn_freed(&tables.jobs, &[]);
+    assert_eq!(
+        placer.learn_ended(&tables.jobs),
+        Ok(0),
+        "a start replays no run"
+    );
+    let next = queued("next", of_class("build", needs(0, 0)));
+    let mut engine = placer.engine();
+    engine.sizes().set_bounds(Some(bounds()));
+    assert_eq!(size(engine.sizes(), &next), (2000, 4 * GIB));
+}
+
 /// Asserts what a server's start teaches: every ended job the store holds whose allocation is
 /// freed, over more than one page of the table, with what it booked, and nothing of a queued, a
 /// live or an ended but still releasing job; those are learned when a later pass sees them

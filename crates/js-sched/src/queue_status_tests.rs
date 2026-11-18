@@ -308,3 +308,24 @@ fn a_requeue_waits_for_a_whole_host_with_its_host() {
         })
     );
 }
+
+/// A mount provider's loss of a running job's tree sends the job back to wait for capacity,
+/// whatever it showed before, with a requeue event naming the host; it is no attempt of its own.
+#[test]
+fn a_lost_tree_waits_for_capacity_with_its_host() {
+    for current in [QueueCode::Placed, QueueCode::WaitingForCapacity] {
+        let lost = note(&Outcome::TreeLost { host: host("h-4") }, current);
+        assert_eq!(
+            lost,
+            Some(QueueNote {
+                code: QueueCode::WaitingForCapacity,
+                detail: "a mount provider on host h-4 lost the job's input tree; the job is queued again"
+                    .to_owned(),
+                event: Some(JobEventKind::Requeued),
+                host: Some(host("h-4")),
+                attempt: false,
+            }),
+            "{current:?}"
+        );
+    }
+}

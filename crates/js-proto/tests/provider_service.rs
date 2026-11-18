@@ -1,6 +1,6 @@
 //! The protocol a node-local mount provider serves (`jobscheduler.provider.v1`): the bytes of
 //! every message against `golden/provider_messages.hex`, which a provider built elsewhere is
-//! held to, the numbers of the mount mode, the four calls and their paths, and the generated
+//! held to, the numbers of the mount mode, the five calls and their paths, and the generated
 //! client and server run against each other in one process over an in-memory duplex stream: no
 //! TCP or UDP socket and no port.
 
@@ -17,8 +17,8 @@ use js_proto::provider::v1::mount_provider_server::{
     MountProvider, MountProviderServer, SERVICE_NAME,
 };
 use js_proto::provider::v1::{
-    MountMode, MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest,
-    ReleaseResponse, Source, SweepRequest, SweepResponse,
+    CheckRequest, CheckResponse, MountMode, MountRequest, MountResponse, PrepareRequest,
+    PrepareResponse, ReleaseRequest, ReleaseResponse, Source, SweepRequest, SweepResponse,
 };
 use prost::Message;
 use prost::encoding::{WireType, encode_key, encode_varint};
@@ -158,6 +158,18 @@ fn release_request() -> ReleaseRequest {
     }
 }
 
+fn check_request() -> CheckRequest {
+    CheckRequest {
+        source: Some(source()),
+    }
+}
+
+fn check_response() -> CheckResponse {
+    CheckResponse {
+        lost: "tree-lost".to_owned(),
+    }
+}
+
 fn sweep_request() -> SweepRequest {
     SweepRequest {
         agent: "host-1".to_owned(),
@@ -184,9 +196,11 @@ fn every_message_of_the_protocol_has_its_golden_bytes() {
     holds(&golden, "MountResponse", &mount_response());
     holds(&golden, "ReleaseRequest", &release_request());
     holds(&golden, "ReleaseResponse", &ReleaseResponse {});
+    holds(&golden, "CheckRequest", &check_request());
+    holds(&golden, "CheckResponse", &check_response());
     holds(&golden, "SweepRequest", &sweep_request());
     holds(&golden, "SweepResponse", &sweep_response());
-    assert_eq!(golden.len(), 9);
+    assert_eq!(golden.len(), 11);
 }
 
 /// Asserts the numbers of the mount mode and how a request reads one: the four values at 0 to
@@ -222,6 +236,7 @@ enum Call {
     Prepare(PrepareRequest),
     Mount(MountRequest),
     Release(ReleaseRequest),
+    Check(CheckRequest),
     Sweep(SweepRequest),
 }
 
@@ -271,6 +286,13 @@ impl MountProvider for Recording {
         self.record(Call::Release(request.into_inner()), ReleaseResponse {})
     }
 
+    async fn check(
+        &self,
+        request: Request<CheckRequest>,
+    ) -> Result<Response<CheckResponse>, Status> {
+        self.record(Call::Check(request.into_inner()), check_response())
+    }
+
     async fn sweep(
         &self,
         request: Request<SweepRequest>,
@@ -279,12 +301,12 @@ impl MountProvider for Recording {
     }
 }
 
-/// Asserts that the generated client makes each of the four calls against the generated
+/// Asserts that the generated client makes each of the five calls against the generated
 /// server over the in-memory stream: the server receives each request whole and in order, and
 /// the client receives each answer whole. It catches a call whose request or answer is lost,
 /// altered or routed to another method on the way.
 #[tokio::test]
-async fn the_four_calls_round_trip_between_the_client_and_the_server() {
+async fn the_five_calls_round_trip_between_the_client_and_the_server() {
     let server = Recording::default();
     let mut client = MountProviderClient::new(connect(server.clone()).await);
     let prepared = client.prepare(prepare_request()).await.expect("prepare");
@@ -293,6 +315,8 @@ async fn the_four_calls_round_trip_between_the_client_and_the_server() {
     assert_eq!(mounted.into_inner(), mount_response());
     let released = client.release(release_request()).await.expect("release");
     assert_eq!(released.into_inner(), ReleaseResponse {});
+    let checked = client.check(check_request()).await.expect("check");
+    assert_eq!(checked.into_inner(), check_response());
     let swept = client.sweep(sweep_request()).await.expect("sweep");
     assert_eq!(swept.into_inner(), sweep_response());
     assert_eq!(
@@ -301,6 +325,7 @@ async fn the_four_calls_round_trip_between_the_client_and_the_server() {
             Call::Prepare(prepare_request()),
             Call::Mount(mount_request()),
             Call::Release(release_request()),
+            Call::Check(check_request()),
             Call::Sweep(sweep_request()),
         ]
     );
@@ -323,7 +348,7 @@ where
     Ok(answer.into_inner())
 }
 
-/// Asserts the name of the service and the paths of its four calls: a request to
+/// Asserts the name of the service and the paths of its five calls: a request to
 /// `/jobscheduler.provider.v1.MountProvider/<Method>` with the golden's message reaches the
 /// method of that name and is answered with the message the golden holds, and a path of
 /// another name is refused `UNIMPLEMENTED`. It catches a renamed service, package or method,
@@ -345,6 +370,10 @@ async fn the_calls_have_the_paths_a_provider_serves() {
         .await
         .expect("release");
     assert_eq!(answer, ReleaseResponse {});
+    let answer: CheckResponse = raw(channel.clone(), "Check", check_request())
+        .await
+        .expect("check");
+    assert_eq!(answer, check_response());
     let answer: SweepResponse = raw(channel.clone(), "Sweep", sweep_request())
         .await
         .expect("sweep");
@@ -355,6 +384,7 @@ async fn the_calls_have_the_paths_a_provider_serves() {
             Call::Prepare(prepare_request()),
             Call::Mount(mount_request()),
             Call::Release(release_request()),
+            Call::Check(check_request()),
             Call::Sweep(sweep_request()),
         ]
     );
@@ -388,13 +418,18 @@ impl MountProvider for Refusing {
         Err(Status::unavailable("the provider is draining"))
     }
 
+    async fn check(&self, _: Request<CheckRequest>) -> Result<Response<CheckResponse>, Status> {
+        Err(Status::deadline_exceeded("the provider is slow"))
+    }
+
     async fn sweep(&self, _: Request<SweepRequest>) -> Result<Response<SweepResponse>, Status> {
         Err(Status::internal("the collection is unreadable"))
     }
 }
 
 /// Asserts that a provider's refusal reaches the client with its code and its message on
-/// every call: `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `UNAVAILABLE` and `INTERNAL`. It
+/// every call: `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `UNAVAILABLE`, `DEADLINE_EXCEEDED` and
+/// `INTERNAL`. It
 /// catches a status that the transport changes on the way, which the agent maps to a refusal
 /// of the job or a try again.
 #[tokio::test]
@@ -415,6 +450,9 @@ async fn a_providers_status_reaches_the_client_whole() {
         .expect_err("refused");
     assert_eq!(release.code(), Code::Unavailable);
     assert_eq!(release.message(), "the provider is draining");
+    let check = client.check(check_request()).await.expect_err("refused");
+    assert_eq!(check.code(), Code::DeadlineExceeded);
+    assert_eq!(check.message(), "the provider is slow");
     let sweep = client.sweep(sweep_request()).await.expect_err("refused");
     assert_eq!(sweep.code(), Code::Internal);
     assert_eq!(sweep.message(), "the collection is unreadable");
@@ -433,9 +471,9 @@ impl MountProvider for ReleaseOnly {
     }
 }
 
-/// Asserts that a server that implements only `Release` answers the other three calls
-/// `UNIMPLEMENTED` and `Release` as implemented, which is how a provider that has not
-/// grown a later method behaves. It catches a build that leaves a method out of the stubs, so
+/// Asserts that a server that implements only `Release` answers `Release` and each of the other
+/// four calls (`Prepare`, `Mount`, `Sweep` and `Check`) `UNIMPLEMENTED`, which is how a provider
+/// that has not grown a later method behaves. It catches a build that leaves a method out of the stubs, so
 /// that a partial provider would not compile or would answer another code.
 #[tokio::test]
 async fn a_method_a_server_leaves_out_is_unimplemented() {
@@ -450,6 +488,11 @@ async fn a_method_a_server_leaves_out_is_unimplemented() {
         .await
         .expect_err("unimplemented");
     assert_eq!(mount.code(), Code::Unimplemented);
+    let check = client
+        .check(check_request())
+        .await
+        .expect_err("unimplemented");
+    assert_eq!(check.code(), Code::Unimplemented);
     let sweep = client
         .sweep(sweep_request())
         .await

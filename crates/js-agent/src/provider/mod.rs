@@ -49,18 +49,21 @@ pub struct CallBounds {
     pub mount: Duration,
     /// `Release`.
     pub release: Duration,
+    /// `Check`.
+    pub check: Duration,
     /// `Sweep`.
     pub sweep: Duration,
 }
 
 impl Default for CallBounds {
     /// The bounds of the provider contract: 10 s for `Prepare`, 30 s for `Mount`, 5 s for
-    /// `Release` and 30 s for `Sweep`.
+    /// `Release`, 5 s for `Check` and 30 s for `Sweep`.
     fn default() -> Self {
         Self {
             prepare: Duration::from_secs(10),
             mount: Duration::from_secs(30),
             release: Duration::from_secs(5),
+            check: Duration::from_secs(5),
             sweep: Duration::from_secs(30),
         }
     }
@@ -73,6 +76,7 @@ impl CallBounds {
             ProviderCall::Prepare { .. } => self.prepare,
             ProviderCall::Mount { .. } => self.mount,
             ProviderCall::Release { .. } => self.release,
+            ProviderCall::Check { .. } => self.check,
             ProviderCall::Sweep { .. } => self.sweep,
         }
     }
