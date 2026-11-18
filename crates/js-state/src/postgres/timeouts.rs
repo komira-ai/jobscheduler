@@ -36,20 +36,26 @@ pub struct Timeouts {
     /// How many unanswered probes end the connection.
     pub keepalive_retries: u32,
     /// The server's `statement_timeout`: the longest one statement runs, waits for locks
-    /// included (a writer's wait for the commit head is one: past it the batch fails, and
-    /// is not run again). It applies to an extension's pooled sessions too. `None` sets no
+    /// included (a writer's wait for a key or for the commit head is one: past it the call
+    /// fails with [`crate::StoreError::Unavailable`], and is not run again). It applies to an extension's pooled sessions too. `None` sets no
     /// limit (0).
     pub statement: Option<Duration>,
     /// The server's `idle_in_transaction_session_timeout`: the longest a session sits in an
     /// open transaction with no statement running before the server ends it. `None` sets no
     /// limit (0).
     pub idle_in_transaction: Option<Duration>,
+    /// How long a call waits for a connection of the store's pool when every one is in use.
+    /// Past it the call fails with [`crate::StoreError::Unavailable`] and runs nothing: the
+    /// store is busy, and the caller may try again. (A connection the pool still has room
+    /// for is made instead, within [`Timeouts::connect`].)
+    pub checkout: Duration,
 }
 
 impl Default for Timeouts {
     /// Ten seconds to connect (as the migration runner's bounded connect); a dead peer found
     /// within a minute (30 s idle, then three probes 10 s apart) and unacknowledged data given
-    /// up after 30 s; 30 s for a statement; a minute idle in a transaction.
+    /// up after 30 s; 30 s for a statement; a minute idle in a transaction; ten seconds for a
+    /// connection of the pool to come free (as long as making a new one may take).
     fn default() -> Timeouts {
         Timeouts {
             connect: Some(Duration::from_secs(10)),
@@ -59,6 +65,7 @@ impl Default for Timeouts {
             keepalive_retries: 3,
             statement: Some(Duration::from_secs(30)),
             idle_in_transaction: Some(Duration::from_secs(60)),
+            checkout: Duration::from_secs(10),
         }
     }
 }

@@ -1,8 +1,11 @@
 //! [`Interfere`]: a store that delegates to another and, when told, fails a commit or lets a
 //! second writer commit first, and keeps the keys read through it. Test support: the suite uses
 //! it to show that an operation writes nothing when its commit fails and that it pins the
-//! versions it read, and the server's tests to count what a pass reads.
+//! versions it read, and the server's tests to count what a pass reads. It also notes every
+//! call made on it while a decision of [`Store::claim_decide`] runs, which is a call on the store
+//! from inside an open transaction.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_state::{
@@ -38,6 +41,11 @@ pub struct Interfere<S> {
     /// What the decisions of [`Store::claim_decide`] read, in order, since the last
     /// [`Interfere::take_claim_reads`]; apart from `reads`, which the passes' own reads are.
     claim_reads: Arc<Mutex<Vec<Read>>>,
+    /// Whether a decision of [`Store::claim_decide`] is running.
+    deciding: AtomicBool,
+    /// The calls made on this store while a decision ran, by name, in order, since the last
+    /// [`Interfere::take_calls_while_deciding`].
+    while_deciding: Mutex<Vec<&'static str>>,
 }
 
 /// The reads of a claimed decision, logged as they are made.
@@ -84,6 +92,8 @@ impl<S: Store> Interfere<S> {
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
             claim_reads: Arc::new(Mutex::new(Vec::new())),
+            deciding: AtomicBool::new(false),
+            while_deciding: Mutex::new(Vec::new()),
         }
     }
 
@@ -148,6 +158,21 @@ impl<S: Store> Interfere<S> {
         std::mem::take(&mut *lock(&self.claim_reads))
     }
 
+    /// The calls made on this store (by the name of the [`Store`] method) while a decision of
+    /// [`Store::claim_decide`] ran, since the last call, taken. A decision reads through the
+    /// [`TxnRead`] it is given; a call on the store itself from inside it needs a second
+    /// connection while the decision's transaction holds the first.
+    pub fn take_calls_while_deciding(&self) -> Vec<&'static str> {
+        std::mem::take(&mut *lock(&self.while_deciding))
+    }
+
+    /// Notes the call `name` when a decision is running.
+    fn called(&self, name: &'static str) {
+        if self.deciding.load(Ordering::SeqCst) {
+            lock(&self.while_deciding).push(name);
+        }
+    }
+
     /// Logs `read` once it passed [`Interfere::fail_read_after`].
     fn log(&self, read: Read) -> Result<(), StoreError> {
         self.countdown(&self.fail_read_at)?;
@@ -174,6 +199,7 @@ impl<S: Store> Interfere<S> {
 
 impl<S: Store> Store for Interfere<S> {
     fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
+        self.called("apply_batch");
         // Taken out before it runs, so the hook's own commits pass straight through.
         let hook = lock(&self.before).take();
         if let Some(hook) = hook {
@@ -184,6 +210,7 @@ impl<S: Store> Store for Interfere<S> {
     }
 
     fn head(&self) -> Result<Option<Revision>, StoreError> {
+        self.called("head");
         if std::mem::take(&mut *lock(&self.fail_head)) {
             return Err(lock(&self.error).clone());
         }
@@ -195,6 +222,7 @@ impl<S: Store> Store for Interfere<S> {
         claim: &[String],
         decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
     ) -> Result<Claim, StoreError> {
+        self.called("claim_decide");
         // A decided commit is a commit: the hook and the failure countdown of commits apply.
         let hook = lock(&self.before).take();
         if let Some(hook) = hook {
@@ -202,42 +230,55 @@ impl<S: Store> Store for Interfere<S> {
         }
         self.countdown(&self.fail_at)?;
         let log = &self.claim_reads;
-        self.inner
-            .claim_decide(claim, &mut |read| decide(&mut LoggedRead { read, log }))
+        let deciding = &self.deciding;
+        self.inner.claim_decide(claim, &mut |read| {
+            deciding.store(true, Ordering::SeqCst);
+            let decided = decide(&mut LoggedRead { read, log });
+            deciding.store(false, Ordering::SeqCst);
+            decided
+        })
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        self.called("get");
         self.log(Read::Get(key.to_owned()))?;
         self.inner.get(key)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.called("scan_prefix");
         self.log(Read::Scan(prefix.to_owned()))?;
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
+        self.called("scan_range");
         self.log(Read::Scan(scan.prefix.to_owned()))?;
         self.inner.scan_range(scan)
     }
 
     fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError> {
+        self.called("changes");
         self.inner.changes(after, limit)
     }
 
     fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        self.called("trim_feed");
         self.inner.trim_feed(before)
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {
+        self.called("reap_expired");
         self.inner.reap_expired()
     }
 
     fn commit_stats(&self) -> CommitStats {
+        self.called("commit_stats");
         self.inner.commit_stats()
     }
 
     fn now(&self) -> StoreTime {
+        self.called("now");
         self.inner.now()
     }
 }
@@ -399,6 +440,29 @@ mod tests {
         store.fail_next();
         let failed = store.claim_decide(&claim, &mut |_| None);
         assert_eq!(failed, Err(StoreError::Failed(INJECTED.to_owned())));
+    }
+
+    // Catches a wrapper that does not see a call made on it from inside a claimed decision
+    // (the suite counts on it to show a placement makes none), and one that counts calls made
+    // outside a decision: only the call inside is noted, by name, and taking the notes empties
+    // them.
+    #[test]
+    fn a_call_made_while_a_decision_runs_is_noted() {
+        use js_state::Claim;
+
+        let store = wrapped();
+        put(&store, "p").expect("put");
+        let claim = ["p".to_owned()];
+        let decided = store
+            .claim_decide(&claim, &mut |_| {
+                let _ = store.now();
+                Some(Txn::new().put("p", "2", Cond::Any))
+            })
+            .expect("answers");
+        assert!(matches!(decided, Claim::Committed(_)), "{decided:?}");
+        let _ = store.now();
+        assert_eq!(store.take_calls_while_deciding(), vec!["now"]);
+        assert!(store.take_calls_while_deciding().is_empty());
     }
 
     // Catches an injected error that is not the one told: a failed commit and a failed read

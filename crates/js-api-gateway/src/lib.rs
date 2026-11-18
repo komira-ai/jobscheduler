@@ -127,6 +127,8 @@
 //! | `PERMISSION_DENIED`, message `operator-only` (a fleet call of a client that is no operator) | 403 | `operator-only` |
 //! | `UNIMPLEMENTED` | 501 | `unimplemented` |
 //! | `INTERNAL`, message `state-write-failed` (a store write that failed) | 500 | `state-write-failed` |
+//! | `UNAVAILABLE`, message `state-write-failed` (a store write the store was too busy to take) | 503 | `state-write-failed` |
+//! | `UNAVAILABLE`, message `store-unavailable` (a store read the store was too busy to take, or the fleet's hosts the store could not list) | 503 | `store-unavailable` |
 //! | any other status, an unknown refusal, a fault of the gateway | 500 | `internal` |
 //! | unauthenticated (the mounting server's bearer layer) | 401 | empty body |
 //!

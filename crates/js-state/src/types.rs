@@ -218,6 +218,12 @@ pub enum StoreError {
     /// preconditions. The text says what the client met.
     #[error("state store connection lost: {0}")]
     Disconnected(String),
+    /// The store is up but too busy to take the call now: no connection came free in time,
+    /// or the server ended a statement that waited past its limit for a lock. Nothing was
+    /// written, and a later call can succeed; a caller answers its own caller with a
+    /// retryable status. The text says what the store met.
+    #[error("state store busy: {0}")]
+    Unavailable(String),
     /// A feed read began at a revision the feed has been trimmed past, so rows between
     /// `after` and `floor` are gone and a poller resuming there would miss them. Only
     /// [`crate::Store::changes`] returns it, and only to a cursor below the floor; the

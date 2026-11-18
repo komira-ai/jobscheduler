@@ -439,6 +439,10 @@ fn each_store_error_has_its_kind_and_others_have_none() {
             },
             FailureKind::StaleCursor,
         ),
+        (
+            StoreError::Unavailable("busy".to_owned()),
+            FailureKind::Unavailable,
+        ),
     ];
     for (error, kind) in cases {
         assert_eq!(FailureKind::of(&JobStoreError::Store(error)), Some(kind));
@@ -449,6 +453,7 @@ fn each_store_error_has_its_kind_and_others_have_none() {
         (FailureKind::Disconnected, "disconnected"),
         (FailureKind::Failed, "failed"),
         (FailureKind::StaleCursor, "stale_cursor"),
+        (FailureKind::Unavailable, "unavailable"),
     ] {
         assert_eq!(kind.name(), name);
         assert_eq!(serde_json::to_value(kind).unwrap(), name);

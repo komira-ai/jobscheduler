@@ -17,6 +17,7 @@
 //! | `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
 //! | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
 //! | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+//! | a read the store was too busy to take (no connection came free, or the statement waited past its limit) | `UNAVAILABLE`, `store-unavailable` | 503 `store-unavailable` |
 //!
 //! A job of another client, asked for by a caller of the role `client`, is answered as one
 //! with no row (`unknown-job`, before any other check of the job), and a listing of such a
@@ -196,10 +197,16 @@ fn invalid(field: &str) -> Status {
     Status::invalid_argument(format!("field: {field}"))
 }
 
-/// The answer to a read of the store that failed. The cause is logged, never answered.
+/// The answer to a read of the store that failed: `store-unavailable` (`UNAVAILABLE`) when the
+/// store was only too busy to take it, else `internal`. The cause is logged, never answered.
 fn read_failed(error: &js_jobs::JobStoreError) -> Status {
     tracing::warn!(%error, "a read of the job tables failed");
-    Status::internal("internal")
+    match error {
+        js_jobs::JobStoreError::Store(js_state::StoreError::Unavailable(_)) => {
+            Status::unavailable(super::fleet::STORE_UNAVAILABLE)
+        }
+        _ => Status::internal("internal"),
+    }
 }
 
 /// The reads the read calls (and the logs group's follows) make of the job tables, and

@@ -88,7 +88,7 @@ const MAX_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(999);
 const INVALID_PAGE_TOKEN: &str = "invalid-page-token";
 
 /// The answer when the job tables cannot be read.
-const STORE_UNAVAILABLE: &str = "store-unavailable";
+pub(super) const STORE_UNAVAILABLE: &str = "store-unavailable";
 
 /// The answer when the usage history cannot be read.
 const USAGE_UNAVAILABLE: &str = "usage-unavailable";
