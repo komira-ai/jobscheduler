@@ -270,6 +270,7 @@ mod tests {
 
     use super::*;
     use crate::agent_api::job_rig::tables;
+    use crate::api::rig::{Lines, process_sink};
 
     fn scratch(name: &str) -> TestDir {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/job_store");
@@ -446,8 +447,9 @@ mod tests {
     }
 
     /// Asserts that an index backfill whose commit another server's write beat is tried
-    /// again: the open succeeds after one wait of 10 ms, and the index entries the backfill
-    /// was to write back are there. It catches the backfill's lost race refusing the start.
+    /// again: the open succeeds after one wait of 10 ms, logs one warning naming the job, the
+    /// count of lost tries and the wait, and the index entries the backfill was to write back
+    /// are there. It catches the backfill's lost race refusing the start.
     #[test]
     fn an_index_backfill_that_another_server_beat_is_tried_again() {
         let store = with_a_queued_job();
@@ -461,8 +463,22 @@ mod tests {
         inner.txn(gone).unwrap().unwrap();
         contend(&store, "job/job-q", 1);
         let (sources, waits) = recording();
-        open_kept(&store, &sources).unwrap();
+        process_sink();
+        let lines = Lines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || open_kept(&store, &sources)).unwrap();
         assert_eq!(*waits.lock().unwrap(), [FIRST_RETRY]);
+        let said = lines.take();
+        let retried: Vec<&str> = said
+            .lines()
+            .filter(|line| line.contains("trying again"))
+            .collect();
+        assert_eq!(retried.len(), 1, "{said}");
+        let wanted = "WARN js_lease_server::job_store: another server changed a job while the job store opened; trying again id=job-q lost=1 wait_ms=10";
+        assert!(retried[0].ends_with(wanted), "{said}");
         let back: Vec<String> = inner
             .scan_prefix(ACTIVE_INDEX)
             .unwrap()
