@@ -11,16 +11,12 @@
 //! - `Mount` answers [`mount_path`] of a prepared source, and `FAILED_PRECONDITION` for one
 //!   that was not prepared.
 //! - `Release` of a source the fake does not know succeeds.
-//! - `Check` answers the cause a test scripted with [`FakeProvider::lose`] for a source, and
-//!   an empty one for every other source (also one the fake does not hold).
 //! - `Sweep` releases the sources of the agent it names whose run is not in `keep`, and
 //!   answers how many; another agent's sources stay.
 //!
 //! A test scripts it: [`FakeProvider::refuse`] a ref (`INVALID_ARGUMENT`),
 //! [`FakeProvider::fail_mount`] (`UNAVAILABLE` for the next calls),
-//! [`FakeProvider::fail_release`] (`INTERNAL` for the next calls),
-//! [`FakeProvider::lose`] a source (what `Check` answers for it),
-//! [`FakeProvider::leave_out_check`] (`Check` answers `UNIMPLEMENTED`), and
+//! [`FakeProvider::fail_release`] (`INTERNAL` for the next calls), and
 //! [`FakeProvider::hold`] a kind of call, which then never answers until
 //! [`FakeProvider::unhold`] ([`FakeProvider::wait_parked`] waits until a held call has
 //! arrived). [`FakeProvider::requests`] is every request the fake received, in
@@ -35,8 +31,8 @@ use std::time::Duration;
 
 use js_proto::provider::v1::mount_provider_server::{MountProvider, MountProviderServer};
 use js_proto::provider::v1::{
-    CheckRequest, CheckResponse, MountRequest, MountResponse, PrepareRequest, PrepareResponse,
-    ReleaseRequest, ReleaseResponse, Source, SweepRequest, SweepResponse,
+    MountRequest, MountResponse, PrepareRequest, PrepareResponse, ReleaseRequest, ReleaseResponse,
+    Source, SweepRequest, SweepResponse,
 };
 use tokio::net::UnixListener;
 use tokio::runtime::{Builder, Runtime};
@@ -52,30 +48,18 @@ const SOCKET: &str = "mp.sock";
 /// The kinds of call of the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
-    /// `Prepare`: begin making a source's tree.
     Prepare,
-    /// `Mount`: the directory of a prepared source.
     Mount,
-    /// `Release`: give up a source.
     Release,
-    /// `Check`: whether a source was lost while its run used it.
-    Check,
-    /// `Sweep`: release an agent's sources of every run it does not keep.
     Sweep,
 }
 
 /// One request the fake received.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seen {
-    /// A `Prepare`, with the request it carried.
     Prepare(PrepareRequest),
-    /// A `Mount`, with the request it carried.
     Mount(MountRequest),
-    /// A `Release`, with the request it carried.
     Release(ReleaseRequest),
-    /// A `Check`, with the request it carried: the source the agent asked about.
-    Check(CheckRequest),
-    /// A `Sweep`, with the request it carried.
     Sweep(SweepRequest),
 }
 
@@ -94,10 +78,6 @@ struct Book {
     refused: BTreeSet<String>,
     mount_failures: u32,
     release_failures: u32,
-    /// The sources `Check` answers a cause for, by (run, index), with the cause.
-    lost: BTreeMap<(String, u32), String>,
-    /// Whether `Check` answers `UNIMPLEMENTED`, as a provider from before it does.
-    check_left_out: bool,
     held: BTreeSet<Kind>,
     /// The held calls waiting to be let go. A call whose client gave up stays counted.
     parked: u32,
@@ -219,23 +199,6 @@ impl MountProvider for Fake {
         Ok(Response::new(ReleaseResponse {}))
     }
 
-    async fn check(
-        &self,
-        request: Request<CheckRequest>,
-    ) -> Result<Response<CheckResponse>, Status> {
-        let request = request.into_inner();
-        self.shared
-            .arrive(Kind::Check, Seen::Check(request.clone()))
-            .await;
-        let (_, run, index) = key(request.source);
-        let book = self.shared.book();
-        if book.check_left_out {
-            return Err(Status::unimplemented("the fake provider has no Check"));
-        }
-        let lost = book.lost.get(&(run, index)).cloned().unwrap_or_default();
-        Ok(Response::new(CheckResponse { lost }))
-    }
-
     async fn sweep(
         &self,
         request: Request<SweepRequest>,
@@ -326,20 +289,6 @@ impl FakeProvider {
     /// The next `times` calls of `Release` answer `INTERNAL`, and release nothing.
     pub fn fail_release(&self, times: u32) {
         self.shared.book().release_failures = times;
-    }
-
-    /// From now on `Check` answers `cause` for the source at `index` of the run `run` (as the
-    /// provider sees the run, `js.` and the job's id), whichever agent asks.
-    pub fn lose(&self, run: &str, index: u32, cause: &str) {
-        self.shared
-            .book()
-            .lost
-            .insert((run.to_owned(), index), cause.to_owned());
-    }
-
-    /// From now on `Check` is answered `UNIMPLEMENTED`, as a provider from before it does.
-    pub fn leave_out_check(&self) {
-        self.shared.book().check_left_out = true;
     }
 
     /// From now on a call of `kind` is recorded and then not answered, until

@@ -76,14 +76,6 @@ pub fn release(run_id: &str, index: u32) -> ProviderCall {
     }
 }
 
-/// `Check` of the source `index` of `run_id`.
-pub fn check(run_id: &str, index: u32) -> ProviderCall {
-    ProviderCall::Check {
-        run_id: run_id.to_owned(),
-        index,
-    }
-}
-
 /// `Sweep`.
 pub fn sweep() -> ProviderCall {
     ProviderCall::Sweep { keep: Vec::new() }
@@ -146,13 +138,6 @@ impl FakeProviders {
         self.always(provider, &mount(run_id, index), answer);
     }
 
-    /// `Check` of the source `index` of `run_id` answers that the provider lost it for
-    /// `cause`, every time.
-    pub fn loses(&self, provider: &str, run_id: &str, index: u32, cause: &str) {
-        let answer = ProviderAnswer::Done(Some(cause.to_owned()));
-        self.always(provider, &check(run_id, index), answer);
-    }
-
     /// The calls sent whose log line begins `provider <kind> `, in order.
     pub fn sent(&self, kind: &str) -> Vec<String> {
         let prefix = format!("provider {kind} ");
@@ -187,9 +172,6 @@ impl FakeProviders {
             }
             ProviderCall::Release { run_id, index } => {
                 format!("provider release {provider} {run_id}#{index}")
-            }
-            ProviderCall::Check { run_id, index } => {
-                format!("provider check {provider} {run_id}#{index}")
             }
             ProviderCall::Sweep { keep } => format!("provider sweep {provider} keep={keep:?}"),
         }

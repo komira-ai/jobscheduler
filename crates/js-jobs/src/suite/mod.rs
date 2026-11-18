@@ -35,7 +35,6 @@ mod idempotency;
 mod indexes;
 mod lifecycle;
 mod logs;
-mod lost;
 mod marks;
 mod paging;
 mod placement;
@@ -60,7 +59,6 @@ pub use idempotency::*;
 pub use indexes::*;
 pub use lifecycle::*;
 pub use logs::*;
-pub use lost::*;
 pub use marks::*;
 pub use paging::*;
 pub use placement::*;
@@ -200,9 +198,6 @@ where
     a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
     a_restarted_prepare_moves_only_the_deadline(backend);
     a_restarted_prepare_loses_to_a_change_of_either_row(backend);
-    a_lost_tree_requeues_a_running_job_and_releases_its_allocation(backend);
-    a_lost_tree_requeue_refuses_a_job_that_is_not_running_or_is_cancelling(backend);
-    a_lost_tree_requeue_loses_to_a_change_of_either_row(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -342,9 +337,6 @@ macro_rules! job_store_tests {
             a_failed_prepare_drops_its_mark_or_writes_nothing,
             a_restarted_prepare_moves_only_the_deadline,
             a_restarted_prepare_loses_to_a_change_of_either_row,
-            a_lost_tree_requeues_a_running_job_and_releases_its_allocation,
-            a_lost_tree_requeue_refuses_a_job_that_is_not_running_or_is_cancelling,
-            a_lost_tree_requeue_loses_to_a_change_of_either_row,
         );
     };
 }

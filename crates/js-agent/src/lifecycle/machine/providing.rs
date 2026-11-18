@@ -14,8 +14,7 @@
 //!   provider that is unavailable is asked again; one that refuses the ref fails the start
 //!   (`provider-refused`); a directory that is not an absolute path in normal form beneath a
 //!   mount root of the agent's (a root it may write, for a read-write mount) fails it
-//!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked,
-//!   nor is any while the release of an earlier run of the same id is owed.
+//!   (`input-not-allowed`). A provider whose sweep at start is not answered yet is not asked.
 //! - **From the admission to `--mount-provider-wait`** a start may wait; past it the start
 //!   fails `input-unavailable` naming the first source without a directory.
 //! - **A stop** while providing ends the start at once, whatever a call in flight does: its
@@ -190,13 +189,6 @@ impl Wanted {
                 "the provider {} has not answered its sweep since the agent started",
                 self.provider
             );
-            return Ok(());
-        }
-        // A run of the same id that ended on this host (a job queued again and placed here
-        // again) may still owe its release: one that came after this `Prepare` would release
-        // the new source, which has the same agent, run and index.
-        if attached.owes(run_id) {
-            self.why = "the release of the run's earlier sources is not answered".to_owned();
             return Ok(());
         }
         if !self.prepared {

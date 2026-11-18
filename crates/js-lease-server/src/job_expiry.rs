@@ -13,7 +13,7 @@
 //!
 //! | state | deadline |
 //! |---|---|
-//! | queued | `max(queued_at + max_queue_wait, deadline_floor)`; for a job a lost tree sent back to queued ([`js_jobs::JobStore::requeue_lost_tree`]), `queued_at` is the instant it was sent back |
+//! | queued | `max(queued_at + max_queue_wait, deadline_floor)` |
 //! | placed, starting | `max(placed_at + start_timeout, deadline_floor)` |
 //! | placed, whole host | none: its prepare deadline governs it ([`crate::job_whole`]) |
 //! | starting, whole host | `max(prepare_deadline + start_timeout, deadline_floor)` |
@@ -36,7 +36,6 @@ use std::time::Duration;
 
 use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, Needs, StartFailure};
 use js_state::StoreTime;
-use js_types::JobEventKind;
 
 use crate::file::PoolSettings;
 use crate::job_store::ServerJobs;
@@ -75,22 +74,6 @@ impl Default for JobLimits {
     }
 }
 
-/// The instant a queued `job`'s wait counts from: its submit, or, for a job a lost tree sent
-/// back to queued, the instant of that requeue (its latest requeue event), so that a job that
-/// ran for longer than the queue wait is not failed for waiting the moment it is queued again.
-fn waiting_since(job: &JobRecord) -> StoreTime {
-    let requeued = job
-        .queue
-        .events()
-        .iter()
-        .rev()
-        .find(|event| event.kind == JobEventKind::Requeued)
-        .map(|event| event.at);
-    requeued
-        .filter(|_| job.lost_trees > 0)
-        .map_or(job.submitted_at, |at| at.max(job.submitted_at))
-}
-
 /// When `job` runs out of time under `limits`, and how it then fails to start: for a queued
 /// job its queue-wait deadline, for a placed or starting one its start deadline (see the
 /// module docs), each held to at least its deadline floor; `None` for a job in any other
@@ -105,7 +88,7 @@ pub(crate) fn deadline(
     let whole = matches!(job.spec.needs, Needs::WholeHost);
     let (from, limit, failure) = match job.state {
         JobState::Queued => (
-            waiting_since(job),
+            job.submitted_at,
             limits.max_queue_wait,
             StartFailure::NoCapacity,
         ),
@@ -143,8 +126,7 @@ pub(crate) fn due(
 /// Ends each job of `jobs` that is out of time at `now` under `limits`, each in one commit
 /// with its allocation's move to releasing (a queued whole-host job's with its mark's delete),
 /// and returns those it ended with how. The jobs read are the queued ones and those of every
-/// live allocation (a placed or starting job always has one; a queued job that has one is read
-/// once), each with its allocation's
+/// live allocation (a placed or starting job always has one), each with its allocation's
 /// prepare deadline. A job that moved on between the read and its commit (placed, started,
 /// ended, or changed by a heartbeat) is left for the next pass, which reads it again; a job
 /// that another writer ended in between keeps that end and is not returned. Each job it ends
@@ -164,9 +146,7 @@ pub(crate) fn expire(
     for allocation in jobs.live_allocations()? {
         let prepared = allocation.prepare_deadline;
         let job = jobs.get_job(&allocation.job)?;
-        // A queued job whose earlier run's allocation is still live is read with the queue.
-        let held = job.filter(|job| job.state != JobState::Queued);
-        waiting.extend(held.map(|job| (job, prepared)));
+        waiting.extend(job.map(|job| (job, prepared)));
     }
     let mut ended = Vec::new();
     for (job, prepared) in waiting {

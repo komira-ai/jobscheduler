@@ -14,8 +14,6 @@ pub const PREPARE: &str = "/jobscheduler.provider.v1.MountProvider/Prepare";
 pub const MOUNT: &str = "/jobscheduler.provider.v1.MountProvider/Mount";
 /// The path of `Release`.
 pub const RELEASE: &str = "/jobscheduler.provider.v1.MountProvider/Release";
-/// The path of `Check`.
-pub const CHECK: &str = "/jobscheduler.provider.v1.MountProvider/Check";
 /// The path of `Sweep`.
 pub const SWEEP: &str = "/jobscheduler.provider.v1.MountProvider/Sweep";
 
@@ -85,22 +83,6 @@ pub struct ReleaseRequest {
 /// `ReleaseResponse`: the source is given up.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct ReleaseResponse {}
-
-/// `CheckRequest`: whether a source was lost while its run used it.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
-pub struct CheckRequest {
-    /// The source.
-    #[prost(message, optional, tag = "1")]
-    pub source: Option<Source>,
-}
-
-/// `CheckResponse`: why the provider lost the source, empty when it did not.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
-pub struct CheckResponse {
-    /// The code of why the source was lost (`tree-lost`), or empty.
-    #[prost(string, tag = "1")]
-    pub lost: String,
-}
 
 /// `SweepRequest`: release an agent's sources of every run it does not keep.
 #[derive(Clone, PartialEq, Eq, prost::Message)]

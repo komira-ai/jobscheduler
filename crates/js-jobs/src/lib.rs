@@ -112,7 +112,6 @@
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
-//! | [`JobStore::requeue_lost_tree`] | put `job/<id>` at its version (running to queued with one more lost tree and the queue note), put `alloc/<id>` at its version (to releasing) |
 //! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it, and delete `mark/<id>` at its version or check it absent), or nothing for an ended job or a second cancel |
 //! | [`JobStore::fail_prepare_with`] | put `job/<id>` at its version (placed to queued with the failed-prepare count and bars, or ended failed to start), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete `mark/<id>` at its version or check it absent |
 //! | [`JobStore::restart_prepare`] | put `alloc/<id>` at its version (the new prepare deadline), check `job/<id>` at its version |
@@ -182,5 +181,5 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob,
-    Placement, Row, SCHEMA_VERSION, TREE_LOST_REQUEUES, Written, queue_order,
+    Placement, Row, SCHEMA_VERSION, Written, queue_order,
 };

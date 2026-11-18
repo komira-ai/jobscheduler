@@ -180,19 +180,9 @@ impl SchedPlacer {
             return Ok(Arc::clone(tables));
         }
         *kept = None;
-        let live = jobs.live_allocations()?;
-        // A queued job that still has a live allocation was sent back to the queue while its
-        // host removes its last container (a lost tree, `JobStore::requeue_lost_tree`): it
-        // cannot be placed before that allocation is freed, so no pass tries it until then.
-        let held: BTreeSet<&JobId> = live.iter().map(|allocation| &allocation.job).collect();
-        let queued = jobs.queued()?;
-        let queued = queued
-            .into_iter()
-            .filter(|job| !held.contains(&job.id))
-            .collect();
         let tables = Arc::new(Tables {
-            live,
-            queued,
+            live: jobs.live_allocations()?,
+            queued: jobs.queued()?,
             marks: jobs.marks()?,
         });
         *kept = Some((written, Arc::clone(&tables)));

@@ -250,9 +250,6 @@ pub const INPUT_UNREADABLE: &str = "input-unreadable";
 /// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a host port of the
 /// job that the agent could not offer again after it restarted, so it stopped the job.
 pub const HOST_PORT_LOST: &str = "host-port-lost";
-/// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a mount provider lost
-/// a source's tree while the job ran; the server runs the job again.
-pub const TREE_LOST: &str = "tree-lost";
 
 /// A whole-node lease request that failed after the host could not be prepared within the
 /// allowed number of replacements; its detail names the last reason code and detail the

@@ -372,10 +372,8 @@ pub struct JobResult {
     )]
     pub logs: Option<LogReport>,
     /// The code of an input the host provides that failed while the job ran:
-    /// [`refusal::INPUT_UNREADABLE`], [`refusal::HOST_PORT_LOST`] or [`refusal::TREE_LOST`],
-    /// from an agent that reads a start's layers, mounts and host ports. A mount provider
-    /// that lost a source's tree while the job ran gives `tree-lost`, and the server runs
-    /// the job again. The failure is then the host's,
+    /// [`refusal::INPUT_UNREADABLE`] or [`refusal::HOST_PORT_LOST`], from an agent that
+    /// reads a start's layers, mounts and host ports. The failure is then the host's,
     /// whatever the outcome and exit status, which are kept as they were. Absent otherwise,
     /// and left out of the text. An agent of this release on the `crun` runtime sets
     /// `host-port-lost` for a job that did not succeed after a restart at which a host port of

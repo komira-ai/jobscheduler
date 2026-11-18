@@ -573,7 +573,6 @@ fn a_job_results_input_failure_is_bounded_as_its_detail() {
         refusal::TREE_UNAVAILABLE.to_owned(),
         refusal::INPUT_UNREADABLE.to_owned(),
         refusal::HOST_PORT_LOST.to_owned(),
-        refusal::TREE_LOST.to_owned(),
         "tree-later".to_owned(),
         long(MAX_DETAIL_LEN),
     ] {

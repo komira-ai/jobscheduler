@@ -60,8 +60,9 @@ pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row (the others: 45, 46 and 59 in `whole_fields`, 47 in `host_fields`,
-/// 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
+/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation
+/// tag 47 in `host_fields`, the queue tags 48 to 53 in `queue_fields`, 54 to 58 in
+/// `rootfs_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -940,7 +941,6 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         client,
         failed_prepares,
         prepare_bars,
-        lost_trees: whole_fields::take_lost_trees(&mut fields)?,
         queue: queue_fields::take_job(&mut fields)?,
         carried: fields.carried(),
     })

@@ -17,10 +17,7 @@ use js_usage::{
     ProfileKey, Used,
 };
 
-use super::{
-    Freed, answer_retired, ended_reason, free_allocation, lose_on_absent, profile_of, reason_of,
-    used_of,
-};
+use super::{Freed, answer_retired, ended_reason, free_allocation, profile_of, reason_of, used_of};
 use crate::agent_api::job_rig::{BOOKED, placed, spec, tables};
 use crate::job_store::ServerJobs;
 
@@ -87,7 +84,7 @@ fn a_confirmation_frees_with_the_reason_of_the_jobs_end() {
             with(JobState::Failed, Some(ResultReason::Cancelled)),
             EndReason::Cancelled,
         ),
-        (with(JobState::Queued, None), EndReason::Exited),
+        (with(JobState::Queued, None), EndReason::Cancelled),
         (with(JobState::Placed, None), EndReason::Cancelled),
         (with(JobState::Starting, None), EndReason::Cancelled),
         (with(JobState::Running, None), EndReason::Cancelled),
@@ -225,108 +222,6 @@ fn a_retired_answer_changes_only_a_job_held_on_that_host() {
         (allocation.step, allocation.end_reason),
         (AllocationStep::Freed, Some(EndReason::StartTimeout))
     );
-}
-
-/// A job queued again for a lost tree has an allocation its host still has to confirm: the
-/// host's confirmation frees it as exited, and so does the host's retired answer for the id.
-/// A queued job with no earlier run (no live allocation) is left as it is. It catches a
-/// requeued job whose allocation is never freed, which would keep the next placement out, and
-/// one freed as a cancel.
-#[test]
-fn a_job_queued_again_is_freed_as_exited_on_its_hosts_confirmation() {
-    let (_store, jobs) = tables();
-    let host = HostId::new("host-a").unwrap();
-    let again = |id: &str| {
-        let (job, _) = placed(&jobs, id, "host-a", spec(), BOOKED);
-        jobs.transition(&job.id, JobState::Placed, JobState::Starting)
-            .unwrap();
-        jobs.transition(&job.id, JobState::Starting, JobState::Running)
-            .unwrap();
-        let note = js_types::QueueNote {
-            code: js_types::QueueCode::WaitingForCapacity,
-            detail: "a mount provider lost the job's input tree".to_owned(),
-            event: Some(js_types::JobEventKind::Requeued),
-            host: Some(host.clone()),
-            attempt: false,
-        };
-        let (queued, releasing) = jobs.requeue_lost_tree(&job.id, note).unwrap();
-        assert_eq!(queued.state, JobState::Queued);
-        assert_eq!(releasing.step, AllocationStep::Releasing);
-        queued.id
-    };
-    let confirmed = again("job-confirmed");
-    let freed = free_allocation(&jobs, &confirmed, Freed::HostConfirmed).unwrap();
-    assert_eq!(
-        (freed.step, freed.end_reason),
-        (AllocationStep::Freed, Some(EndReason::Exited))
-    );
-
-    let retired = again("job-retired");
-    answer_retired(&jobs, &host, &retired).unwrap();
-    let freed = jobs.get_allocation(&retired).unwrap().unwrap();
-    assert_eq!(
-        (freed.step, freed.end_reason),
-        (AllocationStep::Freed, Some(EndReason::Exited))
-    );
-    assert_eq!(
-        jobs.get_job(&retired).unwrap().unwrap().state,
-        JobState::Queued,
-        "the job waits for its next placement"
-    );
-
-    let absent = again("job-absent");
-    assert_eq!(lose_on_absent(&jobs, &absent).unwrap(), None);
-    let freed = jobs.get_allocation(&absent).unwrap().unwrap();
-    assert_eq!(
-        (freed.step, freed.end_reason),
-        (AllocationStep::Freed, Some(EndReason::HostAbsent))
-    );
-    assert_eq!(
-        jobs.get_job(&absent).unwrap().unwrap().state,
-        JobState::Queued,
-        "a host the provider read absent loses no job that waits to run again"
-    );
-}
-
-/// Asserts that the usage history row written when the allocation of a job queued again for a
-/// lost tree is freed counts the run that lost its tree: its run time is from the job's start
-/// to the free, at least the 5 s the job ran, and the free is a release. It catches a requeue
-/// that drops the job's start time, which records the run as one of no time.
-#[test]
-fn the_history_of_a_run_that_lost_its_tree_counts_the_run() {
-    let (time, store, jobs) = timed();
-    let second = Duration::from_secs(1);
-    let id = JobId::parse("job-a").unwrap();
-    let new = NewJob {
-        id: Some(id.clone()),
-        spec: spec(),
-        priority: 0,
-        client: None,
-    };
-    jobs.insert_queued(new).unwrap();
-    jobs.place(&id, HostId::new("host-a").unwrap(), BOOKED)
-        .unwrap();
-    jobs.transition(&id, JobState::Placed, JobState::Starting)
-        .unwrap();
-    jobs.transition(&id, JobState::Starting, JobState::Running)
-        .unwrap();
-    time.advance(5 * second);
-    let note = js_types::QueueNote {
-        code: js_types::QueueCode::WaitingForCapacity,
-        detail: "a mount provider lost the job's input tree".to_owned(),
-        event: Some(js_types::JobEventKind::Requeued),
-        host: Some(HostId::new("host-a").unwrap()),
-        attempt: false,
-    };
-    jobs.requeue_lost_tree(&id, note).unwrap();
-    let freed = free_allocation(&jobs, &id, Freed::HostConfirmed).unwrap();
-    let rows = history_rows(&store);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].ended_reason, EndedReason::Released);
-    let started = jobs.get_job(&id).unwrap().unwrap().started_at.unwrap();
-    let ran = u64::try_from(freed.freed_at.unwrap().since(started).as_millis()).unwrap();
-    assert!(ran >= 5_000, "{ran}");
-    assert_eq!(rows[0].run_ms, Some(ran));
 }
 
 /// Job tables over a store whose clock the test moves.

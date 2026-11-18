@@ -9,19 +9,14 @@
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
 //!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged; a result that names an input failure of the code
-//!    `tree-lost` ([`refusal::TREE_LOST`]: a mount provider lost the job's tree) sends the job
-//!    back to queued instead, with its allocation releasing, while it has been requeued for
-//!    that fewer than [`TREE_LOST_REQUEUES`] times and no cancel was asked for, and is
-//!    acknowledged the same; a result resent for a job so sent back is a duplicate. A job the
-//!    agent ran and ended between two heartbeats is walked through the steps it skipped first. The same listing twice commits nothing,
+//!    to releasing, and is acknowledged. A job the agent ran and ended between two heartbeats
+//!    is walked through the steps it skipped first. The same listing twice commits nothing,
 //!    and a report that would move a job backwards or out of an end is ignored.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
 //!    and was told to stop is stopped and gone, so a cancelled job ends and its allocation is
 //!    freed in one commit.
 //! 3. **Confirmed containers are freed**: an allocation that is releasing, of a job that has
-//!    ended or was sent back to queued, whose host no longer lists the job, is freed
-//!    ([`job_alloc::free_allocation`]). A
+//!    ended, whose host no longer lists the job, is freed ([`job_alloc::free_allocation`]). A
 //!    host that is only silent is never served here, so silence frees nothing.
 //! 4. **The reply is built** from what the store holds now: a stop for every job of the host
 //!    with a cancel intent that has not ended, every listed job the store has no live
@@ -44,11 +39,10 @@ use js_agent_wire::{
 };
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, JobEnd, JobId, JobRecord, JobState, JobStoreError,
-    LogLengths, Output, StartFailure, TREE_LOST_REQUEUES,
+    LogLengths, Output, StartFailure,
 };
-use js_sched::queue_status::{self, Outcome as Told};
 use js_types::{HostId, Resources};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
 use crate::job_start::start_of;
@@ -142,9 +136,7 @@ pub(crate) fn serve(
         .chain(retired.iter().map(String::as_str))
         .collect();
     for (allocation, job) in jobs.live_on(host)? {
-        let ended = job
-            .as_ref()
-            .is_none_or(|job| job.state.is_ended() | (job.state == JobState::Queued));
+        let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
         let gone = !held.contains(allocation.job.as_str());
         if (allocation.step == AllocationStep::Releasing) & ended & gone {
             job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
@@ -273,12 +265,6 @@ fn report(
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
 /// unanswered.
-///
-/// A result whose input failure is [`refusal::TREE_LOST`] does not end a job that has been
-/// sent back fewer than [`TREE_LOST_REQUEUES`] times and has no cancel asked for: the job goes
-/// back to queued ([`requeue_lost_tree`]) and the result is [`Ack::Accepted`]. The host resends
-/// the result until it is acknowledged, so a job that is queued with its allocation still
-/// releasing, which a result names, is answered [`Ack::Duplicate`] and nothing is written.
 fn commit_result(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -288,14 +274,9 @@ fn commit_result(
     let Some(end) = end_of(&job, result) else {
         return Ok(None);
     };
-    if job.state.is_ended() | (job.state == JobState::Queued) {
+    if job.state.is_ended() {
         return Ok(Some(Ack::Duplicate));
     }
-    let lost_tree = matches!(
-        &end,
-        JobEnd::InputFailed { input_failure, .. } if input_failure == refusal::TREE_LOST
-    ) & !job.cancel_requested
-        & (job.lost_trees < TREE_LOST_REQUEUES);
     let ran = matches!(
         end,
         JobEnd::Exited { .. }
@@ -308,9 +289,6 @@ fn commit_result(
     } else {
         job
     };
-    if lost_tree {
-        return requeue_lost_tree(jobs, context, &job).map(Some);
-    }
     let failure = match &end {
         JobEnd::FailedToStart(failure) | JobEnd::Refused { failure, .. } => Some(*failure),
         _ => None,
@@ -328,34 +306,6 @@ fn commit_result(
         }
         Err(error) => Err(error),
     }
-}
-
-/// Sends the running `job`, whose mount provider lost its tree, back to queued with its
-/// allocation releasing ([`js_jobs::JobStore::requeue_lost_tree`]), noted for the queue status
-/// as [`Told::TreeLost`] on the host of `context`, and answers [`Ack::Accepted`]. A cancel
-/// asked for since `job` was read is answered [`Ack::Stale`]: the host resends the result and
-/// the job then ends as it ends without a requeue.
-fn requeue_lost_tree(
-    jobs: &ServerJobs,
-    context: &BeatContext<'_>,
-    job: &JobRecord,
-) -> Result<Ack, JobStoreError> {
-    let told = Told::TreeLost {
-        host: context.host.clone(),
-    };
-    queue_status::note(&told, job.queue.code()).map_or(Ok(Ack::Stale), |note| {
-        match jobs.requeue_lost_tree(&job.id, note) {
-            Ok(_) => {
-                info!(host = %context.host, job = %job.id, lost_trees = job.lost_trees.saturating_add(1), "a mount provider lost a job's tree; the job is queued again");
-                Ok(Ack::Accepted)
-            }
-            Err(JobStoreError::IllegalTransition { .. }) => {
-                warn!(host = %context.host, job = %job.id, "a cancel arrived with a lost tree; the result is answered stale");
-                Ok(Ack::Stale)
-            }
-            Err(error) => Err(error),
-        }
-    })
 }
 
 /// Moves `job` forward to `target` (starting or running) through each step it has not taken,
@@ -390,8 +340,7 @@ fn advance(
 /// [`StartFailure::AgentRefused`] for any other code and for a refusal without one. A job that
 /// ran and whose result names an input that failed (`input_failure`) is failed for its input
 /// ([`JobEnd::InputFailed`]), whatever its outcome, with the exit status it reported: the
-/// failure is its host's (`docs/design/job-rootfs.md`, section 8). [`commit_result`] decides
-/// whether that end stands: a lost tree (`tree-lost`) sends the job back to queued instead.
+/// failure is its host's (`docs/design/job-rootfs.md`, section 8).
 pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     let tail = result.log_tail.clone().unwrap_or_default();
     let logs = result.logs_report().map(|report| LogLengths {
@@ -555,7 +504,3 @@ pub(crate) fn exclusive_of(live: &[(AllocationRecord, Option<JobRecord>)]) -> Op
 #[cfg(test)]
 #[path = "per_job_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "per_job_lost_tests.rs"]
-mod lost_tests;

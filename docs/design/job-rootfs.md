@@ -960,9 +960,7 @@ moment the program runs. `times.started_at_ms - times.placed_at_ms` is how long 
    (the server's `may_move`, `crates/js-jobs/src/record.rs`), then one end, which never changes. The one way back, an
    operation of the store's own outside `may_move` (`requeue_failed_prepare`, `crates/js-jobs/src/store.rs`): a
    whole-host job whose host's prepare failed returns from `PLACED` to `QUEUED`, its `host_id` cleared, with an event
-   `REQUEUED` naming the host it left; it may then be placed on another host. A second one, `requeue_lost_tree` in the
-   same file: a job that is `RUNNING` and whose result says `input_failure: tree-lost` (section 8) returns to `QUEUED`,
-   its `host_id` cleared, with an event `REQUEUED` naming the host it left, at most twice for one job (`lost_trees`).
+   `REQUEUED` naming the host it left; it may then be placed on another host.
 2. **A read may miss a state.** Every state the job passes is recorded, one commit each, but a read sees only the
    state of its moment: a job may go from `PLACED` to `RUNNING`, or to an end, between two reads, and from `QUEUED` to
    an end without being placed (no capacity, a cancel). A client acts on the first read that shows a state at or past
@@ -999,7 +997,7 @@ or `PLACED`; this design adds no watch (decision LR12).
 
 ### 7.4 Where the time goes
 
-**No special fetch.** The agent asks a provider nothing while the job runs, and after it ends only whether a source was lost (section 8). A host path is a directory; the agent opens its
+**No special fetch.** The agent never asks a provider for anything. A host path is a directory; the agent opens its
 root (4.2) and, at the overlay's mount, the kernel looks up the lowers' roots; every other read is the job's, when the
 job makes it, through the kernel, to whatever file system is there. On a node with a lazy file system, that file system
 fetches on first read; jobscheduler neither knows nor needs to.
@@ -1039,7 +1037,7 @@ and the host's input is to blame), or the job's own result stands.
 | An overlay or clone mount fails (the kernel refuses a lower, the upper's volume is not local) | preparing | start fails with the existing runtime failure code; it is the host's configuration |
 | A read of a lazy lower fails while the job runs (`EIO`) | the job | the job's own result: the agent cannot tell one file's failed read from the job's |
 | The job did not succeed, and after it ended a host path of its layers or mounts no longer answers its lookup (`ENOTCONN`, `EIO`, `ESTALE`, or no answer within 5 s) | after exit | `FAILED`, reason `INPUT_FAILED`, `input_failure: input-unreadable`, exit code kept |
-| The job did not succeed, and after it ended the mount provider's `Check` for a source of the run answers `tree-lost` (the tree cannot be read whole: a part of it is gone from every copy) | after exit | the result's `input_failure` is `tree-lost`; the server queues the job again (`REQUEUED`, `lost_trees` + 1), at most twice, and the third loss ends it `FAILED`, reason `INPUT_FAILED`, `input_failure: tree-lost` |
+| A mount provider lost a source's tree while the job ran (a part of it gone for good; tierstore's `tree-lost`, komira-ai/tierstore `docs/design/fetch-cache-serve.md` section 4.6): the provider answers `EIO` to the job's reads of what is missing and to the source directory's `statfs` and listing until the source is released (`provider.proto`) | after exit | as the row above: `FAILED`, reason `INPUT_FAILED`, `input_failure: input-unreadable`, exit code kept. The failure is the host's, not the job's: a client runs the job again as a new job (kbf does), and jobscheduler does not requeue it |
 | A host port cannot be offered again after an agent restart | adoption | the run is stopped; `FAILED`, reason `INPUT_FAILED`, `input_failure: host-port-lost` |
 | The host's service behind a host port refuses or drops a connection | the job | the job's own result |
 | A program in a `no_exec` mount is run | the job | the job's own result (`EACCES`), as for any file it may not run |
@@ -1053,16 +1051,10 @@ the assembly, and the check is an `fstatfs` and a `getdents` of one entry throug
 before the result is built (`Event::ResultReady`), only for a job that did not succeed: a job that succeeded read what
 it needed. It catches the case that matters most, a provider whose whole file system went away under a running job, so
 that a compiler's "cannot read file" is not reported as the user's build error; it does not catch one file's failed
-fill, which only the provider knows. For that the agent asks the provider: after a job that did not succeed has ended,
-and before it releases the run's sources, it sends `Check` (`jobscheduler.provider.v1.MountProvider`) once for each
-provider source of the run, each bounded by 5 s, and holds the result until every one is answered. An answer naming a
-lost source sets the result's `input_failure`: `tree-lost` when the provider says `tree-lost`
-(`refusal::TREE_LOST`), `input-unreadable` for any other cause, with the provider's text in the finding
-`provider-source-lost`. A provider that refuses, answers `UNIMPLEMENTED`, or does not answer in time counts as not
-lost and gives the finding `provider-check-failed`. A job that succeeded, or a run with no provider source, is never
-checked. The provider's side is in komira-ai/tierstore `docs/design/fetch-cache-serve.md`, section 4.6. A start of a
-run whose sources' releases are still owed waits before it asks Prepare, so that the owed release does not release the
-new run's source; a requeued job may be placed on the same host again with the same job id.
+fill, which only the provider knows, and which a client with a provider asks that provider about (decision LR11). A
+provider that lost a source's tree for good (tierstore's `tree-lost`) makes the loss the case the check catches: the
+source's directory answers `EIO` from then on (the provider contract, `provider.proto`), so the job fails for its input
+and is not reported as the user's build error.
 
 **The detail reaches the client.** `JobState::FailedToStart` gains the agent's code, stored in a new tag of the job's
 row and shown in `Job.start_failure_detail`; `end_of` maps `input-unavailable` to `StartFailure::InputUnavailable` and
@@ -1331,11 +1323,11 @@ Each is decided here; the owner may overturn any.
 - **LR10. On macOS a read-only or read-write mount is a link; how a copy-on-write mount is made is not chosen** (5.3).
   The owner decides it from measurements of a lazy provider's real macOS mount. Every candidate realises the same
   `COPY_ON_WRITE` mode, so the spec does not change whichever wins.
-- **LR11. The agent checks a failed job's host paths once after it ends, and asks a provider once for each of the run's sources whether it was lost**, and nothing while it runs (section 8). A lost tree requeues the job.
+- **LR11. The agent checks a failed job's host paths once after it ends**, and nothing while it runs (section 8).
 - **LR12. The job's lifecycle is a documented guarantee any client may rely on; no new state or watch for "creating".**
   `PLACED` with a host and `STARTING` are the moments a client can use, and `JobTimes` already gives the time spent
   preparing. Section 7 states, as rules a client can rely on, what the existing states promise: forward only (with the
-  whole-host requeue and the lost-tree requeue as the only ways back), a read may miss a state, the host is known from `PLACED`, inputs are first
+  whole-host requeue as the one way back), a read may miss a state, the host is known from `PLACED`, inputs are first
   touched on that host while creating.
 - **LR13. The tree wire is retired additively; only the never-reported capability key is removed** (section 6).
 - **LR14. `input-unavailable` is a public start failure code of its own; a refused allow-list is not.** The first is

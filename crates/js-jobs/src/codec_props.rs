@@ -349,11 +349,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::option::of(ident()),
             proptest::option::of(any_text()),
         ),
-        (
-            any::<u32>(),
-            btree_map(host_id(), exclusion(), 0..4),
-            any::<u32>(),
-        ),
+        (any::<u32>(), btree_map(host_id(), exclusion(), 0..4)),
         queue_trail(),
     )
         .prop_map(
@@ -361,7 +357,7 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 (id, spec, priority, state, submitted_at),
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client, start_failure_detail),
-                (failed_prepares, prepare_bars, lost_trees),
+                (failed_prepares, prepare_bars),
                 queue,
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
@@ -381,7 +377,6 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 client: client.map(|name| ClientName::parse(&name).expect("a client name")),
                 failed_prepares,
                 prepare_bars,
-                lost_trees,
                 queue,
                 carried: Carried::default(),
                 start_failure_detail,

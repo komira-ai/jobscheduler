@@ -181,22 +181,15 @@ pub(super) fn cause_input_failure(cause: Option<Cause>, how: Outcome) -> Option<
 /// The code of an input of the host that failed, for a job's result: the host port it lost
 /// ([`cause_input_failure`]) first, then, for a job that did not succeed, what the runtime
 /// found unreadable once it ended (`unreadable`, `Runtime::input_failure`).
-///
-/// Between them comes a source a mount provider lost while the job used it (`lost`, the cause
-/// the provider gave): [`refusal::TREE_LOST`] for `tree-lost`, [`refusal::INPUT_UNREADABLE`]
-/// for any other cause.
 pub(super) fn input_failure(
     cause: Option<Cause>,
     how: Outcome,
-    lost: Option<&str>,
     unreadable: Option<String>,
 ) -> Option<String> {
-    match (cause_input_failure(cause, how), how, lost) {
-        (Some(port), _, _) => Some(port),
-        (None, Outcome::Succeeded, _) => None,
-        (None, _, Some(refusal::TREE_LOST)) => Some(refusal::TREE_LOST.to_owned()),
-        (None, _, Some(_)) => Some(refusal::INPUT_UNREADABLE.to_owned()),
-        (None, _, None) => unreadable,
+    match (cause_input_failure(cause, how), how) {
+        (Some(lost), _) => Some(lost),
+        (None, Outcome::Succeeded) => None,
+        (None, _) => unreadable,
     }
 }
 

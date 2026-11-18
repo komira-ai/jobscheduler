@@ -15,8 +15,6 @@ An attempt can also end `evicted`: the scheduler retired its machine on purpose,
 queue (D62, hosts.md section 11), and the attempt was still running when the drain grace ended; it is never reported failed. It is requeued as a new attempt and **charges no budget**: not platform fault, not loss, not task failure
 (D63). The attempt record keeps the outcome, so a request evicted `max_evictions` times can be counted and its host passed over.
 
-A jobscheduler job whose mount provider lost its input tree (`input_failure: tree-lost`) is queued again and charges its own count, `lost_trees`, not a budget above: at most two requeues, and the third loss ends the job `FAILED`, reason `INPUT_FAILED`. See komira-ai/tierstore `docs/design/fetch-cache-serve.md`, section 4.6.
-
 ## 8.3 Run records
 A submit returns only after a durable run record exists. kbf's store retention is short (a 60 s default in the scheduler, at least 600 s for done rows).
 Jobs need a configurable floor, with a default of days, and the state store holds it. Record fields: request id, definition reference,

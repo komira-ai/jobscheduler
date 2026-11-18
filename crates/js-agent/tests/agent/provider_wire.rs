@@ -109,24 +109,6 @@ fn the_agents_messages_are_the_protos_to_the_byte() {
         &wire::ReleaseResponse {},
         &pb::ReleaseResponse {},
     );
-    same(
-        "CheckRequest",
-        &wire::CheckRequest {
-            source: Some(source().0),
-        },
-        &pb::CheckRequest {
-            source: Some(source().1),
-        },
-    );
-    same(
-        "CheckResponse",
-        &wire::CheckResponse {
-            lost: "tree-lost".to_owned(),
-        },
-        &pb::CheckResponse {
-            lost: "tree-lost".to_owned(),
-        },
-    );
     let keep = vec!["js.job-1".to_owned(), "js.job-2".to_owned()];
     same(
         "SweepRequest",
@@ -160,7 +142,6 @@ fn the_agent_calls_the_protos_paths() {
         (wire::PREPARE, "Prepare"),
         (wire::MOUNT, "Mount"),
         (wire::RELEASE, "Release"),
-        (wire::CHECK, "Check"),
         (wire::SWEEP, "Sweep"),
     ];
     for (path, method) in paths {

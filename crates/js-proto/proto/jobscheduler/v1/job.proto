@@ -286,8 +286,8 @@ enum JobEventKind {
   JOB_EVENT_KIND_FAILING_OVER = 4;
   // The job was placed on a host; the event names the host.
   JOB_EVENT_KIND_PLACED = 5;
-  // The job was sent back to the queue to run again, by a failed whole-host prepare or by a
-  // mount provider that lost the tree of the running job; the event names the host.
+  // A failed whole-host prepare sent the placed job back to the queue; the event names the
+  // host.
   JOB_EVENT_KIND_REQUEUED = 6;
   // A machine was launched for the job.
   JOB_EVENT_KIND_WAITING_FOR_MACHINE = 7;

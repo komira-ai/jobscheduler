@@ -42,14 +42,6 @@ pub enum ProviderCall {
         /// The source's place, as in [`ProviderCall::Prepare`].
         index: u32,
     },
-    /// Ask whether a source was lost while its run used it: the provider answers the cause
-    /// (`tree-lost` when the tree cannot be read whole), or nothing when it was not lost.
-    Check {
-        /// The run.
-        run_id: String,
-        /// The source's place, as in [`ProviderCall::Prepare`].
-        index: u32,
-    },
     /// Release every source of this agent except those of the runs in `keep`.
     Sweep {
         /// The runs (job ids) whose sources are kept.
@@ -67,7 +59,6 @@ impl ProviderCall {
             Self::Mount { run_id, index } => (1, run_id.as_str(), *index),
             Self::Release { run_id, index } => (2, run_id.as_str(), *index),
             Self::Sweep { .. } => (3, "", 0),
-            Self::Check { run_id, index } => (4, run_id.as_str(), *index),
         }
     }
 }
@@ -78,8 +69,7 @@ pub enum ProviderAnswer {
     /// The call is out and not answered yet.
     Pending,
     /// The call succeeded; a [`ProviderCall::Mount`] carries the directory the provider
-    /// answered and a [`ProviderCall::Check`] the cause it lost the source for, when it did
-    /// (both its text, untrusted), every other call `None`.
+    /// answered (its text, untrusted), every other call `None`.
     Done(Option<String>),
     /// The provider refused the ref for good (`INVALID_ARGUMENT` or
     /// `FAILED_PRECONDITION`), with its reason.

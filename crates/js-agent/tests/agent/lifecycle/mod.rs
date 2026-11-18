@@ -32,7 +32,6 @@ mod prepare;
 #[cfg(target_os = "linux")]
 mod provider_flags;
 mod providers;
-mod providers_check;
 mod providers_end;
 mod providers_restart;
 pub mod quota;

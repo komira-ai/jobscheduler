@@ -106,14 +106,6 @@ async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> Provider
                 .await
                 .map(|_| None)
         }
-        ProviderCall::Check { run_id, index } => {
-            let request = wire::CheckRequest {
-                source: source(agent, &run_id, index),
-            };
-            unary::<_, wire::CheckResponse>(channel, wire::CHECK, request)
-                .await
-                .map(|response| Some(response.lost).filter(|lost| !lost.is_empty()))
-        }
         ProviderCall::Sweep { keep } => {
             let request = wire::SweepRequest {
                 agent: agent.to_owned(),
@@ -127,8 +119,7 @@ async fn transact(channel: Channel, agent: &str, call: ProviderCall) -> Provider
     answer(result)
 }
 
-/// What a provider's reply is to the lifecycle (a `Check` that found nothing lost is `Done(None)`,
-/// one that did is `Done(Some(code))`): `INVALID_ARGUMENT` and `FAILED_PRECONDITION`
+/// What a provider's reply is to the lifecycle: `INVALID_ARGUMENT` and `FAILED_PRECONDITION`
 /// are the provider refusing the ref for good; every other failure (`UNAVAILABLE`, a
 /// connection that could not be made, any other code) is a try again later.
 fn answer(result: Result<Option<String>, Status>) -> ProviderAnswer {

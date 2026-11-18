@@ -1,4 +1,4 @@
-//! The whole-host fields of a job row (tags 45, 46 and 59) and of an allocation row (tags 14 and
+//! The whole-host fields of a job row (tags 45 and 46) and of an allocation row (tags 14 and
 //! 15): each round-trips beside a later field, a row from before them reads with their defaults
 //! and a default writes no field, the layout is pinned byte for byte, and every way a value can
 //! fail to parse is refused by tag.
@@ -261,54 +261,6 @@ fn a_prepare_deadline_or_wall_limit_that_is_not_valid_is_refused_by_tag() {
             decode_allocation(&with(&row, tag, value)),
             Err(why),
             "field {tag} of {value:?}"
-        );
-    }
-}
-
-// Catches a lost-tree count that is written at zero, or read back as another number, or lost
-// when a later field sits beside it.
-#[test]
-fn a_lost_tree_count_is_written_only_above_zero_and_round_trips() {
-    assert_eq!(field_of(&job_row(&bare_job()), 59), None);
-
-    let lost = JobRecord {
-        lost_trees: 2,
-        ..bare_job()
-    };
-    let row = job_row(&lost);
-    assert_eq!(field_of(&row, 59), Some(2u32.to_be_bytes().to_vec()));
-    assert_eq!(decode_job(&row), Ok(lost.clone()));
-
-    let later = with(&row, 9_000, b"later");
-    assert_eq!(decode_job(&later).expect("reads").lost_trees, 2);
-}
-
-// Catches a row from before lost trees that is refused, or read as having some.
-#[test]
-fn a_job_row_from_before_lost_trees_reads_as_having_none() {
-    let row = job_row(&JobRecord {
-        lost_trees: 1,
-        ..full_job()
-    });
-    let older = without(&row, job_whole_tag::LOST_TREES);
-    assert_eq!(
-        decode_job(&older),
-        Ok(JobRecord {
-            lost_trees: 0,
-            ..full_job()
-        })
-    );
-}
-
-// Catches a lost-tree count of another width read as a number.
-#[test]
-fn a_lost_tree_count_of_the_wrong_width_is_refused() {
-    let row = job_row(&full_job());
-    for value in [vec![0; 3], vec![0; 5]] {
-        assert_eq!(
-            decode_job(&with(&row, 59, &value)),
-            Err(DecodeError::BadLength { tag: 59 }),
-            "{value:?}"
         );
     }
 }
