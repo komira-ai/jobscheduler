@@ -12,7 +12,8 @@ use std::time::Duration;
 use js_testkit::dir::TestDir;
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 /// How long the fake server waits for a request before it gives up on a connection.
 const SERVER_PATIENCE: Duration = Duration::from_secs(20);
@@ -96,6 +97,28 @@ impl Cert {
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()
+            .with_single_cert(vec![self.der.clone()], key)
+            .unwrap();
+        Arc::new(config)
+    }
+}
+
+impl Cert {
+    /// A server configuration with this certificate that refuses a client unless it
+    /// presents a certificate issued by `client_ca`.
+    pub fn requiring_clients_of(&self, client_ca: CertificateDer<'static>) -> Arc<ServerConfig> {
+        let mut roots = RootCertStore::empty();
+        roots.add(client_ca).unwrap();
+        let provider = Arc::new(default_provider());
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+                .build()
+                .unwrap();
+        let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(self.key.clone()));
+        let config = ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_client_cert_verifier(verifier)
             .with_single_cert(vec![self.der.clone()], key)
             .unwrap();
         Arc::new(config)

@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use js_agent::{
     CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, Connector, CredentialFile, CredentialState,
-    CredentialStore, Dialer, HEARTBEAT_PATH, HELLO_PATH, Note, Session, Step,
+    CredentialStore, Dialer, HEARTBEAT_PATH, HELLO_PATH, Login, Note, Session, Step,
 };
 use js_agent_wire::HostCredential;
-use js_client::ClientError;
+use js_client::{ClientError, HostIdentity};
 use serde_json::{Value, json};
 
 use crate::jobs::private;
@@ -392,7 +392,9 @@ fn a_run_saves_the_credential_and_the_next_run_adopts_it() {
 fn the_real_transport_takes_a_credential_or_says_why_not() {
     let scratch = Scratch::new("credential-transport");
     let token = scratch.write("token", "tok-1\n", 0o600);
-    let mut transport = Dialer.connect("http://127.0.0.1:1", &token, None).unwrap();
+    let mut transport = Dialer
+        .connect("http://127.0.0.1:1", &Login::Token(token), None)
+        .unwrap();
     assert_eq!(transport.adopt_credential(CREDENTIAL), Ok(()));
     let said = transport.adopt_credential("has space").unwrap_err();
     assert!(said.contains("printable ASCII"), "{said}");
@@ -417,24 +419,24 @@ fn tokenless(state: &str) -> Vec<String> {
 /// A connector that records the file each connect was told to read its bearer from.
 struct Recording<'a> {
     script: ScriptConnector,
-    files: &'a RefCell<Vec<PathBuf>>,
+    files: &'a RefCell<Vec<Login>>,
 }
 
 impl Connector for Recording<'_> {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn js_agent::Transport>, ClientError> {
-        self.files.borrow_mut().push(token_file.to_path_buf());
-        self.script.connect(server, token_file, ca_cert)
+        self.files.borrow_mut().push(login.clone());
+        self.script.connect(server, login, ca_cert)
     }
 }
 
 /// Runs the program with `args` over a script of `replies`, stopping at its first wait;
 /// returns the run, what was sent and the files the connector was given.
-fn run_recording(args: &[String], replies: Vec<Reply>) -> (Ran, Sent, Vec<PathBuf>) {
+fn run_recording(args: &[String], replies: Vec<Reply>) -> (Ran, Sent, Vec<Login>) {
     let (script, sent) = Script::new(replies);
     let files = RefCell::new(Vec::new());
     let connector = Recording {
@@ -483,7 +485,7 @@ fn the_token_file_is_optional_only_with_a_credential_in_the_state_root() {
         .unwrap();
     let (ran, sent, files) = run_recording(&args, vec![welcome(2)]);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert_eq!(files, [file.path()]);
+    assert_eq!(files, [Login::Token(file.path())]);
     assert_eq!(paths(&sent), [ADOPTED, HELLO_PATH, HEARTBEAT_PATH]);
     assert_eq!(sent.borrow()[0].1, json!(CREDENTIAL));
     assert!(!ran.err.contains(CREDENTIAL) && !ran.out.contains(CREDENTIAL));
@@ -504,4 +506,87 @@ fn the_token_file_is_optional_only_with_a_credential_in_the_state_root() {
     assert!(!ran.err.contains("not a credential"), "{}", ran.err);
     assert!(sent.borrow().is_empty(), "{:?}", sent);
     assert!(files.is_empty(), "{files:?}");
+}
+
+/// Adds `--host-cert` and `--host-key` for the files `cert` and `key` of `dir` to `args`.
+fn with_host_files(args: &[String], dir: &Path) -> (Vec<String>, HostIdentity) {
+    let (cert, key) = (dir.join("host.pem"), dir.join("host.key"));
+    let mut named = args.to_vec();
+    for (flag, path) in [("--host-cert", &cert), ("--host-key", &key)] {
+        named.extend([flag.to_owned(), path.display().to_string()]);
+    }
+    (named, HostIdentity::new(cert, key))
+}
+
+/// Asserts that an agent given `--host-cert` and `--host-key` needs no `--token-file`,
+/// connects with them (the connector is told so), and even beside a `--token-file` and a host
+/// credential file uses them: the token and credential files are not read (a damaged one does
+/// not stop the agent), the hello does not ask to be given a credential, and a credential the
+/// welcome carries is neither kept nor adopted.
+#[test]
+fn an_agent_given_its_host_certificate_and_key_connects_with_them() {
+    let (_scratch, dir) = state_dir("credential-host-cert");
+    let state = dir.display().to_string();
+    let (args, identity) = with_host_files(&tokenless(&state), &dir);
+
+    let (ran, sent, logins) = run_recording(&args, vec![welcome(1)]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(logins, [Login::HostCertificate(identity.clone())]);
+    assert_eq!(paths(&sent), [HELLO_PATH, HEARTBEAT_PATH]);
+    assert!(sent.borrow()[0].1.get("accepts_host_credential").is_none());
+
+    let file = CredentialFile::in_dir(&dir);
+    fs::write(file.path(), "not a credential").unwrap();
+    let mut beside = args.clone();
+    beside.extend(["--token-file".to_owned(), "/no/such/token".to_owned()]);
+    let (ran, sent, logins) = run_recording(&beside, vec![welcome_issuing(1, CREDENTIAL)]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(logins, [Login::HostCertificate(identity)]);
+    assert_eq!(paths(&sent), [HELLO_PATH, HEARTBEAT_PATH]);
+    assert_eq!(fs::read_to_string(file.path()).unwrap(), "not a credential");
+    assert!(!ran.err.contains(CREDENTIAL) && !ran.out.contains(CREDENTIAL));
+}
+
+/// Asserts that an agent without the host flags connects as before: with the token file when
+/// one is given.
+#[test]
+fn an_agent_without_the_host_flags_connects_with_its_token_file() {
+    let (scratch, dir) = state_dir("credential-no-host-cert");
+    let token = scratch.write("token", "tok-1\n", 0o600);
+    let mut args = tokenless(&dir.display().to_string());
+    args.extend(["--token-file".to_owned(), token.display().to_string()]);
+    let (ran, _, logins) = run_recording(&args, vec![welcome(1)]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(logins, [Login::Token(token)]);
+}
+
+/// Asserts that one of the two host flags without the other stops the agent with the usage
+/// status before it connects or says anything, naming the flag that is missing, in both
+/// directions and whatever `--token-file` is given.
+#[test]
+fn exactly_one_host_flag_stops_the_agent_naming_the_other() {
+    for (name, given, missing) in [
+        ("credential-host-no-key", "--host-cert", "--host-key"),
+        ("credential-host-no-cert", "--host-key", "--host-cert"),
+    ] {
+        let (scratch, dir) = state_dir(name);
+        let token = scratch.write("token", "tok-1\n", 0o600);
+        let mut args = tokenless(&dir.display().to_string());
+        args.extend(["--token-file".to_owned(), token.display().to_string()]);
+        args.extend([
+            given.to_owned(),
+            dir.join("host.file").display().to_string(),
+        ]);
+        let (ran, sent, logins) = run_recording(&args, vec![welcome(1)]);
+        assert_eq!(ran.status(), code(2), "{name}: {}", ran.err);
+        assert!(
+            ran.err.contains(&format!(
+                "the following required arguments were not provided:\n  {missing} <PATH>"
+            )),
+            "{name}: {}",
+            ran.err
+        );
+        assert!(sent.borrow().is_empty(), "{name}: {:?}", sent);
+        assert!(logins.is_empty(), "{name}: {logins:?}");
+    }
 }

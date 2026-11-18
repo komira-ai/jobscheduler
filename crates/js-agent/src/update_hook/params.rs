@@ -30,6 +30,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use js_client::HostIdentity;
 use js_update_hook::is_plain;
 
 use super::settings::{RUNTIMES, Settings, Timeouts};
@@ -215,9 +216,9 @@ pub enum ParamsError {
 
 /// How the hook on a machine reaches the lease server and the agent's state: the values of the
 /// agent's own flags of the same names. `state_root` and `token_file` are params keys
-/// ([`Params::state_root`], [`Params::token_file`]); `server`, `ca_cert` and `host_id` come from
-/// the host's flags file, which the machine reads when a step asks the lease server (a first
-/// install asks none).
+/// ([`Params::state_root`], [`Params::token_file`]); `server`, `ca_cert`, `host_id` and
+/// `host_identity` come from the host's flags file, which the machine reads when a step asks the
+/// lease server (a first install asks none).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectParams {
     /// The lease server (`--server` of the flags file).
@@ -225,12 +226,17 @@ pub struct ConnectParams {
     /// The agent's state root (`state_root`), where the host credential and the taint are.
     pub state_root: Option<PathBuf>,
     /// The join token file (`token_file`), used when no state root is there or a private one
-    /// holds no credential; never in place of a state root that is there and not private.
+    /// holds no credential; never in place of a state root that is there and not private. Not
+    /// used when the flags file names a host certificate.
     pub token_file: Option<PathBuf>,
     /// The certificate to trust (`--ca-cert` of the flags file).
     pub ca_cert: Option<PathBuf>,
     /// The host's id (`--host-id` of the flags file); the machine's own id when absent.
     pub host_id: Option<String>,
+    /// The host's certificate and key (`--host-cert` and `--host-key` of the flags file), which
+    /// the connection presents in place of any token or credential; `None` when the file names
+    /// neither.
+    pub host_identity: Option<HostIdentity>,
 }
 
 /// What the hook reads of its params file.

@@ -9,6 +9,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, POOL, agent_args, hello_body, post, session};
+use crate::host_certs_support::{Options, Rig, Spec};
 use crate::support::{Harness, Scratch, base_args, config, replace};
 
 /// The Macs' shared join token, in their pool's `join_token_file`.
@@ -16,7 +17,7 @@ const MAC: &str = "mac-join-token-0123456789-abcdefghijklm";
 
 /// The Macs' pool: up to four Mac Studios of 24 cores and 64 GiB, macOS on arm64, run
 /// natively under `sandbox-exec`, with `tokens` as its `join_token_file` when given.
-fn mac_pool(tokens: Option<&Path>) -> String {
+pub fn mac_pool(tokens: Option<&Path>) -> String {
     let tokens = tokens.map_or(String::new(), |path| {
         format!("join_token_file = {path:?}\n")
     });
@@ -46,7 +47,7 @@ async fn two_pools(name: &str) -> Harness {
 
 /// The hello of the Mac `host`: more than its pool's shape, macOS on arm64 in the native
 /// runtime, in the pool `pool`.
-fn mac_hello(host: &str, pool: &str) -> Value {
+pub fn mac_hello(host: &str, pool: &str) -> Value {
     json!({
         "host_id": host,
         "pool": pool,
@@ -320,5 +321,53 @@ async fn the_first_pools_tokens_are_its_join_token_file_or_the_flag_but_not_both
     session(
         &post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("node-1")).await,
         "node-1",
+    );
+}
+
+/// Asserts that a host that presents its certificate on a server of two pools is admitted into
+/// the pool its hello names, whichever that is, with the certificate's credential and no token:
+/// the Mac `mac-1` is welcomed into `mac-build` and the node `node-1` into `burst`, each listed
+/// at its own pool's shape and each issued no host credential. A certificate hello takes no
+/// pool from a token, so one that carries an instance of another provider is held to the pool
+/// it names too: the Mac `mac-2`, whose instance is the provider `burst`, is admitted into
+/// `mac-build`, where a one-time token for that instance would be refused.
+#[tokio::test]
+async fn a_certificate_host_is_admitted_into_the_pool_its_hello_names() {
+    let rig = Rig::start_with("host_cert_two_pools", Options::FILES, Some(&mac_pool(None))).await;
+    for (host, hello) in [
+        ("mac-1", mac_hello("mac-1", "mac-build")),
+        ("node-1", hello_body("node-1")),
+        ("mac-2", {
+            let mut hello = mac_hello("mac-2", "mac-build");
+            hello["instance"] = json!({ "provider": "burst", "instance_id": "mac-2" });
+            hello
+        }),
+    ] {
+        let identity = rig.ca.issue(&Spec::host(host));
+        let welcome = rig
+            .client(Some(&identity))
+            .hello(None, &hello)
+            .await
+            .unwrap();
+        assert_eq!(welcome.status, 200, "{host}: {}", welcome.body);
+        let welcome = welcome.json();
+        assert_eq!(welcome["pool"], hello["pool"], "{host}: {welcome}");
+        assert_eq!(welcome["host_credential"], Value::Null, "{host}: {welcome}");
+    }
+    let hosts = rig.listing().await;
+    let hosts: Vec<(&str, u64)> = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|host| {
+            (
+                host["id"].as_str().unwrap(),
+                host["shape"]["cpu_millis"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        hosts,
+        [("mac-1", 24_000), ("mac-2", 24_000), ("node-1", 8000)]
     );
 }

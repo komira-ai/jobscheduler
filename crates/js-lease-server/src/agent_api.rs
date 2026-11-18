@@ -1,5 +1,6 @@
-//! The routes agents call, behind the join tokens: the hello and the heartbeat, and the
-//! routes a host calls about itself ([`own_host`]).
+//! The routes agents call, behind the join tokens or the host's certificate
+//! ([`host_cert`]): the hello and the heartbeat, and the routes a host calls about itself
+//! ([`own_host`]).
 //!
 //! Every answer is a status and `{"error": "<code>"}` with a code from
 //! [`js_agent_wire::refusal`], or the message the route returns. Nothing the peer sent
@@ -75,7 +76,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
@@ -96,6 +96,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
+use self::host_cert::{CertifiedHost, admit_hello};
 use crate::admit::{
     reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
 };
@@ -118,15 +119,25 @@ use crate::util::blocking;
 const STATE_WRITE_FAILED: &str = "state-write-failed";
 
 mod held;
+mod host_cert;
+mod limit;
 mod own_host;
 
 /// The watch of a heartbeat whose reply may be held, and what building it again needs.
 type Watched = (crate::held_beat::Watch, Arc<held::Inputs>);
 
+/// What the authentication left on a hello: the mark of a one-time token or host credential,
+/// of a pool's shared token, and of a host certificate.
+type Marks = (
+    Option<Extension<OneTime>>,
+    Option<Extension<TokenPool>>,
+    Option<Extension<CertifiedHost>>,
+);
+
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
 pub(crate) fn router(agents: Arc<Agents>) -> Router {
-    let hello = post(hello).route_layer(from_fn_with_state(agents.clone(), limit_hello));
+    let hello = post(hello).route_layer(from_fn_with_state(agents.clone(), limit::limit_hello));
     Router::new()
         .route("/v1/agent/hello", hello)
         .route("/v1/agent/heartbeat", post(heartbeat))
@@ -156,12 +167,16 @@ struct TokenPool(String);
 /// credential, with a 401 that says nothing else, and passes the credential the registry
 /// knows the host by on (and the mark [`OneTime`] when it is a one-time token or a host
 /// credential). A retired token is not known, so it gets the same 401, as does the client
-/// token of the lease routes.
+/// token of the lease routes. A request whose connection carries a client certificate is
+/// authenticated by it first, and its bearer is not read ([`host_cert::admit`]).
 async fn authenticate(
     State(agents): State<Arc<Agents>>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    if host_cert::admit(&mut request) {
+        return next.run(request).await;
+    }
     let given = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -185,50 +200,16 @@ async fn authenticate(
     }
 }
 
-/// Holds a credential to its hello limit before the body is read: a 429 with the code
-/// `rate-limited` and a `Retry-After` in whole seconds. The listener reads the body it
-/// leaves and drops it before the 429 goes (`listener.rs`), so the connection does not
-/// close on bytes it never read.
-async fn limit_hello(
-    State(agents): State<Arc<Agents>>,
-    Extension(who): Extension<Credential>,
-    request: Request,
-    next: Next,
-) -> Response {
-    match agents.limiter.admit(&who) {
-        Ok(()) => next.run(request).await,
-        Err(held) => {
-            let seconds = retry_after(held.wait);
-            if held.announce {
-                warn!(
-                    seconds,
-                    "agent hello held to the rate limit; further ones are not logged until the next interval"
-                );
-            }
-            let reply = Refused::new(StatusCode::TOO_MANY_REQUESTS, refusal::RATE_LIMITED);
-            ([(header::RETRY_AFTER, seconds.to_string())], reply).into_response()
-        }
-    }
-}
-
-/// `wait` in whole seconds, rounded up, and at least one.
-fn retry_after(wait: Duration) -> u64 {
-    wait.as_millis()
-        .div_ceil(1000)
-        .max(1)
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
 async fn hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
-    (one_time, pool): (Option<Extension<OneTime>>, Option<Extension<TokenPool>>),
+    (one_time, pool, certified): Marks,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Refused> {
     let presented = one_time.map(|Extension(OneTime(presented))| presented);
     let pool = pool.map(|Extension(TokenPool(pool))| pool);
-    let given = (who, presented, pool.as_deref());
+    let certified = certified.map(|Extension(certified)| certified);
+    let given = (who, presented, pool.as_deref(), certified.as_ref());
     let welcome = serve_hello_in(&agents, given, body, &|| ()).await?;
     // The Welcome can carry the host credential, so no cache may keep it (as for a token
     // response in RFC 6749, section 5.1).
@@ -254,24 +235,33 @@ async fn serve_hello(
     body: Result<Bytes, BytesRejection>,
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
-    serve_hello_in(agents, (who, one_time, None), body, between).await
+    serve_hello_in(agents, (who, one_time, None, None), body, between).await
 }
 
 /// [`serve_hello`], for a request authenticated with a pool's shared join token when `pool`
 /// is that pool's name: the hello must name it. On a server of several pools a hello with a
 /// one-time token or a host credential must name the pool its instance's provider names.
 /// Either refusal is `unknown-pool`, before anything is taken or written: a token of one
-/// pool never registers a host into another.
+/// pool never registers a host into another. A hello with a host certificate (`certified`)
+/// must name the certificate's host, is admitted into the pool it names, and may move a host
+/// that is not live onto the certificate's credential ([`host_cert`]).
 async fn serve_hello_in(
     agents: &Arc<Agents>,
-    (who, one_time, pool): (Credential, Option<Credential>, Option<&str>),
+    given: (
+        Credential,
+        Option<Credential>,
+        Option<&str>,
+        Option<&CertifiedHost>,
+    ),
     body: Result<Bytes, BytesRejection>,
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
+    let (who, one_time, pool, certified) = given;
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    host_cert::check(certified, &hello.host_id)?;
     let several = !agents.more_tokens.is_empty();
     let launched = hello
         .instance
@@ -290,12 +280,12 @@ async fn serve_hello_in(
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
-    let change = agents.hello_change(&host, &hello, &who);
+    let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
     agents.applied(&change);
     between();
-    let mut welcome = match agents.registry.hello(&hello, &who) {
+    let mut welcome = match admit_hello(agents, certified.is_some(), &hello, &who) {
         Ok(welcome) => welcome,
         Err(refusal) => {
             give_back(agents, fresh_use, &hello.host_id, &change).await;
@@ -387,7 +377,7 @@ async fn give_back(
 async fn heartbeat(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
-    one_time: Option<Extension<OneTime>>,
+    (one_time, certified): (Option<Extension<OneTime>>, Option<Extension<CertifiedHost>>),
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
     let heartbeat: Heartbeat = decode(
@@ -397,6 +387,8 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    let certified = certified.map(|Extension(certified)| certified);
+    host_cert::check(certified.as_ref(), &heartbeat.host_id)?;
     // The load is telemetry. The usage hub looks at its own copy only after the registry
     // has accepted the beat, so a beat the registry refuses records nothing to it; the
     // registry keeps the latest load of the host for `GET /v1/hosts` (it checks the beat
@@ -925,20 +917,6 @@ mod tests {
             assert_eq!(answer.error, code);
             assert!(answer.supported.is_none());
         }
-    }
-
-    /// A wait is told in whole seconds rounded up, never zero, whatever the fraction: a
-    /// client told zero would retry at once, and one told too little retries into the
-    /// limit again.
-    #[test]
-    fn a_wait_rounds_up_to_whole_seconds_and_is_never_zero() {
-        let seconds = |millis| retry_after(Duration::from_millis(millis));
-        assert_eq!(seconds(0), 1);
-        assert_eq!(seconds(1), 1);
-        assert_eq!(seconds(1000), 1);
-        assert_eq!(seconds(1001), 2);
-        assert_eq!(seconds(7000), 7);
-        assert_eq!(retry_after(Duration::MAX), u64::MAX);
     }
 }
 

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
-use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
+use js_registry::{Binding, Cordoned, Credential, HostState, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
 use js_types::{HostId, ProviderId};
 use tracing::{error, info, warn};
@@ -539,19 +539,38 @@ impl Agents {
     }
 
     /// The change of the binding of `host` that the registry makes when it admits `hello`
-    /// with `credential`: the binding the registry holds for the host, which it keeps, or a
-    /// new one to `credential` and the hello's instance. Its writes are empty in file mode,
-    /// and when the store holds that binding already, as for a host the registry knows
+    /// with `credential`; `certified` says the hello presented a host certificate. It is the
+    /// binding the registry holds for the host, which it keeps, or a new one to `credential`
+    /// and the hello's instance. Its writes are empty in file mode, and when the store holds that binding already, as for a host the registry knows
     /// (unless the stored binding still holds a cordon that lapsed since the last tick).
     pub(crate) fn hello_change(
         &self,
         host: &HostId,
         hello: &Hello,
-        credential: &Credential,
+        (credential, certified): (&Credential, bool),
     ) -> Change {
         let held = self.registry.bindings().remove(host);
         let fresh = || Binding::new(credential.clone(), hello.instance.clone());
-        self.store.change(host, held.unwrap_or_else(fresh))
+        // A hello with a host certificate moves a host that is not live from the
+        // credential it was bound to onto the certificate's, keeping its taint and cordon
+        // (the registry decides the same, [`Registry::hello_as_certified_host`]; for a live host it
+        // refuses, and nothing is written here).
+        let idle = || {
+            let state = self.registry.own_host(host).map(|own| own.host.state);
+            state != Some(HostState::Live)
+        };
+        let moved = |bound: &Binding| {
+            let taint = bound.taint().cloned();
+            fresh()
+                .with_taint(taint)
+                .with_cordon(bound.cordon_until_ms())
+        };
+        let bound = match held {
+            Some(bound) if certified && bound.credential() != credential && idle() => moved(&bound),
+            Some(bound) => bound,
+            None => fresh(),
+        };
+        self.store.change(host, bound)
     }
 
     /// Commits `writes` (bindings, with the store) in one transaction, on the pool for
@@ -804,7 +823,8 @@ impl Agents {
     }
 
     /// What every tick does for the agent side: read the join tokens again and drop the
-    /// hello limits of those that left the file, then read the job service's client token
+    /// hello limits of those that left the file once they are refilled (a limit that is still
+    /// spent stays, whoever it is of, so a certificate host's is not reset), then read the job service's client token
     /// files again ([`AgentTokens::reload_clients`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in

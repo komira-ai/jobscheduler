@@ -51,6 +51,7 @@ pub(super) fn reach(url: &str, state: Option<PathBuf>, token: Option<PathBuf>) -
         token_file: token,
         ca_cert: None,
         host_id: Some("mac-1".to_owned()),
+        host_identity: None,
     }
 }
 

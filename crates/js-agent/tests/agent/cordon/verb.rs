@@ -6,9 +6,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use js_agent::Login;
 use js_agent::cordon::{Connect, Connection, Host as VerbHost, parse_window, run};
 use js_agent::own_host::{Lease, LeaseError};
-use js_client::ClientError;
+use js_client::{ClientError, HostIdentity};
 
 use super::fakes::{Call, Effect, FakeLease, FakePace, Kind};
 use crate::jobs::private;
@@ -18,7 +19,7 @@ use crate::support::{Host, Scratch, code, linux_host, mac_host};
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Seen {
     server: String,
-    credential: PathBuf,
+    login: Login,
     ca_cert: Option<PathBuf>,
     host: String,
 }
@@ -42,7 +43,7 @@ pub(super) fn drive_with(
     let recording = |at: &Connection<'_>| {
         seen.borrow_mut().push(Seen {
             server: at.server.to_owned(),
-            credential: at.credential.to_path_buf(),
+            login: at.login.clone(),
             ca_cert: at.ca_cert.map(ToOwned::to_owned),
             host: at.host.to_owned(),
         });
@@ -273,7 +274,7 @@ fn the_host_credential_of_the_state_root_wins_over_the_token_file() {
         ran.seen,
         [Seen {
             server: "https://leases.example:7300".to_owned(),
-            credential: kept.join("host-credential"),
+            login: Login::Token(kept.join("host-credential")),
             ca_cert: None,
             host: "h-1".to_owned(),
         }]
@@ -281,7 +282,7 @@ fn the_host_credential_of_the_state_root_wins_over_the_token_file() {
 
     let ran = run_on(&empty_flag);
     assert_eq!(ran.status, code(0), "{}", ran.err);
-    assert_eq!(ran.seen[0].credential, PathBuf::from("/token"));
+    assert_eq!(ran.seen[0].login, Login::Token(PathBuf::from("/token")));
 
     let ran = run_on(&broken_flag);
     assert_eq!(ran.status, code(2));
@@ -534,4 +535,82 @@ fn a_facts_file_that_cannot_be_used_or_a_second_id_flag_is_a_usage_error() {
     assert_eq!(ran.status, code(2));
     assert!(ran.err.contains("cannot be used with"), "{}", ran.err);
     assert!(ran.seen.is_empty());
+}
+
+/// Asserts that `--host-cert` and `--host-key` are what the verb connects with: the connector
+/// is told the host certificate, even beside a state root holding a host credential and a
+/// `--token-file`, and the verb needs neither. It catches a verb that sends a bearer on a host
+/// hostkeeper manages, which the server would not take for the host's own credential.
+#[test]
+fn the_host_certificate_wins_over_the_credential_and_the_token_file() {
+    let files = Scratch::new("cordon_verb_host_cert");
+    let root = state_with(&files, "root", Some(&"c".repeat(64)));
+    let root_flag = root.display().to_string();
+    let host = linux_host();
+    let flags = [
+        "--server",
+        "https://leases.example:7300",
+        "--host-cert",
+        "/run/hostkeeper/host.pem",
+        "--host-key",
+        "/run/hostkeeper/host.key",
+        "--host-id",
+        "h-1",
+        "--for",
+        "1m",
+    ];
+    let certificate_only = drive(&flags, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(certificate_only.status, code(0), "{}", certificate_only.err);
+    let beside: Vec<&str> = flags
+        .iter()
+        .copied()
+        .chain(["--token-file", "/token", "--state-root", &root_flag])
+        .collect();
+    let ran = drive(&beside, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+    for ran in [&certificate_only, &ran] {
+        assert_eq!(
+            ran.seen[0].login,
+            Login::HostCertificate(HostIdentity::new(
+                "/run/hostkeeper/host.pem",
+                "/run/hostkeeper/host.key"
+            ))
+        );
+    }
+}
+
+/// Asserts that one of the two host flags without the other ends the verb with status 2,
+/// naming the flag that is missing, in both directions, and connects to nothing, even with a
+/// good `--token-file`.
+#[test]
+fn one_host_flag_without_the_other_ends_the_verb_naming_the_other() {
+    for (given, missing) in [("--host-cert", "--host-key"), ("--host-key", "--host-cert")] {
+        let flags = [
+            "--server",
+            "https://leases.example:7300",
+            "--token-file",
+            "/token",
+            given,
+            "/run/hostkeeper/host.file",
+            "--host-id",
+            "h-1",
+            "--for",
+            "1m",
+        ];
+        let ran = drive(
+            &flags,
+            &linux_host(),
+            &FakeLease::new(),
+            &mut FakePace::new(),
+        );
+        assert_eq!(ran.status, code(2), "{given}: {}", ran.err);
+        assert!(
+            ran.err.contains(&format!(
+                "the following required arguments were not provided:\n  {missing} <PATH>"
+            )),
+            "{given}: {}",
+            ran.err
+        );
+        assert!(ran.seen.is_empty(), "{given}");
+    }
 }

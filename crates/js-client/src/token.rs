@@ -14,12 +14,12 @@ use crate::error::ClientError;
 /// The most a token file may hold; a token is a short line.
 const MAX_TOKEN_FILE: u64 = 4096;
 
-/// What opening a token file showed.
-struct Probe {
-    is_file: bool,
-    mode: u32,
-    owner: u32,
-    bytes: Vec<u8>,
+/// What opening a secret file showed.
+pub(crate) struct Probe {
+    pub(crate) is_file: bool,
+    pub(crate) mode: u32,
+    pub(crate) owner: u32,
+    pub(crate) bytes: Vec<u8>,
 }
 
 /// The `Authorization` header value for the token in `path`. The file must be a regular
@@ -33,15 +33,25 @@ struct Probe {
 pub fn bearer(path: &Path) -> Result<String, ClientError> {
     let refuse =
         |why: String| ClientError::flag("--token-file", format!("{} {why}", path.display()));
-    let probe = probe(path).map_err(|err| refuse(format!("cannot be read: {err}")))?;
-    if !trusted(&probe, geteuid().as_raw()) {
-        return Err(refuse(format!(
+    let bytes = owner_only(path, MAX_TOKEN_FILE).map_err(refuse)?;
+    let token = token(&bytes).map_err(refuse)?;
+    Ok(format!("Bearer {token}"))
+}
+
+/// The first `max` bytes of the file at `path`, when it is a regular file owned by the
+/// user running the program that nobody else can read or write (mode 0600 or 0400). The
+/// text of an error follows the path in a message and never holds the file's content.
+pub(crate) fn owner_only(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let euid = geteuid().as_raw();
+    let probe = probe(path, max, &|probe| trusted(probe, euid))
+        .map_err(|err| format!("cannot be read: {err}"))?;
+    match trusted(&probe, euid) {
+        true => Ok(probe.bytes),
+        false => Err(format!(
             "must be a regular file owned by you and readable only by you (mode 0600 or 0400), not mode {:04o} owned by uid {}",
             probe.mode, probe.owner
-        )));
+        )),
     }
-    let token = token(&probe.bytes).map_err(refuse)?;
-    Ok(format!("Bearer {token}"))
 }
 
 /// The `Authorization` header value for `secret`, a credential the caller holds in memory
@@ -60,9 +70,13 @@ pub fn bearer_of(secret: &str) -> Result<String, ClientError> {
 }
 
 /// Opens `path` without blocking, so a named pipe is refused instead of waited on (a
-/// symbolic link is followed: secret mounts are links), and reads it only when the open
-/// file passes the checks.
-fn probe(path: &Path) -> std::io::Result<Probe> {
+/// symbolic link is followed: secret mounts are links), and reads the first `max` bytes
+/// only when the open file passes `allow`.
+pub(crate) fn probe(
+    path: &Path,
+    max: u64,
+    allow: &dyn Fn(&Probe) -> bool,
+) -> std::io::Result<Probe> {
     let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
     let opened = OpenOptions::new()
         .read(true)
@@ -76,9 +90,9 @@ fn probe(path: &Path) -> std::io::Result<Probe> {
                 owner: meta.uid(),
                 bytes: Vec::new(),
             };
-            match trusted(&probe, geteuid().as_raw()) {
+            match allow(&probe) {
                 true => (&mut file)
-                    .take(MAX_TOKEN_FILE)
+                    .take(max)
                     .read_to_end(&mut probe.bytes)
                     .map(|_| probe),
                 false => Ok(probe),
