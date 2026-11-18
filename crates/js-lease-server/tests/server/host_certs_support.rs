@@ -193,10 +193,19 @@ pub fn args(scratch: &Scratch, options: Options, ca_file: &Path) -> Vec<OsString
 impl Rig {
     /// A server started as `options` say, trusting a CA made for it.
     pub async fn start(name: &str, options: Options) -> Self {
+        Self::start_with(name, options, None).await
+    }
+
+    /// [`Rig::start`] with a second pool, whose configuration file holds `second_pool`.
+    pub async fn start_with(name: &str, options: Options, second_pool: Option<&str>) -> Self {
         let scratch = Scratch::new(&options.kept.named(name));
         let ca = Ca::new();
         let ca_file = scratch.write("hostkeeper-ca.pem", &ca.pem(), 0o644);
-        let args = args(&scratch, options, &ca_file);
+        let mut args = args(&scratch, options, &ca_file);
+        if let Some(pool) = second_pool {
+            let file = scratch.write("second-pool.toml", pool, 0o644);
+            args.extend(["--agent-pool-config".into(), file.into_os_string()]);
+        }
         let server_cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).unwrap();
         let h = Harness::with(scratch, args).await;
         h.clock

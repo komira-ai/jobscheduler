@@ -539,15 +539,15 @@ impl Agents {
     }
 
     /// The change of the binding of `host` that the registry makes when it admits `hello`
-    /// with `credential`: the binding the registry holds for the host, which it keeps, or a
-    /// new one to `credential` and the hello's instance. Its writes are empty in file mode,
-    /// and when the store holds that binding already, as for a host the registry knows
+    /// with `credential`; `certified` says the hello presented a host certificate. It is the
+    /// binding the registry holds for the host, which it keeps, or a new one to `credential`
+    /// and the hello's instance. Its writes are empty in file mode, and when the store holds that binding already, as for a host the registry knows
     /// (unless the stored binding still holds a cordon that lapsed since the last tick).
     pub(crate) fn hello_change(
         &self,
         host: &HostId,
         hello: &Hello,
-        (credential, service): (&Credential, bool),
+        (credential, certified): (&Credential, bool),
     ) -> Change {
         let held = self.registry.bindings().remove(host);
         let fresh = || Binding::new(credential.clone(), hello.instance.clone());
@@ -566,7 +566,7 @@ impl Agents {
                 .with_cordon(bound.cordon_until_ms())
         };
         let bound = match held {
-            Some(bound) if service && bound.credential() != credential && idle() => moved(&bound),
+            Some(bound) if certified && bound.credential() != credential && idle() => moved(&bound),
             Some(bound) => bound,
             None => fresh(),
         };
