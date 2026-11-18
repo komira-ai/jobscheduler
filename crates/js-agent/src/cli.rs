@@ -47,8 +47,11 @@ pub struct Cli {
     /// state root, the first hello of a host that joins with a one-time token is answered
     /// with a host credential that replaces the token (the server retires it): the agent
     /// keeps the credential in the state root and sends it from then on. Required unless
-    /// `--state-root` holds a usable `host-credential` file, which the agent then sends in
-    /// place of a token; a token file given beside it is read as before.
+    /// `--state-root` holds the service identity (`service-identity.pem` and
+    /// `service-identity.key`), which the agent then presents in place of any token, or a
+    /// usable `host-credential` file, which the agent then sends in place of a token. With
+    /// the identity the token file is not read; with a credential a token file given beside
+    /// it is read as before.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
     /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`

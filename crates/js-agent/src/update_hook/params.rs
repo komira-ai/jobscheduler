@@ -222,10 +222,12 @@ pub enum ParamsError {
 pub struct ConnectParams {
     /// The lease server (`--server` of the flags file).
     pub server: Option<String>,
-    /// The agent's state root (`state_root`), where the host credential and the taint are.
+    /// The agent's state root (`state_root`), where the service identity, the host credential
+    /// and the taint are.
     pub state_root: Option<PathBuf>,
     /// The join token file (`token_file`), used when no state root is there or a private one
-    /// holds no credential; never in place of a state root that is there and not private.
+    /// holds no service identity and no credential; never in place of a state root that is
+    /// there and not private.
     pub token_file: Option<PathBuf>,
     /// The certificate to trust (`--ca-cert` of the flags file).
     pub ca_cert: Option<PathBuf>,

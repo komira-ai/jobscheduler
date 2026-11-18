@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use js_agent::{Answer, Connector, Dialer, Handle, Transport};
+use js_agent::{Answer, Connector, Dialer, Handle, Login, Transport};
 use js_client::Client;
 #[cfg(target_os = "linux")]
 use js_client::ClientError;
@@ -367,10 +367,10 @@ impl Connector for Tape {
     fn connect(
         &self,
         server: &str,
-        token_file: &Path,
+        login: &Login,
         ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
-        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        let inner = Dialer.connect(server, login, ca_cert)?;
         Ok(Box::new(Taping {
             inner,
             flow: self.0.clone(),
@@ -447,7 +447,7 @@ pub fn record(name: &str) -> Value {
     let mut future = flow[0]["agent"]["body"].clone();
     future["protocol"] = json!({ "min": 2, "max": 3 });
     let mut transport = Dialer
-        .connect(&cell.url(), &cell.join_file(), None)
+        .connect(&cell.url(), &Login::Token(cell.join_file()), None)
         .unwrap();
     let answer = transport.post(js_agent::HELLO_PATH, &future).unwrap();
     assert_eq!(answer.status, 400, "{}", answer.body);

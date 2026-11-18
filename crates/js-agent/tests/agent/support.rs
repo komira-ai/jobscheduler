@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::{
-    Answer, CommandRunner, Connector, FileReader, Handle, Jitter, Machine, Platform, Services,
-    Sleeper, Transport, Wake, run_with,
+    Answer, CommandRunner, Connector, FileReader, Handle, Jitter, Login, Machine, Platform,
+    Services, Sleeper, Transport, Wake, run_with,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
@@ -539,7 +539,7 @@ impl Connector for ScriptConnector {
     fn connect(
         &self,
         _server: &str,
-        _token_file: &Path,
+        _login: &Login,
         _ca_cert: Option<&Path>,
     ) -> Result<Box<dyn Transport>, ClientError> {
         let script = self.0.borrow_mut().take().expect("connected once");

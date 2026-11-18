@@ -6,10 +6,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use js_agent::CredentialFile;
 use js_agent::own_host::{HttpLease, Lease as _, RequestLimit};
 use js_agent::update_hook::config::{Done, Params, Reason, Record, run_on, run_step};
 use js_agent::update_hook::{Class, LaunchUnits, Machine, Outcome, Step, Units};
+use js_agent::{CredentialFile, Login};
 
 use super::super::lease_stub::{Reply, Stub};
 use super::super::step_rig::as_root;
@@ -145,7 +145,7 @@ fn over_a_real_server_cutover_records_the_session_and_verify_waits_for_another()
     let credential = CredentialFile::in_dir(&enrolled.state).path();
     let seen = HttpLease::connect(
         &enrolled.server.url(),
-        &credential,
+        &Login::Token(credential),
         None,
         "mac-1",
         RequestLimit::DEFAULT,

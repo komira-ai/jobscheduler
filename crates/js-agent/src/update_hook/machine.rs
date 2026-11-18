@@ -37,7 +37,6 @@ use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 use js_update_hook::peek;
 
-use crate::CredentialFile;
 use crate::cli::{Cli, resolve_host_id};
 use crate::facts::{
     CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
@@ -47,6 +46,7 @@ use crate::lifecycle::StateRoot;
 use crate::own_host::{
     Cordoned, HostReading, HttpLease, Lease, LeaseError, RequestLimit, Uncordoned,
 };
+use crate::{CredentialFile, Login};
 
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
 use super::step::{self, Env, TokenFacts, TokenFn};
@@ -126,42 +126,60 @@ impl Machine<'static> {
     }
 }
 
-/// The file the bearer is read from, with the params key that led to it: the host credential
-/// of the state root when it holds one, which is what the agent sends once it has one, and
-/// otherwise the token file. A state root that is there and not private is an error of its own:
-/// it is not trusted with a credential, and the join token is not used in its place (the server
-/// would refuse it on the host's own routes, which says nothing of the cause). A credential file
-/// that is there and cannot be read, or holds no credential, is refused by the key
-/// `state_root`, and the token file is not used in its place either: the agent would not use it.
-/// `root` is what the hook found at `state_root`.
+/// How the lease connection proves who it is, with the params key that led to it: the service
+/// identity of the state root when it holds one (the agent presents it then), else the host
+/// credential of the state root when it holds one, which is what the agent sends once it has
+/// one, and otherwise the token file. A state root that is there and not private is an error of
+/// its own: it is not trusted with a credential, and the join token is not used in its place (the
+/// server would refuse it on the host's own routes, which says nothing of the cause). A state
+/// root with one identity file only, and a credential file that is there and cannot be read, or
+/// holds no credential, are refused by the key `state_root`, and the token file is not used in
+/// their place either: the agent would not use it. `root` is what the hook found at
+/// `state_root`.
 fn credential(
     params: &ConnectParams,
     root: Result<&Root, &RootError>,
-) -> Result<(PathBuf, &'static str), String> {
+) -> Result<(Login, &'static str), String> {
     let kept = match root.map_err(RootError::to_string)? {
         Root::Open(root) => {
-            let file = CredentialFile::in_dir(root.path());
-            let loaded = file
-                .load()
-                .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
-            loaded.map(|_| (file.path(), STATE_ROOT_KEY))
+            let identity =
+                Login::identity_of(root.path()).map_err(|why| named(&why, STATE_ROOT_KEY))?;
+            match identity {
+                Some(identity) => Some((identity, STATE_ROOT_KEY)),
+                None => {
+                    let file = CredentialFile::in_dir(root.path());
+                    let loaded = file
+                        .load()
+                        .map_err(|why| format!("{STATE_ROOT_KEY}: {why}"))?;
+                    loaded.map(|_| (Login::Token(file.path()), STATE_ROOT_KEY))
+                }
+            }
         }
         Root::Absent => None,
     };
-    kept.or_else(|| params.token_file.clone().map(|file| (file, TOKEN_FILE_KEY)))
-        .ok_or_else(|| {
-            format!("{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a host credential")
-        })
+    kept.or_else(|| {
+        let file = params.token_file.clone();
+        file.map(|file| (Login::Token(file), TOKEN_FILE_KEY))
+    })
+    .ok_or_else(|| {
+        format!(
+            "{TOKEN_FILE_KEY}: required unless {STATE_ROOT_KEY} holds a service identity or a host credential"
+        )
+    })
 }
 
 /// Why the client could not be built, as the client says it. The client's text begins with the
-/// command-line flag of the programs it serves (`--server: `, `--token-file: `, `--ca-cert: `):
-/// the server and the certificate are flags of the host's flags file, so their text is told
-/// as it is; the token flag is not one the hook has, only its params, and the credential may
-/// be the state root's rather than a token file's (`credential_key` says which).
+/// command-line flag of the programs it serves (`--server: `, `--token-file: `, `--state-root: `,
+/// `--ca-cert: `): the server and the certificate are flags of the host's flags file, so their
+/// text is told as it is; the token and state root flags are not ones the hook has, only its
+/// params, and the credential may be the state root's rather than a token file's
+/// (`credential_key` says which).
 fn named(error: &ClientError, credential_key: &str) -> String {
     let text = error.to_string();
-    match text.strip_prefix("--token-file: ") {
+    let why = text
+        .strip_prefix("--token-file: ")
+        .or_else(|| text.strip_prefix("--state-root: "));
+    match why {
         Some(why) => format!("{credential_key}: {why}"),
         None => text,
     }
@@ -221,8 +239,8 @@ impl MachineLease {
             None => own_host_id()?,
         };
         HostId::new(&id).map_err(|why| format!("--host-id: {why}"))?;
-        let (credential, key) = credential(params, root)?;
-        HttpLease::connect(server, &credential, params.ca_cert.as_deref(), &id, limit)
+        let (login, key) = credential(params, root)?;
+        HttpLease::connect(server, &login, params.ca_cert.as_deref(), &id, limit)
             .map(|client| (client, key))
             .map_err(|why| named(&why, key))
     }

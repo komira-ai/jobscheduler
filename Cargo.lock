@@ -1124,6 +1124,7 @@ dependencies = [
  "js-vm-lease",
  "libc",
  "prost",
+ "rcgen",
  "rustix",
  "serde",
  "serde_json",

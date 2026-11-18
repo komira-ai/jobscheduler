@@ -4,7 +4,12 @@
 //! the PEM file it is given or, without one, the public roots bundled in `webpki-roots`
 //! (never the platform's store), and sends the token to the one host named.
 //!
-//! Failures name the flags `--server`, `--token-file` and `--ca-cert`, so a program that
+//! A client can authenticate by a service identity instead: a client certificate and key in
+//! two files of the state root (`ServiceIdentity`), presented in the TLS handshake with no
+//! `Authorization` header and read again before each request, so a renewed pair is used
+//! without a restart.
+//!
+//! Failures name the flags `--server`, `--token-file`, `--ca-cert` and (for the identity files) `--state-root`, so a program that
 //! uses this crate takes its settings from flags of those names.
 //!
 //! With the `jobs` feature (off by default; js-cli turns it on), `jobs` is the client of
@@ -16,6 +21,7 @@
 
 mod client;
 mod error;
+mod identity;
 #[cfg(feature = "jobs")]
 pub mod jobs;
 mod server_url;
@@ -23,5 +29,6 @@ mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
+pub use identity::{SERVICE_CERT_FILE, SERVICE_KEY_FILE, ServiceIdentity};
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};

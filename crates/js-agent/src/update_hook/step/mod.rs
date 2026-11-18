@@ -36,7 +36,8 @@ pub use prepare::prepare;
 pub use rollback::rollback;
 pub use verify::verify;
 
-/// What the hook finds when it looks at the join token file.
+/// What the hook finds when it looks at a secret file: the join token file, or a file of the
+/// service identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenFacts {
     /// Whether it is a regular file after following links.
@@ -47,7 +48,7 @@ pub struct TokenFacts {
     pub uid: u32,
 }
 
-/// How the token file is looked at (see [`TokenFacts`]).
+/// How the token file and the service identity files are looked at (see [`TokenFacts`]).
 pub type TokenFn = dyn Fn(&Path) -> io::Result<TokenFacts>;
 
 /// Everything a step touches.
@@ -61,7 +62,7 @@ pub struct Env<'a> {
     pub manager: Manager,
     /// The user the hook runs as: the owner the join token file must have.
     pub euid: u32,
-    /// How the join token file is looked at.
+    /// How the join token file and the service identity files are looked at.
     pub token: &'a TokenFn,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).

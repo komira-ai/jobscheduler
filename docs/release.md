@@ -272,7 +272,8 @@ only on the binary and the packaging files: root-owned entries, a fixed modifica
 names, gzip without a name. The verb refuses a version that is not `X.Y.Z`, a binary that does not
 carry the version's `--version` line, and a file that is already there. The package carries no
 server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags` (read
-with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places
+with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places. A host
+whose hostkeeper writes the service identity into the agent's state root needs no token file
 (`packaging/js-agent/deb/README.md`).
 
 The `.deb` replaces the hostkeeper archive package of earlier releases (`js-agent-X.Y.Z-<platform>.tar.zst`

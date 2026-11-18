@@ -10,7 +10,9 @@ are described in `packaging/js-agent/deb/README.md`. There is no native package 
 (`packaging/js-agent-macos/README.md`) and is not updated by hostkeeper.
 
 A package is public and the same on every host, so it carries no secret and no host setting. You
-place three files on the node yourself: the join token, the flags file and the instance file.
+place the files on the node yourself: the join token, the flags file and the instance file. A
+node whose hostkeeper writes the service identity needs no join token or instance file (section
+3A).
 
 Examples use `js.example.com`, `node-5` and `farm`. Replace them.
 
@@ -104,6 +106,24 @@ chown root:root /etc/js-agent/flags
 chmod 644 /etc/js-agent/flags
 ```
 
+## 3A. A node that hostkeeper manages needs no join token
+
+An enrolled, approved node is trusted, and hostkeeper writes the agent's service identity into the
+agent's state root: `/var/lib/js-agent/state/service-identity.pem` (the certificate) and
+`/var/lib/js-agent/state/service-identity.key` (the private key, owned by root, mode 0600 or
+0400). hostkeeper renews both files before the certificate expires, and the agent reads them again
+before every request, so a renewal needs no restart. With both files in the state root the agent
+presents the certificate to the lease server and sends no token: skip section 2 and the token and the instance file of section 3, and place only the flags file (section 3). The server must be started
+with the CA that signs these certificates (`--agent-client-ca`). The agent ignores `--token-file`
+and a `host-credential` file on such a host.
+
+Keep the token path (sections 2 and 3) for a node that hostkeeper does not manage, such as a node
+launched by the scaler with a one-time token in its launch data. The state root of such a node
+holds no identity files, and nothing changes for it.
+
+A state root with only one of the two identity files stops the agent with status 2 and names the
+missing file; the first install defers (`join_token_missing`) until both are there.
+
 ## 4. A node that ran the archive package or the setup script's unit
 
 A node that ran the agent from hostkeeper's archive package (`hostkeeper-archive`, deleted from
@@ -165,7 +185,10 @@ hostkeeper's own documents on assignments say when an install is ordered and wha
    version. It downloads the `.deb` from the stable suite, checks it against the pin, extracts it
    into the version's directory under `/var/lib/hostkeeper/packages/js-agent/` and runs the hook's
    `prepare` from that copy (`tree/usr/bin/js-agent`).
-2. On a first install, `prepare` checks for the join token. It defers with the reason
+2. On a first install, `prepare` checks that the node has a way to authenticate. A node whose state
+   root holds the service identity that hostkeeper writes (`service-identity.pem` and
+   `service-identity.key`, the key owned by the user running the hook, mode 0600 or 0400) is not
+   deferred and needs no join token (section 3A). Otherwise it defers with the reason
    `join_token_missing` unless the token file is a regular file, owned by the user running the
    hook (root), with mode 0600 or 0400. hostkeeper retries the install. Fix the file and the next
    attempt goes on. A node whose state root already holds a usable `host-credential` is not
@@ -173,13 +196,15 @@ hostkeeper's own documents on assignments say when an install is ordered and wha
 3. When `prepare` passes, hostkeeper installs the `.deb` with `apt-get` (the package's
    `/usr/bin/js-agent` and its units), holds it, switches `current`, runs `cutover`, which starts
    the agent, and then `verify`.
-4. The agent says hello to the server with the token and the instance. The server registers the
+4. A node with the service identity says hello with its certificate, and the server registers the
+   host under the host id the certificate names, with no token and no host credential. Otherwise
+   the agent says hello to the server with the token and the instance. The server registers the
    host and answers with a host credential. The agent stores it in its state root as the file
    `host-credential`, and sends it from then on. The one-time token is retired by the server and is
    spent.
    - State root: `/var/lib/js-agent/state`.
 
-Keep `/etc/js-agent/token`. Do not delete it. The unit still passes
+On a node that uses a join token, keep `/etc/js-agent/token`. Do not delete it. The unit still passes
 `--token-file /etc/js-agent/token`, the agent reads that file again at every start, and a file
 that is given and missing stops it.
 
@@ -268,8 +293,11 @@ A line is also not a flag when it is only `--`.
 
 ### The first install keeps deferring
 
-hostkeeper shows the install as deferred, and the hook's reason is `join_token_missing`. Check the
-token file:
+hostkeeper shows the install as deferred, and the hook's reason is `join_token_missing`. The detail
+names the two ways to go on: the token file, and the service identity in the state root. On a
+node that hostkeeper manages, check that both identity files are in `/var/lib/js-agent/state`, and
+that the key is owned by root with mode 0600 or 0400 (a detail that says a file is missing or that
+the key must be mode 0600 or 0400 names the one to fix). On any other node, check the token file:
 
 ```
 ls -l /etc/js-agent/token

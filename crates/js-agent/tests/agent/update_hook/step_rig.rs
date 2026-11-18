@@ -21,6 +21,7 @@ use js_agent::update_hook::{
     UpdateInfo, agent_in,
 };
 use js_agent_wire::Taint;
+use js_client::{SERVICE_CERT_FILE, SERVICE_KEY_FILE};
 use js_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 
@@ -425,6 +426,10 @@ pub struct Spy<'a> {
     pub start_leaves: RefCell<Option<(&'static str, &'static str)>>,
     /// What the join token file shows. A good one by default.
     pub token: Rc<Cell<TokenFile>>,
+    /// What the service identity's certificate file shows. Nothing is there by default.
+    pub identity_cert: Rc<Cell<TokenFile>>,
+    /// What the service identity's key file shows. Nothing is there by default.
+    pub identity_key: Rc<Cell<TokenFile>>,
     token_fn: Box<TokenFn>,
     /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
     /// they are used up it prints `0`.
@@ -432,7 +437,7 @@ pub struct Spy<'a> {
     record_path: PathBuf,
 }
 
-/// What looking at the join token file shows.
+/// What looking at the join token file, or a file of the service identity, shows.
 #[derive(Clone, Copy, Debug)]
 pub enum TokenFile {
     /// Nothing is there.
@@ -461,12 +466,24 @@ impl<'a> Spy<'a> {
     pub fn new(rig: &'a Rig) -> Spy<'a> {
         let token = Rc::new(Cell::new(TokenFile::Facts(good_token())));
         let seen = Rc::clone(&token);
+        let identity_cert = Rc::new(Cell::new(TokenFile::Missing));
+        let identity_key = Rc::new(Cell::new(TokenFile::Missing));
+        let (seen_cert, seen_key) = (Rc::clone(&identity_cert), Rc::clone(&identity_key));
         Spy {
             token,
-            token_fn: Box::new(move |_| match seen.get() {
-                TokenFile::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
-                TokenFile::Unreadable => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                TokenFile::Facts(facts) => Ok(facts),
+            identity_cert,
+            identity_key,
+            token_fn: Box::new(move |path| {
+                let shown = match path.file_name().and_then(|name| name.to_str()) {
+                    Some(SERVICE_CERT_FILE) => seen_cert.get(),
+                    Some(SERVICE_KEY_FILE) => seen_key.get(),
+                    _ => seen.get(),
+                };
+                match shown {
+                    TokenFile::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
+                    TokenFile::Unreadable => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                    TokenFile::Facts(facts) => Ok(facts),
+                }
             }),
             tasks: RefCell::new(VecDeque::new()),
             world: &rig.world,

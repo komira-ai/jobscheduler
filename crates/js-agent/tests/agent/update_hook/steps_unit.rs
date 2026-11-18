@@ -407,8 +407,9 @@ fn deferred_for_the_token(name: &str, file: TokenFile, said: &str) {
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "the join token file {} {said}; place it, root-owned and mode 0600, to install the agent",
-            rig.params.token_file.display()
+            "the join token file {} {said}; place it, root-owned and mode 0600, or have hostkeeper write the service identity (service-identity.pem and service-identity.key in {}), to install the agent",
+            rig.params.token_file.display(),
+            rig.params.state_root.display()
         )),
         "{name}"
     );

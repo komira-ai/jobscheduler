@@ -50,7 +50,7 @@
 //! | flag | meaning |
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
-//! | `--token-file <path>` | required unless `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
+//! | `--token-file <path>` | required unless `--state-root` holds the service identity (`service-identity.pem` and `service-identity.key`, which hostkeeper writes there) or a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id; `--host-id-from-facts <path>` takes it from the `host_id` of hostkeeper's facts file instead (not with `--host-id`; a file that cannot be used stops the agent) |
@@ -308,6 +308,7 @@ pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+mod login;
 pub mod logs;
 #[cfg(target_os = "macos")]
 pub mod native;
@@ -356,6 +357,7 @@ pub use identity::{IdentityFlags, IdentitySourceKind};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
+pub use login::Login;
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
@@ -540,6 +542,25 @@ pub fn main_with(
     }
 }
 
+/// How the transport first proves who it is: the service identity of `--state-root` when it
+/// holds one (then no `--token-file` is needed, the token file and the host credential file
+/// are not read, and no bearer is sent), and otherwise [`bearer_file`].
+///
+/// # Errors
+///
+/// [`Failure::Usage`] naming the file that is missing when the state root holds only one of
+/// the two identity files, or whatever [`bearer_file`] refuses.
+fn login(cli: &Cli) -> Result<Login, Failure> {
+    let identity = match &cli.state_root {
+        Some(root) => Login::identity_of(root).map_err(|why| Failure::Usage(why.to_string()))?,
+        None => None,
+    };
+    match identity {
+        Some(identity) => Ok(identity),
+        None => bearer_file(cli).map(Login::Token),
+    }
+}
+
 /// The file the transport first reads its bearer from: `--token-file` when given, and
 /// otherwise the host credential file of `--state-root`, which has the same form (one run
 /// of printable ASCII, owner-only). The agent adopts the credential from the same file
@@ -562,7 +583,7 @@ fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
     };
     kept.ok_or_else(|| {
         Failure::Usage(
-            "--token-file: required unless --state-root holds a host credential".to_owned(),
+            "--token-file: required unless --state-root holds a service identity or a host credential".to_owned(),
         )
     })
 }
@@ -600,10 +621,10 @@ fn execute(
     let image_allow =
         platform::image_allow(&cli, &credentials).map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
-    let bearer_file = bearer_file(&cli)?;
+    let login = login(&cli)?;
     let mut transport = services
         .connector
-        .connect(&cli.server, &bearer_file, ca_cert)
+        .connect(&cli.server, &login, ca_cert)
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
@@ -622,6 +643,10 @@ fn execute(
     });
     let mut offer =
         offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
+    // A host that authenticates by its service identity is issued no host credential, and
+    // says it keeps none.
+    let by_identity = matches!(login, Login::Identity(_));
+    offer.hello.accepts_host_credential &= !by_identity;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
@@ -707,10 +732,12 @@ fn execute(
     }
     // A host that was given a credential in an earlier life uses it from the first hello:
     // its token is dead. The transport was connected with the token file, or with this very
-    // file when no token file was given (above).
+    // file when no token file was given (above). A host that authenticates by its service
+    // identity has no use for one: the file is not read and never adopted.
     let credentials = local
         .state
         .as_ref()
+        .filter(|_| !by_identity)
         .map(|state| CredentialFile::in_dir(state.path()));
     if let Some(file) = &credentials {
         let found = file.load().map_err(Failure::Usage)?;

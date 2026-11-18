@@ -33,15 +33,23 @@ struct Probe {
 pub fn bearer(path: &Path) -> Result<String, ClientError> {
     let refuse =
         |why: String| ClientError::flag("--token-file", format!("{} {why}", path.display()));
-    let probe = probe(path).map_err(|err| refuse(format!("cannot be read: {err}")))?;
-    if !trusted(&probe, geteuid().as_raw()) {
-        return Err(refuse(format!(
+    let bytes = owner_only(path, MAX_TOKEN_FILE).map_err(refuse)?;
+    let token = token(&bytes).map_err(refuse)?;
+    Ok(format!("Bearer {token}"))
+}
+
+/// The first `max` bytes of the file at `path`, when it is a regular file owned by the
+/// user running the program that nobody else can read or write (mode 0600 or 0400). The
+/// text of an error follows the path in a message and never holds the file's content.
+pub(crate) fn owner_only(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let probe = probe(path, max).map_err(|err| format!("cannot be read: {err}"))?;
+    match trusted(&probe, geteuid().as_raw()) {
+        true => Ok(probe.bytes),
+        false => Err(format!(
             "must be a regular file owned by you and readable only by you (mode 0600 or 0400), not mode {:04o} owned by uid {}",
             probe.mode, probe.owner
-        )));
+        )),
     }
-    let token = token(&probe.bytes).map_err(refuse)?;
-    Ok(format!("Bearer {token}"))
 }
 
 /// The `Authorization` header value for `secret`, a credential the caller holds in memory
@@ -62,7 +70,7 @@ pub fn bearer_of(secret: &str) -> Result<String, ClientError> {
 /// Opens `path` without blocking, so a named pipe is refused instead of waited on (a
 /// symbolic link is followed: secret mounts are links), and reads it only when the open
 /// file passes the checks.
-fn probe(path: &Path) -> std::io::Result<Probe> {
+fn probe(path: &Path, max: u64) -> std::io::Result<Probe> {
     let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
     let opened = OpenOptions::new()
         .read(true)
@@ -78,7 +86,7 @@ fn probe(path: &Path) -> std::io::Result<Probe> {
             };
             match trusted(&probe, geteuid().as_raw()) {
                 true => (&mut file)
-                    .take(MAX_TOKEN_FILE)
+                    .take(max)
                     .read_to_end(&mut probe.bytes)
                     .map(|_| probe),
                 false => Ok(probe),

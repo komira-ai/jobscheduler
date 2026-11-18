@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent::{Connector, Dialer, Session, Step};
+use js_agent::{Connector, Dialer, Login, Session, Step};
 use js_agent_wire::ProtocolRange;
 use serde_json::json;
 
@@ -300,7 +300,7 @@ fn a_rate_limited_hello_waits_for_retry_after() {
 fn the_servers_unsupported_protocol_refusal_reaches_the_session() {
     let server = Server::start("e2e_majors", &[]);
     let mut transport = OtherMajors(ProtocolRange { min: 2, max: 3 })
-        .connect(&server.url(), &server.join_file(), None)
+        .connect(&server.url(), &Login::Token(server.join_file()), None)
         .unwrap();
     let mut session = Session::new(hello("mac-1"), &mut *transport, lowest());
     let Step::Fatal(fatal) = session.tick() else {

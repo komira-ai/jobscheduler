@@ -6,9 +6,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use js_agent::Login;
 use js_agent::cordon::{Connect, Connection, Host as VerbHost, parse_window, run};
 use js_agent::own_host::{Lease, LeaseError};
-use js_client::ClientError;
+use js_client::{ClientError, ServiceIdentity};
 
 use super::fakes::{Call, Effect, FakeLease, FakePace, Kind};
 use crate::jobs::private;
@@ -18,7 +19,7 @@ use crate::support::{Host, Scratch, code, linux_host, mac_host};
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Seen {
     server: String,
-    credential: PathBuf,
+    login: Login,
     ca_cert: Option<PathBuf>,
     host: String,
 }
@@ -42,7 +43,7 @@ pub(super) fn drive_with(
     let recording = |at: &Connection<'_>| {
         seen.borrow_mut().push(Seen {
             server: at.server.to_owned(),
-            credential: at.credential.to_path_buf(),
+            login: at.login.clone(),
             ca_cert: at.ca_cert.map(ToOwned::to_owned),
             host: at.host.to_owned(),
         });
@@ -159,7 +160,7 @@ fn a_wrong_flag_or_file_ends_with_status_2_and_names_the_flag() {
                 "h-1",
             ],
             &bare,
-            "--token-file: required unless --state-root holds a host credential",
+            "--token-file: required unless --state-root holds a service identity or a host credential",
         ),
         (
             vec![
@@ -273,7 +274,7 @@ fn the_host_credential_of_the_state_root_wins_over_the_token_file() {
         ran.seen,
         [Seen {
             server: "https://leases.example:7300".to_owned(),
-            credential: kept.join("host-credential"),
+            login: Login::Token(kept.join("host-credential")),
             ca_cert: None,
             host: "h-1".to_owned(),
         }]
@@ -281,7 +282,7 @@ fn the_host_credential_of_the_state_root_wins_over_the_token_file() {
 
     let ran = run_on(&empty_flag);
     assert_eq!(ran.status, code(0), "{}", ran.err);
-    assert_eq!(ran.seen[0].credential, PathBuf::from("/token"));
+    assert_eq!(ran.seen[0].login, Login::Token(PathBuf::from("/token")));
 
     let ran = run_on(&broken_flag);
     assert_eq!(ran.status, code(2));
@@ -533,5 +534,82 @@ fn a_facts_file_that_cannot_be_used_or_a_second_id_flag_is_a_usage_error() {
     let ran = drive(&both, &host, &FakeLease::new(), &mut FakePace::new());
     assert_eq!(ran.status, code(2));
     assert!(ran.err.contains("cannot be used with"), "{}", ran.err);
+    assert!(ran.seen.is_empty());
+}
+
+/// Asserts that a state root holding the service identity is what the verb connects with: the
+/// connector is told the identity, even beside a host credential and a `--token-file`, and the
+/// verb needs neither. It catches a verb that sends a bearer on a host hostkeeper manages, which
+/// the server would not take for the host's own credential.
+#[test]
+fn the_service_identity_of_the_state_root_wins_over_the_credential_and_the_token_file() {
+    let files = Scratch::new("cordon_verb_identity");
+    let root = state_with(&files, "root", Some(&"c".repeat(64)));
+    files.write("root/service-identity.pem", "cert\n", 0o644);
+    files.write("root/service-identity.key", "key\n", 0o600);
+    let root_flag = root.display().to_string();
+    let host = linux_host();
+    let flags = [
+        "--server",
+        "https://leases.example:7300",
+        "--state-root",
+        &root_flag,
+        "--host-id",
+        "h-1",
+        "--for",
+        "1m",
+    ];
+    let tokenless = drive(&flags, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(tokenless.status, code(0), "{}", tokenless.err);
+    let beside: Vec<&str> = flags
+        .iter()
+        .copied()
+        .chain(["--token-file", "/token"])
+        .collect();
+    let ran = drive(&beside, &host, &FakeLease::new(), &mut FakePace::new());
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+    for ran in [&tokenless, &ran] {
+        assert_eq!(
+            ran.seen[0].login,
+            Login::Identity(ServiceIdentity::in_dir(&root))
+        );
+    }
+}
+
+/// Asserts that a state root with one identity file only ends the verb with status 2, naming
+/// the missing file, and connects to nothing, even with a good `--token-file`.
+#[test]
+fn half_a_service_identity_ends_the_verb_naming_the_missing_file() {
+    let files = Scratch::new("cordon_verb_half_identity");
+    let root = state_with(&files, "root", None);
+    files.write("root/service-identity.key", "key\n", 0o600);
+    let root_flag = root.display().to_string();
+    let flags = [
+        "--server",
+        "https://leases.example:7300",
+        "--token-file",
+        "/token",
+        "--state-root",
+        &root_flag,
+        "--host-id",
+        "h-1",
+        "--for",
+        "1m",
+    ];
+    let ran = drive(
+        &flags,
+        &linux_host(),
+        &FakeLease::new(),
+        &mut FakePace::new(),
+    );
+    assert_eq!(ran.status, code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains(&format!(
+            "--state-root: {} is missing",
+            root.join("service-identity.pem").display()
+        )),
+        "{}",
+        ran.err
+    );
     assert!(ran.seen.is_empty());
 }
