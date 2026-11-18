@@ -46,12 +46,25 @@ pub struct StartTimeline {
     /// When the reply that carried the start arrived, on the lifecycle's clock (milliseconds
     /// from its origin, which on a node is the agent's start).
     pub received_ms: u64,
+    /// The server's Unix time in milliseconds at which it placed the job, as its start says
+    /// ([`JobStartSpec::placed_at_ms`](js_agent_wire::JobStartSpec::placed_at_ms)); `None`
+    /// for a run start and for a server that sends none.
+    pub placed_at_ms: Option<u64>,
+    /// When the reply arrived in Unix time (milliseconds), taken from the clock's Unix time
+    /// at the start's admission less the time since `received_ms`; `None` when the clock has
+    /// no Unix time. From `placed_at_ms` to here spans the server's clock and the node's, so
+    /// the skew between them is in it; from here to the runtime's `running` step is on the
+    /// node's clock alone.
+    pub received_at_ms: Option<u64>,
     /// The lifecycle's steps, each with the milliseconds after `received_ms` at which it was
     /// done, in the order they were: `taken` (the worker began on the start), `admitted` (its
-    /// checks passed and its slot is booked), `resolved` (a start with layers or mounts: its
-    /// images are here and its host paths found), `dirs` (its scratch directory, and the
-    /// runtime's beside it, made and put under its quota), `ready` (all it waited for is
-    /// here) and `created` (the runtime's create returned).
+    /// checks passed and its slot is booked). A start without layers or mounts goes on with
+    /// `ready` (all it waited for is here) and `dirs` (its scratch directory, and the
+    /// runtime's beside it, made and put under its quota). A start with layers or mounts
+    /// makes its directories at its admission and goes on with `dirs`, `provided` (a start
+    /// with providers: every provider has answered the directory of its source), `resolved`
+    /// (its images are here and its host paths found) and `ready`. Each ends with `created`
+    /// (the runtime's create returned).
     pub steps: Vec<(&'static str, u64)>,
     /// The runtime's own steps inside the create, each with the wall clock time it was done
     /// at (milliseconds since the Unix epoch), in order; empty for a runtime that keeps none

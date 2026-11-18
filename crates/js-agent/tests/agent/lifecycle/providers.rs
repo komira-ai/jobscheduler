@@ -8,7 +8,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use js_agent::lifecycle::{Event, ProviderAnswer};
+use js_agent::lifecycle::{Event, JobFs, ProviderAnswer};
 use js_agent_wire::refusal;
 use js_agent_wire::{HeldState, JobMount, JobStartSpec, Layer, MountMode, MountSource, Outcome};
 
@@ -87,9 +87,10 @@ fn a_mount_answered_late_still_starts_the_job() {
     h.apply(vec![job_start(with_layer("j1"))]);
     h.life.step();
     assert_eq!(listing(&h, "j1").state, HeldState::Starting);
-    assert!(
-        h.fake.looked_up("j1").is_none(),
-        "no lookup before the directory"
+    assert_eq!(
+        h.fake.looked_up("j1"),
+        Some(JobFs::default()),
+        "the lookups begun at the admission leave the provider's layer out"
     );
     let events = steps(&mut h);
     assert_eq!(events, ["started j1"]);

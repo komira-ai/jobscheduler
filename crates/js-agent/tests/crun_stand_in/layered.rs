@@ -181,9 +181,12 @@ fn prepare(runtime: &mut CrunRuntime, spec: &RunSpec, fs: &JobFs) -> FsPrepared 
     };
     let image = image.clone();
     let run = spec.run_id.clone();
-    assert_eq!(
-        runtime.resolve_fs(&run, &image, fs, 5000),
-        FsPrepared::Pending
+    // The first ask begins the lookups and answers how they stand at once: pending while
+    // the runtime's threads look, ready when they already have.
+    let first = runtime.resolve_fs(&run, &image, fs, 5000);
+    assert!(
+        matches!(first, FsPrepared::Pending | FsPrepared::Ready),
+        "{first:?}"
     );
     let found = settled(|| runtime.resolve_fs(&run, &image, fs, 5000));
     assert_eq!(found, FsPrepared::Ready);

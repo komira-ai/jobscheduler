@@ -88,7 +88,7 @@ impl CrunRuntime {
         // until the lease is torn down.
         self.oci.pin_image(image, name)?;
         self.images.lease(name, &image.digest);
-        let ensure = || self.rt.block_on(self.images.ensure(image));
+        let ensure = || self.rt.block_on(self.images.use_held(image));
         ensure().map_err(Fault::Image)?;
         if !config_path(&self.configs, &image.digest).exists() {
             if assembled.is_some_and(|made| made.root.is_some()) {

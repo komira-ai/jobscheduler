@@ -19,6 +19,7 @@ use js_caps::is_mount_provider_key;
 use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, NetworkPolicy};
 use js_types::{Arch, ExecMode, Os, PortMap, Resources};
 
+use crate::job_api::read::view::millis;
 use crate::per_job::BeatContext;
 
 /// Why a placement's start cannot be sent.
@@ -238,6 +239,7 @@ pub(crate) fn start_of(
         layers: spec.layers.clone(),
         mounts: spec.mounts.clone(),
         host_ports: spec.host_ports.clone(),
+        placed_at_ms: job.placed_at.map(millis),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

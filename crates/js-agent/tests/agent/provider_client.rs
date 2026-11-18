@@ -263,33 +263,95 @@ fn an_answer_that_comes_in_rings_the_clients_wake() {
     assert!(rings.try_recv().is_err(), "one ring for the one answer");
 }
 
-/// Asserts that a call the provider fails rings nothing and the same call answered done after
-/// it rings once: of a release that failed and then succeeded, one ring in all. It catches a
-/// client that rings for a failure, so a lifecycle that asks a failed call again at every step
-/// would ask a provider that fails at once in a loop with no pause.
-#[test]
-fn a_failed_call_rings_nothing_and_a_done_one_rings_once() {
-    let mut rig = rig("pc-wake-fail");
+/// A wake that sends on the returned channel each time it rings.
+fn ringing() -> (js_agent::lifecycle::Wake, std::sync::mpsc::Receiver<()>) {
     let (rung, rings) = std::sync::mpsc::channel::<()>();
     let rung = std::sync::Mutex::new(rung);
-    rig.client.set_wake(js_agent::lifecycle::Wake::new(move || {
+    let wake = js_agent::lifecycle::Wake::new(move || {
         let _ = rung.lock().map(|rung| rung.send(()));
-    }));
+    });
+    (wake, rings)
+}
+
+/// Asserts that a call the provider fails rings the wake once its retry pause has passed,
+/// and that the ask the ring brings is handed the failure and sends the call again in that
+/// same ask: with no pause, the ring comes, the ask answers the failure, the provider is
+/// asked a second time with no further ask, and that call, done, rings once more and is
+/// handed over. It catches a client that rings nothing for a failure, and one whose ring
+/// only hands the failure over, so the call is sent again only at the worker's next step.
+#[test]
+fn a_failed_call_rings_after_its_pause_and_the_ask_it_brings_sends_it_again() {
+    let mut rig = rig_with(
+        "pc-wake-fail",
+        CallBounds {
+            retry: Duration::ZERO,
+            ..CallBounds::default()
+        },
+    );
+    let (wake, rings) = ringing();
+    rig.client.set_wake(wake);
     rig.fake.fail_release(1);
     let call = release("r1", 0);
-    let failed = settle(&mut rig.client, NAME, &call);
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Pending);
+    rings
+        .recv_timeout(GUARD)
+        .expect("rung for the failed release");
+    let failed = rig.client.ask(NAME, &call);
     assert!(
         matches!(failed, ProviderAnswer::Unavailable(_)),
         "{failed:?}"
     );
-    assert_eq!(
-        settle(&mut rig.client, NAME, &call),
-        ProviderAnswer::Done(None)
-    );
     rings
         .recv_timeout(GUARD)
-        .expect("rung once the release was done");
-    assert!(rings.try_recv().is_err(), "the failure rang too");
+        .expect("rung once the release sent again was done");
+    assert_eq!(rig.fake.requests().len(), 2, "sent again by the ask");
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Done(None));
+    assert!(rings.try_recv().is_err(), "one ring for each answer");
+}
+
+/// Asserts that a refusal handed over after its pause is not sent again: a refused source
+/// is final. It catches a client that sends every failure again.
+#[test]
+fn a_refusal_handed_over_after_its_pause_is_not_sent_again() {
+    let mut rig = rig_with(
+        "pc-wake-refused",
+        CallBounds {
+            retry: Duration::ZERO,
+            ..CallBounds::default()
+        },
+    );
+    let (wake, rings) = ringing();
+    rig.client.set_wake(wake);
+    rig.fake.refuse("bad");
+    let call = prepare("r1", 0, "bad", MountMode::ReadOnly);
+    assert_eq!(rig.client.ask(NAME, &call), ProviderAnswer::Pending);
+    rings.recv_timeout(GUARD).expect("rung for the refusal");
+    let refused = rig.client.ask(NAME, &call);
+    assert!(matches!(refused, ProviderAnswer::Refused(_)), "{refused:?}");
+    assert_eq!(rig.fake.requests().len(), 1, "a refusal is not sent again");
+}
+
+/// Asserts that a failed call waits out the retry pause before it rings: with a pause of an
+/// hour, the failure answer is handed over and nothing has rung. It catches a client that
+/// rings for a failure at once, which asks a provider that fails at once in a loop.
+#[test]
+fn a_failed_call_has_not_rung_while_the_retry_pause_runs() {
+    let mut rig = rig_with(
+        "pc-wake-pause",
+        CallBounds {
+            retry: Duration::from_secs(3600),
+            ..CallBounds::default()
+        },
+    );
+    let (wake, rings) = ringing();
+    rig.client.set_wake(wake);
+    rig.fake.fail_release(1);
+    let failed = settle(&mut rig.client, NAME, &release("r1", 0));
+    assert!(
+        matches!(failed, ProviderAnswer::Unavailable(_)),
+        "{failed:?}"
+    );
+    assert!(rings.try_recv().is_err(), "rung before the retry pause");
 }
 
 /// Asserts that two calls with different keys (two indexes of one run, and a prepare and a
@@ -603,7 +665,7 @@ fn a_call_the_provider_holds_is_unavailable_at_its_bound() {
 }
 
 /// Asserts that the bounds a client is given by default are the contract's: 10 s for a
-/// prepare, 30 s for a mount, 5 s for a release and 30 s for a sweep. It catches a bound
+/// prepare, 30 s for a mount, 5 s for a release, 30 s for a sweep and a retry pause of 200 ms. It catches a bound
 /// that drifts from the design.
 #[test]
 fn the_default_bounds_are_the_contracts() {
@@ -614,6 +676,7 @@ fn the_default_bounds_are_the_contracts() {
             mount: Duration::from_secs(30),
             release: Duration::from_secs(5),
             sweep: Duration::from_secs(30),
+            retry: Duration::from_millis(200),
         }
     );
 }

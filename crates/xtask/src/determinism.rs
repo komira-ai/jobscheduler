@@ -765,6 +765,13 @@ pub const ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/js-agent/src/system.rs",
+        item: "Monotonic::unix_ms",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the agent program's wall clock for the arrival time on a start's timeline; the cell gives the agent lifecycle its virtual clock, which has no Unix time, and no decision reads it",
+    },
+    Allowed {
+        file: "crates/js-agent/src/system.rs",
         item: "System::new",
         token: Token::InstantNow,
         sites: 1,

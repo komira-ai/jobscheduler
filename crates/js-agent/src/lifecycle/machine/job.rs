@@ -23,9 +23,10 @@ use crate::logs::Sink;
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// The slot is booked and the start waits for its images, and for the lookups and the
-    /// assembly of its file system ([`Phase`]): no files or container exist yet, no scratch
-    /// directory either before the assembly, and the wall-time limit has not begun.
+    /// The slot is booked and the start waits for its images, and for its providers, the
+    /// lookups and the assembly of its file system ([`Phase`]): no files or container exist
+    /// yet, a start with layers or mounts has its scratch directory from its admission, and
+    /// the wall-time limit has not begun.
     Preparing(Box<Waiting>),
     /// The container runs.
     Running(RunHandle),
@@ -58,6 +59,10 @@ pub(super) struct Given {
     /// The layers and mounts the start names, which the runtime prepares before the
     /// container is made ([`Runtime::resolve_fs`](crate::lifecycle::Runtime::resolve_fs)).
     pub(super) fs: JobFs,
+    /// The server's Unix time in milliseconds at which it placed the job
+    /// ([`JobStartSpec::placed_at_ms`](js_agent_wire::JobStartSpec::placed_at_ms)), for the
+    /// start's timeline alone; `None` for a run start.
+    pub(super) placed_at_ms: Option<u64>,
 }
 
 /// What a start that waits is waiting for besides its images.
@@ -65,12 +70,19 @@ pub(super) struct Given {
 pub(super) enum Phase {
     /// Nothing else: a start with no layer and no mount.
     Images,
-    /// The directories its providers make for the layers and mounts that name one
-    /// (`providing`); each is then a host path, and the start is in [`Phase::Resolving`].
-    Providing(Providing),
-    /// The lookups of its host paths.
-    Resolving,
-    /// The assembly of its file system, once its directories are made: `scratch` is the
+    /// The lookups of its host paths, with its directories made at admission (`scratch` is
+    /// the run's scratch directory, the lease directory beside it made too). `providing` is
+    /// the directories its providers make for the layers and mounts that name one, while
+    /// some is outstanding: the lookups go on beside it, and once every source has its
+    /// directory the sources are host paths, `providing` is `None`, and the lookups of those
+    /// are followed too.
+    Resolving {
+        /// The providers' part, until every source has its directory.
+        providing: Option<Providing>,
+        /// The run's scratch directory.
+        scratch: PathBuf,
+    },
+    /// The assembly of its file system, once its host paths are found: `scratch` is the
     /// run's scratch directory, the lease directory beside it made too.
     Assembling(PathBuf),
 }

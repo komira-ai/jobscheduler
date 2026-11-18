@@ -9,6 +9,7 @@
 mod adopt;
 mod blind_cgroup;
 mod cleanup;
+mod concurrent_start;
 mod disk;
 mod exclusive;
 pub mod fake;
@@ -58,7 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Config, Event, FilesRoot, Lifecycle, MARKER_FILE,
+    Capacity, CheckFinding, CheckHook, Clock, Config, Event, FilesRoot, Lifecycle, MARKER_FILE,
     MountRoots, RunQuota, RuntimeError, ScratchRoot, StateRoot,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
@@ -155,11 +156,29 @@ impl Harness {
 
     /// As [`Harness::restart`], with `checks` as the post-job checks of the new process.
     pub fn restart_with(&mut self, checks: Box<dyn CheckHook>) -> Result<Vec<Event>, RuntimeError> {
+        self.restart_on(checks, Box::new(self.clock.clone()))
+    }
+
+    /// As [`Harness::restart`], with `clock` as the clock of the new process.
+    pub fn restart_with_clock(
+        &mut self,
+        clock: Box<dyn Clock>,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let scratch = self.dir.path("scratch");
+        let checks = hook(&self.log, &self.fake, &scratch, &[]);
+        self.restart_on(checks, clock)
+    }
+
+    fn restart_on(
+        &mut self,
+        checks: Box<dyn CheckHook>,
+        clock: Box<dyn Clock>,
+    ) -> Result<Vec<Event>, RuntimeError> {
         let (life, events) = Lifecycle::adopt(
             self.config.clone(),
             Box::new(self.fake.clone()),
             checks,
-            Box::new(self.clock.clone()),
+            clock,
         )?;
         self.life = life;
         Ok(events)
