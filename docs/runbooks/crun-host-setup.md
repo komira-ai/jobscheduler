@@ -164,8 +164,12 @@ The record goes with the lease directory.
 
 Results the server has not acknowledged, and the job ids the agent must not run again, are kept in
 the state root: one file per held result in `held/`, and `retired.json` (job id and allocation id
-pairs, the newest 4096). A file there that cannot be read is dropped and logged as a finding; it
-does not stop the agent from starting.
+pairs, the newest 4096) with `retired.log`, the ids retired since `retired.json` was last written
+whole, one JSON object a line. An id is appended to the log while the log stays within a
+sixteenth of `retired.json`; the next one writes `retired.json` whole and removes the log, so a
+full list (some 370 KB) is rewritten about once in 250 job ends instead of at every one. A file
+there that cannot be read is dropped and logged as a finding; it does not stop the agent from
+starting.
 
 ## GPU hosts
 

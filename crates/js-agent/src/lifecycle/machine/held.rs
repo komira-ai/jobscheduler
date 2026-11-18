@@ -12,7 +12,16 @@
 //!   lifecycle's own bound on jobs already keeps it to.
 //! - **`retired.json`**, the retired list as pairs of job id and allocation id (the
 //!   allocation is absent when the agent was told to stop a job it did not hold), oldest
-//!   first, rewritten whole whenever an id is added.
+//!   first, written whole (as a result's file is), and **`retired.log`**, the ids added
+//!   since, one JSON object a line, appended and synced. An id added is appended to the log
+//!   while the log, with it, stays within a sixteenth of `retired.json`; otherwise the list
+//!   is written whole and the log removed. A list of a few ids is so always written whole,
+//!   and one of 4096 (some 370 KB with a node's ids, a line some 90 bytes) costs a line of
+//!   the log for each id and a whole write for each 250 or so, where it cost a whole write,
+//!   synced, for each. The log is read after the list, its ids added in order; its last
+//!   line, when no newline ends it, is a write that did not finish and is left out, and the
+//!   next id added writes the list whole. An agent of an earlier release reads
+//!   `retired.json` alone, the list as it was at its last whole write.
 //!
 //! [`Lifecycle::adopt`] reads both. A result whose id is a taken-over job's is set on that
 //! job, which then makes no second result when its container is seen to have exited; any
@@ -60,8 +69,16 @@ const RETIRED_FILE: &str = "retired.json";
 /// tails are at most 8 KiB a stream, and six times that once escaped.
 const RESULT_MAX: u64 = 1 << 20;
 
-/// The most bytes of the retired list that are read: at most 4096 pairs of two ids.
+/// The log of the ids retired since the retired list was written whole, in the state root.
+const RETIRED_LOG: &str = "retired.log";
+
+/// The most bytes of the retired list that are read: at most 4096 pairs of two ids. The log
+/// is held to a sixteenth of the list, so the same bound holds it.
 const RETIRED_MAX: u64 = 4 << 20;
+
+/// The log holds at most the list's length divided by this, in bytes: a whole write then
+/// comes once the log has grown by a sixteenth of the list.
+const LOG_SHARE: u64 = 16;
 
 /// What a result's log tail looked like when it was written: the lengths of the two
 /// streams, none when it has no tail. A tail is only ever cut, so a cut changes the mark.
@@ -109,8 +126,15 @@ pub(super) struct Records {
     root: PathBuf,
     /// The results with a file, by id, with the tail each was written with.
     written: BTreeMap<String, Mark>,
-    /// The count of [`Retired::added`] the file holds.
+    /// The count of [`Retired::added`] the list and its log hold.
     retired_added: u64,
+    /// The length of `retired.json` as it was last written or read; 0 when there is none.
+    list_bytes: u64,
+    /// The length of `retired.log`; 0 when there is none.
+    log_bytes: u64,
+    /// Whether the log may be appended to: not when it ends in a write that did not finish,
+    /// or holds a line that is no id, until the next whole write removes it.
+    log_whole: bool,
     /// A failure to write was reported and no call has written everything since.
     told: bool,
 }
@@ -179,6 +203,21 @@ fn unreadable(events: &mut Vec<Event>, what: &str, why: &str) {
     }));
 }
 
+/// The lines of the retired list's log for `entries`: one JSON object each, as the list
+/// holds it, ended by a newline.
+fn lines_of<'a>(entries: impl Iterator<Item = (&'a str, Option<&'a str>)>) -> io::Result<Vec<u8>> {
+    let mut lines = Vec::new();
+    for (job_id, allocation) in entries {
+        let entry = RetiredId {
+            job_id: job_id.to_owned(),
+            allocation_id: allocation.map(str::to_owned),
+        };
+        serde_json::to_writer(&mut lines, &entry).map_err(io::Error::other)?;
+        lines.push(b'\n');
+    }
+    Ok(lines)
+}
+
 impl Records {
     /// The records of the state root `state`, none known to be on disk.
     pub(super) fn new(state: &StateRoot) -> Self {
@@ -186,6 +225,9 @@ impl Records {
             root: state.path().to_owned(),
             written: BTreeMap::new(),
             retired_added: 0,
+            list_bytes: 0,
+            log_bytes: 0,
+            log_whole: true,
             told: false,
         }
     }
@@ -261,26 +303,67 @@ impl Records {
         (found, self.load_retired(events))
     }
 
-    /// Reads the retired list; empty when there is none or it cannot be used.
+    /// Reads the retired list and then its log; empty when there is neither or they cannot
+    /// be used.
     fn load_retired(&mut self, events: &mut Vec<Event>) -> Retired {
         let mut retired = Retired::default();
         let list = match read_capped(&self.root.join(RETIRED_FILE), RETIRED_MAX) {
-            Err(why) if why.kind() == io::ErrorKind::NotFound => return retired,
-            read => read.map_err(|why| why.to_string()).and_then(|text| {
-                serde_json::from_str::<RetiredList>(&text).map_err(|why| why.to_string())
-            }),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => None,
+            read => Some(read.map_err(|why| why.to_string()).and_then(|text| {
+                let list = serde_json::from_str::<RetiredList>(&text);
+                list.map(|list| (list, text.len()))
+                    .map_err(|why| why.to_string())
+            })),
         };
         match list {
-            Ok(list) => list.retired.iter().for_each(|entry| {
-                retired.insert_with(&entry.job_id, entry.allocation_id.as_deref());
-            }),
-            Err(why) => {
+            None => {}
+            Some(Ok((list, len))) => {
+                self.list_bytes = u64::try_from(len).unwrap_or(u64::MAX);
+                list.retired.iter().for_each(|entry| {
+                    retired.insert_with(&entry.job_id, entry.allocation_id.as_deref());
+                });
+            }
+            Some(Err(why)) => {
                 let why = format!("{why}; it starts empty");
                 unreadable(events, "the retired list", &why);
             }
         }
+        self.load_log(&mut retired, events);
         self.retired_added = retired.added();
         retired
+    }
+
+    /// Adds the ids of the retired list's log to `retired`, in order. The last line, when no
+    /// newline ends it, is left out without a word; a line that is no id is left out with a
+    /// finding. Either way the log is appended to no more: the next id written writes the
+    /// list whole.
+    fn load_log(&mut self, retired: &mut Retired, events: &mut Vec<Event>) {
+        let text = match read_capped(&self.root.join(RETIRED_LOG), RETIRED_MAX) {
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return,
+            Err(why) => {
+                self.log_whole = false;
+                return unreadable(events, "the retired log", &why.to_string());
+            }
+            Ok(text) => text,
+        };
+        self.log_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        let ended = text.ends_with('\n');
+        let lines: Vec<&str> = text.lines().collect();
+        let finished = match ended {
+            true => lines.len(),
+            false => lines.len().saturating_sub(1),
+        };
+        self.log_whole = ended || lines.is_empty();
+        for (n, line) in lines.into_iter().take(finished).enumerate() {
+            match serde_json::from_str::<RetiredId>(line) {
+                Ok(entry) => retired.insert_with(&entry.job_id, entry.allocation_id.as_deref()),
+                Err(why) => {
+                    self.log_whole = false;
+                    let why = format!("line {}: {why}; it is left out", n + 1);
+                    unreadable(events, "the retired log", &why);
+                }
+            }
+        }
     }
 
     /// Writes the file of the result of `job`.
@@ -299,8 +382,53 @@ impl Records {
         .and_then(|body| write_whole(&dir, &name, &body))
     }
 
-    /// Writes the retired list.
-    fn write_retired(&self, retired: &Retired) -> io::Result<()> {
+    /// Writes the ids added to `retired` since the last write: appended to the log while the
+    /// log, with them, stays within a sixteenth of the list on disk and may be appended to;
+    /// otherwise the list whole, and then the log removed.
+    fn write_retired(&mut self, retired: &Retired) -> io::Result<()> {
+        let added = retired.added().saturating_sub(self.retired_added);
+        let fresh = usize::try_from(added).unwrap_or(usize::MAX);
+        let skip = retired.entries().count().checked_sub(fresh);
+        let lines = skip
+            .map(|skip| lines_of(retired.entries().skip(skip)))
+            .transpose()?;
+        let grown = lines.as_ref().map(|lines| {
+            let len = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+            self.log_bytes.saturating_add(len)
+        });
+        match (lines, grown) {
+            (Some(lines), Some(grown))
+                if self.log_whole && grown.saturating_mul(LOG_SHARE) <= self.list_bytes =>
+            {
+                self.append_log(&lines)
+                    .inspect_err(|_| self.log_whole = false)?;
+                self.log_bytes = grown;
+                Ok(())
+            }
+            _ => self.write_list(retired),
+        }
+    }
+
+    /// Appends `lines` to the retired list's log and syncs it (and the state root when the
+    /// log is new).
+    fn append_log(&self, lines: &[u8]) -> io::Result<()> {
+        let mut log = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(self.root.join(RETIRED_LOG))?;
+        log.write_all(lines)?;
+        log.sync_data()?;
+        match self.log_bytes {
+            0 => sync_dir(&self.root),
+            _ => Ok(()),
+        }
+    }
+
+    /// Writes the retired list whole, then removes its log, whose ids it holds: a crash
+    /// between the two leaves a log whose ids the list holds, read again at the next start;
+    /// on a full list that adds back no more than the ids the list had dropped as the oldest.
+    fn write_list(&mut self, retired: &Retired) -> io::Result<()> {
         let list = RetiredList {
             retired: retired
                 .entries()
@@ -310,9 +438,17 @@ impl Records {
                 })
                 .collect(),
         };
-        serde_json::to_vec(&list)
-            .map_err(io::Error::other)
-            .and_then(|body| write_whole(&self.root, RETIRED_FILE, &body))
+        let body = serde_json::to_vec(&list).map_err(io::Error::other)?;
+        write_whole(&self.root, RETIRED_FILE, &body)?;
+        self.list_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+        match fs::remove_file(self.root.join(RETIRED_LOG)) {
+            Ok(()) => sync_dir(&self.root)?,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => {}
+            Err(why) => return Err(why),
+        }
+        self.log_bytes = 0;
+        self.log_whole = true;
+        Ok(())
     }
 
     /// Removes the file of a result; a file that is not there is removed already.
