@@ -44,7 +44,7 @@ pub fn a_lost_tree_requeues_a_running_job_and_releases_its_allocation<B: Backend
     let (queued, releasing) = rig
         .jobs
         .requeue_lost_tree(&id, lost_note("host-a"))
-        .unwrap_or_else(|why| panic!("{name}: a running job was not requeued: {why}"));
+        .expect("a running job is requeued");
     assert_eq!(
         rig.store.commit_stats().txns,
         commits + 1,
@@ -114,7 +114,7 @@ pub fn a_lost_tree_requeues_a_running_job_and_releases_its_allocation<B: Backend
     let (placed, second) = rig
         .jobs
         .place(&id, host("host-b"), share())
-        .unwrap_or_else(|why| panic!("{name}: a requeued job was not placed again: {why}"));
+        .expect("a requeued job is placed again once freed");
     assert_ne!(
         second.allocation_id, first.allocation_id,
         "{name}: the new placement reused the lost run's allocation id"

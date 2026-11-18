@@ -52,20 +52,30 @@ const SOCKET: &str = "mp.sock";
 /// The kinds of call of the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
+    /// `Prepare`: begin making a source's tree.
     Prepare,
+    /// `Mount`: the directory of a prepared source.
     Mount,
+    /// `Release`: give up a source.
     Release,
+    /// `Check`: whether a source was lost while its run used it.
     Check,
+    /// `Sweep`: release an agent's sources of every run it does not keep.
     Sweep,
 }
 
 /// One request the fake received.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seen {
+    /// A `Prepare`, with the request it carried.
     Prepare(PrepareRequest),
+    /// A `Mount`, with the request it carried.
     Mount(MountRequest),
+    /// A `Release`, with the request it carried.
     Release(ReleaseRequest),
+    /// A `Check`, with the request it carried: the source the agent asked about.
     Check(CheckRequest),
+    /// A `Sweep`, with the request it carried.
     Sweep(SweepRequest),
 }
 
