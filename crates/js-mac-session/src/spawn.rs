@@ -306,8 +306,17 @@ mod tests {
         (read, write.into())
     }
 
+    /// `/dev/null`, open for reading and for writing, so that it can stand for any of the
+    /// three standard streams: a write to a descriptor opened for reading alone fails with
+    /// `EBADF`, and a program that checks its writes (GNU `dd` checks the statistics it
+    /// prints on its error stream) then ends with a failure.
     fn null() -> OwnedFd {
-        std::fs::File::open("/dev/null").unwrap().into()
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .unwrap()
+            .into()
     }
 
     fn me() -> (u32, u32) {
@@ -639,6 +648,22 @@ mod tests {
         let (status, len) = run(2);
         assert!(status.success(), "a write under the limit failed: {status}");
         assert_eq!(len, 2048);
+    }
+
+    /// A program that writes to its error stream, and fails when the write fails (as GNU
+    /// `dd` fails when it cannot print its statistics there), runs to a successful end with
+    /// the streams the other tests give theirs. Catches a standard stream given to the
+    /// program open for reading alone, which the `dd` test catches only on a host whose `dd`
+    /// checks the write (GNU `dd` does; uutils `dd` does not).
+    #[test]
+    fn a_program_that_writes_to_its_error_stream_succeeds() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "kbf-mac-session-stderr");
+        let (spawn, _out) = base(&["/bin/sh", "-c", "echo report >&2"], &dir);
+        let status = super::spawn(spawn).unwrap().wait().unwrap();
+        assert!(
+            status.success(),
+            "writing to the error stream failed: {status}"
+        );
     }
 
     /// The operating system's `setrlimit`, run in the test process (the child's own run
