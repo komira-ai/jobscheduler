@@ -615,7 +615,9 @@ impl FakeMachine {
         }
     }
 
-    /// Rings the wake the machine's providers were given, as a provider's answer does.
+    /// Rings the wake the machine's providers were given, as a provider's answer does. Only
+    /// the Linux build's provider tests ring it.
+    #[cfg(target_os = "linux")]
     pub fn ring_providers(&self) {
         let wake = self
             .provider_wake

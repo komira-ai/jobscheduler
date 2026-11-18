@@ -150,13 +150,15 @@ fn constraints() -> impl Strategy<Value = Constraints> {
         text(),
         proptest::option::of(accelerator()),
         variant(3),
+        text(),
     )
         .prop_map(
-            |(os, arch, exec, isa_level, accelerator, isolation)| Constraints {
+            |(os, arch, exec, isa_level, accelerator, isolation, os_version)| Constraints {
                 os,
                 arch,
                 exec,
                 isa_level,
+                os_version,
                 accelerator,
                 isolation,
             },

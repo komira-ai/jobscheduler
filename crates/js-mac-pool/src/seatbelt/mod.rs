@@ -65,7 +65,9 @@ pub use allow::{BaseSet, MacosMajor};
 pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
-pub use policy::{Caps, MAX_LISTED, Narrowing, Policy, PolicyError, ReadModel, SlotLayout};
+pub use policy::{
+    Caps, MAX_LISTED, MountGrant, Narrowing, Policy, PolicyError, ReadModel, SlotLayout,
+};
 pub use profile::{BuildError, Profile, SANDBOX_EXEC};
 pub use scan::{PrivilegedScan, scan_privileged};
 pub use selftest::{

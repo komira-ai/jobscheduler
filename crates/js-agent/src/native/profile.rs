@@ -7,7 +7,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use js_agent_wire::{NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Caps, Narrowing, Net, Policy, Profile, SlotLayout};
+use js_mac_pool::seatbelt::{
+    AbsPath, Caps, MountGrant, Narrowing, Net, Policy, Profile, SlotLayout,
+};
 use js_mac_session::disclaim::Program;
 
 use super::{NativeConfig, fail};
@@ -30,18 +32,21 @@ pub fn profile_argv(
     native: &NativeSpec,
     home: &Path,
 ) -> Result<Vec<String>, RuntimeError> {
-    argv_of(config, native, home, &[])
+    argv_of(config, native, home, (&[], &[]))
 }
 
-/// [`profile_argv`] for a run whose files and inputs are at `read_only` (its files directory
-/// and the `dest` of each input below `exec/`): the profile denies writes there. Reads are
-/// open under the only read model that has a profile ([`ReadModel::Open`]), and the agent
-/// refuses at start a files root that a read deny covers, so the run reads them.
+/// [`profile_argv`] for a run whose files and inputs are at `read_only` (its files directory,
+/// the `dest` of each input below `exec/` and the link of each read-only mount): the profile
+/// denies writes there. Reads are open under the only read model that has a profile
+/// ([`ReadModel::Open`]), and the agent refuses at start a files root that a read deny
+/// covers, so the run reads them. `mounts` are the run's job mounts, granted after the read
+/// denies (every mount root is one), so the run reads and, for a read-write one, writes
+/// only the host directories it was given (`native/mounts.rs`).
 pub(super) fn argv_of(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,
-    read_only: &[(&str, PathBuf)],
+    (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
 ) -> Result<Vec<String>, RuntimeError> {
     let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
     let inputs = read_only
@@ -53,6 +58,7 @@ pub(super) fn argv_of(
         uid_entry: None,
         inputs,
         read_denies: config.read_denies.clone(),
+        mounts: mounts.to_vec(),
     };
     // The policy never grants more than the ceiling. That is a defence in depth only: a
     // start above the ceiling was refused by `check_native` before its user existed, so this

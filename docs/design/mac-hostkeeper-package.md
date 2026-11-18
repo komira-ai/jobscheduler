@@ -18,8 +18,9 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 - `cargo xtask release desired --pkg-url` adds a `macos-arm64` entry to the release's targets when the package is in the
   package repository, and `hostkeeper-desired.yml` sets it for the host group `mac-build`.
 - The agent reports the capabilities `os` and `arch` as detected (`crates/js-agent/src/host.rs`, `capabilities`):
-  `os=macos`, `arch=arm64` on an Apple silicon Mac. It reports no `os_version` capability (bundle admission reads the
-  host's version locally, `crates/js-agent/src/bundle/host.rs`).
+  `os=macos`, `arch=arm64` on an Apple silicon Mac, and `os_version` as the major version of its `ProductVersion`
+  (`crates/js-agent/src/os_version.rs`; bundle admission still reads the host's version locally,
+  `crates/js-agent/src/bundle/host.rs`).
 - kbf's executor asks every job for `os=linux`, and kbf's design leaves macOS out of scope until a macOS design exists:
   the Macs keep `kbf-daemon` with the native driver (kbf repository, `docs/design/actions-as-jobs.md`, section 14).
   A Mac agent that registers is therefore offered no kbf action until kbf asks for `os=macos`. This document does not
@@ -177,12 +178,16 @@ once the group has a desired version for it, so the group may list js-agent befo
 Mac. Until the group lists the package, a `set-desired` for the group is refused `not_in_host_group`.
 
 The lease server's agent pool configuration gains a pool the Macs meet: `capabilities = { os = "macos", arch =
-"arm64" }` and `exec = "sandbox-exec"`. The Macs must reach its agent listener.
+"arm64", layered-rootfs = "true" }` and `exec = "sandbox-exec"`. A joined pool places a host by the capabilities it
+names, so a job with mounts (which asks for `layered-rootfs`, as kbf's macOS action jobs do) is placed on a Mac only
+when the pool names it; every native agent of a release that takes mounts reports it, and one that does not is refused
+at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
+must reach its agent listener.
 
 ## Platform properties
 
-The hello reports `os=macos` and `arch=arm64`. An `os_version` capability, the Mac's `ProductVersion` compared as
-at-least, is a separate change in `js-caps` and the agent; until it lands a job must not ask for one.
+The hello reports `os=macos`, `arch=arm64` and `os_version`, the major version of the Mac's `ProductVersion`. A
+job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as at least, by major version.
 
 ## Order
 

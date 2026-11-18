@@ -290,3 +290,40 @@ fn the_placer_is_told_the_hosts_accelerator_facts_in_any_pool() {
     );
     assert_eq!(told.said(), [format!("up gpu-1 4000 {}", caps.join(","))]);
 }
+
+/// Catches: a Mac placed by the pool's least `os_version` in place of the one it runs (a job
+/// that asks for macOS 27 would never be placed on a pool whose floor is 26, though its hosts
+/// run 27), the pool's value dropped for a host that reports none, and a host whose version is
+/// under the pool's least admitted. The joined pool names `os_version=26` and does not place
+/// by hello: a host that reports 27 is placed as 27, one that reports none (an earlier agent)
+/// is refused at its hello, and one that reports 15 is refused; a pool that names no version
+/// places a host by the one it reports.
+#[test]
+fn a_host_is_placed_by_the_os_version_it_reports_in_every_pool() {
+    let name = ProviderId::new("builders").unwrap();
+    let floored = Shape::new(
+        floor().resources().clone(),
+        map(&[("os", "macos"), ("os_version", "26")]),
+    );
+    let mut said = hello("a");
+    said.capabilities.insert("os_version".into(), "27".into());
+    let told = Arc::new(Shapes::default());
+    let (registry, _) = told_by(
+        PoolConfig::new(name.clone(), class(), floored.clone(), 4),
+        &told,
+    );
+    say(&registry, &said);
+    assert_eq!(told.said(), ["up a 4000 os=macos,os_version=27"]);
+
+    let mut older = hello("b");
+    older.capabilities.insert("os_version".into(), "15".into());
+    assert!(registry.hello(&older, &cred("t")).is_err());
+    assert!(registry.hello(&hello("c"), &cred("t")).is_err());
+    assert!(told.said().is_empty());
+
+    let plain = PoolConfig::new(name, class(), floor(), 4);
+    let told = Arc::new(Shapes::default());
+    let (registry, _) = told_by(plain, &told);
+    say(&registry, &said);
+    assert_eq!(told.said(), ["up a 4000 os_version=27"]);
+}

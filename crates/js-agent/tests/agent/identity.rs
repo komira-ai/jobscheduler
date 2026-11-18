@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 use crate::support::{code, mac_host, run_scripted, welcome};
 
 /// The hello the agent sent with the default flags before `--identity-source` existed,
-/// from the fake Mac host and the flags of [`DEFAULT_FLAGS`].
+/// from the fake Mac host and the flags of [`DEFAULT_FLAGS`], with the `os_version` a Mac
+/// reports since (the fake Mac answers `26.1`).
 const DEFAULT_HELLO: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../js-agent-wire/tests/fixtures/agent/default_hello.json"

@@ -80,7 +80,10 @@ impl Profile {
     /// write denies; the write grants (the run directory, the user's folder entry,
     /// `/dev/null` and `/dev/fd`); the read denies, each with a write deny of the same
     /// path (a read-denied path inside a granted directory is not writable either); the
-    /// write protection of inputs; the network; a deny of unix-socket connect and bind
+    /// write protection of inputs; the mount grants (for each mount a read grant of its
+    /// path, a metadata grant on the path and its ancestors, and for a read-write mount
+    /// a write grant), then the exec denies of the mounts that are `no_exec`, after every
+    /// grant so no grant reopens them; the network; a deny of unix-socket connect and bind
     /// under each read-denied path (after the network rules, so no network allow
     /// reaches the agent's sockets); process info; the floor.
     ///
@@ -130,6 +133,8 @@ impl Profile {
             lines.push(format!("(deny file-write* (subpath (param \"IN_{i}\")))"));
             params.push((format!("IN_{i}"), path.as_str().to_owned()));
         }
+
+        mount_rules(policy, &mut lines, &mut params);
 
         net_rules(policy, &mut lines);
         for i in 0..policy.read_denies().len() {
@@ -181,6 +186,30 @@ impl Profile {
 fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     for rule in rules {
         lines.push((*rule).to_owned());
+    }
+}
+
+/// The grants of the run's mounts, then the exec denies of the `no_exec` ones. The metadata
+/// grant names the path and every ancestor (a denied mount root above it stays unreadable
+/// and unlistable, but `realpath` and `getcwd` can walk through it).
+fn mount_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
+    for (i, mount) in policy.mounts().iter().enumerate() {
+        params.push((format!("GR_{i}"), mount.path.as_str().to_owned()));
+        lines.push(format!("(allow file-read* (subpath (param \"GR_{i}\")))"));
+        lines.push(format!(
+            "(allow file-read-metadata (path-ancestors (param \"GR_{i}\")))"
+        ));
+        if mount.write {
+            lines.push(format!("(allow file-write* (subpath (param \"GR_{i}\")))"));
+        }
+    }
+    for (i, mount) in policy.mounts().iter().enumerate() {
+        if mount.no_exec {
+            lines.push(format!("(deny process-exec* (subpath (param \"GR_{i}\")))"));
+            lines.push(format!(
+                "(deny file-map-executable (subpath (param \"GR_{i}\")))"
+            ));
+        }
     }
 }
 

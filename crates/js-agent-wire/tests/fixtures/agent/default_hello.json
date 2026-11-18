@@ -2,7 +2,8 @@
   "agent_version": "0.1.0",
   "capabilities": {
     "arch": "arm64",
-    "os": "macos"
+    "os": "macos",
+    "os_version": "26"
   },
   "gpu_devices": [],
   "held": [],

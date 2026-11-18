@@ -639,6 +639,7 @@ async fn the_answer_shows_the_job_as_recorded() {
                 arch: "aarch64".to_owned(),
                 exec: v1::ExecMode::Container.into(),
                 isa_level: "armv8.2-a".to_owned(),
+                os_version: String::new(),
                 accelerator: Some(v1::Accelerator {
                     vendor: Some("nvidia".to_owned()),
                     model: Some("nvidia-a100".to_owned()),

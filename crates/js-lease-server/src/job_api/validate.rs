@@ -15,7 +15,7 @@
 //! | `spec.command` | with an empty image, an absolute path in normal form ([`js_types::path::absolute`]) | `field: spec.command` |
 //! | `spec.env` | names and values as given; nothing to refuse | |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
-//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
+//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `osVersion` empty or a whole major version of one to four digits without a leading zero; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
 //! | `spec.network` | a known level | `field: spec.network` |
 //! | `spec.ports` | each port 1 to 65535, no host port twice | `field: spec.ports[i].hostPort`, `spec.ports[i].containerPort` |
@@ -44,8 +44,8 @@
 //! value of the request: not the id, not the image, not a file.
 //!
 //! The capability vocabulary is the one a lease request speaks (design section 3.8): the ISA
-//! level and the structured accelerator are recorded among the job's capabilities under the
-//! keys a lease request uses (`isa_level` and the `accelerator.*` keys), where placement reads
+//! level, the least operating-system version and the structured accelerator are recorded among the job's capabilities under the
+//! keys a lease request uses (`isa_level`, `os_version` and the `accelerator.*` keys), where placement reads
 //! them, and the old `gpus` and `gpu_class` pair is the booked count and class, which the
 //! alias table resolves; an accelerator model this release does not know passes through.
 
@@ -61,7 +61,7 @@ use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
     ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels,
-    Os, Requirements, Resources, normalise_arch,
+    OS_VERSION_KEY, Os, Requirements, Resources, normalise_arch,
 };
 // The network level a job asks a host for, by a name of its own: the type's own name followed
 // by a path separator reads as the server's network module to the source scan of design
@@ -160,6 +160,7 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         os: kept.os.clone(),
         arch: kept.arch.clone(),
         isa_level: kept.isa_level,
+        os_version: kept.os_version,
         exec: kept.exec,
         accelerator,
         network: job_network(network),
@@ -312,10 +313,11 @@ struct Kept {
     arch: Option<String>,
     exec: Option<ExecMode>,
     isa_level: Option<IsaLevel>,
+    os_version: Option<u32>,
 }
 
 /// The constraints of a job, and the capabilities the tables record beside them: the ISA
-/// level and the accelerator's keys, which [`AcceleratorNeed::requested`] checks with the
+/// level, the least operating-system version and the accelerator's keys, which [`AcceleratorNeed::requested`] checks with the
 /// booked GPUs.
 fn host(constraints: &v1::Constraints) -> Result<(Kept, BTreeMap<String, String>), Fault> {
     let given = |text: &str| Some(text.to_owned()).filter(|text| !text.is_empty());
@@ -334,7 +336,13 @@ fn host(constraints: &v1::Constraints) -> Result<(Kept, BTreeMap<String, String>
         .map(|level| level.parse::<IsaLevel>())
         .transpose()
         .map_err(|_| Fault::Field("spec.constraints.isaLevel"))?;
+    let os_version = given(&constraints.os_version)
+        .map(|text| major_version(&text).ok_or(Fault::Field("spec.constraints.osVersion")))
+        .transpose()?;
     let mut capabilities = BTreeMap::new();
+    if let Some(version) = os_version {
+        capabilities.insert(OS_VERSION_KEY.to_owned(), version.to_string());
+    }
     if let Some(level) = given(&constraints.isa_level) {
         capabilities.insert(ISA_LEVEL_KEY.to_owned(), level);
     }
@@ -346,8 +354,17 @@ fn host(constraints: &v1::Constraints) -> Result<(Kept, BTreeMap<String, String>
         arch,
         exec,
         isa_level,
+        os_version,
     };
     Ok((kept, capabilities))
+}
+
+/// The major version `text` states: one to four ASCII digits with no leading zero, and at
+/// least 1.
+fn major_version(text: &str) -> Option<u32> {
+    let digits = (1..=4).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit());
+    let plain = !text.starts_with('0');
+    text.parse::<u32>().ok().filter(|_| digits && plain)
 }
 
 /// The `accelerator.*` capability entries of `accelerator`, one per field it gives.

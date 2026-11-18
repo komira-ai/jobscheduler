@@ -66,6 +66,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             arch: "x86_64".to_owned(),
             exec: v1::ExecMode::Container.into(),
             isa_level: "x86-64-v3".to_owned(),
+            os_version: "26".to_owned(),
             accelerator: Some(accelerator),
             isolation: v1::Isolation::Unspecified.into(),
         });
@@ -86,6 +87,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         .with_disk_bytes(2 << 30);
     let capabilities: BTreeMap<String, String> = [
         (ISA_LEVEL_KEY, "x86-64-v3"),
+        ("os_version", "26"),
         ("accelerator.vendor", "nvidia"),
         ("accelerator.model", "nvidia-a100"),
         ("accelerator.count", "2"),
@@ -133,6 +135,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
         isa_level: Some("x86-64-v3".parse::<IsaLevel>().unwrap()),
+        os_version: Some(26),
         exec: Some(ExecMode::Container),
         accelerator,
         network: Reach::Open,
@@ -290,6 +293,29 @@ fn the_wall_limit_is_present_positive_and_at_most_the_ceiling() {
     assert_eq!(higher, Err(Fault::WallAboveCeiling));
 }
 
+/// Asserts that a least `os_version` of one to four digits without a leading zero is recorded
+/// under the `os_version` capability as the same text and asked of admission as that number
+/// (`1`, `26` and `9999` are the bounds and a typical value), and that an empty one records
+/// no capability and asks for none. Catches a version recorded in another spelling, which
+/// would make one job two, and one dropped on the way to admission, which would place a
+/// macOS 26 job on a macOS 15 host.
+#[test]
+fn a_least_os_version_is_recorded_as_its_number_and_empty_asks_for_none() {
+    for (given, asked) in [("1", 1), ("26", 26), ("9999", 9999)] {
+        let checked = valid(|spec| {
+            spec.constraints = Some(constraints(|c| c.os_version = given.to_owned()));
+        });
+        assert_eq!(
+            checked.spec.constraints.capabilities.get("os_version"),
+            Some(&given.to_owned())
+        );
+        assert_eq!(checked.wanted.os_version, Some(asked));
+    }
+    let none = valid(|spec| spec.constraints = Some(constraints(|_| {})));
+    assert_eq!(none.spec.constraints.capabilities.get("os_version"), None);
+    assert_eq!(none.wanted.os_version, None);
+}
+
 /// Asserts the field each fault names, one fault per case, and that the first field in the
 /// message's order is the one named when two are wrong. It catches a check that lets a bad
 /// value through to the tables and a refusal that names another field than the one at fault.
@@ -325,6 +351,36 @@ fn each_fault_names_its_field() {
             Fault::Field("spec.constraints.isaLevel"),
             Box::new(|spec| {
                 spec.constraints = Some(constraints(|c| c.isa_level = "x86-64-v9".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "26.1".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "0".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "026".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "12345".to_owned()))
+            }),
+        ),
+        (
+            Fault::Field("spec.constraints.osVersion"),
+            Box::new(|spec| {
+                spec.constraints = Some(constraints(|c| c.os_version = "+26".to_owned()))
             }),
         ),
         (

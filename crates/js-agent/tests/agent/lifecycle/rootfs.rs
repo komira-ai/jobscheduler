@@ -9,8 +9,8 @@ use std::fs;
 
 use js_agent::lifecycle::{Config, FsPrepared, Lifecycle, MountRoots, NativeRefusal, RuntimeError};
 use js_agent_wire::{
-    HeldState, JobMount, JobStartSpec, Layer, Mount, MountMode, MountSource, Outcome, Propagation,
-    refusal,
+    HeldState, HostPort, JobMount, JobStartSpec, Layer, Mount, MountMode, MountSource, Outcome,
+    PortProtocol, Propagation, refusal,
 };
 
 use super::fake::{FakeRuntime, Log, ManualClock};
@@ -535,4 +535,38 @@ fn a_held_end_is_not_stopped_or_timed_out() {
         (result.outcome, result.exit_code),
         (Outcome::Failed, Some(4))
     );
+}
+
+/// Asserts that a runtime's own refusal of a job start's layers, mounts and host ports
+/// (`Runtime::check_job_fs`) is answered with the runtime's code, and before the admission of
+/// the host ports, which would refuse the same start `input-not-allowed` because this runtime
+/// offers none; the runtime is asked with the start's layers, mounts and ports; and a start
+/// it accepts goes on to the host-port admission as before. Catches a runtime-specific
+/// refusal that is answered with the generic code of a later check, or never asked.
+#[test]
+fn a_runtimes_refusal_of_a_start_comes_before_the_host_port_admission() {
+    let mut h = harness("rootfs-check-fs");
+    let data = h.dir.path("data").display().to_string();
+    let remapped = |job_id: &str| JobStartSpec {
+        mounts: vec![mount(&data, "/work/data", MountMode::ReadOnly)],
+        host_ports: vec![HostPort {
+            host_port: 8080,
+            container_port: Some(80),
+            protocol: PortProtocol::Tcp,
+        }],
+        ..start(job_id)
+    };
+    h.fake
+        .refuse_job_fs(refusal::HOST_PORT_REMAP_UNSUPPORTED_HERE, "remapped");
+    let events = h.apply(vec![job_start(remapped("j1"))]);
+    assert_eq!(
+        refused(&events, "j1"),
+        ["refused j1 host-port-remap-unsupported-here"]
+    );
+    assert_eq!(h.fake.job_fs_checks(), [(0, 1, 1)]);
+    assert!(h.fake.created().is_empty());
+
+    h.fake.accept_job_fs();
+    let events = h.apply(vec![job_start(remapped("j2"))]);
+    assert_eq!(refused(&events, "j2"), ["refused j2 input-not-allowed"]);
 }

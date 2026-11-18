@@ -290,6 +290,19 @@
         "required": false
       },
       {
+        "doc": "The least version of the host's operating system, as a major version such as 26 (macOS 26): a host is capable when it reports that major version or a later one. Empty: any version.",
+        "field": [
+          "spec",
+          "constraints",
+          "os_version"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.os-version",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
         "doc": "The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling).",
         "field": [
           "spec",

@@ -16,7 +16,9 @@
 
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, mount_provider_key};
 use js_elastic::{Offer, ProviderCaps};
-use js_types::{Capabilities, DISK_GIB_KEY, EXEC_KEY, HostId, Requirements, Resources, Shape};
+use js_types::{
+    Capabilities, DISK_GIB_KEY, EXEC_KEY, HostId, OS_VERSION_KEY, Requirements, Resources, Shape,
+};
 
 use crate::ceiling::{ceiling_of, within_ceiling};
 
@@ -159,8 +161,8 @@ impl ProviderView {
 /// that may offer a machine for it ([`Path::MayOffer`]); otherwise it is refused.
 ///
 /// A host is capable when it is neither tainted nor draining, what the pool books of it holds
-/// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`, `disk-gib`,
-/// `exec`, `layered-rootfs` and each `mount-provider.<name>` (as [`Shape::satisfies`] compares
+/// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`,
+/// `os_version`, `disk-gib`, `exec`, `layered-rootfs` and each `mount-provider.<name>` (as [`Shape::satisfies`] compares
 /// them), and the network ceiling its facts advertise ([`ceiling_of`]) covers `req`'s network
 /// level and host ports ([`within_ceiling`]; a host that advertises none has the level `none`
 /// and no port). Whether it is busy, lost or cordoned does not matter. A provider may offer
@@ -210,7 +212,7 @@ fn inside(caps: &ProviderCaps, req: &Requirements) -> bool {
 }
 
 /// The capabilities a host must report for `req`, as a lease request names them: `os`,
-/// `arch`, `disk-gib` (rounded up to a whole GiB), `isa_level` and `exec`, each only when
+/// `arch`, `disk-gib` (rounded up to a whole GiB), `isa_level`, `os_version` and `exec`, each only when
 /// `req` names it, and `layered-rootfs=true` when `req` names layers, mounts or host ports
 /// ([`Requirements::layered_rootfs`]), and `mount-provider.<name>=true` for each provider
 /// `req` names ([`Requirements::mount_providers`]).
@@ -223,6 +225,10 @@ fn required(req: &Requirements) -> Capabilities {
             req.disk_bytes.map(|bytes| bytes.div_ceil(GIB).to_string()),
         ),
         ("isa_level", req.isa_level.map(|level| level.to_string())),
+        (
+            OS_VERSION_KEY,
+            req.os_version.map(|version| version.to_string()),
+        ),
         (EXEC_KEY, req.exec.map(|mode| mode.name().to_owned())),
         (
             LAYERED_ROOTFS,
