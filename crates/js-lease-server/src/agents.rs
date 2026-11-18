@@ -831,7 +831,8 @@ impl Agents {
 
     /// What every tick does for the agent side: read the deny file again (a file that cannot be
     /// read keeps the hosts denied now, and is counted and logged), read the join tokens again and drop the
-    /// hello limits of those that left the file, then read the job service's client token
+    /// hello limits of those that left the file once they are refilled (a limit that is still
+    /// spent stays, whoever it is of, so a certificate host's is not reset), then read the job service's client token
     /// files again ([`AgentTokens::reload_clients`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in

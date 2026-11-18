@@ -49,6 +49,16 @@ impl Bucket {
         }
     }
 
+    /// Whether the bucket is back at its whole burst at `now`, so that dropping it loses
+    /// nothing: the next hello would start from a full one anyway.
+    fn is_full_at(&self, limit: HelloLimit, now: u64) -> bool {
+        let interval = u64::try_from(limit.interval.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let earned = now.saturating_sub(self.since) / interval;
+        u64::from(self.available).saturating_add(earned) >= u64::from(limit.burst)
+    }
+
     /// Spends one hello at `now` (milliseconds), or says in how many milliseconds the
     /// next one is allowed. A clock that reads earlier than the last use adds nothing.
     fn take(&mut self, limit: HelloLimit, now: u64) -> Result<(), u64> {
@@ -90,8 +100,10 @@ pub(crate) struct Held {
 }
 
 /// A bucket for each credential that has said hello. Only a credential the transport
-/// authenticated reaches it, so the map holds at most one entry per join token in the
-/// file ([`HelloLimiter::retain`] drops those of tokens that left it).
+/// authenticated reaches it: a join token of the file, or the credential of a host's service
+/// certificate. [`HelloLimiter::retain`] drops the buckets of credentials the file no longer
+/// holds once they are back at their whole burst, so the map holds the join tokens of the
+/// file and the hosts that said hello lately.
 pub(crate) struct HelloLimiter {
     limit: HelloLimit,
     clock: SharedClock,
@@ -129,11 +141,15 @@ impl HelloLimiter {
         })
     }
 
-    /// Drops the buckets of every credential not in `keep`: the join tokens that have
-    /// left the token file. A token that comes back starts with a full bucket.
+    /// Drops the buckets of credentials not in `keep` (the join tokens of the file) that are
+    /// back at their whole burst: a full bucket is the same as a new one, so nothing is lost.
+    /// A bucket that is not yet full stays whoever it is of, so the limit of a host that
+    /// authenticates by certificate (its credential is in no file) is not reset by a tick.
+    /// A token that comes back after its bucket was dropped starts with a full bucket.
     pub(crate) fn retain(&self, keep: &[Credential]) {
+        let now = self.clock.now().millis();
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        buckets.retain(|who, _| keep.contains(who));
+        buckets.retain(|who, bucket| keep.contains(who) || !bucket.is_full_at(self.limit, now));
     }
 
     /// How many credentials have a bucket.
@@ -148,7 +164,7 @@ impl HelloLimiter {
 
 #[cfg(test)]
 mod tests {
-    use js_types::{ManualClock, Timestamp};
+    use js_types::{HostId, ManualClock, Timestamp};
 
     use super::*;
 
@@ -260,28 +276,64 @@ mod tests {
         assert!(!announced(&a));
     }
 
-    /// Dropping the credentials a token file no longer holds drops their buckets and
-    /// keeps the rest, so a token that is rotated out does not leave a bucket behind and
-    /// one that comes back starts full. It catches a limiter that only ever grows and a
-    /// retain that drops the buckets still in use.
+    /// Dropping the credentials a token file no longer holds drops their buckets once those
+    /// are refilled and keeps the rest, so a token that is rotated out does not leave a
+    /// bucket behind and one that comes back starts full. It catches a limiter that only ever
+    /// grows and a retain that drops the buckets still in use.
     #[test]
     fn buckets_of_credentials_that_left_are_dropped() {
         let clock = ManualClock::new(Timestamp::from_millis(0));
-        let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock));
+        let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock.clone()));
         let (a, b) = (Credential::of_token("a"), Credential::of_token("b"));
         for _ in 0..3 {
             limiter.admit(&a).unwrap();
         }
         limiter.admit(&b).unwrap();
         assert_eq!(limiter.tracked(), 2);
+        clock.advance(Duration::from_secs(30));
         limiter.retain(std::slice::from_ref(&b));
         assert_eq!(limiter.tracked(), 1);
         for _ in 0..3 {
             assert_eq!(limiter.admit(&a), Ok(()));
         }
         assert_eq!(limiter.tracked(), 2);
-        assert!(limiter.admit(&b).is_ok());
-        assert!(limiter.admit(&b).is_ok());
+        // The bucket that was kept is the one it was, refilled by the 30 seconds.
+        for _ in 0..3 {
+            assert!(limiter.admit(&b).is_ok());
+        }
         assert!(limiter.admit(&b).is_err());
+    }
+
+    /// A bucket that is not back at its whole burst survives `retain` whoever its credential
+    /// is of: an exhausted bucket of a service certificate's credential (in no token file)
+    /// still refuses after a retain that keeps only tokens, while a bucket of a credential
+    /// that is not kept and has refilled is dropped, and a kept one is never dropped.
+    #[test]
+    fn a_bucket_that_is_not_full_survives_a_retain_that_does_not_keep_it() {
+        let clock = ManualClock::new(Timestamp::from_millis(0));
+        let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock.clone()));
+        let host = Credential::of_service_certificate(&HostId::new("farm-1").unwrap());
+        let kept = Credential::of_token("kept");
+        for _ in 0..3 {
+            limiter.admit(&host).unwrap();
+        }
+        limiter.admit(&kept).unwrap();
+        let tokens = [kept.clone()];
+        limiter.retain(&tokens);
+        assert_eq!(limiter.tracked(), 2);
+        assert_eq!(
+            limiter.admit(&host).map_err(|held| held.wait),
+            Err(Duration::from_secs(10))
+        );
+        // Partly refilled is still not full; fully refilled is dropped, and kept stays.
+        clock.advance(Duration::from_secs(10));
+        limiter.retain(&tokens);
+        assert_eq!(limiter.tracked(), 2);
+        clock.advance(Duration::from_secs(20));
+        limiter.retain(&tokens);
+        assert_eq!(limiter.tracked(), 1);
+        for _ in 0..3 {
+            assert_eq!(limiter.admit(&host), Ok(()));
+        }
     }
 }
