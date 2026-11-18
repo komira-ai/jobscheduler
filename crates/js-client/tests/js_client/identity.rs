@@ -551,12 +551,12 @@ fn the_other_flags_are_checked_for_an_identity_client_too() {
         None,
         LIMIT,
     ));
-    assert!(
-        said.starts_with(&format!(
-            "--host-cert: {} cannot be read",
+    assert_eq!(
+        said,
+        format!(
+            "--host-cert: {} is not a regular file",
             dir.path(CERT_FILE).display()
-        )),
-        "{said}"
+        )
     );
 }
 
@@ -600,4 +600,87 @@ fn an_identity_client_takes_no_bearer() {
     let seen = fake.seen();
     assert_eq!(seen[0].presented, vec![minted.der.clone()]);
     assert!(!seen[0].head.to_ascii_lowercase().contains("authorization"));
+}
+
+/// A named pipe at `path`, which a blocking open would wait on forever.
+fn make_fifo(path: &std::path::Path) {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+}
+
+/// Asserts that a certificate file that is a named pipe is refused at connect, without
+/// waiting for a writer, with the full message naming `--host-cert` and the file.
+#[test]
+fn a_certificate_that_is_a_named_pipe_is_refused_without_blocking() {
+    let dir = Scratch::new("identity_cert_fifo");
+    let minted = Authority::new().issue("host-1");
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    make_fifo(&dir.path(CERT_FILE));
+    assert_eq!(
+        refused(Client::connect_with_identity(
+            "https://localhost:1",
+            &identity,
+            None,
+            LIMIT
+        )),
+        format!(
+            "--host-cert: {} is not a regular file",
+            dir.path(CERT_FILE).display()
+        )
+    );
+}
+
+/// Asserts that a certificate file larger than 65536 bytes is refused at connect with the
+/// full message naming `--host-cert`, and one of exactly that size is read (and then
+/// refused only for what it holds).
+#[test]
+fn a_certificate_file_larger_than_the_limit_is_refused() {
+    let dir = Scratch::new("identity_cert_oversize");
+    let minted = Authority::new().issue("host-1");
+    let identity = HostIdentity::new(dir.path(CERT_FILE), dir.path(KEY_FILE));
+    dir.write(KEY_FILE, minted.key_pem.as_bytes(), 0o600);
+    let connect = || Client::connect_with_identity("https://localhost:1", &identity, None, LIMIT);
+    dir.write(CERT_FILE, &vec![b'#'; 65 * 1024], 0o644);
+    assert_eq!(
+        refused(connect()),
+        format!(
+            "--host-cert: {} is larger than 65536 bytes",
+            dir.path(CERT_FILE).display()
+        )
+    );
+    dir.write(CERT_FILE, &vec![b'#'; 64 * 1024], 0o644);
+    assert_eq!(
+        refused(connect()),
+        format!(
+            "--host-cert: {} holds no certificate",
+            dir.path(CERT_FILE).display()
+        )
+    );
+}
+
+/// Asserts that a renewal that leaves the certificate path a named pipe keeps the pair the
+/// client had, and the request does not wait for a writer.
+#[test]
+fn a_renewal_whose_certificate_becomes_a_named_pipe_keeps_the_old_pair() {
+    let dir = Scratch::new("identity_cert_fifo_renewal");
+    let authority = Authority::new();
+    let first = authority.issue("host-1");
+    let second = authority.issue("host-1");
+    let identity = install(&dir, &first, 0o600);
+    let server = Cert::new();
+    let ca = ca_file(&dir, &server);
+    let fake = Mutual::start(server.requiring_clients_of(authority.der()), 1);
+    let client = Client::connect_with_identity(&fake.url(), &identity, Some(&ca), LIMIT).unwrap();
+    fs::remove_file(dir.path(CERT_FILE)).unwrap();
+    make_fifo(&dir.path(CERT_FILE));
+    replace(&dir, KEY_FILE, second.key_pem.as_bytes(), 0o600);
+    client.get("/a").unwrap();
+    assert_eq!(fake.seen()[0].presented, vec![first.der.clone()]);
 }

@@ -2,8 +2,6 @@
 //! another program (hostkeeper) replaces in place while this one runs. A client that
 //! authenticates by it sends no bearer.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -111,12 +109,25 @@ impl HostIdentity {
         }
     }
 
+    /// The certificate file's bytes, when it is a regular file of at most [`MAX_CERT_FILE`]
+    /// bytes. It is opened without blocking, as the key is, so a named pipe is refused.
+    fn read_cert(&self) -> Result<Vec<u8>, ClientError> {
+        let read = probe(&self.cert, MAX_CERT_FILE + 1, &|probe| probe.is_file)
+            .map_err(|why| self.refuse_cert(format!("cannot be read: {why}")))?;
+        if !read.is_file {
+            return Err(self.refuse_cert("is not a regular file"));
+        }
+        if read.bytes.len() as u64 > MAX_CERT_FILE {
+            return Err(self.refuse_cert(format!("is larger than {MAX_CERT_FILE} bytes")));
+        }
+        Ok(read.bytes)
+    }
+
     /// Reads both files and checks them: the certificate parses, the key passes
     /// [`host_key_problem`] and parses, and the key is the certificate's. The errors name
     /// the file, never its bytes.
     fn read(&self) -> Result<Pair, ClientError> {
-        let cert = read_public(&self.cert)
-            .map_err(|why| self.refuse_cert(format!("cannot be read: {why}")))?;
+        let cert = self.read_cert()?;
         let key = self.read_key()?;
         let chain = CertificateDer::pem_slice_iter(&cert)
             .collect::<Result<Vec<_>, _>>()
@@ -151,15 +162,6 @@ impl HostIdentity {
             client: ClientCert::new_with_certs(&owned, private),
         })
     }
-}
-
-/// A whole file of at most [`MAX_CERT_FILE`] bytes.
-fn read_public(path: &Path) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_CERT_FILE)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 /// A certificate and key read together, as the bytes they came from and as what the
@@ -205,8 +207,10 @@ impl Live {
     /// pair that cannot be read or does not hold together (a renewal caught between its two
     /// renames) leaves the agent the client had.
     pub(crate) fn agent(&self) -> Agent {
+        // The files are read before the lock is taken: it is held only to compare and swap.
+        let read = self.identity.read();
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Ok(pair) = self.identity.read()
+        if let Ok(pair) = read
             && pair.bytes != current.bytes
         {
             current.agent = (self.build)(pair.client);
