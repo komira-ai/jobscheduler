@@ -42,7 +42,8 @@ GRANT USAGE ON SEQUENCE kbf_state.rev_seq TO js_lease_server;
 
 Why each grant is there:
 
-- `UPDATE` on `head`: a commit locks it (`SELECT ... FOR UPDATE`, `LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE`) and moves it.
+- `UPDATE` on `head`: a commit that writes locks it as its last step (`LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE`, then `UPDATE head`) and moves it; a placement's decision locks it first.
+- `INSERT`, `UPDATE` and `DELETE` on `kv`: besides the writes themselves, a transaction reserves a key that has no row with an uncommitted placeholder row and locks a key that has one with `INSERT ... ON CONFLICT DO UPDATE ... WHERE false`; it deletes its placeholders before it commits.
 - `SELECT` on `schema_version`: the first connection checks that the schema's version is one this build supports.
 - `USAGE` on `rev_seq`: each commit takes its revision with `nextval('rev_seq')`.
 - The server takes no advisory lock.
@@ -50,7 +51,9 @@ Why each grant is there:
 No grant gives `CREATE`, ownership or superuser. A server running as this role cannot change the schema; only the installer, as the
 owner, can.
 
-The role may hold at most 8 pooled connections plus the lock's own session per server. A limit of 20 leaves room for a second server
+The role may hold at most 8 pooled connections plus the lock's own session per server. A call that finds all 8 in use waits up
+to 10 s for one and then fails as busy (the job API answers `UNAVAILABLE`, 503), and a statement past `statement_timeout`
+is busy too: neither wrote anything. A limit of 20 leaves room for a second server
 during a cutover; the second server is refused at the lock, but it connects first.
 
 Leave `synchronous_commit` at `on` (or `remote_apply`) for the database and the role. Every session checks it. A store whose session

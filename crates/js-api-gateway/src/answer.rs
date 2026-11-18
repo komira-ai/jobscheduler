@@ -158,6 +158,12 @@ impl Answer {
                 "log-store-unavailable" => {
                     Self::coded(StatusCode::SERVICE_UNAVAILABLE, "log-store-unavailable")
                 }
+                "store-unavailable" => {
+                    Self::coded(StatusCode::SERVICE_UNAVAILABLE, "store-unavailable")
+                }
+                "state-write-failed" => {
+                    Self::coded(StatusCode::SERVICE_UNAVAILABLE, "state-write-failed")
+                }
                 _ => Self::internal(),
             },
             Code::Ok

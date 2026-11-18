@@ -24,7 +24,8 @@
 //! rule over the committed row (`per_job::stops_for` and the start filter), so nothing here
 //! touches the start path. The call answers after the commit; a store that fails (the read
 //! or the commit) is `INTERNAL` with the message `state-write-failed` (500
-//! `state-write-failed`) and the job is as it was. So is a row that is gone at the commit
+//! `state-write-failed`), or `UNAVAILABLE` with it (503) when the store was only too busy to
+//! take the call, and the job is as it was. So is a row that is gone at the commit
 //! although the read found it, which only a store that lost the row can do: a job that has
 //! not ended is never swept. A `job_id` that is not a job id is `INVALID_ARGUMENT`, `field: jobId` (400).
 
