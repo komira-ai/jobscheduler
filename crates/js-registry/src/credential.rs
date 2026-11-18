@@ -4,8 +4,8 @@ use js_agent_wire::{InstanceIdentity, Taint};
 use js_types::HostId;
 use sha2::Digest;
 
-/// What the digest of a service certificate's credential starts with.
-const SERVICE_CERTIFICATE_LABEL: &[u8] = b"\0js-registry/service-certificate/v1\0";
+/// What the digest of a host certificate's credential starts with.
+const HOST_CERTIFICATE_LABEL: &[u8] = b"\0js-registry/host-certificate/v1\0";
 
 /// What a host presented to be admitted, reduced to its SHA-256 digest.
 ///
@@ -25,13 +25,13 @@ impl Credential {
         Self(sha2::Sha256::digest(token.as_bytes()).into())
     }
 
-    /// The credential of a service certificate that names `host`: the digest of a fixed
+    /// The credential of a host certificate that names `host`: the digest of a fixed
     /// label and the host id, so that a renewed certificate of the host (new key, new
     /// serial) is the same credential. The label starts with a NUL byte, which no join
     /// token holds (they are printable ASCII), so no token has this digest.
-    pub fn of_service_certificate(host: &HostId) -> Self {
+    pub fn of_host_certificate(host: &HostId) -> Self {
         let mut digest = sha2::Sha256::new();
-        digest.update(SERVICE_CERTIFICATE_LABEL);
+        digest.update(HOST_CERTIFICATE_LABEL);
         digest.update(host.as_str().as_bytes());
         Self(digest.finalize().into())
     }

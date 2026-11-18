@@ -3,7 +3,6 @@
 
 == flags ==
 --agent-client-ca default=none required=false
---agent-deny-file default=none required=false
 --agent-hello-burst default=60 required=false
 --agent-hello-interval default=1s required=false
 --agent-pool-config default=none required=false

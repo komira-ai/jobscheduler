@@ -100,7 +100,7 @@ pub(crate) struct Held {
 }
 
 /// A bucket for each credential that has said hello. Only a credential the transport
-/// authenticated reaches it: a join token of the file, or the credential of a host's service
+/// authenticated reaches it: a join token of the file, or the credential of a host's
 /// certificate. [`HelloLimiter::retain`] drops the buckets of credentials the file no longer
 /// holds once they are back at their whole burst, so the map holds the join tokens of the
 /// file and the hosts that said hello lately.
@@ -305,14 +305,14 @@ mod tests {
     }
 
     /// A bucket that is not back at its whole burst survives `retain` whoever its credential
-    /// is of: an exhausted bucket of a service certificate's credential (in no token file)
+    /// is of: an exhausted bucket of a host certificate's credential (in no token file)
     /// still refuses after a retain that keeps only tokens, while a bucket of a credential
     /// that is not kept and has refilled is dropped, and a kept one is never dropped.
     #[test]
     fn a_bucket_that_is_not_full_survives_a_retain_that_does_not_keep_it() {
         let clock = ManualClock::new(Timestamp::from_millis(0));
         let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock.clone()));
-        let host = Credential::of_service_certificate(&HostId::new("farm-1").unwrap());
+        let host = Credential::of_host_certificate(&HostId::new("farm-1").unwrap());
         let kept = Credential::of_token("kept");
         for _ in 0..3 {
             limiter.admit(&host).unwrap();

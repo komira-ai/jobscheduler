@@ -1,9 +1,9 @@
-//! The shape rules of a service certificate, one broken at a time.
+//! The shape rules of a host certificate, one broken at a time.
 
 use rcgen::ExtendedKeyUsagePurpose as Usage;
 
 use super::*;
-use crate::service_cert_mint::{AGENT_URI, Shape, self_signed};
+use crate::host_cert_mint::{AGENT_ROLE_URI, HOST_ROLE_URI, Shape, self_signed};
 
 /// The result of the shape rules over a certificate of `shape`.
 fn read_shape(shape: &Shape) -> Result<HostId, CertFault> {
@@ -13,8 +13,8 @@ fn read_shape(shape: &Shape) -> Result<HostId, CertFault> {
 /// Asserts that the certificate hostkeeper issues is read as the host its one DNS name is,
 /// whatever other kinds of SAN it carries.
 #[test]
-fn a_service_certificate_names_its_host() {
-    let host = read_shape(&Shape::agent("farm-1")).unwrap();
+fn a_host_certificate_names_its_host() {
+    let host = read_shape(&Shape::host("farm-1")).unwrap();
     assert_eq!(host.as_str(), "farm-1");
 }
 
@@ -27,10 +27,10 @@ fn bytes_that_are_no_certificate_are_unreadable() {
 
 /// Asserts that a certificate that is a CA's is refused, even with every other rule met.
 #[test]
-fn a_certificate_authority_is_not_a_service_certificate() {
+fn a_certificate_authority_is_not_a_host_certificate() {
     let shape = Shape {
         ca: true,
-        ..Shape::agent("farm-1")
+        ..Shape::host("farm-1")
     };
     assert_eq!(read_shape(&shape), Err(CertFault::Authority));
 }
@@ -42,7 +42,7 @@ fn the_key_usage_must_be_client_auth_alone() {
     let refused = |usages: Vec<Usage>| {
         let shape = Shape {
             usages,
-            ..Shape::agent("farm-1")
+            ..Shape::host("farm-1")
         };
         read_shape(&shape)
     };
@@ -68,33 +68,34 @@ fn the_key_usage_must_be_client_auth_alone() {
     );
 }
 
-/// Asserts that the certificate must name the agent service and no other hostkeeper service:
-/// no URI, another service's, the agent's with another's beside it, and a service name that
-/// only starts like the agent's are all refused; a URI that is no service's is ignored.
+/// Asserts that no URI SAN and no CN is required or read: the host-role URI, the agent-role
+/// URI, any other URI, several URIs, none, a CN that names another host and no CN all give the
+/// host of the one DNS name.
 #[test]
-fn the_certificate_must_name_the_agent_service_alone() {
+fn uris_and_the_common_name_are_not_read() {
     let uris = |uris: &[&str]| {
         let shape = Shape {
             uris: uris.iter().map(ToString::to_string).collect(),
-            ..Shape::agent("farm-1")
+            ..Shape::host("farm-1")
         };
         read_shape(&shape)
     };
-    assert_eq!(uris(&[]), Err(CertFault::Service));
-    assert_eq!(
-        uris(&["urn:hostkeeper:service:hostkeeper-agent"]),
-        Err(CertFault::Service)
-    );
-    assert_eq!(
-        uris(&[AGENT_URI, "urn:hostkeeper:service:other"]),
-        Err(CertFault::Service)
-    );
-    assert_eq!(uris(&[AGENT_URI, AGENT_URI]), Err(CertFault::Service));
-    assert_eq!(
-        uris(&["urn:hostkeeper:service:js-agent-2"]),
-        Err(CertFault::Service)
-    );
-    assert!(uris(&[AGENT_URI, "https://example.test/js-agent"]).is_ok());
+    for case in [
+        &[][..],
+        &[HOST_ROLE_URI],
+        &[AGENT_ROLE_URI],
+        &[HOST_ROLE_URI, AGENT_ROLE_URI],
+        &["https://example.test/anything"],
+    ] {
+        assert_eq!(uris(case).unwrap().as_str(), "farm-1", "{case:?}");
+    }
+    for cn in [Some("host:farm-2".to_owned()), None] {
+        let shape = Shape {
+            cn,
+            ..Shape::host("farm-1")
+        };
+        assert_eq!(read_shape(&shape).unwrap().as_str(), "farm-1");
+    }
 }
 
 /// Asserts that exactly one DNS name is required and that it must be a host id: none or two
@@ -104,7 +105,7 @@ fn the_certificate_must_have_one_dns_name_that_is_a_host_id() {
     let dns = |names: &[&str]| {
         let shape = Shape {
             dns: names.iter().map(ToString::to_string).collect(),
-            ..Shape::agent("farm-1")
+            ..Shape::host("farm-1")
         };
         read_shape(&shape)
     };
@@ -114,14 +115,14 @@ fn the_certificate_must_have_one_dns_name_that_is_a_host_id() {
     assert_eq!(dns(&["farm-1"]).unwrap().as_str(), "farm-1");
 }
 
-/// Asserts that a certificate with no SAN extension at all names no service and is refused.
+/// Asserts that a certificate with no SAN extension at all names no host and is refused.
 #[test]
 fn a_certificate_without_names_is_refused() {
     let shape = Shape {
         dns: vec![],
         uris: vec![],
         ip: false,
-        ..Shape::agent("farm-1")
+        ..Shape::host("farm-1")
     };
-    assert_eq!(read_shape(&shape), Err(CertFault::Service));
+    assert_eq!(read_shape(&shape), Err(CertFault::HostCount));
 }

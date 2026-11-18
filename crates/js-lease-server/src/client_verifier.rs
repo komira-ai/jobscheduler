@@ -2,7 +2,7 @@
 //!
 //! A client may present no certificate (token agents and lease clients do not), but one that is
 //! presented must chain to the CA file's certificates by `rustls`'s own web PKI verifier, and
-//! must be a service certificate of an agent ([`crate::service_cert::host_of`]); otherwise the
+//! must be a host certificate ([`crate::host_cert::host_of`]); otherwise the
 //! handshake fails. The CA file's certificates are behind a lock, so that a reload replaces
 //! them for the next handshake and a connection already open keeps what it negotiated.
 
@@ -18,7 +18,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, Error, RootCertStore, SignatureScheme};
 
 use crate::error::StartupError;
-use crate::service_cert::host_of;
+use crate::host_cert::host_of;
 
 /// The flag the refusals name.
 const FLAG: &str = "--agent-client-ca";
@@ -26,11 +26,11 @@ const FLAG: &str = "--agent-client-ca";
 /// The verifier of the agent listeners' TLS: optional client certificates, trusted by the CA
 /// file's certificates as of the last load.
 #[derive(Debug)]
-pub(crate) struct ServiceVerifier {
+pub(crate) struct HostCertVerifier {
     inner: RwLock<Arc<dyn ClientCertVerifier>>,
 }
 
-impl ServiceVerifier {
+impl HostCertVerifier {
     /// The verifier of the certificates in the PEM file `ca`.
     pub(crate) fn open(ca: &Path) -> Result<Self, StartupError> {
         Ok(Self {
@@ -71,7 +71,7 @@ pub(crate) fn load(ca: &Path) -> Result<Arc<dyn ClientCertVerifier>, StartupErro
         .map_err(|err| refuse(&err))
 }
 
-impl ClientCertVerifier for ServiceVerifier {
+impl ClientCertVerifier for HostCertVerifier {
     fn offer_client_auth(&self) -> bool {
         true
     }

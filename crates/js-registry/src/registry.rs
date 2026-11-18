@@ -403,14 +403,14 @@ impl Registry {
         self.admit(hello, credential, false)
     }
 
-    /// [`Registry::hello`] for a hello authenticated by a service certificate
-    /// ([`Credential::of_service_certificate`]): a host id bound to another credential (a
+    /// [`Registry::hello`] for a hello authenticated by a host certificate
+    /// ([`Credential::of_host_certificate`]): a host id bound to another credential (a
     /// join token, say) that is not live is bound to `credential` instead, by this hello,
     /// keeping its taint and cordon; its instance becomes the hello's. A live host is
     /// refused [`Refusal::HostLive`] as for any hello, and every other check is as
     /// `hello`'s. The caller keeps its own record of the binding in step (see
     /// [`Registry::bindings`]).
-    pub fn hello_as_service(
+    pub fn hello_as_certified_host(
         &self,
         hello: &Hello,
         credential: &Credential,

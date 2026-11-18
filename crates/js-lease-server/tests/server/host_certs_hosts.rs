@@ -1,4 +1,4 @@
-//! What a service certificate does to the hosts the server holds: the deny list, a renewed
+//! What a host certificate does to the hosts the server holds: a renewed
 //! certificate on a running session, and a host bound to a join token that moves onto its
 //! certificate.
 
@@ -9,10 +9,10 @@ use js_types::HostId;
 use serde_json::json;
 
 use crate::agents_support::{JOIN, hello_body};
+use crate::host_certs_support::{Client, Options, Rig, Spec, beat_of};
 use crate::job_hosts::cpu_hello;
 use crate::jobs_support::{JobBody, commands, one_start, running};
-use crate::service_certs_support::{Client, Options, Rig, Spec, beat_of};
-use crate::support::{Kept, LogCapture, TOKEN, kept_bindings};
+use crate::support::{Kept, TOKEN, kept_bindings};
 use crate::tls::{connector, tls_request};
 
 /// The code of a refusal.
@@ -45,170 +45,6 @@ async fn enrolled(client: &Client, host: &str) -> (String, crate::support::Reply
     (credential, welcome)
 }
 
-/// Asserts that a host on the deny list is refused 403 `host-denied` on every agent route, for
-/// a certificate host (hello, heartbeat, own-host read), a host of the pool's join token (hello,
-/// heartbeat) and a host with a host credential (own-host read, heartbeat), once a tick has read
-/// the file and not before; that a host that is not listed is served as before; and that when
-/// the lines are removed and a tick has run the hosts are served again on the sessions they
-/// had.
-#[tokio::test]
-async fn a_denied_host_is_refused_on_every_route_until_it_is_readmitted() {
-    let rig = Rig::start("service_cert_deny", Options::FILES).await;
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
-    let plain = rig.client(None);
-    let welcome = cert.hello(None, &hello_body("farm-1")).await.unwrap();
-    let cert_beat = beat_of(&welcome, "farm-1");
-    let welcome = plain
-        .hello(Some(JOIN), &hello_body("farm-2"))
-        .await
-        .unwrap();
-    let token_beat = beat_of(&welcome, "farm-2");
-    let (credential, welcome) = enrolled(&plain, "farm-3").await;
-    let enrolled_beat = beat_of(&welcome, "farm-3");
-
-    rig.deny("# retired\n\nfarm-1\nfarm-2\n  farm-3\n");
-    let before = cert.beat(None, &cert_beat).await.unwrap();
-    assert_eq!(
-        before.status, 200,
-        "the file is read at the tick: {}",
-        before.body
-    );
-    rig.h.ticks.step().await;
-
-    let denied = json!({ "error": "host-denied" });
-    let refused = [
-        cert.hello(None, &hello_body("farm-1")).await.unwrap(),
-        cert.beat(None, &cert_beat).await.unwrap(),
-        cert.host(None, "farm-1").await.unwrap(),
-        plain
-            .hello(Some(JOIN), &hello_body("farm-2"))
-            .await
-            .unwrap(),
-        plain.beat(Some(JOIN), &token_beat).await.unwrap(),
-        plain.host(Some(&credential), "farm-3").await.unwrap(),
-        plain.beat(Some(&credential), &enrolled_beat).await.unwrap(),
-    ];
-    for reply in refused {
-        assert_eq!(reply.status, 403, "{}", reply.body);
-        assert_eq!(reply.json(), denied);
-    }
-    let other = plain
-        .hello(Some(JOIN), &hello_body("farm-4"))
-        .await
-        .unwrap();
-    assert_eq!(other.status, 200, "{}", other.body);
-
-    rig.deny("farm-2\n");
-    rig.h.ticks.step().await;
-    let back = cert.beat(None, &cert_beat).await.unwrap();
-    assert_eq!(back.status, 200, "{}", back.body);
-    let own = cert.host(None, "farm-1").await.unwrap();
-    assert_eq!(own.status, 200, "{}", own.body);
-    let read = plain.host(Some(&credential), "farm-3").await.unwrap();
-    assert_eq!(read.status, 200, "{}", read.body);
-    let still = plain.beat(Some(JOIN), &token_beat).await.unwrap();
-    assert_eq!(code(&still), "host-denied");
-}
-
-/// Asserts that a one-time join token is not used up by a hello of a host on the deny list: the
-/// hello is refused `host-denied` and, once the host is taken off the list and a tick has read
-/// the file, the same token is admitted.
-#[tokio::test]
-async fn a_denied_hello_does_not_use_up_the_hosts_one_time_token() {
-    let rig = Rig::start("service_cert_deny_token", Options::FILES).await;
-    let plain = rig.client(None);
-    let instance = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
-    let minted = plain
-        .send(
-            "POST",
-            "/v1/agent/join-tokens",
-            Some(TOKEN),
-            Some(&instance),
-        )
-        .await
-        .unwrap();
-    assert_eq!(minted.status, 201, "{}", minted.body);
-    let token = minted.json()["token"].as_str().unwrap().to_owned();
-    let mut hello = hello_body("farm-1");
-    hello["instance"] = instance;
-
-    rig.deny("farm-1\n");
-    rig.h.ticks.step().await;
-    let denied = plain.hello(Some(&token), &hello).await.unwrap();
-    assert_eq!(
-        (denied.status, code(&denied)),
-        (403, "host-denied".to_owned())
-    );
-
-    rig.deny("");
-    rig.h.ticks.step().await;
-    let admitted = plain.hello(Some(&token), &hello).await.unwrap();
-    assert_eq!(admitted.status, 200, "{}", admitted.body);
-}
-
-/// Asserts that a certificate holder asking about another host that is on the deny list is
-/// answered `certificate-host-mismatch` on every route, never `host-denied`, so that it learns
-/// nothing of the deny status of hosts that are not its own.
-#[tokio::test]
-async fn a_certificate_asking_about_a_denied_other_host_learns_only_the_mismatch() {
-    let rig = Rig::start("service_cert_deny_other", Options::FILES).await;
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
-    let welcome = cert.hello(None, &hello_body("farm-1")).await.unwrap();
-    let mut beat = beat_of(&welcome, "farm-1");
-    beat["host_id"] = json!("farm-2");
-    rig.deny("farm-2\n");
-    rig.h.ticks.step().await;
-
-    let replies = [
-        cert.hello(None, &hello_body("farm-2")).await.unwrap(),
-        cert.beat(None, &beat).await.unwrap(),
-        cert.host(None, "farm-2").await.unwrap(),
-    ];
-    for reply in replies {
-        assert_eq!(
-            (reply.status, code(&reply)),
-            (403, "certificate-host-mismatch".to_owned()),
-            "{}",
-            reply.body
-        );
-    }
-}
-
-/// Asserts that a host on the deny list cannot cordon or uncordon itself on its own-host route,
-/// with its certificate or with its host credential: both are refused `host-denied`.
-#[tokio::test]
-async fn a_denied_host_cannot_cordon_or_uncordon_itself() {
-    let rig = Rig::start("service_cert_deny_cordon", Options::FILES).await;
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
-    let welcome = cert.hello(None, &hello_body("farm-1")).await.unwrap();
-    assert_eq!(welcome.status, 200, "{}", welcome.body);
-    let plain = rig.client(None);
-    let (credential, _) = enrolled(&plain, "farm-2").await;
-    rig.deny("farm-1\nfarm-2\n");
-    rig.h.ticks.step().await;
-
-    let body = json!({});
-    for verb in ["cordon", "uncordon"] {
-        let route = |host: &str| format!("/v1/hosts/{host}:{verb}");
-        let by_certificate = cert
-            .send("POST", &route("farm-1"), None, Some(&body))
-            .await
-            .unwrap();
-        let by_credential = plain
-            .send("POST", &route("farm-2"), Some(&credential), Some(&body))
-            .await
-            .unwrap();
-        for reply in [by_certificate, by_credential] {
-            assert_eq!(
-                (reply.status, code(&reply)),
-                (403, "host-denied".to_owned()),
-                "{verb}: {}",
-                reply.body
-            );
-        }
-    }
-}
-
 /// Asserts that a certificate host's hello limit is not reset by a tick: with a burst of two,
 /// the third hello of one certificate host is held `rate-limited` (429), and is still held after
 /// a tick has run, while a tick that has run does not give it a new burst.
@@ -218,8 +54,8 @@ async fn a_tick_does_not_reset_the_hello_limit_of_a_certificate_host() {
         burst: Some("2"),
         ..Options::FILES
     };
-    let rig = Rig::start("service_cert_rate", options).await;
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+    let rig = Rig::start("host_cert_rate", options).await;
+    let cert = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1"))));
     let first = cert.hello(None, &hello_body("farm-1")).await.unwrap();
     assert_eq!(first.status, 200, "{}", first.body);
     let live = cert.hello(None, &hello_body("farm-1")).await.unwrap();
@@ -235,38 +71,6 @@ async fn a_tick_does_not_reset_the_hello_limit_of_a_certificate_host() {
     );
 }
 
-/// Asserts that a tick that cannot read the deny file keeps the hosts denied before it and
-/// logs why, and that a tick that can read it again follows it: the host stays refused while
-/// the file is gone, and is served once the file is back without its line.
-#[tokio::test]
-async fn an_unreadable_deny_file_keeps_the_hosts_denied() {
-    let logs = LogCapture::start();
-    let rig = Rig::start("service_cert_deny_gone", Options::FILES).await;
-    let plain = rig.client(None);
-    let welcome = plain
-        .hello(Some(JOIN), &hello_body("farm-2"))
-        .await
-        .unwrap();
-    let beat = beat_of(&welcome, "farm-2");
-    rig.deny("farm-2\n");
-    rig.h.ticks.step().await;
-    std::fs::remove_file(&rig.deny_file).unwrap();
-    rig.h.ticks.step().await;
-
-    let refused = plain.beat(Some(JOIN), &beat).await.unwrap();
-    assert_eq!(code(&refused), "host-denied");
-    assert!(
-        logs.text()
-            .contains("cannot read the agent deny file again"),
-        "{}",
-        logs.text()
-    );
-    rig.deny("");
-    rig.h.ticks.step().await;
-    let served = plain.beat(Some(JOIN), &beat).await.unwrap();
-    assert_eq!(served.status, 200, "{}", served.body);
-}
-
 /// Asserts that a certificate that was renewed (a new key and serial, the same host) carries on
 /// the session of the one before it: a heartbeat with the renewed certificate on the old
 /// session is admitted at the same epoch, answers no new start for the job that is running and no
@@ -277,8 +81,8 @@ async fn a_renewed_certificate_carries_on_the_same_session_and_job() {
         jobs: true,
         ..Options::FILES
     };
-    let rig = Rig::start("service_cert_renewal", options).await;
-    let first = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1").serial(1))));
+    let rig = Rig::start("host_cert_renewal", options).await;
+    let first = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1").serial(1))));
     let welcome = first.hello(None, &cpu_hello("farm-1")).await.unwrap();
     let beat = beat_of(&welcome, "farm-1");
     let job = rig.h.running.job_addr().unwrap();
@@ -299,7 +103,7 @@ async fn a_renewed_certificate_carries_on_the_same_session_and_job() {
     let held = first.beat(None, &listing).await.unwrap().json();
     assert_eq!(commands(&held), (vec![], vec![]), "{held}");
 
-    let renewed = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1").serial(2))));
+    let renewed = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1").serial(2))));
     let carried = renewed.beat(None, &listing).await.unwrap();
     assert_eq!(carried.status, 200, "{}", carried.body);
     assert_eq!(
@@ -335,26 +139,26 @@ fn token_digest() -> String {
     Credential::of_token(JOIN).to_hex()
 }
 
-/// The digest of the service certificate credential of `host`.
+/// The digest of the host certificate credential of `host`.
 fn certificate_digest(host: &str) -> String {
-    Credential::of_service_certificate(&HostId::new(host).unwrap()).to_hex()
+    Credential::of_host_certificate(&HostId::new(host).unwrap()).to_hex()
 }
 
 /// A server keeping its bindings as `kept` says, a host `farm-1` live on the pool's join token,
-/// and a client presenting that host's service certificate.
+/// and a client presenting that host's host certificate.
 async fn kept_token_bound(kept: Kept) -> (Rig, Client) {
     let options = Options {
         kept,
         ..Options::FILES
     };
-    let rig = Rig::start("service_cert_rebind", options).await;
+    let rig = Rig::start("host_cert_rebind", options).await;
     let plain = rig.client(None);
     let welcome = plain
         .hello(Some(JOIN), &hello_body("farm-1"))
         .await
         .unwrap();
     assert_eq!(welcome.status, 200, "{}", welcome.body);
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+    let cert = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1"))));
     (rig, cert)
 }
 
@@ -400,8 +204,8 @@ async fn a_lost_token_host_is_rebound_to_its_certificate_by_its_first_hello() {
 /// is refused too.
 #[tokio::test]
 async fn a_join_token_never_takes_a_certificate_host() {
-    let rig = Rig::start("service_cert_never_token", Options::FILES).await;
-    let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+    let rig = Rig::start("host_cert_never_token", Options::FILES).await;
+    let cert = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1"))));
     let plain = rig.client(None);
     let welcome = cert.hello(None, &hello_body("farm-1")).await.unwrap();
     let live = plain
@@ -435,7 +239,7 @@ async fn the_move_onto_a_certificate_keeps_the_cordon_across_a_restart() {
             kept,
             ..Options::FILES
         };
-        let rig = Rig::start("service_cert_rebind_restart", options).await;
+        let rig = Rig::start("host_cert_rebind_restart", options).await;
         let plain = rig.client(None);
         let (credential, _) = enrolled(&plain, "farm-1").await;
         let cordon = plain
@@ -449,7 +253,7 @@ async fn the_move_onto_a_certificate_keeps_the_cordon_across_a_restart() {
             .unwrap();
         assert_eq!(cordon.status, 200, "{}", cordon.body);
         rig.h.clock.advance(Duration::from_secs(60));
-        let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+        let cert = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1"))));
         let welcome = cert.hello(None, &hello_body("farm-1")).await.unwrap();
         assert_eq!(welcome.status, 200, "{kept:?}: {}", welcome.body);
         let own = cert.host(None, "farm-1").await.unwrap().json();
@@ -472,7 +276,7 @@ async fn the_move_onto_a_certificate_keeps_the_cordon_across_a_restart() {
             (403, "host-bound".to_owned()),
             "{kept:?}"
         );
-        let cert = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+        let cert = rig.client(Some(&rig.ca.issue(&Spec::host("farm-1"))));
         let again = cert.hello(None, &hello_body("farm-1")).await.unwrap();
         assert_eq!(again.status, 200, "{kept:?}: {}", again.body);
     }

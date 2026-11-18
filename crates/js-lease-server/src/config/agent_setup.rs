@@ -2,7 +2,7 @@
 //! clock and id source its job store is opened on ([`Config::with_job_sources`]).
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,9 +56,6 @@ pub(crate) struct AgentSetup {
     /// names no platform for the pool, and the order is `static`, then the pool's launched
     /// hosts ([`crate::sched::rank::static_then`]).
     pub(crate) providers: Option<Vec<ProviderId>>,
-    /// `--agent-deny-file`, `server.agent_deny_file`: the file of the hosts the agent routes
-    /// refuse.
-    pub(crate) deny_file: Option<PathBuf>,
 }
 
 /// A pool after the first: what registers into it and its shared join tokens.
@@ -183,7 +180,6 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         jobs: listen::job_store(cli),
         job_sources: JobSources::default(),
         providers: None,
-        deny_file: cli.agent_deny_file.clone(),
     }))
 }
 

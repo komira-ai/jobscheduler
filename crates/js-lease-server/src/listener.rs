@@ -120,8 +120,8 @@ use tracing::warn;
 
 use crate::api::BODY_LIMIT;
 use crate::config::Limits;
+use crate::host_cert::{CertHost, host_of};
 use crate::io_timeout::IoTimeout;
-use crate::service_cert::{CertHost, host_of};
 use crate::util::or_pending;
 
 /// The most bytes hyper buffers for one connection when it reads: a head larger than

@@ -1,15 +1,15 @@
-//! The hello of a host with a service certificate over a host bound to a join token, with the
+//! The hello of a host with a host certificate over a host bound to a join token, with the
 //! bindings kept in a store: what is committed, when, and what goes back when the hello fails.
 
-use super::super::service::ServiceHost;
+use super::super::host_cert::CertifiedHost;
 use super::*;
 
-/// The hello of `host` in `pool` with the service certificate that names `host`.
+/// The hello of `host` in `pool` with the host certificate that names `host`.
 async fn certified(rig: &Rig, host: &str, pool: &str) -> Result<Welcome, Refused> {
     let id = HostId::new(host).unwrap();
-    let who = Credential::of_service_certificate(&id);
-    let service = ServiceHost(id);
-    let given = (who, None, None, Some(&service));
+    let who = Credential::of_host_certificate(&id);
+    let certified = CertifiedHost(id);
+    let given = (who, None, None, Some(&certified));
     let welcome =
         super::super::serve_hello_in(&rig.agents, given, Ok(body(host, pool, false)), &|| ());
     welcome.await.map(|Json(welcome)| welcome)
@@ -44,7 +44,7 @@ async fn a_rebinding_is_committed_before_the_registry_takes_it() {
 
     certified(&rig, "host-a", "burst").await.unwrap();
     let id = HostId::new("host-a").unwrap();
-    let cert = Credential::of_service_certificate(&id);
+    let cert = Credential::of_host_certificate(&id);
     assert_eq!(rig.commits(), before + 1);
     assert_eq!(stored_credential(&rig, "host-a"), cert.to_hex());
     assert_eq!(rig.held("host-a").unwrap().credential(), &cert);

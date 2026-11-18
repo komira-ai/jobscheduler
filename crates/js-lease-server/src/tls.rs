@@ -27,7 +27,7 @@ use x509_parser::parse_x509_certificate;
 
 use js_types::Clock;
 
-use crate::client_verifier::{self, ServiceVerifier};
+use crate::client_verifier::{self, HostCertVerifier};
 use crate::clock::SharedClock;
 use crate::config::{TlsFiles, read_private};
 use crate::error::StartupError;
@@ -53,7 +53,7 @@ pub(crate) struct Tls {
     clock: SharedClock,
     current: Arc<Current>,
     /// The CA file of `--agent-client-ca` and the verifier that trusts it, when given.
-    clients: Option<(PathBuf, Arc<ServiceVerifier>)>,
+    clients: Option<(PathBuf, Arc<HostCertVerifier>)>,
     acceptor: TlsAcceptor,
     job_acceptor: TlsAcceptor,
 }
@@ -62,7 +62,7 @@ impl Tls {
     /// TLS serving the certificate chain and key in `files`: HTTP/1.1 only on the lease and
     /// agent listeners, HTTP/2 or HTTP/1.1 on the job service's. The key file must be
     /// owner-only like the token file (see `read_private`). With `client_ca`, the lease and
-    /// agent listeners accept the agent service certificates of that CA file.
+    /// agent listeners accept the host certificates of that CA file.
     pub(crate) fn open(
         files: &TlsFiles,
         client_ca: Option<&Path>,
@@ -70,7 +70,7 @@ impl Tls {
     ) -> Result<Self, StartupError> {
         let current = Arc::new(Current(RwLock::new(Arc::new(load(files)?))));
         let clients = match client_ca {
-            Some(ca) => Some((ca.to_path_buf(), Arc::new(ServiceVerifier::open(ca)?))),
+            Some(ca) => Some((ca.to_path_buf(), Arc::new(HostCertVerifier::open(ca)?))),
             None => None,
         };
         let builder = || {

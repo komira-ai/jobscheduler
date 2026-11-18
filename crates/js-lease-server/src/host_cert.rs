@@ -1,28 +1,22 @@
-//! The shape of a service certificate of the host's own `js-agent`, and the host it names.
+//! The shape of a host certificate, and the host it names.
 //!
-//! A certificate the agent presents (see `--agent-client-ca`) is accepted only when it has
-//! the shape hostkeeper issues: an end-entity certificate with the URI SAN
-//! `urn:hostkeeper:service:js-agent` and no other service's, exactly one DNS SAN, which is
-//! a valid host id, and the extended key usage `clientAuth` and nothing else. The CN is
-//! not read. Whether it chains to the CA is the TLS verifier's check
+//! A certificate a host's client presents (see `--agent-client-ca`) is accepted only when it
+//! has the shape hostkeeper's CA issues to a host: an end-entity certificate with exactly one
+//! DNS SAN, which is a valid host id, and the extended key usage `clientAuth` and nothing
+//! else. URI SANs (hostkeeper's role URIs among them) and the subject CN are not read: no
+//! service name is required. Whether it chains to the CA is the TLS verifier's check
 //! ([`crate::client_verifier`]); this module reads the one certificate it is given.
 
 use js_types::HostId;
 use x509_parser::extensions::GeneralName;
 use x509_parser::parse_x509_certificate;
 
-/// The prefix of every URI SAN that names a hostkeeper service.
-const SERVICE_PREFIX: &str = "urn:hostkeeper:service:";
-
-/// The URI SAN of the agent's service certificate.
-const AGENT_SERVICE: &str = "urn:hostkeeper:service:js-agent";
-
 /// The host a connection's client certificate names, as the connection carries it for every
 /// request it serves.
 #[derive(Debug, Clone)]
 pub(crate) struct CertHost(pub(crate) HostId);
 
-/// Why a certificate is not a service certificate of an agent.
+/// Why a certificate is not a host certificate.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum CertFault {
     /// The bytes are not a certificate, or an extension of it cannot be read.
@@ -31,9 +25,6 @@ pub(crate) enum CertFault {
     /// The certificate is a CA's.
     #[error("the certificate is a CA's, not an end entity's")]
     Authority,
-    /// No URI SAN names the agent service, or one names another service too.
-    #[error("the certificate does not name the js-agent service alone")]
-    Service,
     /// The certificate has no DNS SAN, or more than one.
     #[error("the certificate must have exactly one DNS name")]
     HostCount,
@@ -51,8 +42,6 @@ struct Facts {
     authority: bool,
     /// Whether its extended key usage is `clientAuth` and nothing else.
     client_only: bool,
-    /// Its URI SANs.
-    uris: Vec<String>,
     /// Its DNS SANs.
     dns: Vec<String>,
 }
@@ -79,24 +68,21 @@ fn read(der: &[u8]) -> Option<Facts> {
     });
     let names = cert.subject_alternative_name().ok()?;
     let names = names.map_or_else(Vec::new, |san| san.value.general_names.clone());
-    let mut uris = Vec::new();
-    let mut dns = Vec::new();
-    for name in names {
-        match name {
-            GeneralName::URI(uri) => uris.push(uri.to_owned()),
-            GeneralName::DNSName(name) => dns.push(name.to_owned()),
-            _ => {}
-        }
-    }
+    let dns = names
+        .into_iter()
+        .filter_map(|name| match name {
+            GeneralName::DNSName(name) => Some(name.to_owned()),
+            _ => None,
+        })
+        .collect();
     Some(Facts {
         authority,
         client_only,
-        uris,
         dns,
     })
 }
 
-/// The host the service certificate `der` names, or why it is not one.
+/// The host the host certificate `der` names, or why it is not one.
 pub(crate) fn host_of(der: &[u8]) -> Result<HostId, CertFault> {
     let facts = read(der).ok_or(CertFault::Unreadable)?;
     if facts.authority {
@@ -105,15 +91,6 @@ pub(crate) fn host_of(der: &[u8]) -> Result<HostId, CertFault> {
     if !facts.client_only {
         return Err(CertFault::KeyUsage);
     }
-    let services: Vec<&str> = facts
-        .uris
-        .iter()
-        .map(String::as_str)
-        .filter(|uri| uri.starts_with(SERVICE_PREFIX))
-        .collect();
-    if services != [AGENT_SERVICE] {
-        return Err(CertFault::Service);
-    }
     let [host] = &facts.dns[..] else {
         return Err(CertFault::HostCount);
     };
@@ -121,5 +98,5 @@ pub(crate) fn host_of(der: &[u8]) -> Result<HostId, CertFault> {
 }
 
 #[cfg(test)]
-#[path = "service_cert_tests.rs"]
+#[path = "host_cert_tests.rs"]
 mod tests;

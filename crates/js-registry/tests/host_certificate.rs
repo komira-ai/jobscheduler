@@ -1,4 +1,4 @@
-//! The credential of a service certificate, and the hello that moves a host bound to a join
+//! The credential of a host certificate, and the hello that moves a host bound to a join
 //! token over to it.
 
 mod support;
@@ -11,12 +11,13 @@ use support::*;
 
 /// The credential of the certificate that names `name`.
 fn certified(name: &str) -> Credential {
-    Credential::of_service_certificate(&host(name))
+    Credential::of_host_certificate(&host(name))
 }
 
-/// Says hello for `name` as a host that presents its service certificate.
+/// Says hello for `name` as a host that presents its host certificate.
 fn hello_certified(fx: &Fixture, name: &str) -> Result<js_agent_wire::Welcome, Refusal> {
-    fx.registry.hello_as_service(&hello(name), &certified(name))
+    fx.registry
+        .hello_as_certified_host(&hello(name), &certified(name))
 }
 
 /// Asserts what makes the credential of a certificate a credential of a host: the same host
@@ -24,7 +25,7 @@ fn hello_certified(fx: &Fixture, name: &str) -> Result<js_agent_wire::Welcome, R
 /// join token (not even the host id taken as one) is it, and it survives the hex form the
 /// bindings are stored in.
 #[test]
-fn a_service_certificate_credential_belongs_to_its_host_alone() {
+fn a_host_certificate_credential_belongs_to_its_host_alone() {
     assert_eq!(certified("a"), certified("a"));
     assert_ne!(certified("a"), certified("b"));
     assert_ne!(certified("a"), cred("a"));
@@ -126,12 +127,12 @@ fn a_rebinding_takes_the_instance_of_the_certificate_hello() {
         instance_id: "i-2".into(),
     });
     fx.registry
-        .hello_as_service(&named, &certified("b"))
+        .hello_as_certified_host(&named, &certified("b"))
         .unwrap();
     fx.pass_grace();
     let elsewhere = fx
         .registry
-        .hello_as_service(&hello("b"), &certified("b"))
+        .hello_as_certified_host(&hello("b"), &certified("b"))
         .unwrap_err();
     assert_eq!(elsewhere, Refusal::HostBound);
 }

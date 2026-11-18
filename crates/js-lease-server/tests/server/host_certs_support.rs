@@ -1,4 +1,4 @@
-//! What the tests of the agents' service certificates share: a CA of the test's own that mints
+//! What the tests of host certificates share: a CA of the test's own that mints
 //! certificates of any shape, a server that trusts it over TLS on 127.0.0.1, and a client that
 //! presents one (or none) and reports a handshake or a connection that failed as an error.
 //!
@@ -6,7 +6,7 @@
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rcgen::string::Ia5String;
@@ -27,19 +27,26 @@ use crate::agents_support::agent_args;
 use crate::support::{Harness, Kept, Reply, Scratch, TOKEN, guard, parse_reply, replace};
 use crate::tls::test_identity;
 
-/// The URI SAN of an agent's service certificate.
-pub const AGENT_URI: &str = "urn:hostkeeper:service:js-agent";
+/// The URI SAN hostkeeper puts on a host's own certificate.
+pub const HOST_ROLE_URI: &str = "urn:hostkeeper:host-role:host";
+
+/// The URI SAN hostkeeper puts on a certificate of the agent role.
+pub const AGENT_ROLE_URI: &str = "urn:hostkeeper:role:agent";
 
 /// A time inside the validity of the certificates the tests mint, 2030-01-01T00:00:00Z, which a
 /// reload of the server's pair checks the server's clock against.
 pub const START_OF_2030_MS: u64 = 1_893_456_000_000;
 
-/// What a minted certificate has. [`Spec::agent`] is the service certificate of a host's
-/// agent; a test changes one thing about it.
+/// What a minted certificate has. [`Spec::host`] is the host certificate of a host, shaped as
+/// hostkeeper issues it besides its DNS SAN; a test changes one thing about it.
 #[derive(Clone)]
 pub struct Spec {
     pub dns: Vec<String>,
     pub uris: Vec<String>,
+    /// The subject common name, which the server does not read.
+    pub cn: Option<String>,
+    /// Whether the certificate is a CA's.
+    pub ca: bool,
     pub usages: Vec<ExtendedKeyUsagePurpose>,
     /// The years the certificate is valid from and until (1 January of each).
     pub years: (i32, i32),
@@ -47,11 +54,13 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// The service certificate of the agent of `host`.
-    pub fn agent(host: &str) -> Self {
+    /// The host certificate of `host`.
+    pub fn host(host: &str) -> Self {
         Self {
             dns: vec![host.to_owned()],
-            uris: vec![AGENT_URI.to_owned()],
+            uris: vec![HOST_ROLE_URI.to_owned()],
+            cn: Some(format!("host:{host}")),
+            ca: false,
             usages: vec![ExtendedKeyUsagePurpose::ClientAuth],
             years: (2020, 3000),
             serial: 1,
@@ -98,6 +107,15 @@ impl Ca {
             let uri = Ia5String::try_from(uri.clone()).unwrap();
             params.subject_alt_names.push(SanType::URI(uri));
         }
+        params.distinguished_name = DistinguishedName::new();
+        if let Some(cn) = &spec.cn {
+            params
+                .distinguished_name
+                .push(DnType::CommonName, cn.clone());
+        }
+        if spec.ca {
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        }
         params.extended_key_usages = spec.usages.clone();
         params.serial_number = Some(SerialNumber::from(spec.serial));
         params.not_before = date_time_ymd(spec.years.0, 1, 1);
@@ -117,7 +135,6 @@ pub struct Rig {
     /// The certificate of the server's own pair, which a client trusts.
     pub server_cert: String,
     pub ca_file: PathBuf,
-    pub deny_file: PathBuf,
     options: Options,
 }
 
@@ -128,8 +145,6 @@ pub struct Options {
     pub kept: Kept,
     /// Whether the job service is on (the CPU pool, as the job tests place on).
     pub jobs: bool,
-    /// The lines of the deny file at the start.
-    pub denied: &'static str,
     /// `--agent-hello-burst`, when the test needs a small one.
     pub burst: Option<&'static str>,
 }
@@ -138,15 +153,13 @@ impl Options {
     pub const FILES: Options = Options {
         kept: Kept::Files,
         jobs: false,
-        denied: "",
         burst: None,
     };
 }
 
-/// The flags of a server with the pool, TLS and the CA at `ca_file`, the deny file at
-/// `deny_file`, and the job service when `options` say so.
-pub fn args(scratch: &Scratch, options: Options, files: &(PathBuf, PathBuf)) -> Vec<OsString> {
-    let (ca_file, deny_file) = files;
+/// The flags of a server with the pool, TLS and the CA at `ca_file`, and the job service when
+/// `options` say so.
+pub fn args(scratch: &Scratch, options: Options, ca_file: &Path) -> Vec<OsString> {
     let (cert, key) = test_identity();
     let tls_cert = scratch.write("test-only-cert.pem", &cert, 0o644);
     let tls_key = scratch.write("test-only-key.pem", &key, 0o600);
@@ -165,8 +178,7 @@ pub fn args(scratch: &Scratch, options: Options, files: &(PathBuf, PathBuf)) -> 
     for (flag, value) in [
         ("--tls-cert", tls_cert),
         ("--tls-key", tls_key),
-        ("--agent-client-ca", ca_file.clone()),
-        ("--agent-deny-file", deny_file.clone()),
+        ("--agent-client-ca", ca_file.to_path_buf()),
     ] {
         args.push(flag.into());
         args.push(value.into_os_string());
@@ -184,8 +196,7 @@ impl Rig {
         let scratch = Scratch::new(&options.kept.named(name));
         let ca = Ca::new();
         let ca_file = scratch.write("hostkeeper-ca.pem", &ca.pem(), 0o644);
-        let deny_file = scratch.write("deny", options.denied, 0o644);
-        let args = args(&scratch, options, &(ca_file.clone(), deny_file.clone()));
+        let args = args(&scratch, options, &ca_file);
         let server_cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).unwrap();
         let h = Harness::with(scratch, args).await;
         h.clock
@@ -195,7 +206,6 @@ impl Rig {
             ca,
             server_cert,
             ca_file,
-            deny_file,
             options,
         }
     }
@@ -207,7 +217,6 @@ impl Rig {
             h,
             ca,
             ca_file,
-            deny_file,
             options,
             ..
         } = self;
@@ -215,7 +224,7 @@ impl Rig {
             running, scratch, ..
         } = h;
         running.shutdown().await.unwrap();
-        let args = args(&scratch, options, &(ca_file.clone(), deny_file.clone()));
+        let args = args(&scratch, options, &ca_file);
         let args = replace(args, "--boot", "resume");
         let server_cert = std::fs::read_to_string(scratch.path("test-only-cert.pem")).unwrap();
         let h = Harness::with(scratch, args).await;
@@ -226,7 +235,6 @@ impl Rig {
             ca,
             server_cert,
             ca_file,
-            deny_file,
             options,
         }
     }
@@ -245,11 +253,6 @@ impl Rig {
         let reply = reply.unwrap();
         assert_eq!(reply.status, 200, "{}", reply.body);
         reply.json()
-    }
-
-    /// Rewrites the deny file with `text`.
-    pub fn deny(&self, text: &str) {
-        self.h.scratch.write("deny", text, 0o644);
     }
 
     /// A client of this server presenting `identity`, or none.

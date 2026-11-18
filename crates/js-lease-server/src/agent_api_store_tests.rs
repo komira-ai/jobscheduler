@@ -30,8 +30,8 @@ use crate::join_tokens::JoinTokens;
 #[path = "agent_api_store_clear_tests.rs"]
 mod clear;
 
-#[path = "agent_api_service_tests.rs"]
-mod service;
+#[path = "agent_api_host_cert_tests.rs"]
+mod host_cert;
 
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;

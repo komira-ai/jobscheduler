@@ -206,18 +206,12 @@ pub struct Cli {
     /// followed and the file it leads to is checked. SIGHUP reads it again.
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
-    /// The PEM file of the CA certificates (hostkeeper's) that sign the service certificates
+    /// The PEM file of the CA certificates (hostkeeper's) that sign the host certificates
     /// of the hosts' agents, which an agent may present on the agent routes instead of a
     /// join token: it names the host, and the host's agent is admitted with no token.
     /// Needs `--tls-cert` and `--tls-key`. SIGHUP reads it again with the pair.
     #[arg(long)]
     pub agent_client_ca: Option<PathBuf>,
-    /// The hosts the agent routes refuse (403 `host-denied`, whatever the host presents):
-    /// one host id per line, blank lines and `#` comments allowed. Read at start (a bad line
-    /// stops the start) and again at every tick (a file that cannot be read keeps the hosts
-    /// denied now).
-    #[arg(long)]
-    pub agent_deny_file: Option<PathBuf>,
     /// The most connections held open at once, handshaking, idle or busy. At the cap
     /// the server stops accepting until one ends.
     #[arg(long, default_value = "256", value_parser = clap::value_parser!(u16).range(1..))]
@@ -485,7 +479,7 @@ pub struct Config {
     /// handle the bearer layer reads and the tick reloads.
     pub(crate) clients: LiveClients,
     pub(crate) tls: Option<TlsFiles>,
-    /// The CA file of the agents' service certificates (`--agent-client-ca`,
+    /// The CA file of the hosts' certificates (`--agent-client-ca`,
     /// `server.agent_client_ca`); only with `tls`.
     pub(crate) agent_client_ca: Option<PathBuf>,
     pub(crate) limits: Limits,
@@ -680,7 +674,6 @@ impl Config {
             jobs: server.agents.job_store(server.job_store_windows()),
             job_sources: JobSources::default(),
             providers,
-            deny_file: server.agent_deny_file.clone(),
         });
         let elastic = plan;
         let alerts = alert_sink(server.alerts.as_ref(), files)?;

@@ -54,8 +54,7 @@
 //! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of `GET /v1/hosts` and the join, brake and usage routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--tick` | how often the job pass runs and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
-//! | `--agent-client-ca <path>` | a PEM file of the CA certificates (hostkeeper's; two while one is replaced) that sign the service certificates of the hosts' agents. Needs `--tls-cert` and `--tls-key` (refused naming the flag otherwise). The lease and agent listeners then ask a client for a certificate and do not insist on one; the job listener asks for none. A certificate that is presented must chain to the file and be an end-entity certificate with the URI SAN `urn:hostkeeper:service:js-agent` (and no other `urn:hostkeeper:service:` URI), exactly one DNS SAN that is a host id, and the extended key usage `clientAuth` and nothing else; otherwise the handshake fails. On the agent routes (`/v1/agent/hello`, `/v1/agent/heartbeat`, `/v1/hosts/{id}`) the certificate is the credential: a bearer beside it is not read, no one-time token is used and no host credential is issued, the hello's `pool` is taken as declared, and the host the request is about (the body's `host_id`, the path's id) must be the certificate's, or 403 `certificate-host-mismatch`. The registry binds the host to a credential derived from the host id alone, so a renewed certificate (new key and serial) carries on the same session. A host bound to a join token that is not live is re-bound to its certificate by the certificate's first hello (taint and cordon kept, the binding committed first with the store); a live one is refused `host-live`; a host bound to a certificate is never taken by a token (`host-bound`). The file is read at start (an unreadable file, or one with no certificate, refuses the start) and again, with the TLS pair, on SIGHUP: a reload that fails keeps the CA and the pair in force. Token agents and lease clients present no certificate and are served as before. Join tokens and the mint route stay for the scaler path (a launched host's user data) and for hosts not managed by hostkeeper |
-//! | `--agent-deny-file <path>` | a file of host ids the agent routes refuse with 403 `host-denied`, whatever the host presents (a certificate, a join token or a host credential): one id per line, blank lines and `#` comment lines allowed, at most 1 MiB. Read at start (a line that is not a host id stops the start, naming the file and the line number and nothing of the line) and again at every tick (a file that cannot be read keeps the hosts denied now, with a logged error). A hello and a heartbeat are refused by the body's `host_id`, the own-host routes by the path's id. Independent of `--agent-client-ca` |
+//! | `--agent-client-ca <path>` | a PEM file of the CA certificates (hostkeeper's; two while one is replaced) that sign the hosts' certificates. Needs `--tls-cert` and `--tls-key` (refused naming the flag otherwise). The lease and agent listeners then ask a client for a certificate and do not insist on one; the job listener asks for none. A certificate that is presented must chain to the file and be an end-entity certificate with exactly one DNS SAN that is a host id (the host) and the extended key usage `clientAuth` and nothing else; URI SANs and the subject CN are not read, so no service name is needed; otherwise the handshake fails. On the agent routes (`/v1/agent/hello`, `/v1/agent/heartbeat`, `/v1/hosts/{id}`) the certificate is the credential: a bearer beside it is not read, no one-time token is used and no host credential is issued, the hello's `pool` is taken as declared, and the host the request is about (the body's `host_id`, the path's id) must be the certificate's, or 403 `certificate-host-mismatch`. The registry binds the host to a credential derived from the host id alone, so a renewed certificate (new key and serial) carries on the same session. A host bound to a join token that is not live is re-bound to its certificate by the certificate's first hello (taint and cordon kept, the binding committed first with the store); a live one is refused `host-live`; a host bound to a certificate is never taken by a token (`host-bound`). The file is read at start (an unreadable file, or one with no certificate, refuses the start) and again, with the TLS pair, on SIGHUP: a reload that fails keeps the CA and the pair in force. Token agents and lease clients present no certificate and are served as before. Join tokens and the mint route stay for the scaler path (a launched host's user data) and for hosts not managed by hostkeeper |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
 //! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response (so also how long a keep-alive connection may idle), `10s` |
@@ -100,8 +99,7 @@
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
 //! tls_cert          = "/run/credentials/js/tls-cert"
 //! tls_key           = "/run/credentials/js/tls-key"
-//! # agent_client_ca (--agent-client-ca) needs tls_cert and tls_key; agent_deny_file
-//! # (--agent-deny-file): the flags' names and rules
+//! # agent_client_ca (--agent-client-ca) needs tls_cert and tls_key: the flag's name and rules
 //! # store: the path of an owner-only file holding the store's connection (never the
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
@@ -711,12 +709,14 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
-mod deny;
 mod error;
 mod file;
 mod file_checks;
 mod flags;
 mod held_beat;
+mod host_cert;
+#[cfg(test)]
+mod host_cert_mint;
 mod host_keys;
 mod hosts;
 #[cfg(feature = "in-process")]
@@ -754,9 +754,6 @@ mod ready;
 mod scaler;
 mod sched;
 mod server;
-mod service_cert;
-#[cfg(test)]
-mod service_cert_mint;
 mod status;
 mod store;
 mod store_health;

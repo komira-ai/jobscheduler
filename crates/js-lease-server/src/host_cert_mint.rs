@@ -1,4 +1,4 @@
-//! Service certificates minted for the unit tests: a CA of the test's own and leaves of any
+//! Host certificates minted for the unit tests: a CA of the test's own and leaves of any
 //! shape, so a test can break one rule at a time.
 
 use rcgen::string::Ia5String;
@@ -8,13 +8,18 @@ use rcgen::{
 };
 use rustls::pki_types::CertificateDer;
 
-/// The URI SAN of an agent's service certificate.
-pub(crate) const AGENT_URI: &str = "urn:hostkeeper:service:js-agent";
+/// The URI SAN hostkeeper puts on a host's own certificate.
+pub(crate) const HOST_ROLE_URI: &str = "urn:hostkeeper:host-role:host";
 
-/// What a minted leaf has; [`Shape::agent`] is a valid service certificate of a host.
+/// The URI SAN hostkeeper puts on a certificate of the agent role.
+pub(crate) const AGENT_ROLE_URI: &str = "urn:hostkeeper:role:agent";
+
+/// What a minted leaf has; [`Shape::host`] is a valid host certificate, shaped as hostkeeper issues it.
 pub(crate) struct Shape {
     pub(crate) dns: Vec<String>,
     pub(crate) uris: Vec<String>,
+    /// The subject common name, which the shape rules do not read.
+    pub(crate) cn: Option<String>,
     pub(crate) usages: Vec<ExtendedKeyUsagePurpose>,
     /// Also an IP address SAN, which the shape rules do not read.
     pub(crate) ip: bool,
@@ -26,11 +31,12 @@ pub(crate) struct Shape {
 }
 
 impl Shape {
-    /// The service certificate of `host`'s agent.
-    pub(crate) fn agent(host: &str) -> Self {
+    /// The host certificate of `host`, with the URI SAN and CN hostkeeper gives it.
+    pub(crate) fn host(host: &str) -> Self {
         Self {
             dns: vec![host.to_owned()],
-            uris: vec![AGENT_URI.to_owned()],
+            uris: vec![HOST_ROLE_URI.to_owned()],
+            cn: Some(format!("host:{host}")),
             usages: vec![ExtendedKeyUsagePurpose::ClientAuth],
             ip: true,
             ca: false,
@@ -93,6 +99,18 @@ fn params(shape: &Shape) -> CertificateParams {
     if shape.ip {
         let ip = std::net::IpAddr::from([127, 0, 0, 1]);
         params.subject_alt_names.push(SanType::IpAddress(ip));
+    }
+    params.distinguished_name = DistinguishedName::new();
+    if let Some(cn) = &shape.cn {
+        params
+            .distinguished_name
+            .push(DnType::CommonName, cn.clone());
+    }
+    params.distinguished_name = DistinguishedName::new();
+    if let Some(cn) = &shape.cn {
+        params
+            .distinguished_name
+            .push(DnType::CommonName, cn.clone());
     }
     params.extended_key_usages = shape.usages.clone();
     params.serial_number = Some(SerialNumber::from(shape.serial));
