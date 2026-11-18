@@ -815,6 +815,54 @@ async fn a_failed_read_answers_internal() {
     assert_eq!(job.id, "fails-1");
 }
 
+/// Asserts that a read the store was too busy to take answers `UNAVAILABLE` with
+/// `store-unavailable` over gRPC and 503 `{"error":"store-unavailable"}` over the gateway, for
+/// a job read and for a listing, and that the next read passes. Catches a busy store answered
+/// `internal` (500), which a client cannot tell from a fault and does not retry.
+#[tokio::test]
+async fn a_read_the_store_is_too_busy_for_answers_unavailable() {
+    let clock = clock();
+    let store = Arc::new(Interfere::new(Fake::with_flaw(
+        Arc::clone(&clock),
+        Flaw::None,
+    )));
+    let rig = Rig::over(tables(store.clone()), clock).await;
+    queue(&rig.jobs, "busy-1", spec(&[]));
+    store.fail_with(js_state::StoreError::Unavailable(
+        "no connection".to_owned(),
+    ));
+    let busy = (Code::Unavailable, "store-unavailable".to_owned());
+    store.fail_read_after(0);
+    let answer = rig
+        .grpc::<_, GetJobResponse>(
+            "GetJob",
+            GetJobRequest {
+                job_id: "busy-1".to_owned(),
+            },
+        )
+        .await;
+    assert_eq!(refusal(answer), busy);
+    store.fail_read_after(0);
+    let answer = rig
+        .grpc::<_, ListJobsResponse>("ListJobs", ListJobsRequest::default())
+        .await;
+    assert_eq!(refusal(answer), busy);
+    for uri in ["/v1/jobs/busy-1", "/v1/jobs"] {
+        store.fail_read_after(0);
+        let (status, body) = rig.get(uri).await;
+        assert_eq!(
+            (status, json_of(&body)),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "store-unavailable"})
+            ),
+            "{uri}"
+        );
+    }
+    let job = rig.get_job("busy-1").await.expect("the next read passes");
+    assert_eq!(job.id, "busy-1");
+}
+
 /// Every read call over both transports, for the jobs of
 /// [`the_read_calls_change_nothing`] and an unknown id: each job read, a first page of one
 /// job, and the next page filtered by a state and a label.

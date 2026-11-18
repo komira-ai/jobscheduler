@@ -28,7 +28,7 @@ impl ExtensionPool {
         let pool = Pool::open(
             config.dial(),
             config.schema.clone(),
-            config.max_connections,
+            (config.max_connections, config.timeouts.checkout),
             config.supported,
         )
         .map_err(Fail::into_failed)?;
@@ -38,7 +38,9 @@ impl ExtensionPool {
     /// A connection on loan; it goes back to the pool on drop unless it was discarded.
     ///
     /// # Errors
-    /// [`StoreError::Failed`] when a new connection was needed and could not be made.
+    /// [`StoreError::Failed`] when a new connection was needed and could not be made;
+    /// [`StoreError::Unavailable`] when every connection stayed in use for the configuration's
+    /// checkout wait ([`super::Timeouts::checkout`]).
     pub fn checkout(&self) -> Result<Loan<'_>, StoreError> {
         let loan = self.pool.checkout().map_err(Fail::into_failed)?;
         Ok(Loan(loan))

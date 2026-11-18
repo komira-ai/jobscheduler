@@ -104,6 +104,7 @@ where
     a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host(backend);
     a_claimed_placement_deletes_the_marked_jobs_mark(backend);
     a_claimed_placement_of_a_missing_job_is_stale(backend);
+    a_claimed_placement_calls_the_store_only_through_its_transaction(backend);
     a_requeued_job_is_placed_again_over_its_freed_allocation(backend);
     a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read(backend);
     a_duty_is_claimed_by_one_server_for_each_period(backend);
@@ -243,6 +244,7 @@ macro_rules! job_store_tests {
             a_claimed_placement_locks_the_hosts_row_before_it_sums_the_host,
             a_claimed_placement_deletes_the_marked_jobs_mark,
             a_claimed_placement_of_a_missing_job_is_stale,
+            a_claimed_placement_calls_the_store_only_through_its_transaction,
             a_requeued_job_is_placed_again_over_its_freed_allocation,
             a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read,
             a_duty_is_claimed_by_one_server_for_each_period,

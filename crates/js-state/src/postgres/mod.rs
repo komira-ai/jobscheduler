@@ -1,40 +1,49 @@
 //! The Postgres backend (feature `postgres`): section 4.3 of `docs/design/architecture-v2.md`,
 //! clause by clause.
 //!
-//! - **C1, C2.** A batch is one `SERIALIZABLE` transaction. Each transaction in it loads
-//!   its keys `FOR UPDATE`, judges every precondition against what it loaded, then writes.
-//!   A serialization failure runs the batch again.
+//! - **C1, C2.** A batch is one transaction, run read committed. Its body locks every key
+//!   the batch names, in key order in one statement: a key's row is locked, and a key with
+//!   no row is reserved by an uncommitted placeholder row that blocks every other writer of
+//!   the key until this transaction ends. Each transaction in the batch judges its
+//!   preconditions against what is locked, then writes, so what it judged holds at the
+//!   commit. A deadlock between two bodies (keys a claim's decision reads one by one can be
+//!   locked in any order) runs the batch again.
 //! - **C3.** A counter is a row incremented in the writing transaction.
-//! - **C4.** Expiry is `expires_us` against the database's `clock_timestamp()`, read
-//!   after the head lock and again by every read; a reaper (`reap_expired`) writes the
-//!   `Expire` rows. A test injects a clock ([`PostgresStore::with_clock`]) and the same
-//!   statements take its reading instead.
-//! - **C5.** Revisions come from one head row that a writer locks first and holds to its
-//!   commit, so they commit in the order they were taken. A writer queues on a table lock
-//!   (`SHARE UPDATE EXCLUSIVE`) before its snapshot, so waiting costs no
-//!   serialization retry. [`Store::changes`] reads the
-//!   committed head, then the rows up to it, and returns the head as its cursor: nothing
-//!   at or below it can still commit. A bare sequence would not do (a later number can
-//!   commit first and a poller steps over the earlier one); [`Flaw::SequenceRevisions`]
-//!   is that mistake, kept so the suite can show it fails. Polling is the baseline;
-//!   this module sends no `NOTIFY`.
+//! - **C4.** Expiry is `expires_us` against the database's `clock_timestamp()`, read when a
+//!   transaction opens and again after each statement that waited for a key's lock, and by
+//!   every read; a reaper (`reap_expired`) writes the `Expire` rows. A test injects a clock
+//!   ([`PostgresStore::with_clock`]) and the same statements take its reading instead.
+//! - **C5.** Revisions come from one head row, which a transaction takes only at its tail
+//!   (`tx`): it locks the head, moves it past its writes, writes the rows and feed rows at
+//!   those revisions, and commits, so revisions commit in the order they were taken. Bodies
+//!   run at once; tails queue on a table lock (`SHARE UPDATE EXCLUSIVE`, the one every
+//!   release takes) and hold it for a few statements and the commit's flush.
+//!   [`Store::changes`] reads the committed head, then the rows up to it, and returns the
+//!   head as its cursor: nothing at or below it can still commit. A bare sequence would not
+//!   do (a later number can commit first and a poller steps over the earlier one);
+//!   [`Flaw::SequenceRevisions`] is that mistake, kept so the suite can show it fails.
+//!   Polling is the baseline; this module sends no `NOTIFY`.
 //! - **C6.** `synchronous_commit` must be on: a connection where it is not is refused,
 //!   so an acknowledged write has been flushed.
 //! - **C7.** A batch is one transaction and one commit, however many transactions it
-//!   holds; the server's WAL flush groups commits from concurrent callers.
+//!   holds.
 //!
 //! [`ExtensionPool`] is for a crate that keeps tables of its own in the schema:
 //! connections of their own, outside the commit head, taking none of the locks above.
 //! Such a crate registers its migration with [`schema::extend`].
 //!
 //! There is no writer lock and no writer generation: any number of processes open the same
-//! schema and write at once, and each commit is correct on its own (the head lock orders the
+//! schema and write at once, and each commit is correct on its own (the head orders the
 //! commits, every row a transaction changes carries a version it must still find).
 //! [`serving::probe`] says whether a process of a given application name is connected, for
 //! the update hook; it takes no lock.
 //!
-//! [`PostgresStore::claim`] is the claim path: read committed, rows locked
-//! `FOR UPDATE SKIP LOCKED`, each claimed through the same version compare-and-set.
+//! [`PostgresStore::claim`] is the claim path: rows locked `FOR UPDATE SKIP LOCKED`, each
+//! claimed through the same version compare-and-set.
+//!
+//! A call waits at most [`Timeouts::checkout`] for a connection of the pool, and fails with
+//! [`StoreError::Unavailable`] past it; a statement the server ends at its
+//! `statement_timeout` or `lock_timeout` is [`StoreError::Unavailable`] too.
 //!
 //! **Connections.** Every connection is made with the configuration's TLS mode
 //! ([`TlsMode`]: `sslmode`, with the root certificate `sslrootcert` names) and its limits
@@ -47,8 +56,8 @@
 //! happened.
 //!
 //! The feed table grows until [`Store::trim_feed`] trims it (the server's job pass calls
-//! it); a trim deletes in a `SERIALIZABLE` transaction that holds the head lock, so it
-//! never removes a row that can still commit behind it. A read below the feed's floor is
+//! it); a trim deletes only at or below the committed head, so it never removes a row that
+//! can still commit behind it. A read below the feed's floor is
 //! refused with [`StoreError::StaleCursor`]; the floor is derived, not stored (one below
 //! the oldest feed row, or the head when the feed is empty), which holds because every
 //! revision takes exactly one feed row. [`Flaw::SequenceRevisions`] revisions are not
@@ -59,6 +68,7 @@
 #[cfg(any(test, feature = "test-support"))]
 mod backend;
 pub mod boot;
+mod claim;
 mod conn;
 #[cfg(feature = "test-database")]
 mod database;
@@ -95,7 +105,7 @@ use session::{Edge, Pool, Pooled, RangeShape, Session};
 pub use timeouts::Timeouts;
 use tls::Tls;
 pub use tls::{TlsError, TlsMode};
-use tx::{Level, Row, Tx, micros};
+use tx::{Row, Tx, keys_of, micros};
 
 use conn::{Dial, DialError, connection_lost};
 
@@ -182,8 +192,8 @@ impl PostgresConfig {
     /// The schema a store lives in unless told otherwise.
     pub const DEFAULT_SCHEMA: &'static str = "kbf_state";
 
-    /// The most connections a store opens unless told otherwise. Writers queue on the
-    /// commit head, so more would only wait.
+    /// The most connections a store opens unless told otherwise. Transactions run their
+    /// bodies at once and queue only for the commit head at their tails.
     pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 
     /// Reads a `postgres://` URL. Its `sslmode` takes every value libpq does but `allow`
@@ -381,6 +391,8 @@ pub(crate) enum Fail {
     Pg(postgres::Error),
     Refused(String),
     Tls(TlsError),
+    /// No connection of the pool came free in time; the text says so.
+    Busy(String),
 }
 
 impl From<postgres::Error> for Fail {
@@ -406,7 +418,7 @@ impl Fail {
                 *code == SqlState::T_R_SERIALIZATION_FAILURE
                     || *code == SqlState::T_R_DEADLOCK_DETECTED
             }),
-            Fail::Refused(_) | Fail::Tls(_) => false,
+            Fail::Refused(_) | Fail::Tls(_) | Fail::Busy(_) => false,
         }
     }
 
@@ -432,6 +444,16 @@ impl Fail {
             Fail::Pg(err) if call && connection_lost(&err) => {
                 StoreError::Disconnected(describe(&err))
             }
+            // A statement the server ended at its time limit, or that gave up waiting for a
+            // lock: the store is busy, the transaction rolled back.
+            Fail::Pg(err)
+                if err.code().is_some_and(|code| {
+                    *code == SqlState::QUERY_CANCELED || *code == SqlState::LOCK_NOT_AVAILABLE
+                }) =>
+            {
+                StoreError::Unavailable(describe(&err))
+            }
+            Fail::Busy(why) => StoreError::Unavailable(why),
             Fail::Pg(err) => StoreError::Failed(describe(&err)),
             Fail::Refused(why) => StoreError::Failed(why),
             Fail::Tls(err) => StoreError::Failed(err.to_string()),
@@ -469,6 +491,11 @@ fn describe(err: &postgres::Error) -> String {
         Some(source) => format!("{err}: {source}"),
         None => err.to_string(),
     }
+}
+
+/// How many of `results` applied (the rest met a conflict).
+fn applied(results: &[Result<Commit, Conflict>]) -> usize {
+    results.iter().filter(|result| result.is_ok()).count()
 }
 
 fn to_time(us: i64) -> StoreTime {
@@ -519,9 +546,9 @@ impl Pending<'_> {
     /// [`StoreError`] when the commit fails.
     pub fn commit(self) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
         let Pending { store, tx, results } = self;
-        let wrote = tx.dirty();
-        tx.commit().map_err(Fail::into_store)?;
-        store.count(&results, wrote);
+        store
+            .commit(tx, applied(&results))
+            .map_err(Fail::into_store)?;
         Ok(results)
     }
 }
@@ -549,7 +576,7 @@ impl PostgresStore {
         let pool = Pool::open(
             config.dial(),
             config.schema.clone(),
-            config.max_connections,
+            (config.max_connections, config.timeouts.checkout),
             config.supported,
         )
         .map_err(OpenError::from)?;
@@ -589,9 +616,9 @@ impl PostgresStore {
         self
     }
 
-    /// How many times a batch has been run again because the server rolled it back for a
-    /// serialization failure or a deadlock. A writer that waits its turn for the commit
-    /// head costs none.
+    /// How many times a batch, a claim or a decided claim has been run again because the
+    /// server rolled it back for a serialization failure or a deadlock. A writer that waits
+    /// its turn for a key or for the commit head costs none.
     #[must_use]
     pub fn retries(&self) -> u64 {
         self.retries.load(Ordering::Relaxed)
@@ -617,14 +644,6 @@ impl PostgresStore {
 
     fn over(&self) -> Option<i64> {
         self.clock.as_ref().map(|clock| from_time(clock.now()))
-    }
-
-    fn count(&self, results: &[Result<Commit, Conflict>], wrote: bool) {
-        let applied = results.iter().filter(|result| result.is_ok()).count();
-        self.txns.fetch_add(applied as u64, Ordering::Relaxed);
-        if wrote {
-            self.syncs.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     /// Runs `call` on a pooled session, and once more on a new connection when the first
@@ -682,21 +701,41 @@ impl PostgresStore {
 
     /// Opens a transaction. One whose connection was gone before it began is begun again on
     /// a new connection; nothing was written on the old one.
-    fn start(&self, level: Level) -> Result<Tx<'_>, Fail> {
+    fn start(&self) -> Result<Tx<'_>, Fail> {
         let over = self.over();
-        self.twice(|session| Tx::begin(session, level, over, self.flaw))
+        self.twice(|session| Tx::begin(session, over, self.flaw))
     }
 
+    /// Runs `batch` to the point of commit: its keys locked, its transactions applied, and its
+    /// tail run, so the transaction holds the commit head when it wrote. The results carry
+    /// their revisions.
     fn run_batch(&self, batch: &[Txn]) -> Result<(Tx<'_>, Vec<Result<Commit, Conflict>>), Fail> {
-        let mut tx = self.start(Level::Serializable)?;
+        let mut tx = self.start()?;
+        tx.load(&keys_of(batch))?;
         let mut results = Vec::with_capacity(batch.len());
         for txn in batch {
             results.push(tx.apply(txn)?);
         }
+        let revs = tx.flush()?;
+        let results = results
+            .into_iter()
+            .map(|result| result.map(|commit| revs.settle(commit)))
+            .collect();
         Ok((tx, results))
     }
 
-    /// Runs `txn` to the point of commit and holds it there. Test support.
+    /// Commits `tx`, whose tail has run, counting `applied` transactions and, when it made
+    /// anything durable, one sync.
+    fn commit(&self, tx: Tx<'_>, applied: usize) -> Result<(), Fail> {
+        let wrote = tx.dirty();
+        tx.commit()?;
+        self.txns.fetch_add(applied as u64, Ordering::Relaxed);
+        self.syncs.fetch_add(u64::from(wrote), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Runs `txn` to the point of commit and holds it there: when it writes, it holds the
+    /// commit head. Test support.
     ///
     /// # Errors
     /// [`StoreError`] when the database fails.
@@ -709,128 +748,6 @@ impl PostgresStore {
             tx,
             results,
         })
-    }
-
-    /// Claims up to `limit` live rows under `prefix`, in key order, skipping rows another
-    /// transaction holds. `make` turns each row into the transaction that claims it
-    /// (typically: delete the queue entry on its version, write a lease); `None` passes
-    /// the row over, and a transaction whose precondition fails is a lost race and is
-    /// passed over too. All claims commit together.
-    ///
-    /// The transaction runs read committed: after the commit-head lock every statement
-    /// reads the latest committed rows, so there is no serialization failure to retry.
-    ///
-    /// # Errors
-    /// [`StoreError`] when the database fails; nothing is claimed then.
-    pub fn claim(
-        &self,
-        prefix: &str,
-        limit: usize,
-        mut make: impl FnMut(&str, &Versioned) -> Option<Txn>,
-    ) -> Result<Vec<Claimed>, StoreError> {
-        self.claim_in(prefix, limit, &mut make)
-            .map_err(Fail::into_store)
-    }
-
-    fn claim_in(
-        &self,
-        prefix: &str,
-        limit: usize,
-        make: &mut dyn FnMut(&str, &Versioned) -> Option<Txn>,
-    ) -> Result<Vec<Claimed>, Fail> {
-        let mut tx = self.start(Level::ReadCommitted)?;
-        let take = i64::try_from(limit).unwrap_or(i64::MAX);
-        let skip_locked = self.flaw != Flaw::ClaimBlocks;
-        let rows = tx.claim_rows(prefix, take, skip_locked)?;
-        for (key, row) in &rows {
-            tx.remember(key.clone(), row.clone());
-        }
-        let mut claimed = Vec::new();
-        for (key, row) in rows {
-            let was = versioned(&row);
-            let Some(txn) = make(&key, &was) else {
-                continue;
-            };
-            if let Ok(commit) = tx.apply(&txn)? {
-                claimed.push(Claimed { key, was, commit });
-            }
-        }
-        let wrote = tx.dirty();
-        tx.commit()?;
-        if wrote {
-            self.syncs.fetch_add(1, Ordering::Relaxed);
-        }
-        self.txns.fetch_add(claimed.len() as u64, Ordering::Relaxed);
-        Ok(claimed)
-    }
-}
-
-/// The reads a decision of [`PostgresStore::claim_decide`] makes inside its transaction. A
-/// failed read is kept, not returned through the decision (which returns a transaction), and
-/// fails the call after it.
-struct TxReads<'a, 'p> {
-    tx: &'a mut Tx<'p>,
-    failed: Option<postgres::Error>,
-}
-
-impl TxReads<'_, '_> {
-    fn answer<T>(&mut self, read: Result<T, postgres::Error>) -> Result<T, StoreError> {
-        read.map_err(|err| {
-            let said = StoreError::Failed(describe(&err));
-            self.failed = Some(err);
-            said
-        })
-    }
-}
-
-impl TxnRead for TxReads<'_, '_> {
-    fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
-        let row = self.tx.read(key);
-        self.answer(row).map(|row| row.as_ref().map(versioned))
-    }
-
-    fn scan_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        let rows = self.tx.read_prefix(prefix);
-        self.answer(rows).map(|rows| {
-            rows.into_iter()
-                .map(|(key, row)| (key, versioned(&row)))
-                .collect()
-        })
-    }
-}
-
-impl PostgresStore {
-    fn claim_decide_in(
-        &self,
-        claim: &[String],
-        decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
-    ) -> Result<Claim, Fail> {
-        let mut tx = self.start(Level::ReadCommitted)?;
-        let locked = tx.lock_keys(claim)?;
-        if locked.len() != claim.len() {
-            return Ok(Claim::Held);
-        }
-        let mut reads = TxReads {
-            tx: &mut tx,
-            failed: None,
-        };
-        let decided = decide(&mut reads);
-        if let Some(err) = reads.failed {
-            return Err(Fail::Pg(err));
-        }
-        let Some(txn) = decided else {
-            return Ok(Claim::Declined);
-        };
-        match tx.apply(&txn)? {
-            Err(conflict) => Ok(Claim::Conflict(conflict)),
-            Ok(commit) => {
-                let wrote = u64::from(tx.dirty());
-                tx.commit()?;
-                self.syncs.fetch_add(wrote, Ordering::Relaxed);
-                self.txns.fetch_add(1, Ordering::Relaxed);
-                Ok(Claim::Committed(commit))
-            }
-        }
     }
 }
 
@@ -848,21 +765,16 @@ impl Store for PostgresStore {
         claim: &[String],
         decide: &mut dyn FnMut(&mut dyn TxnRead) -> Option<Txn>,
     ) -> Result<Claim, StoreError> {
-        self.claim_decide_in(claim, decide)
-            .map_err(Fail::into_store)
+        self.claim_decide_retrying(claim, decide)
     }
 
     fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
         if batch.is_empty() {
             return Ok(Vec::new());
         }
-        // The commit is inside the retry: a serializable transaction can also be refused
-        // when it commits.
         self.retrying(|| {
             let (tx, results) = self.run_batch(&batch)?;
-            let wrote = tx.dirty();
-            tx.commit()?;
-            self.count(&results, wrote);
+            self.commit(tx, applied(&results))?;
             Ok(results)
         })
     }
@@ -981,26 +893,19 @@ impl Store for PostgresStore {
     fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
         let before = i64::try_from(before.0).unwrap_or(i64::MAX);
         self.retrying(|| {
-            let mut tx = self.start(Level::Serializable)?;
+            let mut tx = self.start()?;
             let removed = tx.trim(before)?;
-            let wrote = tx.dirty();
-            tx.commit()?;
-            if wrote {
-                self.syncs.fetch_add(1, Ordering::Relaxed);
-            }
+            self.commit(tx, 0)?;
             Ok(removed)
         })
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.retrying(|| {
-            let mut tx = self.start(Level::Serializable)?;
+            let mut tx = self.start()?;
             let reaped = tx.reap()?;
-            let wrote = tx.dirty();
-            tx.commit()?;
-            if wrote {
-                self.syncs.fetch_add(1, Ordering::Relaxed);
-            }
+            tx.flush()?;
+            self.commit(tx, 0)?;
             Ok(reaped)
         })
     }

@@ -303,6 +303,37 @@ pub fn a_claimed_placement_deletes_the_marked_jobs_mark<B: Backend>(backend: &B)
     );
 }
 
+/// A claimed placement makes no call on the store while its decision runs: everything it reads,
+/// and the store's time it stamps the placement with, comes through the transaction or from
+/// before it. A call on the store itself from inside the decision needs a second connection of
+/// the pool while the decision's transaction holds the first; with every other connection
+/// waiting on that transaction's locks, the call waits for one that only comes back when their
+/// statements time out. Catches a decision that reads the store's time (or anything else) on
+/// the store instead of through its transaction.
+pub fn a_claimed_placement_calls_the_store_only_through_its_transaction<B: Backend>(backend: &B) {
+    let name = "a_claimed_placement_calls_the_store_only_through_its_transaction";
+    let rig = rig(backend);
+    let a = host("host-a");
+    let shared = rig.queue("t-shared");
+    let whole = rig.queue("t-whole");
+    let _ = rig.store.take_calls_while_deciding();
+    let placement = Placement {
+        prepare_timeout: Some(std::time::Duration::from_secs(60)),
+        ..Placement::default()
+    };
+    rig.jobs
+        .place_claimed(&shared, &a, share(), &placement, Some(&two_shares()))
+        .expect("placed");
+    rig.jobs
+        .place_claimed(&whole, &host("host-b"), Booked::WholeHost, &placement, None)
+        .expect("placed");
+    assert_eq!(
+        rig.store.take_calls_while_deciding(),
+        Vec::<&str>::new(),
+        "{name}: the decision called the store outside its transaction"
+    );
+}
+
 /// A job that does not exist is not claimed: the placement answers `Stale` and writes nothing.
 /// Catches a placement of a missing job that creates rows.
 pub fn a_claimed_placement_of_a_missing_job_is_stale<B: Backend>(backend: &B) {

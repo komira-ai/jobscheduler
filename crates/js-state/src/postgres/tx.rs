@@ -1,13 +1,30 @@
-//! One database transaction of the store: loads and locks the keys a [`Txn`] names,
-//! judges its preconditions against what it loaded, and writes rows, feed rows and
-//! counters with revisions from the commit head.
+//! One database transaction of the store: locks the keys a [`Txn`] names, judges its
+//! preconditions against what it locked, and keeps its writes until its tail, which takes
+//! their revisions from the commit head and writes the rows, feed rows and head together.
 //!
-//! The commit head is one row. A writer locks it first and holds the lock to its commit,
-//! so revisions commit in the order they were taken and the feed has no gap a poller
-//! could step over (C5). Every writer takes the locks in the same order, head then keys,
-//! so none deadlocks on another.
+//! The transaction runs read committed. Its body locks every key it reads or writes, in key
+//! order within one statement: a key with a row is locked (`FOR UPDATE` semantics, through
+//! `INSERT ... ON CONFLICT DO UPDATE ... WHERE false`, which locks the row it conflicts with
+//! and changes nothing), and a key with none is reserved by the same statement with an
+//! uncommitted placeholder row, which no other transaction sees and which makes any other
+//! writer of the key wait on the key's unique index until this one ends. A locked row is the
+//! latest committed one and stays so to the end, and a reserved key stays absent: the
+//! preconditions judged on them hold at the commit.
+//!
+//! The commit head is one row. Only the tail takes it: `LOCK TABLE head` (the mode every
+//! release takes, so writers of an older release queue the same way), then the head moves by
+//! the number of writes, then one statement writes the feed rows, the rows and the deletes
+//! (placeholders included), then the commit. The head is held for those statements and the
+//! commit's flush and for nothing else, so revisions commit in the order they were taken and
+//! the feed has no gap a poller could step over (C5), while the bodies of any number of
+//! transactions run at once. A tail locks no key (its body holds them all), so it waits for
+//! nothing but the head.
+//!
+//! Inside the transaction a written row's version is a provisional one, below zero, that no
+//! precondition can name; the revisions a transaction reports are settled by its tail
+//! ([`Revs`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use postgres::Error;
@@ -19,25 +36,6 @@ use crate::{Commit, Cond, Conflict, Op, Revision, Txn};
 const KIND_PUT: i16 = 0;
 const KIND_DELETE: i16 = 1;
 const KIND_EXPIRE: i16 = 2;
-
-/// How a transaction sees the database.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Level {
-    /// Writes: a conflict the head lock did not prevent surfaces as a serialization
-    /// failure, and the caller runs the transaction again.
-    Serializable,
-    /// Claims: after the head lock, every statement reads the latest committed rows.
-    ReadCommitted,
-}
-
-/// Where revisions come from.
-enum Alloc {
-    /// The head row, locked: `head` as the transaction found it, `last` the last
-    /// revision it has taken.
-    Locked { head: i64, last: i64 },
-    /// A database sequence, which is not part of the transaction (the C5 flaw).
-    Sequence,
-}
 
 /// A stored row, as loaded.
 #[derive(Clone, Debug)]
@@ -66,133 +64,233 @@ pub(super) fn micros(d: Duration) -> i64 {
     i64::try_from(d.as_micros()).unwrap_or(i64::MAX)
 }
 
+/// One write the tail makes: a feed row, in the order the transaction made them.
+struct Write {
+    key: String,
+    kind: i16,
+    value: Option<Vec<u8>>,
+}
+
+/// The revisions a tail took. A transaction reports provisional revisions: the number of
+/// writes made before its result was decided; [`Revs::settle`] turns one into the revision
+/// of that write, or, for none, into the head the transaction committed on.
+pub(super) struct Revs {
+    /// The head below this transaction's writes (0 under the sequence flaw, which has none).
+    base: i64,
+    /// The revision of each write, in order.
+    taken: Vec<i64>,
+}
+
+impl Revs {
+    /// `commit` with its provisional revision replaced by the real one.
+    pub(super) fn settle(&self, commit: Commit) -> Commit {
+        let at = usize::try_from(commit.revision.0).unwrap_or(usize::MAX);
+        let rev = at
+            .checked_sub(1)
+            .and_then(|i| self.taken.get(i).copied())
+            .unwrap_or(self.base);
+        Commit {
+            revision: Revision(u64::try_from(rev).unwrap_or(0)),
+            ..commit
+        }
+    }
+}
+
 pub(super) struct Tx<'p> {
     session: Pooled<'p>,
-    /// The store's time for this transaction, read once after the head lock.
+    /// The injected clock reading, or `None` for the database's clock.
+    over: Option<i64>,
+    /// The store's time: read when the transaction opens, and again after every statement
+    /// that may have waited for a lock, never going back.
     now: i64,
-    alloc: Alloc,
-    /// Every key this transaction has loaded or written, as it stands now. The head lock
-    /// keeps other writers out, so a loaded row stays what was loaded.
+    flaw: Flaw,
+    /// Every key this transaction has locked or written, as it stands now. A key's row is
+    /// locked, or reserved, so it stays what was loaded.
     cache: BTreeMap<String, Option<Row>>,
-    /// Something was written that a commit must make durable.
-    dirty: bool,
+    /// The keys this transaction reserved with a placeholder row.
+    reserved: BTreeSet<String>,
+    /// The writes to make at the tail, in order.
+    writes: Vec<Write>,
+    /// Something besides the writes must be made durable: a counter moved, or feed rows were
+    /// trimmed.
+    kept: bool,
     open: bool,
 }
 
 impl<'p> Tx<'p> {
-    /// Opens a transaction and takes the head lock. `over` is an injected clock reading,
-    /// or `None` for the database's own clock.
+    /// Opens a transaction. `over` is an injected clock reading, or `None` for the
+    /// database's own clock.
     pub(super) fn begin(
         mut session: Pooled<'p>,
-        level: Level,
         over: Option<i64>,
         flaw: Flaw,
     ) -> Result<Tx<'p>, Fail> {
-        let begin = session.client.batch_execute(match level {
-            Level::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
-            Level::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
-        });
+        let begin = session
+            .client
+            .batch_execute("BEGIN ISOLATION LEVEL READ COMMITTED");
         // The session is judged here, as no transaction exists to roll back on drop: one that
         // met a closed connection must not go back to the pool.
         begin.inspect_err(|err| session.note_failure(err))?;
         let mut tx = Tx {
             session,
+            over,
             now: 0,
-            alloc: Alloc::Sequence,
+            flaw,
             cache: BTreeMap::new(),
-            dirty: false,
+            reserved: BTreeSet::new(),
+            writes: Vec::new(),
+            kept: false,
             open: true,
         };
-        if flaw != Flaw::SequenceRevisions {
-            // Queue before the snapshot. A transaction at SERIALIZABLE takes its snapshot
-            // at its first query, so waiting on the head row with `FOR UPDATE` as that
-            // query ends, when the holder commits, in "could not serialize access": every
-            // waiter is rolled back and runs again, one lucky one per round. `LOCK TABLE`
-            // as the first statement waits without a snapshot, and the head row is then
-            // free and current. `SHARE UPDATE EXCLUSIVE` conflicts with itself and with nothing a
-            // reader or writer takes (`ACCESS SHARE`, `ROW SHARE`, `ROW EXCLUSIVE`): a
-            // stronger mode would also block a new connection's `PREPARE` of the statements
-            // on `head`, so a pool could not grow while a writer is in flight. It does
-            // conflict with `VACUUM` and `ANALYZE` of the table, which then wait or yield.
-            tx.session
-                .client
-                .batch_execute("LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE")?;
-            let s: &mut Session = &mut tx.session;
-            let head: i64 = s.client.query_one(&s.st.head_lock, &[])?.get(0);
-            tx.alloc = Alloc::Locked { head, last: head };
-        }
         let s: &mut Session = &mut tx.session;
         tx.now = s.client.query_one(&s.st.now, &[&over])?.get(0);
         Ok(tx)
     }
 
-    pub(super) fn dirty(&self) -> bool {
-        self.dirty
+    /// Takes the commit head now, before anything is read, and reads the clock again after
+    /// the wait: until this transaction ends no other transaction's writes commit, so what it
+    /// reads without a lock ([`Tx::peek`], [`Tx::read_prefix`]) is what its commit finds.
+    pub(super) fn hold_head(&mut self) -> Result<(), Error> {
+        let s: &mut Session = &mut self.session;
+        s.client
+            .batch_execute("LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE")?;
+        self.now = self
+            .now
+            .max(s.client.query_one(&s.st.now, &[&self.over])?.get(0));
+        Ok(())
     }
 
-    /// Makes the transaction durable.
-    pub(super) fn commit(mut self) -> Result<(), Fail> {
-        if let Alloc::Locked { head, last } = self.alloc
-            && last != head
-        {
-            let s: &mut Session = &mut self.session;
-            s.client.execute(&s.st.head_set, &[&last])?;
+    /// Whether the commit makes anything durable.
+    pub(super) fn dirty(&self) -> bool {
+        self.kept || !self.writes.is_empty()
+    }
+
+    /// The tail: takes the revisions of the writes, under the commit head, and makes the
+    /// writes, the deletes and the placeholders' removal in one statement. A transaction
+    /// that wrote nothing takes no lock and reads the committed head; one that keeps
+    /// nothing ([`Tx::dirty`] is false) writes nothing, as its commit rolls back.
+    pub(super) fn flush(&mut self) -> Result<Revs, Error> {
+        let count = i64::try_from(self.writes.len()).unwrap_or(i64::MAX);
+        let s: &mut Session = &mut self.session;
+        let revs = match (self.flaw, count) {
+            (Flaw::SequenceRevisions, _) => Revs {
+                base: 0,
+                taken: s
+                    .client
+                    .query(&s.st.seq, &[&count])?
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect(),
+            },
+            (_, 0) => Revs {
+                base: s.client.query_one(&s.st.head_read, &[])?.get(0),
+                taken: Vec::new(),
+            },
+            _ => {
+                s.client
+                    .batch_execute("LOCK TABLE head IN SHARE UPDATE EXCLUSIVE MODE")?;
+                let top: i64 = s.client.query_one(&s.st.head_move, &[&count])?.get(0);
+                let base = top - count;
+                Revs {
+                    base,
+                    taken: (base + 1..=top).collect(),
+                }
+            }
+        };
+        if self.dirty() {
+            self.write(&revs)?;
         }
+        Ok(revs)
+    }
+
+    /// The tail's one write statement: the feed rows at their revisions, each key's row as
+    /// the transaction leaves it (at the revision of its last write), and the deletes of the
+    /// keys it leaves absent that hold a row or a placeholder.
+    fn write(&mut self, revs: &Revs) -> Result<(), Error> {
+        let mut last: BTreeMap<&str, i64> = BTreeMap::new();
+        let mut feed = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (write, rev) in self.writes.iter().zip(&revs.taken) {
+            last.insert(write.key.as_str(), *rev);
+            feed.0.push(*rev);
+            feed.1.push(write.key.as_str());
+            feed.2.push(write.kind);
+            feed.3.push(write.value.as_deref());
+        }
+        let mut put = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut gone = Vec::new();
+        let touched = last
+            .keys()
+            .copied()
+            .chain(self.reserved.iter().map(String::as_str));
+        for key in touched.collect::<BTreeSet<_>>() {
+            // A key left with a row was written (a reserved key never written holds only its
+            // placeholder, and is absent).
+            if let (Some(Some(row)), Some(rev)) = (self.cache.get(key), last.get(key)) {
+                put.0.push(key);
+                put.1.push(row.value.as_slice());
+                put.2.push(*rev);
+                put.3.push(row.expires_us);
+            } else {
+                gone.push(key);
+            }
+        }
+        let s: &mut Session = &mut self.session;
+        s.client.execute(
+            &s.st.write,
+            &[
+                &feed.0, &feed.1, &feed.2, &feed.3, &put.0, &put.1, &put.2, &put.3, &gone,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Makes the transaction durable, or, when it keeps nothing, rolls it back: its
+    /// placeholders go with it.
+    pub(super) fn commit(mut self) -> Result<(), Fail> {
         self.open = false;
-        if let Err(err) = self.session.client.batch_execute("COMMIT") {
-            // A refusal from the server (a serialization failure) leaves the session
-            // usable. A lost connection, including the server's FATAL as it ends the
-            // backend, leaves it unknown whether the commit happened, and the session is
-            // not reused.
+        let end = if self.dirty() { "COMMIT" } else { "ROLLBACK" };
+        if let Err(err) = self.session.client.batch_execute(end) {
+            // A refusal from the server leaves the session usable. A lost connection,
+            // including the server's FATAL as it ends the backend, leaves it unknown whether
+            // the commit happened, and the session is not reused.
             self.session.note_failure(&err);
             return Err(err.into());
         }
         Ok(())
     }
 
-    fn next_rev(&mut self) -> Result<i64, Error> {
-        match &mut self.alloc {
-            Alloc::Locked { last, .. } => {
-                *last += 1;
-                Ok(*last)
-            }
-            Alloc::Sequence => {
-                let s: &mut Session = &mut self.session;
-                Ok(s.client.query_one(&s.st.seq, &[])?.get(0))
-            }
-        }
-    }
-
-    fn head_revision(&self) -> u64 {
-        match self.alloc {
-            Alloc::Locked { last, .. } => u64::try_from(last).unwrap_or(0),
-            Alloc::Sequence => 0,
-        }
-    }
-
-    /// Adds the rows of `rows` to what the transaction knows (the claim loaded them).
+    /// Adds `row`, which the transaction has locked, to what it knows (a claim locked it).
     pub(super) fn remember(&mut self, key: String, row: Row) {
         self.cache.insert(key, Some(row));
     }
 
-    /// Loads the rows of `keys` that are not known yet, locked, and expires those the
-    /// clock has passed.
-    fn load(&mut self, keys: &[&str]) -> Result<(), Error> {
-        let wanted: Vec<String> = keys
+    /// Locks or reserves the keys of `keys` that are not known yet, in key order in one
+    /// statement, loads their rows, and expires those the clock has passed.
+    pub(super) fn load(&mut self, keys: &[&str]) -> Result<(), Error> {
+        let wanted: Vec<&str> = keys
             .iter()
-            .filter(|key| !self.cache.contains_key(**key))
-            .map(|key| (*key).to_owned())
+            .copied()
+            .filter(|key| !self.cache.contains_key(*key))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
         if !wanted.is_empty() {
             let s: &mut Session = &mut self.session;
-            let rows = s.client.query(&s.st.load, &[&wanted])?;
-            for key in wanted {
-                self.cache.insert(key, None);
-            }
-            for row in rows {
+            let reserved: BTreeSet<String> = s
+                .client
+                .query(&s.st.reserve, &[&wanted])?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            // Every key now has a row this transaction sees: its locked row or its own
+            // placeholder. The clock is read again, after any wait for those locks.
+            for row in s.client.query(&s.st.load, &[&wanted, &self.over])? {
                 let key: String = row.get(0);
-                self.cache.insert(key, Some(Row::from_row(&row, 1)));
+                self.now = self.now.max(row.get(4));
+                let loaded = (!reserved.contains(&key)).then(|| Row::from_row(&row, 1));
+                self.cache.insert(key, loaded);
             }
+            self.reserved.extend(reserved);
         }
         for key in keys {
             let dead = self
@@ -201,21 +299,25 @@ impl<'p> Tx<'p> {
                 .and_then(Option::as_ref)
                 .is_some_and(|row| !row.live(self.now));
             if dead {
-                self.expire(key)?;
+                self.expire(key);
             }
         }
         Ok(())
     }
 
-    fn expire(&mut self, key: &str) -> Result<(), Error> {
-        let rev = self.next_rev()?;
-        let s: &mut Session = &mut self.session;
-        s.client.execute(&s.st.delete, &[&key])?;
-        s.client
-            .execute(&s.st.feed, &[&rev, &key, &KIND_EXPIRE, &None::<&[u8]>])?;
+    /// Records a write and returns its provisional revision (how many writes there are).
+    fn record(&mut self, key: &str, kind: i16, value: Option<Vec<u8>>) -> i64 {
+        self.writes.push(Write {
+            key: key.to_owned(),
+            kind,
+            value,
+        });
+        i64::try_from(self.writes.len()).unwrap_or(i64::MAX)
+    }
+
+    fn expire(&mut self, key: &str) {
+        self.record(key, KIND_EXPIRE, None);
         self.cache.insert(key.to_owned(), None);
-        self.dirty = true;
-        Ok(())
     }
 
     /// Removes every key the clock has expired, one `Expire` row each, in key order.
@@ -229,21 +331,19 @@ impl<'p> Tx<'p> {
             .map(|row| row.get(0))
             .collect();
         for key in &keys {
-            self.expire(key)?;
+            self.expire(key);
         }
         Ok(keys.len())
     }
 
-    /// Deletes the feed rows at or below `before` or the head this transaction holds
-    /// locked, whichever is lower; how many. No revision can still commit at or below
-    /// the head, and none above it is touched. (Under the sequence flaw nothing locks
-    /// the head and nothing moves it, so a trim deletes nothing.)
+    /// Deletes the feed rows at or below `before` or the committed head, whichever is
+    /// lower; how many. Every revision at or below the committed head has committed, and
+    /// none above it is touched. (Under the sequence flaw nothing moves the head, so a trim
+    /// deletes nothing.)
     pub(super) fn trim(&mut self, before: i64) -> Result<u64, Error> {
         let s: &mut Session = &mut self.session;
         let removed = s.client.execute(&s.st.trim, &[&before])?;
-        if removed > 0 {
-            self.dirty = true;
-        }
+        self.kept |= removed > 0;
         Ok(removed)
     }
 
@@ -285,31 +385,26 @@ impl<'p> Tx<'p> {
         Ok(rows)
     }
 
-    /// The live row at `key` as the transaction sees it, locked.
-    pub(super) fn read(&mut self, key: &str) -> Result<Option<Row>, Error> {
-        self.load(&[key])?;
-        Ok(self.live(key).cloned())
+    /// The live row at `key` as committed, read without a lock. A decided claim reads this
+    /// way while it holds the head ([`Tx::hold_head`]), so no one else can change it before the
+    /// transaction ends; the rows it has locked by then are its claimed rows, unchanged.
+    pub(super) fn peek(&mut self, key: &str) -> Result<Option<Row>, Error> {
+        let now = Some(self.now);
+        let s: &mut Session = &mut self.session;
+        let row = s.client.query_opt(&s.st.get, &[&key, &now])?;
+        Ok(row.map(|row| Row::from_row(&row, 0)))
     }
 
-    /// The live rows under `prefix` as the transaction sees them, in key order. Rows this
-    /// transaction has written are as it wrote them.
+    /// The live rows under `prefix` as committed, in key order, read without a lock, as
+    /// [`Tx::peek`] reads one.
     pub(super) fn read_prefix(&mut self, prefix: &str) -> Result<Vec<(String, Row)>, Error> {
         let now = Some(self.now);
         let s: &mut Session = &mut self.session;
         let rows = s.client.query(&s.st.scan, &[&prefix, &now])?;
-        let mut seen: BTreeMap<String, Row> = rows
+        Ok(rows
             .iter()
             .map(|row| (row.get(0), Row::from_row(row, 1)))
-            .collect();
-        for (key, row) in &self.cache {
-            if key.starts_with(prefix) {
-                match row {
-                    Some(row) => drop(seen.insert(key.clone(), row.clone())),
-                    None => drop(seen.remove(key)),
-                }
-            }
-        }
-        Ok(seen.into_iter().collect())
+            .collect())
     }
 
     fn live(&self, key: &str) -> Option<&Row> {
@@ -318,13 +413,9 @@ impl<'p> Tx<'p> {
 
     /// Applies one transaction on top of what this database transaction has done so far.
     /// Every precondition is judged before the first write, so a conflict writes nothing.
+    /// The commit's revision is provisional until the tail settles it ([`Revs::settle`]).
     pub(super) fn apply(&mut self, txn: &Txn) -> Result<Result<Commit, Conflict>, Error> {
-        let keys: Vec<&str> = txn
-            .ops()
-            .iter()
-            .filter_map(|op| op.key_cond().map(|(key, _)| key))
-            .collect();
-        self.load(&keys)?;
+        self.load(&keys_of(std::slice::from_ref(txn)))?;
         for (index, op) in txn.ops().iter().enumerate() {
             let Some((key, cond)) = op.key_cond() else {
                 continue;
@@ -345,43 +436,27 @@ impl<'p> Tx<'p> {
             }
         }
 
-        let mut wrote = None;
         let mut counters = Vec::new();
         for op in txn.ops() {
             match op {
                 Op::Put {
                     key, value, ttl, ..
                 } => {
-                    let rev = self.next_rev()?;
                     let expires = ttl.map(|ttl| self.now.saturating_add(micros(ttl)));
-                    let s: &mut Session = &mut self.session;
-                    s.client
-                        .execute(&s.st.upsert, &[&key.as_str(), value, &rev, &expires])?;
-                    s.client.execute(
-                        &s.st.feed,
-                        &[&rev, &key.as_str(), &KIND_PUT, &Some(value.as_slice())],
-                    )?;
+                    let at = self.record(key, KIND_PUT, Some(value.clone()));
                     self.cache.insert(
                         key.clone(),
                         Some(Row {
                             value: value.clone(),
-                            version: rev,
+                            version: -at,
                             expires_us: expires,
                         }),
                     );
-                    wrote = Some(rev);
                 }
                 Op::Delete { key, .. } => {
                     if self.live(key).is_some() {
-                        let rev = self.next_rev()?;
-                        let s: &mut Session = &mut self.session;
-                        s.client.execute(&s.st.delete, &[&key.as_str()])?;
-                        s.client.execute(
-                            &s.st.feed,
-                            &[&rev, &key.as_str(), &KIND_DELETE, &None::<&[u8]>],
-                        )?;
+                        self.record(key, KIND_DELETE, None);
                         self.cache.insert(key.clone(), None);
-                        wrote = Some(rev);
                     }
                 }
                 Op::Check { .. } => {}
@@ -392,20 +467,24 @@ impl<'p> Tx<'p> {
                         .query_one(&s.st.counter, &[&counter.as_str()])?
                         .get(0);
                     counters.push(u64::try_from(value).unwrap_or(0));
-                    self.dirty = true;
+                    self.kept = true;
                 }
             }
         }
-        if wrote.is_some() {
-            self.dirty = true;
-        }
-        let revision =
-            wrote.map_or_else(|| self.head_revision(), |r| u64::try_from(r).unwrap_or(0));
         Ok(Ok(Commit {
-            revision: Revision(revision),
+            revision: Revision(self.writes.len() as u64),
             counters,
         }))
     }
+}
+
+/// The keys the operations of `batch` name, in the order they name them.
+pub(super) fn keys_of(batch: &[Txn]) -> Vec<&str> {
+    batch
+        .iter()
+        .flat_map(Txn::ops)
+        .filter_map(|op| op.key_cond().map(|(key, _)| key))
+        .collect()
 }
 
 impl Drop for Tx<'_> {

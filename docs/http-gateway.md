@@ -153,6 +153,8 @@ cause.
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
 | a store write that failed | 500 | `state-write-failed` |
+| a store write the store was too busy to take (`UNAVAILABLE`, `state-write-failed`): nothing was written, and a retry may pass | 503 | `state-write-failed` |
+| a store read the store was too busy to take, or a fleet call that could not read the store (`UNAVAILABLE`, `store-unavailable`) | 503 | `store-unavailable` |
 | any other failure, a response that cannot be written | 500 | `internal` |
 | unauthenticated (the mounting server's bearer layer) | 401 | empty body |
 
@@ -161,9 +163,10 @@ is answered by the refusal's code. Any other status is answered by its gRPC code
 message, which the service sets to the code of the table: `NOT_FOUND` with `unknown-job` (404)
 or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink` or `no-live-logs` (409),
 `OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
-`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable` (503),
-`PERMISSION_DENIED` with `operator-only` (403), `INTERNAL` with
-`state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and `INVALID_ARGUMENT`
+`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable`, `store-unavailable` or
+`state-write-failed` (503, the same code), `PERMISSION_DENIED` with `operator-only` (403),
+`INTERNAL` with `state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and
+`INVALID_ARGUMENT`
 (400, where a message `field: <name>` gives the `field`). Every other status, and a refusal
 code this version does not know, is a 500 `internal`. The crate's goldens
 (`crates/js-api-gateway/tests/golden/`) hold the whole mapping.
@@ -283,6 +286,7 @@ retention end.
 | `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
 | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
 | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+| a read the store was too busy to take (no connection came free, or the statement waited past its limit) | `UNAVAILABLE`, `store-unavailable` | 503 `store-unavailable` |
 
 **`GetJob`** answers the job: its spec as submitted (a file's contents left empty), its state
 and start failure, its host once placed, whether a cancel was asked for, its times
@@ -402,6 +406,7 @@ answer from what the commit returned; neither holds anything of its own outside 
 | `CancelJob` of an id with no job, or of another client's job by a `client` | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
 | `SubmitJob` by a `client` of an id another client's job holds | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
 | a store that failed (the commit, or the read before it) | `INTERNAL`, `state-write-failed` | 500 `state-write-failed` |
+| a store too busy to take the commit or the read before it (no connection came free, or a statement waited past its limit): nothing was written, and a retry may pass | `UNAVAILABLE`, `state-write-failed` | 503 `state-write-failed` |
 
 **`SubmitJob`**, in order:
 
