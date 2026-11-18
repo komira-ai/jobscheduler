@@ -286,7 +286,7 @@ in CI measures it.
 | `job.start_failure: agent-refused`, detail `input-not-allowed` | a host path is under no root, or the read-write mount is under `--mount-root-ro` |
 | `mv: can't rename '/out/result.part': I/O error` or `Device or resource busy` | the upload did not finish within `fs.put.commit_deadline_secs`; the file stays staged, and the same `mv` may be tried again while the job runs |
 | `mv` fails `File exists` | the key was committed before with other bytes: use a new nonce |
-| The job fails and its result has `input_failure: input-unreadable` | a source no longer answered after the job ended (`ENOTCONN`, `EIO`, `ESTALE`): `tierstore fs` went away under the job |
+| The job fails and its result has `input_failure: input-unreadable` | a source no longer answered after the job ended (`ENOTCONN`, `EIO`, `ESTALE`): `tierstore fs` went away under the job, or tierstore lost the tree for good (`tree-lost`: `store_pack_lost_total{phase="mid_job"}` counts it) and answers `EIO` for it; the failure is the host's, and the client runs the job again |
 | The agent exits at start naming a root | `tierstore fs` was not mounted when the agent started |
 
 ## 6. Results
