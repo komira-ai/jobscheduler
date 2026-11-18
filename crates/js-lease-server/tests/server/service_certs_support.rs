@@ -130,6 +130,8 @@ pub struct Options {
     pub jobs: bool,
     /// The lines of the deny file at the start.
     pub denied: &'static str,
+    /// `--agent-hello-burst`, when the test needs a small one.
+    pub burst: Option<&'static str>,
 }
 
 impl Options {
@@ -137,6 +139,7 @@ impl Options {
         kept: Kept::Files,
         jobs: false,
         denied: "",
+        burst: None,
     };
 }
 
@@ -167,6 +170,10 @@ pub fn args(scratch: &Scratch, options: Options, files: &(PathBuf, PathBuf)) -> 
     ] {
         args.push(flag.into());
         args.push(value.into_os_string());
+    }
+    if let Some(burst) = options.burst {
+        args.push("--agent-hello-burst".into());
+        args.push(burst.into());
     }
     args
 }
@@ -274,7 +281,9 @@ impl Client {
         }
     }
 
-    fn connector(&self) -> TlsConnector {
+    /// A TLS connector with this client's identity. One connector keeps its sessions, so a
+    /// client that connects again with it resumes a session when the server allows that.
+    pub fn connector(&self) -> TlsConnector {
         let mut roots = rustls::RootCertStore::empty();
         let server = CertificateDer::from_pem_slice(self.trusted.as_bytes()).unwrap();
         roots.add(server).unwrap();
@@ -308,11 +317,25 @@ impl Client {
         bearer: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Reply, String> {
-        guard(self.exchange(method, path, bearer, body)).await
+        guard(self.exchange(&self.connector(), method, path, bearer, body)).await
+    }
+
+    /// [`Client::send`] over `connector` (see [`Client::connector`]), so that the connections
+    /// of one client share a TLS session store.
+    pub async fn send_with(
+        &self,
+        connector: &TlsConnector,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Reply, String> {
+        guard(self.exchange(connector, method, path, bearer, body)).await
     }
 
     async fn exchange(
         &self,
+        connector: &TlsConnector,
         method: &str,
         path: &str,
         bearer: Option<&str>,
@@ -321,7 +344,7 @@ impl Client {
         let tcp = tokio::net::TcpStream::connect(self.addr).await.unwrap();
         // The server certificate names 127.0.0.1, whichever loopback address is dialled.
         let name = ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
-        let mut stream = match self.connector().connect(name, tcp).await {
+        let mut stream = match connector.connect(name, tcp).await {
             Ok(stream) => stream,
             Err(error) => return Err(format!("handshake: {error}")),
         };

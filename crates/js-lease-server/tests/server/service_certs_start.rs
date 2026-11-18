@@ -162,6 +162,87 @@ async fn a_ca_reload_that_succeeds_trusts_the_new_ca_alone() {
     assert_eq!(hello.status, 200, "{}", hello.body);
 }
 
+/// Asserts that a client that keeps one TLS configuration (so that it would resume the session
+/// of an earlier connection if the server let it) is admitted with its certificate of the CA
+/// in force, and after the server's CA file is replaced by another CA and reloaded, is refused
+/// at its next connection with the same certificate: a resumed session would restore the
+/// certificate it showed before without checking it against the CA again. It catches a server
+/// that offers resumption on the listener that asks for client certificates.
+#[tokio::test]
+async fn a_client_that_could_resume_is_checked_again_after_the_ca_changed() {
+    let rig = Rig::start("service_cert_no_resume", Options::FILES).await;
+    let client = rig.client(Some(&rig.ca.issue(&Spec::agent("farm-1"))));
+    let session = client.connector();
+    let welcome = client
+        .send_with(
+            &session,
+            "POST",
+            "/v1/agent/hello",
+            None,
+            Some(&hello_body("farm-1")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(welcome.status, 200, "{}", welcome.body);
+    let again = client
+        .send_with(&session, "GET", "/v1/hosts/farm-1", None, None)
+        .await
+        .unwrap();
+    assert_eq!(again.status, 200, "{}", again.body);
+
+    rig.h
+        .scratch
+        .write("hostkeeper-ca.pem", &Ca::new().pem(), 0o644);
+    rig.h.running.reload_tls().unwrap();
+    let refused = client
+        .send_with(&session, "GET", "/v1/hosts/farm-1", None, None)
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+}
+
+/// Asserts that a reload whose TLS pair fails (a key that is not the certificate's, a key file
+/// that is not owner-only) while the CA file was replaced answers the error of the pair, naming
+/// its flag, and keeps the old CA in force: a certificate of the old CA is still admitted and
+/// one of the new CA is refused.
+#[tokio::test]
+async fn a_pair_that_fails_to_reload_keeps_the_old_ca_in_force() {
+    let rig = Rig::start("service_cert_pair_fails", Options::FILES).await;
+    let key_file = rig.h.scratch.path("test-only-key.pem");
+    let (_, key) = test_identity();
+    let other_key = rcgen::KeyPair::generate().unwrap().serialize_pem();
+    let next = Ca::new();
+    rig.h.scratch.write("hostkeeper-ca.pem", &next.pem(), 0o644);
+    let shown = key_file.display();
+    let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&key_file).unwrap());
+    for (round, (text, mode, said)) in [
+        (
+            other_key,
+            0o600,
+            format!("--tls-key: {shown}: keys may not be consistent: KeyMismatch"),
+        ),
+        (
+            key,
+            0o644,
+            format!("--tls-key: {shown} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode 0644 owned by uid {uid}"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rig.h.scratch.write("test-only-key.pem", &text, mode);
+        let err = rig.h.running.reload_tls().unwrap_err();
+        assert_eq!((err.flag(), err.to_string()), ("--tls-key", said));
+
+        let old_host = format!("farm-{}", 2 * round + 1);
+        let old = rig.client(Some(&rig.ca.issue(&Spec::agent(&old_host))));
+        let admitted = old.hello(None, &hello_body(&old_host)).await.unwrap();
+        assert_eq!(admitted.status, 200, "{}", admitted.body);
+        let new_host = format!("farm-{}", 2 * round + 2);
+        let new = rig.client(Some(&next.issue(&Spec::agent(&new_host))));
+        assert!(new.hello(None, &hello_body(&new_host)).await.is_err());
+    }
+}
+
 /// Asserts that a configuration file with `agent_client_ca` and `agent_deny_file` serves the
 /// certificate of an agent on the agent listener and refuses a denied host there: the file's
 /// keys are the flags'.

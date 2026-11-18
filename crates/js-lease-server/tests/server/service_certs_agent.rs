@@ -12,7 +12,7 @@ use js_agent::{Answer, Connector, Dialer};
 use serde_json::json;
 
 use crate::agents_support::{entry, hello_body};
-use crate::service_certs_support::{Identity, Options, Rig, Spec};
+use crate::service_certs_support::{Ca, Identity, Options, Rig, Spec};
 
 /// The names hostkeeper gives the identity's files in the agent's state root, written out here
 /// rather than taken from js-client so that a rename on one side fails this test.
@@ -35,9 +35,10 @@ fn place(root: &Path, identity: &Identity) {
 
 /// Asserts that the agent's own transport, given a state root that holds a service identity
 /// and no token anywhere, says hello and beats over mutual TLS; that after hostkeeper renews
-/// the identity in place (a new key and serial for the same host) the same transport, with no
-/// restart, beats on in the session its hello opened (a heartbeat of another session or epoch is
-/// refused); and that the server saw no host credential issued.
+/// the identity in place (a new key and serial, issued by a new CA) and the server trusts the
+/// new CA alone, the same transport, with no restart, beats on in the session its hello opened,
+/// which is possible only if it presented the renewed pair (the old one is refused by the server
+/// from then on); and that the server saw no host credential issued.
 #[tokio::test]
 async fn the_agents_transport_logs_in_with_the_identity_hostkeeper_places_and_its_renewal() {
     let rig = Rig::start("service_cert_agent", Options::FILES).await;
@@ -48,9 +49,12 @@ async fn the_agents_transport_logs_in_with_the_identity_hostkeeper_places_and_it
     let server = format!("https://127.0.0.1:{}", rig.addr().port());
 
     let login = Login::identity_of(&root).unwrap().unwrap();
-    let renewal = rig.ca.issue(&Spec::agent("farm-1").serial(2));
+    let next = Ca::new();
+    let renewal = next.issue(&Spec::agent("farm-1").serial(2));
+    let (first_done, mut first_seen) = tokio::sync::mpsc::channel::<()>(1);
+    let (go, mut go_seen) = tokio::sync::mpsc::channel::<()>(1);
     // The transport blocks, so the agent's side runs off the async workers, start to end.
-    let answers: Vec<Answer> = tokio::task::spawn_blocking(move || {
+    let agent = tokio::task::spawn_blocking(move || {
         let mut transport = Dialer.connect(&server, &login, Some(&ca_cert)).unwrap();
         let welcome = transport
             .post("/v1/agent/hello", &hello_body("farm-1"))
@@ -62,12 +66,18 @@ async fn the_agents_transport_logs_in_with_the_identity_hostkeeper_places_and_it
             "phase": "serving",
         });
         let first = transport.post("/v1/agent/heartbeat", &beat).unwrap();
-        place(&root, &renewal);
+        first_done.blocking_send(()).unwrap();
+        go_seen.blocking_recv().unwrap();
         let renewed = transport.post("/v1/agent/heartbeat", &beat).unwrap();
         vec![welcome, first, renewed]
-    })
-    .await
-    .unwrap();
+    });
+    // Between the beats hostkeeper renews the files and the server moves to the new CA.
+    first_seen.recv().await.unwrap();
+    place(&root, &renewal);
+    rig.h.scratch.write("hostkeeper-ca.pem", &next.pem(), 0o644);
+    rig.h.running.reload_tls().unwrap();
+    go.send(()).await.unwrap();
+    let answers: Vec<Answer> = agent.await.unwrap();
     for answer in &answers {
         assert_eq!(answer.status, 200, "{answer:?}");
     }

@@ -83,6 +83,13 @@ impl Tls {
             None => builder()?.with_no_client_auth(),
         }
         .with_cert_resolver(current.clone());
+        if clients.is_some() {
+            // A resumed session restores the client's certificates without checking them
+            // again, so an expired leaf or a removed CA would keep admitting. With a client
+            // verifier every connection is a full handshake.
+            config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+            config.send_tls13_tickets = 0;
+        }
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let mut jobs = builder()?
             .with_no_client_auth()
