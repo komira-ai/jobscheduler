@@ -3,7 +3,8 @@
 //! package that was not downloaded, or running its verb in another job is named.
 
 use super::pkg_upload::{
-    ASSUME, GATE, PKG_JOB, SIGNED_IF, UNSIGNED_IF, UPLOAD, VERB, pkg_upload_problems,
+    ASSUME, DESCRIPTOR, DESCRIPTOR_VERB, GATE, PKG_JOB, SIGNED_IF, UNSIGNED_IF, UPLOAD, VERB,
+    pkg_upload_problems,
 };
 use super::support::{each_named, text_of};
 use super::yaml;
@@ -208,6 +209,50 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "echo assume",
         "pkg-upload: the steps are not the gate, the download, the role and the upload",
     ),
+    // The descriptor mapping: missing, misspelt, without its inputs, or under another `if`.
+    (
+        "pkg-upload",
+        "      - name: Map js-agent to pkg/jobscheduler in the repository's descriptor\n        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome == 'success' }}\n        env:\n          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}\n        run: tool/xtask channels descriptor write --bucket \"$APT_BUCKET\" --distribution-id \"$APT_DISTRIBUTION_ID\" --work \"$RUNNER_TEMP/descriptor\"\n",
+        "",
+        "pkg-upload: there is no step after the upload that runs",
+    ),
+    (
+        "pkg-upload",
+        "tool/xtask channels descriptor write",
+        "tool/xtask channels descriptor read",
+        "pkg-upload: there is no step after the upload that runs",
+    ),
+    (
+        "pkg-upload",
+        " --bucket \"$APT_BUCKET\" --distribution-id",
+        " --distribution-id",
+        "pkg-upload: there is no step after the upload that runs",
+    ),
+    (
+        "pkg-upload",
+        "          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}\n",
+        "          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID: ''\n",
+        "pkg-upload: the descriptor step does not read APT_DISTRIBUTION_ID",
+    ),
+    (
+        "pkg-upload",
+        "          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID",
+        "          APT_BUCKET: other\n          APT_DISTRIBUTION_ID",
+        "pkg-upload: the descriptor step does not read APT_BUCKET",
+    ),
+    (
+        "pkg-upload",
+        "        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome == 'success' }}\n        env:\n          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID",
+        "        if: ${{ steps.gate.outputs.enabled == 'true' }}\n        env:\n          APT_BUCKET: ${{ vars.APT_BUCKET }}\n          APT_DISTRIBUTION_ID",
+        "pkg-upload: the descriptor step does not run under the upload's `if`",
+    ),
+    // Another job runs the verb that writes the descriptor.
+    (
+        "publish",
+        "          sha256sum --check --strict SHA256SUMS\n",
+        "          tool/xtask channels descriptor write --bucket b --work w\n          sha256sum --check --strict SHA256SUMS\n",
+        "publish: runs `xtask channels descriptor write...`, which only pkg-upload may",
+    ),
     // A secret reaches the job.
     (
         "pkg-upload",
@@ -252,4 +297,30 @@ fn the_commands_of_the_table_are_the_ones_the_job_runs() {
     }
     // No other job of the file runs the verb.
     assert_eq!(text.matches(VERB).count(), 1);
+    assert!(text.contains(DESCRIPTOR));
+    assert_eq!(text.matches(DESCRIPTOR_VERB).count(), 1);
+}
+
+#[test]
+fn a_descriptor_step_before_the_upload_is_named() {
+    let text = text_of("release.yml");
+    let start = text
+        .find("      - name: Map js-agent to pkg/jobscheduler")
+        .expect("step");
+    let end = text[start..]
+        .find("\n\n")
+        .map_or(text.len(), |n| start + n + 1);
+    let step = text[start..end].to_owned();
+    let moved = text.replace(&step, "");
+    let upload = moved
+        .find("      - name: Upload the package, then its SHA256SUMS")
+        .expect("upload");
+    let moved = format!("{}{}{}", &moved[..upload], step, &moved[upload..]);
+    let found = problems_of(&moved);
+    assert!(
+        found
+            .iter()
+            .any(|p| p.starts_with("pkg-upload: there is no step after the upload that runs")),
+        "{found:?}"
+    );
 }

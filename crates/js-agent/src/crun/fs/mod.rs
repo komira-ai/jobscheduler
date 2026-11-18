@@ -327,25 +327,30 @@ impl Fs {
         // Every root is held from the start: the one a path lies beneath is open.
         let root = self.roots.beneath(path).and_then(|beneath| {
             let held = self.held.get(beneath.name);
-            held.map(|held| (Arc::clone(held), beneath.rest))
+            held.map(|held| (Arc::clone(held), beneath.name.to_owned(), beneath.rest))
         });
         let paths = Arc::clone(&self.paths);
         let sub_path_text = sub_path.map(str::to_owned);
         let (given, sub_path) = (path.to_owned(), sub_path.map(PathBuf::from));
         let deadline = now_ms.saturating_add(LOOKUP_MS);
         let pending = self.pool.run(deadline, move || {
-            let Some((root, rest)) = root else {
+            let Some((root, name, rest)) = root else {
                 let why = format!("{given} lies beneath no root of this agent");
                 return Err(not_allowed(why));
             };
+            let host_path = || format!("the host path {given} (root {name})");
             let opened = paths
                 .open_beneath(root.as_fd(), &rest)
-                .map_err(refusal_of)?;
+                .map_err(|why| refusal_of(&host_path(), why))?;
             match sub_path {
                 None => Ok(opened),
                 Some(sub_path) => paths
                     .open_beneath(opened.as_fd(), &sub_path)
-                    .map_err(refusal_of),
+                    .map_err(|why| {
+                        let named =
+                            format!("the sub_path {} of {}", sub_path.display(), host_path());
+                        refusal_of(&named, why)
+                    }),
             }
         });
         Lookup {
@@ -514,14 +519,17 @@ fn not_allowed(why: String) -> NativeRefusal {
     }
 }
 
-/// The refusal of a host path that could not be opened beneath its root: one that leads
-/// out of it is not allowed; any other is unavailable.
-fn refusal_of(why: ResolveError) -> NativeRefusal {
+/// The refusal of `what` (the host path as the start named it, with its root, or a
+/// `sub_path` of it) that could not be opened: one that leads out of the directory it is
+/// opened beneath is not allowed; any other is unavailable. The text names `what` in full
+/// before the kernel's answer for the part below the root, so a finding says which path of
+/// which root was missing, not only the part below it.
+fn refusal_of(what: &str, why: ResolveError) -> NativeRefusal {
     match why {
-        ResolveError::Escapes { .. } => not_allowed(why.to_string()),
+        ResolveError::Escapes { .. } => not_allowed(format!("{what}: {why}")),
         ResolveError::Unavailable { .. } => NativeRefusal {
             code: refusal::INPUT_UNAVAILABLE,
-            why: why.to_string(),
+            why: format!("{what}: {why}"),
         },
     }
 }

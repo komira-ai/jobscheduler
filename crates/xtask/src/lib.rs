@@ -63,6 +63,9 @@
 //! - `channels pkg upload --dir <dir> --version <X.Y.Z> --bucket <b> --work <dir>`
 //!   ([`channels::pkg`]): the signed macOS installer package and its `SHA256SUMS` into
 //!   `pkg/jobscheduler/<X.Y.Z>/` of the same bucket, each put once.
+//! - `channels descriptor write --bucket <b> --work <dir> [--distribution-id <id>]`
+//!   ([`channels::descriptor`]): `js-agent` mapped to `pkg/jobscheduler` in the repository's
+//!   `hostkeeper-repository.json`, the one entry of it this repository writes.
 //! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
 //!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
 //!   `pkgutil` and `lsbom` and refused unless it is exactly that.

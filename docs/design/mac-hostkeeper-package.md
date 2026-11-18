@@ -55,8 +55,8 @@ The coordinator resolves a release's `macos-arm64` entry in the named-version fo
 `formats.macos-pkg` gives the path and platforms, to
 `<base>/<macos-pkg path>/<directory>/<version>/js-agent-<version>-macos-arm64.pkg`, and streams it to the Mac; the Mac
 needs no store of its own. The directory defaults to the service's name, so js-agent, which is published under
-`jobscheduler`, needs one `packages` entry in the descriptor that maps `js-agent` to the directory `jobscheduler`; an
-operator makes it once. An entry that does not resolve leaves the Mac `no_build_for_host` and touches no Linux host.
+`jobscheduler`, needs one `packages` entry in the descriptor that maps `js-agent` to the directory `jobscheduler`; the
+release writes it (`channels descriptor write`, below). An entry that does not resolve leaves the Mac `no_build_for_host` and touches no Linux host.
 
 ## The package
 
@@ -142,7 +142,14 @@ as owner), any script, and another identifier or version.
    package with its digest, puts the package and then `SHA256SUMS` under the key prefix `pkg/jobscheduler/<V>/` (the one
    prefix the jobscheduler role may write; If-None-Match `*`, single part), and counts a 412 answer as success only when
    the stored object's digest equals the local one. The package is public at
-   `https://<APT_HOSTNAME>/pkg/jobscheduler/<V>/js-agent-<V>-macos-arm64.pkg`.
+   `https://<APT_HOSTNAME>/pkg/jobscheduler/<V>/js-agent-<V>-macos-arm64.pkg`. A last step of the job runs `channels
+   descriptor write --bucket <b> --distribution-id <id> --work <dir>`: it reads `hostkeeper-repository.json` at the
+   bucket's root with its ETag and merges in the one part this repository owns, `formats.macos-pkg.path` `pkg`,
+   `macos-arm64` among the platforms, and `packages.js-agent` as `{"dir": "jobscheduler"}`, every other key left as
+   it was. It writes the result with `If-Match` on the ETag (a `412` reads and decides again, three attempts), writes
+   nothing when the descriptor holds the mapping already, and invalidates the path in the CDN. It refuses, writing
+   nothing, a descriptor that is absent (hostkeeper's release creates it), of a version newer than 1, not of its form,
+   with another `path` for the format, or with `js-agent` in another directory.
 4. `release desired --pkg-url <base>` (the base is `https://packages.komira.ai/pkg/jobscheduler`) downloads
    `<base>/<V>/SHA256SUMS` and the package and checks the package's sha256 against it. When they are there it adds the
    `macos-arm64` entry, `{"installer":"macos-pkg","repository":"komira-stable","packageVersion":V,"digest":<sha256 of
@@ -169,8 +176,7 @@ Done by an operator as root, never by a package, and before the group's first `s
   (`pool-create`);
 - for `--native-network on`, the pool's pf anchor (`js-mac-provision install`).
 
-Once, for the repository of packages: the descriptor's `packages` entry that maps `js-agent` to the directory
-`jobscheduler`, the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
+Once, for the repository of packages: the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
 write access to the prefix `pkg/jobscheduler/`.
 
 The group lists the package with `host-groups put` (the whole group, `hostkeeper` kept); a package added is installed
@@ -215,5 +221,5 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for
-  js-agent): the Mac shows `no_build_for_host`.
+  js-agent; the release writes the last two, and the first is the descriptor's own): the Mac shows `no_build_for_host`.
 - `set-desired` for `mac-build` before the group lists js-agent: refused `not_in_host_group`; nothing changes.
