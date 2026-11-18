@@ -24,14 +24,15 @@ depend on which instance runs it or how many run it at once.
    transaction that writes it. A cache that decides is a defect.
 2. **Three tools, and nothing else.** Every coordination is one of:
    - a **row lock** taken inside the deciding transaction (a `Txn` locks every key it names, in key order, and holds the lock to
-     its commit: `js-state/src/postgres/tx.rs:1-25`; `Store::claim_decide` locks a claimed row `FOR UPDATE SKIP LOCKED` and
-     decides under it: `js-state/src/postgres/claim.rs:98`);
+     its commit: `js-state/src/postgres/tx.rs:1-25`; `Store::claim_decide` takes the commit head first and then locks the claimed
+     row `FOR UPDATE SKIP LOCKED`, deciding under both: `js-state/src/postgres/claim.rs:98`, `session.rs:155-157`);
    - a **conditional write**: `Cond::Version` (a compare-and-set on the version read) or `Cond::Absent` (a unique key); the
      `Conflict` says who lost;
    - a **claim by advancing a due time** for periodic work (`JobStore::claim_duty`, `js-jobs/src/store/duties.rs:42`): the
      instance whose advance of the duty's row commits runs it for the period.
    No step elects, leases, counts instances or relies on being the only process. An instance that dies at any point leaves
-   nothing that another must clear by a timeout: its transaction committed or it did not.
+   no lock or lease that another must clear by a timeout: its transaction committed or it did not. (A host that falls silent
+   is settled after a timeout, as today, but that is the host's silence judged on the store's clock, not an instance's hold.)
 3. **Time is the database's.** A time that one instance writes and another compares (a deadline, an expiry, a due time, a
    last-heard time) is read from the store's clock (`Store::now`, the database's `now()`), never from the process clock. The
    process clock times only what stays in the process (a tick interval, a backoff, a rate limit).
@@ -73,18 +74,18 @@ and decides nothing shared). Paths are under `crates/`.
 | Decision | Where | How it holds | Tag |
 |---|---|---|---|
 | A transaction's preconditions hold at its commit | `js-state/src/postgres/tx.rs:1-25`, `:269`, `:420` | every key it names is locked in key order (a missing key reserved by a placeholder row), and `Cond` is judged on the locked rows | Built |
-| Revisions are minted in commit order, with no gap in the change feed | `js-state/src/postgres/tx.rs:156`, `:191` | `LOCK TABLE head` in the transaction's tail only, so bodies run at once and tails queue | Built |
-| A claimed row is decided by one transaction | `js-state/src/postgres/claim.rs:98` | `FOR UPDATE SKIP LOCKED`; a held row is skipped, never waited for | Built |
+| Revisions are minted in commit order, with no gap in the change feed | `js-state/src/postgres/tx.rs:191` (a tail), `:156` (`hold_head`) | `LOCK TABLE head` in a plain transaction's tail, so bodies run at once and tails queue; a claimed decision holds it from its start | Built |
+| A claimed row is decided by one transaction | `js-state/src/postgres/claim.rs:98`, `js-state/src/postgres/session.rs:155-157` | the commit head taken first (`hold_head`), then the claimed row `FOR UPDATE SKIP LOCKED` (a held row is skipped, never waited for); the decision's reads are what its commit finds. This serializes the decisions of every instance on the head; their bodies are short (one job, one host's rows) | Built |
 | A schema migration is applied once by racing installers | `js-state/src/postgres/schema.rs:80` | `pg_advisory_xact_lock` inside the applying transaction, version re-read under it; the server itself only judges the schema | Built |
-| The job store's schema row is written once | `js-jobs/src/store.rs:220` | `Cond::Absent`; a conflict re-reads the row | Built |
+| The job store's schema row is written once | `js-jobs/src/store.rs:224-232` | `Cond::Absent`; a conflict re-reads the row | Built |
 | The index backfill and the boot raise of deadlines at open | `js-lease-server/src/job_store.rs:195` (`booted_until_won`), `js-jobs/src/store/ending.rs:275`, `:325` | each write at `Cond::Version`; a beaten open retries (#923); a raise is a max, so a second start only delays deadlines | Built |
 | The first start imports the files beside the state file once | `js-lease-server/src/store/import.rs:89-90` | marker and rows `Cond::Absent` in one transaction, so one import wins; the loser's `Conflict` refuses its start (exit 2) instead of reading the marker | Built (correctness); Designed (G11: the loser starts) |
 | Row expiry (TTL) | `js-state/src/postgres/tx.rs:146`, `:289` | judged on the database clock inside each transaction | Built |
 | Feed trim | `js-lease-server/src/job_store/feed_trim.rs:23`, `js-lease-server/src/job_pass.rs:227` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
-| An unreachable database | `js-lease-server/src/job_pass.rs:183`, `:210`, `js-lease-server/src/store_health.rs:250` | every store call fails and nothing is decided; a hello's or taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:338`, `:645-649`), both retried by the agent | Built |
+| An unreachable database | `js-lease-server/src/job_pass.rs:183`, `:210`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's or taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:338`, `:645-649`), both retried by the agent | Built |
 | `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-930` | answers `StoreTime::ZERO` ("the store trait cannot report a failure here"); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:327`, `:470`, `ending.rs:62`) stamp the epoch until their own write fails | Designed (G2) |
 | Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another | Per instance |
-| The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
+| The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-state/src/postgres/serving.rs:21`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
 
 ### 3.2 Hosts: identity, admission, taint, cordon
 
@@ -96,11 +97,11 @@ and decides nothing shared). Paths are under `crates/`.
 | Revoking an instance's tokens | `js-lease-server/src/join_tokens.rs:662` | acts on the local map only; a token minted on B is not revoked by A, and B keeps accepting one A deleted | Designed (G3) |
 | A host credential's renewed time | `js-lease-server/src/join_tokens.rs:724` (`flush`, by the tick) | the whole renewed row from the local copy at `Cond::Any`: can bring back a token another instance revoked | Designed (G3) |
 | A refused hello gives back its token use and binding | `js-lease-server/src/join_tokens.rs:637`, `js-lease-server/src/agent_state.rs:411-420` | the undo is built from this instance's copy and written at `Cond::Any` | Designed (G3, G4) |
-| A host id is bound to the credential and agent instance of its first hello (`HostBound`) | `js-registry/src/registry.rs:456-463`, `js-lease-server/src/agent_state.rs:413` | judged on the local registry and the bindings read at start; the binding written at `Cond::Any` | Designed (G4) |
+| A host id is bound to the credential and agent instance of its first hello (`HostBound`) | `js-registry/src/registry.rs:456-463` | judged on the local registry and the bindings read at start; the binding written at `Cond::Any` | Designed (G4) |
 | Hellos of one host are serialized | `js-lease-server/src/agent_api.rs:277` (`host_writes`) | a process mutex; correct across instances only once G3 and G4 make the writes conditional, after which it is an economy | Per instance (after G3, G4) |
 | The bindings are saved | `js-lease-server/src/agents.rs:883` (`save_bindings`), `js-lease-server/src/agent_state.rs:286-297` (`writes_to`) | makes the store equal this instance's registry: puts every differing binding and **deletes every binding this registry no longer holds**, at `Cond::Any`; B's tick can delete a binding live on A | Designed (G4) |
 | A taint a heartbeat reports is stored | `js-lease-server/src/agent_state.rs:478` (`commit_taint`) | `Cond::Version` of the row read, after checking the stored taint is the expected one | Built |
-| Every instance sees a host's taint | `js-lease-server/src/agents.rs:296` (`restore_job_taints`, at start), `js-lease-server/src/sched/jobs_pass.rs:69` | the registry's taint decides placement and is loaded at start only; a host that says hello to B after A stored its taint is clean in B | Designed (G4, G7) |
+| Every instance sees a host's taint | `js-lease-server/src/agents.rs:296` (`restore_job_taints`, at start), `js-lease-server/src/sched/jobs_pass.rs:69` (the placer's own registry), `:158` (the hosts filter) | the registry's taint decides placement and is loaded at start only; a host that says hello to B after A stored its taint is clean in B | Designed (G4, G7) |
 | A cordon and its lift | `js-lease-server/src/agents.rs:600` (`keep`), `:670` (`cordon`) | the whole binding rebuilt from the local registry and put at `Cond::Any`; a host held by another instance answers `404`, and other instances' placement never sees the cordon | Designed (G4, G7) |
 | An operator clears a host's taint | `js-lease-server/src/agents_taints.rs:86` | the write is conditional (`commit_taint`), but the host must be in this registry: a host held elsewhere answers `404` (fails closed) | Designed (G4) |
 | Host certificate admission (`--agent-client-ca`) | `js-lease-server/src/host_cert.rs:58`, `js-lease-server/src/client_verifier.rs:27` | a function of the certificate and the configured CA | Per instance |
@@ -115,7 +116,7 @@ and decides nothing shared). Paths are under `crates/`.
 | A host's session, epoch, secret, last heard | `js-registry/src/registry.rs:470-521`, `js-registry/src/registry/beat.rs:123` | the instance holding the connection's cache; a beat that reaches another instance is refused (`409 unknown-host` or `403 session-mismatch`) and the agent says hello there | Per instance |
 | `HostLive` (a second agent process on a live host) | `js-registry/src/registry.rs:464-469` | judged on the local registry: a different agent process that says hello to B while the host is live on A is admitted | Designed (G5) |
 | The pool's machine cap (`PoolFull`) | `js-registry/src/registry.rs:502-511` | counts this registry's hosts: N instances admit N times the cap | Designed (G5) |
-| Whole-host job states (placed, starting, running, prepare deadline) | `js-jobs/src/store/whole.rs:276`, `js-lease-server/src/job_whole.rs:138` | rows written at `Cond::Version` | Built |
+| Whole-host job states (placed, starting, running, prepare deadline) | `js-jobs/src/store/whole.rs:342`, `:347`, `:384`, `js-lease-server/src/job_whole.rs:138` | rows written at `Cond::Version` | Built |
 | The whole-host start's taint and the clock it judges deadlines by | `js-lease-server/src/agent_api.rs:531` (`own.host.taint`), `:608` (`placing.clock.now()`) | the registry's taint and the process clock | Designed (G2, G4) |
 | A job's start command, repeated by two instances | `js-lease-server/src/per_job.rs:165`, `js-lease-server/src/job_start.rs:120` | a pure function of the rows; the placement that creates it is claimed | Built |
 | Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agents.rs:489` (`unclean`, memory), `js-lease-server/src/sched/jobs_pass.rs:158` | another instance's placement does not know | Designed (G5, G7) |
@@ -129,7 +130,7 @@ and decides nothing shared). Paths are under `crates/`.
 | A queued job is placed by exactly one instance | `js-jobs/src/store/whole.rs:125-129`, `:276` | `claim_decide` on `job/<id>` (`SKIP LOCKED`), the job written at `Cond::Version` | Built |
 | A host is never booked past its room | `js-jobs/src/store/whole.rs:174-199` | the host's live allocations summed in the claimed transaction, `HostFull` when they leave no room, `hostbook/<host>` written at `Cond::Version` | Built |
 | One host job (`isolation=host`) per host | `js-jobs/src/store/whole.rs:279`, `js-jobs/src/store/taints.rs:36` | `taint/<host>` put at `Cond::Absent` in the placing transaction | Built |
-| No contained job beside a host job, no job on a tainted or cordoned host | `js-sched-placer/src/jobs.rs:917-927` (`open_to_jobs`, registry view), `js-lease-server/src/sched/jobs_pass.rs:69` | the engine's memory only; the placing transaction reads neither the host's taint, its cordon nor `taint/<host>`, and `taint/<host>` is later deleted at `Cond::Any` (`js-jobs/src/store/taints.rs:72`) | Designed (G7) |
+| No contained job beside a host job, no job on a tainted or cordoned host | `js-sched-placer/src/jobs.rs:917-927` (`open_to_jobs`, registry view), `js-lease-server/src/sched/jobs_pass.rs:158` | the engine's memory only; the placing transaction reads neither the host's taint, its cordon nor `taint/<host>`, and `taint/<host>` is later deleted at `Cond::Any` (`js-jobs/src/store/taints.rs:72`) | Designed (G7) |
 | A host port is held by one job per host | `js-sched-placer/src/jobs.rs:469` | the engine's memory only; the placing transaction does not compare ports | Designed (G7) |
 | A host the scaler drains or releases takes no new job | `js-registry/src/registry/marks.rs:1-25` ("the marks are held in memory only") | a mark in one instance's registry; another instance's placement does not see it | Designed (G7, G9) |
 | One mark row per whole-host job | `js-jobs/src/store/marks.rs:81-94` | `mark/<job>` at `Cond::Absent` or `Cond::Version`, with the job checked at its version | Built |
@@ -161,7 +162,7 @@ and decides nothing shared). Paths are under `crates/`.
 | The job pass (queue expiry, prepare expiry, retention, loss) runs once per period | `js-lease-server/src/job_pass.rs:179-180`, `js-jobs/src/store/duties.rs:42-58` | a due-time claim; each end in the pass is `Cond::Version` (`js-jobs/src/store/ending.rs:89-97`) | Built |
 | The time the pass and the duty claims compare | `js-lease-server/src/job_pass.rs:168-169` | the process clock, against deadlines stamped with the store's clock: a skewed instance ends jobs early or late, or claims a period early | Designed (G2) |
 | Times stored in host rows (join-token expiry, credential expiry, cordon end) | `js-lease-server/src/join_tokens.rs:450-455`, `:534-539` | stamped and judged with the process clock | Designed (G2) |
-| A silent host's jobs are lost (settlement) | `js-lease-server/src/job_pass.rs:126` (`gone`), `:179` (the claim is skipped while `gone` is not empty), `js-lease-server/src/job_alloc.rs:140` | "absent" is this instance's registry forgetting the host; a host connected to another instance is never heard here, so this instance can lose its live work | Designed (G6) |
+| A silent host's jobs are lost (settlement) | `js-lease-server/src/job_pass.rs:126` (`gone`), `:179` (while `gone` is not empty the claim is bypassed and the pass runs regardless), `js-lease-server/src/job_alloc.rs:140` | "absent" is this instance's registry forgetting the host; a host connected to another instance is never heard here, so this instance can lose its live work | Designed (G6) |
 | `taint/<host>` rows are dropped once kept | `js-jobs/src/store/taints.rs:72` | `Cond::Any`: a taint row rewritten between the scan and the delete is lost | Designed (G4) |
 | The scaler runs a step | `js-lease-server/src/server.rs:458`, `js-lease-server/src/scaler/mod.rs:189` | every instance with an elastic pool runs its own loop, with no claim | Designed (G9) |
 | The scaler's records and unremoved hosts | `js-lease-server/src/scaler/kept.rs:51` | read at start, written whole at `Cond::Any`: two scalers overwrite each other | Designed (G9) |
@@ -177,9 +178,9 @@ and decides nothing shared). Paths are under `crates/`.
 | A host-hour pack of minute rows | `js-usage/src/store.rs:101-106` | `Cond::Version` or `Cond::Absent`; a conflict keeps the minutes buffered | Built |
 | The same host-minute flushed by two instances (a host that moved within the minute) | `js-usage/src/store.rs:108` | the later flush replaces the minute instead of adding to it | Designed (G11) |
 | An ended allocation's history record | `js-usage/src/history.rs:348` | `Cond::Absent`, in the commit that frees the allocation | Built |
-| The usage prune | `js-usage/src/hub.rs:448` | every instance prunes each day; each delete is `Cond::Version`, so duplicate work only | Designed (G11) |
+| The usage prune | `js-usage/src/hub.rs:448-457` (`due`) | every instance prunes each day; each delete is `Cond::Version`, so duplicate work only | Designed (G11) |
 | Profile curves' eviction | `js-usage/src/profile_store.rs:220` | victims deleted at `Cond::Any`; dormant (the server feeds it no results) | Designed (G11) |
-| The minute buffer, counters, the usage mutex | `js-lease-server/src/usage_js.rs:193` | the process's own; losing one unflushed buffer when an instance dies is accepted (section 6) | Per instance |
+| The minute buffer, counters, the usage mutex | `js-usage/src/hub.rs:165`, `js-lease-server/src/usage_js.rs` | the process's own; losing one unflushed buffer when an instance dies is accepted (section 6) | Per instance |
 
 ## 4. Time
 
@@ -191,11 +192,17 @@ cannot be read (section 3.1). G2 makes one clock:
   clocks as now). Every caller that stamps or compares a shared time takes it from `try_now` and fails the call, writing nothing,
   when it fails. That is rule 4 for time.
 - The job pass, prepare expiry, the duty claims (`job_pass.rs:168-169`), the whole-host start (`agent_api.rs:608`), join-token and
-  credential expiry and the cordon end (`join_tokens.rs:450-539`, `agents.rs:670`), and the whole-host mark's times
-  (`js-sched-placer/src/jobs.rs:727`) take the store's time, once per pass or request.
+  credential expiry and the cordon end (`join_tokens.rs:450-539`, `agents.rs:676`) take the store's time, once per pass or
+  request. The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:727`) is replaced by G8, on this clock.
 - The process clock stays for intervals that are the process's own: ticks, backoffs, the hello limiter, the held beat.
 
 One more round trip per pass or request, and none per heartbeat that decides nothing.
+
+**Load.** Two costs grow with the fleet, not with the instances. Every claimed decision (a placement) holds the commit head from
+its start (3.1), so the placements of all instances are serialized there; each holds it for one job's rows, and more instances
+spread the same placements without adding any. Presence (section 5) is one small write per host per `presence_refresh`: at the
+default 5 s, 100 hosts are 20 writes a second. Neither is measured here; G5's pull request measures the presence write at the
+deployment's host count, and `js-state/tests/postgres_head_queue.rs` exercises writers queued on the head.
 
 ## 5. Hosts across instances
 
@@ -208,7 +215,8 @@ other instances must know about the host:
   version (`js-state` `Checked`), so a replaced connection commits nothing and its beat is answered `403 session-mismatch`.
 - **Presence** (G5): the same row gains optional fields, written by the holder: the host's pool, agent instance, its claim and
   shape as the hello reported them, whether its last listing was clean, and `heard_at`, the store's time of the last applied beat,
-  refreshed at most every `presence_refresh` (a config key, default 5 s, below the grace). Each write goes through the same
+  refreshed at most every `presence_refresh` (a config key, default 5 s; it must stay below half the shortest
+  pool grace, which the server checks once at start, B20, not at run time). Each write goes through the same
   `Checked` store, so a superseded holder writes nothing. About one small write per host per 5 s, the rate the project owner
   accepted for the coordinator (komira-ai/hostkeeper's design, section 19, decision 4). This amends
   [jobscheduler-design.md](jobscheduler-design.md) section 10.1 ("a heartbeat is not a write"): a beat is still not a write;
@@ -230,8 +238,10 @@ What reads presence:
 - **Settlement** (G6): the claimed job pass reads the presence rows. A host whose `heard_at` is older than grace plus retention by
   the store's time is lost: each of its live allocations is ended in a transaction that also checks `node/<host>` at the version
   read, so a hello that lands meanwhile makes the settlement a conflict and nothing is lost. The registry's `gone` map no longer
-  decides, and the job pass no longer skips its claim for it (`job_pass.rs:179`). A host whose instance died is settled by
-  whichever instance claims the pass, which is what an instance-local judgement cannot do.
+  decides, and the job pass no longer bypasses its claim for it (`job_pass.rs:179`). A host whose instance died is settled by
+  whichever instance claims the pass, which is what an instance-local judgement cannot do. G6's tests: a host whose holding
+  instance stops is settled by the other after grace plus retention on an injected store clock, and a hello landing between the
+  read and the end makes the settlement a conflict that loses nothing.
 
 ## 6. Decisions already taken for js-server
 
@@ -246,15 +256,17 @@ Carried from komira-ai/hostkeeper's design, section 13:
 
 ## 7. Compatibility (B8)
 
-Every change of section 9 is additive. New key prefixes: `node/` (G1), `pool/` (G5); new optional fields in the `node/` value
-(G5); new duty rows under `periodic/` (G9, G11); new scaler rows under `acquires/scaler/` for a launch (G9). No existing key is
-renamed, re-meant or written in a new shape. The binding, join-token and scaler-record rows keep their values; what changes is
+Every change of section 9 is additive. New key prefixes: `node/` (G1; beside, and not under, the usage rows' `usage/node/`),
+`pool/` (G5), `hostmark/` (G7), the one row `hosts/join-mint` (G3, outside the `hosts/join/` prefix the token scan reads); new optional fields in the `node/` value (G5) and a stored deadline in the `mark/<job>` value (G8);
+new duty rows under `periodic/` (G9, G11); new scaler rows under `acquires/scaler/` for a launch and for a pool's brake (G9). No
+existing key is renamed, re-meant or written in a new shape. The binding, join-token and scaler-record rows keep their values; what changes is
 that they are written at the version read, which a reader does not see. An older release ignores the new prefixes.
 
 Mixed releases: the deploy stays stop-first until section 9 is Built, so a release before a gap never runs beside the release that
 closes it. After that, every release follows this rule, and a later change to a row this document adds is additive in the same way.
-Each gap's pull request names its test that runs the previous release's store reader on the new rows (the existing
-`exported_files` and skew tests are the pattern) where it adds a row, and says so where it adds none.
+Each gap's pull request that adds a row names its test that the previous release's reader serves a store holding it (as
+`js-state/tests/postgres_schema.rs::migrating_to_n_plus_1_leaves_the_serving_n_child_working` does for the schema), and says so
+where it adds none.
 
 ## 8. Tests
 
@@ -278,15 +290,17 @@ Built with paths.
 |---|---|---|---|
 | G1 | **Finish komira-ai/jobscheduler#883** (open, conflicts with `main` in `agent_api.rs`): the connection row `node/<host>` and the `Checked` store; merge `main` into its branch, keep its tests (`two_servers_serve_one_store_place_each_job_once_and_keep_to_the_hosts_cores` among them) | which connection commits a listing; first-listing loss; same agent takes over at once | none |
 | G2 | **One clock**: `try_now`, the store's time for every shared deadline, expiry and due time (section 4) | `Store::now` epoch; the pass's clock; host-row times; the whole-host start's clock | none |
-| G3 | **Join tokens and host credentials are rows**: `identify`, `registered_as` and `serves` read the token's row by key; a use is `Cond::Version` on the token row and `Cond::Absent` on a new credential row, in the hello's transaction; mint at `Cond::Absent`, replacement and purge at the scanned version; revoke by a scan of `hosts/join/`; renewal at the row's version, a conflict left to the next tick; the give-back at the version the admit wrote, skipped on conflict; the stale "one writer" comment in `host_keys.rs` goes | 3.2: recognised, used once, minted, revoked, renewed, given back | none |
+| G3 | **Join tokens and host credentials are rows**: `identify`, `registered_as` and `serves` read the token's row by key; a use is `Cond::Version` on the token row and `Cond::Absent` on a new credential row, in the hello's transaction; mint at `Cond::Absent`, replacement and purge at the scanned version, the cap of waiting tokens (`MAX_WAITING`, 256, over
+every pool) counted in the minting transaction under the lock of one row, `hosts/join-mint` (read and written at `Cond::Version`); revoke by a scan of `hosts/join/`; renewal at the row's version, a conflict left to the next tick; the give-back at the version the admit wrote, skipped on conflict; the stale "one writer" comment in `host_keys.rs` goes | 3.2: recognised, used once, minted, revoked, renewed, given back | none |
 | G4 | **Host bindings are rows**: `HostBound` judged on the binding row read in the hello's transaction (`Cond::Absent` for a first hello, `Cond::Version` otherwise), the registry record's taint and cordon taken from that row; `save_bindings` writes only what this instance changed, at the version read, and deletes nothing it did not explicitly forget; cordon, uncordon and clear taint read, change and write the row at its version and take the host from the row (a host held elsewhere is not `404`); `taint/<host>` dropped at the version scanned | 3.2: host bound, saved, taint seen, cordon, clear taint; `taint/` drop | G3 |
 | G5 | **Presence in the connection row** (section 5): pool, agent instance, claim and shape, listing-clean, `heard_at`; `presence_refresh`; admission, host listings, `host_silent_since_ms`, `HostLive` and `PoolFull` read it; `docs/design/jobscheduler-design.md` section 10.1 amended | 3.3: `HostLive`, `PoolFull`, listing-clean; 3.5: admission, listings | G1, G2 |
 | G6 | **Settlement by rows**: the claimed job pass loses a host's allocations by its presence row and `node/<host>` version, never by the local `gone` map; the claim bypass goes | 3.6: settlement | G5 |
 | G7 | **Placement re-checks the host in its transaction**: `place_claimed` reads the host's binding (taint, cordon end by the store's time), `taint/<host>`, the scale-down mark and the ports of the host's live allocations in the claimed transaction and refuses the host; the scale-down mark becomes a row `hostmark/<host>`, written at `Cond::Version` by whoever marks, the registry mark its cache | 3.4: contained beside host job, taint, cordon, ports, scale-down mark | G4, G5 |
-| G8 | **Whole-host drain and queue notes without churn**: a whole-host mark held for a host live on another instance is kept until its stored deadline by the store's time (no `claim_by` from the process's start); the queue note's text is the same whatever the instance sees | 3.4: which host drains; queue notes | G2 |
+| G8 | **Whole-host drain and queue notes without churn**: a whole-host mark held for a host live on another instance is kept until its stored deadline by the store's time (no `claim_by` from the process's start); the queue note's text says whether any live host could serve the job by the presence rows, not by this instance's hosts | 3.4: which host drains; queue notes | G2, G5 |
 | G9 | **The scaler under the rule**: one step per pool and period by a duty claim (`periodic/scaler/<pool>`); its records and unremoved set written at the row's version, a conflict re-reading and re-deciding the step; each launch a row at `Cond::Absent` before the provider call, its acquire id derived from that row so a repeated call is the same machine; caps and budgets judged in the transaction that writes the launch row, under the pool's scaler row lock; the brake a row, its reset a conditional write; a release written to `hostmark/<host>` before the provider release | 3.6: scaler step, records, caps, host view; 3.5: brake reset | G2, G7 |
 | G10 | **Agent connection max age** (section 6) | section 6 | none |
-| G11 | **Economy**: the import's loser reads the marker and starts; a host-minute stored twice is added to, not replaced (CPU summed, peaks by max); the usage prune claimed by `periodic/usage-prune`; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G2 |
+| G11 | **Economy**: the import's loser reads the marker and starts; a host-minute flushed by two instances keeps both: each instance's minutes are stored under its own contribution in the hour
+pack and summed on read, so a flush retried after a lost reply replaces its own contribution and never counts twice; the usage prune claimed by `periodic/usage-prune`; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G2 |
 | G12 | **Job-store cutover tools** (section 6): a dry-run copy of `<state file>.jobs` into the store with counts and a checksum per prefix, and an export of the store's job and usage rows to a SQLite file, with the round trip as its test. Moot for a deployment whose job store is already in Postgres with nothing to bring back | section 6 | none |
 
 After G1 to G11, a start-first update with two overlapping instances is safe from this repository's side; the deploy change is
