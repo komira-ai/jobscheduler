@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
-use js_registry::{Binding, Cordoned, Credential, OsSessions, Registry, Uncordoned};
+use js_registry::{Binding, Cordoned, Credential, HostState, OsSessions, Registry, Uncordoned};
 use js_types::Clock;
 use js_types::{HostId, ProviderId};
 use tracing::{error, info, warn};
@@ -34,6 +34,7 @@ use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, CpuSlack, placer, split};
+use crate::deny::DenyList;
 use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
@@ -67,6 +68,8 @@ pub(crate) struct Agents {
     /// The providers the mint route accepts, or none for any.
     pub(crate) mint_provider: BTreeSet<String>,
     pub(crate) limiter: HelloLimiter,
+    /// The hosts the agent routes refuse (`--agent-deny-file`), read again at every tick.
+    pub(crate) deny: DenyList,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
     pub(crate) store: BindingStore,
@@ -255,7 +258,9 @@ fn placed_in(
         jobs,
         job_sources,
         providers,
+        deny_file,
     } = *agents;
+    let deny = deny_file.map_or_else(|| Ok(DenyList::none()), DenyList::open)?;
     let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
     let joins = joins.requiring_credential(require_host_credential);
     // The usage limits hold the largest host of every pool.
@@ -309,6 +314,7 @@ fn placed_in(
         joins,
         mint_provider,
         limiter: HelloLimiter::new(hello_limit, clock.clone()),
+        deny,
         clock: clock.clone(),
         store,
         host_writes: tokio::sync::Mutex::new(()),
@@ -379,6 +385,7 @@ impl Agents {
             joins,
             mint_provider: BTreeSet::new(),
             limiter: HelloLimiter::new(limit, clock.clone()),
+            deny: DenyList::none(),
             clock: clock.clone(),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             host_writes: tokio::sync::Mutex::new(()),
@@ -547,11 +554,30 @@ impl Agents {
         &self,
         host: &HostId,
         hello: &Hello,
-        credential: &Credential,
+        (credential, service): (&Credential, bool),
     ) -> Change {
         let held = self.registry.bindings().remove(host);
         let fresh = || Binding::new(credential.clone(), hello.instance.clone());
-        self.store.change(host, held.unwrap_or_else(fresh))
+        // A hello with a service certificate moves a host that is not live from the
+        // credential it was bound to onto the certificate's, keeping its taint and cordon
+        // (the registry decides the same, [`Registry::hello_as_service`]; for a live host it
+        // refuses, and nothing is written here).
+        let idle = || {
+            let state = self.registry.own_host(host).map(|own| own.host.state);
+            state != Some(HostState::Live)
+        };
+        let moved = |bound: &Binding| {
+            let taint = bound.taint().cloned();
+            fresh()
+                .with_taint(taint)
+                .with_cordon(bound.cordon_until_ms())
+        };
+        let bound = match held {
+            Some(bound) if service && bound.credential() != credential && idle() => moved(&bound),
+            Some(bound) => bound,
+            None => fresh(),
+        };
+        self.store.change(host, bound)
     }
 
     /// Commits `writes` (bindings, with the store) in one transaction, on the pool for
@@ -803,7 +829,8 @@ impl Agents {
         self.meter.get().unwrap_or(Meter::off())
     }
 
-    /// What every tick does for the agent side: read the join tokens again and drop the
+    /// What every tick does for the agent side: read the deny file again (a file that cannot be
+    /// read keeps the hosts denied now, and is counted and logged), read the join tokens again and drop the
     /// hello limits of those that left the file, then read the job service's client token
     /// files again ([`AgentTokens::reload_clients`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
@@ -820,6 +847,14 @@ impl Agents {
         for err in read.iter().filter_map(|read| read.as_ref().err()) {
             self.errors.fetch_add(1, Ordering::SeqCst);
             warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
+        }
+        let this = Arc::clone(self);
+        match blocking(move || this.deny.reload()).await {
+            Ok(()) => {}
+            Err(error) => {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+                warn!(%error, "cannot read the agent deny file again; the hosts denied now stay denied");
+            }
         }
         // A set that could not be read keeps its tokens, and their limits.
         let credentials = self.every_tokens().flat_map(AgentTokens::credentials);

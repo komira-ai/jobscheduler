@@ -190,6 +190,8 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--tick", "3s"),
         key("--tls-cert", "/cert"),
         key("--tls-key", "/key"),
+        key("--agent-client-ca", "/ca"),
+        key("--agent-deny-file", "/deny"),
         key("--max-connections", "7"),
         key("--handshake-timeout", "3s"),
         key("--header-timeout", "4s"),

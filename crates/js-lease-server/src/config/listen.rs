@@ -11,7 +11,7 @@
 //! [`not_loopback`].
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{Cli, TlsFiles, is_private_address};
 use crate::error::StartupError;
@@ -156,6 +156,18 @@ pub(super) fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {
     match refused {
         Some(refusal) => Err(refusal),
         None => Ok(files),
+    }
+}
+
+/// The CA file of `--agent-client-ca`, refused when the server has no TLS (`has_tls`): a
+/// certificate cannot be asked for over plain HTTP.
+pub(super) fn agent_client_ca(cli: &Cli, has_tls: bool) -> Result<Option<PathBuf>, StartupError> {
+    match (&cli.agent_client_ca, has_tls) {
+        (Some(_), false) => Err(StartupError::new(
+            "--agent-client-ca",
+            "requires --tls-cert and --tls-key: a certificate is asked for over TLS only",
+        )),
+        (ca, _) => Ok(ca.clone()),
     }
 }
 

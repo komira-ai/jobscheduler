@@ -8,7 +8,12 @@
 //! There are two acceptors over that one pair, so a reload reaches both: the lease and
 //! agent listeners' speaks HTTP/1.1 only, as it always has, and the job service's offers
 //! HTTP/2 (`h2`, which gRPC needs) before HTTP/1.1, the two its port serves.
+//!
+//! With `--agent-client-ca` the lease and agent listeners' acceptor also asks a client for a
+//! certificate, which it need not give ([`crate::client_verifier`]); the job service's asks
+//! for none. The CA file is read again with the pair, and a reload takes both or neither.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use rustls::ServerConfig;
@@ -22,6 +27,7 @@ use x509_parser::parse_x509_certificate;
 
 use js_types::Clock;
 
+use crate::client_verifier::{self, ServiceVerifier};
 use crate::clock::SharedClock;
 use crate::config::{TlsFiles, read_private};
 use crate::error::StartupError;
@@ -46,6 +52,8 @@ pub(crate) struct Tls {
     files: TlsFiles,
     clock: SharedClock,
     current: Arc<Current>,
+    /// The CA file of `--agent-client-ca` and the verifier that trusts it, when given.
+    clients: Option<(PathBuf, Arc<ServiceVerifier>)>,
     acceptor: TlsAcceptor,
     job_acceptor: TlsAcceptor,
 }
@@ -53,22 +61,38 @@ pub(crate) struct Tls {
 impl Tls {
     /// TLS serving the certificate chain and key in `files`: HTTP/1.1 only on the lease and
     /// agent listeners, HTTP/2 or HTTP/1.1 on the job service's. The key file must be
-    /// owner-only like the token file (see `read_private`).
-    pub(crate) fn open(files: &TlsFiles, clock: SharedClock) -> Result<Self, StartupError> {
+    /// owner-only like the token file (see `read_private`). With `client_ca`, the lease and
+    /// agent listeners accept the agent service certificates of that CA file.
+    pub(crate) fn open(
+        files: &TlsFiles,
+        client_ca: Option<&Path>,
+        clock: SharedClock,
+    ) -> Result<Self, StartupError> {
         let current = Arc::new(Current(RwLock::new(Arc::new(load(files)?))));
-        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(StartupError::because("--tls-cert"))?;
-        let mut config = builder
+        let clients = match client_ca {
+            Some(ca) => Some((ca.to_path_buf(), Arc::new(ServiceVerifier::open(ca)?))),
+            None => None,
+        };
+        let builder = || {
+            ServerConfig::builder_with_provider(Arc::new(default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(StartupError::because("--tls-cert"))
+        };
+        let mut config = match &clients {
+            Some((_, verifier)) => builder()?.with_client_cert_verifier(verifier.clone()),
+            None => builder()?.with_no_client_auth(),
+        }
+        .with_cert_resolver(current.clone());
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut jobs = builder()?
             .with_no_client_auth()
             .with_cert_resolver(current.clone());
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let mut jobs = config.clone();
         jobs.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(Self {
             files: files.clone(),
             clock,
             current,
+            clients,
             acceptor: TlsAcceptor::from(Arc::new(config)),
             job_acceptor: TlsAcceptor::from(Arc::new(jobs)),
         })
@@ -86,11 +110,20 @@ impl Tls {
 
     /// Reads the files again and, when the pair is whole (the key owner-only and the key
     /// of the certificate) and the leaf certificate is valid now by the server's clock, serves it from the next
-    /// handshake on. Otherwise the pair being served stays and the error says why.
+    /// handshake on; with `--agent-client-ca`, its file is read again too, and the
+    /// certificates in it are trusted from the next handshake on. Otherwise the pair and the
+    /// CA being served stay (a CA file that fails keeps the pair too) and the error says why.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
         let fresh = load(&self.files)?;
         let now = i64::try_from(self.clock.now().millis() / 1000).unwrap_or(i64::MAX);
         check_valid_now(&fresh, &self.files, now)?;
+        let roots = match &self.clients {
+            Some((ca, verifier)) => Some((verifier, client_verifier::load(ca)?)),
+            None => None,
+        };
+        roots
+            .into_iter()
+            .for_each(|(verifier, roots)| verifier.replace(roots));
         *self
             .current
             .0

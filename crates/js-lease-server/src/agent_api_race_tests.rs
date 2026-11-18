@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_registry::{PoolConfig, Registry, SequentialSessions};

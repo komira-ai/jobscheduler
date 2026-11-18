@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path as FilePath;
+use std::time::Duration;
 
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_jobs::interfere::{INJECTED, Interfere};
@@ -28,6 +29,9 @@ use crate::join_tokens::JoinTokens;
 
 #[path = "agent_api_store_clear_tests.rs"]
 mod clear;
+
+#[path = "agent_api_service_tests.rs"]
+mod service;
 
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;
@@ -180,7 +184,7 @@ impl Rig {
         let one_time = one_time.map(|presented| Extension(OneTime(presented)));
         let agents = State(Arc::clone(&self.agents));
         let body = Ok(Bytes::from(beat.to_string()));
-        let reply = super::heartbeat(agents, Extension(who.clone()), one_time, body).await;
+        let reply = super::heartbeat(agents, Extension(who.clone()), (one_time, None), body).await;
         reply.map(|Json(reply)| reply)
     }
 
@@ -202,7 +206,8 @@ impl Rig {
         });
         let agents = State(Arc::clone(&self.agents));
         let body = Ok(Bytes::from(beat.to_string()));
-        let reply = super::heartbeat(agents, Extension(self.pool.clone()), None, body).await;
+        let reply =
+            super::heartbeat(agents, Extension(self.pool.clone()), (None, None), body).await;
         reply.map(|Json(reply)| reply)
     }
 
@@ -487,7 +492,7 @@ async fn heartbeat_and_host_book_reads_make_no_store_call() {
     assert!(listed.to_string().contains("host-a"), "{listed}");
     let target = axum::extract::Path("host-a".to_owned());
     let presented = Some(Extension(OneTime(who.clone())));
-    let shown = own_host::show(State(Arc::clone(&rig.agents)), presented, target).await;
+    let shown = own_host::show(State(Arc::clone(&rig.agents)), (presented, None), target).await;
     assert!(shown.is_ok());
 
     assert!(rig.store.get("probe").is_err(), "no read reached the store");

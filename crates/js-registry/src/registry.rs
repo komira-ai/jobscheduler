@@ -400,6 +400,32 @@ impl Registry {
     /// adopted: each is answered with a cancel in the host's next heartbeat reply (a
     /// welcome carries no commands).
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
+        self.admit(hello, credential, false)
+    }
+
+    /// [`Registry::hello`] for a hello authenticated by a service certificate
+    /// ([`Credential::of_service_certificate`]): a host id bound to another credential (a
+    /// join token, say) that is not live is bound to `credential` instead, by this hello,
+    /// keeping its taint and cordon; its instance becomes the hello's. A live host is
+    /// refused [`Refusal::HostLive`] as for any hello, and every other check is as
+    /// `hello`'s. The caller keeps its own record of the binding in step (see
+    /// [`Registry::bindings`]).
+    pub fn hello_as_service(
+        &self,
+        hello: &Hello,
+        credential: &Credential,
+    ) -> Result<Welcome, Refusal> {
+        self.admit(hello, credential, true)
+    }
+
+    /// [`Registry::hello`], binding the host to `credential` over another credential's
+    /// binding when `rebind` is set and the host is not live.
+    fn admit(
+        &self,
+        hello: &Hello,
+        credential: &Credential,
+        rebind: bool,
+    ) -> Result<Welcome, Refusal> {
         let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
         let protocol = hello.negotiate().map_err(Refusal::Invalid)?;
         hello.validate().map_err(Refusal::Invalid)?;
@@ -425,10 +451,14 @@ impl Registry {
             false => kept_leaving,
         };
         let instance = hello.instance.as_ref();
+        let rebinding = rebind
+            && kept_binding
+                .as_ref()
+                .is_some_and(|bound| bound.credential() != credential);
         let bound_elsewhere = kept_binding
             .as_ref()
             .is_some_and(|bound| !bound.admits(credential, instance));
-        if bound_elsewhere {
+        if bound_elsewhere && !rebinding {
             return Err(Refusal::HostBound);
         }
         let live = known.is_some_and(|record| {
@@ -492,10 +522,10 @@ impl Registry {
             host.clone(),
             Record {
                 pool: Some(pool),
-                binding: Some(
-                    kept_binding
-                        .unwrap_or_else(|| Binding::new(credential.clone(), instance.cloned())),
-                ),
+                binding: Some(match kept_binding {
+                    Some(kept) if !rebinding => kept,
+                    _ => Binding::new(credential.clone(), instance.cloned()),
+                }),
                 epoch,
                 session: Some(SessionDigest::of(&secret)),
                 phase: hello.phase,

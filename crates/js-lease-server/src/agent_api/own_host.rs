@@ -14,6 +14,11 @@
 //! not said hello since the server started and holds nothing a restart puts back) is
 //! 409 `unknown-host`, as for a heartbeat: the agent says hello again.
 //!
+//! A request whose connection carries a service certificate (see [`super::service`]) is
+//! served with no other credential, and the path's host must be the certificate's, or it is
+//! 403 `certificate-host-mismatch`. A host on the deny list is 403 `host-denied` whatever the
+//! credential.
+//!
 //! The server keeps no record of who placed a cordon, and an uncordon lifts any cordon.
 //! A caller therefore uncordons only a cordon it placed, and takes `already_cordoned:
 //! false` in the reply of its cordon as the proof that it placed it. There is no
@@ -45,6 +50,7 @@ use js_registry::{NotHeld, OwnHost};
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
 
+use super::service::{self, ServiceHost};
 use super::{OneTime, Refused, decode, read};
 use crate::agents::{Agents, CordonFault};
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
@@ -154,25 +160,36 @@ fn split(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// The host of the request, if `host` is the host of the credential the request carries.
+/// The host of the request, if `host` is the host of the credential the request carries (a
+/// certificate's host is checked as [`service::check`] does) and is not on the deny list.
 fn authorize(
     agents: &Agents,
-    one_time: Option<Extension<OneTime>>,
+    (one_time, service): (Option<Extension<OneTime>>, Option<Extension<ServiceHost>>),
     host: &str,
 ) -> Result<HostId, Refused> {
-    let Some(Extension(OneTime(presented))) = one_time else {
-        return Err(Refused::new(
-            StatusCode::FORBIDDEN,
-            HOST_CREDENTIAL_REQUIRED,
-        ));
+    let id = match (service, one_time) {
+        (Some(Extension(service)), _) => {
+            service::check(agents, Some(&service), host)?;
+            service.0
+        }
+        (None, Some(Extension(OneTime(presented)))) => {
+            // An id that cannot be a host's is not the credential's host: the answer is the
+            // one for any other host.
+            let id = HostId::new(host).map_err(|_| Refused::join(JoinRefusal::NotAdmitted))?;
+            agents
+                .joins
+                .serves(&presented, host)
+                .map_err(Refused::join)?;
+            service::check(agents, None, host)?;
+            id
+        }
+        (None, None) => {
+            return Err(Refused::new(
+                StatusCode::FORBIDDEN,
+                HOST_CREDENTIAL_REQUIRED,
+            ));
+        }
     };
-    // An id that cannot be a host's is not the credential's host: the answer is the one
-    // for any other host.
-    let id = HostId::new(host).map_err(|_| Refused::join(JoinRefusal::NotAdmitted))?;
-    agents
-        .joins
-        .serves(&presented, host)
-        .map_err(Refused::join)?;
     Ok(id)
 }
 
@@ -198,11 +215,11 @@ fn lease_of(body: &[u8]) -> Result<Duration, Refused> {
 /// `GET /v1/hosts/{id}`.
 pub(super) async fn show(
     State(agents): State<Arc<Agents>>,
-    one_time: Option<Extension<OneTime>>,
+    who: (Option<Extension<OneTime>>, Option<Extension<ServiceHost>>),
     Path(target): Path<String>,
 ) -> Result<Response, Refused> {
     let (host, verb) = split(&target);
-    let host = authorize(&agents, one_time, host)?;
+    let host = authorize(&agents, who, host)?;
     match verb {
         Some(_) => Err(not_found()),
         None => {
@@ -216,12 +233,12 @@ pub(super) async fn show(
 /// `POST /v1/hosts/{id}:cordon` and `POST /v1/hosts/{id}:uncordon`.
 pub(super) async fn act(
     State(agents): State<Arc<Agents>>,
-    one_time: Option<Extension<OneTime>>,
+    who: (Option<Extension<OneTime>>, Option<Extension<ServiceHost>>),
     Path(target): Path<String>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Refused> {
     let (host, verb) = split(&target);
-    let host = authorize(&agents, one_time, host)?;
+    let host = authorize(&agents, who, host)?;
     let body = read(body, INVALID_CORDON)?;
     match verb {
         Some("cordon") => {

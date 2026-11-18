@@ -66,7 +66,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     assert_eq!(
         refused_server("config_unknown_server", "status_token_file = \"/x\""),
         "server.status_token_file: unknown field; known: listen, agent_listen, advertise_url, \
-         scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, tick, \
+         scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, agent_client_ca, agent_deny_file, tick, \
          max_lease_wall, max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, drain_hold, agent_hello_burst, agent_hello_interval, \
          require_host_credential, placement, estimate_feed, cpu_slack, cold_cpu_millis, \

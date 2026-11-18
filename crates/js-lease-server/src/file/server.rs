@@ -31,6 +31,8 @@ const SERVER_KEYS: &[&str] = &[
     "client_token_file",
     "tls_cert",
     "tls_key",
+    "agent_client_ca",
+    "agent_deny_file",
     "tick",
     "max_lease_wall",
     "max_connections",
@@ -85,6 +87,10 @@ pub(crate) struct Server {
     pub(crate) boot: BootMode,
     pub(crate) client_token_file: PathBuf,
     pub(crate) tls: Option<TlsFiles>,
+    /// `agent_client_ca`: the CA file of the agents' service certificates; only with `tls`.
+    pub(crate) agent_client_ca: Option<PathBuf>,
+    /// `agent_deny_file`: the file of the hosts the agent routes refuse.
+    pub(crate) agent_deny_file: Option<PathBuf>,
     pub(crate) tick: Duration,
     /// `max_lease_wall`: the ceiling on a lease's `max_wall`, when the file sets one.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -232,6 +238,13 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         (Some(_), None) => return Err(s.fail("tls_key", "required with server.tls_cert")),
         (None, Some(_)) => return Err(s.fail("tls_cert", "required with server.tls_key")),
     };
+    let agent_client_ca = s.path("agent_client_ca")?;
+    if agent_client_ca.is_some() && tls.is_none() {
+        let reason =
+            "requires server.tls_cert and server.tls_key: a certificate is asked for over TLS only";
+        return Err(s.fail("agent_client_ca", reason));
+    }
+    let agent_deny_file = s.path("agent_deny_file")?;
     let secs = Duration::from_secs;
     let tick = s.duration_or("tick", secs(5))?;
     let defaults = Limits::default();
@@ -286,6 +299,8 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         boot,
         client_token_file,
         tls,
+        agent_client_ca,
+        agent_deny_file,
         tick,
         max_lease_wall,
         limits,
