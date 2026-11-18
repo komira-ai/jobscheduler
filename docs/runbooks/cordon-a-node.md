@@ -48,8 +48,9 @@ file (`--host-id-from-facts`) is cordoned with
 A host whose agent presents its host certificate reads no `host-credential` file, so a file left in
 its state root by an earlier registration is not what the agent uses. Given that state root and no
 host certificate, the verb sends that file, and the server refuses it: `join-token-not-admitted`
-when the earlier registration used another host id than the one asked for, `join-token-expired` or
-`http-401` once the server has let the unused credential lapse. `join-token-not-admitted` also
+when the earlier registration used another host id than the one asked for; `join-token-expired`
+once the credential has gone unused for its bound (24 hours with no hello or heartbeat), and
+`http-401` once a later mint of a join token has dropped that lapsed credential. `join-token-not-admitted` also
 comes when the verb is told another host id than the one the agent registered with (a
 `--host-id-from-facts` on a host whose agent registered with `--host-id`). Standard error then
 says what was sent and for which host:
