@@ -23,12 +23,14 @@
 //!   next id added writes the list whole. An agent of an earlier release reads
 //!   `retired.json` alone, the list as it was at its last whole write.
 //!
-//! [`Lifecycle::adopt`] reads both. A result whose id is a taken-over job's is set on that
+//! [`Lifecycle::adopt`] reads them all. A result whose id is a taken-over job's is set on that
 //! job, which then makes no second result when its container is seen to have exited; any
 //! other becomes a job that holds nothing and is listed until the result is acknowledged.
 //! An unfinished write (`<id>.json.tmp`) is removed without a finding. A file that cannot
 //! be read or understood is removed and reported as a `held-record-unreadable` finding, and
-//! the agent starts all the same; a retired list that cannot be read starts empty. A file
+//! the agent starts all the same; a retired list that cannot be read starts empty, and a log
+//! that cannot be read, or a line of it, adds nothing and is removed by the next whole
+//! write. A file
 //! that cannot be written is a `held-record-failed` finding (once, until a call writes
 //! everything again): the result is still held in memory and the write is tried again at
 //! every call. A result's file is removed only after the retired list that names its id is
@@ -205,17 +207,19 @@ fn unreadable(events: &mut Vec<Event>, what: &str, why: &str) {
 
 /// The lines of the retired list's log for `entries`: one JSON object each, as the list
 /// holds it, ended by a newline.
-fn lines_of<'a>(entries: impl Iterator<Item = (&'a str, Option<&'a str>)>) -> io::Result<Vec<u8>> {
+/// (Two strings always serialise; a failure would leave the line empty, which a read leaves
+/// out as no id.)
+fn lines_of<'a>(entries: impl Iterator<Item = (&'a str, Option<&'a str>)>) -> Vec<u8> {
     let mut lines = Vec::new();
     for (job_id, allocation) in entries {
         let entry = RetiredId {
             job_id: job_id.to_owned(),
             allocation_id: allocation.map(str::to_owned),
         };
-        serde_json::to_writer(&mut lines, &entry).map_err(io::Error::other)?;
+        lines.extend(serde_json::to_vec(&entry).unwrap_or_default());
         lines.push(b'\n');
     }
-    Ok(lines)
+    lines
 }
 
 impl Records {
@@ -338,24 +342,36 @@ impl Records {
     /// finding. Either way the log is appended to no more: the next id written writes the
     /// list whole.
     fn load_log(&mut self, retired: &mut Retired, events: &mut Vec<Event>) {
-        let text = match read_capped(&self.root.join(RETIRED_LOG), RETIRED_MAX) {
+        let read = File::open(self.root.join(RETIRED_LOG)).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(RETIRED_MAX)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        });
+        let bytes = match read {
             Err(why) if why.kind() == io::ErrorKind::NotFound => return,
             Err(why) => {
                 self.log_whole = false;
                 return unreadable(events, "the retired log", &why.to_string());
             }
-            Ok(text) => text,
+            Ok(bytes) => bytes,
         };
-        self.log_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
-        let ended = text.ends_with('\n');
-        let lines: Vec<&str> = text.lines().collect();
+        self.log_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // Bytes, not text: a write cut inside a character spoils its own line alone.
+        let ended = bytes.ends_with(b"\n");
+        let lines: Vec<&[u8]> = bytes
+            .strip_suffix(b"\n")
+            .unwrap_or(&bytes)
+            .split(|byte| *byte == b'\n')
+            .filter(|_| !bytes.is_empty())
+            .collect();
         let finished = match ended {
             true => lines.len(),
             false => lines.len().saturating_sub(1),
         };
         self.log_whole = ended || lines.is_empty();
         for (n, line) in lines.into_iter().take(finished).enumerate() {
-            match serde_json::from_str::<RetiredId>(line) {
+            match serde_json::from_slice::<RetiredId>(line) {
                 Ok(entry) => retired.insert_with(&entry.job_id, entry.allocation_id.as_deref()),
                 Err(why) => {
                     self.log_whole = false;
@@ -389,9 +405,7 @@ impl Records {
         let added = retired.added().saturating_sub(self.retired_added);
         let fresh = usize::try_from(added).unwrap_or(usize::MAX);
         let skip = retired.entries().count().checked_sub(fresh);
-        let lines = skip
-            .map(|skip| lines_of(retired.entries().skip(skip)))
-            .transpose()?;
+        let lines = skip.map(|skip| lines_of(retired.entries().skip(skip)));
         let grown = lines.as_ref().map(|lines| {
             let len = u64::try_from(lines.len()).unwrap_or(u64::MAX);
             self.log_bytes.saturating_add(len)
@@ -441,14 +455,19 @@ impl Records {
         let body = serde_json::to_vec(&list).map_err(io::Error::other)?;
         write_whole(&self.root, RETIRED_FILE, &body)?;
         self.list_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        match fs::remove_file(self.root.join(RETIRED_LOG)) {
-            Ok(()) => sync_dir(&self.root)?,
-            Err(why) if why.kind() == io::ErrorKind::NotFound => {}
+        let removed = match fs::remove_file(self.root.join(RETIRED_LOG)) {
+            Ok(()) => true,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => false,
             Err(why) => return Err(why),
-        }
+        };
+        // The log is gone: a log made from now on is new, and its first append syncs the
+        // state root, whether or not the sync of its removal below goes through.
         self.log_bytes = 0;
         self.log_whole = true;
-        Ok(())
+        match removed {
+            true => sync_dir(&self.root),
+            false => Ok(()),
+        }
     }
 
     /// Removes the file of a result; a file that is not there is removed already.

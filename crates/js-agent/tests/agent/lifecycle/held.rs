@@ -675,8 +675,9 @@ fn at_the_cap_an_id_costs_a_line_until_the_log_reaches_a_sixteenth_of_the_list()
 
 /// Asserts what is read of a log that a crash cut: a last line no newline ends is left out
 /// without a finding and the lines before it are read; a line in the middle that is no id is
-/// left out with one finding and the lines around it are read; an empty log is read as no
-/// ids. After each damaged log, the next id retired writes the list whole and removes the
+/// left out with one finding and the lines around it are read; a last line cut inside a
+/// character is left out like any cut line, the lines before it read; an empty log is read
+/// as no ids. After each damaged log, the next id retired writes the list whole and removes the
 /// log, so that nothing is appended after a cut line. It catches an agent that refuses to
 /// start over a cut log, one that loses the good lines with the bad, and one that appends to
 /// a log whose last line was cut, which would glue two ids into one line.
@@ -715,6 +716,18 @@ fn a_cut_or_damaged_log_keeps_its_good_lines_and_is_folded_into_the_list() {
         assert_eq!(ids.len(), 16 + 1 + usize::from(finding) + 1, "{n}");
         assert_eq!(ids.last().unwrap(), &json!({ "job_id": "s200" }), "{n}");
     }
+
+    // A write cut inside a character spoils only its own line.
+    let mut h = Harness::new("held-retired-cut-char");
+    let list = list_of((0..16).map(sid));
+    fs::write(retired_file(&h), serde_json::to_vec(&list).unwrap()).unwrap();
+    let mut log = line("s100").into_bytes();
+    log.extend(b"{\"job_id\":\"\xc3");
+    fs::write(retired_log(&h), log).unwrap();
+    assert!(h.restart().unwrap().is_empty());
+    assert_eq!(names(&h.start(job("s100"))), ["skipped s100 Retired"]);
+    h.stop("s200");
+    assert!(!retired_log(&h).exists(), "a cut log is folded");
 
     let mut h = Harness::new("held-retired-empty-log");
     let list = list_of((0..16).map(sid));
