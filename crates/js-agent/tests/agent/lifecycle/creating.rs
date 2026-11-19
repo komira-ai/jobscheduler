@@ -7,7 +7,7 @@
 use js_agent::lifecycle::{Event, StartTimeline, code, detail};
 use js_agent_wire::{Command, HeldRun, HeldState, JobSpec, Outcome};
 
-use super::deferring::Deferring;
+use super::deferring::{Deferring, lease};
 use super::per_job::{job_start, listing, start};
 use super::{Harness, job, names};
 
@@ -253,4 +253,30 @@ fn the_end_of_a_lease_while_the_create_is_under_way_times_out_what_it_made() {
     assert!(events.contains(&"result r1".to_owned()), "{events:?}");
     assert_eq!(h.fake.stops().len(), 1);
     assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
+}
+
+/// Asserts that the checks of a run that ends are told, as live beside it, the lease of a
+/// run whose create is under way (its container may already run) and nothing of a start
+/// that still waits for its image (no create is begun, so nothing of it runs). Catches a
+/// lifecycle that tells the checks only of the containers it holds as running or exited,
+/// which makes a starting neighbour's processes the ended run's leftover, and one that names
+/// a start with no create under way.
+#[test]
+fn the_checks_of_a_run_that_ends_are_told_of_a_create_under_way_beside_it() {
+    let (mut h, gate) = Deferring::harness("creating-live");
+    assert_eq!(names(&h.start(job("r1"))), ["started r1"]);
+    gate.hold("r2");
+    assert!(h.start(job("r2")).is_empty());
+    h.fake.pull_pending(COLD);
+    assert!(h.start(cold("r3")).is_empty());
+    assert_eq!(gate.begun(), ["r1", "r2"], "r3 waits for its image");
+    h.fake.exit("r1", 0);
+    h.log.borrow_mut().clear();
+    h.life.step();
+    let log = h.log.borrow().clone();
+    let live: Vec<&String> = log
+        .iter()
+        .filter(|line| line.starts_with("live beside"))
+        .collect();
+    assert_eq!(live, [&format!("live beside r1: {}", lease("r2"))]);
 }

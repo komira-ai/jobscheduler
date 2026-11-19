@@ -12,7 +12,7 @@ use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, ref
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
-use super::super::lifecycle::deferring::Deferring;
+use super::super::lifecycle::deferring::{Deferring, lease};
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use super::{ended, spec, vm};
 
@@ -100,9 +100,12 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
 /// with its handle, and the create of a run of another kind by the other runtime, so that a
 /// create the other runtime holds pending is answered pending by the router's `poll_create`
 /// until it is released, and then with the container's handle; a run the other runtime holds
-/// no create of is answered a failure naming it. Catches a VM start begun on the host
-/// runtime, a container's create begun on the VM runtime, and a poll that is not forwarded
-/// to the runtime that holds the create.
+/// no create of is answered a failure naming it. `creating` names the held create's lease by
+/// the other runtime's answer until it is answered, and no VM run, while the wrapped fake,
+/// which keeps the trait's default, names no run. Catches a VM start begun on the host
+/// runtime, a container's create begun on the VM runtime, a poll or a `creating` that is not
+/// forwarded to the runtime that holds the create, and a default that names a run nothing is
+/// making.
 #[test]
 fn a_create_is_begun_by_the_runtime_of_its_kind_and_polled_on_the_other() {
     let driver = Arc::new(FakeDriver::new());
@@ -118,12 +121,24 @@ fn a_create_is_begun_by_the_runtime_of_its_kind_and_polled_on_the_other() {
     assert_eq!(with.begin_create(&plain), Created::Pending);
     assert_eq!(gate.begun(), ["run-plain"]);
     assert_eq!(with.poll_create("run-plain"), Created::Pending);
+    assert_eq!(
+        with.creating("run-plain"),
+        Some(RunHandle(lease("run-plain"))),
+        "the other runtime names the create it holds"
+    );
+    assert_eq!(with.creating("run-vm"), None);
+    assert_eq!(
+        fake.creating("run-plain"),
+        None,
+        "a runtime with the trait's default, whose creates answer at once, names none"
+    );
     assert!(fake.created().is_empty());
     gate.release("run-plain");
     assert!(matches!(
         with.poll_create("run-plain"),
         Created::Done(Ok(_))
     ));
+    assert_eq!(with.creating("run-plain"), None, "answered");
     assert_eq!(fake.created().len(), 1);
     let Created::Done(Err(why)) = with.poll_create("run-plain") else {
         panic!("the create was answered");

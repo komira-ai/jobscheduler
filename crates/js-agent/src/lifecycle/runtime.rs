@@ -429,6 +429,17 @@ pub trait Runtime {
         Created::Done(Err(RuntimeError::new(why)))
     }
 
+    /// The handle the run `run_id` will have, while the create [`Runtime::begin_create`] began
+    /// for it is under way off the worker ([`Created::Pending`]), and until
+    /// [`Runtime::poll_create`] has taken its answer; `None` for a run with no create under
+    /// way. Such a create may already have made the run's control group and started its
+    /// processes, so the post-job checks of another run count what is in that group as this
+    /// run's ([`Finished::live`](crate::lifecycle::Finished::live)). The default, whose
+    /// creates are never pending, has none.
+    fn creating(&self, _run_id: &str) -> Option<RunHandle> {
+        None
+    }
+
     /// Whether the container runs, has exited or is gone, without waiting. A backend maps
     /// the runtime's "no such container" to [`Status::Gone`], not to an error: an error
     /// means the runtime could not say, and the job is polled again.
