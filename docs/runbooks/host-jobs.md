@@ -42,7 +42,8 @@ Nothing in the scheduler clears a host job's taint by itself: the machine must b
 host job's taint is cleared the way any taint is, once the machine is reimaged: an operator calls
 `ClearHostTaint` (`js host host-taint --host-id ID`), which clears the taint the server stores for
 the host. The call does not reach the agent: if the agent's `taint.json` is still on the host,
-move it aside first (a reimaged host has none), or the agent refuses the next start
+move it aside first with `js-agent clear-taint` (docs/runbooks/clear-a-taint.md; a reimaged host
+has none), or the agent refuses the next start
 `host-tainted` and the server takes that as the host's taint again.
 A job store taint row that a failed write left behind (the server logs a warning that names the
 host) is put back on the binding at the next start; start the server once after such a warning,

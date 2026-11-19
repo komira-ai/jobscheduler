@@ -454,3 +454,85 @@ impl Sleeper for Settling2<'_> {
         Wake::Elapsed
     }
 }
+
+/// A worker holding `r1`, exited, whose post-job check could not read the host's processes:
+/// the host is tainted (`unchecked`) and `r1` is left `Blocked`, its result held.
+fn with_blocked_run(dir: &Scratch, machine: &FakeMachine) -> Worker {
+    let worker = start(dir, machine);
+    machine.world.fail("processes", u32::MAX);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    machine.world.exit("r1", 0);
+    assert!(worker.handle().settle());
+    let snapshot = worker.snapshot();
+    assert_eq!(snapshot.blocked, ["r1"], "{snapshot:?}");
+    assert_eq!(snapshot.results.len(), 1);
+    worker
+}
+
+/// Asserts that a tainted agent whose only run is one its checks blocked leaves at the first
+/// heartbeat of the drain once the run's result is acknowledged, instead of heartbeating
+/// `draining` for the whole wait: the drain's heartbeat still lists the run (the server is
+/// told of it), nothing is stopped, the worker still holds the run for the next process, and
+/// the log says what is left and why. It catches the stop of a tainted crun agent that holds
+/// no job running and still does not exit on SIGTERM until its drain wait runs out.
+#[test]
+fn a_run_the_taint_blocks_does_not_hold_the_drain() {
+    let dir = Scratch::new("jobs-drain-blocked");
+    let machine = FakeMachine::new();
+    let worker = with_blocked_run(&dir, &machine);
+    let replies = vec![welcome(1), ack_of("r1"), beat_ok()];
+    // One stop request, as systemd sends one SIGTERM: a second would end any drain.
+    let act = |n: usize| if n == 1 { Wake::Stop } else { Wake::Elapsed };
+    let (exit, log, sent) = drained(&worker, LONG, replies, act);
+
+    assert_eq!(exit, Exit::Stopped);
+    assert_eq!(phases(&sent), ["serving", "serving", "draining"]);
+    assert_eq!(sent[1].1["taint"]["reason"], "unchecked");
+    assert_eq!(sent[1].1["results"][0]["run_id"], "r1");
+    assert_eq!(
+        sent[2].1["held"],
+        json!([{ "run_id": "r1", "state": "exited_unacked" }])
+    );
+    assert_eq!(sent[2].1["results"], json!([]));
+    assert!(
+        !machine.world.log().contains(&"stop r1".to_owned()),
+        "a blocked run has nothing to stop"
+    );
+    assert_eq!(worker.snapshot().blocked, ["r1"]);
+    assert!(
+        log.contains("draining: only the runs whose checks found the taint are left"),
+        "{log}"
+    );
+    assert!(!log.contains("a run or a result is left"), "{log}");
+}
+
+/// Asserts that the result of a blocked run still holds the drain until the server
+/// acknowledges it: the first heartbeat of the drain carries the result unacknowledged, the
+/// second carries it again and is acknowledged, and the agent leaves after the third. It
+/// catches a drain that leaves a result the server could still take, because its run is one
+/// the drain does not wait for.
+#[test]
+fn the_result_of_a_blocked_run_holds_the_drain_until_it_is_acknowledged() {
+    let dir = Scratch::new("jobs-drain-blocked-result");
+    let machine = FakeMachine::new();
+    let worker = with_blocked_run(&dir, &machine);
+    let replies = vec![welcome(1), beat_ok(), ack_of("r1"), beat_ok()];
+    let (exit, log, sent) = drained(&worker, LONG, replies, |n| match n {
+        0 => Wake::Stop,
+        _ => Wake::Elapsed,
+    });
+
+    assert_eq!(exit, Exit::Stopped);
+    assert_eq!(
+        phases(&sent),
+        ["serving", "draining", "draining", "draining"]
+    );
+    assert_eq!(sent[1].1["results"][0]["run_id"], "r1");
+    assert_eq!(sent[2].1["results"][0]["run_id"], "r1");
+    assert_eq!(sent[3].1["results"], json!([]));
+    assert!(
+        log.contains("draining: only the runs whose checks found the taint are left"),
+        "{log}"
+    );
+}

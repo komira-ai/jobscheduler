@@ -603,7 +603,7 @@ impl<'a> Session<'a> {
 
     /// Starts a drain with jobs: the phase is `draining` in every heartbeat and in a
     /// hello that may follow, and the worker takes no new job. The caller goes on ticking
-    /// ([`Session::tick`]) while [`Session::jobs_left`], and stops the jobs when the
+    /// ([`Session::tick`]) while [`Session::drain_left`], and stops the jobs when the
     /// [`Drain::wait`] has passed ([`Session::stop_jobs`]).
     pub fn begin_drain(&mut self) {
         self.phase = Phase::Draining;
@@ -621,6 +621,14 @@ impl<'a> Session<'a> {
         self.jobs
             .iter()
             .any(|jobs| !jobs.worker.snapshot().is_empty())
+    }
+
+    /// Whether a drain still waits: the worker holds something a wait can see end, a run or
+    /// job that is not `Blocked` ([`Snapshot::blocked`]), a result or a retired job id.
+    pub fn drain_left(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|jobs| crate::run::drain_waits(&jobs.worker.snapshot()))
     }
 
     /// Asks the worker to stop every run it holds.

@@ -74,8 +74,9 @@ state the host really holds and a re-check that sees no difference does not prov
   pinned too: the seal pins it. So is one the pin file names: when the pin happened in an earlier process, `taint.pinned`
   holds the marker's taint, and a restored residue equal to it, field for field, stays pinned; a pin file that cannot be
   read pins; one that names another taint is a stale file of an operator-cleared taint and is ignored. The decision is
-  `StateRoot::restored_rechecks`, which `TaintState::load` and the update hook share. An operator's clear by hand moves
-  `taint.json`, `taint.pinned` and the `owed-*` records aside. The code is `TaintState::load`, `CheckHook::run_restored` and `Integrity::compare`. Not
+  `StateRoot::restored_rechecks`, which `TaintState::load` and the update hook share. An
+  operator's clear (`js-agent clear-taint`) keeps `taint.json`, `taint.pinned` and the `owed-*`
+  records aside. The code is `TaintState::load`, `CheckHook::run_restored` and `Integrity::compare`. Not
   measured: how often an agent restarts with a taint.
 - **Idle.** Every run is over; a run whose checks found the taint (`Blocked`) counts as over, since its container and
   scratch directory are gone and it would otherwise hold the host busy for good.
@@ -127,7 +128,8 @@ its reason (`cleared_reason`); a host with no taint answers `cleared` false and 
 written; an unknown host is `NOT_FOUND`. The call does not reach the agent: an agent whose
 marker still holds the taint refuses the next start `host-tainted`, and the server takes that
 refusal as the host's taint again, so the operator moves the agent's `taint.json` and its
-`taint.pinned` file and `owed-*` records aside first, or lets the agent clear it itself. A host job's taint row still
+`taint.pinned` file and `owed-*` records aside first (`js-agent clear-taint`, see
+docs/runbooks/clear-a-taint.md), or lets the agent clear it itself. A host job's taint row still
 in the job store is put back on the binding at the next start, so that clear follows the start.
 
 ## The update hook

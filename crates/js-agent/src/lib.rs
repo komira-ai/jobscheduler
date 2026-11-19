@@ -30,6 +30,13 @@
 //! kill -TERM %1; wait %1                                             # prints `lifted`
 //! ```
 //!
+//! `js-agent clear-taint --reason <text> --by <operator>` (Linux, run as root) is an operator's
+//! clear of the agent's taint: with no run that lives on the host, it stops the crun unit, keeps
+//! `taint.json`, `taint.pinned` and the `owed-*` records aside as `.cleared-<time>-by-<operator>`,
+//! records the clear in the state root and starts the unit again, and says how it ended as the
+//! update hook does (exit 0, 1 or 75 and one JSON line), so hostkeeper can run it; see
+//! `clear_taint`.
+//!
 //! `js-agent crun-gpu-dropin --out <file>` (Linux, run as root by `js-agent-crun-gpu.service`
 //! before each start of `js-agent-crun.service`) writes the systemd drop-in that adds the
 //! `--gpu-device`, `--gpu-mount` and `--gpu-env` flags for the host's NVIDIA nodes to the crun
@@ -286,6 +293,8 @@
 
 mod backoff;
 pub mod bundle;
+#[cfg(target_os = "linux")]
+mod clear_taint;
 mod cli;
 pub mod cli_runtime;
 mod container;
@@ -491,6 +500,15 @@ pub fn main_with(
         .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
     {
         return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
+    // An operator's clear of the taint stops and starts the agent's unit itself: it runs no
+    // agent and installs no signal handler.
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(clear_taint::VERB))
+    {
+        return clear_taint::run_system(&args, out, err);
     }
     // The GPU drop-in is a short-lived step of systemd's, before the crun unit starts.
     #[cfg(target_os = "linux")]
