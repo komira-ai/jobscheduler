@@ -312,6 +312,7 @@ fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
+        placed_at_ms: None,
     }
 }
 
