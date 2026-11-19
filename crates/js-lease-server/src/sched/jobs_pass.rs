@@ -20,7 +20,7 @@
 //! returns the hosts it tainted so that the caller writes their bindings
 //! ([`Agents::keep_taints`]). One pass of the server runs at a time ([`Agents::placing`]),
 //! from its read of the open hosts to its last taint, so a pass never offers a host that an
-//! earlier pass has tainted.
+//! earlier pass has tainted. A server that drains ([`crate::drain`]) runs no pass.
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
@@ -137,11 +137,16 @@ impl Agents {
         self.pass_over_queue(Pass::IfChanged)
     }
 
-    /// [`Agents::place_jobs`], or [`Agents::place_jobs_after_beat`] as `pass` says.
+    /// [`Agents::place_jobs`], or [`Agents::place_jobs_after_beat`] as `pass` says. Nothing
+    /// once the server drains ([`crate::drain`]): its hosts are leaving for another server,
+    /// which places the queued jobs as they say hello there.
     fn pass_over_queue(&self, pass: Pass) -> Vec<HostId> {
         let (Some(jobs), Some(placer)) = (&self.jobs, &self.placer) else {
             return Vec::new();
         };
+        if self.draining.begun() {
+            return Vec::new();
+        }
         // Held from the read of the hosts to the last taint: a pass that read the hosts
         // before another pass tainted one would offer it again.
         let _placing = self.placing.lock().unwrap_or_else(PoisonError::into_inner);

@@ -45,15 +45,18 @@
 //! first start over an empty store, which imports it once (`crate::store`). Each host's binding is
 //! the key `hosts/binding/<host id>` of the store ([`crate::host_keys`]): a JSON object
 //! with a `version` and the fields of a file entry (all but `id`, which is the key). The
-//! keys are read once at start, and nothing on the hot path reads the store. A change the
+//! keys are read at start; after it, one key is read at the hello of a host the registry does
+//! not know ([`BindingStore::stored`]), as another server over the same store may have
+//! changed it, and nothing else on the hot path reads the store. A change the
 //! server makes itself (a hello that binds a host, a taint, a cordon or its lift) is
 //! committed before the registry holds it ([`BindingStore::change`]), and a failed commit
 //! leaves memory as it was. The save of each tick then makes the store hold what the
 //! registry has bound ([`BindingStore::save`]), in one transaction: it drops the binding
-//! of a host the registry forgot, and a cordon that lapsed. Fields of a value that this
+//! of a host the registry held and forgot (never of one it did not hold, which another
+//! server may serve), and a cordon that lapsed. Fields of a value that this
 //! build does not know are kept and written back.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -266,12 +269,20 @@ enum Keeper {
     Store(Arc<dyn Store>),
 }
 
-/// The bindings the file or the store holds, and the fields of each stored value that this
-/// build does not know (none in the file, whose reader drops them).
+/// The bindings the file or the store holds, the fields of each stored value that this
+/// build does not know (none in the file, whose reader drops them), and the hosts this
+/// server's registry has held a binding of.
+///
+/// Over a store other servers share, a binding this server read but whose host its registry
+/// never held (a host that says hello to another server) is not this server's to delete: a
+/// save deletes only the binding of a host its registry held and then let go of. A server
+/// that starts beside another therefore leaves every binding the other one serves as it
+/// is.
 #[derive(Default)]
 struct Held {
     bindings: BTreeMap<HostId, Binding>,
     extra: BTreeMap<HostId, Extra>,
+    held: BTreeSet<HostId>,
 }
 
 impl Held {
@@ -282,12 +293,11 @@ impl Held {
         (key(host), value)
     }
 
-    /// The writes that make the store hold `bindings` instead of these.
+    /// The writes that make the store hold `bindings`, the registry's, instead of these: a put
+    /// for each binding that differs, and a delete for each host the registry held before and
+    /// holds no more.
     fn writes_to(&self, bindings: &BTreeMap<HostId, Binding>) -> Writes {
-        let gone = self
-            .bindings
-            .keys()
-            .filter(|host| !bindings.contains_key(*host));
+        let gone = self.gone(bindings);
         let gone = gone.map(|host| self.write(host, None));
         let changed = bindings
             .iter()
@@ -296,15 +306,40 @@ impl Held {
         gone.chain(changed).collect()
     }
 
-    /// Holds `binding` for `host`, or no binding and nothing kept for it.
+    /// The hosts the registry held a binding of and holds none of in `bindings`.
+    fn gone<'a>(
+        &'a self,
+        bindings: &'a BTreeMap<HostId, Binding>,
+    ) -> impl Iterator<Item = &'a HostId> + 'a {
+        self.held
+            .iter()
+            .filter(|host| !bindings.contains_key(*host))
+    }
+
+    /// Holds what a save of `bindings`, the registry's, left in the store: the hosts the
+    /// registry let go of have no binding, those it holds have theirs, and every other
+    /// binding read stays as it was read.
+    fn settle(&mut self, bindings: BTreeMap<HostId, Binding>) {
+        let gone: Vec<HostId> = self.gone(&bindings).cloned().collect();
+        for host in &gone {
+            self.hold(host, None);
+        }
+        for (host, binding) in bindings {
+            self.hold(&host, Some(&binding));
+        }
+    }
+
+    /// Holds `binding` for `host` as the registry's, or no binding and nothing kept for it.
     fn hold(&mut self, host: &HostId, binding: Option<&Binding>) {
         match binding {
             Some(binding) => {
                 self.bindings.insert(host.clone(), binding.clone());
+                self.held.insert(host.clone());
             }
             None => {
                 self.bindings.remove(host);
                 self.extra.remove(host);
+                self.held.remove(host);
             }
         }
     }
@@ -334,7 +369,7 @@ impl BindingStore {
     pub(crate) fn new(path: PathBuf, current: BTreeMap<HostId, Binding>) -> Self {
         let held = Held {
             bindings: current,
-            extra: BTreeMap::new(),
+            ..Held::default()
         };
         Self {
             keeper: Keeper::File(path),
@@ -368,6 +403,42 @@ impl BindingStore {
         Ok((kept, bindings))
     }
 
+    /// The binding the store holds for `host` now, read by its key, which is also held from
+    /// here on as what the store holds (so a change made after it puts back, on undo, what
+    /// the store held). `None` when the store holds none, and in file mode: the file is the
+    /// one server's, and its bindings are those read at start.
+    ///
+    /// A server reads it at the hello of a host its registry does not know
+    /// ([`crate::agents::Agents::restore_stored`]): the host may come from another server
+    /// over the same store, which stored a taint or a cordon for it after this one started.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read, or its value is not a binding.
+    pub(crate) fn stored(&self, host: &HostId) -> io::Result<Option<Binding>> {
+        let Keeper::Store(store) = &self.keeper else {
+            return Ok(None);
+        };
+        let name = key(host);
+        let Some(row) = store.get(&name).map_err(io::Error::other)? else {
+            // Another server dropped it since it was read: what was read is not what the
+            // store holds, so a change puts the binding again rather than taking it for
+            // stored. (The registry does not know the host, so it holds no binding of it.)
+            let mut written = self.lock();
+            written.bindings.remove(host);
+            written.extra.remove(host);
+            return Ok(None);
+        };
+        let stored: Stored = host_keys::decode(&name, &row.value).map_err(io::Error::other)?;
+        let (_, binding, extra) = stored
+            .into_binding(host.to_string())
+            .map_err(|reason| io::Error::other(format!("{name}: {reason}")))?;
+        let mut written = self.lock();
+        written.bindings.insert(host.clone(), binding.clone());
+        written.extra.insert(host.clone(), extra);
+        Ok(Some(binding))
+    }
+
     /// Whether the bindings are kept in the file (no store setting).
     pub(crate) fn in_file(&self) -> bool {
         matches!(self.keeper, Keeper::File(_))
@@ -377,31 +448,64 @@ impl BindingStore {
         self.written.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Makes the file or the store hold what `current` returns, which is called with the
-    /// store's lock held so that the last save to write has read the newest bindings.
-    /// Nothing is written when they hold it already; a failed write leaves them as they
-    /// were and is retried by the next call, which finds the bindings still different. The
-    /// store is written in one transaction: a put for each binding that changed, a delete
-    /// for each host that has none any more.
+    /// Makes the file or the store hold what `current` returns (the registry's bindings),
+    /// which is called with the store's lock held so that the last save to write has read the
+    /// newest bindings. Nothing is written when they hold it already; a failed write leaves
+    /// them as they were and is retried by the next call, which finds the bindings still
+    /// different.
+    ///
+    /// The file is the one server's, and holds exactly `current`. The store is written in
+    /// one transaction: a put for each binding that changed, and a delete for each host the
+    /// registry held and let go of; a binding of a host the registry never held is another
+    /// server's and is left as it is ([`Held`]).
     pub(crate) fn save<F>(&self, current: F) -> io::Result<()>
     where
         F: FnOnce() -> BTreeMap<HostId, Binding>,
     {
         let mut written = self.lock();
         let bindings = current();
-        if written.bindings == bindings {
-            return Ok(());
-        }
         match &self.keeper {
-            Keeper::File(path) => replace(path, render(&bindings)?.as_bytes())?,
-            Keeper::Store(store) => host_keys::commit(&**store, written.writes_to(&bindings))?,
+            Keeper::File(path) => {
+                if written.bindings == bindings {
+                    return Ok(());
+                }
+                replace(path, render(&bindings)?.as_bytes())?;
+                written.bindings = bindings;
+            }
+            Keeper::Store(store) => {
+                host_keys::commit(&**store, written.writes_to(&bindings))?;
+                written.settle(bindings);
+            }
         }
-        let Held {
-            bindings: held,
-            extra,
-        } = &mut *written;
-        extra.retain(|host, _| bindings.contains_key(host));
-        *held = bindings;
+        Ok(())
+    }
+
+    /// Makes the file or the store hold `bindings`, the bindings a start read with the taints
+    /// it put back on them ([`crate::agents_taints`]), before the registry holds any of them.
+    /// The file is written whole, as [`BindingStore::save`] writes it. In the store only the
+    /// bindings that differ from what it holds are put, in one transaction, and nothing is
+    /// deleted or held as the registry's: a host whose binding is not the registry's yet may
+    /// be served by another server over the same store ([`Held`]).
+    ///
+    /// # Errors
+    ///
+    /// The file or the store could not be written: it holds what it held.
+    pub(crate) fn restore(&self, bindings: &BTreeMap<HostId, Binding>) -> io::Result<()> {
+        let Keeper::Store(store) = &self.keeper else {
+            return self.save(|| bindings.clone());
+        };
+        let mut written = self.lock();
+        let changed = bindings
+            .iter()
+            .filter(|(host, binding)| written.bindings.get(*host) != Some(*binding));
+        let changed: Vec<_> = changed.collect();
+        let writes = changed
+            .iter()
+            .map(|(host, binding)| written.write(host, Some(binding)));
+        host_keys::commit(&**store, writes.collect())?;
+        for (host, binding) in changed {
+            written.bindings.insert(host.clone(), binding.clone());
+        }
         Ok(())
     }
 

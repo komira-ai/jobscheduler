@@ -62,7 +62,7 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
-//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms` |
+//! | `--drain-hold` | how long after SIGTERM or ctrl-c the server keeps serving the job service and ticking, its readiness route already answering 503 `draining`, before the stop begins, `15s`, at least `1ms`; the agent routes' listener closes at the signal (`--listen` itself when they share it, with every route on it) and no job is placed from then on |
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given; not used with `--store`, which keeps them in the store. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
@@ -688,8 +688,11 @@
 //! at every tick of its [`Ticker`] (a timer of `--tick` in production); `/healthz` answers
 //! 503 once the loop has stopped, or while the store paths have failed for
 //! `--store-unreachable-after`. On SIGTERM or ctrl-c the server (with `--ready-listen`, its
-//! readiness route answering 503 `draining` from now on) keeps serving for `--drain-hold`
-//! (`15s`), so a proxy that polls the route takes it out of rotation first, then stops accepting, gives the
+//! readiness route answering 503 `draining` from now on) closes the listener of the agent
+//! routes (each connection once it has answered; a held heartbeat is answered at once), places
+//! no more jobs, and keeps serving the job service and ticking for `--drain-hold` (`15s`), so a
+//! proxy that polls the route takes it out of rotation first and the agents move to another
+//! server over the same store, then stops accepting, gives the
 //! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
 //! ticks once more and exits 0. A second signal while it drains is not needed: the drain is
 //! bounded. A SIGTERM or ctrl-c that arrives before the start is done (with or without
@@ -716,6 +719,7 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
+mod drain;
 mod error;
 mod file;
 mod file_checks;

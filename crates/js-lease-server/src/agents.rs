@@ -2,7 +2,9 @@
 //! and the bindings, and how they are put together at start.
 //!
 //! Without a store setting the join tokens and the bindings are kept in files beside the
-//! state file; with one, in the state store ([`crate::host_keys`]), read once at start.
+//! state file; with one, in the state store ([`crate::host_keys`]), read at start, and one row
+//! at a time later where another server over the store may have written it (a binding at the
+//! hello of a host the registry does not know, a token at its first use here).
 //! Every change of them that the server makes itself is written under one gate
 //! ([`Agents::host_writes`]), from its commit to the registry's taking it: a hello, the
 //! taint a heartbeat brings, a cordon or its lift, and the save of each tick. With the store
@@ -34,6 +36,7 @@ use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, CpuSlack, placer, split};
+use crate::drain::Drain;
 use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
@@ -128,6 +131,9 @@ pub(crate) struct Agents {
     /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
     /// pass commits wakes.
     pub(crate) wakes: Wakes,
+    /// The drain of a stopping server ([`crate::drain`]): once it has begun, no pass places a
+    /// job and no heartbeat's reply is held.
+    pub(crate) draining: Drain,
     /// How long a heartbeat's reply with nothing to send is held ([`held_beat::hold_bound`]).
     pub(crate) hold_bound: Duration,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
@@ -334,6 +340,7 @@ fn placed_in(
         meter: OnceLock::new(),
         placing: Mutex::default(),
         wakes: Wakes::default(),
+        draining: Drain::default(),
         hold_bound: held_beat::hold_bound(interval),
         providers,
     };
@@ -404,6 +411,7 @@ impl Agents {
             meter: OnceLock::new(),
             placing: Mutex::default(),
             wakes: Wakes::default(),
+            draining: Drain::default(),
             hold_bound,
             providers,
         }
@@ -542,6 +550,31 @@ impl Agents {
     ) -> bool {
         let this = Arc::clone(self);
         blocking(move || this.joins.release_writing(&who, &host, binding)).await
+    }
+
+    /// Puts back, before the hello of `host` is judged, the taint or cordon the store holds
+    /// for it when the registry does not know the host: the start of this server put back
+    /// what the store held then ([`Registry::restore_tainted`]), and this does the same for
+    /// what the store holds now, so a host that comes from another server over the same
+    /// store keeps the taint that server stored after this one started, and takes no job
+    /// here that its agent would refuse. Nothing for a host the registry knows, whose record
+    /// holds its taint, and nothing in file mode.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read: the hello is refused with an error the agent retries,
+    /// and nothing is judged on less than the store holds.
+    pub(crate) async fn restore_stored(self: &Arc<Self>, host: &HostId) -> io::Result<()> {
+        if self.registry.own_host(host).is_some() {
+            return Ok(());
+        }
+        let this = Arc::clone(self);
+        let named = host.clone();
+        let stored = blocking(move || this.store.stored(&named)).await?;
+        if let Some(binding) = stored {
+            self.registry.restore_tainted(host, binding);
+        }
+        Ok(())
     }
 
     /// The change of the binding of `host` that the registry makes when it admits `hello`

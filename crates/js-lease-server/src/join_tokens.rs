@@ -108,8 +108,9 @@
 //! (`--store`, `server.store`) no file is written, and the file is read only by the first start
 //! over an empty store, which imports it once (`crate::store`): each row is the key
 //! `hosts/join/<digest>` of the state store ([`crate::host_keys`]), a JSON object with a
-//! `version` and the fields of a file row (all but `hash`, which is the key), read once at
-//! start. Fields of a value that this build does not know are kept and written back. A
+//! `version` and the fields of a file row (all but `hash`, which is the key), read at start,
+//! and a row this set does not hold read by its key at its first use
+//! ([`JoinTokens::identify_stored`]). Fields of a value that this build does not know are kept and written back. A
 //! change is committed as the file is written, before it is held: a mint, a use, a release
 //! and a revoke each commit the rows they change in one transaction, and the use of a token
 //! by a hello commits the host's binding in the same transaction
@@ -342,8 +343,9 @@ impl JoinTokens {
         Ok(Self::over(Keeper::File(path), entries, clock, random))
     }
 
-    /// The tokens `store` holds under `hosts/join/`, read once at start. A value that cannot
-    /// be read as written is a refusal, as a damaged file is.
+    /// The tokens `store` holds under `hosts/join/`, read at start (a row written later is
+    /// read at its first use, [`JoinTokens::identify_stored`]). A value that cannot be read as
+    /// written is a refusal, as a damaged file is.
     ///
     /// # Errors
     ///
@@ -355,20 +357,8 @@ impl JoinTokens {
     ) -> Result<Self, String> {
         let mut entries = Entries::new();
         for (hash, bytes) in host_keys::scan(&*store, JOINS)? {
-            let named = format!("{JOINS}{hash}");
-            let stored: Stored = host_keys::decode(&named, &bytes)?;
-            let row = Row {
-                hash,
-                provider: stored.provider,
-                instance_id: stored.instance_id,
-                expires_at_ms: stored.expires_at_ms,
-                used_by: stored.used_by,
-                credential_expires_at_ms: stored.credential_expires_at_ms,
-                replaces: stored.replaces,
-            };
-            let (hash, entry) = entry_of(row).map_err(|reason| format!("{named}: {reason}"))?;
-            let extra = stored.extra;
-            entries.insert(hash, Entry { extra, ..entry });
+            let (hash, entry) = stored_entry(hash, &bytes)?;
+            entries.insert(hash, entry);
         }
         Ok(Self::over(Keeper::Store(store), entries, clock, random))
     }
@@ -973,6 +963,10 @@ fn render(entries: &Entries) -> io::Result<String> {
     };
     toml::to_string(&document).map_err(io::Error::other)
 }
+
+#[path = "join_tokens_stored.rs"]
+mod stored;
+use stored::stored_entry;
 
 #[cfg(test)]
 #[path = "join_tokens_tests.rs"]

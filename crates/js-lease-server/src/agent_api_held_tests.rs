@@ -203,3 +203,59 @@ async fn a_whole_host_job_placed_while_held_names_its_allocation_at_once() {
     assert_eq!(reply.commands, []);
     assert!(reply.beat_now);
 }
+
+/// Asserts that a reply held when the server begins to drain is answered at the drain, empty
+/// and saying `beat_now`, after the one wait it had begun: a placement on the host and its wake
+/// that come with the drain do not hold it on or put a start in it (the host is leaving, and
+/// the server it says hello to next sends the start). It catches a drain that leaves an
+/// agent's heartbeat held on a server that stops, so the agent learns it must move only at the
+/// bound or at the next wake.
+#[tokio::test]
+async fn a_held_reply_is_answered_when_the_drain_begins() {
+    let (rig, agent) = held_rig("held_drain", LONG);
+    let drain = async {
+        waited(&rig, 1).await;
+        rig.agents.draining.begin();
+        rig.place("job-1", "host-a");
+        rig.agents
+            .wakes
+            .wake(&js_types::HostId::new("host-a").unwrap());
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), drain);
+    assert_eq!(reply.unwrap(), quiet_held());
+    assert_eq!(waits(&rig), 1);
+}
+
+/// Asserts that a server that drains holds no reply: a heartbeat with nothing to send is
+/// answered at once, empty and saying `beat_now`, and no hold began. It catches a drain that
+/// ends the holds under way but lets a heartbeat that arrives after it wait the bound.
+#[tokio::test]
+async fn a_draining_server_holds_no_reply() {
+    let (rig, agent) = held_rig("held_drained", LONG);
+    rig.agents.draining.begin();
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply, quiet_held());
+    assert_eq!(waits(&rig), 0);
+}
+
+/// Asserts that a server that drains places no job, by the tick's pass or a heartbeat's: a
+/// queued job stays queued with no allocation while the registered host has room, and a
+/// heartbeat of the host gets no start. It catches a draining server that places a job on a
+/// host that is leaving it, where another server would have to start it.
+#[tokio::test]
+async fn a_draining_server_places_no_job() {
+    let (rig, agent) = held_rig("held_no_place", Duration::ZERO);
+    let job = queue_share(&rig, "job-1", 600);
+    rig.agents.draining.begin();
+    place_all(&rig);
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(starts(&reply).len(), 0, "{reply:?}");
+    assert_eq!(rig.job(&job).state, JobState::Queued);
+    assert_eq!(
+        rig.jobs
+            .live_on(&js_types::HostId::new("host-a").unwrap())
+            .unwrap()
+            .len(),
+        0
+    );
+}

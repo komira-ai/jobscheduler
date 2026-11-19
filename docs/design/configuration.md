@@ -165,8 +165,15 @@ file, the job store and the usage file are kept as without it.
   are the cordons' record, which every server places by) and the digests of the join tokens and host credentials:
   `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
   back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
-  format, written whole) and `acquires/scaler/unremoved` (`{"version":1,"hosts":[...]}`). They are read once at start, after the lock;
-  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` are then not written. Each change is committed before the server
+  format, written whole) and `acquires/scaler/unremoved` (`{"version":1,"hosts":[...]}`). They are read at start, after the lock;
+  `<state file>.agents`, `.joins`, `.scaler` and `.scaler.unremoved` are then not written. Over a store another server shares (an
+  update that runs two for a while), two rows are also read by key later: a host's binding at the hello of a host this server's
+  registry does not know, so it keeps the taint or cordon another server stored after this one started, and the row of a one-time
+  token or host credential this server does not hold, at its first use, so a host another server admitted meanwhile is not refused
+  401 here (a read that fails answers 503 `state-write-failed`). The tick deletes the binding only of a host this server's registry
+  held and then forgot, never of one it never held, which another server may be serving; so a binding
+  of a host that no server holds again stays in the store, as inert as before (a binding is enforced only
+  for a host a registry holds). Each change is committed before the server
   holds it: a hello that uses a token commits the use and the host's binding in one transaction, and a refused hello gives both back in
   one more; a taint, a cordon or its lift, a mint and a revoke each commit first; the scaler commits its records before the first
   provider call of a step, and a commit that fails stops the step as a failed file write does. A failed commit changes nothing and is

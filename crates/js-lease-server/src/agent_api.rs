@@ -75,6 +75,7 @@
 //! it; the reply is then built again from the store and carries the start.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::sync::Arc;
 
 use axum::Json;
@@ -122,6 +123,9 @@ mod held;
 mod host_cert;
 mod limit;
 mod own_host;
+mod unknown;
+
+use self::unknown::{identify_single, unknown_bearer};
 
 /// The watch of a heartbeat whose reply may be held, and what building it again needs.
 type Watched = (crate::held_beat::Watch, Arc<held::Inputs>);
@@ -183,20 +187,23 @@ async fn authenticate(
         .and_then(|value| value.to_str().ok())
         .and_then(bearer);
     let pooled = given.and_then(|given| agents.identify_pooled(given));
-    let single = || given.and_then(|given| agents.joins.identify(given));
-    match (pooled, single()) {
+    let single = match (&pooled, given) {
+        (None, Some(given)) => identify_single(&agents, given).await,
+        _ => Ok(None),
+    };
+    match (pooled, single) {
         (Some((credential, pool)), _) => {
             request.extensions_mut().insert(credential);
             request.extensions_mut().insert(TokenPool(pool));
             next.run(request).await
         }
-        (None, Some(presented)) => {
+        (None, Ok(Some(presented))) => {
             let registered = agents.joins.registered_as(&presented);
             request.extensions_mut().insert(registered);
             request.extensions_mut().insert(OneTime(presented));
             next.run(request).await
         }
-        (None, None) => StatusCode::UNAUTHORIZED.into_response(),
+        (None, unknown) => unknown_bearer(unknown),
     }
 }
 
@@ -280,6 +287,8 @@ async fn serve_hello_in(
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
+    let restored = agents.restore_stored(&host).await;
+    restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
@@ -308,6 +317,13 @@ async fn serve_hello_in(
     agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
+}
+
+/// The refusal of a hello whose host's stored binding could not be read: 503
+/// `state-write-failed`, which the agent retries.
+fn unread_binding(host: &str, error: &io::Error) -> Refused {
+    warn!(%error, %host, "agent hello refused: the host's binding could not be read");
+    Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
 }
 
 /// What a hello's token takes before the registry is asked, with `writes` (the host's

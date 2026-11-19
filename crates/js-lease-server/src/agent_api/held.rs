@@ -13,6 +13,10 @@
 //! still empty (another server's change, a placement this one undid) is held on. A read that
 //! fails answers the reply as it was, and the agent's next heartbeat, sent at once, is served
 //! in full.
+//!
+//! A server that drains ([`crate::drain`]) ends every hold at once and begins none: the reply
+//! goes out as it is, saying `beat_now`, so the agent's next heartbeat opens a new connection
+//! at once and reaches whichever server still accepts one.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -91,13 +95,22 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
         return;
     }
     reply.beat_now = true;
+    if agents.draining.begun() {
+        return;
+    }
     let bound = tokio::time::sleep(agents.hold_bound);
     tokio::pin!(bound);
+    let draining = agents.draining.begins();
+    tokio::pin!(draining);
     loop {
         agents.wakes.waiting();
+        // A drain ends the hold before anything else, and a wake comes before the bound: a
+        // start that is there is sent now rather than on the next heartbeat.
         tokio::select! {
-            () = &mut bound => return,
+            biased;
+            () = &mut draining => return,
             () = hold.watch.woken() => {}
+            () = &mut bound => return,
         }
         let inputs = Arc::clone(&hold.inputs);
         let metering = Arc::clone(agents);
