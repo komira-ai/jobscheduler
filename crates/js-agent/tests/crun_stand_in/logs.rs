@@ -343,9 +343,8 @@ fn the_result_is_reported_before_the_final_is_written() {
     let _ = runtime.prepare(&node.image(), None);
     assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
     live.store.block_puts();
-    let (life, _) =
-        Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
-            .expect("adopts");
+    let (life, _) = Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
+        .expect("adopts");
     let mut life = Ringing::new(life);
     life.apply_and_create(&HeartbeatReply {
         commands: vec![Command::JobStart(Box::new(job_start(&node, "j6-big")))],

@@ -200,7 +200,7 @@ impl Clock for Still {
 }
 
 /// A lifecycle over `runtime`, with its scratch and state roots on `node`.
-fn lifecycle(node: &Node, runtime: CrunRuntime) -> Ringing {
+pub(crate) fn lifecycle(node: &Node, runtime: CrunRuntime) -> Ringing {
     use std::os::unix::fs::PermissionsExt as _;
     let private = |name: &str| {
         let dir = node.dir.join(name);

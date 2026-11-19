@@ -529,6 +529,18 @@ impl Ringing {
         events
     }
 
+    /// Steps, each step after a ring of the runtime, until `done` says so of the lifecycle:
+    /// the events of the steps. Unlike [`Ringing::until_created`] it does not wait for the
+    /// starts that are held, so a test can watch one start finish while another is held.
+    pub fn until(&mut self, mut done: impl FnMut(&Lifecycle) -> bool) -> Vec<Event> {
+        let mut events = Vec::new();
+        while !done(&self.life) {
+            self.rung.recv_timeout(LONG).expect("the runtime rang");
+            events.extend(self.life.step());
+        }
+        events
+    }
+
     fn starting(&self) -> bool {
         let runs = self.life.held().into_iter().map(|run| run.state);
         let jobs = self.life.held_jobs().into_iter().map(|job| job.state);
