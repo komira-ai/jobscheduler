@@ -130,6 +130,7 @@ impl Node {
             })
             .to_vec(),
             devices: Vec::new(),
+            fuse: false,
             mounted_root: None,
             listen_ports: Vec::new(),
         }

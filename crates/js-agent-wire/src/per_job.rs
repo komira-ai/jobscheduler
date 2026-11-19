@@ -126,7 +126,7 @@ impl BookedResources {
 /// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
 /// change adds, as optional fields: the network policy and the declared ports (the job
 /// network change), the kind of start, the isolation, and the layers, mounts and host
-/// ports of a job's file system (`docs/design/job-rootfs.md`).
+/// ports of a job's file system (`docs/design/job-rootfs.md`), and `fuse`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
     /// The job's id; the key of every idempotent step. The grammar of every id here
@@ -216,6 +216,16 @@ pub struct JobStartSpec {
     /// whose hello reports [`HOST_JOBS_CAPABILITY`].
     #[serde(default, skip_serializing_if = "Isolation::is_contained")]
     pub isolation: Isolation,
+    /// Whether the job is given the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN` of the
+    /// container's own user namespace (never of the host), with the io_uring system calls
+    /// allowed; its network, `noNewPrivileges` and masked paths are as for any contained
+    /// job. Absent for false. An agent that predates the field ignores it and runs the job
+    /// without the device, whose mount then fails, so a server sends it only to a host whose
+    /// hello reports `fuse-jobs` (`js_caps::FUSE_JOBS`). An agent that was not given the
+    /// device by its operator refuses the start `fuse-jobs-not-allowed`. Not allowed with
+    /// [`Isolation::Host`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fuse: bool,
     /// The read-only layers of the job's root, base first, above `image` (or in place of it,
     /// when `image` is empty); a later layer's file hides an earlier one's. With layers the
     /// root is writable and the writes are the job's own. At most [`limits::MAX_LAYERS`];
@@ -251,7 +261,8 @@ impl JobStartSpec {
     /// Checks the start: the ids, that an image or a layer is named and the image well
     /// formed, the command, the environment, the files, the booked resources, the wall
     /// limit, the declared ports, and the layers, mounts and host ports
-    /// ([`crate::rootfs`]). The server calls it before it sends a start and the agent before
+    /// ([`crate::rootfs`]), and that a host start asks for no FUSE device. The server calls
+    /// it before it sends a start and the agent before
     /// it acts on one, together with [`JobStartSpec::require_pinned`]. It does not look at
     /// `log_sink`: a sink never refuses a start ([`JobStartSpec::log_sink_checked`]).
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -292,6 +303,9 @@ impl JobStartSpec {
         ];
         if self.isolation == Isolation::Host && rootfs.contains(&false) {
             return Err(at.field("isolation").fail(Rule::Inconsistent));
+        }
+        if self.fuse && self.isolation == Isolation::Host {
+            return Err(at.field("fuse").fail(Rule::Inconsistent));
         }
         Ok(())
     }

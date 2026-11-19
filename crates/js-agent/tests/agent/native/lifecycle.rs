@@ -308,6 +308,7 @@ fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),

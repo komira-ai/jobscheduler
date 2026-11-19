@@ -240,6 +240,7 @@ pub(crate) fn start_of(
         mounts: spec.mounts.clone(),
         host_ports: spec.host_ports.clone(),
         placed_at_ms: job.placed_at.map(millis),
+        fuse: false,
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

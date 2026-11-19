@@ -355,6 +355,7 @@ impl Subject for CrunSubject {
                 gpus: [0, 1].into(),
             },
             allow_host_jobs: false,
+            allow_fuse_jobs: false,
             mounts: MountRoots::new(&[("sync".to_owned(), sync)]).expect("mount roots"),
             scratch: ScratchRoot::open_with(&scratch, DirLayout::Searchable).expect("scratch root"),
             files: None,

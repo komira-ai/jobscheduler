@@ -216,6 +216,7 @@ fn lifecycle(node: &Node, runtime: CrunRuntime) -> Lifecycle {
             gpus: Default::default(),
         },
         allow_host_jobs: false,
+        allow_fuse_jobs: false,
         mounts: MountRoots::new(&[]).expect("no mount roots"),
         scratch: ScratchRoot::open_with(&private("life-scratch"), DirLayout::Private)
             .expect("a scratch root"),

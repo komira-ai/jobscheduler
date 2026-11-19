@@ -135,6 +135,7 @@ impl Rig {
             files: None,
             slot: 0,
             isolation: Isolation::Contained,
+            fuse: false,
             labels: BTreeMap::new(),
             bundle: None,
             network: Default::default(),

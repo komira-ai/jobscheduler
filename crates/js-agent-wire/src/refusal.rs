@@ -123,6 +123,8 @@ pub const HOST_NOT_REGISTERED: &str = "host-not-registered";
 pub const LIMITS_EXCEED_SHAPE: &str = "limits-exceed-shape";
 /// A host job where host jobs are not allowed.
 pub const HOST_JOBS_NOT_ALLOWED: &str = "host-jobs-not-allowed";
+/// A start with `fuse` on an agent that was not given the FUSE device by its operator.
+pub const FUSE_JOBS_NOT_ALLOWED: &str = "fuse-jobs-not-allowed";
 /// A hello whose protocol range shares no major with the server's (see
 /// [`crate::protocol`]).
 pub const UNSUPPORTED_PROTOCOL: &str = "unsupported-protocol";

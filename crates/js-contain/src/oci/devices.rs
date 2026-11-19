@@ -4,6 +4,9 @@
 //! every device first and then allow each given node, by its type, major and minor, to be
 //! read and written. A container given no device gets neither section.
 //!
+//! A container given the FUSE device ([`ContainerSpec::fuse`]) is given `/dev/fuse` after the
+//! booked GPUs' nodes, and gets the same sections for it.
+//!
 //! The nodes every container has (`/dev/null`, `/dev/zero`, the terminals) are `crun`'s
 //! own: it makes them and allows them in its device program whatever the bundle lists.
 
@@ -24,11 +27,34 @@ pub(crate) const DEVICE_ACCESS: &str = "rw";
 /// The rule every device rule list starts with: every device, every access, denied.
 const DENY_ALL: &str = "rwm";
 
-/// The `linux.devices` entries of `spec`: one character device per node, at the node's
-/// path, with its major and minor numbers, its owner and its permission bits within
+/// The kernel's FUSE device, as a node: `/dev/fuse`, character 10:229, owned by root, with
+/// the widest mode a container's node is given.
+fn fuse_node() -> DeviceNode {
+    DeviceNode {
+        path: "/dev/fuse".to_owned(),
+        major: 10,
+        minor: 229,
+        uid: 0,
+        gid: 0,
+        mode: DEVICE_MODE,
+    }
+}
+
+/// The nodes `spec`'s container is given: those of [`ContainerSpec::devices`], then the FUSE
+/// node when [`ContainerSpec::fuse`] is set.
+pub(crate) fn given(spec: &ContainerSpec) -> Vec<DeviceNode> {
+    let mut nodes = spec.devices.clone();
+    if spec.fuse {
+        nodes.push(fuse_node());
+    }
+    nodes
+}
+
+/// The `linux.devices` entries of `spec`: one character device per node [`given`], at the
+/// node's path, with its major and minor numbers, its owner and its permission bits within
 /// [`DEVICE_MODE`].
 pub(crate) fn nodes(spec: &ContainerSpec) -> Vec<LinuxDevice> {
-    spec.devices
+    given(spec)
         .iter()
         .map(|node| {
             built(
@@ -47,7 +73,7 @@ pub(crate) fn nodes(spec: &ContainerSpec) -> Vec<LinuxDevice> {
 }
 
 /// The `linux.resources.devices` rules of `spec`: every device denied, then each node
-/// allowed [`DEVICE_ACCESS`].
+/// [`given`] allowed [`DEVICE_ACCESS`].
 pub(crate) fn rules(spec: &ContainerSpec) -> Vec<LinuxDeviceCgroup> {
     let deny = built(
         LinuxDeviceCgroupBuilder::default()
@@ -56,7 +82,7 @@ pub(crate) fn rules(spec: &ContainerSpec) -> Vec<LinuxDeviceCgroup> {
             .build(),
     );
     std::iter::once(deny)
-        .chain(spec.devices.iter().map(allow))
+        .chain(given(spec).iter().map(allow))
         .collect()
 }
 

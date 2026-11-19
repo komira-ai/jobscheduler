@@ -93,6 +93,7 @@ fn start_of(job: &str, allocation: &str, command: &[&str]) -> Command {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        fuse: false,
     }))
 }
 

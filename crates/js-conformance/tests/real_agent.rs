@@ -117,6 +117,7 @@ impl Agent {
                 gpus: Default::default(),
             },
             allow_host_jobs: false,
+            allow_fuse_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(dir.path()).unwrap(),
             files: None,
@@ -241,6 +242,7 @@ fn job_start(job: &str, cpu_millis: u64) -> Command {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        fuse: false,
     }))
 }
 

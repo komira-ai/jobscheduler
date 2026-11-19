@@ -265,6 +265,46 @@ fn the_hello_reports_host_jobs_only_with_allow_host_jobs() {
     assert!(caps.get("host-jobs").is_none(), "{hello}");
 }
 
+/// Proves a crun agent started with `--allow-fuse-jobs` on a host whose probe cannot pass (the
+/// stand-in host has no `/proc/sys/kernel/osrelease`) takes the flag, reports neither
+/// `fuse-jobs` nor `fuse-uring`, and warns once, naming what is missing; that one without the
+/// flag says nothing of it; and that neither key can be given with `--capability`. Catches a
+/// host that reports a device it cannot give, a flag that does nothing without a word to the
+/// operator, and a key an operator could set by hand.
+#[test]
+fn the_hello_reports_no_fuse_key_where_the_probe_fails() {
+    let (ran, hello) = crun_hello("hello-fuse-jobs", &["--allow-fuse-jobs"]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(caps["runtime"], "container", "{hello}");
+    assert!(caps.get("fuse-jobs").is_none(), "{hello}");
+    assert!(caps.get("fuse-uring").is_none(), "{hello}");
+    let warning = "js-agent: warning: --allow-fuse-jobs: fuse-jobs is not reported: the kernel's \
+                   version cannot be read: /proc/sys/kernel/osrelease: No such file or directory";
+    assert_eq!(ran.err.matches(warning).count(), 1, "{}", ran.err);
+    assert_eq!(
+        ran.err.matches("--allow-fuse-jobs").count(),
+        1,
+        "{}",
+        ran.err
+    );
+
+    let (ran, hello) = crun_hello("hello-fuse-jobs-none", &[]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(hello["capabilities"].get("fuse-jobs").is_none(), "{hello}");
+    assert!(!ran.err.contains("--allow-fuse-jobs"), "{}", ran.err);
+
+    for key in ["fuse-jobs", "fuse-uring"] {
+        let claim = format!("{key}=true");
+        let name = format!("hello-claimed-{key}");
+        let (ran, hello) = crun_hello(&name, &["--capability", &claim]);
+        assert_eq!(ran.status(), code(2), "{key}: {}", ran.err);
+        let said = format!("--capability: {key} is detected and cannot be set");
+        assert!(ran.err.contains(&said), "{}", ran.err);
+        assert_eq!(hello, Value::Null);
+    }
+}
+
 /// The answers of a kernel that has none of the system calls of a job's layers and mounts.
 fn no_calls() -> [(&'static str, std::io::Result<()>); 4] {
     let missing = || Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
@@ -392,6 +432,7 @@ fn host_start() -> crate::support::Reply {
         log_sink: None,
         kind: Default::default(),
         isolation: Isolation::Host,
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
