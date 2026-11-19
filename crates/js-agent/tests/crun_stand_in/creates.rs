@@ -247,6 +247,45 @@ fn a_start_held_in_its_wiring_does_not_hold_another_start() {
     assert!(nothing_of(&node, "ra-wired") && nothing_of(&node, "rb-wired"));
 }
 
+/// Proves a lease whose create is under way is not removed: with run A held in its wiring
+/// (its sidecar recorded, its supervisor up), a removal of its name and an orphan removal of
+/// its run are both refused saying a create of it is under way, and its sidecar stays; once
+/// released, A answers done and runs, and its removal then takes everything away. Catches a
+/// removal that tears a lease down while a pool thread is still making it, which would leave
+/// a supervisor nobody records.
+#[test]
+fn a_lease_whose_create_is_under_way_is_not_removed() {
+    let node = Node::new("creates-no-remove");
+    let (gate, entered) = Gate::new();
+    let release = gate.hold("ra-wired");
+    let (mut runtime, rung) = gated(&node, &gate);
+    assert_eq!(
+        runtime.begin_create(&wired(&node, "ra-wired")),
+        Created::Pending
+    );
+    let name = entered.recv_timeout(LONG).expect("A reached its wiring");
+
+    let removed = runtime
+        .remove(&RunHandle(name.clone()))
+        .expect_err("under way");
+    assert!(
+        removed.to_string().contains("a create of it is under way"),
+        "{removed}"
+    );
+    let orphan = runtime.remove_orphan("ra-wired").expect_err("under way");
+    assert!(
+        orphan.to_string().contains("a create of it is under way"),
+        "{orphan}"
+    );
+    assert_eq!(sidecar_json(&node, &name)["state"], "starting");
+
+    release.send(Release::Wire).expect("released");
+    let a = settled(&mut runtime, &rung, "ra-wired").expect("A started");
+    assert_eq!(runtime.poll(&a), Ok(Status::Running));
+    runtime.remove(&a).expect("A removed");
+    assert!(nothing_of(&node, "ra-wired"));
+}
+
 /// Proves the lifecycle holds a start that waits as starting and lets another job start: with
 /// job A's wiring held, job B (no network) is started, is held as running, and A is still
 /// held as starting; once A is released it starts too. Catches a lifecycle that waits for a

@@ -447,6 +447,10 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     let full = waits.iter().position(|wait| *wait != INTERVAL);
     let full = full.expect("the worker's queue filled");
     assert!(
+        waits[..full].iter().all(|wait| *wait == INTERVAL),
+        "{waits:?}"
+    );
+    assert!(
         waits[full..].windows(2).all(|pair| pair[0] < pair[1]),
         "{waits:?}"
     );

@@ -656,7 +656,8 @@ impl Runtime for CrunRuntime {
     /// Removes the container and everything its lease made. A handle this process does not
     /// hold is a leftover of an earlier process: it is removed if the ledger holds it as
     /// this agent's, nothing happens if the ledger does not know it, and the call fails
-    /// (and changes nothing) if its sidecar is another agent's or is not well formed.
+    /// (and changes nothing) if its sidecar is another agent's or is not well formed, or a
+    /// create of it is under way.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
         let fs = &self.fs;

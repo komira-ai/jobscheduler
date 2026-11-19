@@ -18,10 +18,17 @@
 //! failure is taken apart on the worker, as a failed start always was: a lease whose make
 //! failed through the ledger's discard, a container whose start failed by its removal.
 //!
-//! The sidecar is written twice in a start: in the state starting before anything it names
-//! is made, and in the state running, with the supervisor, once the network is wired. A
+//! The sidecar is recorded in the state starting before anything it names is made, and
+//! rewritten once, in the state running with the supervisor, after the network is wired. A
 //! teardown in between finds the supervisor by the record it keeps in the lease directory
-//! (the ledger's teardown reads it when the sidecar names none).
+//! (the ledger's teardown reads it when the sidecar names none). A lease whose create is under
+//! way is not removed: its name is refused to a removal until the create answered.
+//!
+//! A create has no deadline of its own: its waits are bounded where they are made (the
+//! supervisor's ready word, the network's route), and a call that hangs in the kernel (a disk
+//! or a file system that never answers) holds its thread and its start, which stays
+//! `starting` with its slot booked; a stop of it waits for the answer. Such a start holds one
+//! of the [`THREADS`] and no other job, where it held the whole worker before.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
