@@ -49,6 +49,13 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
   absent, so a log field never refuses a start or a heartbeat.
+- `JobResult.usage` (`JobUsage`: `peak_memory_bytes` and `cpu_usage_usec`), what the job's control group counted, read by the agent
+  from `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease group once the job ended and before the group is
+  removed. It is absent, never zero, when either file cannot be read (cgroup version 1, a kernel without `memory.peak`) and for
+  a result an agent read back from its state root after a restart. It is decoded as `logs` is: a malformed value reads as absent
+  and is never part of a result's acceptance. A server from before the field ignores it, and a result from an agent from before it
+  reads with no usage; the lease server stores it as the job's resource usage, which is what the placement history is taught from
+  (`docs/design/sizing.md`, section 7.7).
 
 The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that
@@ -270,6 +277,10 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   1 + 12 + 1 + (16 + 130) + 1 + (20 + 130) + 1 + (16 + 4,098) + 1 + (16 + 20) + 1 = **4,464** bytes, under the 1 MiB `REPLY_LIMIT`.
 - `log_sink` in a start, with `endpoint` at 512 bytes, `region` 64, `bucket` 63 and `prefix` 577:
   1 + 11 + 1 + (11 + 514) + 1 + (9 + 66) + 1 + (9 + 65) + 1 + (9 + 579) + 1 + (13 + 5) + 1 = **1,298** bytes.
+
+- `usage` in a job's result, `,"usage":{"peak_memory_bytes":N,"cpu_usage_usec":N}`: 1 + 7 + 1 + 1 + (20 + 20) + 1 + (17 + 20) + 1 =
+  **89** bytes per result (measured by `usage_at_its_widest_adds_89_bytes_to_a_result`). The agent's `results_budget` counts it with the
+  rest of the result.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
 `log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).

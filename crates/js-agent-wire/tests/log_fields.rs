@@ -120,6 +120,7 @@ fn result_with(logs: Option<LogReport>) -> JobResult {
         log_tail: None,
         logs,
         input_failure: None,
+        usage: None,
     }
 }
 

@@ -97,6 +97,13 @@ The size is decided by the placement pass, not at submit, and is not written on 
 submit with the same id is still the same job. What it was booked is its allocation's `booked`. A contained job's booking is its
 `memory.max` and `cpu.max`, and the CPU slack and memory percent bound the booking as they bound every booking.
 
+**Where a run's usage comes from.** Each run's peak memory and CPU time are what its host reported: when a contained job ends, its
+agent reads `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease control group, before the group is removed, and sends
+them as the `usage` of the job's result (`docs/design/agent-wire.md`); the server stores them with the job's output. A job whose
+result carries none (an agent from before the field, cgroup version 1, a result read back after an agent restart) has no usage, and
+a success with no peak is not a memory sample, so a class whose jobs all lack it stays at the cold size. The count a server logs at
+its start (`taught`) counts the runs that gave a class a sample, not the jobs it read.
+
 **What a run teaches.** When a pass sees a job's allocation freed, it reads the job once and gives the estimator one run: an exit 0 is
 a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
 the job's own limit, which raises the class's floor to twice the booking it died at. A success whose peak came within 5% of its

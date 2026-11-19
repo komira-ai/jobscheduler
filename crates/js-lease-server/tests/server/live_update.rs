@@ -13,7 +13,7 @@ use js_state::postgres::test_database;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::agents_support::{JOIN, Session, job_hello, job_host_args, post};
+use crate::agents_support::{JOIN, Session, entry, hosts, job_hello, job_host_args, post};
 use crate::jobs_support::{JobBody, commands, exited, job_agent, job_state, running, submit_body};
 use crate::store_support::store_file;
 use crate::support::{Harness, Scratch};
@@ -281,5 +281,53 @@ fn an_update_during_live_jobs_loses_doubles_and_strands_nothing() {
                 "{job} was started under one allocation: {on:?}"
             );
         }
+    });
+}
+
+/// A taint an agent reports: a residue its checks found after the run `run`.
+fn residue(run: &str) -> Value {
+    json!({ "reason": "residue", "check": "process-as-job-user", "run_id": run })
+}
+
+/// Asserts that an agent's clear of its taint ends the taint for good when the clear reaches
+/// the other server of an update: the host says hello to both servers, its taint is reported
+/// to the first, which stores it, and the heartbeat that reports it cleared reaches the second,
+/// which acknowledges the clear. The first is then stopped, and a third server started over the
+/// store (a later restart) lists the host untainted after its hello and places a job on it. It
+/// catches a clear acknowledged by a server that does not hold the taint and left in the store,
+/// which every later start puts back on the host, so that it takes no job though its agent is
+/// clean and never reports the clear again.
+#[test]
+fn an_agent_clear_that_reaches_the_other_server_ends_the_taint() {
+    let database = test_database();
+    let url = database.url();
+    Runtime::new().unwrap().block_on(async {
+        let first = server(&url, "live_update_clear_first").await;
+        let second = server(&url, "live_update_clear_second").await;
+        let at_first = job_agent(&first, &job_hello("burst-1")).await;
+        let at_second = job_agent(&second, &job_hello("burst-1")).await;
+
+        let mut tainted = at_first.beat();
+        tainted["taint"] = residue("r1");
+        let reply = post(&first, "/v1/agent/heartbeat", Some(JOIN), &tainted).await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.json()["taint_ack"], true);
+
+        let mut cleared = at_second.beat();
+        cleared["taint_cleared"] = residue("r1");
+        let reply = post(&second, "/v1/agent/heartbeat", Some(JOIN), &cleared).await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.json()["taint_cleared_ack"], true);
+        first.running.shutdown().await.unwrap();
+
+        let third = server(&url, "live_update_clear_third").await;
+        let mut host = Agent::new("burst-1");
+        host.hello(&third).await;
+        let listed = hosts(&third).await;
+        assert_eq!(entry(&listed, "burst-1")["taint"], Value::Null, "{listed}");
+        submit(&third, "job-1").await;
+        third.ticks.step().await;
+        host.beat(&third).await;
+        assert_eq!(host.running.len(), 1, "the host runs the job");
     });
 }

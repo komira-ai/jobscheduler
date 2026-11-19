@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js_agent_wire::{HostPort, PortProtocol};
+use js_agent_wire::{HostPort, JobUsage, PortProtocol};
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::container::{ContainerLimits, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
@@ -15,7 +15,7 @@ use super::config_dir;
 use super::settings::system_now_ms;
 use super::spec::{
     EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, host_spec, job_env, log_tail_of,
-    not_run_words, pinned,
+    not_run_words, pinned, usage_of,
 };
 use crate::cli_runtime::DEFAULT_PIDS;
 use crate::image::ImageConfig;
@@ -803,4 +803,35 @@ fn a_contained_jobs_tmpdir_is_its_tmp_over_the_images() {
     spec.env = vec![pair("PATH", "/bin"), pair("TMPDIR", "/image/tmp")];
     super::spec::tmp_env(&mut spec);
     assert_eq!(spec.env, [pair("PATH", "/bin"), pair("TMPDIR", "/tmp")]);
+}
+
+/// Proves a lease's usage is the `memory.peak` and the `usage_usec` of `cpu.stat` its group
+/// holds, and absent as a whole when either is missing or does not parse: with both files the
+/// exact values come back (a CPU time among other `cpu.stat` counters); with no `memory.peak`
+/// (a kernel without it), no `cpu.stat` (a group of cgroup version 1), a `cpu.stat` without
+/// `usage_usec`, or a group that is gone, nothing comes back, never a zero for the counter that
+/// could not be read. Catches a zero reported for an unknown, one counter read from the
+/// other's file, and a half-known usage.
+#[test]
+fn a_leases_usage_is_both_counters_or_none() {
+    let fixture = Fixture::new("usage");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    assert_eq!(usage_of(&fixture.lease()), None);
+    fs::write(dir.join("memory.peak"), "3221225472\n").expect("peak");
+    assert_eq!(usage_of(&fixture.lease()), None);
+    fs::write(dir.join("cpu.stat"), "user_usec 1\nsystem_usec 2\n").expect("stat");
+    assert_eq!(usage_of(&fixture.lease()), None);
+    let stat = "usage_usec 4500000\nuser_usec 4000000\nsystem_usec 500000\n";
+    fs::write(dir.join("cpu.stat"), stat).expect("stat");
+    assert_eq!(
+        usage_of(&fixture.lease()),
+        Some(JobUsage {
+            peak_memory_bytes: 3_221_225_472,
+            cpu_usage_usec: 4_500_000,
+        })
+    );
+    fs::write(dir.join("memory.peak"), "max\n").expect("peak");
+    assert_eq!(usage_of(&fixture.lease()), None);
+    fs::remove_dir_all(&dir).expect("remove the group");
+    assert_eq!(usage_of(&fixture.lease()), None);
 }

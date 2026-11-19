@@ -403,6 +403,29 @@ pub struct JobResult {
     /// keeps its meaning beside it. A server from before the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_failure: Option<String>,
+    /// What the job's control group used, when the agent could read it ([`JobUsage`]); absent
+    /// otherwise, and left out of the text. Never part of the result's acceptance: a value
+    /// that does not decode reads as absent and [`JobResult::validate`] does not look at it.
+    /// A server from before the field ignores it, and a result from an agent from before it
+    /// reads as absent here.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub usage: Option<JobUsage>,
+}
+
+/// What one job used while it ran, as its host read it from the job's control group once it
+/// ended. Both numbers are measured; an agent that cannot read one of them sends no
+/// [`JobUsage`] at all, so a zero is a measured zero and never an unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobUsage {
+    /// The most memory the job's group held at once, in bytes (`memory.peak`).
+    pub peak_memory_bytes: u64,
+    /// The CPU time the job's group used, in microseconds (`usage_usec` of `cpu.stat`), the
+    /// unit of `cpu_usage_usec` in [`crate::LoadReport`].
+    pub cpu_usage_usec: u64,
 }
 
 impl JobResult {

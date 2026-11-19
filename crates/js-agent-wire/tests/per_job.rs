@@ -64,6 +64,7 @@ fn job_result() -> JobResult {
         }),
         logs: None,
         input_failure: None,
+        usage: None,
     }
 }
 

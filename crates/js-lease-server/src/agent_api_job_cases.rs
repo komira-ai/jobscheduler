@@ -509,3 +509,66 @@ async fn a_job_naming_a_provider_is_started_only_on_a_host_that_reports_it() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].job_id, fitting.id.to_string());
 }
+
+/// Through the heartbeats alone, results that carry the usage their agent counted teach the
+/// job's class, and the next job of it that books nothing is placed booked from that history:
+/// after five clean runs of a class that reported 2 GiB peaks, its next job books less memory
+/// than the cold size (the first jobs booked), while a class whose five clean runs reported
+/// no usage books the cold size again. It catches a result whose usage is lost between the
+/// wire and the stored job (every class then stays cold however often it ran).
+#[tokio::test]
+async fn results_that_report_usage_size_the_next_job_of_the_class_from_history() {
+    let mut rig = placing_rig("usage_sizes");
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let counted = js_agent_wire::JobUsage {
+        peak_memory_bytes: 2 << 30,
+        cpu_usage_usec: 30_000_000,
+    };
+    let mut memory_of = Vec::new();
+    for (class, usage) in [("measured", Some(counted)), ("bare", None)] {
+        let labels = BTreeMap::from([("size-class".to_owned(), class.to_owned())]);
+        for round in 0..6 {
+            let id = format!("{class}-{round}");
+            let new = NewJob {
+                id: Some(JobId::parse(&id).unwrap()),
+                spec: js_jobs::JobSpec {
+                    needs: js_jobs::Needs::Shape(js_types::Resources::new(0, 0, 0, None).unwrap()),
+                    labels: js_types::Labels::from_caller(&labels).unwrap(),
+                    ..spec()
+                },
+                priority: 0,
+                client: None,
+            };
+            let queued = rig.jobs.insert_queued(new).unwrap().record.id;
+            rig.beat(&agent).await.unwrap();
+            agent.take(&rig.beat(&agent).await.unwrap());
+            agent.run(&id);
+            rig.beat(&agent).await.unwrap();
+            rig.advance(std::time::Duration::from_secs(10));
+            match usage {
+                Some(usage) => agent.end_with_usage(&id, usage),
+                None => agent.end(&id, Outcome::Succeeded, Some(0)),
+            }
+            agent.take(&rig.beat(&agent).await.unwrap());
+            rig.beat(&agent).await.unwrap();
+            assert_eq!(rig.allocation(&queued).step, AllocationStep::Freed, "{id}");
+            if round == 0 || round == 5 {
+                let booked = rig.allocation(&queued).booked;
+                memory_of.push(crate::job_alloc::booked_of(booked).memory_bytes);
+            }
+        }
+    }
+    assert_eq!(memory_of.len(), 4, "two classes, two samples each");
+    let (cold, learned, first_bare, last_bare) =
+        (memory_of[0], memory_of[1], memory_of[2], memory_of[3]);
+    assert_eq!(
+        first_bare, cold,
+        "a class with no history books the cold size"
+    );
+    assert_eq!(last_bare, cold, "no usage reported: still the cold size");
+    assert!(
+        learned < cold,
+        "five runs with usage size the sixth from history below the cold size: {learned} < {cold}"
+    );
+}

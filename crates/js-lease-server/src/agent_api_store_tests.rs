@@ -37,6 +37,9 @@ mod host_cert;
 #[path = "agent_api_overlap_tests.rs"]
 mod overlap;
 
+#[path = "agent_api_taint_log_tests.rs"]
+mod taint_log;
+
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;
 

@@ -9,7 +9,8 @@ use js_state::Store;
 use tracing::{info, warn};
 
 /// Teaches `placer` the runs of the ended jobs of `jobs` ([`SchedPlacer::learn_ended`]) and
-/// answers how many it taught. A read that fails is logged and the server starts with no
+/// answers how many taught a class a memory sample (a job that ended with no usage is not
+/// counted). A read that fails is logged and the server starts with no
 /// history: every class books its cold size until its jobs run again, which is what a server
 /// with an empty store does, so the start is not refused for it.
 pub(crate) fn learn<S: Store, I: IdSource>(placer: &SchedPlacer, jobs: &JobStore<S, I>) -> usize {
