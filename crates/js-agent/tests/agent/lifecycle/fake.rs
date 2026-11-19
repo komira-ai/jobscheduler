@@ -123,6 +123,9 @@ struct State {
     /// The directory the runtime keeps each container's own directory in (see
     /// [`FakeRuntime::keep_lease_dirs_in`]).
     lease_root: Option<PathBuf>,
+    /// The directory it keeps each job's temporary directory in (see
+    /// [`FakeRuntime::keep_tmp_dirs_in`]).
+    tmp_root: Option<PathBuf>,
     /// Whether the directory it names has no name to make it by.
     lease_unnamable: bool,
     /// What `network_ceiling` answers; `none` by default, as the trait's default.
@@ -403,6 +406,13 @@ impl FakeRuntime {
     /// lifecycle makes it, bounds it with the run and removes it.
     pub fn keep_lease_dirs_in(&self, root: &Path) {
         self.state.borrow_mut().lease_root = Some(root.to_owned());
+    }
+
+    /// From now the runtime gives each job a temporary directory in `root`
+    /// (`.tmp-fake-<run id>`), as the crun runtime does beside the runs' directories: the
+    /// lifecycle makes it, bounds it in the slot's temporary project and removes it.
+    pub fn keep_tmp_dirs_in(&self, root: &Path) {
+        self.state.borrow_mut().tmp_root = Some(root.to_owned());
     }
 
     /// From now the directory the runtime names for a container is one that has no name (the
@@ -708,6 +718,11 @@ impl Runtime for FakeRuntime {
         }
         let root = state.lease_root.clone();
         root.map(|root| root.join(format!(".lease-fake-{run_id}")))
+    }
+
+    fn tmp_dir(&self, run_id: &str) -> Option<PathBuf> {
+        let root = self.state.borrow().tmp_root.clone();
+        root.map(|root| root.join(format!(".tmp-fake-{run_id}")))
     }
 
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {

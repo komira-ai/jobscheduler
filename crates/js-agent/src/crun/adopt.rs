@@ -616,6 +616,11 @@ impl CrunRuntime {
                 }
             }
         }
+        let removed = super::dirs::remove_tmp_beside(&lease.dir, name);
+        step(
+            "remove the job's temporary directory",
+            removed.as_ref().err().map(ToString::to_string),
+        )?;
         // Last: the images may go only once nothing of the lease can use them.
         step("remove the image's pin", self.unpin_all(name).err())
     }

@@ -46,15 +46,18 @@ fn a_start_gives_its_steps_once_in_the_order_they_were_done() {
 
 /// Proves the whole of a run the runtime makes and reads. A run becomes: the lease's
 /// directories, given to the job user or to the job's id (first id of the subordinate range
-/// plus 1000) in the order the layout says, then the run's scratch directory to the job's
-/// id, then the lease's cgroup and its four files to the job user; a cgroup limited by the
-/// booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
+/// plus 1000) in the order the layout says, then the job's temporary directory to the job
+/// user with its `tmp` and `var-tmp` to the job's id, then the run's scratch directory to the
+/// job's id, then the lease's cgroup and its four files to the job user; a cgroup limited by
+/// the booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
 /// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
-/// in the image's environment with the scratch directory bound. It lists with the run's
-/// label, the agent's and the time it was made. The program's exit 3 polls as 3, again as
-/// the same, and removing it leaves no directory, no cgroup and no listing, repeated without
-/// error. Catches a limit that is not the booking, files the job cannot write or `crun`
-/// cannot use, and a removal that leaves a lease behind.
+/// in the image's environment with the scratch directory bound, and the temporary
+/// directory's `tmp` and `var-tmp` bound at `/tmp` and `/var/tmp` (`noexec`). It lists with
+/// the run's label, the agent's and the time it was made. The program's exit 3 polls as 3,
+/// again as the same, and removing it leaves no directory (the temporary one included), no
+/// cgroup and no listing, repeated without error. Catches a limit that is not the booking,
+/// files the job cannot write or `crun` cannot use, a `/tmp` in memory or not bound, and a
+/// removal that leaves a lease or a job's `/tmp` behind.
 #[test]
 fn a_run_is_made_started_read_and_removed() {
     let node = Node::new("run-life");
@@ -111,6 +114,23 @@ fn a_run_is_made_started_read_and_removed() {
         .find(|mount| mount["destination"] == "/scratch")
         .expect("a scratch mount");
     assert_eq!(scratch["source"], json!(spec.scratch));
+    // The job's temporary directory, beside the lease's: its `tmp` and `var-tmp` bound at
+    // `/tmp` and `/var/tmp`, read-write, no program run from them, on disk (no tmpfs).
+    let tmp = lease.with_file_name(format!(
+        ".tmp-{}",
+        lease.file_name().unwrap().to_string_lossy()
+    ));
+    for (inside, at) in [("tmp", "/tmp"), ("var-tmp", "/var/tmp")] {
+        let found: Vec<&Value> = mounts.iter().filter(|m| m["destination"] == at).collect();
+        assert_eq!(found.len(), 1, "{at}");
+        assert_eq!(found[0]["type"], "bind", "{at}");
+        assert_eq!(found[0]["source"], json!(tmp.join(inside)), "{at}");
+        assert_eq!(
+            found[0]["options"],
+            json!(["bind", "rw", "nosuid", "nodev", "noexec"]),
+            "{at}"
+        );
+    }
 
     let (job, job_id) = ((node.uid, node.gid), (SUB_UID + 1000, SUB_GID + 1000));
     let own = |path: std::path::PathBuf, (uid, gid): (u32, u32)| (path, uid, gid);
@@ -123,6 +143,9 @@ fn a_run_is_made_started_read_and_removed() {
             own(lease.join("work"), job_id),
             own(lease.join("rw"), job),
             own(lease.join("rw/home"), job_id),
+            own(tmp.clone(), job),
+            own(tmp.join("tmp"), job_id),
+            own(tmp.join("var-tmp"), job_id),
             own(spec.scratch.clone(), job_id),
             own(cgroup.clone(), job),
             own(cgroup.join("cgroup.procs"), job),
@@ -132,7 +155,7 @@ fn a_run_is_made_started_read_and_removed() {
     );
 
     assert_eq!(runtime.remove(&id), Ok(()));
-    assert!(!lease.exists() && !cgroup.exists());
+    assert!(!lease.exists() && !cgroup.exists() && !tmp.exists());
     assert_eq!(runtime.poll(&id), Ok(Status::Gone));
     assert!(runtime.list_labelled().expect("lists").is_empty());
     assert_eq!(runtime.remove(&id), Ok(()));
