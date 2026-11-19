@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_agent::integrity::{FakeHost, Integrity, code};
 use js_agent::lifecycle::{CheckFinding, CheckHook as _, Finished};
 
-use super::{JOB_UID, after, process, started};
+use super::{JOB_UID, after, mount, process, started};
 
 /// The wait of these tests.
 const WAIT: Duration = Duration::from_millis(300);
@@ -132,5 +132,26 @@ fn a_restored_recheck_judges_what_is_there_after_the_wait() {
     let mut checks = started(&host, vec![]).with_settle(WAIT);
     let found = restored(&mut checks, "taint-recheck").unwrap_err();
     assert_eq!(found.code(), code::PROCESS_AS_JOB_USER);
+    assert_eq!(host.settled(), [WAIT]);
+}
+
+/// Asserts that a new mount at the re-check of a restored taint is judged after the wait like
+/// a process: one gone after the wait clears nothing against the host, and one still there
+/// is a `new-mount`. It catches a restored re-check that keeps a taint for a mount the host
+/// held for a moment.
+#[test]
+fn a_restored_recheck_judges_a_mount_after_the_wait() {
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]).with_settle(WAIT);
+    host.mount(mount("/mnt/brief", "/dev/sdb"));
+    host.at_settle(|host| host.unmount("/mnt/brief"));
+    assert!(restored(&mut checks, "taint-recheck").is_ok());
+    assert_eq!(host.settled(), [WAIT]);
+
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]).with_settle(WAIT);
+    host.mount(mount("/mnt/brief", "/dev/sdb"));
+    let found = restored(&mut checks, "taint-recheck").unwrap_err();
+    assert_eq!(found.code(), code::NEW_MOUNT);
     assert_eq!(host.settled(), [WAIT]);
 }

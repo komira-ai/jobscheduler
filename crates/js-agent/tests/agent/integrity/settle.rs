@@ -165,6 +165,7 @@ fn the_checks_wait_only_for_a_leftover_and_only_when_given_a_wait() {
     ));
     assert!(after(&mut checks, "r1").is_err());
     host.mount(mount("/mnt/x", "/dev/sdb"));
+    // It would be gone at a wait, which a check given no wait never takes: it is reported.
     host.at_settle(|host| host.unmount("/mnt/x"));
     let found = after(&mut checks, "r2").unwrap_err();
     assert_eq!(found.code(), code::DAEMONISED_CHILD);
@@ -177,32 +178,31 @@ fn the_checks_wait_only_for_a_leftover_and_only_when_given_a_wait() {
     assert!(host.settled().is_empty());
 }
 
-/// A FUSE mount a test on the host makes below its build directory, as a file system test run
-/// by hand on a build host does.
-fn fuse_test_mount(name: &str) -> Mount {
+/// A FUSE mount a process of the host makes below a build directory and holds for a moment.
+fn fuse_mount(name: &str) -> Mount {
     Mount {
         root: "/".to_owned(),
-        point: format!("/srv/build/target/tmp/{name}/mnt"),
-        fstype: "fuse.tsfuse".to_owned(),
-        source: "tsfuse-kernel".to_owned(),
+        point: format!("/srv/build/tmp/{name}/mnt"),
+        fstype: "fuse.testfs".to_owned(),
+        source: "testfs".to_owned(),
     }
 }
 
 /// Asserts that a new mount that is there at the first look and gone after the wait is not a
 /// finding (the checks asked for the wait once and the host is not tainted), and that the
 /// same mount, still there after the wait, is the `new-mount` it always was, named whole. It
-/// catches a mount the host holds for a moment as a job ends (a FUSE test's mount on the
-/// host, unmounted a few hundred milliseconds after the check) tainting the host for good,
+/// catches a mount the host holds for a moment as a job ends (a FUSE mount of a process
+/// on the host, unmounted a few hundred milliseconds after the check) tainting the host for good,
 /// and a wait that lets a mount that outlives the job go.
 #[test]
 fn a_mount_that_is_gone_after_the_wait_is_not_a_leftover_and_one_that_stays_is() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.mount(fuse_test_mount("k18-no-open-1"));
-    host.mount(fuse_test_mount("k19-keep-cache-2"));
+    host.mount(fuse_mount("a-1"));
+    host.mount(fuse_mount("b-2"));
     host.at_settle(|host| {
-        host.unmount("/srv/build/target/tmp/k18-no-open-1/mnt");
-        host.unmount("/srv/build/target/tmp/k19-keep-cache-2/mnt");
+        host.unmount("/srv/build/tmp/a-1/mnt");
+        host.unmount("/srv/build/tmp/b-2/mnt");
     });
     assert!(after(&mut checks, "r1").is_ok());
     assert_eq!(host.settled(), [WAIT]);
@@ -211,17 +211,16 @@ fn a_mount_that_is_gone_after_the_wait_is_not_a_leftover_and_one_that_stays_is()
 
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.mount(fuse_test_mount("k18-no-open-1"));
-    host.mount(fuse_test_mount("k19-keep-cache-2"));
-    host.at_settle(|host| host.unmount("/srv/build/target/tmp/k18-no-open-1/mnt"));
+    host.mount(fuse_mount("a-1"));
+    host.mount(fuse_mount("b-2"));
+    host.at_settle(|host| host.unmount("/srv/build/tmp/a-1/mnt"));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
         (
             true,
             code::NEW_MOUNT,
-            "new-mount: /srv/build/target/tmp/k19-keep-cache-2/mnt (fuse.tsfuse) from tsfuse-kernel"
-                .to_owned()
+            "new-mount: /srv/build/tmp/b-2/mnt (fuse.testfs) from testfs".to_owned()
         )
     );
     assert_eq!(host.settled(), [WAIT]);
@@ -268,9 +267,9 @@ fn a_mount_of_the_jobs_own_tree_is_judged_after_the_wait() {
 fn a_mount_made_during_the_wait_is_judged_by_the_next_check() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.mount(fuse_test_mount("k15-splice-0"));
+    host.mount(fuse_mount("c-3"));
     host.at_settle(|host| {
-        host.unmount("/srv/build/target/tmp/k15-splice-0/mnt");
+        host.unmount("/srv/build/tmp/c-3/mnt");
         host.mount(mount("/mnt/late", "/dev/sdc"));
     });
     assert!(after(&mut checks, "r1").is_ok());
@@ -298,9 +297,9 @@ fn a_baseline_mount_remounted_during_the_wait_stays_in_the_baseline() {
     host.mount(mount("/run/tierstore/fs", "tierstore"));
     let mut checks = started(&host, vec![]).with_settle(WAIT);
     host.unmount("/run/tierstore/fs");
-    host.mount(fuse_test_mount("k17-small-pipe-4"));
+    host.mount(fuse_mount("d-4"));
     host.at_settle(|host| {
-        host.unmount("/srv/build/target/tmp/k17-small-pipe-4/mnt");
+        host.unmount("/srv/build/tmp/d-4/mnt");
         host.mount(mount("/run/tierstore/fs", "tierstore"));
     });
     assert!(after(&mut checks, "r1").is_ok());
@@ -314,7 +313,7 @@ fn a_baseline_mount_remounted_during_the_wait_stays_in_the_baseline() {
 fn a_second_look_that_cannot_read_the_mounts_is_unchecked() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.mount(fuse_test_mount("k21-max-pages-64-6"));
+    host.mount(fuse_mount("e-5"));
     host.at_settle(|host| host.fail(input::MOUNTS));
     let found = after(&mut checks, "r1").unwrap_err();
     assert!(matches!(found, CheckFinding::Unchecked { .. }), "{found:?}");
@@ -416,6 +415,39 @@ fn a_process_of_the_jobs_own_removed_container_is_judged_after_the_wait_and_name
             "daemonised-child: pid 311 (sleep, state S, cgroup 0::/machine.slice/libpod-own.scope) \
              was left behind by job r2 (parent init)"
                 .to_owned()
+        )
+    );
+}
+
+/// Asserts that a mount below the directory of a job the agent still holds, there at both
+/// looks, is no finding when a transient mount makes the checks wait, and is kept out of the
+/// baseline the check takes, so it is a `new-mount` at the next check once that job is no
+/// longer held. It catches the second look letting a held job's mount into the baseline.
+#[test]
+fn a_held_jobs_mount_through_the_wait_stays_out_of_the_baseline() {
+    let held = std::path::PathBuf::from("/run/js-agent/mounts/js-a-r2");
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]).with_settle(WAIT);
+    host.mount(mount("/run/js-agent/mounts/js-a-r2/rootfs", "overlay"));
+    host.mount(fuse_mount("f-6"));
+    host.at_settle(|host| host.unmount("/srv/build/tmp/f-6/mnt"));
+    let holding = js_agent::lifecycle::Finished {
+        run_id: "r1",
+        live: &[],
+        slot: None,
+        live_slots: &[],
+        held_mounts: std::slice::from_ref(&held),
+    };
+    assert!(js_agent::lifecycle::CheckHook::run(&mut checks, &holding).is_ok());
+    assert_eq!(host.settled(), [WAIT]);
+
+    let found = after(&mut checks, "r3").unwrap_err();
+    assert_eq!(
+        said(&found),
+        (
+            true,
+            code::NEW_MOUNT,
+            "new-mount: /run/js-agent/mounts/js-a-r2/rootfs (ext4) from overlay".to_owned()
         )
     );
 }

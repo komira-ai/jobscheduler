@@ -784,7 +784,8 @@ impl Integrity {
         later
             .processes
             .retain(|process| seen.contains(&process.key()));
-        // A mount of the baseline that was remounted during the wait is not one that arrived.
+        // A mount that arrived during the wait is the next check's; one of the baseline that
+        // was remounted during the wait did not arrive.
         later
             .mounts
             .retain(|mount| first.mounts.contains(mount) || self.baseline.mounts.contains(mount));
