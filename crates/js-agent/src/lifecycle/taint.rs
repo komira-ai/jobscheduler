@@ -18,8 +18,8 @@
 //!   apart and the server's acknowledgement of the clear (see "A taint that clears itself").
 //!   The marker is then renamed to `taint.json.cleared-<unix seconds>`, never removed: the
 //!   file is kept as an operator's clear keeps it. Every other taint ends only when an
-//!   operator reimages the host, or moves the file by hand (with `taint.pinned` and the
-//!   `owed-*` records).
+//!   operator reimages the host, or clears it with `js-agent clear-taint`, which keeps the
+//!   file aside with `taint.pinned` and the `owed-*` records (see `clear_taint`).
 //! - **It is read when the agent starts**, so a tainted agent that restarts is still
 //!   tainted. A marker that exists but cannot be read or understood taints the host with the
 //!   reason [`reason::MARKER_UNREADABLE`]: a file that is there is never taken for an absent
@@ -54,7 +54,7 @@
 //! stale one of a taint an operator cleared, and is ignored. The agent never removes the pin
 //! file (it never clears while pinned). A failed write is a finding
 //! (`taint-write-failed`) like a marker's, the pin stands in memory, and the write is tried
-//! again at the next step. An operator who clears a pinned taint by hand moves `taint.pinned`
+//! again at the next step. An operator's clear (`js-agent clear-taint`) keeps `taint.pinned`
 //! aside with `taint.json` and the `owed-*` records.
 //!
 //! The state root holds one more kind of file: `owed-<run id>`, the record that a job's

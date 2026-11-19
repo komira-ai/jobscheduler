@@ -171,7 +171,7 @@ impl World {
     }
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove` or
-    /// `list`) fail.
+    /// `list`, or `processes`: the process listing a post-job check reads) fail.
     #[cfg(target_os = "linux")]
     pub fn fail(&self, call: &'static str, times: u32) {
         self.lock().failing.insert(call, times);
@@ -249,8 +249,9 @@ impl World {
         self.lock().checking
     }
 
-    /// A check begins: counted, and held while [`World::hold_checks`] is set.
-    fn begin_check(&self) {
+    /// A check begins: counted, and held while [`World::hold_checks`] is set. Whether its
+    /// process listing fails ([`World::fail`] with `processes`).
+    fn begin_check(&self) -> bool {
         let mut state = self.lock();
         state.checking += 1;
         self.0.changed.notify_all();
@@ -265,6 +266,7 @@ impl World {
                 break;
             }
         }
+        state.fails_listing()
     }
 
     /// `image` is being pulled: a start that names it waits until [`World::end_pull`].
@@ -313,6 +315,17 @@ impl World {
 }
 
 impl State {
+    /// Whether a check's process listing fails now (and counts it).
+    fn fails_listing(&mut self) -> bool {
+        match self.failing.get_mut("processes") {
+            Some(times) if *times > 0 => {
+                *times -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the call `call` fails now (and counts it), and panics if it is to.
     #[cfg(target_os = "linux")]
     fn fails(&mut self, call: &'static str) -> bool {
@@ -766,7 +779,9 @@ struct AnyDirectory(FakeHost, World);
 
 impl HostView for AnyDirectory {
     fn processes(&self) -> Result<Vec<Process>, String> {
-        self.1.begin_check();
+        if self.1.begin_check() {
+            return Err("the fake host's process listing fails".to_owned());
+        }
         self.0.processes()
     }
 

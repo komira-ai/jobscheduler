@@ -199,8 +199,8 @@
 //!   or cannot run, leaves the run `Blocked`: its slot stays booked, it counts toward the
 //!   runs the agent holds and is listed as `exited_unacked` for as long as the taint stands.
 //!   When a taint that clears itself ends, its blocked runs are freed and their slots come
-//!   back; for any other taint the host is reimaged (or the marker moved by hand and the
-//!   agent restarted).
+//!   back; for any other taint the host is reimaged, or an operator clears it with
+//!   `js-agent clear-taint`, which keeps the marker aside and restarts the agent.
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
 //!   flag. A job that holds a read-write mount can write in its root, so it can swap a

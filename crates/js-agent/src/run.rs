@@ -10,7 +10,9 @@
 //! next heartbeat says `draining` at once (the server then sends no start and books
 //! nothing more on the host) and carries what the worker holds; the loop goes on
 //! heartbeating, every interval, while a run or a result the server has not acknowledged
-//! is left, so the results of jobs that end reach the server and are acknowledged. When
+//! is left, so the results of jobs that end reach the server and are acknowledged. A run whose
+//! post-job checks found the taint (`Blocked`) is not waited for: it has no container, and it
+//! leaves only when the taint clears, which no wait brings about (see [`drain_waits`]). When
 //! [`Drain::wait`] has passed it asks the worker to stop what still runs, and keeps
 //! heartbeating for [`Drain::settle`] more. It ends, with status 0, when a heartbeat that
 //! listed nothing has been sent, when that time has passed, or at a second stop request.
@@ -42,6 +44,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::session::{Drain, Fatal, Session, Step};
+use crate::worker::Snapshot;
 
 /// How a wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +170,7 @@ fn drain_jobs(
     loop {
         // What this heartbeat lists is what the server then believes: the drain is done
         // when a heartbeat that listed nothing has been sent.
-        let idle = !session.jobs_left();
+        let idle = !session.drain_left();
         let step = session.tick();
         print(session, log);
         let after = match step {
@@ -195,12 +198,37 @@ fn drain_jobs(
 
 /// The end of a drain, with a line when something is left.
 fn leave(session: &Session<'_>, log: &mut dyn Write) -> Exit {
-    if session.jobs_left() {
+    if session.drain_left() {
         let _ = writeln!(
             log,
             "js-agent: draining: a run or a result is left; the next start adopts what \
              still exists"
         );
+    } else if session.jobs_left() {
+        let _ = writeln!(
+            log,
+            "js-agent: draining: only the runs whose checks found the taint are left; they \
+             leave with the taint, which the next start reads from the marker again"
+        );
     }
     Exit::Stopped
 }
+
+/// Whether a drain waits on what `snapshot` holds: a run or a job that is not `Blocked`
+/// ([`Snapshot::blocked`]), a result or a retired job id the server has not acknowledged. A
+/// `Blocked` run's container and scratch directory are gone and it leaves only when the taint
+/// clears, which no wait of the drain brings about: a tainted agent that holds nothing else
+/// leaves at once instead of heartbeating `draining` for the whole `--drain-wait`.
+pub(crate) fn drain_waits(snapshot: &Snapshot) -> bool {
+    let waits = |id: &String| !snapshot.blocked.contains(id);
+    let run = snapshot.held.iter().any(|run| waits(&run.run_id));
+    let job = snapshot
+        .jobs
+        .iter()
+        .any(|job| job.result.is_some() || waits(&job.job_id));
+    run || job || !snapshot.results.is_empty() || !snapshot.retired_jobs.is_empty()
+}
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;

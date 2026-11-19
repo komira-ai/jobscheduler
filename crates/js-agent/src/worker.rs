@@ -366,6 +366,8 @@ pub struct Snapshot {
     pub jobs: Vec<HeldJob>,
     /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
     pub retired_jobs: Vec<String>,
+    /// The ids among `held` and `jobs` whose checks found the taint: they leave with it alone.
+    pub blocked: Vec<String>,
 }
 
 impl Snapshot {
@@ -377,6 +379,7 @@ impl Snapshot {
             taint_cleared: life.pending_taint_clear(),
             jobs: life.held_jobs(),
             retired_jobs: life.retired_jobs(),
+            blocked: life.blocked(),
         }
     }
 

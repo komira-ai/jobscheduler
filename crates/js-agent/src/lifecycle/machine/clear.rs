@@ -36,6 +36,15 @@ impl Lifecycle {
         self.taint.pending_clear()
     }
 
+    /// The run ids and job ids of the runs and jobs whose checks found the taint (`Blocked`),
+    /// in the order of [`Lifecycle::held`]. Their container and scratch directory are gone and
+    /// they leave only when the taint clears, so a drain that waits for them waits for nothing
+    /// it can see end; a restarted agent reads the taint again from the marker.
+    pub fn blocked(&self) -> Vec<String> {
+        let blocked = self.jobs.iter().filter(|job| job.stage == Stage::Blocked);
+        blocked.map(|job| job.run_id.clone()).collect()
+    }
+
     /// Whether no run is held but those whose checks found the taint (`Blocked`) or that are
     /// over (`Freed`), whose container and scratch directory are gone. A container the agent
     /// could not remove is not a run, but it has tainted the host as `cleanup-failed` when it

@@ -15,6 +15,8 @@ mod bell;
 mod binary;
 mod bounds;
 mod bundle;
+#[cfg(target_os = "linux")]
+mod clear_taint;
 mod cli_runtime;
 mod container;
 mod cordon;
