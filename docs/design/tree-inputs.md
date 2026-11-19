@@ -616,7 +616,7 @@ Two cases the baseline alone does not cover, both new here:
   (`integrity/mod.rs:531`, the host's own mounts, today the network namespaces and `/run/user/<uid>`) gains one entry:
   `point` equal to the configured `--tierstore-fs` and `fstype` equal to `fuse.tierstore`. The function takes the
   configured path, as a field of the check. A FUSE mount anywhere else, or another type at that point, is still a
-  finding. A job cannot make this mount: its container has no `/dev/fuse` and no capabilities.
+  finding. A job cannot make this mount: its container has no `/dev/fuse` and no capabilities, unless the agent gives it the FUSE device (`--allow-fuse-jobs` and a start with `fuse`, `docs/runbooks/fuse-jobs.md`), which a farm test environment does and which mounts in the job's own mount namespace only.
 - **The type and source must be stable** across instances `a` and `b` and across releases, or each hand-over would be
   a new mount. Section 12 asks tierstore to fix them as `fuse.tierstore` and `tierstore`.
 

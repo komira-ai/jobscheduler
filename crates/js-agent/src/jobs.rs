@@ -110,6 +110,8 @@ pub fn start(
         silence_stop,
         vm,
         allow_host_jobs,
+        // What the probe found, not the flag, decides: the hello says what it found.
+        allow_fuse_jobs: _,
     } = local;
     // `Local` holds a state root and a scratch root with a backend.
     let (backend, scratch, state) = match (backend, scratch, state) {
@@ -120,6 +122,7 @@ pub fn start(
     let config = Config {
         capacity: Capacity::of(hello),
         allow_host_jobs,
+        allow_fuse_jobs: hello.capabilities.contains_key(js_caps::FUSE_JOBS),
         mounts,
         scratch,
         files,

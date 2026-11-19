@@ -23,7 +23,8 @@
 //! The memory and CPU limits that bound the job are the lease cgroup's, as for a contained
 //! job; the container's own cgroup repeats them ([`unified`]). A host spec
 //! with a mount, a shared tree or a device is refused: the job sees the host's own paths
-//! and devices, and none of them could be given without changing the host.
+//! and devices, and none of them could be given without changing the host. So is one given
+//! the FUSE device ([`ContainerSpec::fuse`]): it sees the host's own.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -119,7 +120,8 @@ fn init_argv(init: &str, argv: &[String]) -> Vec<String> {
 ///
 /// # Errors
 /// `spec.exec_root` or the init's path is not a normalized absolute path, or `spec` has a
-/// mount, a shared tree or a device ([`SpecError::HostMounts`]).
+/// mount, a shared tree or a device ([`SpecError::HostMounts`]), or is given the FUSE device
+/// ([`SpecError::HostFuse`]).
 pub(crate) fn host_config(
     spec: &ContainerSpec,
     placement: &Placement<'_>,
@@ -127,6 +129,9 @@ pub(crate) fn host_config(
     normalized("exec_root", &spec.exec_root, "/")?;
     let init = placement.init.to_string_lossy();
     normalized("init path", &init, "/")?;
+    if spec.fuse {
+        return Err(SpecError::HostFuse);
+    }
     if !(spec.mounts.is_empty() && spec.shared.is_empty() && spec.devices.is_empty()) {
         return Err(SpecError::HostMounts);
     }

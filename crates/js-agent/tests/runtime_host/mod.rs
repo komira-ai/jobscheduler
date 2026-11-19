@@ -307,6 +307,7 @@ impl RuntimeHost {
             files: None,
             slot: 0,
             isolation: js_agent_wire::Isolation::Contained,
+            fuse: false,
             bundle: None,
             labels: BTreeMap::new(),
             network: self.network,

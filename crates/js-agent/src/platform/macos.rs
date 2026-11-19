@@ -341,6 +341,8 @@ pub(crate) struct Jobs {
     pub(crate) taint_recheck: Duration,
     /// No host jobs.
     pub(crate) allow_host_jobs: bool,
+    /// No FUSE device: only the crun runtime gives it.
+    pub(crate) allow_fuse_jobs: bool,
 }
 
 /// The job flags of a macOS agent: nothing is checked until the roots are known
@@ -364,6 +366,7 @@ pub(crate) fn jobs(
         settle: crate::lifecycle::DEFAULT_SETTLE,
         taint_recheck: crate::lifecycle::taint::DEFAULT_TAINT_RECHECK,
         allow_host_jobs: false,
+        allow_fuse_jobs: false,
     })
 }
 

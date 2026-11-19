@@ -1,19 +1,20 @@
 //! The host contract of an agent that runs containers (the Linux build's runtimes): `runtime`
 //! and `exec` are `container`, with `per-job`, `start-fence`, `gpu-toolkit`, `gpu-passthrough`,
-//! the scratch quota, `host-jobs`, `layered-rootfs` and `mount-provider.<name>` (see
-//! [`super`]).
+//! the scratch quota, `host-jobs`, `fuse-jobs`, `fuse-uring`, `layered-rootfs` and
+//! `mount-provider.<name>` (see [`super`]).
 
 use std::path::Path;
 
 use js_agent_wire::{HOST_JOBS_CAPABILITY, Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling};
 use js_caps::{
-    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA,
-    SCRATCH_QUOTA_PROJECT, mount_provider_key,
+    EXEC, FLAG_SET, FUSE_JOBS, FUSE_URING, GPU_PASSTHROUGH, GPU_TOOLKIT, RUNTIME,
+    SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT, mount_provider_key,
 };
 use js_types::ExecMode;
 
 use super::{report_per_job, report_run_files};
 use crate::facts::CommandRunner;
+use crate::fuse_env::FuseEnv;
 use crate::lifecycle::MountProviders;
 
 /// The `PATH` the toolkit hook runs with; it inherits nothing else.
@@ -65,6 +66,36 @@ pub(crate) fn report_host_jobs(hello: &mut Hello, allowed: bool) {
             .capabilities
             .insert(HOST_JOBS_CAPABILITY.to_owned(), FLAG_SET.to_owned());
     }
+}
+
+/// Says that the agent gives contained jobs the FUSE device, when it was started with
+/// `--allow-fuse-jobs` (`allowed`) and its probe (`env`) found the host fit: `fuse-jobs`, and
+/// `fuse-uring` with it where FUSE over io_uring is usable too. Returns one warning for each
+/// condition that failed (`fuse-uring` is not blamed for what `fuse-jobs` already is), naming
+/// what is missing; an agent that was not given the flag says nothing.
+pub(crate) fn report_fuse(hello: &mut Hello, allowed: bool, env: &FuseEnv) -> Vec<String> {
+    if !allowed {
+        return Vec::new();
+    }
+    let warn = |key: &str, why: &str| format!("--allow-fuse-jobs: {key} is not reported: {why}");
+    let mut warnings = Vec::new();
+    match &env.jobs {
+        Ok(()) => {
+            hello
+                .capabilities
+                .insert(FUSE_JOBS.to_owned(), FLAG_SET.to_owned());
+            match &env.uring {
+                Ok(()) => {
+                    hello
+                        .capabilities
+                        .insert(FUSE_URING.to_owned(), FLAG_SET.to_owned());
+                }
+                Err(why) => warnings.push(warn(FUSE_URING, why)),
+            }
+        }
+        Err(why) => warnings.push(warn(FUSE_JOBS, why)),
+    }
+    warnings
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
@@ -360,6 +391,73 @@ mod tests {
         report_host_jobs(&mut refused, false);
         assert!(!refused.capabilities.contains_key(HOST_JOBS_CAPABILITY));
         assert_eq!(HOST_JOBS_CAPABILITY, "host-jobs");
+    }
+
+    /// Asserts that `fuse-jobs` and `fuse-uring` are reported as `true` only by an agent given
+    /// `--allow-fuse-jobs` whose probe passed (the second only where io_uring is usable
+    /// too), that each failed condition is one exact warning, that a hello that carries them
+    /// still validates, and that an agent without the flag reports neither and says nothing
+    /// even over a probe that failed. Catches a host that offers the device it cannot give,
+    /// and one that is never told its operator's flag did nothing.
+    #[test]
+    fn fuse_keys_are_reported_only_where_the_flag_and_the_probe_agree() {
+        let ok = || Ok(());
+        let keys = |hello: &Hello| -> Vec<String> {
+            let found = hello.capabilities.keys();
+            found
+                .filter(|key| key.starts_with("fuse-"))
+                .cloned()
+                .collect()
+        };
+        let mut both = reported(&Config::none());
+        let env = FuseEnv {
+            jobs: ok(),
+            uring: ok(),
+        };
+        assert_eq!(report_fuse(&mut both, true, &env), Vec::<String>::new());
+        assert_eq!(keys(&both), ["fuse-jobs", "fuse-uring"]);
+        assert_eq!(both.capabilities["fuse-jobs"], FLAG_SET);
+        assert_eq!(both.capabilities["fuse-uring"], FLAG_SET);
+        assert_eq!(both.validate(), Ok(()));
+
+        let mut no_uring = reported(&Config::none());
+        let env = FuseEnv {
+            jobs: ok(),
+            uring: Err("the fuse module's enable_uring is off".to_owned()),
+        };
+        assert_eq!(
+            report_fuse(&mut no_uring, true, &env),
+            [
+                "--allow-fuse-jobs: fuse-uring is not reported: the fuse module's enable_uring \
+                 is off"
+            ]
+        );
+        assert_eq!(keys(&no_uring), ["fuse-jobs"]);
+
+        let mut old = reported(&Config::none());
+        let why = "the kernel is 6.8, below 6.14".to_owned();
+        let env = FuseEnv {
+            jobs: Err(why.clone()),
+            uring: Err(why),
+        };
+        assert_eq!(
+            report_fuse(&mut old, true, &env),
+            ["--allow-fuse-jobs: fuse-jobs is not reported: the kernel is 6.8, below 6.14"]
+        );
+        assert!(keys(&old).is_empty());
+
+        for env in [
+            FuseEnv {
+                jobs: ok(),
+                uring: ok(),
+            },
+            env,
+        ] {
+            let mut unasked = reported(&Config::none());
+            assert_eq!(report_fuse(&mut unasked, false, &env), Vec::<String>::new());
+            assert!(keys(&unasked).is_empty());
+        }
+        assert_eq!((FUSE_JOBS, FUSE_URING), ("fuse-jobs", "fuse-uring"));
     }
 
     /// Asserts that `mount-provider.<name>` is reported as `true` for each provider the agent

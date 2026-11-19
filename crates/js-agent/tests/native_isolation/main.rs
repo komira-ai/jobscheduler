@@ -314,6 +314,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels: Default::default(),
         bundle: None,
         network: Default::default(),

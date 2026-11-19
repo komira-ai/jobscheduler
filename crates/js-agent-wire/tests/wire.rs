@@ -35,6 +35,7 @@ fn refusal_codes_snapshot() {
         refusal::HOST_NOT_REGISTERED,
         refusal::LIMITS_EXCEED_SHAPE,
         refusal::HOST_JOBS_NOT_ALLOWED,
+        refusal::FUSE_JOBS_NOT_ALLOWED,
         refusal::UNSUPPORTED_PROTOCOL,
         refusal::INVALID_HEARTBEAT,
         refusal::INVALID_WELCOME,
@@ -93,7 +94,7 @@ fn refusal_codes_snapshot() {
         codes.join(" "),
         "invalid-hello reserved-label wall-time-not-positive invalid-job invalid-image \
          image-digest-required invalid-mount invalid-file host-live host-tainted stale-epoch unknown-host not-held host-lost \
-         no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
+         no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed fuse-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \

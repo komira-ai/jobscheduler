@@ -403,6 +403,7 @@ impl Node {
             files: None,
             slot: 0,
             isolation: js_agent_wire::Isolation::Contained,
+            fuse: false,
             bundle: None,
             labels: BTreeMap::from([(label::RUN.to_owned(), run_id.to_owned())]),
             network: Default::default(),

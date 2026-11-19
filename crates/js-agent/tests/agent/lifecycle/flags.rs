@@ -10,7 +10,7 @@ use js_agent::lifecycle::{
     DEFAULT_SETTLE, DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, MAX_SETTLE_MS, MAX_SILENCE_STOP_SECS,
     SILENCE_STOP_GRACE_RATIO, fits_grace, settle, silence_stop,
 };
-use js_agent::platform::HOST_JOBS_NEED_CRUN;
+use js_agent::platform::{FUSE_JOBS_NEED_CRUN, HOST_JOBS_NEED_CRUN};
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER_CAP};
 use js_oci::Allow;
 
@@ -105,6 +105,61 @@ fn allow_host_jobs_is_refused_on_every_runtime_but_crun() {
         HOST_JOBS_NEED_CRUN,
         "--allow-host-jobs: only the crun runtime launches a host job; the container engine \
          (--allow-container-engine) runs contained jobs only"
+    );
+}
+
+/// Asserts that `--allow-fuse-jobs` ends the agent with status 2, before anything is sent, on
+/// every runtime but crun: with the words of `FUSE_JOBS_NEED_CRUN` on the container engine
+/// (`--allow-container-engine`), and naming `--no-jobs` on an agent that runs no job. Catches
+/// an agent whose runtime cannot give a job the FUSE device but whose operator was never told.
+#[test]
+fn allow_fuse_jobs_is_refused_on_every_runtime_but_crun() {
+    let dir = Scratch::new("life-flags-fuse-jobs");
+    let (state, scratch) = (dir.path("state"), dir.path("scratch"));
+    for path in [&state, &scratch] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let user = container_user();
+    let s = |path: &std::path::Path| path.display().to_string();
+    let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
+    let docker = [
+        "--allow-fuse-jobs",
+        "--allow-container-engine",
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--container-subuid",
+        "jobmap",
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let (ran, sent, _) = run_scripted(&docker, &linux_host(), vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains(FUSE_JOBS_NEED_CRUN), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+    let (ran, sent, _) = run_scripted(
+        &["--allow-fuse-jobs", "--no-jobs"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("--allow-fuse-jobs: not with --no-jobs (an agent that runs no job)"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
+    assert_eq!(
+        FUSE_JOBS_NEED_CRUN,
+        "--allow-fuse-jobs: only the crun runtime gives a job the FUSE device; the container \
+         engine (--allow-container-engine) does not"
     );
 }
 
