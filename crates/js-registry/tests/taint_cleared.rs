@@ -165,3 +165,30 @@ fn a_host_cleared_can_be_tainted_again() {
         Some("host-tainted".to_owned())
     );
 }
+
+/// Asserts that the taint a refused start made (reason `host-tainted`, run id the refused
+/// run; the agent's own report was not held when the start was refused) is ended by the
+/// agent's report that it cleared its own taint, whatever that taint's fields: the refusal
+/// only mirrors the agent's taint, and nothing else would ever end it, since the agent is
+/// clean and reports no taint. The check names the clearing, the reply acknowledges it and
+/// the bindings carry no taint. It catches a host left tainted in the server, taking no job,
+/// after its agent is clean.
+#[test]
+fn a_cleared_report_ends_the_taint_a_refused_start_made() {
+    let fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    let mut beat = fx.heartbeat("a", epoch);
+    beat.results = vec![refused_start("r1")];
+    fx.registry.heartbeat(&beat, &cred("t")).unwrap();
+    let made = view(&fx).taint.unwrap();
+    assert_eq!(made.reason, "host-tainted");
+
+    let mut beat = fx.heartbeat("a", epoch);
+    beat.taint_cleared = Some(taint("residue", "daemonised-child"));
+    let check = fx.registry.check_heartbeat(&beat, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, true));
+    let reply = fx.registry.heartbeat(&beat, &cred("t")).unwrap();
+    assert!(reply.taint_cleared_ack);
+    assert_eq!(view(&fx).taint, None);
+    assert_eq!(fx.registry.bindings()[&host("a")].taint(), None);
+}

@@ -103,7 +103,9 @@ for a taint report. A clear that reaches a server whose registry holds no taint 
 start-first update: the agent reported its taint to one and its clear reaches the other) ends the taint the store holds
 when it is the cleared one, field for field, by the same compare-and-set, before the reply; the server's memory does not
 change. Without that the clear was acknowledged with the taint left in the store, the agent never sent it again, and every
-later start put the taint back on a clean host, which then took no job. A cleared report of any other taint (a host job's
+later start put the taint back on a clean host, which then took no job. When the taint the registry holds is the one a refused start made (reason `host-tainted`, which only mirrors the agent's own
+taint and which the clean agent never reports), a cleared report of any taint ends it: without that the agent was
+acknowledged, the server's taint stayed, and no one reported it again. A cleared report of any other taint (a host job's
 taint the server set, say) changes nothing and is acknowledged all the same (`taint_cleared_ack`), so the agent stops sending
 it. A start refused `host-tainted` in the beat that carries the
 clear taints nothing (those results were made before the clear); a taint the agent makes again is reported in `taint`

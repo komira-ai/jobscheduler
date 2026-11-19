@@ -600,7 +600,8 @@ impl Registry {
     /// reporting once it has it. A tainted host takes no new job and is never forgotten for
     /// being silent. The one thing that ends a taint here is the host's own report that it
     /// cleared the taint held for it: `taint_cleared` equal to the held taint, field for
-    /// field. A report of a different taint changes nothing.
+    /// field, or any `taint_cleared` when the held taint is the one a refused start made
+    /// (reason `host-tainted`). A report of a different taint changes nothing otherwise.
     ///
     /// This records the beat: it changes the registry. [`Registry::check_heartbeat`] runs
     /// the same checks and finds the taint the beat would record, changing nothing, so a
