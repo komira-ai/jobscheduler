@@ -1,12 +1,15 @@
-//! What the agent writes down before it asks a mount provider for anything, so that a
-//! restart can release what may exist (`docs/design/mount-providers.md`, section 4):
+//! What the agent writes down when it has asked its mount providers to prepare a run's
+//! sources, so that a restart can release what may exist (`docs/design/mount-providers.md`, section 4):
 //! `providers/<run>.json` in the state root, one file for each run that has provider
 //! sources, holding the provider and the index of each.
 //!
 //! A source is named in every call by the agent, the run and the index, so the record needs
 //! no answer of a provider's to say what to release. It is written whole (a temporary file,
 //! synced, renamed over, the directory synced; the directory is `0700`, the file `0600`)
-//! before the first `Prepare` of the run, and removed once every source is released. An
+//! in the admission that sends the run's first `Prepare`s, after them so that the syncs
+//! overlap the providers' work (a crash in between is released by the sweep each provider
+//! is asked when the agent starts, which keeps only the runs the agent adopted), and removed
+//! once every source is released. An
 //! unfinished write (`<run>.json.tmp`) of a dead process is removed without a finding; a
 //! file that cannot be read or understood is removed and reported as a
 //! `provider-record-failed` finding.

@@ -175,11 +175,13 @@ fn a_refused_ref_fails_the_start_provider_refused() {
 
 /// Asserts that the record of a start's provider sources (`providers/<run>.json` in the state
 /// root: the provider and the index of each source, the directory `0700` and the file `0600`)
-/// is on disk when the first `Prepare` is sent, and is gone once the sources are released.
-/// Catches a crash between `Prepare` and the record that leaves a source nobody can release,
-/// and a record that outlives its run.
+/// is not yet on disk when each `Prepare` is sent (the provider works while the record's
+/// syncs are spent), is on disk when the admission returns, and is gone once the sources are
+/// released. Catches a record written before the asks, which holds the provider's first work
+/// back by the record's syncs, a record that is not written at all, and a record that
+/// outlives its run.
 #[test]
-fn the_record_is_written_before_the_first_prepare_and_removed_after_release() {
+fn the_record_is_written_after_the_prepares_and_removed_after_release() {
     let (mut h, providers) = rig("prov-record", |_| {});
     providers.watch_records(h.dir.path("state/providers"));
     providers.mounts_at("tier", "j1", 0, &tree(&h, "ro", "t1"));
@@ -188,8 +190,8 @@ fn the_record_is_written_before_the_first_prepare_and_removed_after_release() {
     assert_eq!(
         providers.sent("prepare"),
         [
-            "provider prepare tier j1#0 k1 ReadOnly record=yes",
-            "provider prepare tier j1#1 k2 ReadOnly record=yes"
+            "provider prepare tier j1#0 k1 ReadOnly record=no",
+            "provider prepare tier j1#1 k2 ReadOnly record=no"
         ]
     );
     let record = h.dir.path("state/providers/j1.json");
@@ -458,13 +460,15 @@ fn a_failed_sweep_is_asked_again_every_ten_seconds_and_reported_once() {
 }
 
 /// Asserts that a start whose record cannot be written (the `providers` directory of the
-/// state root is a file) fails `input-unavailable` with a `provider-record-failed` finding
-/// and asks no provider. Catches a source prepared that a restart could not release.
+/// state root is a file) fails `input-unavailable` with a `provider-record-failed` finding,
+/// although its providers were asked first, and that what was asked is released by the
+/// failed start's cleanup, each source once. Catches a failed record that leaves the asked
+/// sources held by the providers.
 #[test]
-fn a_record_that_cannot_be_written_fails_the_start_before_any_provider_is_asked() {
+fn a_record_that_cannot_be_written_fails_the_start_and_releases_what_was_asked() {
     let (mut h, providers) = rig("prov-record-fails", |_| {});
     fs::write(h.dir.path("state/providers"), "not a directory").unwrap();
-    h.apply(vec![job_start(with_layer("j1"))]);
+    h.apply(vec![job_start(with_layer_and_mount("j1"))]);
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.outcome, Outcome::FailedToStart);
     assert_eq!(result.detail.as_deref(), Some(refusal::INPUT_UNAVAILABLE));
@@ -473,12 +477,20 @@ fn a_record_that_cannot_be_written_fails_the_start_before_any_provider_is_asked(
         message.starts_with("the record of the run's provider sources cannot be written: "),
         "{message}"
     );
-    steps(&mut h);
-    assert!(providers.sent("prepare").is_empty());
-    assert!(
-        providers.sent("release").is_empty(),
-        "nothing was asked, nothing is released"
+    assert_eq!(
+        providers.sent("prepare"),
+        [
+            "provider prepare tier j1#0 k1 ReadOnly",
+            "provider prepare tier j1#1 k2 ReadOnly"
+        ],
+        "the providers were asked before the record was tried"
     );
+    steps(&mut h);
+    assert_eq!(
+        providers.sent("release"),
+        ["provider release tier j1#0", "provider release tier j1#1"]
+    );
+    assert!(h.fake.created().is_empty(), "no container was made");
 }
 
 /// Asserts that a start that waits for its provider and an image together fails when the
