@@ -75,6 +75,7 @@
 //! it; the reply is then built again from the store and carries the start.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::sync::Arc;
 
 use axum::Json;
@@ -122,6 +123,9 @@ mod held;
 mod host_cert;
 mod limit;
 mod own_host;
+mod unknown;
+
+use self::unknown::{identify_single, unknown_bearer};
 
 /// The watch of a heartbeat whose reply may be held, and what building it again needs.
 type Watched = (crate::held_beat::Watch, Arc<held::Inputs>);
@@ -187,41 +191,20 @@ async fn authenticate(
         (None, Some(given)) => identify_single(&agents, given).await,
         _ => Ok(None),
     };
-    let single = match single {
-        Ok(single) => single,
-        Err(error) => {
-            warn!(%error, "agent request refused: its token could not be read from the store");
-            return Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
-                .into_response();
-        }
-    };
     match (pooled, single) {
         (Some((credential, pool)), _) => {
             request.extensions_mut().insert(credential);
             request.extensions_mut().insert(TokenPool(pool));
             next.run(request).await
         }
-        (None, Some(presented)) => {
+        (None, Ok(Some(presented))) => {
             let registered = agents.joins.registered_as(&presented);
             request.extensions_mut().insert(registered);
             request.extensions_mut().insert(OneTime(presented));
             next.run(request).await
         }
-        (None, None) => StatusCode::UNAUTHORIZED.into_response(),
+        (None, unknown) => unknown_bearer(unknown),
     }
-}
-
-/// The credential of the one-time token or host credential `given`: from the tokens this
-/// server holds, or else from the store's row of it, which a token another server minted or
-/// a credential it issued after this server started is in
-/// ([`crate::join_tokens::JoinTokens::identify_stored`]).
-async fn identify_single(agents: &Arc<Agents>, given: &str) -> Result<Option<Credential>, String> {
-    if let Some(known) = agents.joins.identify(given) {
-        return Ok(Some(known));
-    }
-    let this = Arc::clone(agents);
-    let given = given.to_owned();
-    blocking(move || this.joins.identify_stored(&given)).await
 }
 
 async fn hello(
@@ -304,10 +287,8 @@ async fn serve_hello_in(
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
-    agents.restore_stored(&host).await.map_err(|error| {
-        warn!(%error, host = %hello.host_id, "agent hello refused: the host's binding could not be read");
-        Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
-    })?;
+    let restored = agents.restore_stored(&host).await;
+    restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
@@ -336,6 +317,13 @@ async fn serve_hello_in(
     agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
+}
+
+/// The refusal of a hello whose host's stored binding could not be read: 503
+/// `state-write-failed`, which the agent retries.
+fn unread_binding(host: &str, error: &io::Error) -> Refused {
+    warn!(%error, %host, "agent hello refused: the host's binding could not be read");
+    Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
 }
 
 /// What a hello's token takes before the registry is asked, with `writes` (the host's

@@ -78,6 +78,15 @@ async fn started_with(
     );
     let mut config = Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap();
     config.agent_listen = split.then(|| "127.0.0.1:0".parse().unwrap());
+    if split {
+        // A hold of a millisecond, so a test can let it run out; one that does not await it to
+        // the end sees it pending, as it does the default hold.
+        let limits = config.limits();
+        config = config.with_limits(crate::config::Limits {
+            drain_hold: Duration::from_millis(1),
+            ..limits
+        });
+    }
     let clock = ManualClock::default();
     let (_handle, ticker) = channel_ticker();
     let running = start(config, SharedClock::new(clock.clone()), ticker)
@@ -174,4 +183,18 @@ async fn the_agent_routes_close_at_the_signal_and_the_job_service_stays() {
         // server is dropped, which ends the rest.
         drop(running);
     }
+}
+
+/// Asserts the whole stop of a server whose agent routes have a port of their own: the hold
+/// runs out, the agents' port then refuses a connection, and the stop after it (which finds
+/// that port stopping already) ends cleanly with the readiness route still `draining`. It
+/// catches a stop that waits again for a port the hold stopped, or fails on it.
+#[tokio::test]
+async fn a_hold_that_runs_out_is_followed_by_a_clean_stop() {
+    let (running, _jobs, _id, _dir) = started_with("hold_runs_out", true).await;
+    let agents = running.agent_addr().unwrap();
+    running.hold().await;
+    assert_eq!(running.gate.phase(), crate::ready::Phase::Draining);
+    running.shutdown().await.unwrap();
+    assert!(tokio::net::TcpStream::connect(agents).await.is_err());
 }
