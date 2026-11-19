@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use js_agent_wire::{HeartbeatReply, HeldState};
 use js_jobs::{AllocationStep, JobState};
+use js_types::HostId;
 
+use crate::held_beat::STARTING_WINDOW_MS;
 use crate::job_expiry::JobLimits;
 
 use super::job_rig::{FakeAgent, Rig, clocked_rig, starts, whole_rig};
@@ -252,33 +254,45 @@ async fn starting_rig(name: &str, bound: Duration, starting: Duration) -> (Rig, 
 }
 
 /// Asserts which bound a beat's hold takes: the short one when the listing has a job `starting`
-/// (alone or among others), the normal one when it has none or is empty. The two bounds differ,
-/// so the value says which was taken; nothing waits. It catches a hold that takes the normal bound
-/// for a host with a start under way, so the start's `running` reaches the server a hold later,
-/// and the short bound taken for every beat.
+/// (alone or among others) that a hold first saw so less than the window ago, the normal one
+/// when it has none, is empty, or every job of it has been `starting` for the window; a job
+/// newly listed `starting` takes the short one again. The two bounds differ, so the value says
+/// which was taken, and the rig's manual clock moves the window; nothing waits. It catches a
+/// hold that takes the normal bound for a host with a start under way, so the start's `running`
+/// reaches the server a hold later, the short bound taken for every beat, and a start that waits
+/// for minutes keeping its host beating five times a second.
 #[test]
-fn a_listing_with_a_starting_job_takes_the_short_bound_and_any_other_the_normal_one() {
+fn a_listing_with_a_young_starting_job_takes_the_short_bound_and_any_other_the_normal_one() {
     let (rig, mut agent) = held_rig("held_limit", Duration::from_secs(2));
     let rig = rig.holding_starting_for(Duration::from_secs(1));
-    let short = Duration::from_secs(1);
-    let normal = Duration::from_secs(2);
-    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), normal);
+    let host = HostId::new("host-a").unwrap();
+    let limit = |agent: &FakeAgent| super::held::limit(&rig.agents, &host, &agent.listing());
+    let (short, normal) = (Duration::from_secs(1), Duration::from_secs(2));
+    assert_eq!(limit(&agent), normal);
     agent.hold("job-1", "alloc-1", HeldState::Running);
-    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), normal);
+    assert_eq!(limit(&agent), normal);
     agent.hold("job-2", "alloc-2", HeldState::Starting);
-    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), short);
+    assert_eq!(limit(&agent), short);
+    rig.advance(Duration::from_millis(STARTING_WINDOW_MS - 1));
+    assert_eq!(limit(&agent), short);
+    rig.advance(Duration::from_millis(1));
+    assert_eq!(limit(&agent), normal);
+    agent.hold("job-3", "alloc-3", HeldState::Starting);
+    assert_eq!(limit(&agent), short);
 }
 
 /// Asserts that a heartbeat that lists a job `starting` is held no longer than the short bound
 /// for such a beat, however long the normal bound is: its reply ends after one wait, empty and
-/// saying `beat_now`. It shows the hold taking that bound end to end (the choice itself is
-/// asserted by value above: a hold that takes the normal bound here ends too, a bound later).
+/// saying `beat_now`, and the hold was given the short bound. It shows the hold taking that
+/// bound end to end (a hold that took the normal bound here would end a bound later, and say so
+/// in the bound it was given).
 #[tokio::test]
 async fn a_beat_that_lists_a_starting_job_ends_at_the_short_bound() {
     let (rig, agent) = starting_rig("held_starting_short", LONG, Duration::ZERO).await;
     let reply = rig.beat(&agent).await.unwrap();
     assert_eq!(reply, quiet_held());
     assert_eq!(waits(&rig), 1);
+    assert_eq!(rig.agents.wakes.last_bound(), Some(Duration::ZERO));
 }
 
 /// Asserts that a heartbeat that lists no job `starting` (here one that runs) is held to the
@@ -302,12 +316,14 @@ async fn a_beat_that_lists_no_starting_job_is_held_to_the_normal_bound() {
     assert_eq!(started, ["job-2"]);
 }
 
-/// Asserts that a placement on the host while a heartbeat that lists a job `starting` is held
-/// ends that hold at once and its reply carries the start, without `beat_now`. It catches a
-/// short hold that is not watched for wakes.
+/// Asserts that a heartbeat that lists a job `starting` is held to the short bound, and that a
+/// placement on the host meanwhile ends that hold at once and its reply carries the start,
+/// without `beat_now`. The normal bound is nothing and the short one long, so a hold that took
+/// the normal bound would answer at once, empty, before the placement. It catches a hold that
+/// does not take the bound of the beat's own listing, and a short hold not watched for wakes.
 #[tokio::test]
 async fn a_placement_wakes_a_beat_that_lists_a_starting_job() {
-    let (rig, agent) = starting_rig("held_starting_wake", LONG, LONG).await;
+    let (rig, agent) = starting_rig("held_starting_wake", Duration::ZERO, LONG).await;
     let placed = async {
         waited(&rig, 1).await;
         queue_share(&rig, "job-2", 600);
@@ -318,6 +334,7 @@ async fn a_placement_wakes_a_beat_that_lists_a_starting_job() {
     let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
     assert_eq!(started, ["job-2"]);
     assert!(!reply.beat_now);
+    assert_eq!(rig.agents.wakes.last_bound(), Some(LONG));
 }
 
 /// Asserts that a server that drains places no job, by the tick's pass or a heartbeat's: a

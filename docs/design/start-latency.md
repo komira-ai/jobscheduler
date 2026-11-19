@@ -149,7 +149,8 @@ agents' journals:
   The rewrite that named the supervisor while the start was still starting is gone: a teardown of a
   lease whose sidecar names no supervisor ends the supervisor the lease directory records (it did so
   already for a lease whose sidecar is gone), and that record is written before the rewrite was.
-- **The beat after a start ends when the container runs.** The worker rings the sleeper's bell when
+- **The beat after a start ends when the container runs** (the third part below ends it when the
+  worker has taken the start instead). The worker rings the sleeper's bell when
   what it publishes holds news for the server: a run or job that runs or ended, a new result, a newly
   retired job id, a taint or its clear (`worker/bell.rs`). A start just taken, listed as `starting`,
   is not news (the third part below makes it news). The wait after an accepted heartbeat whose reply the worker took ends on the bell
@@ -170,7 +171,9 @@ agents' journals:
 - **The bell, not a second heartbeat.** While a heartbeat is held at the server the session thread
   waits in it; the agent sends no second request. A start's `running` rides on the heartbeat that
   leaves when the container runs, before the server holds one; a second start whose container runs
-  while that heartbeat is held is reported when the hold ends, at most one hold later, as before.
+  while that heartbeat is held is reported when the hold ends, at most one hold later, as before. (In
+  the third part the heartbeat that leaves when the start is taken is held, briefly, and `running`
+  rides on the one after it.)
 - **No protocol change.** The server still answers a reply with a command without `beat_now`; the
   agent shortens only its own wait, and only on news, so an older server is served the same way and a
   slow agent is not asked in a loop.
@@ -191,6 +194,8 @@ js-agent 0.1.280 (with both parts), one node over three hours, 554 starts, from 
 (`placed_at_ms` to the runtime's `running`). That node took every job of the pool while these were
 taken, so its load inflates them.
 
+Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for the three hours.
+
 | Segment | p50 | p90 |
 |---|---|---|
 | placement to `running` | 515 ms | 930 ms (p99 1.8 s) |
@@ -206,7 +211,8 @@ taken, so its load inflates them.
   interval unless the bell rings, and a start just listed as `starting` did not ring it. No heartbeat
   of the host was held at the server until one of its starts ran, so a placement on a host with a
   start under way waited for that start's `running`. On a host that takes every job a start is
-  nearly always under way, which is the p90 of the delivery.
+  nearly always under way; this is read in the code and is the likeliest cause of the delivery's
+  p90, not measured apart.
 - **The provider record's syncs came before the first `Prepare`.** `Lifecycle::provide` wrote the
   record (the file synced, renamed, the directory synced) on the worker and only then asked the
   providers, so those syncs were added to `admitted->provided` in full. A provider begins making its
@@ -230,7 +236,9 @@ taken, so its load inflates them.
   is answered on that hold at once. The server holds a beat that lists a job `starting` for
   `held_beat::STARTING_HOLD` (200 ms, never more than the normal bound) instead of the normal
   bound, so the start's `running`, which rides on the next heartbeat, reaches the server at most
-  that much after the container runs.
+  that much after the container runs. It does so for `held_beat::STARTING_WINDOW_MS` (2 s, on the
+  server's clock) from when a hold first saw that job `starting` (`held_beat::Starts`); after it
+  the normal bound applies again.
 - **`Prepare` first, then the record.** `Lifecycle::provide` remembers the sources for the release,
   asks each provider, and then writes the record, in the same call and before the worker steps
   again. A record that cannot be written still fails the start, and its cleanup releases what was
@@ -252,6 +260,13 @@ taken, so its load inflates them.
 - **200 ms for that hold.** A host with a start under way beats about five times a second, and each
   beat is a new connection and a commit of the listing at the server. Shorter would add beats;
   longer would report `running` later. A placement ends the hold at once whatever its bound.
+- **Only for 2 s of each start.** A start can wait minutes as `starting` (a provider's `Mount`, up to
+  `--mount-provider-wait`; an image pull). Holding its host's beats short all that time would make
+  about 600 beats for a two-minute wait instead of about 24. Nearly every start runs within 2 s
+  (placement to `running` p99 1.8 s on the busy node), and one that takes longer is reported at most
+  one normal hold after it runs. The window counts from the server's first sight of the job in a held beat, which needs no
+  wire field; each server process keeps its own, and a host whose held beat lists no start is
+  forgotten.
 - **A constant, not a setting.** No operator has a reason to tune it apart from the interval; it is
   capped by the interval's own hold.
 - **The record stays synced.** Only its place in the admission moves. A restart still finds the
@@ -270,7 +285,8 @@ taken, so its load inflates them.
   until the server is updated. A new server with an older agent behaves as before: that agent never
   sends a beat while its only change is a start taken.
 - A start's `running` reaches the server up to 200 ms after the container runs while the host holds
-  a beat (before: at once, but only because no beat was held for the next placement).
+  a beat, or one normal hold after it for a start that took longer than the window (before: at once,
+  but only because no beat was held for the next placement).
 
 ### What is left
 

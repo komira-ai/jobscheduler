@@ -139,6 +139,9 @@ pub(crate) struct Agents {
     /// How long such a reply is held when the beat lists a job as `starting`
     /// ([`held_beat::starting_hold`]).
     pub(crate) starting_hold: Duration,
+    /// The jobs each host's held beats list as `starting`, and since when
+    /// ([`held_beat::Starts`]).
+    pub(crate) starts: held_beat::Starts,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
     /// its hosts name them: the order the pass offers the hosts in
     /// ([`crate::sched::rank`]).
@@ -346,6 +349,7 @@ fn placed_in(
         draining: Drain::default(),
         hold_bound: held_beat::hold_bound(interval),
         starting_hold: held_beat::starting_hold(interval),
+        starts: held_beat::Starts::default(),
         providers,
     };
     Ok((Arc::new(agents), placer))
@@ -419,6 +423,7 @@ impl Agents {
             draining: Drain::default(),
             hold_bound,
             starting_hold,
+            starts: held_beat::Starts::default(),
             providers,
         }
     }

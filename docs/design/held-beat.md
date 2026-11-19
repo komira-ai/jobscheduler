@@ -25,7 +25,10 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    phase is `serving`: a draining, preparing or tainted host takes no new start, and a draining agent
    counts its drain in the waits it asks for, which a held reply would stretch. When the reply has
    nothing to send (no command, acknowledgement, taint acknowledgement or log credential), the route holds
-   it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`. A reply that is
+   it open for the pool's heartbeat interval, at most 5 s, and answers it with `beat_now`; a beat that lists
+   a job `starting` that a hold first saw so less than 2 s ago is held at most 200 ms instead
+   (`held_beat::STARTING_HOLD`, `STARTING_WINDOW_MS`), so that start's `running` is not kept a whole hold.
+   A reply that is
    not held but carries no command (only acknowledgements, which are answered once) says `beat_now` too,
    so the heartbeat after a job's end is held at once; a reply with a command, which is sent again until
    the agent acts on it, waits the interval, so a slow agent is not asked in a loop. Everything the
@@ -40,8 +43,10 @@ Submit to start on an idle host is then one pass, one store read and one reply, 
 interval in it. The agent beats again as soon as a reply without a command reaches it, so while the host is
 idle a heartbeat of it is waiting at the server nearly all the time. After a start (a reply with a command)
 it waits the interval, so a job submitted to the same host within one interval of the last start waits for
-that beat; an agent whose worker rings its bell (`docs/design/start-latency.md`, second part) ends that wait
-when the start's container runs, and its heartbeat that reports `running` is then the one held.
+that beat; an agent whose worker rings its bell ends that wait when the worker has taken the start
+(`docs/design/start-latency.md`, third part; in the second part, when the start's container ran): its
+heartbeat lists the start `starting`, is held for the short bound above, and a placement meanwhile is
+answered on it at once. The start's `running` rides on the heartbeat after it.
 
 ## Compatibility
 
@@ -67,5 +72,5 @@ when the start's container runs, and its heartbeat that reports `running` is the
 - **Store read fails while held.** The reply is answered as it was (empty, `beat_now`); the agent's next
   heartbeat, sent at once, is served in full and answers `state-write-failed` if the store still fails.
 - **Reports during a hold.** A job's state change on the host reaches the server in the agent's next
-  heartbeat, which leaves when the held reply returns: at most one hold later, as it was at most one
-  interval later before.
+  heartbeat, which leaves when the held reply returns: at most one hold later (200 ms for a beat that lists
+  a young start), as it was at most one interval later before.

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, NetworkCeiling};
-use js_types::{HostId, Resources};
+use js_types::{Clock, HostId, Resources};
 use tracing::warn;
 
 use crate::agents::Agents;
@@ -70,12 +70,20 @@ impl Inputs {
     }
 }
 
-/// How long a reply to a beat that lists `listed` is held at most: [`Agents::starting_hold`]
-/// when the listing has a job `starting`, [`Agents::hold_bound`] when it has none. (The server
-/// sees jobs only: the registry cancels every run a beat lists, so a reply to a beat that lists
-/// one is never quiet and never held.)
-pub(super) fn limit(agents: &Agents, listed: &[HeldJob]) -> Duration {
-    match listed.iter().any(|job| job.state == HeldState::Starting) {
+/// How long a reply to a beat of `host` that lists `listed` is held at most, now on the
+/// server's clock: [`Agents::starting_hold`] when the listing has a job `starting` that a hold
+/// first saw so less than [`crate::held_beat::STARTING_WINDOW_MS`] ago
+/// ([`crate::held_beat::Starts::young`]), [`Agents::hold_bound`] otherwise. (The server sees
+/// jobs only: the registry cancels every run a beat lists, so a reply to a beat that lists one
+/// is never quiet and never held.)
+pub(super) fn limit(agents: &Agents, host: &HostId, listed: &[HeldJob]) -> Duration {
+    let starting: Vec<&str> = listed
+        .iter()
+        .filter(|job| job.state == HeldState::Starting)
+        .map(|job| job.job_id.as_str())
+        .collect();
+    let now_ms = agents.clock.now().millis();
+    match agents.starts.young(host, &starting, now_ms) {
         true => agents.starting_hold,
         false => agents.hold_bound,
     }
@@ -112,7 +120,9 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
     if agents.draining.begun() {
         return;
     }
-    let bound = tokio::time::sleep(limit(agents, &hold.inputs.listed));
+    let limit = limit(agents, &hold.inputs.host, &hold.inputs.listed);
+    agents.wakes.holding_for(limit);
+    let bound = tokio::time::sleep(limit);
     tokio::pin!(bound);
     let draining = agents.draining.begins();
     tokio::pin!(draining);

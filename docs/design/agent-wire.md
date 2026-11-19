@@ -82,7 +82,7 @@ reader that predates it ignores it (`crates/js-agent-wire/tests/previous_release
 between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,000 and the grace to at most `MAX_GRACE_MS`
 86,400,000. A start rides on the reply to the host's next heartbeat and is resent on every reply until the host lists it (section
 5.7, step 3). To an agent that reported `held-beat` the server holds a reply with nothing to send open for up to the interval (at
-most 5 s) and answers it as soon as a job is placed on the host; such a reply says `beat_now`, and the agent sends its next
+most 5 s; at most 200 ms when the beat lists a job `starting` that a hold first saw so less than 2 s ago) and answers it as soon as a job is placed on the host; such a reply says `beat_now`, and the agent sends its next
 heartbeat at once ([held-beat.md](held-beat.md)). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
 says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
 403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
