@@ -318,8 +318,9 @@ pub use quota_flags::{
 use quota_flags::{job_tmp_gib, scratch_quota_limits};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared, ResolvedMount,
-    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts, check_run_env, label,
+    Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared,
+    ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts,
+    check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use settle::{DEFAULT_SETTLE, MAX_SETTLE_MS, settle};

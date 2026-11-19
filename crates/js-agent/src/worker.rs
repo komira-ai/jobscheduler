@@ -89,8 +89,9 @@
 //!   `RestartPreventExitStatus=2`). So the agent's own time to leave is the wind-down wait
 //!   plus the rescue bound, minutes and not hours.
 //!
-//! A start the worker is already inside when it is closed is not undone: its container may
-//! be made after the rescue listed, and then it is the next process's to adopt.
+//! A start the worker is already inside when it is closed is not undone, nor one the runtime
+//! is making off the worker (`crun`'s create pool): its container may be made after the
+//! rescue listed, and then it is the next process's to adopt.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -111,6 +112,7 @@ use crate::lifecycle::{
 };
 use crate::readiness::{HookWindow, WorkerHook};
 
+mod bell;
 mod nudge;
 mod quiesce;
 
@@ -454,6 +456,8 @@ struct Shared {
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
     /// clock ([`stall_bound`] after it began), plus one; 0 while it waits for an order.
     busy_until: AtomicU64,
+    /// Rung when what the worker publishes holds news for the server (module `bell`).
+    bell: std::sync::OnceLock<Wake>,
 }
 
 /// Marks the worker as ended when the thread leaves, however it leaves. It is dropped
@@ -852,6 +856,7 @@ fn work(
     // plain limit again, moved later by the time the hook really took. (The worker is the
     // only writer of `busy_until` during an order.)
     let (plain, opened) = (Cell::new(0), Cell::new(0));
+    let mut told = Snapshot::of(&life);
     let watch = |window: HookWindow| {
         let limit = shared.busy_until.load(Ordering::SeqCst);
         let now = clock.now_ms();
@@ -926,7 +931,7 @@ fn work(
                 said
             });
         lines.extend(sampled.into_iter().flatten());
-        shared.publish(Snapshot::of(&life), &answers, lines);
+        shared.publish_news(&mut told, (Snapshot::of(&life), &answers, lines));
         shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
             let _ = done.send(());

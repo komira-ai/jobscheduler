@@ -40,7 +40,8 @@ Submit to start on an idle host is then one pass, one store read and one reply, 
 interval in it. The agent beats again as soon as a reply without a command reaches it, so while the host is
 idle a heartbeat of it is waiting at the server nearly all the time. After a start (a reply with a command)
 it waits the interval, so a job submitted to the same host within one interval of the last start waits for
-that beat.
+that beat; an agent whose worker rings its bell (`docs/design/start-latency.md`, second part) ends that wait
+when the start's container runs, and its heartbeat that reports `running` is then the one held.
 
 ## Compatibility
 

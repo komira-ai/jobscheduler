@@ -10,6 +10,8 @@ mod adopt;
 mod blind_cgroup;
 mod cleanup;
 mod concurrent_start;
+mod creating;
+pub mod deferring;
 mod disk;
 mod exclusive;
 pub mod fake;

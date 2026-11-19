@@ -89,6 +89,10 @@ pub(super) enum Phase {
     /// The assembly of its file system, once its host paths are found: `scratch` is the
     /// run's scratch directory, the lease directory beside it made too.
     Assembling(PathBuf),
+    /// The create of its container, which the runtime makes off the worker
+    /// ([`Runtime::begin_create`](crate::lifecycle::Runtime::begin_create)): everything else
+    /// is here, its directories and files are made.
+    Creating,
 }
 
 /// What a start that waits (for its images, or its file system) keeps to finish starting.

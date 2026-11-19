@@ -16,9 +16,10 @@
 //! # Order
 //!
 //! The sidecar is written, in the state [`Phase::Starting`], *before* anything it names is
-//! made, and rewritten in the state [`Phase::Running`] (with the start and the supervisor)
-//! once the supervisor answered. It is removed *after* the last of the lease is gone. A
-//! process that dies in between leaves a sidecar with some or none of its lease: the next
+//! made, and rewritten once, in the state [`Phase::Running`] (with the start and the
+//! supervisor), once the supervisor answered and the network is wired. A teardown in between
+//! finds the supervisor by the record it keeps in the lease directory. It is removed *after*
+//! the last of the lease is gone. A process that dies in between leaves a sidecar with some or none of its lease: the next
 //! start removes what there is and then the sidecar. A lease with no sidecar cannot have
 //! been made by this code; the start-up pass removes one that carries this agent's name
 //! prefix.
@@ -203,15 +204,6 @@ impl Entry {
         }
     }
 
-    /// This sidecar, still in the state starting, with the supervisor of the container
-    /// being started, so a teardown that finds it ends the supervisor.
-    pub(super) fn supervised(&self, supervisor: Supervisor) -> Self {
-        Self {
-            supervisor: Some(supervisor),
-            ..self.clone()
-        }
-    }
-
     /// This sidecar once the container started at `started_wall_ms` under `supervisor`.
     pub(super) fn running(&self, started_wall_ms: u64, supervisor: Supervisor) -> Self {
         Self {
@@ -362,8 +354,9 @@ fn is_leaf(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// The ledger of one agent.
-#[derive(Debug)]
+/// The ledger of one agent. A copy names the same directory: a start made off the worker
+/// writes its sidecar through one.
+#[derive(Debug, Clone)]
 pub(super) struct Ledger {
     dir: PathBuf,
     agent: String,
