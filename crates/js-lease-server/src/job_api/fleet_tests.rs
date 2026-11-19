@@ -292,9 +292,11 @@ async fn the_host_list_shows_booked_resources() {
     assert_eq!(h1.booked, [whole(h1, "job-w")]);
 }
 
-/// Asserts that a host listing that cannot read the job tables, and the answer of a cordon
-/// whose host cannot then be read, are `UNAVAILABLE` `store-unavailable`, not a listing with
-/// nothing booked. It catches a failed read taken as no booking.
+/// Asserts that a host listing that cannot read the job tables is `UNAVAILABLE`
+/// `store-unavailable`, not a listing with nothing booked, and that a cordon whose job store
+/// cannot be read is `UNAVAILABLE` `cordon-unsaved`: the job store keeps the cordon, so none
+/// was placed. It catches a failed read taken as no booking, and a cordon acknowledged that no
+/// server would keep the host out for.
 #[tokio::test]
 async fn a_listing_that_cannot_read_the_job_tables_is_unavailable() {
     let s = server("store-down");
@@ -304,7 +306,8 @@ async fn a_listing_that_cannot_read_the_job_tables_is_unavailable() {
     let answer = list_hosts(&s.api, Request::new(ListHostsRequest {})).await;
     assert_eq!(refused(answer), unavailable);
     s.store.fail_read_after(0);
-    assert_eq!(refused(cordon(&s.api, "h1", Some(60)).await), unavailable);
+    let unsaved = (Code::Unavailable, CORDON_UNSAVED.to_owned());
+    assert_eq!(refused(cordon(&s.api, "h1", Some(60)).await), unsaved);
     assert_eq!(list(&s.api).await.len(), 1);
 }
 
@@ -345,15 +348,22 @@ async fn cordon_twice_is_cordon_once() {
     assert!(!s.bindings_file().unwrap().contains("cordon_until_ms"));
 }
 
-/// Asserts the cordon's length as the host's own route has it, through the one function
-/// both use: 99999 s is cut to 3600 s, no length is 300 s, and zero is `INVALID_ARGUMENT`
-/// `invalid-cordon` and places nothing. It catches a second copy of the rules that drifts.
+/// Asserts the length of an operator's cordon: 48 hours is kept whole (an operator's cordon
+/// is not renewed, so it is not cut to the host route's hour), a length past seven days is cut
+/// to seven days, no length is 300 s, and zero is `INVALID_ARGUMENT` `invalid-cordon` and
+/// places nothing. It catches an operator's cordon that lapses after an hour, so a host taken
+/// out for two days goes back into placement with no one asking.
 #[tokio::test]
 async fn cordon_is_clamped_and_zero_is_refused() {
     let s = server("cordon-clamp");
     s.register("h1");
-    let cut = cordon(&s.api, "h1", Some(99_999)).await.unwrap();
-    assert_eq!(cut.host.unwrap().cordon_expires_at_ms, Some(T0 + 3_600_000));
+    let two_days = cordon(&s.api, "h1", Some(48 * 3600)).await.unwrap();
+    let until = two_days.host.unwrap().cordon_expires_at_ms;
+    assert_eq!(until, Some(T0 + 48 * 3_600_000));
+    uncordon(&s.api, "h1").await.unwrap();
+    let cut = cordon(&s.api, "h1", Some(8 * 24 * 3600)).await.unwrap();
+    let week = T0 + 7 * 24 * 3_600_000;
+    assert_eq!(cut.host.unwrap().cordon_expires_at_ms, Some(week));
     uncordon(&s.api, "h1").await.unwrap();
     let default = cordon(&s.api, "h1", None).await.unwrap();
     assert_eq!(

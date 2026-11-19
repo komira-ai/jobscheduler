@@ -22,6 +22,12 @@ pub const MARK: &str = "mark/";
 /// `idx/` space names it.
 pub const TAINT: &str = "taint/";
 
+/// `cordon/<host>`: the cordon of a host, a row with a time to live that lapses when the
+/// cordon does, written by [`crate::JobStore::cordon_host`] and deleted by
+/// [`crate::JobStore::uncordon_host`]. Every placement's transaction checks it absent. No
+/// `idx/` space names it.
+pub const CORDON: &str = "cordon/";
+
 /// `hostbook/<host>`: the reservation row of a host. Every placement made through
 /// [`crate::JobStore::place_claimed`] writes it in the transaction that places the job, at the
 /// version that transaction read, so a reader that works from a picture of the host sees it
@@ -61,6 +67,12 @@ pub fn mark(id: &JobId) -> String {
 #[must_use]
 pub fn taint(host: &HostId) -> String {
     format!("{TAINT}{host}")
+}
+
+/// The key of the cordon of `host`.
+#[must_use]
+pub fn cordon(host: &HostId) -> String {
+    format!("{CORDON}{host}")
 }
 
 /// The key of the row of the periodic duty `duty`.
@@ -260,6 +272,7 @@ mod tests {
             "job/j-1",
             "mark/j-1",
             "taint/host-a",
+            "cordon/host-a",
         ] {
             assert_eq!(indexed_row(other), None, "{other}");
         }
@@ -273,5 +286,12 @@ mod tests {
             "a taint row has no unread entry"
         );
         assert_eq!(unread(&mark(&job)), None, "a mark row has no unread entry");
+        assert_eq!(cordon(&host), "cordon/host-a");
+        assert_eq!(indexed_row(&cordon(&host)), None);
+        assert_eq!(
+            unread(&cordon(&host)),
+            None,
+            "a cordon row has no unread entry"
+        );
     }
 }

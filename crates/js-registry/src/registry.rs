@@ -6,7 +6,7 @@ use js_caps::{HostContract, RUNTIME, SCRATCH_QUOTA};
 use js_provider::HostBook;
 use js_types::sched::usage::NodeLoad;
 use js_types::{Clock, Timestamp};
-use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, Shape};
+use js_types::{CordonHolder, HostId, LeaseId, MemoryHeadroom, ProviderId, Shape};
 
 use crate::config::{ConfigError, PoolConfig, quota_default};
 use crate::credential::{Binding, Credential};
@@ -101,6 +101,9 @@ pub struct HostView {
     /// When the host's cordon lapses, when it is cordoned ([`Registry::cordon`]): it
     /// takes no new job until then.
     pub cordon_until: Option<Timestamp>,
+    /// Who holds the host's cordon, when it is cordoned and a holder placed or took the
+    /// cordon ([`js_types::cordon`]).
+    pub cordon_holder: Option<CordonHolder>,
     /// The latest load the host reported (in the units of [`NodeLoad`]). Only the latest
     /// accepted beat's load is kept: minutes it carries that a consumer has not read before the
     /// next beat are lost to it, and a beat whose reply was lost is sent again, so a consumer
@@ -445,6 +448,7 @@ impl Registry {
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
         let kept_cordon = known.and_then(|record| record.cordon);
+        let kept_cordon_holder = known.and_then(|record| record.cordon_holder.clone());
         let kept_leaving = known.and_then(|record| record.leaving);
         let kept_leaving = match state.ending.contains(&host) {
             true => Some(marks::Leaving::Releasing),
@@ -537,6 +541,7 @@ impl Registry {
                 beats: 0,
                 taint: kept_taint,
                 cordon: kept_cordon,
+                cordon_holder: kept_cordon_holder,
                 hello_at: Some(now),
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
                 leaving: kept_leaving,

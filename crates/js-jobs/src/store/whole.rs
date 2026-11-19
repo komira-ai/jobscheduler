@@ -104,6 +104,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// - with `capacity`, the host's live allocations plus this booking must fit it, else
     ///   [`JobStoreError::HostFull`] and nothing is written (the conditional update that
     ///   reserves the capacity: the booking and the check are one transaction);
+    /// - the host must not be cordoned: a live `cordon/<host>` row is [`JobStoreError::HostCordoned`]
+    ///   and nothing is written (the commit checks the row absent too);
     /// - the host's reservation row (`hostbook/<host>`) is written at the version the
     ///   transaction read, so a reader that works from a picture of the host sees it moved.
     ///
@@ -111,7 +113,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ///
     /// # Errors
     /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
-    /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`].
+    /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`];
+    /// [`JobStoreError::HostCordoned`].
     pub fn place_claimed(
         &self,
         id: &JobId,
@@ -184,6 +187,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 },
             )?;
         }
+        ensure(
+            read.get(&keys::cordon(host))?.is_none(),
+            JobStoreError::HostCordoned {
+                id: id.clone(),
+                host: host.clone(),
+            },
+        )?;
         let (txn, placed, allocation) = self.build_placement(
             id,
             (job, row.version),
@@ -277,6 +287,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
         let txn = super::taints::with_taint(txn, &placed, &allocation.host)?;
+        // A host with a cordon in force is placed on by no one: the commit conflicts.
+        let txn = txn.check(keys::cordon(&allocation.host), Cond::Absent);
         Ok((txn, placed, allocation))
     }
 

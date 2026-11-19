@@ -76,6 +76,7 @@ impl Registry {
                 reserved_for: None,
                 drain_deadline: None,
                 cordon_until: record.cordon.filter(|until| *until > now),
+                cordon_holder: record.cordon_holder_at(now),
             }
         }
     }

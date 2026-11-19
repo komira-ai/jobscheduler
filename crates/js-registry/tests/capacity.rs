@@ -19,6 +19,7 @@ use js_registry::{
     Binding, DEFAULT_LOST_RETENTION_MS, HostState, MIN_LOST_RETENTION_MS, PoolConfig,
     StaticCapacity,
 };
+use js_types::cordon::Asker;
 use js_types::{Clock, ExecMode, Model, ProviderId, Resources, Shape, accelerator_of};
 use support::*;
 
@@ -701,7 +702,9 @@ fn grace_and_retention_boundaries_decide_unknown_and_absent() {
     fx.registry.heartbeat(&report, &cred("t")).unwrap();
     let kept_for = DEFAULT_GRACE_MS + RETENTION_MS;
     let cordon = Duration::from_millis(kept_for + 2 * HOUR_MS);
-    fx.registry.cordon(&host("c"), cordon).unwrap();
+    fx.registry
+        .cordon(&host("c"), cordon, &Asker::Unnamed)
+        .unwrap();
     advance(&fx, kept_for + HOUR_MS);
     for id in ["t", "c"] {
         assert_eq!(

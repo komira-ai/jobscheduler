@@ -137,6 +137,7 @@ async fn scaler_records_are_committed_before_the_provider_is_called() {
 
 /// Asserts that the first start over an empty store imports the four files once: the store
 /// then holds exactly the host's binding (credential digest, instance, taint, cordon), the
+/// cordon's row in the job store, the
 /// two join-token rows (the used one with its host and credential time), the records file's
 /// text, the host to remove, and the marker. A restart, with the bindings file edited since,
 /// changes nothing in the store (its revision is the same) and reads the binding from the
@@ -169,6 +170,10 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
         // The job store's schema marker: the job store is in this store.
         "meta/jobs/schema",
     ];
+    // The imported cordon, written into the job store at start, which keeps the cordons with
+    // the job service on.
+    let cordon = format!("cordon/{HOST}");
+    let expected: Vec<&str> = expected.into_iter().chain([cordon.as_str()]).collect();
     let mut expected: Vec<String> = expected.iter().map(|key| key.to_string()).collect();
     expected.sort();
     assert_eq!(keys, expected);

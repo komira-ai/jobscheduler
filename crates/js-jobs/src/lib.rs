@@ -1,4 +1,4 @@
-//! The job, allocation, mark and taint tables, as typed records over the `js-state`
+//! The job, allocation, mark, taint and cordon tables, as typed records over the `js-state`
 //! [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
@@ -29,6 +29,13 @@
 //! reason [`HOST_JOB_TAINT`]): [`JobStore::place`] and [`JobStore::place_with`] write it in the
 //! transaction that places the job, and the caller deletes it once it holds the taint where it
 //! keeps every host's taint ([`JobStore::drop_taints`]); nothing else in this crate deletes one.
+//!
+//! A **cordon** takes a host out of placement. It is a row with a time to live
+//! (`cordon/<host>`) that holds who holds the cordon, when the request that placed it named a
+//! holder ([`JobStore::cordon_host`], [`JobStore::uncordon_host`], [`JobStore::cordons`],
+//! [`JobStore::restore_cordon`]), so every server that shares the store sees a cordon any
+//! server took, and every placement's transaction checks the row absent: a placement on a
+//! cordoned host commits nothing.
 //!
 //! # Results and retention
 //!
@@ -64,6 +71,7 @@
 //! | `alloc/<id>` | the [`AllocationRecord`] of the job `<id>`: one allocation per job at a time, found from its job without a scan |
 //! | `mark/<id>` | the [`MarkRecord`] of the queued whole-host job `<id>`: one mark per job at a time, found from its job without a scan; a store written before marks has none and opens unchanged |
 //! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
+//! | `cordon/<host>` | the cordon of `<host>`: the holder it names, if any (the time it lapses is the row's expiry, so a lapsed cordon is an absent row); written by [`JobStore::cordon_host`] and [`JobStore::restore_cordon`], deleted by [`JobStore::uncordon_host`] or by its expiry, listed whole by [`JobStore::cordons`]; checked absent by every placement's transaction; a store written before cordons has none and opens unchanged |
 //! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
@@ -105,9 +113,13 @@
 //! | operation | transaction |
 //! |---|---|
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
-//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports); for a host-isolation job ([`Isolation::Host`]) also put `taint/<host>` if absent, so a host already tainted makes the placement [`JobStoreError::Stale`] |
+//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports); for a host-isolation job ([`Isolation::Host`]) also put `taint/<host>` if absent, so a host already tainted makes the placement [`JobStoreError::Stale`]; and check `cordon/<host>` absent, so a cordoned host makes it [`JobStoreError::Stale`] |
 //! | [`JobStore::place_with`] | as [`JobStore::place`], with the allocation's prepare deadline (the store's time now plus [`Placement::prepare_timeout`]) and wall limit, and delete `mark/<id>` at its version, or check it absent |
 //! | [`JobStore::place_reserving`] | as [`JobStore::place_with`], and put `hostbook/<host>` if absent or at the version the caller's picture of the host was read at ([`JobStore::host_books`]), so a placement made since, by this server or another, makes it stale |
+//! | [`JobStore::place_claimed`] | as [`JobStore::place_with`], decided on the rows the transaction locked; it reads `cordon/<host>` and answers [`JobStoreError::HostCordoned`] when a cordon is in force, and checks it absent in the commit |
+//! | [`JobStore::cordon_host`] | put `cordon/<host>` with the time left as its time to live, if absent or at the version read; nothing when the cordon in force is another holder's |
+//! | [`JobStore::uncordon_host`] | delete `cordon/<host>` at the version read when the rule lifts it; nothing otherwise |
+//! | [`JobStore::restore_cordon`] | put `cordon/<host>` with the time given as its time to live, if absent |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given, whatever it holds, in one transaction; nothing for no hosts |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
@@ -180,6 +192,6 @@ pub use result::{
     Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Backfill, Beside, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob,
-    Placement, Row, SCHEMA_VERSION, Written, queue_order,
+    Backfill, Beside, CordonWrite, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE,
+    MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, UncordonWrite, Written, queue_order,
 };

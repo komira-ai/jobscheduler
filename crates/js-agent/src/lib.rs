@@ -18,7 +18,7 @@
 //!
 //! `js-agent cordon --server <url> --state-root <dir> --for <duration>` (Linux and macOS, run as
 //! the user who can read the host's credential) keeps the lease server from placing a lease on
-//! this host for a window, and lifts the cordon at the end or on SIGTERM or SIGINT; see
+//! this host for a window, and lifts the cordon at the end or on SIGTERM, SIGINT or SIGHUP; see
 //! [`cordon`] and docs/runbooks/cordon-a-node.md. It is for an operator's measurement script,
 //! which needs one node to itself for an hour or two:
 //!

@@ -5,7 +5,7 @@ Usage: js host [OPTIONS] <COMMAND>
 Commands:
   list        Lists the hosts, each with the resources booked on it.
   cordon      Takes a host out of placement for a time, or extends a cordon already there.
-  uncordon    Lifts a host's cordon.
+  uncordon    Lifts a host's cordon, whoever placed it.
   host-taint  Clears the taint a host has stored, so that placement offers the host jobs again.
   help        Print this message or the help of the given subcommand(s)
 

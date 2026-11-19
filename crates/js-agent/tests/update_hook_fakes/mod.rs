@@ -637,14 +637,17 @@ impl Lease for World {
         let already_cordoned = host.cordon.is_some();
         let expires_at_ms = host
             .cordon
+            .as_ref()
             .map_or(asked, |cordon| cordon.expires_at_ms.max(asked));
         host.cordon = Some(CordonView {
             expires_at_ms,
             expires_in_ms: None,
+            holder: None,
         });
         self.save(&host)?;
         Ok(Cordoned {
             already_cordoned,
+            held_by_other: false,
             host,
         })
     }
@@ -655,7 +658,11 @@ impl Lease for World {
         if lifted {
             self.save(&host)?;
         }
-        Ok(Uncordoned { lifted, host })
+        Ok(Uncordoned {
+            lifted,
+            held_by_other: false,
+            host,
+        })
     }
 
     fn host(&self) -> Result<HostReading, LeaseError> {

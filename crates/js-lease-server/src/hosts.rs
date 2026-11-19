@@ -111,10 +111,12 @@ pub(crate) struct HostEntry {
     /// or cancelled, or the host goes.
     #[serde(skip_serializing_if = "Option::is_none")]
     drain_deadline_ms: Option<u64>,
-    /// Set for a registered host that is cordoned: when the cordon lapses. The host cordoned
-    /// itself for an update of its agent; if the agent that did so is gone, the cordon
-    /// lapses by itself within the last `lease_secs` it asked for (at most 3600 s from
-    /// its last extension), or the host's own `:uncordon` lifts it.
+    /// Set for a registered host that is cordoned: when the cordon lapses, and its holder when
+    /// it has one. A host's own cordon (its agent's update, or `js-agent cordon`) lapses by
+    /// itself within the last `lease_secs` it asked for (at most 3600 s from its last
+    /// extension) once its requester is gone; an operator's lasts the length it was set for
+    /// (at most seven days). The host's own `:uncordon`, or the operator's `UncordonHost`,
+    /// lifts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cordon: Option<CordonListed>,
     /// Set for a registered host whose latest heartbeat carried a load: the reading of
@@ -123,10 +125,13 @@ pub(crate) struct HostEntry {
     load: Option<LoadView>,
 }
 
-/// The cordon of a listed host.
+/// The cordon of a listed host: when it lapses, and who holds it when a holder placed or took
+/// it.
 #[derive(Debug, Serialize)]
 pub(crate) struct CordonListed {
     pub(crate) expires_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) holder: Option<String>,
 }
 
 /// The latest load of a host, in the units its field names state. It is what the agent
@@ -255,6 +260,7 @@ impl HostEntry {
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
             cordon: host.cordon_until.map(|at| CordonListed {
                 expires_at_ms: at.millis(),
+                holder: host.cordon_holder.map(|holder| holder.to_string()),
             }),
             load: host.load.map(LoadView::of),
         }
@@ -322,6 +328,7 @@ mod tests {
             reserved_for: None,
             drain_deadline: None,
             cordon_until: None,
+            cordon_holder: None,
             load: None,
         }
     }

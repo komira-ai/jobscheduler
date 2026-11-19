@@ -9,6 +9,7 @@ use std::time::Duration;
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_jobs::JobId;
 use js_types::HostId;
+use js_types::cordon::Asker;
 
 use super::engine_rig::{GIB, Rig, T0, hello_of, pool, rig_of};
 use super::rank::STATIC;
@@ -47,12 +48,12 @@ fn place_on(r: &Rig, id: &str, on: &str, others: &[&str]) {
     let registry = &r.agents.registry;
     for other in others {
         registry
-            .cordon(&host(other), Duration::from_secs(600))
+            .cordon(&host(other), Duration::from_secs(600), &Asker::Unnamed)
             .unwrap();
     }
     assert_eq!(r.place(id, 1_000, GIB).as_deref(), Some(on));
     for other in others {
-        registry.uncordon(&host(other)).unwrap();
+        registry.uncordon(&host(other), None).unwrap();
     }
 }
 
@@ -94,7 +95,7 @@ fn a_free_host_of_a_later_provider_is_used_before_any_launch() {
     let cordoned = two_providers("walk_later_cordoned", None);
     let registry = &cordoned.agents.registry;
     registry
-        .cordon(&host("static-1"), Duration::from_secs(600))
+        .cordon(&host("static-1"), Duration::from_secs(600), &Asker::Unnamed)
         .unwrap();
     assert_eq!(
         cordoned.place("job", 1_000, GIB).as_deref(),
@@ -133,7 +134,7 @@ fn hosts_rank_by_their_binding_alone() {
     only_static
         .agents
         .registry
-        .cordon(&host("static-1"), Duration::from_secs(600))
+        .cordon(&host("static-1"), Duration::from_secs(600), &Asker::Unnamed)
         .unwrap();
     assert_eq!(only_static.place("job", 1_000, GIB), None);
     let listed = only_static.agents.registry.hosts();

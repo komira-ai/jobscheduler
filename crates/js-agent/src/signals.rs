@@ -1,5 +1,6 @@
-//! The program's stop requests: SIGTERM and SIGINT, read on a thread of their own and
-//! handed to the loop through a channel, which is also how the loop waits.
+//! The program's stop requests: SIGTERM and SIGINT (and SIGHUP for the cordon verb), read on a
+//! thread of their own and handed to the loop through a channel, which is also how the loop
+//! waits.
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -16,8 +17,9 @@ use crate::run::{Sleeper, Wake};
 #[derive(Debug)]
 pub struct SystemSleeper {
     stops: Receiver<()>,
-    /// Kept so the channel never closes: a closed channel would end every wait at once.
-    _sender: Sender<()>,
+    /// Kept so the channel never closes (a closed channel would end every wait at once), and
+    /// for the handlers [`SystemSleeper::stop_on_hangup`] adds.
+    sender: Sender<()>,
 }
 
 impl SystemSleeper {
@@ -29,30 +31,44 @@ impl SystemSleeper {
     /// The handlers or the thread that reads them cannot be set up.
     pub fn install() -> io::Result<Self> {
         let (sender, stops) = channel();
-        let forward = sender.clone();
-        Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .and_then(|runtime| {
-                let streams = {
-                    let _inside = runtime.enter();
-                    [SignalKind::terminate(), SignalKind::interrupt()]
-                        .into_iter()
-                        .map(signal)
-                        .collect::<io::Result<Vec<_>>>()
-                };
-                streams.map(|streams| {
-                    for stream in streams {
-                        runtime.spawn(relay(stream, forward.clone()));
-                    }
-                    thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
-                })
-            })
-            .map(|()| Self {
-                stops,
-                _sender: sender,
-            })
+        watch([SignalKind::terminate(), SignalKind::interrupt()], &sender)
+            .map(|()| Self { stops, sender })
     }
+
+    /// Also takes SIGHUP, the end of an ssh session, as a stop request. `js-agent cordon`
+    /// asks for it, so that a cordon is lifted when its terminal goes away; the agent daemon
+    /// never does, and so does what it always did on SIGHUP.
+    ///
+    /// # Errors
+    ///
+    /// The handler or the thread that reads it cannot be set up.
+    pub fn stop_on_hangup(&self) -> io::Result<()> {
+        watch([SignalKind::hangup()], &self.sender)
+    }
+}
+
+/// Reads `kinds` of signal on a thread of its own, for the life of the process, and sends a
+/// stop request on `to` for each delivery.
+fn watch<const N: usize>(kinds: [SignalKind; N], to: &Sender<()>) -> io::Result<()> {
+    let forward = to.clone();
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .and_then(|runtime| {
+            let streams = {
+                let _inside = runtime.enter();
+                kinds
+                    .into_iter()
+                    .map(signal)
+                    .collect::<io::Result<Vec<_>>>()
+            };
+            streams.map(|streams| {
+                for stream in streams {
+                    runtime.spawn(relay(stream, forward.clone()));
+                }
+                thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
+            })
+        })
 }
 
 /// Sends a stop request for every delivery on `stream`.

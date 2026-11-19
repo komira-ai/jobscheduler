@@ -9,8 +9,9 @@ use std::time::Duration;
 use js_agent::Wake;
 use js_agent::cordon::Pace;
 use js_agent::own_host::{
-    CordonView, Cordoned, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
+    CordonView, Cordoned, HeldLease, HostReading, Lease, LeaseError, MAX_CORDON_SECS, Uncordoned,
 };
+use js_types::CordonHolder;
 
 /// The host the fake serves.
 pub const HOST: &str = "h-1";
@@ -45,6 +46,12 @@ pub struct State {
     pub id: String,
     /// A cordon is in force (whoever placed it).
     pub cordoned: bool,
+    /// The holder of the cordon in force, when it names one.
+    pub holder: Option<String>,
+    /// The holder and take-over flag each cordon request carried, in order.
+    pub cordon_asks: Vec<(String, bool)>,
+    /// The holder each uncordon carried, in order.
+    pub uncordon_asks: Vec<String>,
     /// The lease the host holds.
     pub lease: Option<String>,
     /// The `leases` count the host reads.
@@ -72,6 +79,9 @@ impl FakeLease {
         Self(Rc::new(RefCell::new(State {
             id: HOST.to_owned(),
             cordoned: false,
+            holder: None,
+            cordon_asks: Vec::new(),
+            uncordon_asks: Vec::new(),
             lease: None,
             leases: 0,
             releasing: false,
@@ -101,6 +111,21 @@ impl FakeLease {
     /// Makes every call take `each` of `clock`, as a slow server does.
     pub fn slow(&self, clock: &Rc<Cell<Duration>>, each: Duration) {
         self.0.borrow_mut().latency = Some((Rc::clone(clock), each));
+    }
+
+    /// The holder and take-over flag each cordon request carried.
+    pub fn cordon_asks(&self) -> Vec<(String, bool)> {
+        self.0.borrow().cordon_asks.clone()
+    }
+
+    /// The holder each uncordon carried.
+    pub fn uncordon_asks(&self) -> Vec<String> {
+        self.0.borrow().uncordon_asks.clone()
+    }
+
+    /// The holder of the cordon in force.
+    pub fn holder(&self) -> Option<String> {
+        self.0.borrow().holder.clone()
     }
 
     /// Whether a cordon is in force.
@@ -135,6 +160,7 @@ impl FakeLease {
         let cordon = state.cordoned.then(|| CordonView {
             expires_at_ms: 1_000_000 + state.lease_secs * 1000,
             expires_in_ms: Some(state.lease_secs * 1000),
+            holder: state.holder.clone(),
         });
         HostReading {
             id,
@@ -182,6 +208,7 @@ impl Lease for FakeLease {
         });
         Ok(Cordoned {
             already_cordoned,
+            held_by_other: false,
             host: self.reading(named),
         })
     }
@@ -192,6 +219,7 @@ impl Lease for FakeLease {
         self.set(|state| state.cordoned = false);
         Ok(Uncordoned {
             lifted,
+            held_by_other: false,
             host: self.reading(named),
         })
     }
@@ -199,6 +227,60 @@ impl Lease for FakeLease {
     fn host(&self) -> Result<HostReading, LeaseError> {
         let named = self.effect(Kind::Host, Call::Host)?;
         Ok(self.reading(named))
+    }
+}
+
+impl HeldLease for FakeLease {
+    /// The rule of the server: with no cordon in force the request places one for its holder;
+    /// the holder renews its own; another holder's is left as it is (`held_by_other`, and no
+    /// change); a take-over makes the cordon in force the asker's.
+    fn cordon_held(
+        &self,
+        lease_secs: u64,
+        holder: &CordonHolder,
+        take_over: bool,
+    ) -> Result<Cordoned, LeaseError> {
+        let named = self.effect(Kind::Cordon, Call::Cordon(lease_secs))?;
+        let name = holder.as_str().to_owned();
+        let (already_cordoned, other) = {
+            let state = self.0.borrow();
+            let other = state.cordoned && !take_over && state.holder.as_ref() != Some(&name);
+            (state.cordoned, other)
+        };
+        self.set(|state| {
+            state.cordon_asks.push((name.clone(), take_over));
+            if !other {
+                state.cordoned = true;
+                state.holder = Some(name);
+                state.lease_secs = lease_secs.min(MAX_CORDON_SECS);
+            }
+        });
+        Ok(Cordoned {
+            already_cordoned,
+            held_by_other: other,
+            host: self.reading(named),
+        })
+    }
+
+    fn uncordon_held(&self, holder: &CordonHolder) -> Result<Uncordoned, LeaseError> {
+        let named = self.effect(Kind::Uncordon, Call::Uncordon)?;
+        let name = holder.as_str().to_owned();
+        let (cordoned, ours) = {
+            let state = self.0.borrow();
+            (state.cordoned, state.holder.as_ref() == Some(&name))
+        };
+        self.set(|state| {
+            state.uncordon_asks.push(name);
+            if ours {
+                state.cordoned = false;
+                state.holder = None;
+            }
+        });
+        Ok(Uncordoned {
+            lifted: cordoned && ours,
+            held_by_other: cordoned && !ours,
+            host: self.reading(named),
+        })
     }
 }
 

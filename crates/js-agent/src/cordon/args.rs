@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use js_client::HostIdentity;
+use js_types::CordonHolder;
 
 use crate::cli::parse_agent_flags;
 use crate::flags_file::{self, FileFacts};
@@ -19,29 +20,41 @@ use crate::{CredentialFile, Login};
 
 /// What `--help` says after the flags.
 const AFTER_HELP: &str = "\
-The verb cordons this host on the lease server (no new lease is placed on it), renews the \
-cordon every third of --lease-secs until --for has passed, and lifts it. It prints one line \
-per state change on standard output:
+The verb cordons this host on the lease server (no new lease is placed on it) as a named \
+holder (--holder, by default a name made for this run and printed on the cordoned line), \
+renews the cordon every third of --lease-secs until --for has passed, and lifts it. Every \
+call names the holder, so the server says whose the cordon is: the verb extends and lifts \
+its own and never another holder's. It prints one line per state change on standard output:
 
-  cordoned host=<id> expires_in_ms=<n> leases=<n>   the cordon was placed
+  cordoned host=<id> holder=<h> expires_in_ms=<n> leases=<n>
+                                                    the cordon was placed (or taken over, or
+                                                    placed again after a lapse of ours)
   idle host=<id>                                    once: no lease, not releasing, no mark
   lifted host=<id>                                  the cordon was lifted at the end or on a stop
   lapsed host=<id>                                  the cordon had lapsed already, nothing to lift
-  kept host=<id> reason=already_cordoned            another holder's cordon was found; not lifted
-  kept host=<id> reason=taken_after_lapse          ours lapsed (a stalled process) and another
-                                                    holder's took its place; not lifted
+  kept host=<id> reason=already_cordoned holder=<h|-> expires_in_ms=<n>
+                                                    another holder's cordon was found; it is not
+                                                    extended and not lifted
+  kept host=<id> reason=taken_over holder=<h|->     our cordon lapsed and another holder's took
+                                                    its place, or it was taken over; not lifted
+
+With --take-over the cordon in force is taken over whoever holds it, and held and lifted as the \
+verb's own. A cordon found is not extended: one whose holder died lapses within its last \
+--lease-secs, and the next run then places its own cordon; to go on sooner, take it over, or \
+lift it with `js host uncordon --host-id <id>`. The verb needs a lease server of this release \
+(an earlier one refuses the holder with invalid-cordon).
 
 On a host the agent runs on, give the agent's own flags file and state root (--flags-file \
 /etc/js-agent/flags --state-root /var/lib/js-agent/state): the server, the host id and the \
 credential are then the agent's. When the server refuses the credential, standard error says \
 what was sent and for which host.
 
-SIGTERM and SIGINT end the window early and lift the cordon. A process that is killed with \
+SIGTERM, SIGINT and SIGHUP (the end of an ssh session) end the window early and lift the cordon. A process that is killed with \
 SIGKILL (or loses the machine) lifts nothing: the cordon is a lease that is renewed, and it \
 lapses by itself within --lease-secs of the last renewal.
 
 Exit status: 0 held and lifted (or lapsed), 1 a server or credential error, 2 a wrong flag \
-or file, 3 another holder's cordon was found (it is left in place).";
+or file, 3 another holder's cordon was found, at the start or later (it is left in place).";
 
 /// The flags of `js-agent cordon`.
 #[derive(Debug, Parser)]
@@ -119,6 +132,25 @@ pub struct Args {
         value_parser = clap::value_parser!(u64).range(1..=MAX_CORDON_SECS)
     )]
     pub lease_secs: u64,
+    /// Who holds the cordon: 1 to 63 characters of `[a-z0-9._-]`, sent with every request.
+    /// The cordon is renewed and lifted for this holder only, and a cordon of another holder
+    /// is left as it is. By default a name made for this run, which the `cordoned` line
+    /// prints. Give a stable name to tell one's own cordon from a requester's that died.
+    #[arg(long, value_name = "NAME", value_parser = parse_holder)]
+    pub holder: Option<CordonHolder>,
+    /// Takes the cordon in force over, whoever holds it, and holds and lifts it as the
+    /// verb's own. Without it a cordon found is another holder's and is left as it is.
+    #[arg(long)]
+    pub take_over: bool,
+}
+
+/// A holder name, as `--holder` takes it.
+///
+/// # Errors
+///
+/// Text that is empty, longer than 63 characters or has a character outside `[a-z0-9._-]`.
+pub fn parse_holder(text: &str) -> Result<CordonHolder, String> {
+    CordonHolder::new(text).map_err(|why| why.to_string())
 }
 
 /// A length of time as `<n><unit>` terms, such as `90m` or `1h30m`.

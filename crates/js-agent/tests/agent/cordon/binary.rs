@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::Duration;
 
+use js_types::CordonHolder;
 use rustix::process::{Pid, Signal, kill_process};
 
 use super::http::enrol;
@@ -40,19 +41,20 @@ fn next_line(lines: &Receiver<String>) -> Option<String> {
     }
 }
 
-/// Asserts the program end to end: `js-agent cordon` finds the credential in the state root,
-/// places a cordon on the real server (which then shows it), prints `cordoned` and `idle`,
-/// and on SIGTERM lifts it, prints `lifted`, exits 0 with nothing on standard error and
-/// leaves the server with no cordon. It is the test of the verb's dispatch before the
-/// daemon's signal handling, of its own handling of SIGTERM, of the system clock and of the
-/// real connector. It catches a verb that dies on the signal with the cordon left in force.
-#[test]
-fn the_binary_cordons_a_host_and_lifts_the_cordon_on_sigterm() {
-    let enrolled = enrol("cordon_binary");
-    let (url, state) = (enrolled.server.url(), enrolled.state_flag());
+/// A running verb, the lines it prints and the server it cordons on.
+struct Running {
+    verb: Verb,
+    pid: Pid,
+    lines: Receiver<String>,
+}
+
+/// Starts `js-agent cordon` on `server` for the host `mac-1`, with `more` flags beside the
+/// ones every run needs.
+fn start(url: &str, state: &str, more: &[&str]) -> Running {
     let child = Command::new(env!("CARGO_BIN_EXE_js-agent"))
-        .args(["cordon", "--server", &url, "--state-root", &state])
+        .args(["cordon", "--server", url, "--state-root", state])
         .args(["--host-id", "mac-1", "--for", "1h", "--lease-secs", "30"])
+        .args(more)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -69,29 +71,80 @@ fn the_binary_cordons_a_host_and_lifts_the_cordon_on_sigterm() {
             }
         }
     });
+    Running { verb, pid, lines }
+}
 
-    let cordoned = next_line(&lines).expect("the verb ended before it cordoned");
-    assert_eq!(cordoned, "cordoned host=mac-1 expires_in_ms=30000 leases=0");
-    assert_eq!(next_line(&lines).as_deref(), Some("idle host=mac-1"));
-    let listed = enrolled.server.host("mac-1");
-    assert!(listed["cordon"]["expires_at_ms"].is_u64(), "{listed}");
-
-    kill_process(pid, Signal::TERM).unwrap();
-    assert_eq!(next_line(&lines).as_deref(), Some("lifted host=mac-1"));
+/// Reads what is left of the run once it has been signalled: the `lifted` line, the end of
+/// standard output, a status of 0 and nothing on standard error.
+fn finish_lifted(mut run: Running) {
+    assert_eq!(next_line(&run.lines).as_deref(), Some("lifted host=mac-1"));
     assert_eq!(
-        next_line(&lines),
+        next_line(&run.lines),
         None,
         "the verb closes its output at exit"
     );
-    let status = verb.child.wait().unwrap();
+    let status = run.verb.child.wait().unwrap();
     assert!(status.success(), "{status}");
     let mut err = String::new();
-    verb.child
+    run.verb
+        .child
         .stderr
         .take()
         .unwrap()
         .read_to_string(&mut err)
         .unwrap();
     assert_eq!(err, "");
+}
+
+/// Asserts the program end to end: `js-agent cordon` finds the credential in the state root,
+/// places a cordon on the real server (which then shows it), prints `cordoned` with the holder
+/// it made for the run (`cordon-<its pid>-<unix millis>`, a valid holder id) and `idle`, and
+/// on SIGTERM lifts it, prints `lifted`, exits 0 with nothing on standard error and leaves the
+/// server with no cordon. It is the test of the verb's dispatch before the daemon's signal
+/// handling, of its own handling of SIGTERM, of the system clock, of the default holder and of
+/// the real connector. It catches a verb that dies on the signal with the cordon left in
+/// force, and a default holder that is not a valid id or is not made per run.
+#[test]
+fn the_binary_cordons_a_host_and_lifts_the_cordon_on_sigterm() {
+    let enrolled = enrol("cordon_binary");
+    let (url, state) = (enrolled.server.url(), enrolled.state_flag());
+    let run = start(&url, &state, &[]);
+
+    let cordoned = next_line(&run.lines).expect("the verb ended before it cordoned");
+    let prefix = format!("cordoned host=mac-1 holder=cordon-{}-", run.verb.child.id());
+    let rest = cordoned.strip_prefix(&prefix).expect(&cordoned);
+    let (millis, tail) = rest.split_once(' ').expect(&cordoned);
+    assert!(millis.bytes().all(|b| b.is_ascii_digit()), "{cordoned}");
+    assert_eq!(tail, "expires_in_ms=30000 leases=0");
+    let holder = format!("cordon-{}-{millis}", run.verb.child.id());
+    assert!(CordonHolder::new(&holder).is_ok(), "{holder}");
+    assert_eq!(next_line(&run.lines).as_deref(), Some("idle host=mac-1"));
+    let listed = enrolled.server.host("mac-1");
+    assert!(listed["cordon"]["expires_at_ms"].is_u64(), "{listed}");
+
+    kill_process(run.pid, Signal::TERM).unwrap();
+    finish_lifted(run);
+    assert!(enrolled.server.host("mac-1").get("cordon").is_none());
+}
+
+/// Asserts that SIGHUP, which ends an ssh session, stops the verb as SIGTERM does: it lifts its
+/// cordon, prints `lifted`, exits 0 and leaves the server with no cordon, with the holder it
+/// was given printed on the `cordoned` line. It catches a verb that the hangup kills (or
+/// leaves running) with the cordon in force.
+#[test]
+fn the_binary_lifts_the_cordon_on_sighup() {
+    let enrolled = enrol("cordon_binary_hup");
+    let (url, state) = (enrolled.server.url(), enrolled.state_flag());
+    let run = start(&url, &state, &["--holder", "ops-session"]);
+
+    let cordoned = next_line(&run.lines).expect("the verb ended before it cordoned");
+    assert_eq!(
+        cordoned,
+        "cordoned host=mac-1 holder=ops-session expires_in_ms=30000 leases=0"
+    );
+    assert_eq!(next_line(&run.lines).as_deref(), Some("idle host=mac-1"));
+
+    kill_process(run.pid, Signal::HUP).unwrap();
+    finish_lifted(run);
     assert!(enrolled.server.host("mac-1").get("cordon").is_none());
 }

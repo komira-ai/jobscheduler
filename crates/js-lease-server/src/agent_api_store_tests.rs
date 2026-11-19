@@ -13,6 +13,7 @@ use js_registry::{Binding, PoolConfig, Registry, SequentialSessions};
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, Store, Txn};
 use js_testkit::dir::TestDir;
+use js_types::cordon::Asker;
 use js_types::{ManualClock, Timestamp};
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::{Value, json};
@@ -437,32 +438,38 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
     rig.store.fail_next();
     let lines = Lines::default();
     let capture = capture(&lines);
-    let failed = rig.agents.cordon(&host, lease).await;
+    let failed = rig.agents.cordon(&host, lease, Asker::Unnamed).await;
     drop(capture);
     assert_eq!(failed.err(), Some(CordonFault::Unsaved));
     logged(&lines, "ERROR", "cannot commit the cordon of a host");
     assert_eq!(cordon_until(&rig), None);
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], Value::Null);
 
-    assert!(rig.agents.cordon(&host, lease).await.unwrap().placed);
+    assert!(
+        rig.agents
+            .cordon(&host, lease, Asker::Unnamed)
+            .await
+            .unwrap()
+            .placed
+    );
     let until = START_MS + 60_000;
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], until);
     assert_eq!(cordon_until(&rig), Some(Timestamp::from_millis(until)));
 
     rig.store.fail_next();
-    let failed = rig.agents.uncordon(&host).await;
+    let failed = rig.agents.uncordon(&host, None).await;
     assert_eq!(failed.err(), Some(CordonFault::Unsaved));
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], until);
     assert_eq!(cordon_until(&rig), Some(Timestamp::from_millis(until)));
 
-    assert!(rig.agents.uncordon(&host).await.unwrap().lifted);
+    assert!(rig.agents.uncordon(&host, None).await.unwrap().lifted);
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], Value::Null);
     assert_eq!(cordon_until(&rig), None);
 
     let ghost = HostId::new("ghost").unwrap();
-    let unknown = rig.agents.cordon(&ghost, lease).await;
+    let unknown = rig.agents.cordon(&ghost, lease, Asker::Unnamed).await;
     assert_eq!(unknown.err(), Some(CordonFault::NotHeld));
-    let unknown = rig.agents.uncordon(&ghost).await;
+    let unknown = rig.agents.uncordon(&ghost, None).await;
     assert_eq!(unknown.err(), Some(CordonFault::NotHeld));
 }
 
