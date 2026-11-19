@@ -864,6 +864,24 @@ mod tests {
         assert!(!bare.ends_held(&id));
     }
 
+    /// Asserts that a runtime that keeps the trait's defaults creates on the caller's thread:
+    /// `begin_create` answers what `create_and_start` does, at once and never pending, and
+    /// `poll_create` answers a failure naming the run, since none of its creates is under way.
+    /// Catches a default that answers pending for a create nobody runs, or one that loses the
+    /// create's error.
+    #[test]
+    fn a_runtime_that_says_nothing_creates_on_the_callers_thread() {
+        let mut bare = Bare;
+        assert_eq!(
+            bare.begin_create(&spec()),
+            Created::Done(Err(RuntimeError::new("bare")))
+        );
+        assert_eq!(
+            bare.poll_create("r7"),
+            Created::Done(Err(RuntimeError::new("no create of r7 is under way")))
+        );
+    }
+
     /// Catches the host paths of a start counted in another order than the runtime's sources
     /// (a layer's after a mount's), a read-write mount not marked as writing, a `sub_path`
     /// lost, an image layer taken for a host path or the other way round, and a layer or a
