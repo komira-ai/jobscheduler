@@ -24,6 +24,9 @@ pub(crate) const CREDENTIAL_CODES: [&str; 4] = [
     "http-401",
 ];
 
+/// How the text of a failure the server's refusal of the credential caused begins.
+pub(super) const CREDENTIAL_ERROR: &str = "credential error: ";
+
 /// What to hold and for how long.
 #[derive(Clone, Copy, Debug)]
 pub struct Plan<'a> {
@@ -81,7 +84,7 @@ fn explain(what: &str, why: &LeaseError) -> String {
             "server error: {what}: the server holds no such host (it has not said hello since the server started)"
         ),
         LeaseError::Refused(code) if CREDENTIAL_CODES.contains(&code.as_str()) => {
-            format!("credential error: {what}: the server refused the credential ({code})")
+            format!("{CREDENTIAL_ERROR}{what}: the server refused the credential ({code})")
         }
         LeaseError::Refused(code) => format!("server error: {what}: the server refused ({code})"),
         LeaseError::Unreachable(text) => format!("server error: {what}: {text}"),

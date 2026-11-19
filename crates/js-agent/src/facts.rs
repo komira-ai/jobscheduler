@@ -97,7 +97,8 @@ pub trait FileReader {
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
 
     /// What is known of the file at `path` for a check of who may have written it (a link is
-    /// followed): the facts file of `--host-id-from-facts` is read through this.
+    /// followed): the facts file of `--host-id-from-facts`, and the flags file of the cordon
+    /// verb's `--flags-file`, are read through this.
     fn facts(&self, path: &Path) -> io::Result<FileFacts>;
 }
 
