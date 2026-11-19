@@ -5,13 +5,17 @@ use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, Hooks, HostPorts, config_dir};
 use js_agent::image::config_path;
-use js_agent::lifecycle::{Body, DirLayout, FilesRoot, RunHandle, RunSpec, label};
+use js_agent::lifecycle::{
+    Body, DirLayout, Event, FilesRoot, Lifecycle, RunHandle, RunSpec, Wake, label,
+};
+use js_agent_wire::{HeartbeatReply, HeldState};
 use js_contain::OciConfig;
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::subids::IdFiles;
@@ -485,3 +489,76 @@ impl Node {
 
 /// A wait no test comes to the end of.
 pub const LONG: Duration = Duration::from_secs(3600);
+
+/// A lifecycle whose runtime's rings a test waits on: the runtime makes and starts a
+/// container off the caller's thread and rings when it is done, and the lifecycle takes the
+/// answer at its next step, as the worker does when it is woken.
+pub struct Ringing {
+    life: Lifecycle,
+    rung: Receiver<()>,
+}
+
+impl Ringing {
+    /// `life`, its runtime's rings sent to the test.
+    pub fn new(life: Lifecycle) -> Self {
+        let (ring, rung) = channel();
+        let wake = Wake::new(move || {
+            let _ = ring.send(());
+        });
+        Self {
+            life: life.with_wake(wake),
+            rung,
+        }
+    }
+
+    /// Applies `reply` and steps until no start waits for its create: the events of all of
+    /// it, in order.
+    pub fn apply_and_create(&mut self, reply: &HeartbeatReply) -> Vec<Event> {
+        let mut events = self.life.apply(reply);
+        events.extend(self.until_created());
+        events
+    }
+
+    /// Steps until no run or job is held as starting, each step after a ring of the
+    /// runtime: the events of the steps.
+    pub fn until_created(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        while self.starting() {
+            self.rung.recv_timeout(LONG).expect("the runtime rang");
+            events.extend(self.life.step());
+        }
+        events
+    }
+
+    /// Steps, each step after a ring of the runtime, until `done` says so of the lifecycle:
+    /// the events of the steps. Unlike [`Ringing::until_created`] it does not wait for the
+    /// starts that are held, so a test can watch one start finish while another is held.
+    pub fn until(&mut self, mut done: impl FnMut(&Lifecycle) -> bool) -> Vec<Event> {
+        let mut events = Vec::new();
+        while !done(&self.life) {
+            self.rung.recv_timeout(LONG).expect("the runtime rang");
+            events.extend(self.life.step());
+        }
+        events
+    }
+
+    fn starting(&self) -> bool {
+        let runs = self.life.held().into_iter().map(|run| run.state);
+        let jobs = self.life.held_jobs().into_iter().map(|job| job.state);
+        runs.chain(jobs).any(|state| state == HeldState::Starting)
+    }
+}
+
+impl std::ops::Deref for Ringing {
+    type Target = Lifecycle;
+
+    fn deref(&self) -> &Lifecycle {
+        &self.life
+    }
+}
+
+impl std::ops::DerefMut for Ringing {
+    fn deref_mut(&mut self) -> &mut Lifecycle {
+        &mut self.life
+    }
+}

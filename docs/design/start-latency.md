@@ -64,20 +64,18 @@ before the providers had all answered.
 
 ## Decisions
 
-- **The ledger's fsyncs stay.** The sidecar is written and synced before anything it names is made,
-  and rewritten twice (supervisor named; running) with a sync each: six fsyncs a start. They are what
-  lets a restarted agent adopt or remove what a crashed one made. `begin` to `running`, which holds
-  all six with the supervisor's spawn, measured about 20 ms; the timeline's `recorded` and `running`
-  steps show their share per start. They are the next agent-side candidate only if the farm table
-  shows `begin->recorded` or `supervised->running` large.
+- **The ledger's fsyncs stay** (the second part below rewrites the sidecar once a start instead of
+  twice, and makes the create off the worker). The sidecar is written and synced before anything it
+  names is made, and rewritten once it runs. They are what lets a restarted agent adopt or remove
+  what a crashed one made.
 - **The other sync writes stay, for the same reason.** The provider record (written and synced before
   the first `Prepare`, so a restart can release what a provider may hold) and the mount list of the
   assembly, which is on a `tmpfs` (`/run/js-agent/mounts`), where a sync costs nothing.
 - **`Prepare` then `Mount` stays two calls.** The provider protocol answers `Prepare` at once and
   `Mount` when the tree can be opened; sending `Mount` before `Prepare` was answered would let the two
   arrive in either order. The second call costs one round trip on the node's socket and one step.
-- **The beat after a start still waits the interval** (below): changing it changes the protocol, and
-  its cost is not yet measured.
+- **The beat after a start still waited the interval** in this first part; the second part below
+  ends that wait when the container runs, with no change of the protocol.
 
 ## The p99 tail: what it may be waiting on
 
@@ -97,17 +95,92 @@ The code gives three candidates, and the new line tells them apart.
 
 ## What is left
 
-- **The beat after a start.** A reply that carries a command does not say `beat_now`, so the agent
-  waits its interval (5 s by default) before its next heartbeat, and a second job placed on that host
-  within the interval waits for it (`docs/design/held-beat.md`). The bound is one interval; the farm
-  table's `placed->received` will say how often it is paid. Removing it needs the server not to send a
-  start again before the agent could have listed it, or the agent to beat once its worker has taken
-  the start; either is a change of the held beat's protocol.
+- **The beat after a start** (done in the second part below).
 - **A placement on another server process** reaches the host only on its next heartbeat, up to one
   hold (5 s) later; the wakes are in-process (`held_beat.rs`).
 - **The farm measurement.** Run a cold build on the farm with this agent and server, and print the
   table with `js-start-timeline` over each node's journal for the window; the rows are described in
   the runbook.
+
+## Second part: the worker, the sidecar, the beat
+
+### Measured on the farm (before)
+
+js-agent 0.1.267 (with the first part), 343 jobs of a cold build over 25 minutes, read from the
+agents' journals:
+
+- **One worker steps every job of a host, and a start's create runs on it.** A start's
+  `create_and_start` (the sidecar's record and two rewrites, each synced; the cgroup; the bundle;
+  the supervisor) ran on the job worker's one thread. On a node whose SATA disk answered syncs in
+  66 to 178 ms, every job of the host waited behind each start's syncs: the worker's queue of 16
+  replies filled, the agent logged `the job worker is busy: an answer was dropped` 1,047 times, and,
+  the dropped reply having said `beat_now`, it sent the next heartbeat after 0 ms, which the server
+  answered with the same start again.
+- **About 3 s of every job was waiting, on every node.** Placement to the reply's arrival was 0.9 s
+  at the median (the heartbeat interval there is 1 s), the server heard `running` 1.4 s at the
+  median after the container ran, and the result came 0.1 s after the job's end.
+
+### Why, read in the code
+
+- `Lifecycle::apply_at` called `Runtime::create_and_start` in the worker's order for a start that
+  waits for nothing (`prepare_or_begin`), so the start was not even listed until its create returned,
+  and nothing else of the host moved meanwhile.
+- A heartbeat reply that carries a command never says `beat_now` (`agent_api/held.rs`, so a slow
+  agent is not asked in a loop), and the session waited its interval after it. For that interval no
+  heartbeat of the host was held at the server, so a placement on a busy host, which had just been
+  given a start, waited for the next beat: the 0.9 s. The held-beat path works; a busy host was rarely
+  in it. The heartbeat that told the server `running` was the one after that interval: the 1.4 s.
+- `Session::beat_done` took the wait from `beat_now` before it knew whether the worker had taken the
+  reply: a dropped reply that said `beat_now` was followed at once by the next heartbeat.
+
+### What this part changes
+
+- **The create runs off the worker** (`crun/create.rs`). `CrunRuntime` answers
+  `Runtime::begin_create` with `Created::Pending` and makes and starts the lease on a pool of four
+  threads (`js-create`); the lifecycle holds the start as `starting`, in the phase `Creating` with its
+  slot booked, and asks `Runtime::poll_create` at each step; the pool rings the worker's wake when it
+  answers. The worker keeps what reads its books (the checks, the name, refused while a create of it
+  is under way, the sidecar's contents) and takes apart, on the worker as before, what a failed
+  create left. A slow sync now holds its own start and nothing else. Other runtimes keep the default,
+  which creates on the worker as before.
+- **One sidecar rewrite a start.** The sidecar is recorded before anything is made and rewritten once,
+  in the state running with the supervisor, after the network is wired: four syncs instead of six.
+  The rewrite that named the supervisor while the start was still starting is gone: a teardown of a
+  lease whose sidecar names no supervisor ends the supervisor the lease directory records (it did so
+  already for a lease whose sidecar is gone), and that record is written before the rewrite was.
+- **The beat after a start ends when the container runs.** The worker rings the sleeper's bell when
+  what it publishes holds news for the server: a run or job that runs or ended, a new result, a newly
+  retired job id, a taint or its clear (`worker/bell.rs`). A start just taken, listed as `starting`,
+  is not news. The wait after an accepted heartbeat whose reply the worker took ends on the bell
+  (`Session::beats_on_news`, `Sleeper::sleep_or_bell`); every other wait (a backoff, a retry, the
+  drain's) does not. So the heartbeat after a start leaves the moment its container runs, carries
+  `running`, and is then the heartbeat the server holds for the next placement on the host: a
+  placement waits at most for the start before it, not for the interval.
+- **A full worker is backed off from.** After a reply the worker had no room for, the next heartbeat
+  waits the session's backoff (500 ms to 1 s at first, doubling while the worker stays full, reset
+  by a reply it takes), not the interval and never 0 ms.
+
+### Decisions
+
+- **A pool of four threads, not a thread per start.** A start that hangs (a supervisor that never
+  says it is ready is bounded at 30 s; a network attach by its route wait) holds a thread; four
+  bound what a host does at once and what a hung disk can hold, and a fifth start waits its turn in
+  the order it was begun. It is the size of the file system pool beside it.
+- **The bell, not a second heartbeat.** While a heartbeat is held at the server the session thread
+  waits in it; the agent sends no second request. A start's `running` rides on the heartbeat that
+  leaves when the container runs, before the server holds one; a second start whose container runs
+  while that heartbeat is held is reported when the hold ends, at most one hold later, as before.
+- **No protocol change.** The server still answers a reply with a command without `beat_now`; the
+  agent shortens only its own wait, and only on news, so an older server is served the same way and a
+  slow agent is not asked in a loop.
+- **A stop asked while the create runs waits for it.** The create cannot be called back, so the stop
+  is carried to the made container, which is stopped as any running one is; a create that failed
+  ends the start `failed_to_start`.
+
+### Still to measure
+
+The farm table after this agent ships (each segment's p50 and p90 on the slow node and a fast one,
+from `js-start-timeline` over the journals of the same kind of cold build).
 
 ## Tests
 

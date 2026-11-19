@@ -5,9 +5,10 @@
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::PinnedImage;
-use js_contain::oci::{LeaseDirs, Owner};
+use js_contain::oci::{LeaseDirs, Oci, Owner};
 use js_types::{JobNetwork, Resources};
 
+use super::create::Maker;
 use super::dirs::{TMP_PLACES, make_dir, owned, project_of, take_dir, take_empty_dir};
 use super::fault::Fault;
 use super::fs::Assembled;
@@ -27,11 +28,16 @@ use crate::lifecycle::RunSpec;
 /// its network is wired).
 pub(super) type Marks = Vec<(&'static str, u64)>;
 
+/// The job's temporary directory of the lease `name`: `.tmp-<name>` beside the lease's
+/// directory, in the scratch root when the leases are beside the runs.
+fn tmp_dir_of(oci: &Oci, name: &str) -> std::path::PathBuf {
+    super::dirs::tmp_dir_beside(&oci.lease_dirs(name).dir, name)
+}
+
 impl CrunRuntime {
-    /// The job's temporary directory of the lease `name`: `.tmp-<name>` beside the lease's
-    /// directory, in the scratch root when the leases are beside the runs.
+    /// The job's temporary directory of the lease `name` (see [`tmp_dir_of`]).
     pub(super) fn tmp_dir_of(&self, name: &str) -> std::path::PathBuf {
-        super::dirs::tmp_dir_beside(&self.oci.lease_dirs(name).dir, name)
+        tmp_dir_of(&self.oci, name)
     }
 
     /// The job's temporary directory of the run `run_id` that the lifecycle makes and bounds
@@ -42,7 +48,9 @@ impl CrunRuntime {
         let name = super::container_name(&self.host_id, run_id).ok()?;
         self.leases_beside.then(|| self.tmp_dir_of(&name))
     }
+}
 
+impl Maker {
     /// Marks `step` done now, on the runtime's clock.
     pub(super) fn mark(&self, marks: &mut Marks, step: &'static str) {
         marks.push((step, (self.hooks.now_ms)()));
@@ -69,7 +77,7 @@ impl CrunRuntime {
         gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
-        let tmp = self.tmp_dir_of(name);
+        let tmp = tmp_dir_of(&self.oci, name);
         let mut container = match spec.isolation {
             js_agent_wire::Isolation::Contained => {
                 container_spec(name, spec, image, (&lease, Some(&tmp)), cgroup.name())
@@ -77,7 +85,7 @@ impl CrunRuntime {
             js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
         };
         if let Some(made) = assembled {
-            Self::give(&mut container, made);
+            CrunRuntime::give(&mut container, made);
         }
         match &config {
             Some(config) => config.apply(args, &mut container)?,
@@ -118,7 +126,7 @@ impl CrunRuntime {
             // agent on the image pins it, and the removal is refused.
             self.oci.unpin_image(name)?;
             self.rt.block_on(self.oci.remove_image(image))?;
-            self.pulls.forget(given);
+            self.forget.forget(given);
             self.oci.pin_image(image, name)?;
             ensure().map_err(Fault::Image)?;
         }
@@ -127,7 +135,7 @@ impl CrunRuntime {
 
     /// The directories, hand-overs, cgroup and bundle of one lease.
     ///
-    /// A contained lease's job gets its temporary directory ([`CrunRuntime::tmp_dir_of`]):
+    /// A contained lease's job gets its temporary directory ([`tmp_dir_of`]):
     /// the lifecycle's, taken empty, when the leases are beside the runs (it put it under the
     /// slot's temporary project), or made here otherwise; given to the job user like the
     /// lease's directory, with its `tmp` and `var-tmp` made in it and given to the job's own
@@ -173,7 +181,7 @@ impl CrunRuntime {
                 .map_err(|why| Fault::step("make a lease directory", &why))?;
         }
         if !host {
-            let tmp = self.tmp_dir_of(&container.name);
+            let tmp = tmp_dir_of(&self.oci, &container.name);
             let made = match self.leases_beside {
                 true => take_empty_dir(&tmp),
                 false => make_dir(&tmp),

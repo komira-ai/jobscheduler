@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Wake, Whereabouts, label,
+    Created, FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
+use super::super::lifecycle::deferring::Deferring;
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use super::{ended, spec, vm};
 
@@ -93,6 +94,41 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     assert_eq!(fake.stops().len(), 1);
     with.remove(&on_host).unwrap();
     assert!(fake.gone("run-plain"));
+}
+
+/// Asserts that the create of a VM run is begun by the VM runtime, which answers at once
+/// with its handle, and the create of a run of another kind by the other runtime, so that a
+/// create the other runtime holds pending is answered pending by the router's `poll_create`
+/// until it is released, and then with the container's handle; a run the other runtime holds
+/// no create of is answered a failure naming it. Catches a VM start begun on the host
+/// runtime, a container's create begun on the VM runtime, and a poll that is not forwarded
+/// to the runtime that holds the create.
+#[test]
+fn a_create_is_begun_by_the_runtime_of_its_kind_and_polled_on_the_other() {
+    let driver = Arc::new(FakeDriver::new());
+    let fake = FakeRuntime::new(&Log::default(), &ManualClock::default());
+    let (deferring, gate) = Deferring::around(fake.clone());
+    let mut with = WithVms::new(VmRuntime::new(driver), Box::new(deferring));
+    gate.hold("run-plain");
+    let begun = with.begin_create(&spec("run-vm", &["make"]));
+    assert_eq!(begun, Created::Done(Ok(RunHandle("run-vm".to_owned()))));
+    assert!(gate.begun().is_empty());
+    let mut plain = spec("run-plain", &["make"]);
+    plain.labels.remove(label::KIND);
+    assert_eq!(with.begin_create(&plain), Created::Pending);
+    assert_eq!(gate.begun(), ["run-plain"]);
+    assert_eq!(with.poll_create("run-plain"), Created::Pending);
+    assert!(fake.created().is_empty());
+    gate.release("run-plain");
+    assert!(matches!(
+        with.poll_create("run-plain"),
+        Created::Done(Ok(_))
+    ));
+    assert_eq!(fake.created().len(), 1);
+    let Created::Done(Err(why)) = with.poll_create("run-plain") else {
+        panic!("the create was answered");
+    };
+    assert_eq!(why.to_string(), "no create of run-plain is under way");
 }
 
 /// Asserts that every question about the host is the other runtime's answer (the image

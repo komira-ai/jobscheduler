@@ -50,6 +50,8 @@ pub enum Wake {
     Elapsed,
     /// The process was asked to stop (SIGTERM or SIGINT).
     Stop,
+    /// The bell rang: the job worker has news for the server ([`Sleeper::sleep_or_bell`]).
+    Bell,
 }
 
 /// Lets time pass, and tells the loop when the process is asked to stop. The real one
@@ -58,6 +60,19 @@ pub trait Sleeper {
     /// Waits `duration`, or until a stop request arrives, whichever is first. A stop
     /// request that arrived earlier ends the wait at once.
     fn sleep(&mut self, duration: Duration) -> Wake;
+
+    /// [`Sleeper::sleep`], also ended by the bell ([`Wake::Bell`]): rung since the last
+    /// wait that it ended, it ends this one at once. A stop request comes before the bell.
+    /// The default has no bell and only sleeps.
+    fn sleep_or_bell(&mut self, duration: Duration) -> Wake {
+        self.sleep(duration)
+    }
+
+    /// The bell [`Sleeper::sleep_or_bell`] wakes on, for the job worker to ring; none for a
+    /// sleeper without one (the default).
+    fn bell(&self) -> Option<crate::lifecycle::Wake> {
+        None
+    }
 }
 
 /// How the loop ended.
@@ -85,7 +100,13 @@ pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn
                 note.iter().for_each(|note| {
                     let _ = writeln!(log, "js-agent: {note}; next in {}ms", after.as_millis());
                 });
-                if sleeper.sleep(after) == Wake::Stop {
+                // The wait after an accepted heartbeat ends early when the worker has news
+                // for the server (a job that runs, or ended); no other wait does.
+                let woken = match session.beats_on_news() {
+                    true => sleeper.sleep_or_bell(after),
+                    false => sleeper.sleep(after),
+                };
+                if woken == Wake::Stop {
                     return stop(session, sleeper, log);
                 }
             }

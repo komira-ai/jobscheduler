@@ -77,7 +77,13 @@
 //!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
 //!   and acts on each command in order; a command it refuses is logged by its place in the
 //!   reply. A reply the worker has no room for is dropped and noted ([`Note::Busy`]): the
-//!   server sends everything again.
+//!   server sends everything again, and the next heartbeat waits a backoff that grows while
+//!   the worker stays full ([`Backoff`]), so a full worker is not asked again at once.
+//! - The wait after a heartbeat whose reply the worker took ends as soon as the worker has
+//!   news for the server: a job that runs, or ended ([`Session::beats_on_news`],
+//!   [`Worker::ring_on_news`]). So a start's `running` reaches the server the moment its
+//!   container runs, not an interval after the reply that carried the start, and the
+//!   heartbeat that carries it is then the one the server holds for the next placement.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told. A `taint_cleared_ack` counts only when the
@@ -142,8 +148,8 @@ use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, ProtocolRange,
-    RefusalReason, ValidationError, Welcome,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, RefusalReason,
+    ValidationError, Welcome,
 };
 use js_caps::DISK_GIB;
 use serde_json::Value;
@@ -158,6 +164,9 @@ use crate::refused_body::{code_of, field_of, reason_of, supported_of};
 use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Snapshot, Worker};
+
+mod fatal;
+pub use fatal::Fatal;
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -174,49 +183,6 @@ struct Live {
     epoch: u64,
     secret: Secret,
     interval: Duration,
-}
-
-/// The server's answer ends the agent: it will not have this host, and the answer will
-/// not change by asking again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fatal {
-    /// The message refused: `hello` or `heartbeat`.
-    pub what: &'static str,
-    /// The HTTP status.
-    pub status: u16,
-    /// The server's code, such as `host-bound`, or `unreadable`.
-    pub code: String,
-    /// The majors the server speaks, when it said so (`unsupported-protocol`).
-    pub supported: Option<ProtocolRange>,
-    /// The capability at fault, when the server named one (`host-contract`,
-    /// `execution-mismatch`).
-    pub field: Option<String>,
-    /// Which condition failed, when the server named one (`shape-not-accepted`).
-    pub reason: Option<String>,
-}
-
-impl fmt::Display for Fatal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let majors = self
-            .supported
-            .map(|range| format!("; it speaks majors {} to {}", range.min, range.max))
-            .unwrap_or_default();
-        let field = self
-            .field
-            .as_ref()
-            .map(|field| format!("; the capability at fault is {field}"))
-            .unwrap_or_default();
-        let reason = self
-            .reason
-            .as_ref()
-            .map(|reason| format!(", reason {reason}"))
-            .unwrap_or_default();
-        write!(
-            f,
-            "the server refused the {} with status {} ({}{reason}{majors}{field}); not retrying",
-            self.what, self.status, self.code
-        )
-    }
 }
 
 /// Why an exchange did not go through.
@@ -482,6 +448,8 @@ pub struct Session<'a> {
     saying: Option<u64>,
     /// The host's live-log credential, when the agent uploads live logs.
     log_grant: Option<Arc<HostGrant>>,
+    /// The last tick's wait may end when the worker has news ([`Session::beats_on_news`]).
+    news: bool,
 }
 
 impl<'a> Session<'a> {
@@ -510,6 +478,7 @@ impl<'a> Session<'a> {
             told: None,
             saying: None,
             log_grant: None,
+            news: false,
         }
     }
 
@@ -589,6 +558,7 @@ impl<'a> Session<'a> {
 
     /// Does one exchange: a hello when there is no session, a heartbeat when there is.
     pub fn tick(&mut self) -> Step {
+        self.news = false;
         if self.worker_down() {
             return Step::Failed(WORKER_ENDED.to_owned());
         }
@@ -596,6 +566,14 @@ impl<'a> Session<'a> {
             None => self.hello_step(),
             Some(live) => self.beat_step(live),
         }
+    }
+
+    /// Whether the wait the last [`Session::tick`] asked for may end as soon as the worker
+    /// has news for the server (a job that runs, or ended: [`Worker::ring_on_news`]): the
+    /// wait after a heartbeat the server accepted and whose reply the worker took. A wait
+    /// after a failure, a refusal or a reply the worker had no room for runs its course.
+    pub fn beats_on_news(&self) -> bool {
+        self.news
     }
 
     /// Whether the job worker is gone, by its end mark, by a reply that found nobody to read
@@ -856,7 +834,6 @@ impl<'a> Session<'a> {
     fn beat_done(&mut self, body: &Value, interval: Duration) -> Step {
         match serde_json::from_value::<HeartbeatReply>(body.clone()) {
             Ok(reply) => {
-                self.backoff.reset();
                 self.proven = true;
                 self.lost_young = false;
                 self.jobs.iter().for_each(|jobs| jobs.worker.heard());
@@ -873,16 +850,26 @@ impl<'a> Session<'a> {
                 });
                 let refused = self.hold.as_mut().and_then(Hold::take_note);
                 self.keep_log_grant(&reply);
-                // A reply the server held open asks for the next heartbeat at once, so one is
-                // always waiting there for a start to ride on (`held-beat`).
-                let after = match reply.beat_now {
-                    true => Duration::ZERO,
-                    false => interval,
-                };
+                let beat_now = reply.beat_now;
                 let accepted = self.accept(HeartbeatReply {
                     beat_now: false,
                     ..reply
                 });
+                // A reply the worker had no room for is sent again by the server: the next
+                // heartbeat waits a backoff that grows while the worker stays full, not the
+                // interval and never nothing, so a full worker is not asked in a loop.
+                let busy = accepted == Some(Note::Busy);
+                if !busy {
+                    self.backoff.reset();
+                }
+                self.news = !busy;
+                // A reply the server held open asks for the next heartbeat at once, so one is
+                // always waiting there for a start to ride on (`held-beat`).
+                let after = match (busy, beat_now) {
+                    (true, _) => self.backoff.next(&mut *self.jitter, None),
+                    (false, true) => Duration::ZERO,
+                    (false, false) => interval,
+                };
                 Step::Wait {
                     after,
                     note: followed.or(refused).or(accepted),
