@@ -7,12 +7,14 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::channel;
 
 use js_agent_wire::{JobMount, Layer, MountMode, refusal};
 use js_testkit::dir::TestDir;
 
 use super::pool::Poll;
-use super::tests::{Mounts, Paths, host_layer, mount, owners, scratch, until};
+use super::pool::THREADS;
+use super::tests::{GUARD, Mounts, Paths, host_layer, mount, owners, scratch, until};
 use super::{CHECK_MS, Fs, FsError, FsSettings, LOOKUP_MS};
 use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal};
 
@@ -807,4 +809,111 @@ fn a_call_with_an_unchanged_fs_only_polls() {
         assert_eq!(answer, FsPrepared::Ready);
     }
     assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
+
+/// Asks the pool for the assembly of the run `run`, once its lookups have answered: the run's
+/// lease is `lease-<run>`, and `start` its host paths.
+fn assembly_asked(fs_: &mut Fs, dir: &TestDir, run: &str, start: &JobFs) {
+    let lease_name = format!("lease-{run}");
+    until(|| match fs_.resolve((run, &lease_name), "", start, 0) {
+        FsPrepared::Pending => None,
+        other => Some(other),
+    });
+    let lease = dir.path().join(format!(".{lease_name}"));
+    fs::create_dir(&lease).expect("the lease directory");
+    fs_.ask_assembly(run, (None, Vec::new()), lease, owners())
+        .expect("asked");
+}
+
+/// Catches the lookups of a start sharing their threads with the assemblies and the checks
+/// of others (a start's `admitted` to `resolved` queued behind another's mounts, and held
+/// for ever behind a provider's file system that hung in an assembly): with every thread
+/// of the assemblies' pool held in an assembly's clone, another assembly and a check queue
+/// behind them, and a start's lookups still answer, ring the wake, and are `Ready`; once the
+/// assemblies are let go, each answers `Ready` and the check answers.
+#[test]
+fn lookups_answer_while_every_thread_of_the_assemblies_is_held() {
+    let dir = scratch("fs-lookups-apart");
+    let (mut fs_, _) = open(&dir, Paths::default());
+    let (held, began, go) = Mounts::holding_clones(dir.path());
+    fs_.calls = Arc::new(held);
+    let (rung, rings) = channel::<()>();
+    let rung = std::sync::Mutex::new(rung);
+    fs_.set_wake(crate::lifecycle::Wake::new(move || {
+        let _ = rung.lock().map(|rung| rung.send(()));
+    }));
+    let tree = dir.path().join("data/tree");
+    let start = job(vec![mount(&tree, "/t", MountMode::ReadOnly)]);
+    let runs: Vec<String> = (0..=THREADS).map(|n| format!("run-{n}")).collect();
+    for run in &runs[..THREADS] {
+        assembly_asked(&mut fs_, &dir, run, &start);
+        began.recv().expect("an assembly began its clone");
+        // The ring of this run's lookup, which answered before its assembly was asked.
+        rings.recv_timeout(GUARD).expect("the lookup rang");
+    }
+    // One more assembly and a check: no thread of the pool is free for them.
+    assembly_asked(&mut fs_, &dir, &runs[THREADS], &start);
+    rings.recv_timeout(GUARD).expect("its lookup rang");
+    let check = fs_.check("lease-run-0", 1, 0);
+    assert!(began.try_recv().is_err(), "the fifth assembly waits");
+    assert_eq!(check.poll(0), Poll::Waiting, "the check waits");
+    let ro_tree = dir.path().join("ro/tree");
+    let later = job(vec![mount(&ro_tree, "/l", MountMode::ReadOnly)]);
+    let answer = until(
+        || match fs_.resolve(("later", "lease-later"), "", &later, 0) {
+            FsPrepared::Pending => None,
+            other => Some(other),
+        },
+    );
+    assert_eq!(
+        answer,
+        FsPrepared::Ready,
+        "a lookup is not behind an assembly"
+    );
+    rings.recv_timeout(GUARD).expect("the lookup rang the wake");
+    drop(go);
+    for run in &runs {
+        let made = until(|| match fs_.assembled(run, 0) {
+            FsPrepared::Pending => None,
+            other => Some(other),
+        });
+        assert_eq!(made, FsPrepared::Ready, "{run}");
+    }
+    let checked = until(|| match check.poll(0) {
+        Poll::Waiting => None,
+        other => Some(other),
+    });
+    assert_eq!(checked, Poll::Answered(None));
+}
+
+/// Catches the lookups of a start sharing their threads with the checks after other jobs (a
+/// source whose file system hung, checked after each job that failed, holding every thread):
+/// with every thread of the assemblies' pool held in a check and another check queued behind
+/// them, a start's lookups answer `Ready`; once the checks are let go each answers.
+#[test]
+fn lookups_answer_while_every_thread_of_the_checks_is_held() {
+    let dir = scratch("fs-lookups-apart-checks");
+    let (paths, began, go) = Paths::holding_checks();
+    let (mut fs_, _) = open(&dir, paths);
+    let checks: Vec<_> = (0..=THREADS).map(|_| fs_.check("lease", 1, 0)).collect();
+    for _ in 0..THREADS {
+        began.recv().expect("a check began");
+    }
+    assert!(began.try_recv().is_err(), "the fifth check waits");
+    let tree = dir.path().join("data/tree");
+    let start = job(vec![mount(&tree, "/t", MountMode::ReadOnly)]);
+    assert_eq!(
+        resolved_run(&mut fs_, "r", "", &start),
+        FsPrepared::Ready,
+        "a lookup is not behind a check"
+    );
+    assert!(checks.iter().all(|check| check.poll(0) == Poll::Waiting));
+    drop(go);
+    for check in &checks {
+        let answer = until(|| match check.poll(0) {
+            Poll::Waiting => None,
+            other => Some(other),
+        });
+        assert_eq!(answer, Poll::Answered(None));
+    }
 }

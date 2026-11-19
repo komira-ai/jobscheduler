@@ -1,10 +1,12 @@
-//! The `js-paths` pool: the threads that make the calls of a job's file system that may
-//! wait on a provider's file system (a lookup of a host path, the mounts of an assembly, the
-//! check of a job's sources after it ended), off the lifecycle's worker.
+//! The pools of the threads that make the calls of a job's file system that may wait on a
+//! provider's file system, off the lifecycle's worker: `js-lookups` for the lookups of host
+//! paths, and `js-paths` for the mounts of an assembly and the check of a job's sources after
+//! it ended. They are two so that an assembly (which holds a thread for as long as its mounts
+//! take, for ever on a hung file system) or a check never delays another start's lookups.
 //!
 //! A call on a FUSE file system blocks in the kernel until the file system answers, and one
-//! that has hung never returns. The pool has a fixed number of threads and makes none on
-//! demand, so a hung provider holds at most those threads; every call waits for a thread
+//! that has hung never returns. A pool has a fixed number of threads and makes none on
+//! demand, so a hung provider holds at most those threads of each; every call waits for a thread
 //! in the order it was asked, and the caller gives up on its answer at a deadline of its
 //! own clock ([`Pending::poll`]) whether or not a thread ever took it. A thread stuck in the
 //! kernel stays stuck until the file system answers or is unmounted.
@@ -19,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::lifecycle::Wake;
 
-/// The threads of the pool of a node.
+/// The threads of each pool of a node.
 pub(crate) const THREADS: usize = 4;
 
 /// What a thread of the pool runs.
