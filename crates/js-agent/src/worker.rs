@@ -89,8 +89,9 @@
 //!   `RestartPreventExitStatus=2`). So the agent's own time to leave is the wind-down wait
 //!   plus the rescue bound, minutes and not hours.
 //!
-//! A start the worker is already inside when it is closed is not undone: its container may
-//! be made after the rescue listed, and then it is the next process's to adopt.
+//! A start the worker is already inside when it is closed is not undone, nor one the runtime
+//! is making off the worker (`crun`'s create pool): its container may be made after the
+//! rescue listed, and then it is the next process's to adopt.
 
 use std::cell::Cell;
 use std::collections::VecDeque;

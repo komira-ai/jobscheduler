@@ -16,8 +16,9 @@
 //! # Order
 //!
 //! The sidecar is written, in the state [`Phase::Starting`], *before* anything it names is
-//! made, and rewritten in the state [`Phase::Running`] (with the start and the supervisor)
-//! once the supervisor answered. It is removed *after* the last of the lease is gone. A
+//! made, and rewritten once, in the state [`Phase::Running`] (with the start and the
+//! supervisor), once the supervisor answered and the network is wired. A teardown in between
+//! finds the supervisor by the record it keeps in the lease directory. It is removed *after* the last of the lease is gone. A
 //! process that dies in between leaves a sidecar with some or none of its lease: the next
 //! start removes what there is and then the sidecar. A lease with no sidecar cannot have
 //! been made by this code; the start-up pass removes one that carries this agent's name

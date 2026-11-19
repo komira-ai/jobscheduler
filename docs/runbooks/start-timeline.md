@@ -48,7 +48,7 @@ logs `taken`, `admitted`, `dirs`, `provided` (only when it has providers), `reso
 | `provided` | a start with providers only: the last directory a provider answered for its sources is in (its time after `admitted` is the providers' wait; on the tier store that is the tree attach, `Mount`) |
 | `resolved` | a start with layers or mounts only: its providers have answered, its images are on the node and its host paths, the providers' directories among them, were found |
 | `ready` | everything it waited for is here (its images, its providers' answers, its assembled file system), and the agent goes on to make what is left and create the container |
-| `created` | the runtime's create returned |
+| `created` | the runtime's create returned; for `crun`, which creates off the worker, the step at which the worker took its answer (the time between `ready` or `dirs` and `created` is the create pool's: the runtime's steps below say where it went) |
 
 A start whose image is still being pulled, or whose providers or file system are being prepared,
 waits between `admitted` and `ready` (`provided` and `resolved` fall in between). The work it waits on wakes the agent's worker
