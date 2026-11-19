@@ -108,12 +108,7 @@ impl Fixture {
                 .push(host.clone());
             true
         };
-        serve(
-            &self.jobs,
-            beat,
-            (&rules(), self.now()),
-            (&NoMetrics, &taint),
-        )
+        serve(&self.jobs, beat, &rules(), (&NoMetrics, &taint))
     }
 
     /// The tick at the clock's time.

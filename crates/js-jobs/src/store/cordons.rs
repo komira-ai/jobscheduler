@@ -81,7 +81,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         host: &HostId,
     ) -> Result<Option<(Cordon<Duration>, js_state::Version)>, JobStoreError> {
         let key = keys::cordon(host);
-        let now = self.store.now();
+        let now = self.store.now()?;
         self.store
             .get(&key)?
             .map(|row| Ok((cordon_in(&key, &row, now)?, row.version)))
@@ -166,7 +166,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::Store`].
     pub fn cordons(&self) -> Result<BTreeMap<HostId, Cordon<Duration>>, JobStoreError> {
-        let now = self.store.now();
+        let now = self.store.now()?;
         let rows = self.store.scan_prefix(keys::CORDON)?.into_iter();
         let in_force = |(key, row): (String, Versioned)| {
             let host = HostId::new(key.trim_start_matches(keys::CORDON)).ok()?;

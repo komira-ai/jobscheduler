@@ -427,10 +427,12 @@ async fn a_heartbeat_taint_is_committed_before_it_is_acknowledged() {
 /// Asserts that a cordon and its lift are committed before the registry takes them: a
 /// cordon whose commit fails is `Unsaved`, logged as an error naming the failure, and
 /// leaves the host uncordoned in the registry and in the store; one that commits holds in
-/// both, until the lease's end on the clock; a lift whose commit fails leaves the cordon in
-/// both, and one that commits lifts it in both. A host the registry does not hold is
-/// `NotHeld` either way. It catches a cordon or a lift that takes effect before it is
-/// durable, so a restart would undo it.
+/// both, until the lease's end: on the server's clock in the registry, and on the store's in
+/// the binding, which another server over the store reads (the two clocks are apart here: the
+/// store's starts at its origin); a lift whose commit fails leaves the cordon in both, and one
+/// that commits lifts it in both. A host the registry does not hold is `NotHeld` either way.
+/// It catches a cordon or a lift that takes effect before it is durable, so a restart would
+/// undo it, and a binding that stores the server's clock for the store's.
 #[tokio::test]
 async fn cordon_and_uncordon_commit_before_they_take_effect() {
     let rig = rig("cordon");
@@ -448,6 +450,10 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
     assert_eq!(cordon_until(&rig), None);
     assert_eq!(rig.binding("host-a")["cordon_until_ms"], Value::Null);
 
+    let store_ms = js_state::Store::now(&*rig.store)
+        .unwrap()
+        .as_duration()
+        .as_millis();
     assert!(
         rig.agents
             .cordon(&host, lease, Asker::Unnamed)
@@ -455,14 +461,19 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
             .unwrap()
             .placed
     );
+    let stored = u64::try_from(store_ms).unwrap() + 60_000;
     let until = START_MS + 60_000;
-    assert_eq!(rig.binding("host-a")["cordon_until_ms"], until);
+    assert_ne!(
+        stored, until,
+        "the store's clock and the server's are apart"
+    );
+    assert_eq!(rig.binding("host-a")["cordon_until_ms"], stored);
     assert_eq!(cordon_until(&rig), Some(Timestamp::from_millis(until)));
 
     rig.store.fail_next();
     let failed = rig.agents.uncordon(&host, None).await;
     assert_eq!(failed.err(), Some(CordonFault::Unsaved));
-    assert_eq!(rig.binding("host-a")["cordon_until_ms"], until);
+    assert_eq!(rig.binding("host-a")["cordon_until_ms"], stored);
     assert_eq!(cordon_until(&rig), Some(Timestamp::from_millis(until)));
 
     assert!(rig.agents.uncordon(&host, None).await.unwrap().lifted);
@@ -474,6 +485,31 @@ async fn cordon_and_uncordon_commit_before_they_take_effect() {
     assert_eq!(unknown.err(), Some(CordonFault::NotHeld));
     let unknown = rig.agents.uncordon(&ghost, None).await;
     assert_eq!(unknown.err(), Some(CordonFault::NotHeld));
+}
+
+/// Asserts that a cordon whose store cannot read its clock (its database stopped) is
+/// `Unsaved` and takes effect nowhere: the binding's end would be put on the store's clock by
+/// that reading, so nothing is committed and the registry holds no cordon. Once the clock
+/// reads again the cordon is placed. It catches a cordon end stored by a skew the store did not
+/// give (one a second server would read as lapsed, or as holding for hours).
+#[tokio::test]
+async fn a_cordon_whose_store_cannot_read_its_clock_is_unsaved() {
+    let rig = rig("cordon_unclocked");
+    rig.pooled("host-a", "burst").await.unwrap();
+    let host = HostId::new("host-a").unwrap();
+    let lease = Duration::from_secs(60);
+    rig.store.fail_clock(true);
+    let commits = rig.store.commit_stats().txns;
+    let failed = rig.agents.cordon(&host, lease, Asker::Unnamed).await;
+    assert_eq!(failed.err(), Some(CordonFault::Unsaved));
+    assert_eq!(rig.store.commit_stats().txns, commits);
+    assert_eq!(rig.binding("host-a")["cordon_until_ms"], Value::Null);
+    let own = rig.agents.registry.own_host(&host).unwrap();
+    assert_eq!(own.cordon_until, None);
+
+    rig.store.fail_clock(false);
+    let placed = rig.agents.cordon(&host, lease, Asker::Unnamed).await;
+    assert!(placed.unwrap().placed);
 }
 
 /// Asserts that the hot path reads and writes no store: with the store's next commit and
@@ -706,16 +742,24 @@ fn stored_hosts_keep_the_fields_a_newer_build_wrote() {
     store.txn(txn).unwrap().unwrap();
     let kept: Arc<dyn Store> = store.clone();
 
-    let (bindings, read) = BindingStore::in_store(Arc::clone(&kept)).unwrap();
+    let (bindings, read) =
+        BindingStore::in_store(Arc::clone(&kept), crate::agent_state::epoch_clock()).unwrap();
     let host = HostId::new("host-a").unwrap();
     let bound = Binding::new(Credential::of_token("t"), None);
     assert_eq!(read, BTreeMap::from([(host.clone(), bound.clone())]));
     let cordoned = BTreeMap::from([(host, bound.with_cordon(Some(7)))]);
+    // The server's clock is at the epoch: the end is written on the store's, as far past the
+    // store's reading as it is past the server's.
+    let store_ms = u64::try_from(store.now().unwrap().as_duration().as_millis()).unwrap();
     bindings.save(|| cordoned).unwrap();
     let written = store.get("hosts/binding/host-a").unwrap().unwrap().value;
     let written: Value = serde_json::from_slice(&written).unwrap();
-    let expected =
-        json!({ "version": 1, "credential": digest, "cordon_until_ms": 7, "later": [1] });
+    let expected = json!({
+        "version": 1,
+        "credential": digest,
+        "cordon_until_ms": store_ms + 7,
+        "later": [1],
+    });
     assert_eq!(written, expected);
 
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));
@@ -779,7 +823,8 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
             .unwrap()
             .unwrap();
         let kept: Arc<dyn Store> = store;
-        let bindings = BindingStore::in_store(Arc::clone(&kept)).err();
+        let bindings =
+            BindingStore::in_store(Arc::clone(&kept), crate::agent_state::epoch_clock()).err();
         let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));
         let random = Box::new(SequentialSessions::new());
         let joins = JoinTokens::in_store(kept, clock, random).err();
@@ -788,7 +833,9 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
 
     let store = fake();
     store.fail_read_after(0);
-    let failed = BindingStore::in_store(store.clone()).err().unwrap();
+    let failed = BindingStore::in_store(store.clone(), crate::agent_state::epoch_clock())
+        .err()
+        .unwrap();
     assert!(failed.contains(js_jobs::interfere::INJECTED), "{failed}");
     store.fail_read_after(0);
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(START_MS)));

@@ -78,7 +78,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let (job, job_version) = self.job_row(id)?;
         let (allocation, allocation_version) = self.allocation_row(id)?;
-        let now = self.store.now();
+        let now = self.store.now()?;
         let mut txn = Txn::new();
         let job = if job.state.is_ended() {
             job

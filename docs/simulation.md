@@ -719,9 +719,12 @@ model:
   server falls between two inputs, never inside one, so a commit cut in half is not
   modelled either.
 - **The store's clock.** The server opens a SQLite store on the system's clock, which it
-  takes from no seam. It writes no key with a time to live, so no decision reads that
-  clock; the cell's own read of the store, while the server is down, uses the cell's
-  clock.
+  takes from no seam here. The job tables' deadlines (queue wait, start and prepare
+  deadlines, retention), the periodic duties' due times and a stored cordon end are
+  stamped and judged by that clock, not by the cell's, so no scenario moves them by the
+  cell's clock; the server's own tests drive them on an injected store clock
+  (`crates/js-lease-server/src/job_pass_clock_tests.rs`). The cell's own read of the
+  store, while the server is down, uses the cell's clock.
 - **Jobs that book GPUs, and whole-host jobs on a host with GPUs.** The server sends no
   start for a job that books GPUs (it records no device indices), so the job front asks for a
   work's cpu and memory only, and a whole-host job (which books the whole host) is started

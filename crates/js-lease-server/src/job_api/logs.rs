@@ -246,7 +246,7 @@ pub(super) async fn get_logs(
     for _ in 0..FOLLOW_POLLS {
         api.logs.waiter.wait(FOLLOW_POLL).await;
         let row = read::Reads(api).job(&request.job_id, caller).await?;
-        job = read::unexpired(api, row)?;
+        job = read::unexpired(api, row).await?;
         page = attempt(api, &source, &job, stream, from, max).await?;
         if job.state.is_ended() || !page.is_empty_after(from) {
             break;

@@ -30,7 +30,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         if job.state != JobState::Queued {
             return Ok(None);
         }
-        let now = self.store.now();
+        let now = self.store.now()?;
         let mut noted = job.clone();
         if !noted.queue.apply_all(notes, now) {
             return Ok(None);

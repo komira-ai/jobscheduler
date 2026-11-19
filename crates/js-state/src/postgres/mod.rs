@@ -917,17 +917,16 @@ impl Store for PostgresStore {
         }
     }
 
-    fn now(&self) -> StoreTime {
+    fn now(&self) -> Result<StoreTime, StoreError> {
         if let Some(clock) = &self.clock {
-            return clock.now();
+            return Ok(clock.now());
         }
-        // The store trait cannot report a failure here; a database that cannot be
-        // reached reads as the origin, and the next call that can fail says why.
+        // The database's clock, read as every other call reads: a database that cannot be
+        // reached is the call's error, never a reading of the origin.
         self.read(|s| {
             let us: i64 = s.client.query_one(&s.st.now, &[&None::<i64>])?.get(0);
             Ok(to_time(us))
         })
-        .unwrap_or(StoreTime::ZERO)
     }
 }
 

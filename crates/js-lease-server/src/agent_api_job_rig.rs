@@ -377,6 +377,20 @@ pub(crate) fn clocked_rig_keeping(
     rig_on(name, (true, placing), kept, (clock, shared), extra)
 }
 
+/// A server named `name` holding the job tables and its jobs to `limits`, not placing, whose
+/// store reads a clock of its own: [`Rig::advance`] moves the store's clock, and the clock
+/// returned beside the rig is the server's (its registry's too). Both start at [`START_MS`],
+/// and a test sets them apart to show which one a decision reads.
+pub(crate) fn two_clock_rig(name: &str, limits: JobLimits) -> (Rig, ManualClock) {
+    let store = Arc::new(StoreClock::default());
+    store.advance(std::time::Duration::from_millis(START_MS));
+    let server = ManualClock::new(Timestamp::from_millis(START_MS));
+    let kept = (limits, Retention::DEFAULT);
+    let clocks = (store, SharedClock::new(server.clone()));
+    let rig = rig_on(name, (true, false), kept, clocks, Extra::default());
+    (rig, server)
+}
+
 /// A server named `name` (`(with_jobs, placing)` as [`rig_of`]) holding its jobs to the limits
 /// of `kept` and keeping each ended job for its retention, on the server clock `shared`, its
 /// store on `clock`, with what `extra` adds.

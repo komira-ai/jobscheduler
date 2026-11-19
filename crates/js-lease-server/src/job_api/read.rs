@@ -4,8 +4,9 @@
 //! Every call reads the tables through [`Reads`], which offers the two reads they need (one
 //! job, one page of jobs) and no write, so no read call changes any state. Each read runs on
 //! the pool for blocking calls ([`JobApi::on_tables`]). None takes a lock:
-//! the service holds no handle on the registry. Time is read from the
-//! service's clock, and only to tell an ended job whose retention end has passed.
+//! the service holds no handle on the registry. Time is read only to tell an ended job whose
+//! retention end has passed, and from the store's clock ([`js_jobs::JobStore::now`]), which
+//! stamped that end: a read whose store cannot read its clock fails as a failed read does.
 //!
 //! # Answers
 //!
@@ -80,8 +81,7 @@ use js_proto::v1::{
     self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
-use js_state::{ResumeToken, StoreTime};
-use js_types::Clock;
+use js_state::ResumeToken;
 use js_types::HostId;
 use tonic::{Request, Response, Status};
 
@@ -244,15 +244,17 @@ impl Reads<'_> {
     }
 }
 
-/// The service's clock, as a reading of the store's clock: both count from the Unix epoch.
-fn now(api: &JobApi) -> StoreTime {
-    StoreTime::from_duration(std::time::Duration::from_millis(api.clock.now().millis()))
-}
-
-/// `job`, unless it has ended and its retention end has passed at the service's clock: the
-/// same instant the sweep deletes it from.
-pub(super) fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
-    match js_jobs::sweep([&job], now(api)).is_empty() {
+/// `job`, unless it has ended and its retention end has passed at the store's clock, which
+/// stamped that end and by which every server's sweep deletes the job: the same instant the
+/// sweep deletes it from, whichever server is asked. The clock is read only for a job with a
+/// retention end; a failed reading answers as a failed read does, never the job or `expired`.
+pub(super) async fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
+    if job.retention_ends.is_none() {
+        return Ok(job);
+    }
+    let now = api.on_tables(|jobs| jobs.now()).await;
+    let now = now.map_err(|error| read_failed(&error))?;
+    match js_jobs::sweep([&job], now).is_empty() {
         true => Ok(job),
         false => Err(expired()),
     }
@@ -277,7 +279,7 @@ pub(super) async fn get_result(
     request: Request<GetResultRequest>,
 ) -> Result<Response<GetResultResponse>, Status> {
     let job = Reads(api).job(&request.into_inner().job_id, caller).await?;
-    let job = unexpired(api, job)?;
+    let job = unexpired(api, job).await?;
     match job.state.is_ended() {
         true => Ok(Response::new(GetResultResponse {
             result: Some(view::result(&job)),
@@ -296,7 +298,7 @@ pub(super) async fn get_logs(
 ) -> Result<Response<GetLogsResponse>, Status> {
     let request = request.into_inner();
     let job = Reads(api).job(&request.job_id, caller).await?;
-    let job = unexpired(api, job)?;
+    let job = unexpired(api, job).await?;
     let answer = match logs::stream_of(&request) {
         None => tails(&job),
         Some(stream) => logs::get_logs(api, caller, job, &request, stream).await?,

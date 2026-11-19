@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::scaler_support::{
     RECORDS_KEY, UNREMOVED_KEY, account, open_store, peek, put_in_store, records_path, start,
-    start_refused, submit, text_in, unremoved_path,
+    start_on_one_clock, start_refused, submit, text_in, unremoved_path,
 };
 use crate::support::{Harness, Kept, Scratch, T0, base_args, logged_with};
 
@@ -150,7 +150,9 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
     account(&scratch);
     let records = the_four_files(&scratch);
     let source = text_in(&scratch, "live", "initialise", Kept::Store);
-    let h = start(scratch, &source).await;
+    // The store reads the server's clock, so the cordon end the file holds on the server's
+    // clock is the store's time too.
+    let h = start_on_one_clock(scratch, &source).await;
     let store = h.running.store().unwrap();
 
     let keys: Vec<String> = everything(&*store)
@@ -224,7 +226,7 @@ async fn first_boot_on_an_empty_store_imports_the_four_files_once() {
     let before = revision(&open_store(&scratch));
     write_beside(&scratch, ".agents", &agents_file("edited"));
     let again = text_in(&scratch, "live", "resume", Kept::Store);
-    let h = start(scratch, &again).await;
+    let h = start_on_one_clock(scratch, &again).await;
     let store = h.running.store().unwrap();
     assert_eq!(revision(&*store), before, "the restart wrote nothing");
     assert_eq!(json_at(&*store, &binding)["taint_reason"], "residue");
