@@ -242,13 +242,12 @@ impl Lifecycle {
 
     /// Lets the jobs make progress: stops every job when the server has been silent for the
     /// bound ([`Lifecycle::stop_on_silence`]), takes each job that waits to start one step
-    /// on, watches each running container and its wall-time limit,
-    /// then takes each finished job as far through its cleanup as it will go, and tries
-    /// again to remove the containers no job stands for that could not be removed. Every
-    /// start is advanced before any job is watched or cleaned, so a start that waits is
-    /// never behind another job's cleanup (its fsyncs, its removals, its checks) in the
-    /// same step; a start that has settled to running is watched in that step. Call it on
-    /// every tick.
+    /// on, watches each running container and its wall-time limit, then takes each finished
+    /// job as far through its cleanup as it will go, and tries again to remove the
+    /// containers no job stands for that could not be removed. Every start is advanced
+    /// before any job is watched or cleaned, so a start that waits is never behind another
+    /// job's cleanup (its fsyncs, its removals, its checks) in the same step; a start that
+    /// has settled to running is watched in that step. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it
