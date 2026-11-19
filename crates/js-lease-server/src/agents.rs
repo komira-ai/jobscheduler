@@ -136,6 +136,9 @@ pub(crate) struct Agents {
     pub(crate) draining: Drain,
     /// How long a heartbeat's reply with nothing to send is held ([`held_beat::hold_bound`]).
     pub(crate) hold_bound: Duration,
+    /// How long such a reply is held when the beat lists a job as `starting`
+    /// ([`held_beat::starting_hold`]).
+    pub(crate) starting_hold: Duration,
     /// The machine providers of the pool's Default platform, first to last, as the bindings of
     /// its hosts name them: the order the pass offers the hosts in
     /// ([`crate::sched::rank`]).
@@ -342,6 +345,7 @@ fn placed_in(
         wakes: Wakes::default(),
         draining: Drain::default(),
         hold_bound: held_beat::hold_bound(interval),
+        starting_hold: held_beat::starting_hold(interval),
         providers,
     };
     Ok((Arc::new(agents), placer))
@@ -385,6 +389,7 @@ impl Agents {
         };
         let providers = static_then(&registry.pool_id());
         let hold_bound = held_beat::hold_bound(registry.heartbeat_interval());
+        let starting_hold = held_beat::starting_hold(registry.heartbeat_interval());
         Self {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
@@ -413,6 +418,7 @@ impl Agents {
             wakes: Wakes::default(),
             draining: Drain::default(),
             hold_bound,
+            starting_hold,
             providers,
         }
     }

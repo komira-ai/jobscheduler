@@ -603,6 +603,15 @@ impl Rig {
         self
     }
 
+    /// This rig's server holding a heartbeat's reply that lists a job `starting` for `bound`
+    /// at most.
+    pub(crate) fn holding_starting_for(mut self, bound: std::time::Duration) -> Rig {
+        let mut agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        agents.starting_hold = bound;
+        self.agents = Arc::new(agents);
+        self
+    }
+
     /// Registers `host`, whose agent reports `capabilities`, past the route.
     fn register_with(&mut self, host: &str, capabilities: serde_json::Value) {
         let hello: Hello = serde_json::from_value(json!({

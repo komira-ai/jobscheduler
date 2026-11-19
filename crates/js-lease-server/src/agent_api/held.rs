@@ -1,7 +1,9 @@
 //! The hold of a heartbeat's reply ([`crate::held_beat`]): a reply with nothing to send to a
 //! serving host that reported `held-beat` is held open until a placement on the host wakes it, or for
 //! [`Agents::hold_bound`] at most, and says `beat_now`, so the agent sends its next heartbeat
-//! at once.
+//! at once. A beat that lists a job as `starting` is held for [`Agents::starting_hold`] at
+//! most instead, so that the start's `running`, which rides on the next heartbeat, is not
+//! kept a whole hold.
 //!
 //! A reply is held only when it carries nothing at all: no command, no acknowledgement, no
 //! taint acknowledgement and no log credential, so a hold never delays what the beat asked
@@ -20,8 +22,9 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
-use js_agent_wire::{HeartbeatReply, HeldJob, NetworkCeiling};
+use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, NetworkCeiling};
 use js_types::{HostId, Resources};
 use tracing::warn;
 
@@ -52,6 +55,19 @@ pub(super) struct Inputs {
 }
 
 impl Inputs {
+    /// How long a reply to this beat is held at most: [`Agents::starting_hold`] when the
+    /// listing has a job `starting`, [`Agents::hold_bound`] when it has none.
+    fn bound(&self, agents: &Agents) -> Duration {
+        let starting = self
+            .listed
+            .iter()
+            .any(|job| job.state == HeldState::Starting);
+        match starting {
+            true => agents.starting_hold,
+            false => agents.hold_bound,
+        }
+    }
+
     /// The context the per-job half builds the starts in, counting into `metrics`.
     pub(super) fn context<'a>(&'a self, metrics: &'a dyn MetricsSink) -> BeatContext<'a> {
         BeatContext {
@@ -79,9 +95,9 @@ pub(super) struct Hold {
 
 /// Holds `reply` while it carries nothing (beside the whole-host allocation it names): until a
 /// wake builds a reply with something in it, which replaces its commands and allocation, or
-/// until the bound. A reply says `beat_now` when it carries no command: one held to the bound,
-/// one woken with a new whole-host allocation alone, and one not held that carries only
-/// acknowledgements, a taint acknowledgement or a log credential.
+/// until the bound ([`Inputs::bound`]). A reply says `beat_now` when it carries no command:
+/// one held to the bound, one woken with a new whole-host allocation alone, and one not held
+/// that carries only acknowledgements, a taint acknowledgement or a log credential.
 pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut HeartbeatReply) {
     let quiet = HeartbeatReply {
         exclusive: reply.exclusive.clone(),
@@ -98,7 +114,7 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
     if agents.draining.begun() {
         return;
     }
-    let bound = tokio::time::sleep(agents.hold_bound);
+    let bound = tokio::time::sleep(hold.inputs.bound(agents));
     tokio::pin!(bound);
     let draining = agents.draining.begins();
     tokio::pin!(draining);

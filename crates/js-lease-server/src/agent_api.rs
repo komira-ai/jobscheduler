@@ -72,7 +72,9 @@
 //! to send is held open until a job is placed on the host, or for the heartbeat interval at
 //! most five seconds, and says `beat_now` ([`held`], [`crate::held_beat`]). The host's
 //! heartbeat is watched from before the store is read, so a placement after the read wakes
-//! it; the reply is then built again from the store and carries the start.
+//! it; the reply is then built again from the store and carries the start. A heartbeat that
+//! lists a job as `starting` is held for [`crate::held_beat::starting_hold`] (200 ms) at most
+//! instead, so the start's `running` is not kept a whole hold.
 
 use std::collections::BTreeSet;
 use std::io;

@@ -238,6 +238,70 @@ async fn a_draining_server_holds_no_reply() {
     assert_eq!(waits(&rig), 0);
 }
 
+/// A placing server holding replies for `bound`, and replies to a beat that lists a job
+/// `starting` for `starting`, with `host-a` registered as an agent that takes held replies;
+/// that agent, which has been given `job-1` and lists it `starting`.
+async fn starting_rig(name: &str, bound: Duration, starting: Duration) -> (Rig, FakeAgent) {
+    let (rig, mut agent) = held_rig(name, bound);
+    let rig = rig.holding_starting_for(starting);
+    queue_share(&rig, "job-1", 600);
+    place_all(&rig);
+    agent.take(&rig.beat(&agent).await.unwrap());
+    assert!(agent.holds("job-1"));
+    (rig, agent)
+}
+
+/// Asserts that a heartbeat that lists a job `starting` is held no longer than the short bound
+/// for such a beat, however long the normal bound is: its reply ends after one wait, empty and
+/// saying `beat_now`. It catches a held beat of a host with a start under way that waits the
+/// whole hold, so the start's `running` reaches the server a hold later.
+#[tokio::test]
+async fn a_beat_that_lists_a_starting_job_ends_at_the_short_bound() {
+    let (rig, agent) = starting_rig("held_starting_short", LONG, Duration::ZERO).await;
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply, quiet_held());
+    assert_eq!(waits(&rig), 1);
+}
+
+/// Asserts that a heartbeat that lists no job `starting` (here one that runs) is held to the
+/// normal bound: with the short bound at nothing, the reply is still waiting when a placement
+/// comes, and carries its start. It catches a short bound taken for every beat of a host that
+/// holds a job.
+#[tokio::test]
+async fn a_beat_that_lists_no_starting_job_is_held_to_the_normal_bound() {
+    let (rig, mut agent) = starting_rig("held_not_starting", LONG, Duration::ZERO).await;
+    agent.run("job-1");
+    let placed = async {
+        waited(&rig, 1).await;
+        queue_share(&rig, "job-2", 600);
+        place_all(&rig);
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), placed);
+    let started: Vec<String> = starts(&reply.unwrap())
+        .into_iter()
+        .map(|s| s.job_id)
+        .collect();
+    assert_eq!(started, ["job-2"]);
+}
+
+/// Asserts that a placement on the host while a heartbeat that lists a job `starting` is held
+/// ends that hold at once and its reply carries the start, without `beat_now`. It catches a
+/// short hold that is not watched for wakes.
+#[tokio::test]
+async fn a_placement_wakes_a_beat_that_lists_a_starting_job() {
+    let (rig, agent) = starting_rig("held_starting_wake", LONG, LONG).await;
+    let placed = async {
+        waited(&rig, 1).await;
+        queue_share(&rig, "job-2", 600);
+        place_all(&rig);
+    };
+    let (reply, ()) = tokio::join!(rig.beat(&agent), placed);
+    let reply = reply.unwrap();
+    let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
+    assert_eq!(started, ["job-2"]);
+    assert!(!reply.beat_now);
+}
+
 /// Asserts that a server that drains places no job, by the tick's pass or a heartbeat's: a
 /// queued job stays queued with no allocation while the registered host has room, and a
 /// heartbeat of the host gets no start. It catches a draining server that places a job on a

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use js_types::HostId;
 
-use super::{MAX_HOLD, Wakes, Watch, hold_bound};
+use super::{MAX_HOLD, STARTING_HOLD, Wakes, Watch, hold_bound, starting_hold};
 
 /// Whether `watch` holds a wake already: its wait ends without yielding.
 async fn woken_now(watch: &Watch) -> bool {
@@ -26,6 +26,18 @@ fn a_reply_is_held_for_the_interval_up_to_five_seconds() {
     assert_eq!(hold_bound(Duration::from_secs(1)), Duration::from_secs(1));
     assert_eq!(hold_bound(Duration::from_secs(30)), Duration::from_secs(5));
     assert_eq!(MAX_HOLD, Duration::from_secs(5));
+}
+
+/// Asserts that a reply to a beat that lists a job `starting` is held for 200 ms, and never
+/// longer than the normal hold of the same interval. It catches a short hold that outlasts a
+/// short interval, and one that is not short next to the interval agents beat at.
+#[test]
+fn a_reply_to_a_starting_beat_is_held_for_the_short_bound_or_the_normal_one_if_shorter() {
+    assert_eq!(STARTING_HOLD, Duration::from_millis(200));
+    assert_eq!(starting_hold(Duration::from_secs(1)), STARTING_HOLD);
+    assert_eq!(starting_hold(Duration::from_secs(30)), STARTING_HOLD);
+    let short = Duration::from_millis(50);
+    assert_eq!(starting_hold(short), short);
 }
 
 /// Asserts that a wake that comes before the hold begins is kept, so the hold that follows

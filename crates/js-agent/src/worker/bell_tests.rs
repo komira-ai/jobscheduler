@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use js_agent_wire::{HeldJob, HeldRun, JobResult, Outcome, RunResult, Taint};
+use js_agent_wire::{HeldJob, HeldRun, HeldState, JobResult, Outcome, RunResult, Taint};
 
 use super::*;
 use crate::worker::LeaseAnswers;
@@ -80,19 +80,20 @@ fn a_run_that_runs_is_news() {
     assert!(holds_news(&starting, &running));
 }
 
-/// Proves a run that is listed for the first time as starting is not news, and that a run
-/// listed as starting before and still starting is not news either. Catches a heartbeat sent
-/// while the server still waits for the reply that carried the start.
+/// Proves a run that is listed for the first time as starting is news, and that a run listed
+/// as starting before and still starting is not. Catches a start taken that the server hears
+/// of only at the interval (no heartbeat of the host held for a placement meanwhile), and a
+/// ring at every publish while the start stands.
 #[test]
-fn a_run_just_taken_as_starting_is_not_news() {
+fn a_run_just_taken_as_starting_is_news_and_one_still_starting_is_not() {
     let none = Snapshot::default();
     let starting = with_runs(vec![run("r1", HeldState::Starting)]);
-    assert!(!holds_news(&none, &starting));
+    assert!(holds_news(&none, &starting));
     assert!(!holds_news(&starting, &starting));
 }
 
 /// Proves a run already listed that goes back to starting counts as a change, and so is news.
-/// Catches a filter that treats every starting entry as quiet.
+/// Catches a change of state that is not told.
 #[test]
 fn a_run_listed_before_that_changes_to_starting_is_news() {
     let before = with_runs(vec![run("r1", HeldState::Running)]);
@@ -110,14 +111,15 @@ fn a_run_that_ended_is_news_and_a_run_removed_is_not() {
     assert!(!holds_news(&exited, &Snapshot::default()));
 }
 
-/// Proves a job follows the same rules as a run: a fresh starting job is not news, a job
-/// that runs or ends is, a removed job is not. Catches a job listing left out of the check.
+/// Proves a job follows the same rules as a run: a job newly listed as starting is news, one
+/// still starting is not, a job that runs or ends is news, a removed job is not. Catches a
+/// job listing left out of the check.
 #[test]
-fn a_job_is_news_when_it_runs_or_ends_and_not_when_it_is_taken_or_removed() {
+fn a_job_is_news_when_it_is_taken_runs_or_ends_and_not_when_unchanged_or_removed() {
     let none = Snapshot::default();
     let starting = with_jobs(vec![job("j1", HeldState::Starting)]);
     let running = with_jobs(vec![job("j1", HeldState::Running)]);
-    assert!(!holds_news(&none, &starting));
+    assert!(holds_news(&none, &starting));
     assert!(!holds_news(&starting, &starting));
     assert!(holds_news(&none, &running));
     assert!(holds_news(&starting, &running));
@@ -125,7 +127,7 @@ fn a_job_is_news_when_it_runs_or_ends_and_not_when_it_is_taken_or_removed() {
 }
 
 /// Proves a job already listed that changes while starting (here by gaining a result) is
-/// news. Catches a filter that treats every starting job as quiet.
+/// news. Catches a check that treats a starting job already listed as quiet.
 #[test]
 fn a_job_listed_before_that_changes_while_starting_is_news() {
     let before = with_jobs(vec![job("j1", HeldState::Starting)]);
@@ -217,10 +219,10 @@ fn counting() -> (Wake, Arc<AtomicUsize>) {
     (bell, rings)
 }
 
-/// Proves a publish rings the bell once when it holds news and not when it does not, that
-/// what is published is what the shared state then holds, and that `told` becomes the
-/// snapshot published so the same news does not ring twice. Catches a bell rung for every
-/// publish, and one that never learns what it told.
+/// Proves a publish rings the bell once when it holds news (a start taken is news) and not
+/// when it does not, that what is published is what the shared state then holds, and that
+/// `told` becomes the snapshot published so the same news does not ring twice. Catches a bell
+/// rung for every publish, and one that never learns what it told.
 #[test]
 fn a_publish_rings_the_bell_for_news_only_and_remembers_what_it_told() {
     let shared = Shared::default();
@@ -231,18 +233,21 @@ fn a_publish_rings_the_bell_for_news_only_and_remembers_what_it_told() {
 
     let starting = with_runs(vec![run("r1", HeldState::Starting)]);
     shared.publish_news(&mut told, (starting.clone(), &answers, Vec::new()));
-    assert_eq!(rings.load(Ordering::SeqCst), 0);
+    assert_eq!(rings.load(Ordering::SeqCst), 1, "the start taken");
     assert_eq!(told, starting);
+
+    shared.publish_news(&mut told, (starting.clone(), &answers, Vec::new()));
+    assert_eq!(rings.load(Ordering::SeqCst), 1, "the same start rings once");
 
     let running = with_runs(vec![run("r1", HeldState::Running)]);
     let lines = vec!["a line".to_owned()];
     shared.publish_news(&mut told, (running.clone(), &answers, lines));
-    assert_eq!(rings.load(Ordering::SeqCst), 1);
+    assert_eq!(rings.load(Ordering::SeqCst), 2);
     assert_eq!(told, running);
     assert_eq!(shared.lock().snapshot, running);
 
     shared.publish_news(&mut told, (running, &answers, Vec::new()));
-    assert_eq!(rings.load(Ordering::SeqCst), 1, "the same news rings once");
+    assert_eq!(rings.load(Ordering::SeqCst), 2, "the same news rings once");
 }
 
 /// Proves a publish with news and no bell given rings nobody and still publishes. Catches a

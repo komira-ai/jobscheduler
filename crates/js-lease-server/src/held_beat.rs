@@ -10,6 +10,11 @@
 //! once and none is lost. The agent sends its next heartbeat as soon as a held reply reaches
 //! it, so one heartbeat of the host is nearly always waiting here.
 //!
+//! A heartbeat that lists a job as `starting` is held for [`starting_hold`] at most instead:
+//! the agent sends that heartbeat as soon as its worker has taken the start, and the start's
+//! `running` rides on the next one, so the hold is kept short, while a placement still wakes
+//! it at once.
+//!
 //! The wakes are this process's: a placement made by another server is not seen here, and
 //! its start goes out on the host's next heartbeat, at most one hold later.
 
@@ -29,6 +34,19 @@ pub(crate) const MAX_HOLD: Duration = Duration::from_secs(5);
 /// than the interval, so a host's silence is counted as it was.
 pub(crate) fn hold_bound(interval: Duration) -> Duration {
     interval.min(MAX_HOLD)
+}
+
+/// The longest a reply is held while the beat lists a job as `starting`: the start's `running`
+/// can reach the server only on the heartbeat after this one, so this is the most it waits for
+/// the hold to end. It is long enough that a host with a start under way, which beats again at
+/// once after each held reply, is not asked in a tight loop (five beats a second at most), and
+/// short next to the agent's whole wait for the start. A placement ends the hold at once.
+pub(crate) const STARTING_HOLD: Duration = Duration::from_millis(200);
+
+/// How long a reply with nothing to send is held when the beat lists a job as `starting`:
+/// [`STARTING_HOLD`], and never longer than [`hold_bound`] of the same `interval`.
+pub(crate) fn starting_hold(interval: Duration) -> Duration {
+    hold_bound(interval).min(STARTING_HOLD)
 }
 
 /// The heartbeats being watched, one per host, and how often a held reply began to wait.
