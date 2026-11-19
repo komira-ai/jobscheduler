@@ -120,7 +120,7 @@ fn the_agents_flags_file_names_the_server_the_host_and_the_host_certificate() {
     assert_eq!(lease.calls(), [Call::Cordon(300), Call::Uncordon]);
     assert_eq!(
         ran.out,
-        "cordoned host=web-04 expires_in_ms=300000 leases=0\nidle host=web-04\nlifted host=web-04\n"
+        "cordoned host=web-04 holder=cordon-4242-1700000000000 expires_in_ms=300000 leases=0\nidle host=web-04\nlifted host=web-04\n"
     );
     assert!(ran.err.is_empty(), "{}", ran.err);
 }
@@ -416,7 +416,7 @@ fn on_a_real_server_the_agents_flags_file_cordons_the_host_another_host_id_canno
     assert_eq!(ran.status, code(0), "{}", ran.err);
     assert_eq!(
         ran.out,
-        "cordoned host=mac-1 expires_in_ms=300000 leases=0\nidle host=mac-1\nlifted host=mac-1\n"
+        "cordoned host=mac-1 holder=cordon-4242-1700000000000 expires_in_ms=300000 leases=0\nidle host=mac-1\nlifted host=mac-1\n"
     );
     assert_eq!(renewals.get(), 9, "a renewal every 100 s of 900");
     assert!(server.host("mac-1").get("cordon").is_none());

@@ -1,5 +1,6 @@
-//! The program's stop requests: SIGTERM and SIGINT, read on a thread of their own and
-//! handed to the loop through a line it waits on, which also carries the job worker's bell.
+//! The program's stop requests: SIGTERM and SIGINT (and SIGHUP for the cordon verb), read on a
+//! thread of their own and handed to the loop through a line it waits on, which also carries
+//! the job worker's bell.
 
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -79,27 +80,44 @@ impl SystemSleeper {
         let sleeper = Self {
             line: Arc::default(),
         };
-        let line = Arc::clone(&sleeper.line);
-        Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .and_then(|runtime| {
-                let streams = {
-                    let _inside = runtime.enter();
-                    [SignalKind::terminate(), SignalKind::interrupt()]
-                        .into_iter()
-                        .map(signal)
-                        .collect::<io::Result<Vec<_>>>()
-                };
-                streams.map(|streams| {
-                    for stream in streams {
-                        runtime.spawn(relay(stream, Arc::clone(&line)));
-                    }
-                    thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
-                })
-            })
-            .map(|()| sleeper)
+        let kinds = [SignalKind::terminate(), SignalKind::interrupt()];
+        watch(kinds, &sleeper.line).map(|()| sleeper)
     }
+
+    /// Also takes SIGHUP, the end of an ssh session, as a stop request. `js-agent cordon`
+    /// asks for it, so that a cordon is lifted when its terminal goes away; the agent daemon
+    /// never does, and so does what it always did on SIGHUP.
+    ///
+    /// # Errors
+    ///
+    /// The handler or the thread that reads it cannot be set up.
+    pub fn stop_on_hangup(&self) -> io::Result<()> {
+        watch([SignalKind::hangup()], &self.line)
+    }
+}
+
+/// Reads `kinds` of signal on a thread of its own, for the life of the process, and puts a
+/// stop request on `line` for each delivery.
+fn watch<const N: usize>(kinds: [SignalKind; N], line: &Arc<Line>) -> io::Result<()> {
+    let line = Arc::clone(line);
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .and_then(|runtime| {
+            let streams = {
+                let _inside = runtime.enter();
+                kinds
+                    .into_iter()
+                    .map(signal)
+                    .collect::<io::Result<Vec<_>>>()
+            };
+            streams.map(|streams| {
+                for stream in streams {
+                    runtime.spawn(relay(stream, Arc::clone(&line)));
+                }
+                thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
+            })
+        })
 }
 
 /// Puts a stop request on the line for every delivery on `stream`.

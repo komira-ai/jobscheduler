@@ -40,7 +40,10 @@
 //!    except as backfill, which the walk below decides.
 //! 4. **Walks the queue** ([`Engine::walk_jobs`]) in the binding order of
 //!    [`js_sched::walk_in_order`], one placement round of the scheduler per job, over the
-//!    hosts the registry would let take a job now ([`open_to_jobs`]), each as an [`OpenHost`]:
+//!    hosts the registry would let take a job now ([`open_to_jobs`]) and whose cordon the job
+//!    store does not hold ([`js_jobs::JobStore::cordons`], read with the tables and judged
+//!    against each pass's time, so a cordon placed through another server keeps the host out
+//!    too), each as an [`OpenHost`]:
 //!    the network ceiling its hello advertises, whether it reported that it runs host jobs and
 //!    the machine provider it is of, read again on every pass. Of the hosts that could take a
 //!    job now (capable, with room under the CPU slack and the memory percent), the job goes to
@@ -698,6 +701,17 @@ impl SchedPlacer {
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let tables = self.tables(jobs)?;
+        // A host whose cordon the job store holds takes no new job, whichever server placed the
+        // cordon (the registry knows another server's only from its tick). Each cordon lapses
+        // by the clock, so it is judged at this pass.
+        let at = self.clock.now();
+        let cordoned = |host: &HostId| tables.cordons.get(host).is_some_and(|end| *end > at);
+        let open = hosts.open.iter().filter(|(host, _)| !cordoned(host));
+        let open: BTreeMap<HostId, OpenHost> = open.map(|(h, o)| (h.clone(), o.clone())).collect();
+        let hosts = &JobHosts {
+            open: &open,
+            ..*hosts
+        };
         let (live, queued, marks) = (&tables.live, &tables.queued, &tables.marks);
         self.learn_freed(jobs, live);
         let now = self.now();

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Credential, HostState, Refusal};
+use js_types::cordon::Asker;
 use support::*;
 
 /// The credential of the certificate that names `name`.
@@ -62,7 +63,7 @@ fn a_certificate_hello_rebinds_a_lost_token_host_keeping_its_taint_and_cordon() 
     };
     assert!(fx.registry.taint_host(&host("a"), taint.clone()));
     fx.registry
-        .cordon(&host("a"), Duration::from_secs(3600))
+        .cordon(&host("a"), Duration::from_secs(3600), &Asker::Unnamed)
         .unwrap();
     fx.pass_grace();
 

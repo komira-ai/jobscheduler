@@ -52,7 +52,7 @@ mod whole_fields;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use host_fields::job_host_tag;
-pub(crate) use host_fields::{decode_taint, encode_taint};
+pub(crate) use host_fields::{decode_cordon, decode_taint, encode_cordon, encode_taint};
 pub(crate) use mark_fields::{decode_mark, encode_mark};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};

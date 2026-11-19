@@ -182,6 +182,7 @@ impl FakeService for AgentHost {
                     host.cordon = Some(js_agent::update_hook::CordonView {
                         expires_at_ms: super::fakes::START_MS + OPERATOR_CORDON_MS,
                         expires_in_ms: None,
+                        holder: None,
                     });
                 });
                 fs::copy(

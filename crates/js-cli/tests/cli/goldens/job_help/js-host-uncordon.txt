@@ -1,4 +1,4 @@
-Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
+Lifts a host's cordon, whoever placed it. Lifting a host that is not cordoned changes nothing.
 
 Usage: js host uncordon [OPTIONS] --host-id <TEXT>
 

@@ -156,9 +156,10 @@ fn the_machine_lease_cordons_reads_and_uncordons_a_live_host_at_every_duration_b
     let expiry = CordonView {
         expires_at_ms: T0 + 120_000,
         expires_in_ms: Some(120_000),
+        holder: None,
     };
     let cordoned = HostReading {
-        cordon: Some(expiry),
+        cordon: Some(expiry.clone()),
         ..first.clone()
     };
     assert_eq!(placed.host, cordoned);
@@ -187,11 +188,12 @@ fn the_machine_lease_cordons_reads_and_uncordons_a_live_host_at_every_duration_b
     let longest = CordonView {
         expires_at_ms: T0 + MAX_CORDON_SECS * 1000,
         expires_in_ms: Some(MAX_CORDON_SECS * 1000),
+        holder: None,
     };
     for asked in [MAX_CORDON_SECS, MAX_CORDON_SECS + 1, u64::MAX] {
         let placed = lease.cordon(asked).unwrap();
         assert!(!placed.already_cordoned, "{asked}");
-        assert_eq!(placed.host.cordon, Some(longest), "{asked}");
+        assert_eq!(placed.host.cordon.as_ref(), Some(&longest), "{asked}");
         assert!(lease.uncordon().unwrap().lifted, "{asked}");
     }
 }

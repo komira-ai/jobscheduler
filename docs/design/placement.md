@@ -86,7 +86,7 @@ took before.
 **Where a probe can be placed.** No client route requests a probe now; the rules below describe the placement engines, not an API.
 
 - The lease server places probes. Its cordon is the host's own (`POST /v1/hosts/{id}:cordon`, which the update
-  hook takes), so a cordoned host is one whose cordon has not lapsed. The registry has no drain of that cordon, so the lease server never
+  hook takes) or the operator's (`CordonHost`), so a cordoned host is one whose cordon has not lapsed. The registry has no drain of that cordon, so the lease server never
   answers `probe-host-draining`. The registry only reports what it knows of the host (its booked shape, cordon, phase, taint and whether it
   is being scaled away), and the placer judges it.
 - A probe is refused `probe-unsupported` by the (removed) static pool, whose hosts are never

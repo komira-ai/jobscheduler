@@ -344,7 +344,9 @@ pub(super) fn ask_secs(cordon: &Cordon, params: &Params, now_ms: u64) -> u64 {
 
 /// When the reply says the cordon lapses.
 fn expiry_of(host: &HostReading) -> u64 {
-    host.cordon.map_or(0, |cordon| cordon.expires_at_ms)
+    host.cordon
+        .as_ref()
+        .map_or(0, |cordon| cordon.expires_at_ms)
 }
 
 /// Writes the record, places the cordon and records whose it is.

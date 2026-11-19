@@ -4,12 +4,21 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use js_agent::cordon::{IDLE_POLL, Outcome, Plan, hold};
 use js_agent::own_host::LeaseError;
+use js_types::CordonHolder;
 
 use super::fakes::{Call, Effect, FakeLease, FakePace, HOST, Kind, Lines};
+
+/// The holder the verb names in these tests.
+static ME: LazyLock<CordonHolder> = LazyLock::new(|| holder("me"));
+
+fn holder(name: &str) -> CordonHolder {
+    CordonHolder::new(name).expect("a holder")
+}
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -21,6 +30,8 @@ fn plan(lease_secs: u64, window: u64) -> Plan<'static> {
         host: HOST,
         lease_secs,
         window: secs(window),
+        holder: &ME,
+        take_over: false,
     }
 }
 
@@ -29,7 +40,7 @@ fn run(lease: &FakeLease, pace: &mut FakePace<'_>, plan: &Plan<'_>, lines: &Line
     hold(lease, pace, plan, &mut lines.clone())
 }
 
-const CORDONED: &str = "cordoned host=h-1 expires_in_ms=300000 leases=0";
+const CORDONED: &str = "cordoned host=h-1 holder=me expires_in_ms=300000 leases=0";
 const IDLE: &str = "idle host=h-1";
 const LIFTED: &str = "lifted host=h-1";
 
@@ -37,7 +48,7 @@ const LIFTED: &str = "lifted host=h-1";
 /// `lease_secs` (100 s of 300) until the window of an hour has passed, no read of the host
 /// (it read idle at once), one uncordon at the end, and the three lines `cordoned`, `idle`,
 /// `lifted` and no more. It catches a renewal at the wrong step, a renewal at the very end of
-/// the window, a poll that goes on after the host read idle, and a missing or repeated line.
+/// the window, a poll that goes on after the host read idle, and a missing or repeated line, and a call that does not name the holder.
 #[test]
 fn a_cordon_is_renewed_every_third_of_its_lease_until_the_window_ends_and_then_lifted() {
     let (lease, lines) = (FakeLease::new(), Lines::default());
@@ -52,6 +63,9 @@ fn a_cordon_is_renewed_every_third_of_its_lease_until_the_window_ends_and_then_l
     assert_eq!(lines.all(), [CORDONED, IDLE, LIFTED]);
     assert_eq!(pace.elapsed(), secs(3600));
     assert!(!lease.cordoned());
+    let asks = lease.cordon_asks();
+    assert_eq!(asks, vec![("me".to_owned(), false); 36]);
+    assert_eq!(lease.uncordon_asks(), ["me"]);
 }
 
 /// Asserts the idle line: a host that holds a lease, then only runs to finish, then a mark,
@@ -90,7 +104,7 @@ fn the_idle_line_comes_once_when_the_host_reads_idle() {
     let outcome = run(&lease, &mut pace, &plan(300, 600), &lines);
     assert_eq!(outcome, Outcome::Done);
 
-    let cordoned = "cordoned host=h-1 expires_in_ms=300000 leases=1";
+    let cordoned = "cordoned host=h-1 holder=me expires_in_ms=300000 leases=1";
     let seen = seen.borrow();
     for before in &seen[..3] {
         assert_eq!(before, &[cordoned], "no idle line while the host is busy");
@@ -129,7 +143,7 @@ fn a_lease_a_release_or_a_mark_keeps_the_host_from_reading_idle() {
             state.mark = mark.map(str::to_owned);
         });
         let outcome = run(&lease, &mut FakePace::new(), &plan(300, 60), &lines);
-        let cordoned = format!("cordoned host=h-1 expires_in_ms=300000 leases={leases}");
+        let cordoned = format!("cordoned host=h-1 holder=me expires_in_ms=300000 leases={leases}");
         assert_eq!(outcome, Outcome::Done, "{named:?} {releasing} {mark:?}");
         assert_eq!(lines.all(), [cordoned.as_str(), LIFTED]);
         assert!(lease.calls().contains(&Call::Host));
@@ -167,20 +181,64 @@ fn a_stop_request_lifts_the_cordon_it_placed() {
     assert_eq!(pace.elapsed(), Duration::ZERO);
 }
 
-/// Asserts that a cordon found in force is another holder's: the verb makes the one call that
-/// told it, prints `kept ... reason=already_cordoned`, does not wait, renew or lift, and the
-/// cordon stays. It catches a verb that lifts a cordon it did not place.
+/// Asserts that a cordon found in force that another holder holds (a named one, or one that
+/// names none) is neither extended, renewed nor lifted: the verb makes the one call that told
+/// it, prints `kept ... reason=already_cordoned` with the holder (`-` for none) and the time
+/// the cordon has left, does not wait or lift, and the cordon stays as it was. It catches a
+/// verb that lifts or extends a cordon it did not place, and a kept line that hides whose it is.
 #[test]
-fn a_cordon_that_was_there_already_is_neither_renewed_nor_lifted() {
+fn a_cordon_another_holder_holds_is_neither_extended_nor_lifted() {
+    for (found, shown) in [(Some("someone"), "someone"), (None, "-")] {
+        let (lease, lines) = (FakeLease::new(), Lines::default());
+        lease.set(|state| {
+            state.cordoned = true;
+            state.holder = found.map(str::to_owned);
+            state.lease_secs = 120;
+        });
+        let mut pace = FakePace::new();
+        let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
+        assert_eq!(outcome, Outcome::OtherHolder);
+        assert_eq!(lease.calls(), [Call::Cordon(300)]);
+        let kept =
+            format!("kept host=h-1 reason=already_cordoned holder={shown} expires_in_ms=120000");
+        assert_eq!(lines.all(), [kept]);
+        assert_eq!(lease.cordon_asks(), [("me".to_owned(), false)]);
+        assert!(lease.uncordon_asks().is_empty());
+        assert!(pace.waits.is_empty());
+        assert!(lease.cordoned());
+        let state_holder = lease.holder();
+        assert_eq!(
+            state_holder.as_deref(),
+            found,
+            "the holder is left as it was"
+        );
+    }
+}
+
+/// Asserts a take-over: with `take_over` the first call carries the flag, finds another
+/// holder's cordon and takes it (the reply is not `held_by_other`), so the verb prints
+/// `cordoned` as its own, renews without the flag, and lifts it at the end naming itself. It
+/// catches a take-over that is not sent, one sent on every renewal, and one whose cordon is
+/// then left in force.
+#[test]
+fn a_take_over_makes_the_cordon_found_the_verbs_and_it_is_lifted() {
     let (lease, lines) = (FakeLease::new(), Lines::default());
-    lease.set(|state| state.cordoned = true);
-    let mut pace = FakePace::new();
-    let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
-    assert_eq!(outcome, Outcome::OtherHolder);
-    assert_eq!(lease.calls(), [Call::Cordon(300)]);
-    assert_eq!(lines.all(), ["kept host=h-1 reason=already_cordoned"]);
-    assert!(pace.waits.is_empty());
-    assert!(lease.cordoned());
+    lease.set(|state| {
+        state.cordoned = true;
+        state.holder = Some("someone".to_owned());
+    });
+    let taking = Plan {
+        take_over: true,
+        ..plan(300, 200)
+    };
+    let outcome = run(&lease, &mut FakePace::new(), &taking, &lines);
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(lines.all(), [CORDONED, IDLE, LIFTED]);
+    let asks = lease.cordon_asks();
+    let (me, taken) = ("me".to_owned(), true);
+    assert_eq!(asks, [(me.clone(), taken), (me, false)]);
+    assert_eq!(lease.uncordon_asks(), ["me"]);
+    assert!(!lease.cordoned());
 }
 
 /// Asserts that a reply naming another host stops the verb and lifts nothing, whichever reply
@@ -342,49 +400,47 @@ fn the_window_is_counted_on_the_clock_and_not_in_waits() {
     assert!((3700..3750).contains(&elapsed), "{elapsed}");
 }
 
-/// Asserts that a cordon this verb lets lapse (the process was stopped for longer than
-/// `lease_secs`, so it renewed nothing) and that another holder then placed is not lifted: the
-/// renewal after the lapse finds the host cordoned, which cannot be the verb's own cordon any
-/// more, so the verb says `kept` with the reason, makes no uncordon and ends as another holder's
-/// cordon. It catches a verb that takes every renewal as its own and lifts another holder's
-/// cordon at the end of its window.
+/// Asserts that a renewal which finds the cordon another holder's (ours lapsed and another's
+/// took its place, or an operator took it over, which names no holder) says `kept ...
+/// reason=taken_over` with that holder (`-` for none), sends no lift, leaves the cordon and
+/// ends as another holder's. It catches a verb that carries on, or lifts, a cordon that is not
+/// its own any more.
 #[test]
-fn a_cordon_taken_by_another_holder_after_ours_lapsed_is_kept() {
-    let (lease, lines) = (FakeLease::new(), Lines::default());
-    let pace = FakePace::new();
-    let clock = pace.clock();
-    // During the first wait the process is stopped for 400 s more: the cordon of 300 s lapses
-    // and another holder cordons the host (the server reads it cordoned).
-    let mut pace = pace.on_wait(move |waits, _| {
-        if waits == 1 {
-            clock.set(clock.get() + secs(400));
-        }
-    });
-    let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
-    assert_eq!(outcome, Outcome::OtherHolder);
-    assert_eq!(lease.calls(), [Call::Cordon(300), Call::Cordon(300)]);
-    assert_eq!(
-        lines.all(),
-        [CORDONED, IDLE, "kept host=h-1 reason=taken_after_lapse"]
-    );
-    assert!(lease.cordoned());
+fn a_renewal_that_finds_another_holders_cordon_keeps_it() {
+    for (found, shown) in [(Some("someone"), "someone"), (None, "-")] {
+        let (lease, lines) = (FakeLease::new(), Lines::default());
+        let mut pace = FakePace::new().on_wait({
+            let lease = lease.clone();
+            move |waits, _| {
+                if waits == 1 {
+                    lease.set(|state| {
+                        state.holder = found.map(str::to_owned);
+                    });
+                }
+            }
+        });
+        let outcome = run(&lease, &mut pace, &plan(300, 3600), &lines);
+        assert_eq!(outcome, Outcome::OtherHolder);
+        assert_eq!(lease.calls(), [Call::Cordon(300), Call::Cordon(300)]);
+        let kept = format!("kept host=h-1 reason=taken_over holder={shown}");
+        assert_eq!(lines.all(), [CORDONED, IDLE, kept.as_str()]);
+        assert!(lease.uncordon_asks().is_empty());
+        assert!(lease.cordoned());
+    }
 }
 
 /// Asserts that a cordon this verb let lapse and that nobody took is placed again by the next
 /// renewal (the reply says the host was not cordoned), said again with a `cordoned` line, held
 /// for the rest of the window and lifted at its end. It catches a verb that gives up its window
-/// after a lapse, or one that lifts nothing at the end because it no longer counts the cordon
-/// as its own.
+/// after a lapse, one that does not say the cordon is placed again, and one that lifts nothing
+/// at the end because it no longer counts the cordon as its own.
 #[test]
 fn a_cordon_that_lapsed_and_was_not_taken_is_placed_again_and_lifted() {
     let (lease, lines) = (FakeLease::new(), Lines::default());
-    let pace = FakePace::new();
-    let clock = pace.clock();
-    let mut pace = pace.on_wait({
+    let mut pace = FakePace::new().on_wait({
         let lease = lease.clone();
         move |waits, _| {
             if waits == 1 {
-                clock.set(clock.get() + secs(400));
                 lease.set(|state| state.cordoned = false);
             }
         }
@@ -394,4 +450,25 @@ fn a_cordon_that_lapsed_and_was_not_taken_is_placed_again_and_lifted() {
     assert_eq!(lease.calls().last(), Some(&Call::Uncordon));
     assert_eq!(lines.all(), [CORDONED, IDLE, CORDONED, LIFTED]);
     assert!(!lease.cordoned());
+}
+
+/// Asserts that a lift which finds the cordon another holder's (it lapsed and another took it
+/// during the last wait) says `kept ... reason=taken_over`, leaves the cordon, and ends as
+/// another holder's; and that the lift is sent naming the verb's holder, which is how the
+/// server knows to leave it. It catches a lift that claims `lifted` or `lapsed` for a cordon
+/// that is in force and not ours.
+#[test]
+fn a_lift_that_finds_another_holders_cordon_keeps_it() {
+    let (lease, lines) = (FakeLease::new(), Lines::default());
+    let mut pace = FakePace::new().on_wait({
+        let lease = lease.clone();
+        move |_, _| lease.set(|state| state.holder = Some("someone".to_owned()))
+    });
+    // 100 s window, a renewal every 100 s: one wait, and the window ends before a renewal.
+    let outcome = run(&lease, &mut pace, &plan(300, 100), &lines);
+    assert_eq!(outcome, Outcome::OtherHolder);
+    assert_eq!(lease.uncordon_asks(), ["me"]);
+    let kept = "kept host=h-1 reason=taken_over holder=someone";
+    assert_eq!(lines.all(), [CORDONED, IDLE, kept]);
+    assert!(lease.cordoned());
 }

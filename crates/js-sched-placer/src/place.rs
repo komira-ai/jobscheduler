@@ -45,7 +45,7 @@ use super::engine::{Engine, Settings};
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
 /// queued jobs, and follows the registry's hosts.
 pub struct SchedPlacer {
-    clock: Arc<dyn Clock + Send + Sync>,
+    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     /// The placer's clock when it was made: the server's start, which the marks of the
     /// whole-host jobs the store held then wait from for their hosts' hellos.
     boot: FarmTime,

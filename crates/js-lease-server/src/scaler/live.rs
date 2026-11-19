@@ -283,9 +283,9 @@ impl Effects for Live {
                 Ok(())
             }
             // The registry holds no host by that id: the same answer as a mark's.
-            Call::Cordon => registry
-                .cordon(&id, DEFAULT_CORDON)
-                .map(drop)
+            Call::Cordon => self
+                .agents
+                .cordon_now(&id, DEFAULT_CORDON)
                 .map_err(|_| Busy::UnknownHost),
         };
         if let Err(busy) = done {

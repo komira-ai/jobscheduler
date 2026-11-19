@@ -103,14 +103,16 @@ service JobService {
     };
   }
   // Takes a host out of placement for a time, or extends a cordon already there. A cordon
-  // lapses unless it is extended. Jobs already on the host go on.
+  // lapses unless it is extended. It holds for its whole length with nothing renewing it,
+  // over restarts of the host's agent and of the server. Jobs already on the host go on.
   rpc CordonHost(CordonHostRequest) returns (CordonHostResponse) {
     option (google.api.http) = {
       post: "/v1/hosts/{host_id}:cordon"
       body: "*"
     };
   }
-  // Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
+  // Lifts a host's cordon, whoever placed it. Lifting a host that is not cordoned changes
+  // nothing.
   rpc UncordonHost(UncordonHostRequest) returns (UncordonHostResponse) {
     option (google.api.http) = {
       post: "/v1/hosts/{host_id}:uncordon"
@@ -319,7 +321,7 @@ message CordonHostRequest {
   // The id of the host to cordon.
   string host_id = 1;
   // How long the cordon holds unless it is extended, in seconds from the call. Absent:
-  // 300. The server cuts a longer one to 3600.
+  // 300. The server cuts a longer one to 604800 (seven days).
   optional uint32 cordon_secs = 2;
 }
 

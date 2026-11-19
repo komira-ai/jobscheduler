@@ -32,6 +32,7 @@ fn view(id: &str, state: HostState, mark: Option<HostMark>) -> HostView {
         reserved_for: None,
         drain_deadline: None,
         cordon_until: None,
+        cordon_holder: None,
         load: None,
     }
 }
@@ -49,6 +50,7 @@ fn every_kind() -> FakeHosts {
     };
     let cordoned = HostView {
         cordon_until: Some(Timestamp::from_millis(T0 + 60_000)),
+        cordon_holder: None,
         ..view("r-cordoned", HostState::Live, None)
     };
     let gpu = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".to_owned()))
@@ -176,6 +178,7 @@ async fn the_hosts_json_and_grpc_agree() {
                 check: None,
             }),
             cordon_until: Some(Timestamp::from_millis(T0 + 60_000)),
+            cordon_holder: None,
             ..view("r-1", HostState::Lost, Some(HostMark::Draining))
         },
         gpu_host(gpu),

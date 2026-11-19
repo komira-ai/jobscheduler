@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use js_agent_wire::Taint;
 use js_client::{Client, ClientError, Reply};
+use js_types::CordonHolder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -60,13 +61,17 @@ impl RequestLimit {
 }
 
 /// When a cordon lapses, on the lease server's clock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CordonView {
     /// Milliseconds since the epoch.
     pub expires_at_ms: u64,
     /// Milliseconds from the server's now to `expires_at_ms`, when the server said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in_ms: Option<u64>,
+    /// Who holds the cordon, when it was placed or taken over by a request that named a
+    /// holder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
 }
 
 /// What `GET /v1/hosts/{id}` says of a host's own host.
@@ -112,6 +117,10 @@ pub struct HostReading {
 pub struct Cordoned {
     /// The host was cordoned before this call.
     pub already_cordoned: bool,
+    /// The cordon in force is another holder's and was left as it was: the call changed
+    /// nothing. Absent from a server of an earlier release, which has no holders.
+    #[serde(default)]
+    pub held_by_other: bool,
     /// The host after the call.
     #[serde(flatten)]
     pub host: HostReading,
@@ -122,6 +131,10 @@ pub struct Cordoned {
 pub struct Uncordoned {
     /// A cordon was in force and this call ended it.
     pub lifted: bool,
+    /// The cordon in force is another holder's and was left as it was. Absent from a server
+    /// of an earlier release, which has no holders.
+    #[serde(default)]
+    pub held_by_other: bool,
     /// The host after the call.
     #[serde(flatten)]
     pub host: HostReading,
@@ -165,6 +178,32 @@ pub trait Lease {
     /// # Errors
     /// [`LeaseError`].
     fn host(&self) -> Result<HostReading, LeaseError>;
+}
+
+/// The routes of a requester that names itself, which is how the server tells the cordon of
+/// one requester from another's: `js-agent cordon` uses these and no others. The update hook
+/// names no holder and uses [`Lease`].
+pub trait HeldLease: Lease {
+    /// `POST /v1/hosts/{id}:cordon {"lease_secs", "holder", "take_over"}`: places a cordon
+    /// held by `holder` when none is in force, renews one `holder` holds, and leaves another
+    /// holder's as it is (the reply says `held_by_other`). With `take_over` the cordon in
+    /// force becomes `holder`'s whoever held it.
+    ///
+    /// # Errors
+    /// [`LeaseError`].
+    fn cordon_held(
+        &self,
+        lease_secs: u64,
+        holder: &CordonHolder,
+        take_over: bool,
+    ) -> Result<Cordoned, LeaseError>;
+
+    /// `POST /v1/hosts/{id}:uncordon {"holder"}`: lifts the cordon only when `holder` holds
+    /// it. Succeeds when there was no cordon.
+    ///
+    /// # Errors
+    /// [`LeaseError`].
+    fn uncordon_held(&self, holder: &CordonHolder) -> Result<Uncordoned, LeaseError>;
 }
 
 /// [`Lease`] over HTTP/1.1, through the pinned-root client of `js-client`, for one host.
@@ -249,5 +288,27 @@ impl Lease for HttpLease {
 
     fn host(&self) -> Result<HostReading, LeaseError> {
         answer(self.client.get(&self.path(None))).and_then(read)
+    }
+}
+
+impl HeldLease for HttpLease {
+    fn cordon_held(
+        &self,
+        lease_secs: u64,
+        holder: &CordonHolder,
+        take_over: bool,
+    ) -> Result<Cordoned, LeaseError> {
+        let mut body = json!({ "lease_secs": lease_secs, "holder": holder.as_str() });
+        if take_over {
+            body["take_over"] = json!(true);
+        }
+        let sent = self.client.post(&self.path(Some("cordon")), &body);
+        answer(sent).and_then(read)
+    }
+
+    fn uncordon_held(&self, holder: &CordonHolder) -> Result<Uncordoned, LeaseError> {
+        let body = json!({ "holder": holder.as_str() });
+        let sent = self.client.post(&self.path(Some("uncordon")), &body);
+        answer(sent).and_then(read)
     }
 }

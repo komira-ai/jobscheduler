@@ -1,4 +1,4 @@
-Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. Jobs already on the host go on.
+Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. It holds for its whole length with nothing renewing it, over restarts of the host's agent and of the server. Jobs already on the host go on.
 
 Usage: js host cordon [OPTIONS] --host-id <TEXT>
 
@@ -16,7 +16,7 @@ Options:
           Print machine output (one JSON object per line) instead of text; errors too
 
       --cordon-secs <DURATION>
-          How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 3600. A duration: 90, 90s, 15m or 2h.
+          How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 604800 (seven days). A duration: 90, 90s, 15m or 2h.
 
       --host-id <TEXT>
           The id of the host to cordon.

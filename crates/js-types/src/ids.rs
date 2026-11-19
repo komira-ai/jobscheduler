@@ -83,6 +83,13 @@ name_id!(
     ProviderId,
     "provider"
 );
+name_id!(
+    /// Who holds a host's cordon: a name the requester chooses and sends with each request
+    /// of its cordon, so that the server renews and lifts the cordon only for the holder that
+    /// placed it ([`crate::cordon`]).
+    CordonHolder,
+    "cordon holder"
+);
 
 impl ClassId {
     /// An id from a constant already known to be valid.

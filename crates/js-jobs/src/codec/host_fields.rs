@@ -1,7 +1,8 @@
-//! The host fields of a job and the taint of its host: the job row's exec mode (tag 14) and
-//! isolation (tag 47, [`job_host_tag::ISOLATION`]), and the taint row (`taint/<host>`,
-//! [`HostTaint`]), which has the same format byte and tag-length-value fields as the other
-//! rows, with the tags of [`taint_tag`], and the same
+//! The host fields of a job and the taint and cordon of its host: the job row's exec mode
+//! (tag 14) and isolation (tag 47, [`job_host_tag::ISOLATION`]), the taint row
+//! (`taint/<host>`, [`HostTaint`]) and the cordon row (`cordon/<host>`, the holder of the
+//! cordon, if it names one), which have the same format byte and tag-length-value fields as
+//! the other rows, with the tags of [`taint_tag`] and [`cordon_tag`], and the same
 //! additive rules (B8): a tag this build does not know is skipped, and a format byte above
 //! this build's is [`DecodeError::Newer`].
 //!
@@ -13,9 +14,9 @@
 //! host job as contained, and it does not read the taint table: a server is not rolled back
 //! to such a build while a host job is recorded.
 
-use js_types::ExecMode;
+use js_types::{CordonHolder, ExecMode};
 
-use super::{Carried, DecodeError, Fields, Writer, byte_of, job_id_of};
+use super::{Carried, DecodeError, Fields, Writer, byte_of, job_id_of, text_of};
 use crate::error::JobStoreError;
 use crate::record::{HostTaint, Isolation};
 
@@ -29,6 +30,12 @@ pub(crate) mod job_host_tag {
 pub(crate) mod taint_tag {
     /// The job whose placement tainted the host (text).
     pub const JOB: u16 = 1;
+}
+
+/// The tags of a cordon row.
+pub(crate) mod cordon_tag {
+    /// The holder of the cordon (text); absent when the request that placed it named none.
+    pub const HOLDER: u16 = 1;
 }
 
 /// The value of [`job_host_tag::ISOLATION`] for a job that runs on the host.
@@ -97,6 +104,35 @@ pub(crate) fn decode_taint(row: &[u8]) -> Result<HostTaint, DecodeError> {
     let mut fields = Fields::of(row)?;
     let job = fields.need(taint_tag::JOB, job_id_of)?;
     Ok(HostTaint { job })
+}
+
+/// The row of a cordon held by `holder` (none: a cordon no holder named). The time the
+/// cordon lapses is the row's expiry, not a field.
+///
+/// # Errors
+/// [`JobStoreError::TooLarge`] when a field is over 4 GiB.
+pub(crate) fn encode_cordon(holder: Option<&CordonHolder>) -> Result<Vec<u8>, JobStoreError> {
+    let mut row = Writer::default();
+    row.put_opt(
+        cordon_tag::HOLDER,
+        holder.map(|holder| holder.as_str().as_bytes().to_vec()),
+    );
+    row.finish(&Carried::default())
+}
+
+/// The holder a cordon row names, if it names one. A tag this build does not know is skipped.
+///
+/// # Errors
+/// [`DecodeError::Newer`] for a row a later build wrote; another [`DecodeError`] for one that
+/// does not parse.
+pub(crate) fn decode_cordon(row: &[u8]) -> Result<Option<CordonHolder>, DecodeError> {
+    let mut fields = Fields::of(row)?;
+    fields.opt(cordon_tag::HOLDER, holder_of)
+}
+
+/// The cordon holder a value holds.
+fn holder_of(tag: u16, value: Vec<u8>) -> Result<CordonHolder, DecodeError> {
+    CordonHolder::new(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
 
 #[cfg(test)]

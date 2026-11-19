@@ -41,7 +41,7 @@ use js_jobs::{
     AllocationRecord, IdSource, JobId, JobRecord, JobStore, JobStoreError, MarkRecord, Written,
 };
 use js_registry::WholeNodeConfig;
-use js_types::HostId;
+use js_types::{HostId, Timestamp};
 
 use super::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::place::SchedPlacer;
@@ -71,6 +71,10 @@ pub(crate) struct Tables {
     pub(crate) queued: Vec<JobRecord>,
     /// Every mark ([`JobStore::marks`]).
     pub(crate) marks: Vec<MarkRecord>,
+    /// When each cordon the job store holds lapses, on the placer's clock: the time it had
+    /// left when the tables were read, from then ([`JobStore::cordons`]). A cordon lapses by
+    /// the clock with no write, so a pass judges each against its own time.
+    pub(crate) cordons: BTreeMap<HostId, Timestamp>,
 }
 
 /// The job tables a pass read, with where the job store's writes stood before the read.
@@ -91,6 +95,17 @@ impl PassMetrics for Watched<'_> {
         self.failed.set(true);
         self.metrics.store_write_failed();
     }
+}
+
+/// When each of `cordons` lapses, each with the time it had left at `now`.
+fn cordons_from(
+    cordons: BTreeMap<HostId, js_types::cordon::Cordon<Duration>>,
+    now: Timestamp,
+) -> BTreeMap<HostId, Timestamp> {
+    let lapse = |(host, cordon): (HostId, js_types::cordon::Cordon<Duration>)| {
+        (host, now.plus(cordon.until))
+    };
+    cordons.into_iter().map(lapse).collect()
 }
 
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> MutexGuard<'_, T> {
@@ -164,10 +179,12 @@ impl SchedPlacer {
     }
 
     /// The job tables of `jobs`: those the last pass read when no write of the job store came
-    /// since, and otherwise read now. A failed read keeps nothing.
+    /// since, and otherwise read now, with the cordons the store holds. A failed read keeps
+    /// nothing.
     ///
     /// # Errors
-    /// As [`JobStore::live_allocations`], [`JobStore::queued`] and [`JobStore::marks`].
+    /// As [`JobStore::live_allocations`], [`JobStore::queued`], [`JobStore::marks`] and
+    /// [`JobStore::cordons`].
     pub(crate) fn tables<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
@@ -184,6 +201,7 @@ impl SchedPlacer {
             live: jobs.live_allocations()?,
             queued: jobs.queued()?,
             marks: jobs.marks()?,
+            cordons: cordons_from(jobs.cordons()?, self.clock.now()),
         });
         *kept = Some((written, Arc::clone(&tables)));
         Ok(tables)

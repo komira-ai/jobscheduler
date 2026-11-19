@@ -57,6 +57,21 @@ pub enum JobStoreError {
         /// The host.
         host: HostId,
     },
+    /// The host is cordoned: a live `cordon/<host>` row is there, so no job is placed on it.
+    #[error("host {host} is cordoned, so job {id} is not placed on it")]
+    HostCordoned {
+        /// The job.
+        id: JobId,
+        /// The host.
+        host: HostId,
+    },
+    /// The host's cordon row changed between the read and the commit of a cordon, a lift or a
+    /// restore; the caller reads it again and retries.
+    #[error("the cordon of host {host} changed while the operation ran")]
+    CordonConflict {
+        /// The host.
+        host: HostId,
+    },
     /// The job is not in the state the caller expects.
     #[error("job {id} is {found:?}, not {expected:?}")]
     UnexpectedState {
@@ -170,6 +185,7 @@ mod tests {
     fn every_error_says_what_failed_and_where() {
         let id = JobId::parse("a").expect("an id");
         let code = NonZeroU32::MIN;
+        let host = HostId::new("h").expect("a host id");
         let cases = [
             (
                 JobStoreError::Store(StoreError::Failed("down".to_owned())),
@@ -195,6 +211,17 @@ mod tests {
             (
                 JobStoreError::Stale { id: id.clone() },
                 "job a changed while the operation ran",
+            ),
+            (
+                JobStoreError::HostCordoned {
+                    id: id.clone(),
+                    host: host.clone(),
+                },
+                "host h is cordoned, so job a is not placed on it",
+            ),
+            (
+                JobStoreError::CordonConflict { host: host.clone() },
+                "the cordon of host h changed while the operation ran",
             ),
             (
                 JobStoreError::UnexpectedState {

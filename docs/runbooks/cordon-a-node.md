@@ -5,6 +5,38 @@ service afterwards. The lease server lets a host cordon itself: while a cordon i
 is placed no new job (a job it runs goes on). `js-agent cordon` is the client for it,
 for an operator's script, on Linux and on macOS.
 
+A cordon keeps the host out of every placement: with the job service on, the job store holds it,
+so no server over that store places a job on the host while it is in force (each pass leaves the
+host out, and the placement's own transaction refuses it), whichever server took the cordon.
+
+## Taking a host out of placement for hours or days
+
+For "keep jobs off this host for the next 48 hours" there is no need to stop the agent or to keep a
+process running: an operator's cordon, set through the job service with an operator's token,
+holds for the whole length asked for (up to seven days per call) with nothing renewing it. It is
+kept over restarts and updates of the host's agent (the agent's update hook never lifts a cordon it
+did not place) and over restarts of the lease server, and the jobs already on the host go on:
+
+```text
+js host cordon --server https://<job service> --token-file <operator token> --host-id <id> --cordon-secs 48h
+```
+
+`js host list` shows the cordon's end (`cordon_expires_at_ms`) while it holds. To put the host back
+into placement before then:
+
+```text
+js host uncordon --server https://<job service> --token-file <operator token> --host-id <id>
+```
+
+The call extends a cordon already in force (it never shortens one) and lifts any holder's. A cordon
+it extends past its end becomes the operator's: a `js-agent cordon` run that held it before finds
+it taken (`kept ... reason=taken_over`) and lifts nothing, and a run started meanwhile finds the
+operator's cordon, prints `kept` and leaves it alone. A cordon asked for longer than seven days is
+cut to seven days; repeat the call to go on.
+
+Every lease server over the store must be of this release for a cordon to keep a host out of every
+placement: an earlier server neither writes the job store's cordon nor checks it when it places.
+
 ## What it does
 
 On a host the agent runs on, as root, name the agent's own flags file and its state root:
@@ -41,7 +73,14 @@ file (`--host-id-from-facts`) is cordoned with
    token yet. The pool's shared join token is refused by the server on these routes.
 2. It renews the cordon every third of `--lease-secs` (default 300, at most 3600) until `--for` has
    passed. The cordon is a lease the verb renews: a server that is not asked again lets it lapse.
-3. It lifts the cordon at the end, or at once on SIGTERM or SIGINT.
+3. It lifts the cordon at the end, or at once on SIGTERM, SIGINT or SIGHUP (the end of an ssh
+   session, so a dropped connection does not leave the cordon to lapse).
+
+The verb is a named holder of the cordon, and names it on every call (`--holder <name>`, 1 to 63
+characters of `[a-z0-9._-]`; without it a name made for the run, `cordon-<pid>-<unix millis>`,
+which the `cordoned` line prints). The server therefore says whose a cordon is, and the verb never
+guesses it from a clock. It needs a lease server of this release: an earlier server refuses the
+holder field with `invalid-cordon`.
 
 ### When the server refuses the credential
 
@@ -63,25 +102,34 @@ js-agent cordon: it sent the host credential in /var/lib/js-agent/state/host-cre
 Run it again with `--flags-file` as above: the verb then takes the host id and the credential from
 the agent's own flags, so it asks for the host the agent registers, with what the agent presents.
 
-It lifts only a cordon it placed. The server cannot say who placed a cordon, and an uncordon lifts
-any, so the verb relies on the `already_cordoned` flag of its first reply: when that says `true`,
-someone else holds a cordon, the verb prints `kept`, renews nothing, lifts nothing and exits 3. (That
-first call extended the other holder's cordon to at least `--lease-secs` from now; it never
-shortens one.) It also lifts nothing when a reply names a host other than the one it cordoned.
+It extends and lifts only its own cordon:
 
-Two limits come from there being one cordon per host and no record of who placed it:
+- With no cordon in force, the first call places one, held by the verb's holder.
+- When a cordon is in force that another holder holds (an operator's, which names no holder, or a
+  requester's with another name), the server leaves it exactly as it was: the verb prints `kept
+  host=<id> reason=already_cordoned holder=<holder, or -> expires_in_ms=<n>`, renews nothing, lifts
+  nothing and exits 3. A cordon that is found is no longer extended, so a requester that died is
+  not kept alive by the next one: its cordon lapses within its last `--lease-secs`, and the next
+  run then places its own.
+- `--take-over` makes the cordon in force the verb's, whoever holds it, and the verb holds and lifts
+  it as its own (the first call only asks for it; the renewals do not). Taken over, an operator's
+  long cordon ends with the verb's window: take one over only to end it.
+- A request that names no holder (an operator's `js host cordon`, or an update of the agent) and
+  extends the verb's cordon past its end makes it unnamed; the verb's next renewal then finds it
+  another's (`taken_over`) and the verb stops without lifting it.
+- A renewal that finds another holder's cordon (the verb's own lapsed, for instance because the
+  process was stopped for longer than `--lease-secs`, and another holder's took its place, or it was
+  taken over) prints `kept host=<id> reason=taken_over holder=<holder, or ->`, lifts nothing and
+  exits 3. A renewal that places the cordon again (it lapsed and nobody took its place) says
+  `cordoned` again, and the cordon is held and lifted as before.
+- The lift names the holder, so the server ends the verb's own cordon only. When it finds another
+  holder's, the verb prints the same `taken_over` line and exits 3.
+- It also lifts nothing when a reply names a host other than the one it cordoned.
 
-- A cordon that someone else places during the window (an admin's request, or a tool that does
-  not look at `already_cordoned`) merges with the verb's, and the verb lifts it at the end of its
-  window. Only its first reply can tell it that the host was cordoned before it.
-- If the process is stopped (a suspended process, a frozen machine) for longer than
-  `--lease-secs`, its cordon lapses. The next renewal then says again whose the cordon is: one that
-  was there already is another holder's, and the verb prints `kept host=<id>
-  reason=taken_after_lapse`, lifts nothing and exits 3; one that the renewal placed is the verb's
-  again, said with a new `cordoned` line, and held and lifted as before. The verb counts its cordon from when its request left and the server from when it arrived, so
-  a renewal stalled only just past `--lease-secs` can find the verb's own cordon still in force and
-  call it `taken_after_lapse`: an exit 3 after a stall may leave the verb's own cordon, which lapses
-  by itself within `--lease-secs`.
+To recover from a cordon whose holder died (a `kept ... reason=already_cordoned` that should not be
+there), wait for it to lapse (at most that holder's `--lease-secs`, which `expires_in_ms` says), or
+run the verb again with `--take-over`, or lift it as the operator with
+`js host uncordon --host-id <id>`.
 
 ## What it prints
 
@@ -89,12 +137,12 @@ One line per state change on standard output, to be read by a script:
 
 | line | when |
 |---|---|
-| `cordoned host=<id> expires_in_ms=<n> leases=<n>` | the cordon was placed |
+| `cordoned host=<id> holder=<h> expires_in_ms=<n> leases=<n>` | the cordon was placed or taken over, or placed again by a renewal after a lapse of the verb's own |
 | `idle host=<id>` | once: the host reads no lease (`lease` absent, `leases` 0), is not `releasing`, and has no `mark` |
 | `lifted host=<id>` | the cordon was lifted |
 | `lapsed host=<id>` | the cordon had lapsed already at the end, nothing was left to lift |
-| `kept host=<id> reason=already_cordoned` | another holder's cordon was found |
-| `kept host=<id> reason=taken_after_lapse` | the verb's cordon lapsed and another holder's took its place |
+| `kept host=<id> reason=already_cordoned holder=<h or -> expires_in_ms=<n>` | another holder's cordon was found when the verb asked; it is not extended and not lifted |
+| `kept host=<id> reason=taken_over holder=<h or ->` | the cordon became another holder's during the window (a lapse and another's cordon, or a take-over); at a renewal or at the lift |
 
 `idle` means what a script's drain gate checks on `GET /v1/hosts`: `lease` null, `releasing` false
 and `mark` null. Until it is printed the verb reads the host every 5 seconds, so a script that waits
@@ -103,9 +151,9 @@ for it is told within seconds of the last lease ending.
 | exit status | meaning |
 |---|---|
 | 0 | held to the end (or a stop) and lifted, or had lapsed |
-| 1 | a server or credential error; the message on standard error says which and never holds the credential. A cordon the verb placed is lifted if the server can still be asked |
+| 1 | a server or credential error; the message on standard error says which and never holds the credential. The verb's cordon is lifted if the server can still be asked |
 | 2 | a wrong flag or a file it names |
-| 3 | another holder's cordon was found and is left in place |
+| 3 | another holder's cordon was found, when the verb asked or later, and is left in place |
 
 A process killed with SIGKILL lifts nothing: the cordon lapses by itself within `--lease-secs` of the
 last renewal (at most an hour).

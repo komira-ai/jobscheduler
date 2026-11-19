@@ -161,7 +161,8 @@ file, the job store and the usage file are kept as without it.
   tries again every second while another process holds the lock, and takes it before it reads anything from the store or binds any other
   listener (see "The readiness port"). Without `--ready-listen`, a second server on the same file exits 2 with one line, `--store: another
   process holds the store's writer lock`, having bound nothing and opened neither the store nor any file of the state file's family.
-- **What it keeps.** The host bindings (with each host's taint and cordon) and the digests of the join tokens and host credentials:
+- **What it keeps.** The host bindings (with each host's taint and cordon; with the job service on, the job store's `cordon/<host>` rows
+  are the cordons' record, which every server places by) and the digests of the join tokens and host credentials:
   `hosts/binding/<host id>` and `hosts/join/<digest>`, each a JSON object with a `version`, whose unknown fields are kept and written
   back; and the scaler's records and the hosts the registry refused to remove: `acquires/scaler/records` (the records file's own
   format, written whole) and `acquires/scaler/unremoved` (`{"version":1,"hosts":[...]}`). They are read once at start, after the lock;

@@ -28,6 +28,7 @@ mod claimed;
 mod clock;
 mod collect;
 mod compat;
+mod cordons;
 mod duties;
 mod failures;
 mod hosts;
@@ -52,6 +53,7 @@ pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
 pub use compat::*;
+pub use cordons::*;
 pub use duties::*;
 pub use failures::*;
 pub use hosts::*;
@@ -188,6 +190,17 @@ where
     a_whole_host_job_in_host_isolation_taints_its_host(backend);
     host_taints_lists_every_taint_and_refuses_a_bad_row(backend);
     the_retention_tick_keeps_taint_rows(backend);
+    a_cordon_is_placed_and_renewed_by_its_holder(backend);
+    another_holders_cordon_is_left_as_it_was(backend);
+    a_take_over_makes_the_cordon_the_askers(backend);
+    a_cordon_lapses_with_the_store_clock(backend);
+    a_lift_ends_a_cordon_by_the_rule(backend);
+    a_cordon_request_that_races_or_fails_writes_nothing(backend);
+    a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force(backend);
+    restore_cordon_writes_once_and_never_overwrites(backend);
+    restore_cordons_carries_the_bindings_once(backend);
+    a_placement_on_a_cordoned_host_commits_nothing(backend);
+    a_cordon_taken_during_a_placement_makes_it_stale(backend);
     drop_taints_deletes_the_named_rows_in_one_commit(backend);
     place_with_writes_the_prepare_deadline_and_drops_the_mark(backend);
     a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(backend);
@@ -328,6 +341,17 @@ macro_rules! job_store_tests {
             a_whole_host_job_in_host_isolation_taints_its_host,
             host_taints_lists_every_taint_and_refuses_a_bad_row,
             the_retention_tick_keeps_taint_rows,
+            a_cordon_is_placed_and_renewed_by_its_holder,
+            another_holders_cordon_is_left_as_it_was,
+            a_take_over_makes_the_cordon_the_askers,
+            a_cordon_lapses_with_the_store_clock,
+            a_lift_ends_a_cordon_by_the_rule,
+            a_cordon_request_that_races_or_fails_writes_nothing,
+            a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force,
+            restore_cordon_writes_once_and_never_overwrites,
+            restore_cordons_carries_the_bindings_once,
+            a_placement_on_a_cordoned_host_commits_nothing,
+            a_cordon_taken_during_a_placement_makes_it_stale,
             drop_taints_deletes_the_named_rows_in_one_commit,
             place_with_writes_the_prepare_deadline_and_drops_the_mark,
             a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark,

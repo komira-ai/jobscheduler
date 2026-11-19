@@ -95,6 +95,7 @@ fn h1() -> HostView {
         reserved_for: None,
         drain_deadline: None,
         cordon_until: None,
+        cordon_holder: None,
         load: None,
     }
 }

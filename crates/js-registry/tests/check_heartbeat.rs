@@ -17,6 +17,7 @@ use js_registry::{
     Refusal,
 };
 use js_types::HostId;
+use js_types::cordon::Asker;
 use support::*;
 
 fn report(reason: &str) -> Taint {
@@ -529,7 +530,9 @@ fn check_heartbeat_forgets_a_host_exactly_when_heartbeat_does() {
 
     let fx = retaining();
     let hour = Duration::from_secs(3600);
-    fx.registry.cordon(&host("a"), hour).unwrap();
+    fx.registry
+        .cordon(&host("a"), hour, &Asker::Unnamed)
+        .unwrap();
     after_retention(&fx, 1);
     admitted_alike(&fx, &fx.heartbeat("a", 1));
 }

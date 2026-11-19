@@ -7,13 +7,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent::Login;
-use js_agent::cordon::{Connect, Connection, Host as VerbHost, parse_window, run};
-use js_agent::own_host::{Lease, LeaseError};
+use js_agent::cordon::{Connect, Connection, Host as VerbHost, parse_holder, parse_window, run};
+use js_agent::own_host::{HeldLease, LeaseError};
 use js_client::{ClientError, HostIdentity};
 
 use super::fakes::{Call, Effect, FakeLease, FakePace, Kind};
 use crate::jobs::private;
 use crate::support::{Host, Scratch, code, linux_host, mac_host};
+
+/// The holder a run that gives none is handed by the entry point.
+pub(super) const DEFAULT_HOLDER: &str = "cordon-4242-1700000000000";
 
 /// What the verb asked the connector for.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +42,17 @@ pub(super) fn drive_with(
     connect: &Connect<'_>,
     pace: &mut FakePace<'_>,
 ) -> Ran {
+    drive_named(flags, host, connect, pace, DEFAULT_HOLDER)
+}
+
+/// [`drive_with`], with `default_holder` as the name the entry point made for the run.
+fn drive_named(
+    flags: &[&str],
+    host: &Host,
+    connect: &Connect<'_>,
+    pace: &mut FakePace<'_>,
+    default_holder: &str,
+) -> Ran {
     let seen = RefCell::new(Vec::new());
     let recording = |at: &Connection<'_>| {
         seen.borrow_mut().push(Seen {
@@ -55,6 +69,7 @@ pub(super) fn drive_with(
         files: &host.files,
         connect: &recording,
         pace,
+        default_holder,
     };
     let mut args: Vec<OsString> = vec!["js-agent".into(), "cordon".into()];
     args.extend(flags.iter().map(OsString::from));
@@ -86,7 +101,7 @@ const BASE: [&str; 6] = [
 ];
 
 /// `BASE` and `more`.
-fn with(more: &[&'static str]) -> Vec<&'static str> {
+fn with<'a>(more: &[&'a str]) -> Vec<&'a str> {
     BASE.iter().chain(more).copied().collect()
 }
 
@@ -94,7 +109,7 @@ fn with(more: &[&'static str]) -> Vec<&'static str> {
 /// error, it names every line the verb prints and every exit status, and it says that a
 /// process killed with SIGKILL leaves its cordon to lapse within `--lease-secs`. It catches a
 /// help that is an error, one that is silent about the lapse, and one that stops listing a
-/// line a script reads.
+/// line a script reads, the holder and the ways to recover from a stale one.
 #[test]
 fn help_lists_the_lines_the_statuses_and_the_lapse_of_a_killed_verb() {
     let ran = drive(
@@ -107,11 +122,15 @@ fn help_lists_the_lines_the_statuses_and_the_lapse_of_a_killed_verb() {
     assert!(ran.err.is_empty(), "{}", ran.err);
     assert!(ran.seen.is_empty());
     for word in [
-        "cordoned host=<id> expires_in_ms=<n> leases=<n>",
+        "cordoned host=<id> holder=<h> expires_in_ms=<n> leases=<n>",
         "idle host=<id>",
         "lifted host=<id>",
         "lapsed host=<id>",
-        "kept host=<id> reason=already_cordoned",
+        "kept host=<id> reason=already_cordoned holder=<h|-> expires_in_ms=<n>",
+        "kept host=<id> reason=taken_over holder=<h|->",
+        "SIGHUP",
+        "--take-over",
+        "js host uncordon --host-id <id>",
         "SIGKILL",
         "lapses by itself within --lease-secs",
         "3 another holder's cordon",
@@ -203,7 +222,7 @@ fn a_wrong_flag_or_file_ends_with_status_2_and_names_the_flag() {
 /// connection error reported as a server error, which would send an operator to the server.
 #[test]
 fn a_flag_the_connector_refuses_ends_with_status_2() {
-    let refuse = |_: &Connection<'_>| -> Result<Box<dyn Lease>, ClientError> {
+    let refuse = |_: &Connection<'_>| -> Result<Box<dyn HeldLease>, ClientError> {
         Err(ClientError::Flag {
             flag: "--ca-cert",
             why: "/ca.pem: no certificate found".to_owned(),
@@ -339,7 +358,7 @@ fn the_statuses_tell_held_from_another_holders_cordon_from_an_error() {
     let ran = drive(&more, &linux_host(), &lease, &mut FakePace::new());
     assert_eq!(ran.status, code(0));
     let lines = [
-        "cordoned host=h-1 expires_in_ms=300000 leases=0",
+        "cordoned host=h-1 holder=cordon-4242-1700000000000 expires_in_ms=300000 leases=0",
         "idle host=h-1",
         "lifted host=h-1",
     ];
@@ -350,10 +369,12 @@ fn the_statuses_tell_held_from_another_holders_cordon_from_an_error() {
     lease.set(|state| state.cordoned = true);
     let ran = drive(&more, &linux_host(), &lease, &mut FakePace::new());
     assert_eq!(ran.status, code(3));
-    assert_eq!(ran.out, "kept host=h-1 reason=already_cordoned\n");
+    let kept = "kept host=h-1 reason=already_cordoned holder=- expires_in_ms=0";
+    assert_eq!(ran.out, format!("{kept}\n"));
     assert_eq!(
         ran.err,
-        "js-agent cordon: host h-1 is cordoned by another holder; it is left in place\n"
+        "js-agent cordon: host h-1 is cordoned by another holder; it is left in place \
+         (--take-over takes it over)\n"
     );
     assert!(lease.cordoned());
 
@@ -372,6 +393,84 @@ fn the_statuses_tell_held_from_another_holders_cordon_from_an_error() {
         ran.err,
         "js-agent cordon: server error: cannot cordon the host: cannot talk to the server\n"
     );
+}
+
+/// Asserts `--holder` and `--take-over`: the holder given is sent on the cordon, every renewal
+/// and the lift, and printed on the `cordoned` line; with none the name the entry point made
+/// is used the same way; `--take-over` is sent on the first call only and takes a cordon that
+/// another holds, which is then lifted. It catches a holder that is parsed and not sent, a
+/// default that is not used, and a take-over that is sent again at each renewal.
+#[test]
+fn the_holder_is_named_on_every_call_and_a_take_over_is_asked_once() {
+    let line =
+        |holder: &str| format!("cordoned host=h-1 holder={holder} expires_in_ms=300000 leases=0");
+    let (lease, mut pace) = (FakeLease::new(), FakePace::new());
+    let more = with(&["--for", "200s", "--holder", "ops.alice-1"]);
+    let ran = drive(&more, &linux_host(), &lease, &mut pace);
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+    assert_eq!(ran.out.lines().next(), Some(line("ops.alice-1").as_str()));
+    let asks = lease.cordon_asks();
+    assert_eq!(asks, vec![("ops.alice-1".to_owned(), false); 2]);
+    assert_eq!(lease.uncordon_asks(), ["ops.alice-1"]);
+
+    let (lease, mut pace) = (FakeLease::new(), FakePace::new());
+    let more = with(&["--for", "200s"]);
+    let ran = drive(&more, &linux_host(), &lease, &mut pace);
+    assert_eq!(ran.out.lines().next(), Some(line(DEFAULT_HOLDER).as_str()));
+    assert_eq!(lease.uncordon_asks(), [DEFAULT_HOLDER]);
+
+    let lease = FakeLease::new();
+    lease.set(|state| {
+        state.cordoned = true;
+        state.holder = Some("dead-requester".to_owned());
+    });
+    let more = with(&["--for", "200s", "--holder", "me", "--take-over"]);
+    let ran = drive(&more, &linux_host(), &lease, &mut FakePace::new());
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+    assert_eq!(ran.out.lines().next(), Some(line("me").as_str()));
+    let asks = lease.cordon_asks();
+    assert_eq!(asks, [("me".to_owned(), true), ("me".to_owned(), false)]);
+    assert!(!lease.cordoned());
+}
+
+/// Asserts that a holder which is not an id (empty, upper case, a space, too long) is a usage
+/// error: status 2, the flag named on standard error, nothing printed and no connection made;
+/// that `parse_holder` takes a good name and refuses a bad one with the id rule's words; and
+/// that a default holder the entry point made badly is a usage error too. It catches a holder
+/// sent to the server to be refused there.
+#[test]
+fn a_holder_that_is_not_an_id_is_a_usage_error() {
+    for bad in ["", "Ops", "a b", &"x".repeat(64)] {
+        let more = with(&["--for", "10m", "--holder", bad]);
+        let ran = drive(
+            &more,
+            &linux_host(),
+            &FakeLease::new(),
+            &mut FakePace::new(),
+        );
+        assert_eq!(ran.status, code(2), "{bad:?}");
+        assert!(ran.err.contains("--holder"), "{}", ran.err);
+        assert!(ran.out.is_empty());
+        assert!(ran.seen.is_empty());
+    }
+    assert_eq!(parse_holder("ops-1").unwrap().as_str(), "ops-1");
+    assert!(parse_holder("Ops").unwrap_err().contains("cordon holder"));
+
+    let lease = FakeLease::new();
+    let connect = {
+        let lease = lease.clone();
+        move |_: &Connection<'_>| Ok(Box::new(lease.clone()) as Box<dyn HeldLease>)
+    };
+    let more = with(&["--for", "10m"]);
+    let (host, mut pace) = (linux_host(), FakePace::new());
+    let ran = drive_named(&more, &host, &connect, &mut pace, "Not A Holder");
+    assert_eq!(ran.status, code(2));
+    assert!(
+        ran.err.starts_with("js-agent cordon: --holder: "),
+        "{}",
+        ran.err
+    );
+    assert!(lease.calls().is_empty());
 }
 
 /// Asserts `--for` and `--lease-secs`: each duration form is the number of seconds it says
