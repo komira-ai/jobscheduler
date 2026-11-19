@@ -297,11 +297,17 @@ fn take_sample(host: &mut RuntimeHost, run_id: &str) -> Result<Sample, String> {
         .lease_dir(run_id)
         .ok_or_else(|| format!("the runtime names no lease directory for {run_id}"))?;
     fs::create_dir(&lease).map_err(|why| format!("make {}: {why}", lease.display()))?;
+    // And the job's temporary directory beside it, made empty the same way.
+    let tmp = host
+        .runtime
+        .tmp_dir(run_id)
+        .ok_or_else(|| format!("the runtime names no temporary directory for {run_id}"))?;
+    fs::create_dir(&tmp).map_err(|why| format!("make {}: {why}", tmp.display()))?;
     let sample = match host.runtime.check_egress() {
         Err(why) => failed(0, format!("check the egress: {why}")),
         Ok(()) => staged_then_timed(host, &spec)?,
     };
-    for dir in [&spec.scratch, &lease] {
+    for dir in [&spec.scratch, &lease, &tmp] {
         match js_contain::remove::remove_tree(dir) {
             Err(why) if why.kind() != std::io::ErrorKind::NotFound => {
                 return Err(format!("remove {}: {why}", dir.display()));

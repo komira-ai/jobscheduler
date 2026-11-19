@@ -302,12 +302,14 @@ pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use provider::{ProviderAnswer, ProviderCall, Providers};
 pub use quota::RunQuota;
-use quota_flags::scratch_quota_limits;
+pub use quota::TMP_INODES;
 pub use quota_flags::{
-    DEFAULT_SCRATCH_ABANDON_LIMIT, DEFAULT_SCRATCH_GIB, DEFAULT_SCRATCH_MAX_INODES,
-    DEFAULT_SCRATCH_QUOTA_FAILURES, DEFAULT_SCRATCH_USAGE_WAIT_SECS, MAX_SCRATCH_ABANDON_LIMIT,
-    MAX_SCRATCH_GIB, MAX_SCRATCH_QUOTA_FAILURES, MAX_SCRATCH_USAGE_WAIT_SECS,
+    DEFAULT_JOB_TMP_GIB, DEFAULT_SCRATCH_ABANDON_LIMIT, DEFAULT_SCRATCH_GIB,
+    DEFAULT_SCRATCH_MAX_INODES, DEFAULT_SCRATCH_QUOTA_FAILURES, DEFAULT_SCRATCH_USAGE_WAIT_SECS,
+    MAX_SCRATCH_ABANDON_LIMIT, MAX_SCRATCH_GIB, MAX_SCRATCH_QUOTA_FAILURES,
+    MAX_SCRATCH_USAGE_WAIT_SECS,
 };
+use quota_flags::{job_tmp_gib, scratch_quota_limits};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared, ResolvedMount,
@@ -484,6 +486,9 @@ pub struct Local {
     /// `--scratch-abandon-limit`, or [`DEFAULT_SCRATCH_ABANDON_LIMIT`]. Meaningful with
     /// `--scratch-quota` only.
     pub scratch_abandon_limit: u32,
+    /// `--job-tmp-gib`, or [`DEFAULT_JOB_TMP_GIB`]: the GiB of each job's temporary
+    /// directory, with a runtime that gives one.
+    pub job_tmp_gib: u64,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
     /// `--run-files-root`, or for containers the default under `/run` when that can be
@@ -670,6 +675,7 @@ impl Local {
             ));
         }
         let (default_gib, max_inodes, failures, usage_wait, abandon) = scratch_quota_limits(cli)?;
+        let tmp_gib = job_tmp_gib(cli)?;
         let settle = jobs.settle;
         let taint_recheck = jobs.taint_recheck;
         let egress = std::mem::take(&mut jobs.egress);
@@ -685,6 +691,7 @@ impl Local {
             scratch_quota_failures: failures,
             scratch_usage_wait_secs: usage_wait,
             scratch_abandon_limit: abandon,
+            job_tmp_gib: tmp_gib,
             backend: jobs.backend(scratch.as_ref(), files.as_ref()),
             scratch,
             files,
@@ -712,18 +719,28 @@ pub(crate) fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
 }
 
 impl Local {
-    /// The quota the flags ask for over `quota`: a run without `disk_bytes` books
-    /// `--scratch-default-gib`, and a run is bounded to the bytes it books and to
+    /// The quota the flags ask for over `quota`: with `bounds_tmp` (a runtime that gives each
+    /// job a temporary directory), each job's temporary directory is bounded to
+    /// `--job-tmp-gib`; with `--scratch-quota`, a run without `disk_bytes` books
+    /// `--scratch-default-gib`, and a run's scratch is bounded to the bytes it books and to
     /// `--scratch-max-inodes` inodes.
-    pub fn run_quota(&self, quota: Arc<dyn ScratchQuota>) -> RunQuota {
-        RunQuota::new(
-            quota,
-            self.scratch_default_gib << 30,
-            self.scratch_max_inodes,
-        )
-        .with_max_failures(self.scratch_quota_failures)
-        .with_usage_wait_ms(self.scratch_usage_wait_secs.saturating_mul(1000))
-        .with_abandon_limit(self.scratch_abandon_limit)
+    pub fn run_quota(&self, quota: Arc<dyn ScratchQuota>, bounds_tmp: bool) -> RunQuota {
+        let quota = match self.scratch_quota {
+            true => RunQuota::new(
+                quota,
+                self.scratch_default_gib << 30,
+                self.scratch_max_inodes,
+            ),
+            false => RunQuota::tmp_only(quota),
+        };
+        let quota = match bounds_tmp {
+            true => quota.with_tmp_bytes(self.job_tmp_gib << 30),
+            false => quota.without_tmp(),
+        };
+        quota
+            .with_max_failures(self.scratch_quota_failures)
+            .with_usage_wait_ms(self.scratch_usage_wait_secs.saturating_mul(1000))
+            .with_abandon_limit(self.scratch_abandon_limit)
     }
 
     /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or

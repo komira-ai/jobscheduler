@@ -55,9 +55,10 @@ pub const NO_GPUS: &str = "containers on this runtime cannot use a GPU";
 const KERNEL_TREES: [&str; 3] = ["/proc", "/sys", "/dev"];
 
 /// The places no `--gpu-mount` goes to or below: the kernel's trees, the job's scratch, and
-/// what the runtime mounts itself over the image (the job's overlay, its home, its tmpfs
-/// mounts, which hold the run's files, and its name files). Below any of them the image is
-/// not what the job sees, and a driver directory there would hide what the job needs.
+/// what the runtime mounts itself over the image (the job's overlay, its home, its `/tmp` and
+/// `/var/tmp`, its `/run` tmpfs, which holds the run's files, and its name files). Below any
+/// of them the image is not what the job sees, and a driver directory there would hide what
+/// the job needs.
 pub const DESTINATION_OFF_LIMITS: [&str; 12] = [
     "/proc",
     "/sys",

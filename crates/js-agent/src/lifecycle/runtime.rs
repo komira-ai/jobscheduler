@@ -737,6 +737,16 @@ pub trait Runtime {
         None
     }
 
+    /// The directory, directly below the scratch root, that this runtime gives the job of
+    /// `run_id` as its temporary space (a container's `/tmp` and `/var/tmp`), or `None` when it
+    /// gives none. The lifecycle makes the directory empty beside the run's, puts it under the
+    /// slot's temporary project (a bound of its own, apart from the run's scratch quota:
+    /// [`RunQuota::apply_tmp`](super::RunQuota)), and removes it with the run's; the runtime
+    /// makes what goes in it and removes the directory with the container.
+    fn tmp_dir(&self, _run_id: &str) -> Option<PathBuf> {
+        None
+    }
+
     /// Whether every container this runtime starts is in a control group the agent can
     /// read ([`Runtime::cgroup`]). A runtime that says so and then cannot name a run's
     /// control group for a settle wait is asked where that run's container is

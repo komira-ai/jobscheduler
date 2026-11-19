@@ -185,6 +185,10 @@ impl Runtime for WithVms {
         self.other.lease_dir(run_id)
     }
 
+    fn tmp_dir(&self, run_id: &str) -> Option<PathBuf> {
+        self.other.tmp_dir(run_id)
+    }
+
     fn places_in_cgroup(&self) -> bool {
         self.other.places_in_cgroup()
     }

@@ -58,6 +58,9 @@ fn an_image_is_pinned_by_its_digest_and_the_tag_is_dropped() {
     }
 }
 
+/// The job's temporary directory of the lease of [`lease`].
+const TMP: &str = "/s/.tmp-js-x-r1";
+
 fn lease() -> LeaseDirs {
     LeaseDirs {
         dir: PathBuf::from("/s/js-x-r1"),
@@ -119,7 +122,13 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
         reference: format!("registry.example/job@{}", digest()),
         digest: digest(),
     };
-    let mut spec = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/js");
+    let mut spec = container_spec(
+        "js-x-r1",
+        &run(None, None),
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/js",
+    );
     config.apply(&[], &mut spec).expect("applied");
     let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
     let image_env = vec![
@@ -139,7 +148,9 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 
 /// Catches a run that becomes a different container than it asked for: the lease's name,
 /// image, directories and cgroup; the run's scratch read-write at `/scratch` first, then
-/// its mounts with the access they asked, then its files read-only; the job starting at the
+/// the job's temporary directory's `tmp` at `/tmp` and `var-tmp` at `/var/tmp` (plain
+/// binds, read-write, `noexec`: no tmpfs in memory), then its mounts with the access they
+/// asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
 /// named none; the run's booked CPU and memory as its container cgroup's own limits (without
 /// them the job reads `max` in `/sys/fs/cgroup/cpu.max`); no program or environment (the
@@ -155,7 +166,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         "js-x-r1",
         &run(Some(77), Some(PathBuf::from("/run/files/r1"))),
         &image,
-        &lease(),
+        (&lease(), Some(Path::new(TMP))),
         "/js/actions/js-x-r1",
     );
     assert_eq!(spec.name, "js-x-r1");
@@ -185,22 +196,38 @@ fn a_run_becomes_the_container_it_asked_for() {
         recursive: true,
         no_exec: false,
     };
+    let tmp = |target: &str, source: &str| HostMount {
+        target: target.to_owned(),
+        source: PathBuf::from(source),
+        read_only: false,
+        recursive: false,
+        no_exec: true,
+    };
     assert_eq!(
         spec.mounts,
         [
             bind("/scratch", "/scratch/r1", false),
+            tmp("/tmp", "/s/.tmp-js-x-r1/tmp"),
+            tmp("/var/tmp", "/s/.tmp-js-x-r1/var-tmp"),
             bind("/mnt/data/in", "/data/in", true),
             bind("/mnt/data/out", "/data/out", false),
             bind("/run/js-files", "/run/files/r1", true),
         ]
     );
-    let plain = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
+    let plain = container_spec(
+        "js-x-r1",
+        &run(None, None),
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
     assert_eq!(
         (plain.limits.cpu_millis, plain.limits.memory_bytes),
         (Some(1500), Some(1 << 30))
     );
-    assert_eq!(plain.mounts.len(), 3);
+    // `/scratch`, `/tmp`, `/var/tmp` and the run's two mounts.
+    assert_eq!(plain.mounts.len(), 5);
     assert!(
         plain.listen_ports.is_empty(),
         "a run without host ports waits for none"
@@ -218,7 +245,13 @@ fn a_run_becomes_the_container_it_asked_for() {
             protocol: PortProtocol::Tcp,
         },
     ];
-    let ported = container_spec("js-x-r1", &ported, &image, &lease(), "/c");
+    let ported = container_spec(
+        "js-x-r1",
+        &ported,
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
     assert_eq!(
         ported.listen_ports,
         [5432, 80],
@@ -688,10 +721,85 @@ fn a_run_that_names_no_process_limit_gets_room_for_a_build_sized_to_the_node() {
         reference: format!("registry.example/job@{}", digest()),
         digest: digest(),
     };
-    let plain = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
+    let plain = container_spec(
+        "js-x-r1",
+        &run(None, None),
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
     assert_eq!(plain.limits.pids, 32_768);
     let host = host_spec("js-x-r1", &run(None, None), &image, &lease(), "/c");
     assert_eq!(host.limits, plain.limits);
-    let named = container_spec("js-x-r1", &run(Some(512), None), &image, &lease(), "/c");
+    let named = container_spec(
+        "js-x-r1",
+        &run(Some(512), None),
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
     assert_eq!(named.limits.pids, 512);
+}
+
+/// Catches a job's temporary directory taken when it is not the empty one the lifecycle
+/// bound: it must be there and be an empty directory (not a file, a link, or a directory with
+/// something in it, whose files would carry no project); the one taken gets mode `0755`.
+/// And the directory is `.tmp-<lease name>` beside the lease's own directory, its `tmp` and
+/// `var-tmp` bound at `/tmp` and `/var/tmp`.
+#[test]
+fn a_tmp_directory_is_taken_only_when_it_is_there_and_empty() {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let base = scratch_dir("take-tmp");
+    let tmp = base.join(".tmp-js-x-r1");
+    fs::create_dir(&tmp).expect("a directory");
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).expect("mode");
+    super::dirs::take_empty_dir(&tmp).expect("taken");
+    let mode = fs::metadata(&tmp).expect("metadata").permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let kind = |dir: &Path| {
+        super::dirs::take_empty_dir(dir)
+            .expect_err("refused")
+            .kind()
+    };
+    assert_eq!(kind(&base.join("missing")), ErrorKind::NotFound);
+    fs::write(tmp.join("early"), b"x").expect("a file in it");
+    assert_eq!(kind(&tmp), ErrorKind::InvalidInput);
+    let file = base.join("file");
+    fs::write(&file, b"x").expect("a file");
+    let link = base.join("link");
+    symlink(&base, &link).expect("a link");
+    for refused in [&file, &link] {
+        assert!(super::dirs::take_empty_dir(refused).is_err(), "{refused:?}");
+    }
+    assert_eq!(
+        super::dirs::tmp_dir_beside(Path::new("/s/.lease-js-x-r1"), "js-x-r1"),
+        PathBuf::from("/s/.tmp-js-x-r1")
+    );
+    assert_eq!(
+        super::dirs::TMP_PLACES,
+        [("tmp", "/tmp"), ("var-tmp", "/var/tmp")]
+    );
+}
+
+/// Catches a contained job whose `TMPDIR` is not its `/tmp`: the variable is set over the
+/// image's own value, once. (A job cannot name `TMPDIR`: the agent owns it, and the wire
+/// refuses a start that does.)
+#[test]
+fn a_contained_jobs_tmpdir_is_its_tmp_over_the_images() {
+    let image = PinnedImage {
+        reference: format!("registry.example/job@{}", digest()),
+        digest: digest(),
+    };
+    let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+    let mut spec = container_spec(
+        "js-x-r1",
+        &run(None, None),
+        &image,
+        (&lease(), Some(Path::new(TMP))),
+        "/c",
+    );
+    spec.env = vec![pair("PATH", "/bin"), pair("TMPDIR", "/image/tmp")];
+    super::spec::tmp_env(&mut spec);
+    assert_eq!(spec.env, [pair("PATH", "/bin"), pair("TMPDIR", "/tmp")]);
 }

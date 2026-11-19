@@ -41,7 +41,7 @@ mod sys;
 mod xfs;
 
 pub use fake::{Call, FakeQuota};
-pub use ids::{MAX_SLOTS, ProjectId, ProjectIds};
+pub use ids::{MAX_SLOTS, ProjectId, ProjectIds, clean};
 #[cfg(target_os = "linux")]
 pub use xfs::XfsQuota;
 

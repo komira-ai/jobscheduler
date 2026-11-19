@@ -257,8 +257,10 @@ the engine runtime's `--gpu-toolkit-hook` reports: such a pool does not admit a 
 
 ## The scratch quota
 
-The agent puts a project quota on each run's directory, which needs the scratch XFS filesystem
-mounted with `prjquota`. XFS does not turn quota accounting on by remounting, so the script
+The agent puts a project quota on each job's `/tmp` and `/var/tmp` (and, with `--scratch-quota`,
+on each run's directory), which needs the scratch XFS filesystem mounted with `prjquota`: a crun
+agent whose scratch filesystem lacks it starts no job. `--skip-scratch-quota` is only for a host
+whose scratch is already mounted with `prjquota` some other way. XFS does not turn quota accounting on by remounting, so the script
 unmounts and mounts the filesystem again through its unit: it edits `Options=` (for example
 `loop` becomes `loop,prjquota`), runs `systemctl daemon-reload`, `systemctl stop` and
 `systemctl start` on the mount unit, and then checks with `findmnt -o OPTIONS` that `prjquota` is

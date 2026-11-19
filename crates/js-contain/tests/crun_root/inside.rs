@@ -182,24 +182,29 @@ async fn the_root_is_read_only() {
     assert!(root.has("ro"), "{:?}: {}", root.options, run.said);
 }
 
-/// Catches a `/tmp` a job cannot write, one that runs programs, and one with set-uid files
-/// or devices: the job writes and reads back a file there, copies a program there and is
-/// refused when it runs it ("Permission denied"; the same program runs from the image's
-/// `/bin`), and the mount table lists `/tmp` as a tmpfs with `noexec`, `nosuid` and `nodev`.
+/// Catches a `/tmp` or `/var/tmp` a job cannot write, one that runs programs, one with
+/// set-uid files or devices, and one that is memory: the job writes and reads back a file
+/// in each, copies a program to `/tmp` and is refused when it runs it ("Permission denied";
+/// the same program runs from the image's `/bin`), and the mount table lists `/tmp` and
+/// `/var/tmp` with `noexec`, `nosuid` and `nodev`, on the file system of the host directory
+/// bound there (the cell's scratch directory's), not a tmpfs of their own.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
-async fn tmp_is_writable_and_runs_no_program() {
+async fn tmp_is_writable_on_disk_and_runs_no_program() {
     let cell = Cell::new("tmp");
-    let run = cell
-        .sh(
-            "tmp",
-            "echo hello > /tmp/f; cat /tmp/f; cp /bin/busybox /tmp/bb; chmod 755 /tmp/bb; \
-             /tmp/bb true 2>&1; echo exec=$?; /bin/busybox true; echo control=$?; \
-             echo --; cat /proc/self/mountinfo",
-        )
-        .await;
+    let shape = Shape {
+        mounts: cell.tmp_mounts("tmp"),
+        ..Shape::default()
+    };
+    let script = "echo hello > /tmp/f; cat /tmp/f; echo there > /var/tmp/g; cat /var/tmp/g; \
+                  cp /bin/busybox /tmp/bb; chmod 755 /tmp/bb; /tmp/bb true 2>&1; echo exec=$?; \
+                  /bin/busybox true; echo control=$?; echo --; cat /proc/self/mountinfo";
+    let lease = cell.lease("tmp", &["/bin/sh", "-c", script], shape);
+    let running = cell.start(&lease).await;
+    let run = cell.finish(&lease, running).await;
     let out = run.out();
     assert!(out.lines().any(|l| l == "hello"), "{}", run.said);
+    assert!(out.lines().any(|l| l == "there"), "{}", run.said);
     assert!(out.contains("Permission denied"), "{}", run.said);
     assert!(
         out.lines().any(|l| l.starts_with("exec=") && l != "exec=0"),
@@ -207,16 +212,29 @@ async fn tmp_is_writable_and_runs_no_program() {
         run.said
     );
     assert!(out.lines().any(|l| l == "control=0"), "{}", run.said);
-    let tmp = mount_at(&after(out, "--").join("\n"), "/tmp");
-    assert_eq!(tmp.fstype, "tmpfs", "{}", run.said);
-    for option in ["noexec", "nosuid", "nodev"] {
-        assert!(
-            tmp.has(option),
-            "{option} in {:?}: {}",
-            tmp.options,
-            run.said
-        );
+    let host = std::fs::read_to_string("/proc/self/mountinfo").expect("the host's mounts");
+    let scratch = mounts(&host)
+        .into_iter()
+        .filter(|m| cell.scratch.starts_with(&m.point))
+        .max_by_key(|m| m.point.len())
+        .expect("the mount of the cell's scratch directory");
+    let inside = after(out, "--").join("\n");
+    for point in ["/tmp", "/var/tmp"] {
+        let tmp = mount_at(&inside, point);
+        assert_eq!(tmp.fstype, scratch.fstype, "{point}: {}", run.said);
+        for option in ["noexec", "nosuid", "nodev"] {
+            assert!(
+                tmp.has(option),
+                "{point}: {option} in {:?}: {}",
+                tmp.options,
+                run.said
+            );
+        }
     }
+    assert!(
+        std::fs::read_to_string(cell.scratch.join(".tmp-tmp/tmp/f")).is_ok_and(|f| f == "hello\n"),
+        "the job's /tmp is the host directory"
+    );
 }
 
 /// Catches a job given a network other than loopback: the interfaces the kernel lists for

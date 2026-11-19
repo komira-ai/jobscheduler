@@ -37,6 +37,8 @@ pub struct Spy {
     /// The reads of lagging usage still to come for each project (see `set_lag`).
     lagging: Mutex<std::collections::BTreeMap<ProjectId, u32>>,
     lag: Mutex<u32>,
+    /// The only project that lags, when set (see `set_lag_of`).
+    lag_only: Mutex<Option<ProjectId>>,
     probe_none: Mutex<Option<String>>,
     fail_usage: Mutex<bool>,
     fail_runs_apply: Mutex<bool>,
@@ -55,6 +57,7 @@ impl Spy {
             applied: Mutex::default(),
             lagging: Mutex::default(),
             lag: Mutex::default(),
+            lag_only: Mutex::default(),
             probe_none: Mutex::default(),
             fail_usage: Mutex::default(),
             fail_runs_apply: Mutex::default(),
@@ -84,6 +87,12 @@ impl Spy {
             .fail_runs_apply
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = fail;
+    }
+
+    /// As [`Spy::set_lag`], for the project `project` alone: the others read zero at once.
+    pub fn set_lag_of(&self, project: ProjectId, reads: u32) {
+        self.set_lag(reads);
+        *self.lag_only.lock().unwrap_or_else(PoisonError::into_inner) = Some(project);
     }
 
     /// Ends every lag: the usage of a project reads what it holds from now.
@@ -212,7 +221,11 @@ impl ScratchQuota for Spy {
         // The files of a project are its usage: once the tree is gone, so is the usage.
         if done.is_ok() && !run_dir.exists() {
             self.inner.charge(project, Usage::ZERO);
-            let lag = *self.lag.lock().unwrap_or_else(PoisonError::into_inner);
+            let only = *self.lag_only.lock().unwrap_or_else(PoisonError::into_inner);
+            let lag = match only {
+                Some(lagging) if lagging != project => 0,
+                _ => *self.lag.lock().unwrap_or_else(PoisonError::into_inner),
+            };
             // Only the first clear starts the lag: a retry of it does not start it again.
             self.lagging
                 .lock()
@@ -737,7 +750,7 @@ fn the_flags_set_the_default_and_the_inode_limit_of_every_run() {
     ] {
         let local = local_with("quota-flags", &extra);
         let fake = Arc::new(FakeQuota::new());
-        let quota = local.run_quota(fake.clone());
+        let quota = local.run_quota(fake.clone(), false);
         assert_eq!(quota.default_disk_bytes(), gib * GIB);
         let shown = format!("{quota:?}");
         assert!(
@@ -766,24 +779,24 @@ fn the_flags_set_the_default_and_the_inode_limit_of_every_run() {
 #[test]
 fn the_failure_flag_reaches_the_quota() {
     let fake = || Arc::new(FakeQuota::new());
-    let default = local_with("quota-failures-default", &[]).run_quota(fake());
+    let default = local_with("quota-failures-default", &[]).run_quota(fake(), false);
     assert_eq!(default.max_failures(), 3);
     let five = local_with("quota-failures-five", &["--scratch-quota-failures", "5"]);
-    assert_eq!(five.run_quota(fake()).max_failures(), 5);
-    let default_wait = local_with("quota-wait-default", &[]).run_quota(fake());
+    assert_eq!(five.run_quota(fake(), false).max_failures(), 5);
+    let default_wait = local_with("quota-wait-default", &[]).run_quota(fake(), false);
     assert_eq!(default_wait.usage_wait_ms(), 600_000);
     let wait = local_with("quota-wait", &["--scratch-usage-wait-secs", "30"]);
-    assert_eq!(wait.run_quota(fake()).usage_wait_ms(), 30_000);
+    assert_eq!(wait.run_quota(fake(), false).usage_wait_ms(), 30_000);
     assert_eq!(default_wait.abandon_limit(), 8);
     let limit = local_with("quota-limit", &["--scratch-abandon-limit", "2"]);
-    assert_eq!(limit.run_quota(fake()).abandon_limit(), 2);
+    assert_eq!(limit.run_quota(fake(), false).abandon_limit(), 2);
     assert_eq!(
         RunQuota::new(fake(), GIB, 1)
             .with_abandon_limit(0)
             .abandon_limit(),
         1
     );
-    let shown = format!("{:?}", wait.run_quota(fake()));
+    let shown = format!("{:?}", wait.run_quota(fake(), false));
     assert!(shown.contains("usage_wait_ms: 30000"), "{shown}");
     assert_eq!(
         RunQuota::new(fake(), GIB, 1)
