@@ -11,6 +11,8 @@
 
 mod answers;
 #[cfg(target_os = "linux")]
+mod bell;
+#[cfg(target_os = "linux")]
 mod contract;
 #[cfg(target_os = "linux")]
 mod contract_e2e;

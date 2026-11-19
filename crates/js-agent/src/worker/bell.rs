@@ -77,3 +77,7 @@ pub(super) fn holds_news(before: &Snapshot, now: &Snapshot) -> bool {
     .into_iter()
     .any(|news| news)
 }
+
+#[cfg(test)]
+#[path = "bell_tests.rs"]
+mod tests;
