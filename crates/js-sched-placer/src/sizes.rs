@@ -25,9 +25,9 @@
 //!   rounded up to a quarter core.
 //! - **Cold.** A class with no estimate yet ([`js_sizing::Fallback::Missing`], `Cold` or
 //!   `Stale`) books the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and
-//!   `cold_memory_bytes` when it sets them, else a quarter of the most cores and a quarter of
-//!   the most bookable memory a known host has ([`Bounds`] of [`bounds_of`]); never more than
-//!   the most a known host has, and at least the class's memory floor. The cold memory is
+//!   `cold_memory_bytes`, which default to [`DEFAULT_COLD_CPU_MILLIS`] (4 cores) and
+//!   [`DEFAULT_COLD_MEMORY_BYTES`] (16 GiB); never more than the most a known host has
+//!   ([`Bounds`] of [`bounds_of`]), and at least the class's memory floor. The cold memory is
 //!   also the estimator's default booking: before five runs a class's memory may only rise
 //!   from it.
 //! - **Too large.** A class whose estimate reaches the most bookable memory a host has
@@ -102,15 +102,15 @@ use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 
-/// The share a cold class books of the most cores and the most bookable memory a host has: a
-/// quarter.
-const COLD_SHARE: u64 = 4;
+/// The CPU a class with no estimate books unless the server sets another: 4 cores.
+pub const DEFAULT_COLD_CPU_MILLIS: u64 = 4000;
 
-/// The CPU step a cold booking is rounded down to, and its least: a quarter core.
+/// The memory a class with no estimate books unless the server sets another, and the least
+/// its class books before five runs: 16 GiB.
+pub const DEFAULT_COLD_MEMORY_BYTES: u64 = 16 << 30;
+
+/// The least CPU a cold class books: a quarter core.
 const CPU_STEP: u64 = 250;
-
-/// The memory step a cold booking is rounded down to: 256 MiB.
-const MEMORY_STEP: u64 = 256 << 20;
 
 /// The milliseconds of a day.
 const DAY_MILLIS: u64 = 86_400_000;
@@ -118,37 +118,42 @@ const DAY_MILLIS: u64 = 86_400_000;
 /// A peak within this many hundredths of its booking hit the booking.
 const AT_LIMIT_PERCENT: u64 = 95;
 /// What a class with no estimate books ([`JobSizes::sized`]): the server's `cold_cpu_millis`
-/// and `cold_memory_bytes`. A dimension left `None` books a quarter of the most a known host
-/// has (the default, for both); a value above the most a known host has books that most.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// and `cold_memory_bytes`, by default ([`ColdSize::default`]) 4 cores and 16 GiB. A value
+/// above the most a known host has books that most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColdSize {
     /// The CPU a cold class books, in millicores; at least 250 (a quarter core) when the
-    /// server reads it from its file.
-    pub cpu_millis: Option<u64>,
+    /// server reads it from its file or flags.
+    pub cpu_millis: u64,
     /// The memory a cold class books, in bytes, and the least a class books before five runs;
-    /// at least 1 GiB when the server reads it from its file.
-    pub memory_bytes: Option<u64>,
+    /// at least 1 GiB when the server reads it from its file or flags.
+    pub memory_bytes: u64,
+}
+
+impl Default for ColdSize {
+    /// [`DEFAULT_COLD_CPU_MILLIS`] and [`DEFAULT_COLD_MEMORY_BYTES`]: 4 cores and 16 GiB.
+    fn default() -> Self {
+        Self {
+            cpu_millis: DEFAULT_COLD_CPU_MILLIS,
+            memory_bytes: DEFAULT_COLD_MEMORY_BYTES,
+        }
+    }
 }
 
 impl ColdSize {
     /// `bounds` with this cold memory as its default booking, held at the host's memory.
     fn applied(self, bounds: Bounds) -> Bounds {
-        let given = self
-            .memory_bytes
-            .map(|memory| memory.min(bounds.host_memory));
         Bounds {
-            default_memory: given.unwrap_or(bounds.default_memory),
+            default_memory: self.memory_bytes.min(bounds.host_memory),
             ..bounds
         }
     }
 
-    /// The CPU a cold class books under `bounds`: this cold CPU, else a quarter of the most
-    /// cores a host has rounded down to a quarter core; held at those cores, and at least a
-    /// quarter core.
+    /// The CPU a cold class books under `bounds`: this cold CPU held at the most cores a host
+    /// has, and at least a quarter core.
     fn cpu(self, bounds: &Bounds) -> u64 {
         let node = u64::from(bounds.node_cpu_millis);
-        let quarter = node / COLD_SHARE / CPU_STEP * CPU_STEP;
-        self.cpu_millis.unwrap_or(quarter).min(node).max(CPU_STEP)
+        self.cpu_millis.min(node).max(CPU_STEP)
     }
 }
 
@@ -197,7 +202,7 @@ pub struct JobSizes {
 }
 
 impl JobSizes {
-    /// No history, a class with no estimate booking a quarter of the largest known host.
+    /// No history, a class with no estimate booking the default cold size: 4 cores and 16 GiB.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -425,9 +430,9 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
 }
 
 /// The bounds of hosts of `capacities` (each the CPU and the bookable memory a host offers):
-/// the most memory and the most cores a host has (each on its own), with a cold booking of a
-/// quarter of that memory,
-/// rounded down to 256 MiB and at least 1 GiB. `None` with no host that offers memory.
+/// the most memory and the most cores a host has (each on its own), with a cold booking of
+/// [`DEFAULT_COLD_MEMORY_BYTES`] held at that memory ([`JobSizes::set_bounds`] puts the
+/// server's cold memory in its place). `None` with no host that offers memory.
 #[must_use]
 pub fn bounds_of(
     capacities: impl IntoIterator<Item = js_types::sched::Resources>,
@@ -440,9 +445,8 @@ pub fn bounds_of(
                 memory.max(capacity.memory_bytes),
             )
         });
-    let cold = (memory / COLD_SHARE / MEMORY_STEP * MEMORY_STEP).max(js_sizing::GIB);
     (memory > 0).then(|| Bounds {
-        default_memory: cold,
+        default_memory: DEFAULT_COLD_MEMORY_BYTES.min(memory),
         host_memory: memory,
         node_cpu_millis: u32::try_from(cpu).unwrap_or(u32::MAX),
     })

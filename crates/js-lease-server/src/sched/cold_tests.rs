@@ -159,23 +159,24 @@ fn share(cpu_millis: u64, memory_bytes: u64) -> Booked {
 /// Asserts that a server whose file sets `cold_cpu_millis = 2000` and
 /// `cold_memory_bytes = 8589934592` books a job that names nothing, of a class with no runs,
 /// two cores and 8 GiB on a host of 88 cores and 251 GiB; that one whose file sets neither
-/// books a quarter of that host (22 cores and 62.75 GiB, as before the keys); and that one
-/// setting only the memory keeps the quarter of the cores. Catches keys read and then dropped
-/// on the way from the file to the engine.
+/// books the default, 4 cores and 16 GiB (not a quarter of that host, 22 cores and 62.75 GiB);
+/// and that one setting only the memory keeps the default cores. Catches keys read and then
+/// dropped on the way from the file to the engine, and a default taken from the host's size.
 #[test]
 fn the_file_s_cold_size_is_what_the_server_books_a_class_with_no_runs() {
     let farm = "cold_cpu_millis = 2000\ncold_memory_bytes = 8589934592";
     assert_eq!(cold_booking("cold_farm", farm), share(2000, 8 * GIB));
-    assert_eq!(cold_booking("cold_unset", ""), share(22_000, MEMORY / 4));
+    assert_eq!(cold_booking("cold_unset", ""), share(4000, 16 * GIB));
     let memory = "cold_memory_bytes = 8589934592";
-    assert_eq!(cold_booking("cold_memory", memory), share(22_000, 8 * GIB));
+    assert_eq!(cold_booking("cold_memory", memory), share(4000, 8 * GIB));
 }
 
 /// Asserts that `--cold-cpu-millis 2000 --cold-memory-bytes 8589934592` make the server book a
 /// job that names nothing, of a class with no runs, two cores and 8 GiB on a host of 88 cores
-/// and 251 GiB, and that `--cold-cpu-millis` alone keeps a quarter of the host's memory.
-/// Catches flags read and then dropped (a server started from its flags, as a farm's is,
-/// would book a quarter of the host).
+/// and 251 GiB; that `--cold-cpu-millis` alone keeps the default memory (16 GiB); and that a
+/// server started from its flags with neither books the default, 4 cores and 16 GiB. Catches
+/// flags read and then dropped, and a flag default other than the file's (a server started
+/// from its flags, as a farm's is, would book a quarter of the host).
 #[test]
 fn the_flags_cold_size_is_what_the_server_books_a_class_with_no_runs() {
     let both = [
@@ -186,13 +187,15 @@ fn the_flags_cold_size_is_what_the_server_books_a_class_with_no_runs() {
     ];
     assert_eq!(flag_booking("cold_flags", &both), share(2000, 8 * GIB));
     let cpu = ["--cold-cpu-millis", "2000"];
-    assert_eq!(flag_booking("cold_flag_cpu", &cpu), share(2000, MEMORY / 4));
+    assert_eq!(flag_booking("cold_flag_cpu", &cpu), share(2000, 16 * GIB));
+    assert_eq!(flag_booking("cold_flag_none", &[]), share(4000, 16 * GIB));
 }
 
 /// Asserts that a flag below its least (249 millicores, a byte under 1 GiB), negative or not a
 /// number is refused naming the flag, and that either flag without `--agent-pool-config` is
-/// refused naming it. Catches a cold size of no CPU, one under the estimator's least memory,
-/// and a flag accepted where nothing reads it.
+/// refused naming it, its default value (4000, 17179869184) too. Catches a cold size of no
+/// CPU, one under the estimator's least memory, and a flag accepted where nothing reads it
+/// (a flag given at its default is still given).
 #[test]
 fn the_cold_flags_are_refused_out_of_range_and_without_a_pool() {
     for (flag, bad) in [
@@ -213,6 +216,8 @@ fn the_cold_flags_are_refused_out_of_range_and_without_a_pool() {
     for (flag, value) in [
         ("--cold-cpu-millis", "2000"),
         ("--cold-memory-bytes", "8589934592"),
+        ("--cold-cpu-millis", "4000"),
+        ("--cold-memory-bytes", "17179869184"),
     ] {
         let dir = scratch("cold_flag_no_pool");
         let token = write(dir.path(), "token", &"t".repeat(40), 0o600);
