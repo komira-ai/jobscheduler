@@ -64,7 +64,7 @@ pub struct Settings {
     /// The share of each host's memory the engine may book (`memory_schedulable_percent`).
     pub memory: MemoryPercent,
     /// What a job that books nothing books while its class has no estimate
-    /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`).
+    /// (`server.cold_cpu_millis`, `server.cold_memory_bytes`); by default 4 cores and 16 GiB.
     pub cold: ColdSize,
 }
 

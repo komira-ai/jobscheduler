@@ -15,7 +15,7 @@ use js_state::Clock as _;
 use js_types::sched::Resources as Capacity;
 use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
-use super::{JobSizes, SIZE_CLASS_LABEL, bounds_of, class_name, day_of, micros, millis};
+use super::{ColdSize, JobSizes, SIZE_CLASS_LABEL, bounds_of, class_name, day_of, micros, millis};
 use crate::engine::Settings;
 use crate::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, host, spec_of};
@@ -29,7 +29,17 @@ fn capacity(cpu_millis: u64, memory_bytes: u64) -> Capacity {
     Capacity::new(cpu_millis, memory_bytes)
 }
 
-/// The bounds of one host of eight cores and 16 GiB: a cold booking of two cores and 4 GiB.
+/// The cold size of this module's tests: two cores and 4 GiB, a quarter of [`bounds`]'s host,
+/// so that a cold booking leaves the host room. The default cold size (4 cores and 16 GiB,
+/// the whole of that host's memory) is the subject of `sizes_cold_tests` and of
+/// [`a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs`].
+const MODULE_COLD: ColdSize = ColdSize {
+    cpu_millis: 2000,
+    memory_bytes: 4 * GIB,
+};
+
+/// The bounds of one host of eight cores and 16 GiB; [`JobSizes::with_cold`] of
+/// [`MODULE_COLD`] puts its cold booking at two cores and 4 GiB.
 fn bounds() -> Bounds {
     bounds_of([capacity(8000, 16 * GIB)]).unwrap()
 }
@@ -138,7 +148,7 @@ fn runs(
 
 /// Sizes taught `jobs` (each booked as `booked`) under [`bounds`].
 fn taught(jobs: &[JobRecord], booked: Booked) -> JobSizes {
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     sizes.set_bounds(Some(bounds()));
     for job in jobs {
         assert!(sizes.observe(job, booked), "{} teaches a run", job.id);
@@ -166,12 +176,12 @@ fn queued(id: &str, spec: JobSpec) -> JobRecord {
     tables.jobs.insert_queued(new).unwrap().record
 }
 
-/// Asserts that a job that books nothing is booked the cold size (a quarter of the largest
-/// host's cores and bookable memory) while its class has no runs, that a job that names both
-/// its CPU and its memory, and one that books the whole host, are booked as they ask, and that
-/// before any host is known every job is left as it is. Catches a cold size read from the
-/// smallest host, a sizing that overrides a declared booking, and a whole-host job made a
-/// share.
+/// Asserts that a job that books nothing is booked the default cold size (4 cores and 16 GiB,
+/// held at the largest host's cores and bookable memory) while its class has no runs, that a
+/// job that names both its CPU and its memory, and one that books the whole host, are booked
+/// as they ask, and that before any host is known every job is left as it is. Catches a cold
+/// size held at the smallest host (4 cores and 8 GiB here), a sizing that overrides a
+/// declared booking, and a whole-host job made a share.
 #[test]
 fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
     let mut sizes = JobSizes::new();
@@ -185,7 +195,7 @@ fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
         capacity(4000, 8 * GIB),
         capacity(8000, 16 * GIB),
     ]));
-    assert_eq!(size(&sizes, &nothing), (2000, 4 * GIB));
+    assert_eq!(size(&sizes, &nothing), (4000, 16 * GIB));
     let declared = queued("declared", of_class("build", needs(500, GIB)));
     assert_eq!(sizes.sized(&declared, Day(0)), declared);
     let whole = queued("whole", of_class("build", Needs::WholeHost));
@@ -197,7 +207,7 @@ fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
 /// sizing that replaces a named dimension, or drops the disk or the GPUs.
 #[test]
 fn a_dimension_the_job_names_is_kept_and_only_the_other_is_sized() {
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     sizes.set_bounds(Some(bounds()));
     let cpu_only = queued("cpu-only", of_class("build", needs(500, 0)));
     assert_eq!(size(&sizes, &cpu_only), (500, 4 * GIB));
@@ -420,7 +430,7 @@ fn failed_or_cancelled_runs_teach_the_memory_nothing() {
 #[test]
 fn a_job_that_never_ran_had_the_whole_host_or_no_result_teaches_nothing() {
     let tables = Tables::new();
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     let ok = ran(
         &tables,
         ("ok", None),
@@ -478,7 +488,7 @@ fn a_success_at_its_booking_holds_the_class_at_the_booking() {
         18 * 256 * MIB
     );
     let unbooked = runs(&tables, "zero", 1, "build", booked(2000, 0), near);
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     sizes.set_bounds(Some(bounds()));
     assert!(
         sizes.observe(&unbooked[0], booked(2000, 0)),
@@ -494,7 +504,7 @@ fn runs_taught_before_any_host_is_known_are_taught_when_one_is() {
     let tables = Tables::new();
     let end = || exited(0, 2 * GIB, Duration::from_secs(30));
     let jobs = runs(&tables, "build", 5, "build", booked(2000, 4 * GIB), end);
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     for job in &jobs {
         assert!(sizes.observe(job, booked(2000, 4 * GIB)));
     }
@@ -528,7 +538,7 @@ fn freed_names_each_allocation_gone_since_the_last_call_once() {
         tables.jobs.insert_queued(new).unwrap();
         ids.push(tables.jobs.place(&id, host("a"), booked(1, 2)).unwrap().1);
     }
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     assert_eq!(sizes.freed(&ids), Vec::new());
     assert_eq!(
         sizes.freed(&ids[1..]),
@@ -538,21 +548,28 @@ fn freed_names_each_allocation_gone_since_the_last_call_once() {
 }
 
 /// Asserts the bounds of a set of hosts: none with no host or no memory; otherwise the
-/// largest host's memory and cores, with a cold booking of a quarter of its memory rounded
-/// down to 256 MiB and at least 1 GiB, and cores beyond what the estimator counts held at its
-/// most. Catches a cold booking off the step, under a gibibyte, or a count that wraps.
+/// largest host's memory and cores, with a cold booking of the default 16 GiB held at that
+/// memory (16 GiB on a host of 16 GiB and 100 bytes or of 251 GiB, 2 GiB on a host of 2 GiB),
+/// and cores beyond what the estimator counts held at its most. Catches a cold booking taken
+/// from the host's size, one above the host, or a count that wraps.
 #[test]
-fn the_bounds_are_the_largest_hosts_with_a_quarter_of_its_memory_cold() {
+fn the_bounds_are_the_largest_hosts_with_the_default_cold_memory() {
     assert_eq!(bounds_of([]), None);
     assert_eq!(bounds_of([capacity(8000, 0)]), None);
     let odd = bounds_of([capacity(8000, 16 * GIB + 100), capacity(1000, GIB)]).unwrap();
     assert_eq!(
         (odd.default_memory, odd.host_memory, odd.node_cpu_millis),
-        (4 * GIB, 16 * GIB + 100, 8000)
+        (16 * GIB, 16 * GIB + 100, 8000)
+    );
+    assert_eq!(
+        bounds_of([capacity(88_000, 251 * GIB)])
+            .unwrap()
+            .default_memory,
+        16 * GIB
     );
     assert_eq!(
         bounds_of([capacity(1000, 2 * GIB)]).unwrap().default_memory,
-        GIB
+        2 * GIB
     );
     let many = bounds_of([capacity(u64::MAX, GIB)]).unwrap();
     assert_eq!(many.node_cpu_millis, u32::MAX);
@@ -596,7 +613,11 @@ impl JobStarts for Quiet {
 /// A placer over the host `a` of eight cores and 16 GiB, on a clock at zero.
 fn placer() -> SchedPlacer {
     let clock = ManualClock::new(Timestamp::from_millis(0));
-    let placer = SchedPlacer::new(Settings::default(), clock);
+    let settings = Settings {
+        cold: MODULE_COLD,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, clock);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
     let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
     placer.engine().host_up(&host("a"), &shape, at(0));

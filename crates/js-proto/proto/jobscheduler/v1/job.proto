@@ -48,8 +48,9 @@ enum Isolation {
 // them. A job that leaves cpu_millis or memory_bytes at 0 (or sends no needs) is booked, for
 // each of them, the size the history of its class gives: the class is the job's label
 // size-class, else its image's name and command. A class with too few runs books what the
-// class named by its label size-fallback gives, else a quarter of the most cores and of the
-// most bookable memory a host has; never less than what the class was killed at. A class
+// class named by its label size-fallback gives, else the server's cold size (4 cores and
+// 16 GiB unless the server sets another), held at the most cores and the most bookable memory
+// a host has; never less than what the class was killed at. A class
 // whose runs need more memory than any host has books the whole of the largest. What a
 // contained job books is its limit on its host.
 message Needs {
