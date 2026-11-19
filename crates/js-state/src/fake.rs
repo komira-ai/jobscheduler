@@ -786,8 +786,8 @@ impl Store for Fake {
         lock(&self.inner).stats
     }
 
-    fn now(&self) -> StoreTime {
-        self.clock.now()
+    fn now(&self) -> Result<StoreTime, StoreError> {
+        Ok(self.clock.now())
     }
 }
 

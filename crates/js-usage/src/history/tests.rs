@@ -612,7 +612,7 @@ impl Store for Hooked {
         self.inner.commit_stats()
     }
 
-    fn now(&self) -> js_state::StoreTime {
+    fn now(&self) -> Result<js_state::StoreTime, js_state::StoreError> {
         self.inner.now()
     }
 }

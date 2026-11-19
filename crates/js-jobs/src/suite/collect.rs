@@ -82,7 +82,10 @@ pub fn the_tick_deletes_only_freed_allocations_past_their_window<B: Backend>(bac
         3,
         "{name}: the usage rows were not written"
     );
-    let advance_to = |at: js_state::StoreTime| rig.clock.advance(at.since(rig.store.now()));
+    let advance_to = |at: js_state::StoreTime| {
+        rig.clock
+            .advance(at.since(rig.store.now().expect("the store's clock")))
+    };
 
     advance_to(edge.saturating_add(WINDOW));
     jobs.tick().expect("the tick runs");

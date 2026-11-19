@@ -134,11 +134,15 @@ fn the_database_clock_judges_expiry() {
         .expect("an hour has not passed");
     let expires = hour.expires_at.expect("a ttl key reports its expiry");
     assert!(
-        expires > store.now(),
+        expires > store.now().expect("the database's clock"),
         "the expiry lies ahead of the database's now"
     );
     assert!(
-        store.now().since(StoreTime::ZERO) > Duration::from_secs(1_700_000_000),
+        store
+            .now()
+            .expect("the database's clock")
+            .since(StoreTime::ZERO)
+            > Duration::from_secs(1_700_000_000),
         "the database's now is the wall clock, not the origin"
     );
     assert_eq!(

@@ -10,7 +10,10 @@
 //! records file's text, the hosts to remove and the marker in ONE transaction. A file that is
 //! refused, or a commit that fails, writes nothing: the start is refused and the next start
 //! imports again. The marker is written even when there are no files (a fresh install), so a
-//! file that appears later is never read.
+//! file that appears later is never read. A binding's cordon end, which the file holds on the
+//! server's clock, is written on the store's ([`crate::agent_state`]), by the store's clock
+//! less the server's read once before the files: a store that cannot read its clock imports
+//! nothing.
 //!
 //! With the marker present the files are not read: each one still there is named once at
 //! info level and ignored. A store that already holds server state without the marker (one a
@@ -26,7 +29,9 @@ use std::path::Path;
 use js_state::{Cond, Store, StoreError, Txn};
 use tracing::info;
 
+use crate::agent_state::Skew;
 use crate::agents::state_path;
+use crate::clock::SharedClock;
 use crate::error::StartupError;
 use crate::host_keys;
 use crate::scaler::kept;
@@ -47,8 +52,9 @@ const HELD: [&str; 2] = ["hosts/", "acquires/"];
 const FILES: [&str; 4] = [".agents", ".joins", ".scaler", ".scaler.unremoved"];
 
 /// Imports the files beside the state file at `state_file` into `store` once (see the module
-/// docs). `records_needed`: a live elastic pool not at its first start, whose missing records
-/// file is refused. `refuse` makes a refusal naming the store's setting.
+/// docs), the bindings' cordon ends moved from `clock` (the server's) onto the store's.
+/// `records_needed`: a live elastic pool not at its first start, whose missing records file is
+/// refused. `refuse` makes a refusal naming the store's setting.
 ///
 /// # Errors
 ///
@@ -56,7 +62,7 @@ const FILES: [&str; 4] = [".agents", ".joins", ".scaler", ".scaler.unremoved"];
 /// committed, by `refuse`. Nothing was written.
 pub(super) fn run(
     store: &dyn Store,
-    state_file: &Path,
+    (state_file, clock): (&Path, &SharedClock),
     records_needed: bool,
     refuse: &dyn Fn(String) -> StartupError,
 ) -> Result<(), StartupError> {
@@ -74,7 +80,11 @@ pub(super) fn run(
         .collect::<Result<Vec<_>, _>>()
         .map_err(unread)?;
     let writes = match held.iter().all(Vec::is_empty) {
-        true => files(state_file, records_needed)?,
+        true => {
+            let skew = Skew::read(store, clock);
+            let skew = skew.map_err(|err| refuse(format!("the store could not be read: {err}")))?;
+            files(state_file, records_needed, skew)?
+        }
         false => {
             info!(
                 "the store already holds server state without the import marker: the files beside the state file are not imported"
@@ -97,9 +107,13 @@ pub(super) fn run(
 }
 
 /// The keys of the four files beside `state_file`, read with their own readers.
-fn files(state_file: &Path, records_needed: bool) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
+fn files(
+    state_file: &Path,
+    records_needed: bool,
+    skew: Skew,
+) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
     let at = |suffix: &str| state_path(state_file, suffix);
-    let mut writes = agent_state::import(&at(".agents"))?;
+    let mut writes = agent_state::import(&at(".agents"), skew)?;
     writes.extend(join_tokens::import(&at(".joins"))?);
     let records = RecordsFile::new(at(".scaler"));
     let unremoved = UnremovedFile::new(at(".scaler.unremoved"));
@@ -179,7 +193,14 @@ mod tests {
         for reads in [0, 1] {
             let store = store();
             store.fail_read_after(reads);
-            let refused = run(&store, &path, false, &refuse).unwrap_err().to_string();
+            let refused = run(
+                &store,
+                (&path, &crate::agent_state::epoch_clock()),
+                false,
+                &refuse,
+            )
+            .unwrap_err()
+            .to_string();
             assert!(
                 refused.starts_with("--store: the store could not be read: "),
                 "{refused}"
@@ -204,16 +225,62 @@ mod tests {
         );
         let store = store();
         store.fail_next();
-        let refused = run(&store, &path, false, &refuse).unwrap_err().to_string();
+        let refused = run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            false,
+            &refuse,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             refused.starts_with("--store: the import of the state files failed: "),
             "{refused}"
         );
         assert!(refused.contains(INJECTED), "{refused}");
         assert!(store.get(IMPORTED).unwrap().is_none());
-        run(&store, &path, false, &refuse).unwrap();
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            false,
+            &refuse,
+        )
+        .unwrap();
         assert_eq!(store.get(IMPORTED).unwrap().unwrap().value, MARKER);
         assert!(store.get("hosts/binding/a").unwrap().is_some());
+    }
+
+    /// Asserts that a binding's cordon end, which the file holds on the server's clock, is
+    /// imported on the store's: with the server's clock at 5 000 s and the store's at its
+    /// origin, a cordon a minute from the server's now is stored a minute from the store's. A
+    /// store that cannot read its clock refuses the start through `refuse` and writes nothing.
+    /// It catches an import that copies the server's time into the store, where every server
+    /// reads it as the store's.
+    #[test]
+    fn a_cordon_end_is_imported_on_the_store_clock() {
+        let (_dir, path) = state("import_cordon_clock");
+        let credential = "0123456789abcdef".repeat(4);
+        let text = format!(
+            "version = 1\n[[host]]\nid = \"a\"\ncredential = \"{credential}\"\ncordon_until_ms = 5060000\n"
+        );
+        beside(&path, ".agents", &text);
+        let server = js_types::ManualClock::new(js_types::Timestamp::from_millis(5_000_000));
+        let server = SharedClock::new(server);
+        let store = store();
+        store.fail_clock(true);
+        let refused = run(&store, (&path, &server), false, &refuse).unwrap_err();
+        let refused = refused.to_string();
+        assert!(
+            refused.starts_with("--store: the store could not be read: "),
+            "{refused}"
+        );
+        assert_eq!(store.commit_stats().txns, 0);
+
+        store.fail_clock(false);
+        run(&store, (&path, &server), false, &refuse).unwrap();
+        let row = store.get("hosts/binding/a").unwrap().unwrap().value;
+        let row: serde_json::Value = serde_json::from_slice(&row).unwrap();
+        assert_eq!(row["cordon_until_ms"], 60_000);
     }
 
     /// The four files beside `state`: one binding, one join token, the records and a host to
@@ -254,7 +321,13 @@ mod tests {
         let (_dir, path) = state("import_once");
         the_four_files(&path);
         let store = store();
-        run(&store, &path, true, &refuse).unwrap();
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap();
         assert_eq!(store.commit_stats().txns, 1);
         let join = format!("hosts/join/{}", "0123456789abcdef".repeat(4));
         let all = [
@@ -266,7 +339,13 @@ mod tests {
         ];
         assert_eq!(keys(&store), all);
         beside(&path, ".agents", "not toml");
-        run(&store, &path, true, &refuse).unwrap();
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap();
         assert_eq!(
             store.commit_stats().txns,
             1,
@@ -276,7 +355,13 @@ mod tests {
         let held = self::store();
         let txn = Txn::new().put("acquires/scaler/unremoved", "{}", Cond::Any);
         held.txn(txn).unwrap().unwrap();
-        run(&held, &path, true, &refuse).unwrap();
+        run(
+            &held,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap();
         assert_eq!(keys(&held), ["acquires/scaler/unremoved", IMPORTED]);
     }
 
@@ -288,10 +373,23 @@ mod tests {
     fn no_files_set_the_marker_and_missing_records_refuse_a_live_pool() {
         let (_dir, path) = state("import_none");
         let store = store();
-        let refused = run(&store, &path, true, &refuse).unwrap_err().to_string();
+        let refused = run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            true,
+            &refuse,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(refused.contains("is missing"), "{refused}");
         assert_eq!(keys(&store), Vec::<String>::new());
-        run(&store, &path, false, &refuse).unwrap();
+        run(
+            &store,
+            (&path, &crate::agent_state::epoch_clock()),
+            false,
+            &refuse,
+        )
+        .unwrap();
         assert_eq!(keys(&store), [IMPORTED]);
     }
 
@@ -310,7 +408,14 @@ mod tests {
             the_four_files(&path);
             beside(&path, suffix, "{}");
             let store = store();
-            let refused = run(&store, &path, false, &refuse).unwrap_err().to_string();
+            let refused = run(
+                &store,
+                (&path, &crate::agent_state::epoch_clock()),
+                false,
+                &refuse,
+            )
+            .unwrap_err()
+            .to_string();
             assert!(refused.starts_with("--state-file: "), "{refused}");
             assert!(refused.contains(says), "{refused}");
             assert_eq!(keys(&store), Vec::<String>::new());
@@ -330,13 +435,19 @@ mod tests {
             locked: false,
         };
         store.fail_read_after(0);
-        let refused = server.import(&path, false).unwrap_err().to_string();
+        let refused = server
+            .import((&path, &crate::agent_state::epoch_clock()), false)
+            .unwrap_err()
+            .to_string();
         assert!(
             refused.starts_with("--store: the store could not be read: "),
             "{refused}"
         );
         store.fail_next();
-        let refused = server.import(&path, false).unwrap_err().to_string();
+        let refused = server
+            .import((&path, &crate::agent_state::epoch_clock()), false)
+            .unwrap_err()
+            .to_string();
         assert!(
             refused.starts_with("--store: the import of the state files failed: "),
             "{refused}"

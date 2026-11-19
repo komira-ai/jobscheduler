@@ -109,8 +109,16 @@ pub trait Store: Send + Sync {
     /// The commit counters.
     fn commit_stats(&self) -> CommitStats;
 
-    /// The store's clock reading, the one expiry is judged by.
-    fn now(&self) -> StoreTime;
+    /// The store's clock reading, the one expiry is judged by. Every time one server writes
+    /// and another compares (a deadline, an expiry, a due time) is read here, never from the
+    /// caller's own clock. A backend that cannot read its clock fails: it never answers a
+    /// reading it did not make, so a caller that stamps or compares a time with it decides
+    /// nothing and writes nothing when it fails.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend cannot read its clock (on Postgres, the database's,
+    /// which an unreachable database cannot give).
+    fn now(&self) -> Result<StoreTime, StoreError>;
 
     /// Applies one transaction: a batch of one.
     ///
@@ -257,7 +265,7 @@ impl Store for std::sync::Arc<dyn Store> {
         (**self).commit_stats()
     }
 
-    fn now(&self) -> StoreTime {
+    fn now(&self) -> Result<StoreTime, StoreError> {
         (**self).now()
     }
 
@@ -424,9 +432,9 @@ mod tests {
         assert_eq!(feed.rows.len(), 3);
         assert_eq!(<Arc<dyn Store> as Store>::commit_stats(&handle).txns, 3);
 
-        let before = <Arc<dyn Store> as Store>::now(&handle);
+        let before = <Arc<dyn Store> as Store>::now(&handle).expect("the store's clock");
         clock.advance(Duration::from_secs(1));
-        let after = <Arc<dyn Store> as Store>::now(&handle);
+        let after = <Arc<dyn Store> as Store>::now(&handle).expect("the store's clock");
         assert_eq!(after, clock.now());
         assert!(after > before);
         assert_eq!(<Arc<dyn Store> as Store>::reap_expired(&handle), Ok(1));

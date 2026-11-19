@@ -25,10 +25,14 @@
 //!
 //! Presence and marks (`registry.advance()`) and placement follow in the tick
 //! ([`crate::api::Shared::tick`]). Every state change is one store transaction carrying the
-//! allocation change that goes with it (section 8, row 25). The pass reads no clock of its
-//! own: `now` is the server's injected clock, and the store stamps what it writes with its own
-//! injected clock. No rule of the pass ends a job because its host is silent (section 6.3,
-//! question 25): see [`crate::job_loss`].
+//! allocation change that goes with it (section 8, row 25). Every deadline the pass judges was
+//! stamped by the store's clock, by whichever server wrote it, so the pass judges them by the
+//! same clock: `now` is the store's reading ([`js_jobs::JobStore::now`]), taken once per pass,
+//! and the duty claims read it too. A pass whose store cannot read its clock decides nothing.
+//! The server's own clock only measures how long the pass took.
+//!
+//! No rule of the pass ends a job because its host is silent (section 6.3, question 25): see
+//! [`crate::job_loss`].
 //!
 //! The pass holds each queue-wait and start deadline to at least the job's deadline floor,
 //! which [`js_jobs::JobStore::raise_at_boot`] raises, with the retention ends, to the boot plus
@@ -136,18 +140,22 @@ impl Observe for Presence<'_> {
     }
 }
 
-/// `millis` since the Unix epoch as a reading of the store's clock, which counts from there.
+/// `millis` since the Unix epoch as a reading of the store's clock, which counts from there:
+/// for the tests whose server and store read one manual clock. The server itself never turns
+/// its own clock into the store's.
+#[cfg(test)]
 pub(crate) fn store_time(millis: u64) -> StoreTime {
     StoreTime::from_duration(Duration::from_millis(millis))
 }
 
 impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
-    /// server's clock, under the pool's limits, with the hosts the registry removed read absent;
-    /// then those removals are settled. A failed pass is logged and changes no removal; the
-    /// next tick passes again. The pass's duration, the start failures
-    /// and losses it made, and a failure of it, are counted on the agent side's meter
-    /// ([`Agents::meter`]).
+    /// store's clock (read once, after the duty is claimed), under the pool's limits, with the
+    /// hosts the registry removed read absent; then those removals are settled. A failed pass
+    /// is logged and changes no removal; the next tick passes again. A store that cannot read
+    /// its clock fails the claim or the pass before any write: no job is ended or deleted by a
+    /// time the store did not give. The pass's duration, the start failures and losses it
+    /// made, and a failure of it, are counted on the agent side's meter ([`Agents::meter`]).
     ///
     /// What the pass says of the store, for [`crate::store_health`]: how long it ran on the
     /// server's clock, or the kind of the store's failure; `None` when the pass failed for a
@@ -166,7 +174,6 @@ impl Agents {
             gone: &gone,
         };
         let began = self.clock.now();
-        let now = store_time(began.millis());
         let meter = self.meter();
         let sink = meter.sink();
         // One server runs the pass in each period: the one whose advance of the duty's row
@@ -177,7 +184,7 @@ impl Agents {
         // two passes in one period do no wrong, and one that is never run would leave the
         // removed host's jobs unended.
         if gone.is_empty() {
-            match jobs.claim_duty(JOB_PASS, now, self.duty_period()) {
+            match jobs.claim_duty(JOB_PASS, self.duty_period()) {
                 Ok(true) => {}
                 Ok(false) => return None,
                 Err(error) => {
@@ -187,6 +194,14 @@ impl Agents {
                 }
             }
         }
+        let now = match jobs.now() {
+            Ok(now) => now,
+            Err(error) => {
+                sink.store_write_failed();
+                warn!(%error, "the store's clock could not be read; the job pass decides nothing until the next tick");
+                return FailureKind::of(&error).map(Pass::Failed);
+            }
+        };
         let rules = self.whole_rules();
         let limits = (self.job_limits, &rules);
         let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
@@ -213,18 +228,18 @@ impl Agents {
                 FailureKind::of(&error).map(Pass::Failed)
             }
         };
-        self.trim_feed(now);
+        self.trim_feed();
         seen
     }
 
     /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
-    /// logs how many rows went, when this server claims the duty for the period that begins at
-    /// `now`. A store that fails is logged; the next tick trims again.
-    fn trim_feed(&self, now: StoreTime) {
+    /// logs how many rows went, when this server claims the duty for the period that begins
+    /// now by the store's clock. A store that fails is logged; the next tick trims again.
+    fn trim_feed(&self) {
         let (Some(feed), Some(jobs)) = (&self.job_feed, &self.jobs) else {
             return;
         };
-        match jobs.claim_duty(FEED_TRIM, now, self.duty_period()) {
+        match jobs.claim_duty(FEED_TRIM, self.duty_period()) {
             Ok(true) => {}
             Ok(false) => return,
             Err(error) => {
@@ -243,3 +258,7 @@ impl Agents {
 #[cfg(test)]
 #[path = "job_pass_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "job_pass_clock_tests.rs"]
+mod clock_tests;

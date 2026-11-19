@@ -37,6 +37,7 @@ use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Clock, LockRefused, Store, SystemClock, WriterLock, WriterTarget};
 use tracing::info;
 
+use crate::clock::SharedClock;
 use crate::config::{StoreClock, StoreNames, StoreSetting};
 use crate::error::StartupError;
 use crate::ticker::{Tick, Ticker};
@@ -150,7 +151,8 @@ impl ServerStore {
     }
 
     /// The first start's import of the files beside the state file at `state_file`, once,
-    /// and a no-op at every later start (see the `import` module). `records_needed` is true
+    /// and a no-op at every later start (see the `import` module), the cordon ends the file
+    /// holds on `clock` (the server's) written on the store's. `records_needed` is true
     /// for a live elastic pool that is not at its first start, which does not start without
     /// its records.
     ///
@@ -160,11 +162,11 @@ impl ServerStore {
     /// the store's setting: nothing was imported.
     pub(crate) fn import(
         &self,
-        state_file: &Path,
+        (state_file, clock): (&Path, &SharedClock),
         records_needed: bool,
     ) -> Result<(), StartupError> {
         let refuse = |reason: String| self.refuse(reason);
-        import::run(&*self.store, state_file, records_needed, &refuse)
+        import::run(&*self.store, (state_file, clock), records_needed, &refuse)
     }
 
     /// A refusal of the start for `reason`, naming the store's flag or key: what the store

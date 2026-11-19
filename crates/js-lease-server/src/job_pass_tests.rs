@@ -197,10 +197,7 @@ fn a_pass_another_server_claimed_is_left_to_it_until_the_period_is_out() {
     rig.agents.set_duty_period(MINUTE);
     let id = queue(&rig, "job-q", spec());
     rig.advance(31 * MINUTE);
-    let claimed = rig
-        .jobs
-        .claim_duty("job-pass", store_time(now_ms(&rig)), MINUTE)
-        .unwrap();
+    let claimed = rig.jobs.claim_duty("job-pass", MINUTE).unwrap();
     assert!(claimed, "another server claims the period");
     assert_eq!(rig.agents.job_pass(), None, "the pass was left to it");
     assert_eq!(rig.job(&id).state, JobState::Queued);
@@ -255,10 +252,7 @@ fn the_feed_trim_is_claimed_like_the_pass() {
         head(&rig) > 5,
         "the writes made more changes than the feed keeps"
     );
-    let claimed = rig
-        .jobs
-        .claim_duty("feed-trim", store_time(now_ms(&rig)), MINUTE)
-        .unwrap();
+    let claimed = rig.jobs.claim_duty("feed-trim", MINUTE).unwrap();
     assert!(claimed, "another server claims the period");
     rig.tick();
     assert!(
@@ -712,11 +706,7 @@ async fn a_server_with_a_removed_host_runs_the_pass_in_a_period_another_claimed(
     let mut a = FakeAgent::new("host-a");
     let on_a = started(&rig, &mut a, "job-a", true).await;
     let placer = rig.agents.placer.clone().unwrap();
-    let claim = |rig: &Rig| {
-        rig.jobs
-            .claim_duty("job-pass", store_time(now_ms(rig)), MINUTE)
-            .unwrap()
-    };
+    let claim = |rig: &Rig| rig.jobs.claim_duty("job-pass", MINUTE).unwrap();
     assert!(claim(&rig), "another server claims the period");
     assert_eq!(rig.agents.job_pass(), None, "nothing is owed: left to it");
 

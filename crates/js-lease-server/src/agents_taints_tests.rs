@@ -140,14 +140,16 @@ fn a_taint_row_the_binding_lacks_is_put_on_it_and_a_held_taint_stands() {
 fn the_restored_taints_are_committed_to_the_store_in_one_transaction() {
     let kept = kept_store();
     let dynamic: Arc<dyn Store> = kept.clone();
-    let (store, _) = BindingStore::in_store(Arc::clone(&dynamic)).unwrap();
+    let (store, _) =
+        BindingStore::in_store(Arc::clone(&dynamic), crate::agent_state::epoch_clock()).unwrap();
     let (_jobs_store, jobs) = host_jobs_placed();
     let mut held = bindings(None);
     let before = kept.commit_stats().txns;
     restore_job_taints(&jobs, &store, &mut held, FLAG).unwrap();
     assert_eq!(kept.commit_stats().txns, before + 1);
 
-    let (_, read) = BindingStore::in_store(Arc::clone(&dynamic)).unwrap();
+    let (_, read) =
+        BindingStore::in_store(Arc::clone(&dynamic), crate::agent_state::epoch_clock()).unwrap();
     assert_eq!(read.len(), 2);
     assert_eq!(read[&host("host-a")].taint(), Some(&host_job("job-a")));
     assert_eq!(read[&host("host-b")].taint(), Some(&host_job("job-b")));
@@ -164,7 +166,8 @@ fn the_restored_taints_are_committed_to_the_store_in_one_transaction() {
 fn a_taint_table_that_cannot_be_read_or_bindings_that_cannot_be_committed_refuse_the_start() {
     let kept = kept_store();
     let dynamic: Arc<dyn Store> = kept.clone();
-    let (store, _) = BindingStore::in_store(Arc::clone(&dynamic)).unwrap();
+    let (store, _) =
+        BindingStore::in_store(Arc::clone(&dynamic), crate::agent_state::epoch_clock()).unwrap();
     let (jobs_store, jobs) = host_jobs_placed();
     let mut held = bindings(None);
 
@@ -178,7 +181,8 @@ fn a_taint_table_that_cannot_be_read_or_bindings_that_cannot_be_committed_refuse
     let wanted = "--job-listen: cannot write the host bindings: ";
     assert!(unwritten.to_string().starts_with(wanted), "{unwritten}");
     assert_eq!(held, bindings(None));
-    let (_, read) = BindingStore::in_store(Arc::clone(&dynamic)).unwrap();
+    let (_, read) =
+        BindingStore::in_store(Arc::clone(&dynamic), crate::agent_state::epoch_clock()).unwrap();
     assert!(read.is_empty());
 
     jobs_store.fail_next();

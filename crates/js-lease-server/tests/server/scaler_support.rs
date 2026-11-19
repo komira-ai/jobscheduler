@@ -523,6 +523,18 @@ pub async fn start(scratch: Scratch, text: &str) -> Harness {
     harness
 }
 
+/// [`start`], with the server's stores reading the server's clock
+/// ([`Harness::over_on_one_clock`]): a test that compares a time the store holds with one the
+/// server read.
+pub async fn start_on_one_clock(scratch: Scratch, text: &str) -> Harness {
+    let path = scratch.write("js.toml", text, 0o644);
+    let clock = crate::config_support::clock();
+    let config = Config::from_config_file(&path, &cloud_kinds(), &OwnerOnlyFiles, clock);
+    let harness = Harness::over_on_one_clock(scratch, config.unwrap()).await;
+    harness.checks.step().await;
+    harness
+}
+
 /// Starts a server on `text` that must be refused at start, and says why. The tickers are
 /// not stepped.
 pub async fn start_refused(scratch: &Scratch, text: &str) -> String {

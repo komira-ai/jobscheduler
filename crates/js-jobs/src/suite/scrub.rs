@@ -414,7 +414,7 @@ where
         "{name}: the row did not hold the contents before the boot"
     );
     clock.advance(Duration::from_secs(8 * 24 * 3600));
-    let boot = store.now();
+    let boot = store.now().expect("the store's clock");
     let bare_row = store.get("job/old-bare").expect("reads");
     let live_row = store.get("job/old-running").expect("reads");
     let commits = store.commit_stats().txns;

@@ -52,7 +52,7 @@ fn kept_store() -> Arc<Interfere<Fake>> {
 /// The taint the binding of `name` holds in `kept`, read as a server reads it at start.
 fn bound_taint(kept: &Arc<Interfere<Fake>>, name: &str) -> Option<Taint> {
     let dynamic: Arc<dyn Store> = kept.clone();
-    let (_, bindings) = BindingStore::in_store(dynamic).unwrap();
+    let (_, bindings) = BindingStore::in_store(dynamic, crate::agent_state::epoch_clock()).unwrap();
     let binding = bindings.get(&host(name));
     binding.and_then(|binding| binding.taint().cloned())
 }

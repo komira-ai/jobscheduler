@@ -31,6 +31,8 @@ pub struct Interfere<S> {
     fail_read_at: Mutex<Option<usize>>,
     /// Whether the next head read fails ([`Interfere::fail_next_head`]).
     fail_head: Mutex<bool>,
+    /// Whether every clock read fails ([`Interfere::fail_clock`]).
+    fail_clock: AtomicBool,
     before: Mutex<Option<Hook>>,
     /// The error a failed commit or read answers; [`StoreError::Failed`] with [`INJECTED`]
     /// until [`Interfere::fail_with`] says another.
@@ -88,6 +90,7 @@ impl<S: Store> Interfere<S> {
             fail_at: Mutex::new(None),
             fail_read_at: Mutex::new(None),
             fail_head: Mutex::new(false),
+            fail_clock: AtomicBool::new(false),
             before: Mutex::new(None),
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
@@ -126,6 +129,14 @@ impl<S: Store> Interfere<S> {
     /// reads after it pass. Head reads are not counted by [`Interfere::fail_read_after`].
     pub fn fail_next_head(&self) {
         *lock(&self.fail_head) = true;
+    }
+
+    /// Fails every read of the store's clock ([`Store::now`]) while `failing`, with
+    /// [`StoreError::Failed`] or the error [`Interfere::fail_with`] set, before it reaches the
+    /// wrapped store: a store whose database cannot be read. The other calls are not failed by
+    /// it, so a test shows what a caller does with the clock alone gone.
+    pub fn fail_clock(&self, failing: bool) {
+        self.fail_clock.store(failing, Ordering::SeqCst);
     }
 
     /// Fails the next commit ([`Interfere::fail_after`] of 0).
@@ -277,8 +288,11 @@ impl<S: Store> Store for Interfere<S> {
         self.inner.commit_stats()
     }
 
-    fn now(&self) -> StoreTime {
+    fn now(&self) -> Result<StoreTime, StoreError> {
         self.called("now");
+        if self.fail_clock.load(Ordering::SeqCst) {
+            return Err(lock(&self.error).clone());
+        }
         self.inner.now()
     }
 }
@@ -516,5 +530,23 @@ mod tests {
         assert_eq!(store.commit_stats().txns, 1);
         assert_eq!(store.now(), store.inner().now());
         assert!(store.into_inner().is_some(), "nothing else holds the store");
+    }
+
+    // Catches a clock switch that fails other calls too, answers a reading while it is on, or
+    // stays on once turned off: while it is on the clock answers the error told and a read
+    // and a commit still pass; off, the clock reads the wrapped store's again.
+    #[test]
+    fn a_failed_clock_answers_its_error_and_nothing_else_fails() {
+        let store = wrapped();
+        store.fail_with(StoreError::Disconnected("gone".to_owned()));
+        store.fail_clock(true);
+        assert_eq!(
+            store.now(),
+            Err(StoreError::Disconnected("gone".to_owned()))
+        );
+        put(&store, "a").expect("a commit passes");
+        assert!(store.get("a").expect("a read passes").is_some());
+        store.fail_clock(false);
+        assert_eq!(store.now(), store.inner().now());
     }
 }

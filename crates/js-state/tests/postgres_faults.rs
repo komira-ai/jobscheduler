@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use js_state::postgres::{Flaw, PostgresBackend, PostgresConfig, PostgresStore, schema};
-use js_state::{Cond, Revision, Store, StoreError, Txn};
+use js_state::{Cond, Revision, Store, StoreError, StoreTime, Txn};
 use js_testkit::database::{CatalogGuard, batch_execute_retrying, ddl};
 use postgres::{Client, NoTls};
 
@@ -228,6 +228,33 @@ impl Reconnects {
     fn count(&self) -> u64 {
         self.count.load(Ordering::SeqCst)
     }
+}
+
+// Catches a clock that answers a reading it did not make when the database cannot be reached
+// (the origin, which a caller stamping a deadline with it would write as the epoch): the
+// database's clock reads the wall clock while it is reachable; with every connection the store
+// makes killed, as a stopped database refuses them, the reading is the call's error; and once
+// the database is back the clock reads again, never before the reading made earlier.
+#[test]
+fn the_clock_of_a_store_whose_database_is_gone_is_an_error_not_the_epoch() {
+    let backend = PostgresBackend::new(&url(), Flaw::None);
+    let config = config(&backend);
+    let (store, reconnects) =
+        Reconnects::hooked(PostgresStore::open(&config).expect("opens"), &app(&config));
+    let before = store.now().expect("the database's clock");
+    assert!(
+        before.since(StoreTime::ZERO) > Duration::from_secs(1_700_000_000),
+        "the database's clock is the wall clock: {before:?}"
+    );
+
+    reconnects.armed.store(true, Ordering::SeqCst);
+    terminate(&mut admin(), &app(&config));
+    let gone = store.now();
+    assert!(matches!(gone, Err(StoreError::Disconnected(_))), "{gone:?}");
+
+    reconnects.armed.store(false, Ordering::SeqCst);
+    let after = store.now().expect("the database's clock once it is back");
+    assert!(after >= before, "{after:?} is before {before:?}");
 }
 
 // Catches a pool that keeps a session the server killed (a store that handed the dead
