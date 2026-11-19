@@ -184,7 +184,10 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         resolved(&mut fs_, "out", &out),
         refused(
             refusal::INPUT_NOT_ALLOWED,
-            "out leads out of the directory it is opened beneath".to_owned()
+            format!(
+                "the host path {} (root data): out leads out of the directory it is opened beneath",
+                data.join("out").display()
+            )
         )
     );
     let mut climbs = mount(&data.join("tree"), "/c", MountMode::ReadOnly);
@@ -193,7 +196,11 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         resolved(&mut fs_, "climbs", &job(vec![climbs])),
         refused(
             refusal::INPUT_NOT_ALLOWED,
-            "climbs leads out of the directory it is opened beneath".to_owned()
+            format!(
+                "the sub_path climbs of the host path {} (root data): climbs leads out of the \
+                 directory it is opened beneath",
+                data.join("tree").display()
+            )
         )
     );
     let missing = job(vec![mount(
@@ -205,7 +212,10 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         resolved(&mut fs_, "missing", &missing),
         refused(
             refusal::INPUT_UNAVAILABLE,
-            "missing: No such file or directory (os error 2)".to_owned()
+            format!(
+                "the host path {} (root data): missing: No such file or directory (os error 2)",
+                data.join("missing").display()
+            )
         )
     );
     // A file where a directory should be, a directory that cannot be searched, and a
@@ -221,21 +231,31 @@ fn each_host_path_is_opened_beneath_its_root_on_the_pool() {
         (
             "file",
             mount(&data.join("tree/file"), "/f", MountMode::ReadOnly),
-            "tree/file: Not a directory (os error 20)",
+            format!(
+                "the host path {} (root data): tree/file: Not a directory (os error 20)",
+                data.join("tree/file").display()
+            ),
         ),
         (
             "locked",
             mount(&data.join("locked/inner"), "/l", MountMode::ReadOnly),
-            "locked/inner: Permission denied (os error 13)",
+            format!(
+                "the host path {} (root data): locked/inner: Permission denied (os error 13)",
+                data.join("locked/inner").display()
+            ),
         ),
-        ("file-sub", file_sub, "file: Not a directory (os error 20)"),
+        (
+            "file-sub",
+            file_sub,
+            format!(
+                "the sub_path file of the host path {} (root data): file: Not a directory \
+                 (os error 20)",
+                data.join("tree").display()
+            ),
+        ),
     ] {
         let answer = resolved(&mut fs_, run, &job(vec![mount]));
-        assert_eq!(
-            answer,
-            refused(refusal::INPUT_UNAVAILABLE, why.to_owned()),
-            "{run}"
-        );
+        assert_eq!(answer, refused(refusal::INPUT_UNAVAILABLE, why), "{run}");
     }
     fs::set_permissions(data.join("locked"), fs::Permissions::from_mode(0o755)).expect("chmod");
     let inside = job(vec![mount(&data.join("inside"), "/i", MountMode::ReadOnly)]);
@@ -593,6 +613,76 @@ fn a_start_with_an_image_and_no_layers_keeps_its_image_for_the_assembly() {
     assert_eq!((name, kept, layers), ("lease", image, &[][..]));
     assert!(began.try_recv().is_err(), "no lookup was asked");
     drop(go);
+}
+
+/// Catches a refusal of a missing host path that names only the part below its root (a
+/// tree named by its digest alone, with no word of the root or the path the start gave):
+/// a start whose read-only layer names a directory not yet written beneath its root is
+/// refused `input-unavailable` with the host path in full and the root's name, after one
+/// open, a mount of the same kind is named the same way, a missing `sub_path` of a host path
+/// that is there is named with that host path, and a tree written after a start's refusal is
+/// found by a later start.
+#[test]
+fn a_missing_host_path_is_refused_by_its_full_path_and_root_after_one_open() {
+    let dir = scratch("fs-missing-named");
+    let (paths, opens) = counting();
+    let (mut fs_, _) = open(&dir, paths);
+    let tree = dir.path().join("ro/85a0");
+    let layer = JobFs {
+        layers: vec![host_layer(&tree)],
+        mounts: Vec::new(),
+    };
+    let missing = |rest: &str, path: &Path| {
+        FsPrepared::Refused(NativeRefusal {
+            code: refusal::INPUT_UNAVAILABLE,
+            why: format!(
+                "the host path {} (root ro): {rest}: No such file or directory (os error 2)",
+                path.display()
+            ),
+        })
+    };
+    assert_eq!(
+        resolved_run(&mut fs_, "layer", "", &layer),
+        missing("85a0", &tree)
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "one open of the layer");
+    let deep = dir.path().join("ro/tree/sub/gone");
+    let mounted = job(vec![mount(&deep, "/g", MountMode::ReadOnly)]);
+    assert_eq!(
+        resolved_run(&mut fs_, "mount", "", &mounted),
+        missing("tree/sub/gone", &deep)
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 2, "one open of the mount");
+    let there = dir.path().join("ro/tree");
+    let mut gone_sub = mount(&there, "/s", MountMode::ReadOnly);
+    gone_sub.sub_path = Some("gone".to_owned());
+    assert_eq!(
+        resolved_run(&mut fs_, "sub", "", &job(vec![gone_sub])),
+        FsPrepared::Refused(NativeRefusal {
+            code: refusal::INPUT_UNAVAILABLE,
+            why: format!(
+                "the sub_path gone of the host path {} (root ro): gone: No such file or \
+                 directory (os error 2)",
+                there.display()
+            ),
+        })
+    );
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        4,
+        "the host path, then its sub_path"
+    );
+    fs::create_dir(&tree).expect("the tree written");
+    assert_eq!(
+        resolved_run(&mut fs_, "later", "", &layer),
+        FsPrepared::Ready,
+        "a start after the tree is written finds it"
+    );
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        5,
+        "one open of the later start"
+    );
 }
 
 /// Catches a later call that looks up again what was begun, or loses its order: the first

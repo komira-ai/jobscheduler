@@ -33,14 +33,13 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::Parser;
 use js_agent_wire::Taint;
 use js_client::{ClientError, HostIdentity};
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
 use js_update_hook::peek;
 
-use crate::cli::{Cli, resolve_host_id};
+use crate::cli::{Cli, parse_agent_flags, resolve_host_id};
 use crate::facts::{
     CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
 };
@@ -315,17 +314,8 @@ fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
         flags_file::FLAG.into(),
         flags_file.as_os_str().to_owned(),
     ];
-    let words = flags_file::expand_with(args, machine.euid, machine.flags)
-        .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))?;
-    Cli::try_parse_from(words).map_err(|why| {
-        let text = why.to_string();
-        let reason: Vec<&str> = text
-            .lines()
-            .take_while(|line| !line.starts_with("Usage:"))
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        format!("{FLAGS_FILE_KEY}: {}", reason.join(" "))
-    })
+    parse_agent_flags(args, machine.euid, machine.flags)
+        .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))
 }
 
 /// The host's certificate and key when the flags name both. It does not depend on the host id:

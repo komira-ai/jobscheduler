@@ -973,8 +973,9 @@ moment the program runs. `times.started_at_ms - times.placed_at_ms` is how long 
    soon as it has the start, which can be before a read shows `PLACED`, since the start may leave on the heartbeat
    right after the placement's commit. So the hook of 7.3 can warm or fetch ahead, but it cannot be relied on to make a
    path exist in time: a host path whose root must exist exists before the submit, or the start fails
-   `input-unavailable` (section 8). Beyond the roots it opens, the agent reads nothing of a host path: every other
-   read is the job's, during `RUNNING`.
+   `input-unavailable` (section 8). Each host path is opened once, when the agent has the start, and a missing one
+   fails the start at once: a path written after that open is not seen by that start, only by a later one. Beyond the
+   roots it opens, the agent reads nothing of a host path: every other read is the job's, during `RUNNING`.
 5. **Creating is bounded.** The pool's start timeout (900 s by default, `crates/js-lease-server/src/job_expiry.rs`)
    counts from placement; a job not `RUNNING` by then ends `FAILED_TO_START` with `START_TIMEOUT`. A whole-host job is
    bounded by its host's prepare deadline while `PLACED`, and by the start timeout counted from that deadline once
@@ -1032,7 +1033,7 @@ and the host's input is to blame), or the job's own result stands.
 | An image or image layer outside `--image-allow` | admission | start fails `image-not-allowed`, as today |
 | On macOS, a host port whose job port differs from its host port, which placement never sends (2.6) | admission | start fails `host-port-remap-unsupported-here`; public `AGENT_REFUSED` |
 | A source, enum value, option or repeated field a server does not know (a later addition of 2.4, sent to an earlier server) | submit | `INVALID_ARGUMENT` naming the field, for a source or a value; an unknown option or repeated field (`host_sockets`) is dropped, which the client sees in `Job.spec` (9) |
-| A host path or its `sub_path` missing, not a directory, unreadable, or leading out of its root (or, for a `sub_path`, its host path) by a link | preparing | start fails `input-unavailable`, or `input-not-allowed` for the link; public `START_FAILURE_CODE_INPUT_UNAVAILABLE` / `AGENT_REFUSED` |
+| A host path or its `sub_path` missing, not a directory, unreadable, or leading out of its root (or, for a `sub_path`, its host path) by a link | preparing | start fails `input-unavailable`, or `input-not-allowed` for the link; public `START_FAILURE_CODE_INPUT_UNAVAILABLE` / `AGENT_REFUSED`. The agent's `start-failed` finding names the host path as the start gave it, its root's name and, after the part below the root, the kernel's answer (`the host path /r/t/x (root t): x: No such file or directory (os error 2)`) |
 | A host path's lookup passes 60 s | preparing | start fails `input-unavailable` |
 | An image layer's pull fails | preparing | as an image's pull fails today |
 | An overlay or clone mount fails (the kernel refuses a lower, the upper's volume is not local) | preparing | start fails with the existing runtime failure code; it is the host's configuration |

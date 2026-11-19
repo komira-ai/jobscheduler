@@ -409,3 +409,39 @@ fn pkg_upload_fails_on_a_missing_package_and_refuses_a_bad_version_as_usage() {
     );
     assert!(!work.exists());
 }
+
+/// `channels descriptor write` through the built program: flags in their form reach the verb,
+/// whose `aws` is the one named (status 1, naming it, after the work directory is made); `--attempts
+/// 0` is a usage error (status 2) that writes nothing. Catches a `descriptor` verb the program does
+/// not route to the write, and a usage error reported as a failure.
+#[test]
+fn descriptor_write_runs_its_aws_and_refuses_zero_attempts_as_usage() {
+    let dir = scratch("descriptor-write");
+    let work = dir.join("work");
+    let aws = dir.join("no-aws");
+    let write = |attempts: &str| {
+        Command::new(XTASK)
+            .args(["channels", "descriptor", "write", "--bucket", "apt-bucket"])
+            .args(["--attempts", attempts, "--work"])
+            .arg(&work)
+            .arg("--aws")
+            .arg(&aws)
+            .output()
+            .expect("run xtask")
+    };
+
+    let out = write("0");
+    assert_eq!(code(&out), Some(2), "{out:?}");
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        "xtask: --attempts is 0; it must be 1 or more\n"
+    );
+    assert!(!work.exists());
+
+    let out = write("1");
+    assert_eq!(code(&out), Some(1), "{out:?}");
+    assert_eq!(text(&out.stdout), "");
+    assert!(text(&out.stderr).contains(&aws.display().to_string()));
+    assert!(work.exists());
+}

@@ -141,7 +141,8 @@ The flags are both or neither. One alone stops the agent with status 2 and names
 start a pair that cannot be used (a missing file, a key that fails the rule, a key that is not the
 certificate's) stops it with status 2, naming the file and never its content. `js-agent cordon`
 takes `--host-cert` and `--host-key` the same way, and the user running it must be able to read the
-key.
+key; given the agent's flags file (`--flags-file /etc/js-agent/flags`) it reads them, the server and
+the host id from there (`docs/runbooks/cordon-a-node.md`).
 
 Keep the token path (sections 2 and 3) for a node that hostkeeper does not manage, such as a node
 launched by the scaler with a one-time token in its launch data. Its flags file names neither flag,

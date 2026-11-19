@@ -75,7 +75,9 @@
 # `beta-macos-probe` (macos-probe.yml) run on the hosted macOS runners, and `promote-macos` adds
 # the macOS archives (`*-aarch64-apple-darwin.tar.gz`) to the published release when all three
 # and `publish` succeeded. `pkg-upload` puts the signed package in the package repository
-# (`pkg/jobscheduler/<version>/`), where hostkeeper-desired.yml finds it, as soon as
+# (`pkg/jobscheduler/<version>/`) and maps `js-agent` to `pkg/jobscheduler` in the repository's
+# descriptor (`hostkeeper-repository.json`, which a coordinator reads to find the package), where
+# hostkeeper-desired.yml finds it, as soon as
 # `beta-macos-pkg` has ended and `publish` succeeded: a package that failed to build or sign is
 # left out (hosts on macOS then keep their version) and the deploy goes on without it, so
 # `desired` waits for the package job's end but never for its success, and for no test of the
@@ -629,7 +631,13 @@ jobs:
   # the environment `apt-publish`, compiles nothing, ends green and writes nothing without the
   # settings of that environment (`channels gate`), and runs for a push to main only. A release
   # whose package was not built or not signed (the `pkg-signing` environment is not set up)
-  # uploads nothing, and the release is deployed to the Linux hosts alone.
+  # uploads nothing, and the release is deployed to the Linux hosts alone. After the upload a
+  # last step adds the one entry this repository owns to the repository's descriptor,
+  # `hostkeeper-repository.json` (`channels descriptor write`): `formats.macos-pkg.packages.js-agent`
+  # is `{"dir": "jobscheduler"}`, which is how a coordinator finds a package that is not in
+  # `pkg/<name>/`. Hostkeeper's release creates the descriptor, this job only adds to it with
+  # `If-Match`, and every other key stays as it was; the CDN path is invalidated when the
+  # variable APT_DISTRIBUTION_ID is set.
   pkg-upload:
     needs: [plan, deploy-tool, publish, beta-macos-pkg]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' && needs.publish.result == 'success' && needs.deploy-tool.result == 'success' }}
@@ -674,6 +682,12 @@ jobs:
         env:
           APT_BUCKET: ${{ vars.APT_BUCKET }}
         run: tool/xtask channels pkg upload --dir pkg --version "$VERSION" --bucket "$APT_BUCKET" --work "$RUNNER_TEMP/pkg-work"
+      - name: Map js-agent to pkg/jobscheduler in the repository's descriptor
+        if: ${{ steps.gate.outputs.enabled == 'true' && steps.signed.outcome == 'success' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+        run: tool/xtask channels descriptor write --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --work "$RUNNER_TEMP/descriptor"
 
   # Builds the `xtask` binary that gamma, cp-deploy-digest, pkg-upload and every apt read, index
   # and write job run. A job of its own so that the build, whose scripts run code from the locked dependency
