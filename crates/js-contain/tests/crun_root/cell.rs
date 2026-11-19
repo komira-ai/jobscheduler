@@ -313,6 +313,31 @@ impl Cell {
         }
     }
 
+    /// The job's temporary directories of the lease `name`, made as the agent makes them
+    /// (`.tmp-<name>/tmp` and `.tmp-<name>/var-tmp` in the scratch directory, given to the
+    /// job's id), and their binds at `/tmp` and `/var/tmp`: plain binds, read-write, no
+    /// program run from them.
+    pub fn tmp_mounts(&self, name: &str) -> Vec<HostMount> {
+        let (job_uid, job_gid) = self.job_ids();
+        let top = self.scratch.join(format!(".tmp-{name}"));
+        mkdir(&top, 0o755);
+        [("tmp", "/tmp"), ("var-tmp", "/var/tmp")]
+            .into_iter()
+            .map(|(dir, target)| {
+                let source = top.join(dir);
+                mkdir(&source, 0o755);
+                lchown(&source, Some(job_uid), Some(job_gid)).expect("give a directory to the job");
+                HostMount {
+                    target: target.to_owned(),
+                    source,
+                    read_only: false,
+                    recursive: false,
+                    no_exec: true,
+                }
+            })
+            .collect()
+    }
+
     /// The lease `name` running `argv` over the image, with its directories handed to the
     /// job's id (as a root daemon does itself, with no helper container) and its cgroup
     /// made, limited as `shape` says and handed to the job user.

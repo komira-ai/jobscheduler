@@ -81,6 +81,15 @@ pub const SLOTS: u32 = MAX_JOBS as u32;
 /// How many free slots a start tries before it is refused `no-capacity` (see `take_slot`).
 const MAX_SLOT_ATTEMPTS: usize = 8;
 
+/// Which bound a directory of a run is put under ([`Lifecycle::bind`]).
+#[derive(Clone, Copy)]
+enum Bound {
+    /// The run's scratch project, at the bytes the run booked.
+    Scratch(u64),
+    /// The slot's temporary project, at the bound of a job's temporary directory.
+    Tmp,
+}
+
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
 
@@ -693,19 +702,23 @@ impl Lifecycle {
         Err(refusal)
     }
 
-    /// Bounds the empty scratch directory `dir` of the run in `slot` to `booked` bytes, when
-    /// a scratch quota is on; the outcome counts toward the quota's health.
+    /// Bounds the empty directory `dir` of the run in `slot`, when a quota is on: a scratch
+    /// directory to the bytes the run booked (when the run's scratch is bounded), or the job's
+    /// temporary directory to its own bound; the outcome counts toward the quota's health.
     fn bind(
         &mut self,
         dir: &std::path::Path,
         slot: u32,
-        booked: u64,
+        bound: Bound,
         events: &mut Vec<Event>,
     ) -> Result<(), QuotaError> {
         let Some(quota) = self.config.quota.clone() else {
             return Ok(());
         };
-        let bound = quota.apply(dir, slot, booked);
+        let bound = match bound {
+            Bound::Scratch(booked) => quota.apply(dir, slot, booked),
+            Bound::Tmp => quota.apply_tmp(dir, slot),
+        };
         match &bound {
             Ok(()) => self.quota_health.ok(),
             Err(_) => {

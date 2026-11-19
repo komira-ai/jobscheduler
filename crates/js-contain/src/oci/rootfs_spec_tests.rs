@@ -130,8 +130,8 @@ fn a_host_mount_at_the_exec_root_takes_the_overlays_place() {
     let (root, _) = mount_at(&config, "/job/root").expect("the exec root");
     let (sdk, _) = mount_at(&config, "/job/root/sdk").expect("below it");
     let (scratch, _) = mount_at(&config, "/scratch").expect("scratch");
-    let (tmp, _) = mount_at(&config, "/tmp").expect("tmp");
-    assert!(root < tmp && tmp < scratch && scratch < sdk, "{mounts:?}");
+    let (run, _) = mount_at(&config, "/run").expect("run");
+    assert!(root < run && run < scratch && scratch < sdk, "{mounts:?}");
     let plain = config_of(&spec());
     let (_, overlay) = mount_at(&plain, "/job/root").expect("the overlay");
     assert_eq!(overlay["type"], "overlay");

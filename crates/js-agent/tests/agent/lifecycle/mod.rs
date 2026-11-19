@@ -50,6 +50,7 @@ mod taint_clear;
 mod taint_idle;
 mod taint_pin;
 mod timeline;
+mod tmp_dir;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -100,6 +101,10 @@ pub struct Options {
     /// Run with a scratch quota over this spy (a run without disk books
     /// [`quota::DEFAULT_BYTES`], a run is limited to [`quota::INODES`] inodes).
     pub quota: Option<Arc<quota::Spy>>,
+    /// How the quota over the spy is made, instead of the scratch quota above: a test of a
+    /// job's temporary directory bounds it with [`RunQuota::tmp_only`] or
+    /// [`RunQuota::with_tmp_bytes`].
+    pub quota_build: Option<fn(Arc<quota::Spy>) -> RunQuota>,
 }
 
 impl Harness {
@@ -117,11 +122,10 @@ impl Harness {
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
         if let Some(spy) = &options.quota {
-            config.quota = Some(RunQuota::new(
-                spy.clone(),
-                quota::DEFAULT_BYTES,
-                quota::INODES,
-            ));
+            config.quota = Some(match options.quota_build {
+                Some(build) => build(spy.clone()),
+                None => RunQuota::new(spy.clone(), quota::DEFAULT_BYTES, quota::INODES),
+            });
             let seen = spy.clone();
             fake.watch_quota(move |dir| seen.applied(dir));
         }

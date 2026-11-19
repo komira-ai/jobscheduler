@@ -84,6 +84,7 @@ struct Bound {
     runtime: Shared,
     run_dir: PathBuf,
     lease_dir: PathBuf,
+    tmp_dir: PathBuf,
     neighbour: PathBuf,
     project: ProjectId,
 }
@@ -100,6 +101,7 @@ impl Drop for Bound {
         }
         let _ = fs::remove_file(&self.neighbour);
         let _ = fs::remove_dir_all(&self.lease_dir);
+        let _ = fs::remove_dir_all(&self.tmp_dir);
         let _ = fs::remove_dir_all(&self.run_dir);
         let _ = self.quota.clear(&self.run_dir, self.project);
     }
@@ -158,6 +160,11 @@ fn write_to(target: &str, mib: u64, slot: u32, around: Around) -> Written {
         .borrow()
         .lease_dir(RUN)
         .expect("the runtime keeps its lease beside the runs");
+    let tmp_dir = subject
+        .runtime()
+        .borrow()
+        .tmp_dir(RUN)
+        .expect("the runtime keeps the job's temporary directory beside the runs");
     let lease_name = lease_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -174,11 +181,13 @@ fn write_to(target: &str, mib: u64, slot: u32, around: Around) -> Written {
         runtime: subject.runtime(),
         run_dir: spec.scratch.clone(),
         lease_dir: lease_dir.clone(),
+        tmp_dir: tmp_dir.clone(),
         neighbour: neighbour.clone(),
         project,
     };
     // The lifecycle's order: both directories empty, both bound, then the container.
     fs::create_dir(&lease_dir).expect("make the lease directory");
+    fs::create_dir(&tmp_dir).expect("make the job's temporary directory");
     if around.bound {
         for dir in [&spec.scratch, &lease_dir] {
             bound
@@ -339,15 +348,22 @@ fn a_lease_directory_outside_the_runs_project_is_refused() {
         .borrow()
         .lease_dir(RUN)
         .expect("the runtime keeps its lease beside the runs");
+    let tmp_dir = subject
+        .runtime()
+        .borrow()
+        .tmp_dir(RUN)
+        .expect("the runtime keeps the job's temporary directory beside the runs");
     let bound = Bound {
         quota,
         runtime: subject.runtime(),
         run_dir: spec.scratch.clone(),
         lease_dir: lease_dir.clone(),
+        tmp_dir: tmp_dir.clone(),
         neighbour: subject.runs().join("no-neighbour"),
         project,
     };
     fs::create_dir(&lease_dir).expect("make the lease directory");
+    fs::create_dir(&tmp_dir).expect("make the job's temporary directory");
     bound
         .quota
         .apply(&spec.scratch, project, LIMIT, INODES)

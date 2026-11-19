@@ -110,6 +110,8 @@ impl Lifecycle {
             starting: BTreeMap::new(),
         };
         let mut events = Vec::new();
+        let now = this.clock.now_ms();
+        this.quota_health = QuotaHealth::at_start(this.config.quota.as_ref(), now, &mut events);
         this.owed_at_start(&mut events);
         let mut stuck = Vec::new();
         for (_, container) in found {
@@ -155,10 +157,12 @@ impl Lifecycle {
         // slots they sit on is read before the sweep, as usage, and their projects are
         // cleared after the trees are gone.
         let leftover = this.leftover_slots(&mut events);
-        // A runtime that keeps a directory of its own beside a run's keeps it with the run's.
+        // A runtime that keeps directories of its own beside a run's (its lease, its job's
+        // temporary directory) keeps them with the run's.
         let leases: Vec<String> = owned
             .iter()
-            .filter_map(|run| this.runtime.lease_dir(run))
+            .flat_map(|run| [this.runtime.lease_dir(run), this.runtime.tmp_dir(run)])
+            .flatten()
             .filter_map(|dir| {
                 dir.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -189,7 +193,13 @@ impl Lifecycle {
     /// the look and is reported; the slots left unread are checked by the run that takes
     /// them.
     fn leftover_slots(&self, events: &mut Vec<Event>) -> Vec<u32> {
-        let Some(quota) = &self.config.quota else {
+        // A quota found unusable at the start has nothing to read.
+        let Some(quota) = self
+            .config
+            .quota
+            .as_ref()
+            .filter(|_| self.quota_health.why().is_none())
+        else {
             return Vec::new();
         };
         let mut leftover = Vec::new();
@@ -223,7 +233,7 @@ impl Lifecycle {
         let gone = self.config.scratch.vanished();
         for slot in leftover {
             let clean = quota
-                .clear(&gone, *slot)
+                .clear(&gone, &gone, *slot)
                 .and_then(|()| quota.claim(*slot).map(|_| ()));
             if let Err(why) = clean {
                 self.slots.park(*slot);

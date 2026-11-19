@@ -191,6 +191,7 @@ impl Lifecycle {
         let job = &mut jobs[index];
         let run_id = job.run_id.clone();
         let lease = runtime.lease_dir(&run_id);
+        let tmp = runtime.tmp_dir(&run_id);
         loop {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
@@ -238,8 +239,9 @@ impl Lifecycle {
                 Stage::Scratch => match runtime
                     .discard_fs(&run_id)
                     .map_err(std::io::Error::other)
-                    .and_then(|()| remove_run_dirs(config, &run_id, lease.as_deref()))
-                {
+                    .and_then(|()| {
+                        remove_run_dirs(config, &run_id, [lease.as_deref(), tmp.as_deref()])
+                    }) {
                     Ok(()) => {
                         // What the run's providers made for it is given up now that nothing
                         // mounts it. A failed release is tried at every step (`provided`)
@@ -258,9 +260,12 @@ impl Lifecycle {
                         // to do. None of it taints: nothing is left on disk.
                         if let (Some(quota), Some(slot)) = (&config.quota, job.slot) {
                             let dir = config.scratch.of(&run_id);
+                            // A runtime that gives no temporary directory leaves the slot's
+                            // temporary project unbound; its limits are taken off all the same.
+                            let gone = tmp.clone().unwrap_or_else(|| config.scratch.vanished());
                             let now = clock.now_ms();
                             let health = config.scratch.health_dir();
-                            if let Err(why) = quota.clear(&dir, slot) {
+                            if let Err(why) = quota.clear(&dir, &gone, slot) {
                                 quota_health.failed(quota, now, &health, events);
                                 job.note(code::QUOTA_CLEAR_FAILED, why.to_string(), events);
                                 return;
@@ -386,17 +391,18 @@ impl Lifecycle {
     }
 }
 
-/// Removes the run's scratch directory and its files directory; both are tried, and the
-/// first failure is the one reported.
+/// Removes the run's scratch directory, the runtime's directories beside it (its lease and
+/// its job's temporary directory) and its files directory; all are tried, and the first
+/// failure is the one reported.
 fn remove_run_dirs(
     config: &Config,
     run_id: &str,
-    lease: Option<&std::path::Path>,
+    beside: [Option<&std::path::Path>; 2],
 ) -> std::io::Result<()> {
-    // The runtime removes its own directory with the container; one it left (a start that
+    // The runtime removes its own directories with the container; one it left (a start that
     // failed after the directory was made) goes with the run's.
-    let lease = lease.map_or(Ok(()), |dir| config.scratch.remove_lease(dir));
-    let scratch = config.scratch.remove(run_id).and(lease);
+    let [lease, tmp] = beside.map(|dir| dir.map_or(Ok(()), |dir| config.scratch.remove_lease(dir)));
+    let scratch = config.scratch.remove(run_id).and(lease).and(tmp);
     let files = config
         .files
         .as_ref()

@@ -31,6 +31,7 @@ mod quota;
 mod runtime_suite;
 mod subject;
 mod sweep;
+mod tmp;
 
 use runtime_suite::{Program, Subject, begin, clean_up, conformance};
 

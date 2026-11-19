@@ -10,6 +10,7 @@ use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
 
+use super::dirs::TMP_PLACES;
 use crate::cli_runtime::{DEFAULT_PIDS, FILES_TARGET, SCRATCH_TARGET, text_of};
 use crate::lifecycle::{Exit, RunSpec};
 
@@ -60,13 +61,16 @@ pub(super) fn pinned(image: &str) -> Result<PinnedImage, String> {
 /// environment goes over the image's after that ([`job_env`]). The container is given the FUSE
 /// device when the run asks for it ([`RunSpec::fuse`]).
 ///
-/// The run's scratch directory, its mounts and its files are bound after the exec root, in
-/// that order, as js-contain wants host mounts.
+/// The run's scratch directory, the job's temporary directory (`tmp`, when given: its `tmp`
+/// at `/tmp` and its `var-tmp` at `/var/tmp`, read-write, no program run from them), the
+/// run's mounts and its files are bound after the exec root, in that order, as js-contain
+/// wants host mounts; a mount of the run's below `/tmp` is bound after the temporary
+/// directory.
 pub(super) fn container_spec(
     name: &str,
     run: &RunSpec,
     image: &PinnedImage,
-    lease: &LeaseDirs,
+    (lease, tmp): (&LeaseDirs, Option<&Path>),
     cgroup_parent: &str,
 ) -> ContainerSpec {
     let bind = |target: &str, source: &Path, read_only: bool| HostMount {
@@ -77,6 +81,15 @@ pub(super) fn container_spec(
         no_exec: false,
     };
     let mut mounts = vec![bind(SCRATCH_TARGET, &run.scratch, false)];
+    if let Some(tmp) = tmp {
+        mounts.extend(TMP_PLACES.map(|(dir, target)| HostMount {
+            target: target.to_owned(),
+            source: tmp.join(dir),
+            read_only: false,
+            recursive: false,
+            no_exec: true,
+        }));
+    }
     mounts.extend(
         run.mounts
             .iter()
@@ -136,7 +149,7 @@ pub(super) fn host_spec(
         isolation: Isolation::Host,
         exec_root: run.scratch.to_string_lossy().into_owned(),
         mounts: Vec::new(),
-        ..container_spec(name, run, image, lease, cgroup_parent)
+        ..container_spec(name, run, image, (lease, None), cgroup_parent)
     }
 }
 
@@ -151,6 +164,19 @@ pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
         .retain(|(name, _)| !env.iter().any(|(job, _)| job == name));
     container.env.extend(env.iter().cloned());
 }
+
+/// The `TMPDIR` of a contained job: its `/tmp`, the temporary directory the runtime binds
+/// there, over the image's own value. A job cannot name `TMPDIR`: the agent owns the name
+/// (`js_types::env::OWNED_ENV_NAMES`), and the wire refuses a start that sets it.
+pub(super) fn tmp_env(container: &mut ContainerSpec) {
+    job_env(
+        container,
+        &[(TMPDIR.to_owned(), TMP_PLACES[0].1.to_owned())],
+    );
+}
+
+/// The variable that names where a program makes its temporary files.
+const TMPDIR: &str = "TMPDIR";
 
 /// Sets the program of a root of layers alone, which has no image configuration: `args` as
 /// given (the first an absolute path in the root, the program), with an environment of the

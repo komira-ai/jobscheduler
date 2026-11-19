@@ -27,7 +27,7 @@ use js_agent_wire::{Isolation, JobSpec};
 use super::job::{Given, Keyed, Phase, Stage, Waiting, run_spec};
 use super::providing::{Follow, Providing, follow};
 use super::timeline::mark_at;
-use super::{Failure, Lifecycle, runtime_failure};
+use super::{Bound, Failure, Lifecycle, runtime_failure};
 use crate::lifecycle::runtime::{
     FsPrepared, JobFs, Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError, Ticket,
 };
@@ -294,8 +294,9 @@ impl Lifecycle {
     /// Makes the run's scratch directory and, beside it, the directory the runtime keeps of
     /// the run (a container's writable layers and home), both put under the run's project
     /// before anything is written to them: a file made earlier would carry no project and
-    /// escape the count. A failure leaves what was made to the cleanup, which removes it and
-    /// clears the project.
+    /// escape the count; and, beside them, the job's temporary directory, put under the slot's
+    /// temporary project the same way. A failure leaves what was made to the cleanup, which
+    /// removes it and clears the projects.
     fn make_dirs(
         &mut self,
         run_id: &str,
@@ -314,7 +315,16 @@ impl Lifecycle {
             .transpose()
             .map_err(scratch_failure)?;
         for dir in std::iter::once(&scratch).chain(lease.as_ref()) {
-            self.bind(dir, slot, booked, events)
+            self.bind(dir, slot, Bound::Scratch(booked), events)
+                .map_err(|why| scratch_failure(why.into()))?;
+        }
+        if let Some(dir) = self.runtime.tmp_dir(run_id) {
+            let tmp = self
+                .config
+                .scratch
+                .create_lease(&dir)
+                .map_err(scratch_failure)?;
+            self.bind(&tmp, slot, Bound::Tmp, events)
                 .map_err(|why| scratch_failure(why.into()))?;
         }
         self.mark(run_id, "dirs");

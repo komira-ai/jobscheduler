@@ -10,7 +10,7 @@ use js_agent_wire::Hello;
 use crate::bundle::Admission;
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
-use crate::quota::ScratchQuota;
+use crate::quota::{Mode, Probe, ScratchQuota};
 use crate::readiness::WorkerHook;
 use crate::session::Drain;
 use crate::system::Machine;
@@ -34,9 +34,21 @@ pub struct Seams<'a> {
     pub readiness: Option<WorkerHook>,
     /// The rules for a start that names a bundle; `None` without `--bundle-store`.
     pub bundle: Option<Admission>,
-    /// The scratch quota to bound the runs with: given exactly when `--scratch-quota` is,
-    /// after its probe passed.
-    pub quota: Option<Arc<dyn ScratchQuota>>,
+    /// The quota to bound the runs with, and what its probe found when the agent started:
+    /// given when `--scratch-quota` is, after its probe passed, and for a runtime that gives
+    /// each job a temporary directory (crun), whatever the probe found (a quota whose probe
+    /// was not project starts unhealthy, and no run starts until it works).
+    pub quota: Option<FoundQuota>,
+}
+
+/// The quota of the scratch root the agent found at start, for [`Seams::quota`].
+pub struct FoundQuota {
+    /// The quota.
+    pub quota: Arc<dyn ScratchQuota>,
+    /// What its probe found when the agent started.
+    pub probe: Probe,
+    /// Whether the runtime gives each job a temporary directory for the quota to bound (crun).
+    pub bounds_tmp: bool,
 }
 
 /// Starts the worker when the runtime of this build is configured (Linux: the crun runtime or
@@ -61,7 +73,18 @@ pub fn start(
     seams: Seams<'_>,
     err: &mut dyn Write,
 ) -> Result<Option<(Worker, Drain, Arc<Outbox>)>, String> {
-    let quota = seams.quota.map(|quota| local.run_quota(quota));
+    let quota = seams.quota.map(|found| {
+        let FoundQuota {
+            quota,
+            probe,
+            bounds_tmp,
+        } = found;
+        let quota = local.run_quota(quota, bounds_tmp);
+        match probe.mode {
+            Mode::Project => quota,
+            Mode::None => quota.unusable(probe.reason),
+        }
+    });
     let Local {
         mounts,
         providers,
@@ -74,6 +97,7 @@ pub fn start(
         scratch_quota_failures: _,
         scratch_usage_wait_secs: _,
         scratch_abandon_limit: _,
+        job_tmp_gib: _,
         backend,
         state,
         watch,
