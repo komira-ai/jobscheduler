@@ -17,8 +17,17 @@
 //! made on the worker as they are for any start (local operations on the scratch volume),
 //! and the assembly, whose mounts look up the providers' file systems, runs off it.
 //!
+//!
+//! The create of the container runs off the worker too, when the runtime can
+//! ([`Runtime::begin_create`]): the start then waits as `starting` in the phase `Creating`, its
+//! slot booked, and the runtime is asked at every step until the create answers, so a create
+//! that is slow (a slow disk under its sidecar's sync, a slow supervisor) holds its own start
+//! and no other. A stop, a cancel or the end of its lease that comes meanwhile waits for the
+//! answer: a container that was made is then stopped as any running one is.
+//!
 //! [`Runtime::resolve_fs`]: crate::lifecycle::Runtime::resolve_fs
 //! [`Runtime::assemble_fs`]: crate::lifecycle::Runtime::assemble_fs
+//! [`Runtime::begin_create`]: crate::lifecycle::Runtime::begin_create
 
 use std::path::PathBuf;
 
@@ -29,7 +38,7 @@ use super::providing::{Follow, Providing, follow};
 use super::timeline::mark_at;
 use super::{Bound, Failure, Lifecycle, runtime_failure};
 use crate::lifecycle::runtime::{
-    FsPrepared, JobFs, Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError, Ticket,
+    Created, FsPrepared, JobFs, Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError, Ticket,
 };
 use crate::lifecycle::{Event, code, detail};
 
@@ -76,6 +85,8 @@ enum Next {
     /// Everything is here: its container is to be made, in `scratch` when its directories
     /// were made before (the assembly's).
     Begin(Option<PathBuf>),
+    /// The create its container waited on answered: it runs, or the create failed.
+    Created(Result<RunHandle, Failure>),
 }
 
 impl Lifecycle {
@@ -118,8 +129,21 @@ impl Lifecycle {
         };
         let phase = match (given.fs.is_empty(), tickets.is_empty()) {
             (true, true) => {
-                let started =
-                    self.begin((spec, keyed), given, (mounts, None), (slot, booked), events);
+                let begun = self.begin(
+                    (spec, keyed),
+                    given,
+                    (mounts.clone(), None),
+                    (slot, booked),
+                    events,
+                );
+                let Some(started) = begun else {
+                    return self.wait_created(
+                        (spec, keyed),
+                        given,
+                        (mounts, slot, booked),
+                        received,
+                    );
+                };
                 self.settle((spec, keyed), started, (slot, booked), at, events);
                 return;
             }
@@ -134,12 +158,6 @@ impl Lifecycle {
                 }
             }
         };
-        // The lease the start names ends `valid_for_ms` after the reply came; a run that
-        // waits is held to that end when it starts.
-        let lease_end_ms = match spec.valid_for_ms {
-            0 => u64::MAX,
-            valid => received.saturating_add(valid),
-        };
         let waiting = Waiting {
             spec: spec.clone(),
             given: given.clone(),
@@ -148,8 +166,36 @@ impl Lifecycle {
             booked,
             tickets,
             phase,
-            lease_end_ms,
+            lease_end_ms: lease_end(spec, received),
         };
+        self.hold_waiting((spec, keyed), waiting);
+    }
+
+    /// Holds the start `spec`, whose create the runtime makes off the worker, as `starting`
+    /// until the create answers.
+    fn wait_created(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        given: &Given,
+        (mounts, slot, booked): (Vec<ResolvedMount>, u32, u64),
+        received: u64,
+    ) {
+        let waiting = Waiting {
+            spec: spec.clone(),
+            given: given.clone(),
+            mounts,
+            slot,
+            booked,
+            tickets: Vec::new(),
+            phase: Phase::Creating,
+            lease_end_ms: lease_end(spec, received),
+        };
+        self.hold_waiting((spec, keyed), waiting);
+    }
+
+    /// Holds a start that waits as `starting`, booking its slot.
+    fn hold_waiting(&mut self, (spec, keyed): (&JobSpec, Keyed), waiting: Waiting) {
+        let (slot, booked) = (waiting.slot, waiting.booked);
         let mut job = super::Job::of(
             spec,
             Stage::Preparing(Box::new(waiting)),
@@ -202,7 +248,12 @@ impl Lifecycle {
         let Stage::Preparing(waiting) = &mut job.stage else {
             return;
         };
-        let next = match job.cause.is_some() || now >= waiting.lease_end_ms {
+        let stopping = job.cause.is_some() || now >= waiting.lease_end_ms;
+        // A create under way is waited for whether or not the start is to end: what it made
+        // is stopped once it runs.
+        let creating = waiting.phase == Phase::Creating;
+        let next = match stopping {
+            _ if creating => created(runtime.poll_create(&waiting.spec.run_id)),
             true => ending(runtime.as_mut(), waiting, now),
             false => match follow(waiting, (providers, &config.mounts), now) {
                 Follow::Go => step(runtime.as_mut(), waiting, now),
@@ -213,7 +264,7 @@ impl Lifecycle {
                 Follow::Fail(failure) => Next::Fail(failure),
             },
         };
-        let keyed = job.keyed;
+        let (keyed, cause, silent) = (job.keyed, job.cause, job.silent);
         let (spec, given, mounts) = (
             waiting.spec.clone(),
             waiting.given.clone(),
@@ -249,20 +300,46 @@ impl Lifecycle {
                 self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
             }
             Next::Begin(scratch) => {
-                let started = self.begin(
+                let begun = self.begin(
                     (&spec, keyed),
                     &given,
-                    (mounts, scratch),
+                    (mounts.clone(), scratch),
                     (slot, booked),
                     events,
                 );
+                match begun {
+                    Some(started) => {
+                        self.settle((&spec, keyed), started, (slot, booked), at, events)
+                    }
+                    None => {
+                        let waiting = Waiting {
+                            spec,
+                            given,
+                            mounts,
+                            slot,
+                            booked,
+                            tickets: Vec::new(),
+                            phase: Phase::Creating,
+                            lease_end_ms,
+                        };
+                        self.jobs[index].stage = Stage::Preparing(Box::new(waiting));
+                    }
+                }
+            }
+            Next::Created(started) => {
                 self.settle((&spec, keyed), started, (slot, booked), at, events);
+                // A stop asked for while the create was under way stops what it made.
+                let job = &mut self.jobs[index];
+                cause.iter().for_each(|cause| {
+                    job.request_stop_for(*cause, silent);
+                });
             }
         }
     }
 
     /// Makes the run's scratch directory (with its quota) and files, unless the directories
-    /// were made before (`scratch`), and creates and starts its container.
+    /// were made before (`scratch`), and creates and starts its container: the answer, or
+    /// `None` while the runtime makes it off the worker ([`Created::Pending`]).
     pub(super) fn begin(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
@@ -270,12 +347,15 @@ impl Lifecycle {
         (mounts, scratch): (Vec<ResolvedMount>, Option<PathBuf>),
         (slot, booked): (u32, u64),
         events: &mut Vec<Event>,
-    ) -> Result<RunHandle, Failure> {
+    ) -> Option<Result<RunHandle, Failure>> {
         let run_id = &spec.run_id;
         self.mark(run_id, "ready");
         let scratch = match scratch {
             Some(scratch) => scratch,
-            None => self.make_dirs(run_id, (slot, booked), events)?,
+            None => match self.make_dirs(run_id, (slot, booked), events) {
+                Ok(scratch) => scratch,
+                Err(failure) => return Some(Err(failure)),
+            },
         };
         // The files are written before the container exists, and only here: a start that
         // is sent again finds its job above and never reaches this point. `admit` has
@@ -284,11 +364,15 @@ impl Lifecycle {
             (Some(root), false) => root.write(run_id, &spec.files).map(Some),
             _ => Ok(None),
         };
-        let files = written.map_err(scratch_failure)?;
+        let files = match written {
+            Ok(files) => files,
+            Err(why) => return Some(Err(scratch_failure(why))),
+        };
         let run = run_spec((spec, keyed), given, (mounts, scratch, files), slot, booked);
-        self.runtime
-            .create_and_start(&run)
-            .map_err(|why| runtime_failure(&why))
+        match created(self.runtime.begin_create(&run)) {
+            Next::Created(started) => Some(started),
+            _ => None,
+        }
     }
 
     /// Makes the run's scratch directory and, beside it, the directory the runtime keeps of
@@ -329,6 +413,23 @@ impl Lifecycle {
         }
         self.mark(run_id, "dirs");
         Ok(scratch)
+    }
+}
+
+/// When the lease a start names ends: `valid_for_ms` after the reply came (`received`); a run
+/// that waits is held to that end when it starts.
+fn lease_end(spec: &JobSpec, received: u64) -> u64 {
+    match spec.valid_for_ms {
+        0 => u64::MAX,
+        valid => received.saturating_add(valid),
+    }
+}
+
+/// What a step makes of the runtime's answer about a create.
+fn created(answer: Created) -> Next {
+    match answer {
+        Created::Pending => Next::Wait,
+        Created::Done(started) => Next::Created(started.map_err(|why| runtime_failure(&why))),
     }
 }
 
@@ -377,7 +478,9 @@ fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
     let asked = ask(runtime, images);
     let run_id = waiting.spec.run_id.as_str();
     let fs = match &waiting.phase {
-        Phase::Images => FsPrepared::Ready,
+        // A start whose create is under way is never stepped (`advance` asks the runtime
+        // about the create instead); it is named here so the match is whole.
+        Phase::Images | Phase::Creating => FsPrepared::Ready,
         // The sources of a provider that has not answered are left out; once it has, they
         // are host paths in the file system and nothing is left out.
         Phase::Resolving { .. } => runtime.resolve_fs(
@@ -405,7 +508,8 @@ fn step(runtime: &mut dyn Runtime, waiting: &mut Waiting, now: u64) -> Next {
         Phase::Images => Next::Begin(None),
         Phase::Resolving {
             providing: Some(_), ..
-        } => Next::Wait,
+        }
+        | Phase::Creating => Next::Wait,
         Phase::Resolving { scratch, .. } => Next::Assemble(scratch.clone()),
         Phase::Assembling(scratch) => Next::Begin(Some(scratch.clone())),
     }

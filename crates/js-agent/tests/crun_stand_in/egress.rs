@@ -20,7 +20,7 @@ use js_agent::lifecycle::{
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, NetworkCeiling};
 use js_types::{JobNetwork, PortMap};
 
-use crate::node::{LONG, NoImages, Node, PID};
+use crate::node::{LONG, NoImages, Node, PID, Ringing};
 
 /// What the port was asked, and how it answers.
 #[derive(Debug, Default)]
@@ -200,7 +200,7 @@ impl Clock for Still {
 }
 
 /// A lifecycle over `runtime`, with its scratch and state roots on `node`.
-fn lifecycle(node: &Node, runtime: CrunRuntime) -> Lifecycle {
+pub(crate) fn lifecycle(node: &Node, runtime: CrunRuntime) -> Ringing {
     use std::os::unix::fs::PermissionsExt as _;
     let private = |name: &str| {
         let dir = node.dir.join(name);
@@ -228,11 +228,11 @@ fn lifecycle(node: &Node, runtime: CrunRuntime) -> Lifecycle {
     };
     let clock = Box::new(Still);
     let adopted = Lifecycle::adopt(config, Box::new(runtime), Box::new(NoChecks), clock);
-    adopted.expect("a lifecycle over an empty runtime").0
+    Ringing::new(adopted.expect("a lifecycle over an empty runtime").0)
 }
 
 /// Asks `life` to start the run `run_id` of the node's image; the events as short texts.
-fn start(life: &mut Lifecycle, node: &Node, run_id: &str) -> Vec<String> {
+fn start(life: &mut Ringing, node: &Node, run_id: &str) -> Vec<String> {
     let spec = JobSpec {
         run_id: run_id.to_owned(),
         lease_id: format!("lease-{run_id}"),
@@ -264,7 +264,7 @@ fn start(life: &mut Lifecycle, node: &Node, run_id: &str) -> Vec<String> {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
     };
-    life.apply(&reply)
+    life.apply_and_create(&reply)
         .iter()
         .map(|event| match event {
             Event::Started { run_id, .. } => format!("started {run_id}"),

@@ -18,7 +18,7 @@ use js_agent::lifecycle::{
 };
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, Taint};
 
-use crate::node::{ELSEWHERE, LONG, NoImages, Node, no_process};
+use crate::node::{ELSEWHERE, LONG, NoImages, Node, Ringing, no_process};
 
 struct Pass;
 
@@ -115,18 +115,19 @@ fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>
     runtime.remove(&probe).expect("removed");
     node.pipe(&probe.0);
     let clock = Manual(Rc::new(Cell::new(0)));
-    let (mut life, _) = Lifecycle::adopt(
+    let (life, _) = Lifecycle::adopt(
         config,
         Box::new(runtime),
         Box::new(Pass),
         Box::new(clock.clone()),
     )
     .expect("adopts");
+    let mut life = Ringing::new(life);
     let start = |spec| HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
     };
-    life.apply(&start(job(&node, "r1-hold")));
+    life.apply_and_create(&start(job(&node, "r1-hold")));
     assert!(!life.is_tainted(), "the start alone says nothing");
     let first = life.step();
     assert!(

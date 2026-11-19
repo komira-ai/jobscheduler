@@ -39,11 +39,19 @@ impl Pool {
     /// # Errors
     /// A thread could not be made.
     pub(crate) fn new(threads: usize) -> io::Result<Self> {
+        Self::named(threads, "js-paths")
+    }
+
+    /// A pool of `threads` threads named `name`.
+    ///
+    /// # Errors
+    /// A thread could not be made.
+    pub(crate) fn named(threads: usize, name: &str) -> io::Result<Self> {
         let (work, queue) = mpsc::channel::<Task>();
         let queue = Arc::new(Mutex::new(queue));
         let spawned = (0..threads).try_for_each(|_| {
             let queue = Arc::clone(&queue);
-            let thread = std::thread::Builder::new().name("js-paths".to_owned());
+            let thread = std::thread::Builder::new().name(name.to_owned());
             thread.spawn(move || serve(&queue)).map(drop)
         });
         spawned.map(|()| Self {

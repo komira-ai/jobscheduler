@@ -1,8 +1,8 @@
 //! The program's stop requests: SIGTERM and SIGINT, read on a thread of their own and
-//! handed to the loop through a channel, which is also how the loop waits.
+//! handed to the loop through a line it waits on, which also carries the job worker's bell.
 
 use std::io;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -11,13 +11,61 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::run::{Sleeper, Wake};
 
-/// A [`Sleeper`] that waits on the channel the signal thread sends on, so a stop request
-/// wakes it at once and one that came earlier is not lost.
+/// What waits on the line for the loop: the stop requests not yet taken, and whether the
+/// bell rang since a wait last took it.
+#[derive(Debug, Default)]
+struct Calls {
+    stops: u64,
+    bell: bool,
+}
+
+/// The line the signal thread and the bell call the loop on.
+#[derive(Debug, Default)]
+struct Line {
+    calls: Mutex<Calls>,
+    changed: Condvar,
+}
+
+impl Line {
+    fn lock(&self) -> MutexGuard<'_, Calls> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Changes what waits on the line with `call`, and wakes the loop.
+    fn call(&self, call: impl FnOnce(&mut Calls)) {
+        call(&mut self.lock());
+        self.changed.notify_all();
+    }
+
+    /// Waits `duration`, or until a stop request is there, or the bell when `bell` (see
+    /// [`Sleeper::sleep_or_bell`]). A stop request is taken first, then the bell.
+    fn wait(&self, duration: Duration, bell: bool) -> Wake {
+        let waits = |calls: &mut Calls| calls.stops == 0 && !(bell && calls.bell);
+        let calls = self.lock();
+        let (mut calls, _) = self
+            .changed
+            .wait_timeout_while(calls, duration, waits)
+            .unwrap_or_else(PoisonError::into_inner);
+        match (calls.stops, bell && calls.bell) {
+            (0, false) => Wake::Elapsed,
+            (0, true) => {
+                calls.bell = false;
+                Wake::Bell
+            }
+            (_, _) => {
+                calls.stops -= 1;
+                Wake::Stop
+            }
+        }
+    }
+}
+
+/// A [`Sleeper`] that waits on the line the signal thread calls on, so a stop request
+/// wakes it at once and one that came earlier is not lost; and the job worker's bell, which
+/// ends a wait that may end early ([`Sleeper::sleep_or_bell`]).
 #[derive(Debug)]
 pub struct SystemSleeper {
-    stops: Receiver<()>,
-    /// Kept so the channel never closes: a closed channel would end every wait at once.
-    _sender: Sender<()>,
+    line: Arc<Line>,
 }
 
 impl SystemSleeper {
@@ -28,8 +76,10 @@ impl SystemSleeper {
     ///
     /// The handlers or the thread that reads them cannot be set up.
     pub fn install() -> io::Result<Self> {
-        let (sender, stops) = channel();
-        let forward = sender.clone();
+        let sleeper = Self {
+            line: Arc::default(),
+        };
+        let line = Arc::clone(&sleeper.line);
         Builder::new_current_thread()
             .enable_all()
             .build()
@@ -43,31 +93,39 @@ impl SystemSleeper {
                 };
                 streams.map(|streams| {
                     for stream in streams {
-                        runtime.spawn(relay(stream, forward.clone()));
+                        runtime.spawn(relay(stream, Arc::clone(&line)));
                     }
                     thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
                 })
             })
-            .map(|()| Self {
-                stops,
-                _sender: sender,
-            })
+            .map(|()| sleeper)
     }
 }
 
-/// Sends a stop request for every delivery on `stream`.
-async fn relay(mut stream: Signal, to: Sender<()>) {
+/// Puts a stop request on the line for every delivery on `stream`.
+async fn relay(mut stream: Signal, to: Arc<Line>) {
     loop {
         stream.recv().await;
-        let _ = to.send(());
+        to.call(|calls| calls.stops += 1);
     }
 }
 
 impl Sleeper for SystemSleeper {
     fn sleep(&mut self, duration: Duration) -> Wake {
-        match self.stops.recv_timeout(duration) {
-            Ok(()) => Wake::Stop,
-            Err(_) => Wake::Elapsed,
-        }
+        self.line.wait(duration, false)
+    }
+
+    fn sleep_or_bell(&mut self, duration: Duration) -> Wake {
+        self.line.wait(duration, true)
+    }
+
+    fn bell(&self) -> Option<crate::lifecycle::Wake> {
+        let line = Arc::clone(&self.line);
+        let ring = move || line.call(|calls| calls.bell = true);
+        Some(crate::lifecycle::Wake::new(ring))
     }
 }
+
+#[cfg(test)]
+#[path = "signals_tests.rs"]
+mod tests;

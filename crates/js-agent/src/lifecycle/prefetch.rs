@@ -114,6 +114,12 @@ pub struct Forgetter {
 }
 
 impl Forgetter {
+    /// [`Prefetcher::forget`].
+    pub fn forget(&self, image: &str) {
+        self.shared.lock().images.remove(image);
+        self.shared.changed.notify_all();
+    }
+
     /// [`Prefetcher::forget_digest`].
     pub fn forget_digest(&self, digest: &str) {
         let suffix = format!("@{digest}");
@@ -242,8 +248,7 @@ impl Prefetcher {
     /// call pulls again), a failure is dropped, and a pull under way is let go, its end
     /// ignored. For the owner of an image store that evicts images.
     pub fn forget(&self, image: &str) {
-        self.shared.lock().images.remove(image);
-        self.shared.changed.notify_all();
+        self.forgetter().forget(image);
     }
 
     /// [`Prefetcher::forget`] for every image named by `digest` (`sha256:<hex>`): those

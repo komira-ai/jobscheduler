@@ -11,6 +11,7 @@
 //! has a limit on its address space and its running time.
 
 mod backoff;
+mod bell;
 mod binary;
 mod bounds;
 mod bundle;
