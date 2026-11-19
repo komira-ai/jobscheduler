@@ -120,7 +120,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   Recommend (b), the grace set by the operator (step 49).
 - **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. Settled by the project owner
   (reading (a)).** A `DefaultProvider` pool refuses a request with `no-capable-host`, at submit, only when no registered host could ever
-  satisfy its constraints and shape (a host that exists, is not tainted and is merely busy, lost or cordoned is capable), unless an
+  satisfy its constraints and shape (a host that exists and is merely busy, lost, cordoned or tainted is capable), unless an
   elastic provider of the pool could launch a machine that meets it; when a capable host exists but is busy, the request waits in the
   queue. A queued request whose last capable host leaves keeps waiting for `regain_grace` before it is refused (D41). Refusing whenever no
   host is free now was considered and rejected: it turns an ordinary busy fleet into errors and moves the queue into every caller (two
@@ -152,9 +152,9 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   release it. Recommend (b): the acquire was recorded before the call and is already paid for, a terminate mid-boot can read back Unknown,
   and the next burst would launch again after a `cooldown`; keeping it bounds the waste to one boot plus one `idle_timeout`, and
   requests queued meanwhile use it. The waiting request goes to the freed host at once (providers.md).
-- **D41. What counts as capable, and queued requests when capability goes.** Capable: in the host table, not tainted, not denied, not
-  draining, not `releasing`, total shape and facts meeting the request. Busy, lost (inside the retention window), cordoned and quarantined
-  hosts are capable; **tainted hosts are not**, because a taint ends only by the agent's own acknowledged clear (taint-self-clearing.md) or by the operator's `ClearHostTaint` after moving the agent's marker aside, which may be an unbounded human wait. A
+- **D41. What counts as capable, and queued requests when capability goes.** Capable: in the host table, not denied, not
+  draining, not `releasing`, total shape and facts meeting the request. Busy, lost (inside the retention window), cordoned, quarantined
+  and **tainted** hosts are capable at admission of a job: a taint ends, by the agent's own acknowledged clear (taint-self-clearing.md) or by the operator's `ClearHostTaint`, so a job that only has to wait for it is queued, not refused. Placement still skips a tainted host until its taint ends. A
   queued request whose last capable host leaves (and no elastic provider could serve it) waits `regain_grace` (default 5 minutes on the
   injected clock) and is then refused with `no-capable-host`; a new submission gets no grace. Alternatives: refuse at once (a routine agent
   restart would refuse every queued request), or wait for ever (a wait nobody can end). Recommend the grace.

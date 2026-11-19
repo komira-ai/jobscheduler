@@ -95,7 +95,7 @@ pub(super) const STATE_WRITE_FAILED: &str = "state-write-failed";
 #[tonic::async_trait]
 pub(crate) trait Admission: Send + Sync {
     /// `false` only when no host and no catalog could ever serve `wanted`: a busy or silent
-    /// host counts, a tainted or departing one does not, and a catalog not yet read may
+    /// host counts, a tainted one too (its taint ends), a departing one does not, and a catalog not yet read may
     /// offer. A job that asks for host `isolation` can only be served by a host that reported
     /// it runs host jobs; a catalog is never offered it, as a machine not launched yet has
     /// reported nothing.

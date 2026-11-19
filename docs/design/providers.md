@@ -37,7 +37,7 @@ machines an elastic provider launched can join it.
 - `list` and `observe` are the host table. Present while heard; Unknown on silence, never Absent; Absent only on deregister or removal (5.6).
 - Identity and admission are those of registration.md (join credential, pool exists, tainted set, shape satisfied, `max_machines`).
 
-**Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table and not tainted,
+**Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table (a tainted host is capable: its taint ends, and placement skips it meanwhile),
 not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` or `Whole` class needs the
 host to exist; a `Book` class needs the total to hold the booking); and its latest facts satisfy every constraint of the request (5.13).
 Busy hosts are capable. Lost hosts (silent past the grace, inside the retention window) are capable: the agent registers again with the
@@ -172,7 +172,7 @@ it bounds the waste to one boot plus one idle period, and any request queued mea
 boot-failure rule.
 
 **Tainted and lost hosts in the hierarchy.** A tainted host is replaced by an acquire in the hierarchy only if it was an elastic host
-(5.12); a tainted registered host is simply gone from the capable set, and the elastic entries (if any) serve the demand. Demand is
+(5.12); a tainted registered host is not placed on, but stays in the capable set at admission, and the elastic entries (if any) serve the demand. Demand is
 computed over the whole pool, not per entry.
 
 **Several clouds, tiers, spot hosts.** `aws`, `gcp`, `azure` and on-prem sources are providers of this one hierarchy; an entry may be a
