@@ -675,10 +675,16 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
-        let held = self.registry.bindings().remove(&check.host);
-        let untainted = held.as_ref().is_some_and(|bound| bound.taint().is_none());
-        let stray = heartbeat.taint_cleared.as_ref().filter(|_| !check.cleared);
-        let stray = stray.filter(|_| untainted & check.taint.is_none());
+        // A clear the registry does not take, on a host it holds untainted. The host is read
+        // only for such a beat, and outside `host_writes`: a taint stored in between is kept by
+        // the store's conditional write, which expects the taint it read.
+        let stray = heartbeat.taint_cleared.as_ref();
+        let stray = stray.filter(|_| !check.cleared & check.taint.is_none());
+        let untainted = |host: &HostId| {
+            let own = self.registry.own_host(host);
+            own.is_some_and(|own| own.host.taint.is_none())
+        };
+        let stray = stray.filter(|_| untainted(&check.host));
         if let Some(cleared) = stray {
             let gate = self.host_writes.lock().await;
             self.end_stored_taint(&check.host, cleared).await?;

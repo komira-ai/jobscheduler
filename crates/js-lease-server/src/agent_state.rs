@@ -669,14 +669,16 @@ impl BindingStore {
         host_keys::committed(store.txn(txn))
     }
 
-    /// Commits the binding the store holds for `host` without its taint when that taint is
-    /// `cleared`, field for field, or the taint a refused start made (reason `host-tainted`),
-    /// which the agent, clean again, never reports and so ends with any cleared taint, by the
-    /// conditional write of [`BindingStore::commit_taint`], and holds the binding without it as stored; the change, or `None` when nothing was
-    /// written (the store holds no binding of `host`, another taint or none, and in file mode).
-    /// What this server holds as stored for `host` is left as it was unless the commit is made,
-    /// so a later [`BindingStore::save`] never writes this server's binding over a taint the
-    /// store holds that the registry does not.
+    /// Ends the taint the store holds for `host` when the agent reports `cleared`: the stored
+    /// taint is `cleared`, field for field, or one a refused start made (reason
+    /// `host-tainted`, which the agent never reports, so any cleared report ends it; an agent
+    /// still tainted refuses its next start and taints the host again). The binding without
+    /// the taint is committed by the conditional write of [`BindingStore::commit_taint`],
+    /// expecting the taint read, and is then held as stored. Answers the change, or `None`
+    /// when nothing was written: the store holds no binding of `host`, another taint or none,
+    /// and in file mode. Unless the commit is made, what this server holds as stored for
+    /// `host` is left as it was, so a later [`BindingStore::save`] never writes this
+    /// server's binding over a taint the store holds that the registry does not.
     ///
     /// # Errors
     ///
