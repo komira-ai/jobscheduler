@@ -95,8 +95,9 @@
 //!   agent was given or is refused (`input-not-allowed`); it asks each provider to `Prepare`
 //!   its source when the start is admitted, beside the image pull, then writes a record of
 //!   its sources in the state root (so a restart can release them; a start whose record
-//!   cannot be written fails and has what was asked released), and waits (as `starting`) for each provider's `Mount` answer, the
-//!   directory being held to the agent's mount roots as a host path is, for at most
+//!   cannot be written fails and has what was asked released), and waits (as `starting`)
+//!   for each provider's `Mount` answer, the directory being held to the agent's mount
+//!   roots as a host path is, for at most
 //!   `--mount-provider-wait` from its admission (`input-unavailable`; a provider that refuses
 //!   the ref fails it `provider-refused`). Each source is then a host path, and the start goes
 //!   on as above. When the run's file system is taken apart, on every end path, each source is
