@@ -47,6 +47,7 @@ pub fn spec(run_id: &str, args: &[&str]) -> RunSpec {
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels: BTreeMap::from([(label::KIND.to_owned(), label::VM_KIND.to_owned())]),
         bundle: None,
         network: Default::default(),

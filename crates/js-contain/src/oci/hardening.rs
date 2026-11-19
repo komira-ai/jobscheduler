@@ -10,7 +10,12 @@
 //!   (`helper`): it runs the daemon's own give and unpack modes, which need to change
 //!   owners. They are capabilities of the container's own user namespace, whose ids
 //!   are the daemon user's subordinate ids: they give its root nothing over an inode the
-//!   daemon user owns, since that user is not mapped.
+//!   daemon user owns, since that user is not mapped. A job given the FUSE device
+//!   ([`ContainerSpec::fuse`](crate::container::ContainerSpec::fuse)) holds `CAP_SYS_ADMIN`
+//!   alone, in all five sets (the process is not root, so the ambient set carries it), and
+//!   its filter is resolved for that capability with the three `io_uring` calls allowed
+//!   ([`fuse_seccomp`]). `CAP_SYS_ADMIN` here is a capability of the container's own user
+//!   namespace, as the helper's are.
 //! - **Masked and read-only paths:** `DefaultMaskedPaths` and `DefaultReadOnlyPaths` of
 //!   the same release ([`MASKED_PATHS`], [`READONLY_PATHS`]).
 //! - **Seccomp:** the same release's `pkg/seccomp/seccomp.json`, kept as
@@ -34,7 +39,8 @@
 //! - **Devices:** a job's `/dev` is a tmpfs of its own (`spec`) holding `crun`'s default
 //!   nodes and none of the host's. A run that booked GPUs is given their nodes, and its
 //!   device cgroup then denies every device and allows those nodes only (`devices`); a job
-//!   given no device gets no device section.
+//!   given no device gets no device section. A job given the FUSE device is also given
+//!   `/dev/fuse` (character 10:229, mode 0666) the same way (`devices`).
 //!
 //! Left out, on purpose: the `net.ipv4.ping_group_range` and
 //! `net.ipv4.ip_unprivileged_port_start` sysctls (a job has loopback only) and the
@@ -42,8 +48,10 @@
 
 use std::collections::HashSet;
 
-use oci_spec::runtime::{Capability, LinuxSeccomp};
+use oci_spec::runtime::{Capability, LinuxSeccomp, LinuxSeccompAction, LinuxSyscallBuilder};
 use serde_json::{Value, json};
+
+use super::spec::{built, strings};
 
 /// The capabilities every job's container holds (`CAP_` names, as OCI writes them).
 pub(crate) const CAPABILITIES: [&str; 11] = [
@@ -130,6 +138,15 @@ pub enum SeccompError {
     Profile(String),
 }
 
+/// The capability a job given the FUSE device holds, in all five sets.
+pub(crate) const FUSE_CAPABILITY: &str = "CAP_SYS_ADMIN";
+
+/// The syscalls a job given the FUSE device is allowed beyond the profile: FUSE over
+/// `io_uring`. The pinned profile does not name them, so they are added after it is
+/// resolved and the profile and [`PROFILE_SHA256`] stay as pinned.
+pub(crate) const FUSE_SYSCALLS: [&str; 3] =
+    ["io_uring_setup", "io_uring_enter", "io_uring_register"];
+
 /// The pinned profile for a node of Go architecture `arch` (`amd64`, `arm64`) whose
 /// containers hold `caps`.
 ///
@@ -138,6 +155,24 @@ pub enum SeccompError {
 /// (the unit tests parse it, so only an edit can break that).
 pub(crate) fn seccomp(arch: &str, caps: &[&str]) -> Result<LinuxSeccomp, SeccompError> {
     from_profile(PROFILE, arch, caps)
+}
+
+/// The filter of a job given the FUSE device: the pinned profile resolved for
+/// [`FUSE_CAPABILITY`], then one entry that allows [`FUSE_SYSCALLS`].
+///
+/// # Errors
+/// As [`seccomp`].
+pub(crate) fn fuse_seccomp(arch: &str) -> Result<LinuxSeccomp, SeccompError> {
+    let mut section = seccomp(arch, &[FUSE_CAPABILITY])?;
+    let mut calls = section.syscalls().clone().unwrap_or_default();
+    calls.push(built(
+        LinuxSyscallBuilder::default()
+            .names(strings(&FUSE_SYSCALLS))
+            .action(LinuxSeccompAction::ScmpActAllow)
+            .build(),
+    ));
+    section.set_syscalls(Some(calls));
+    Ok(section)
 }
 
 fn malformed(what: &str) -> SeccompError {

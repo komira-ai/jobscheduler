@@ -193,6 +193,7 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels: Default::default(),
         bundle: None,
         network: Default::default(),

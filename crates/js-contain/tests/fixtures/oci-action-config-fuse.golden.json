@@ -1,0 +1,386 @@
+{
+  "annotations": {},
+  "hostname": "localhost",
+  "linux": {
+    "cgroupsPath": "/js.slice/actions/lease-1-2/ctr",
+    "devices": [
+      {
+        "fileMode": 438,
+        "gid": 0,
+        "major": 10,
+        "minor": 229,
+        "path": "/dev/fuse",
+        "type": "c",
+        "uid": 0
+      }
+    ],
+    "gidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 200000,
+        "size": 65536
+      }
+    ],
+    "maskedPaths": [
+      "/proc/acpi",
+      "/proc/kcore",
+      "/proc/keys",
+      "/proc/latency_stats",
+      "/proc/sched_debug",
+      "/proc/scsi",
+      "/proc/timer_list",
+      "/proc/timer_stats",
+      "/sys/dev/block",
+      "/sys/devices/virtual/powercap",
+      "/sys/firmware",
+      "/sys/fs/selinux"
+    ],
+    "namespaces": [
+      {
+        "type": "pid"
+      },
+      {
+        "type": "network"
+      },
+      {
+        "type": "ipc"
+      },
+      {
+        "type": "uts"
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "cgroup"
+      },
+      {
+        "type": "mount"
+      }
+    ],
+    "readonlyPaths": [
+      "/proc/asound",
+      "/proc/bus",
+      "/proc/fs",
+      "/proc/irq",
+      "/proc/sys",
+      "/proc/sysrq-trigger"
+    ],
+    "resources": {
+      "devices": [
+        {
+          "access": "rwm",
+          "allow": false
+        },
+        {
+          "access": "rw",
+          "allow": true,
+          "major": 10,
+          "minor": 229,
+          "type": "c"
+        }
+      ],
+      "pids": {
+        "limit": 101
+      },
+      "unified": {
+        "memory.oom.group": "1"
+      }
+    },
+    "seccomp": {
+      "architectures": [
+        "SCMP_ARCH_X86_64",
+        "SCMP_ARCH_X86",
+        "SCMP_ARCH_X32"
+      ],
+      "defaultAction": "SCMP_ACT_ERRNO",
+      "defaultErrnoRet": 38,
+      "syscalls": "27 entries"
+    },
+    "uidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 100000,
+        "size": 65536
+      }
+    ]
+  },
+  "mounts": [
+    {
+      "destination": "/proc",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ],
+      "source": "proc",
+      "type": "proc"
+    },
+    {
+      "destination": "/dev",
+      "options": [
+        "nosuid",
+        "strictatime",
+        "mode=755",
+        "size=65536k"
+      ],
+      "source": "tmpfs",
+      "type": "tmpfs"
+    },
+    {
+      "destination": "/dev/pts",
+      "options": [
+        "nosuid",
+        "noexec",
+        "newinstance",
+        "ptmxmode=0666",
+        "mode=0620"
+      ],
+      "source": "devpts",
+      "type": "devpts"
+    },
+    {
+      "destination": "/dev/shm",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=102m"
+      ],
+      "source": "shm",
+      "type": "tmpfs"
+    },
+    {
+      "destination": "/dev/mqueue",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ],
+      "source": "mqueue",
+      "type": "mqueue"
+    },
+    {
+      "destination": "/sys",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "ro"
+      ],
+      "source": "sysfs",
+      "type": "sysfs"
+    },
+    {
+      "destination": "/sys/fs/cgroup",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "relatime",
+        "ro"
+      ],
+      "source": "cgroup",
+      "type": "cgroup"
+    },
+    {
+      "destination": "/dev/js-init",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/scratch/oci-bin/js-init",
+      "type": "bind"
+    },
+    {
+      "destination": "/etc/hosts",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "noexec",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/etc/hosts",
+      "type": "bind"
+    },
+    {
+      "destination": "/etc/hostname",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "noexec",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/etc/hostname",
+      "type": "bind"
+    },
+    {
+      "destination": "/etc/resolv.conf",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "noexec",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/etc/resolv.conf",
+      "type": "bind"
+    },
+    {
+      "destination": "/job/root",
+      "options": [
+        "lowerdir=/scratch/lease-1-2/root,upperdir=/scratch/lease-1-2/upper,workdir=/scratch/lease-1-2/work,userxattr,metacopy=off,redirect_dir=nofollow,index=off,xino=off",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "overlay",
+      "type": "overlay"
+    },
+    {
+      "destination": "/run",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=106m"
+      ],
+      "source": "tmpfs",
+      "type": "tmpfs"
+    },
+    {
+      "destination": "/root",
+      "options": [
+        "rbind",
+        "rw",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/rw/home",
+      "type": "bind"
+    },
+    {
+      "destination": "/scratch",
+      "options": [
+        "rbind",
+        "rw",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/scratch/lease-1-2/job",
+      "type": "bind"
+    },
+    {
+      "destination": "/tmp",
+      "options": [
+        "bind",
+        "rw",
+        "nosuid",
+        "nodev",
+        "noexec"
+      ],
+      "source": "/scratch/.tmp-lease-1-2/tmp",
+      "type": "bind"
+    },
+    {
+      "destination": "/var/tmp",
+      "options": [
+        "bind",
+        "rw",
+        "nosuid",
+        "nodev",
+        "noexec"
+      ],
+      "source": "/scratch/.tmp-lease-1-2/var-tmp",
+      "type": "bind"
+    },
+    {
+      "destination": "/workspace",
+      "options": [
+        "rbind",
+        "rw",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/srv/mount-root",
+      "type": "bind"
+    },
+    {
+      "destination": "/run/js-files",
+      "options": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "source": "/run/js-agent/files/1-2",
+      "type": "bind"
+    }
+  ],
+  "ociVersion": "1.0.0",
+  "process": {
+    "args": [
+      "/dev/js-init",
+      "--",
+      "tool",
+      "--flag",
+      "a b"
+    ],
+    "capabilities": {
+      "ambient": [
+        "CAP_SYS_ADMIN"
+      ],
+      "bounding": [
+        "CAP_SYS_ADMIN"
+      ],
+      "effective": [
+        "CAP_SYS_ADMIN"
+      ],
+      "inheritable": [
+        "CAP_SYS_ADMIN"
+      ],
+      "permitted": [
+        "CAP_SYS_ADMIN"
+      ]
+    },
+    "cwd": "/job/root/pkg",
+    "env": [
+      "PATH=/bin",
+      "HOSTNAME=localhost",
+      "HOME=/root"
+    ],
+    "noNewPrivileges": true,
+    "oomScoreAdj": 0,
+    "rlimits": [
+      {
+        "hard": 103,
+        "soft": 103,
+        "type": "RLIMIT_NOFILE"
+      },
+      {
+        "hard": 104,
+        "soft": 104,
+        "type": "RLIMIT_NPROC"
+      },
+      {
+        "hard": 0,
+        "soft": 0,
+        "type": "RLIMIT_CORE"
+      }
+    ],
+    "terminal": false,
+    "user": {
+      "gid": 1000,
+      "uid": 1000
+    }
+  },
+  "root": {
+    "path": "/scratch/oci-images/aaaa/rootfs",
+    "readonly": true
+  }
+}

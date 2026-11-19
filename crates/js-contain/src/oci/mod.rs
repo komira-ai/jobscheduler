@@ -81,6 +81,8 @@ pub mod supervise;
 pub mod words;
 
 #[cfg(test)]
+mod fuse_spec_tests;
+#[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
 mod host_lease_tests;

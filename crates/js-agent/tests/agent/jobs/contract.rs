@@ -194,7 +194,15 @@ fn the_toolkit_hook_flag_is_checked_at_start() {
 /// contract satisfied by a flag instead of by what the host has.
 #[test]
 fn the_contract_capabilities_cannot_be_set_by_flag() {
-    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib", "run-files"] {
+    for key in [
+        "runtime",
+        "exec",
+        "gpu-toolkit",
+        "disk-gib",
+        "run-files",
+        "fuse-jobs",
+        "fuse-uring",
+    ] {
         let flag = format!("{key}=container");
         let (ran, sent, _) = run_scripted(
             &["--capability", flag.as_str()],

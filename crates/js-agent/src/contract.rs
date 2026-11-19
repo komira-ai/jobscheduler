@@ -60,6 +60,12 @@
 //!   the crun runtime takes: its runtime launches a job with `isolation = host`
 //!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
 //!   a job, so no other agent reports it. An operator cannot set it.
+//! - `fuse-jobs` is `true` for a crun agent started with `--allow-fuse-jobs` whose kernel is at
+//!   least 6.14 and whose `/dev/fuse` is the FUSE device, and `fuse-uring` with it where the
+//!   fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0 (the probe is
+//!   [`crate::fuse_env`]); a flag whose probe fails is a warning naming what is missing and
+//!   reports neither. A server sends a start with `fuse` only to a host that reports
+//!   `fuse-jobs`. An operator cannot set either.
 //! - `mount-provider.<name>` is `true` for each node-local mount provider a crun agent was
 //!   given (`--mount-provider`), where the agent reports `layered-rootfs` (a provider's tree
 //!   is a layer or a mount of the job). A server sends a job that names a provider only to a
@@ -71,7 +77,9 @@ use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES};
 #[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
-pub(crate) use container::{ToolkitHook, report, report_host_jobs, report_mount_providers};
+pub(crate) use container::{
+    ToolkitHook, report, report_fuse, report_host_jobs, report_mount_providers,
+};
 
 /// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
 /// start whose fence it retired and stops its jobs after a silence), and that it beats again

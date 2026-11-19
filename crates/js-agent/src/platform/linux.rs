@@ -59,6 +59,14 @@ pub struct Flags {
     /// must be reimaged. Without it such a start creates nothing and is refused.
     #[arg(long)]
     pub allow_host_jobs: bool,
+    /// Give a contained job that asks for it the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN`
+    /// of its own user namespace, io_uring allowed, network unchanged. Taken with the crun
+    /// runtime only. The agent reports `fuse-jobs` when the kernel is at least 6.14 and
+    /// `/dev/fuse` is the FUSE device, and `fuse-uring` when the fuse module's `enable_uring`
+    /// is on and `kernel.io_uring_disabled` is 0; otherwise it warns, naming what is missing,
+    /// and reports neither. Without it such a start creates nothing and is refused.
+    #[arg(long)]
+    pub allow_fuse_jobs: bool,
     /// A directory whose listing (names, sizes, modification and status change times,
     /// inodes, owners and modes of its entries) the post-job checks compare with the
     /// listing taken when the host was last known clean; a change taints the host. May be
@@ -398,6 +406,7 @@ impl Flags {
         let checks = [
             ("--allow-container-engine", self.allow_container_engine),
             ("--allow-host-jobs", self.allow_host_jobs),
+            ("--allow-fuse-jobs", self.allow_fuse_jobs),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
@@ -606,6 +615,8 @@ pub(crate) struct Jobs {
     pub(crate) taint_recheck: Duration,
     /// `--allow-host-jobs`.
     pub(crate) allow_host_jobs: bool,
+    /// `--allow-fuse-jobs`.
+    pub(crate) allow_fuse_jobs: bool,
     /// `--mount-provider` and `--mount-provider-wait`, checked.
     providers: MountProviders,
 }
@@ -679,9 +690,10 @@ impl Jobs {
 }
 
 /// The job flags of a Linux agent checked: the engine's settings from its flags (or the
-/// settings of `crun`), `--allow-host-jobs` (which `crun` alone takes,
-/// [`HOST_JOBS_NEED_CRUN`]), the egress ceiling (above none on `crun` only), `--settle-ms` and
-/// `--taint-recheck-ms`. `mounts` are the mount roots, which `crun` binds beneath.
+/// settings of `crun`), `--allow-host-jobs` and `--allow-fuse-jobs` (which `crun` alone takes,
+/// [`HOST_JOBS_NEED_CRUN`], [`FUSE_JOBS_NEED_CRUN`]), the egress ceiling (above none on `crun`
+/// only), `--settle-ms` and `--taint-recheck-ms`. `mounts` are the mount roots, which `crun`
+/// binds beneath.
 ///
 /// # Errors
 ///
@@ -700,6 +712,9 @@ pub(crate) fn jobs(
     if os.allow_host_jobs && start.is_none() {
         return Err(HOST_JOBS_NEED_CRUN.to_owned());
     }
+    if os.allow_fuse_jobs && start.is_none() {
+        return Err(FUSE_JOBS_NEED_CRUN.to_owned());
+    }
     let crun = start.map(|settings| settings.with_host_jobs(os.allow_host_jobs));
     let egress = egress_of(os, crun.is_some())?;
     let crun = crun.map(|settings| settings.with_mount_roots(mounts));
@@ -715,6 +730,7 @@ pub(crate) fn jobs(
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
         allow_host_jobs: os.allow_host_jobs,
+        allow_fuse_jobs: os.allow_fuse_jobs,
         providers: MountProviders::from_flags(
             &os.mount_providers,
             &os.mount_provider_users,
@@ -727,6 +743,10 @@ pub(crate) fn jobs(
 /// Why `--allow-host-jobs` is refused at start on an agent whose runtime is not `crun`.
 pub const HOST_JOBS_NEED_CRUN: &str = "--allow-host-jobs: only the crun runtime launches a \
      host job; the container engine (--allow-container-engine) runs contained jobs only";
+
+/// Why `--allow-fuse-jobs` is refused at start on an agent whose runtime is not `crun`.
+pub const FUSE_JOBS_NEED_CRUN: &str = "--allow-fuse-jobs: only the crun runtime gives a job the \
+     FUSE device; the container engine (--allow-container-engine) does not";
 
 /// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
 /// `crun` enforces a ceiling, so a ceiling above none on the engine is refused rather than
@@ -842,7 +862,7 @@ pub(crate) fn report(
     let crun = settings.crun();
     // A crun agent given a device list gives jobs the GPUs they book, and uploads live logs.
     let passthrough = crun.is_some_and(|plan| plan.gpus.is_some());
-    let found = contract::report(
+    let mut found = contract::report(
         hello,
         start.toolkit.as_ref(),
         services.commands,
@@ -851,6 +871,8 @@ pub(crate) fn report(
         (passthrough, &local.egress.ceiling(), crun.is_some()),
     );
     contract::report_host_jobs(hello, local.allow_host_jobs);
+    let fuse = crate::fuse_env::probe(&|path| services.files.read(path), crate::crun::read_node);
+    found.extend(contract::report_fuse(hello, local.allow_fuse_jobs, &fuse));
     let layered = crun.is_some_and(|plan| plan.layered);
     contract::report_layered(hello, layered);
     contract::report_mount_providers(hello, &local.providers, layered);

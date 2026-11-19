@@ -128,6 +128,7 @@ fn start(job_id: &str, prefix: Option<String>) -> JobStartSpec {
         }),
         kind: Default::default(),
         isolation: Default::default(),
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),

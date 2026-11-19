@@ -472,6 +472,12 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if given.fuse && !self.config.allow_fuse_jobs {
+            return Err(no(
+                refusal::FUSE_JOBS_NOT_ALLOWED,
+                "this agent gives no job the FUSE device",
+            ));
+        }
         if !spec.files.is_empty() && spec.isolation == Isolation::Host {
             return Err(no(
                 detail::FILES_NEED_CONTAINER,

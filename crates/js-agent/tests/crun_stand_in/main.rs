@@ -23,6 +23,7 @@ mod budget;
 mod creates;
 mod egress;
 mod env;
+mod fuse;
 mod gpus;
 mod host;
 mod host_ports;

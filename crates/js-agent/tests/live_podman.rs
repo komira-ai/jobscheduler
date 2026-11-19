@@ -114,6 +114,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         scratch: scratch.to_path_buf(),
         files: None,
         isolation: Isolation::Contained,
+        fuse: false,
         labels,
         slot: 0,
         bundle: None,

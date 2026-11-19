@@ -49,6 +49,7 @@ async fn a_start_is_resent_until_listed() {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
+        fuse: false,
     };
     let mut last = None;
     for _ in 0..3 {

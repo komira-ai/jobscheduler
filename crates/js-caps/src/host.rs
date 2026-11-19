@@ -17,11 +17,13 @@
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
 //! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
+//! | [`FUSE_JOBS`] | [`FLAG_SET`] | the agent runs contained jobs that ask for FUSE (`--allow-fuse-jobs`), its kernel is at least 6.14, and `/dev/fuse` is the kernel's FUSE device (char 10:229) |
+//! | [`FUSE_URING`] | [`FLAG_SET`] | as [`FUSE_JOBS`], and the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0, so FUSE over io_uring is usable; reported only together with [`FUSE_JOBS`] |
 //! | [`OS_VERSION`] | the major version of the host's operating system, a decimal number such as `26` | the agent runs on macOS and could read the version |
 //! | `mount-provider.<name>` ([`mount_provider_key`]) | [`FLAG_SET`] | the agent reports layered rootfs and was given the node-local provider `<name>` (`--mount-provider`) |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
-//! much free disk), [`LAYERED_ROOTFS`] and a `mount-provider.<name>` key (the same
+//! much free disk), [`LAYERED_ROOTFS`], [`FUSE_JOBS`], [`FUSE_URING`] and a `mount-provider.<name>` key (the same
 //! value); see [`crate::Request`]. The provider keys are a family, not names, so they are
 //! not among [`DETECTED_KEYS`]: [`is_mount_provider_key`] says whether a key is one.
 //!
@@ -94,6 +96,21 @@ pub const GPU_PASSTHROUGH: &str = "gpu-passthrough";
 /// exactly.
 pub const LAYERED_ROOTFS: &str = "layered-rootfs";
 
+/// The capability key of an agent that gives a contained job the FUSE device (`--allow-fuse-jobs`):
+/// `/dev/fuse` and `CAP_SYS_ADMIN` of the container's own user namespace. Its value is
+/// [`FLAG_SET`]. The agent reports it only when its kernel is at least 6.14 and `/dev/fuse` is
+/// the kernel's FUSE device (char 10:229). An agent without it runs a job that asks for FUSE
+/// without the device, so such a job is placed only on a host that reports this key, and its
+/// start is sent only there. An operator cannot set it with a flag; a request compares it
+/// exactly.
+pub const FUSE_JOBS: &str = "fuse-jobs";
+
+/// The capability key of a host where FUSE over io_uring is usable: the agent reports
+/// [`FUSE_JOBS`], the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0.
+/// Its value is [`FLAG_SET`]. It is reported only together with [`FUSE_JOBS`]. An operator
+/// cannot set it with a flag; a request compares it exactly.
+pub const FUSE_URING: &str = "fuse-uring";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
@@ -119,7 +136,7 @@ pub fn is_mount_provider_key(key: &str) -> bool {
 }
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 12] = [
+pub const DETECTED_KEYS: [&str; 14] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -131,6 +148,8 @@ pub const DETECTED_KEYS: [&str; 12] = [
     BUNDLE,
     BUNDLE_ROOT,
     LAYERED_ROOTFS,
+    FUSE_JOBS,
+    FUSE_URING,
     OS_VERSION,
 ];
 
