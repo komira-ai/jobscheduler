@@ -7,6 +7,7 @@ mod crun;
 mod lifecycle;
 mod mapped;
 mod noise;
+mod overlap;
 mod proc;
 mod restored;
 mod rules;

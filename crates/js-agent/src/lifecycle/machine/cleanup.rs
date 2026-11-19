@@ -3,8 +3,8 @@
 
 use super::Lifecycle;
 use super::job::{
-    Cause, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint, input_failure,
-    outcome,
+    Cause, Job, Phase, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint,
+    input_failure, outcome,
 };
 use crate::lifecycle::runtime::{RunHandle, Status, Whereabouts};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
@@ -149,22 +149,31 @@ impl Lifecycle {
         if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
             return;
         }
-        let live: Vec<RunHandle> = self
-            .jobs
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != index)
-            .filter_map(|(_, job)| job.stage.container().cloned())
+        // The containers of the other jobs still on the host: those the lifecycle holds, and
+        // those whose create is under way off the worker, which may have made the run's
+        // group and started its processes before the lifecycle takes the answer (a busy
+        // host's runs overlap so, and they all run as the one job user under `crun`).
+        let runtime = &*self.runtime;
+        let on_host = |job: &Job| match &job.stage {
+            Stage::Preparing(waiting) if waiting.phase == Phase::Creating => {
+                runtime.creating(&job.run_id)
+            }
+            stage => stage.container().cloned(),
+        };
+        let others = || {
+            self.jobs
+                .iter()
+                .enumerate()
+                .filter(move |(other, _)| *other != index)
+                .filter_map(|(_, job)| on_host(job).map(|id| (id, job.slot)))
+        };
+        let live: Vec<RunHandle> = others()
+            .map(|(id, _)| id)
             .chain(self.stuck.iter().map(|held| held.id.clone()))
             .collect();
         // The slots of the other jobs whose containers are still on the host.
-        let live_slots: Vec<u32> = self
-            .jobs
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != index)
-            .filter(|(_, job)| job.stage.container().is_some())
-            .filter_map(|(_, job)| job.slot)
+        let live_slots: Vec<u32> = others()
+            .filter_map(|(_, slot)| slot)
             .chain(self.stuck.iter().filter_map(|held| held.slot))
             .collect();
         // Where the runtime mounts the file systems of the other jobs it still holds, a job
