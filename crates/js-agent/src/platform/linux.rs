@@ -297,12 +297,13 @@ pub struct Flags {
     #[arg(long, value_name = "127.0.0.1:PORT/PREFIX")]
     pub image_allow_loopback: Vec<String>,
     /// How many milliseconds the agent lets the host settle before it counts what it sees
-    /// against a job: a process that was not on the host before the job counts as the job's
-    /// leftover (`daemonised-child`, `process-as-job-user`) only when it is still there this
-    /// long after the check first saw it, and a running run whose control group the runtime
-    /// cannot name taints the host as unchecked only when it is still so this long after the
-    /// first step that saw it. A host's own short-lived processes at the moment a job ends
-    /// and a container read as running a step after it exited are neither. By default 1000;
+    /// against a job: a process or mount that was not on the host before the job counts as
+    /// the job's leftover (`daemonised-child`, `process-as-job-user`, `new-mount`) only when it
+    /// is still there this long after the check first saw it, and a running run whose control
+    /// group the runtime cannot name taints the host as unchecked only when it is still so
+    /// this long after the first step that saw it. A host's own short-lived processes and
+    /// mounts at the moment a job ends and a container read as running a step after it
+    /// exited are neither. By default 1000;
     /// from 1 to 60000. Not with `--no-jobs`.
     #[arg(long, value_name = "MILLISECONDS")]
     pub settle_ms: Option<u64>,
