@@ -59,7 +59,7 @@ hand:
 | `crun`, `crun version` | the distribution's `crun` package, 1.14 or newer, at `/usr/bin/crun` | not a `Depends`: hostkeeper's install must find nothing to install but the package, and the program must be the distribution's file, which its AppArmor profile attaches to |
 | `newuidmap`, `newgidmap` | the `uidmap` package | not a `Depends`, as for `crun` |
 | `apparmor profile` | where `kernel.apparmor_restrict_unprivileged_userns` is 1, the distribution's profile for `/usr/bin/crun` loaded (`apparmor`) | the profile is the distribution's |
-| `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), with project quotas (`prjquota`) | the disk is the host's |
+| `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), XFS with project quotas (`prjquota`): each job's `/tmp` and `/var/tmp` is a directory there bounded by a project quota (`--job-tmp-gib`), and an agent whose scratch filesystem has no `prjquota` starts no job (each start is refused `quota-unavailable`, and the finding `quota-unhealthy` says why) | the disk is the host's |
 | `cgroup v2 delegation` | cgroup v2 and systemd 254 or newer | the unit asks for it (`Delegate=yes`, `DelegateSubgroup=supervisor`) |
 
 The state root and the other directories are the package's tmpfiles file's, made at each start of

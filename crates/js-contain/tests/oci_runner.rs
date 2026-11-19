@@ -339,7 +339,8 @@ async fn directories_are_opened_and_given_by_a_helper() {
     let mode = |p: PathBuf| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
     assert_eq!(mode(spec.dir.clone()), 0o755);
     assert_eq!(mode(spec.dir.join("rw/home")), 0o755);
-    // `/tmp`, `/var/tmp` and `/run` are tmpfs mounts, not directories of the lease.
+    // `/run` is a tmpfs mount, and `/tmp` and `/var/tmp` are the caller's host mounts: none
+    // is a directory of the lease.
     for name in ["tmp", "var-tmp", "run"] {
         assert!(!spec.dir.join("rw").join(name).exists(), "{name}");
     }

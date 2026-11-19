@@ -774,8 +774,9 @@ mid-read after them is the forced unmount of tierstore 7.5, tierstore's to make.
 
 ## 6. Disk
 
-There is no per-job disk quota on the farm: its pools book no disk, and its agents run without `--scratch-quota`
-(`jobscheduler-design.md` 5.7, `pools-providers-network.md`, `agent-privilege.md` Duty 3). This design keeps that.
+There is no per-run scratch quota on the farm: its pools book no disk, and its agents run without `--scratch-quota`
+(`jobscheduler-design.md` 5.7, `pools-providers-network.md`, `agent-privilege.md` Duty 3). This design keeps that. (A
+job's `/tmp` and `/var/tmp` alone have a bound of their own, `--job-tmp-gib`, that books nothing.)
 
 - **A tree's bytes** are in tierstore's cache, under the cache's own budget, not in the run's scratch. They book
   nothing.

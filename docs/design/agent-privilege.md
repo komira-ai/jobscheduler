@@ -118,7 +118,11 @@ and a follow-up should make a listing whose entries cannot be examined a `watch-
 
 The quota is optional (`--scratch-quota`), and the farm does not set it: its pools book no disk
 per job, and the tierstore on each node is the cache (jobscheduler-design.md, section 5.7). The
-duty below applies only to an agent run with the flag.
+duty below applies only to an agent run with the flag, except for the job's temporary directory:
+every crun agent bounds each contained job's `/tmp` and `/var/tmp` (`.tmp-<lease>` beside the run's
+directory) with a project of its own, the slot's temporary id (`base + MAX_SLOTS + 1 + slot`), to
+`--job-tmp-gib`, with the same calls, in the same order, as for the run's directory, and an agent
+whose scratch root cannot enforce a project quota starts no run until it can.
 
 Today the lifecycle applies an XFS project quota to the empty run directory before it is given to
 the job, reads the usage when it claims a slot, and takes the limits off after the tree is removed

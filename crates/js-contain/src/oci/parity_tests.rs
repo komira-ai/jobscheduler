@@ -1,5 +1,5 @@
 //! The resolved bundle of a job against what the engine this backend replaces gave it:
-//! no capability, no new privileges, a `/tmp` that cannot run programs, no core dumps,
+//! no capability, no new privileges, a `/tmp` and a `/run` that cannot run programs, no core dumps,
 //! `nosuid` and `nodev` on every bind. Each test reads the `config.json` the runner
 //! writes (`spec::render`), not the code that builds it, so a setting dropped or
 //! weakened anywhere on the way is seen. What a real `crun` does with the bundle is for
@@ -88,50 +88,72 @@ fn no_new_privileges_is_set() {
     assert_eq!(config()["process"]["noNewPrivileges"], true);
 }
 
-/// Catches a `/tmp` a job can run programs from, with no size, or one that is still the
-/// lease's disk directory: it is a tmpfs of the limits' size, `noexec`, `nosuid`, `nodev`
-/// and world-writable with the sticky bit (podman's
-/// `--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m`).
+/// Catches a `/tmp` or `/var/tmp` that is memory again, or that a job can run programs
+/// from: neither is a tmpfs, each is exactly one mount, the bind of the caller's directory
+/// (a plain `bind`, so no mount below the directory on the host reaches the job), read-write,
+/// `noexec`, `nosuid` and `nodev`.
 #[test]
-fn tmp_is_a_noexec_tmpfs_with_a_size() {
+fn tmp_and_var_tmp_are_noexec_binds_of_the_callers_directories_not_tmpfs() {
     let config = config();
-    let tmp = mount_at(&config, "/tmp");
-    assert_eq!(tmp["type"], "tmpfs");
-    let options = options(tmp);
-    for want in ["noexec", "nosuid", "nodev", "mode=1777", "size=106m"] {
-        assert!(options.contains(&want), "{want} not in {options:?}");
-    }
-    let tmps = config["mounts"]
-        .as_array()
-        .expect("mounts")
-        .iter()
-        .filter(|m| m["destination"] == "/tmp")
-        .count();
-    assert_eq!(tmps, 1, "one mount at /tmp");
-}
-
-/// Catches `/var/tmp` or `/run` left as a place a job can run programs from, or with no
-/// size (podman made both `rw,noexec,nosuid,nodev,size=64m` tmpfs mounts, as `/tmp`): each
-/// is one tmpfs mount of the limits' size, `noexec`, `nosuid`, `nodev`, mode 1777, and not
-/// also a bind of a lease directory.
-#[test]
-fn var_tmp_and_run_are_noexec_tmpfs_with_a_size() {
-    let config = config();
-    for dest in ["/var/tmp", "/run"] {
-        let mount = mount_at(&config, dest);
-        assert_eq!(mount["type"], "tmpfs", "{dest}");
-        let options = options(mount);
-        for want in ["noexec", "nosuid", "nodev", "mode=1777", "size=106m"] {
-            assert!(options.contains(&want), "{dest}: {want} not in {options:?}");
-        }
-        let count = config["mounts"]
+    for (dest, source) in [
+        ("/tmp", "/scratch/.tmp-lease-1-2/tmp"),
+        ("/var/tmp", "/scratch/.tmp-lease-1-2/var-tmp"),
+    ] {
+        let at: Vec<&Value> = config["mounts"]
             .as_array()
             .expect("mounts")
             .iter()
             .filter(|m| m["destination"] == dest)
-            .count();
-        assert_eq!(count, 1, "one mount at {dest}");
+            .collect();
+        assert_eq!(at.len(), 1, "one mount at {dest}");
+        assert_eq!(at[0]["type"], "bind", "{dest}");
+        assert_eq!(at[0]["source"], source, "{dest}");
+        assert_eq!(
+            options(at[0]),
+            ["bind", "rw", "nosuid", "nodev", "noexec"],
+            "{dest}"
+        );
     }
+}
+
+/// Catches a `/tmp` made a tmpfs again by the bundle itself: a spec whose caller binds
+/// nothing at `/tmp` or `/var/tmp` gets no mount there at all (the image's read-only root
+/// shows through), never a tmpfs in memory.
+#[test]
+fn without_a_callers_directory_tmp_and_var_tmp_get_no_mount() {
+    let mut spec = spec();
+    spec.mounts
+        .retain(|mount| !matches!(mount.target.as_str(), "/tmp" | "/var/tmp"));
+    let config = config_with(&spec).expect("a config");
+    let mounts = config["mounts"].as_array().expect("mounts");
+    for dest in ["/tmp", "/var/tmp"] {
+        assert!(
+            mounts.iter().all(|m| m["destination"] != dest),
+            "a mount at {dest}"
+        );
+    }
+}
+
+/// Catches `/run` left as a place a job can run programs from, or with no size (podman made
+/// it a `rw,noexec,nosuid,nodev,size=64m` tmpfs): it is one tmpfs mount of the limits'
+/// `run_mib`, `noexec`, `nosuid`, `nodev`, mode 1777, and not also a bind of a lease
+/// directory.
+#[test]
+fn run_is_a_noexec_tmpfs_with_a_size() {
+    let config = config();
+    let mount = mount_at(&config, "/run");
+    assert_eq!(mount["type"], "tmpfs");
+    let options = options(mount);
+    for want in ["noexec", "nosuid", "nodev", "mode=1777", "size=106m"] {
+        assert!(options.contains(&want), "{want} not in {options:?}");
+    }
+    let count = config["mounts"]
+        .as_array()
+        .expect("mounts")
+        .iter()
+        .filter(|m| m["destination"] == "/run")
+        .count();
+    assert_eq!(count, 1, "one mount at /run");
 }
 
 /// Catches core dumps left on, and the other two limits lost with them: `RLIMIT_CORE` is
@@ -173,8 +195,9 @@ fn every_bind_is_nosuid_and_nodev() {
         .iter()
         .filter(|m| m["type"] == "bind")
         .collect();
-    // init, 3 name files, 1 shared, the home directory, 3 host mounts.
-    assert_eq!(binds.len(), 9, "{binds:?}");
+    // init, 3 name files, 1 shared, the home directory, 5 host mounts (`/tmp` and
+    // `/var/tmp` among them).
+    assert_eq!(binds.len(), 11, "{binds:?}");
     for bind in binds {
         let options = options(bind);
         assert!(options.contains(&"nosuid"), "{bind}");
@@ -275,8 +298,8 @@ fn the_process_limit_never_exceeds_what_the_daemon_may_give() {
     // Everything else is untouched.
     let cut = limits.within_nproc(1000);
     assert_eq!(
-        (cut.pids, cut.nofile, cut.tmp_mib),
-        (limits.pids, limits.nofile, limits.tmp_mib)
+        (cut.pids, cut.nofile, cut.run_mib),
+        (limits.pids, limits.nofile, limits.run_mib)
     );
 }
 

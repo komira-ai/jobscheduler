@@ -31,6 +31,21 @@ pub const MAX_SCRATCH_QUOTA_FAILURES: u32 = 1_000_000;
 /// The most GiB `--scratch-default-gib` takes: the bytes must fit the wire's disk limit.
 pub const MAX_SCRATCH_GIB: u64 = js_agent_wire::limits::MAX_DISK_BYTES >> 30;
 
+/// The GiB of each job's temporary directory when `--job-tmp-gib` is not given.
+pub const DEFAULT_JOB_TMP_GIB: u64 = 1;
+
+/// `--job-tmp-gib`, checked: from 1 to [`MAX_SCRATCH_GIB`]; [`DEFAULT_JOB_TMP_GIB`] when not
+/// given.
+pub(super) fn job_tmp_gib(cli: &Cli) -> Result<u64, String> {
+    let gib = cli.job_tmp_gib.unwrap_or(DEFAULT_JOB_TMP_GIB);
+    match (1..=MAX_SCRATCH_GIB).contains(&gib) {
+        true => Ok(gib),
+        false => Err(format!(
+            "--job-tmp-gib: {gib} is not from 1 to {MAX_SCRATCH_GIB}"
+        )),
+    }
+}
+
 /// The inode limit of a run under `--scratch-quota` when `--scratch-max-inodes` is not
 /// given.
 pub const DEFAULT_SCRATCH_MAX_INODES: u64 = 1_000_000;

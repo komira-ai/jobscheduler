@@ -42,8 +42,9 @@ pub struct ContainerLimits {
     /// against the job user's limit, not the daemon's; either way the `pids` of each lease
     /// is the per-job bound.
     pub nproc: u64,
-    /// The size of the container's `/tmp` tmpfs, in MiB.
-    pub tmp_mib: u64,
+    /// The size of the container's `/run` tmpfs, in MiB. Its `/tmp` and `/var/tmp` are the
+    /// caller's host mounts ([`ContainerSpec::mounts`]), on disk.
+    pub run_mib: u64,
     /// The CPU the lease booked, in thousandths of a core, written on the container's own
     /// cgroup as `cpu.max` ([`cpu_max`](crate::cgroup::cpu_max), the text
     /// [`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard) writes on the lease). The
@@ -68,13 +69,13 @@ pub const NPROC_HIGH: u64 = 4_194_304;
 
 impl ContainerLimits {
     /// 8192 pids, a 64 MiB `/dev/shm`, 65,536 open files, [`NPROC_HIGH`] processes, a
-    /// 64 MiB `/tmp`, and no CPU or memory limit on the container's own cgroup.
+    /// 64 MiB `/run`, and no CPU or memory limit on the container's own cgroup.
     pub const DEFAULT: Self = Self {
         pids: 8192,
         shm_mib: 64,
         nofile: 65_536,
         nproc: NPROC_HIGH,
-        tmp_mib: 64,
+        run_mib: 64,
         cpu_millis: None,
         memory_bytes: None,
     };
@@ -285,7 +286,7 @@ pub(crate) mod tests {
                 shm_mib: 102,
                 nofile: 103,
                 nproc: 104,
-                tmp_mib: 106,
+                run_mib: 106,
                 cpu_millis: None,
                 memory_bytes: None,
             },
@@ -297,6 +298,20 @@ pub(crate) mod tests {
                     read_only: false,
                     recursive: true,
                     no_exec: false,
+                },
+                HostMount {
+                    target: "/tmp".to_owned(),
+                    source: PathBuf::from("/scratch/.tmp-lease-1-2/tmp"),
+                    read_only: false,
+                    recursive: false,
+                    no_exec: true,
+                },
+                HostMount {
+                    target: "/var/tmp".to_owned(),
+                    source: PathBuf::from("/scratch/.tmp-lease-1-2/var-tmp"),
+                    read_only: false,
+                    recursive: false,
+                    no_exec: true,
                 },
                 HostMount {
                     target: "/workspace".to_owned(),

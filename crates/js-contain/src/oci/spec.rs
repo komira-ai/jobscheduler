@@ -29,12 +29,14 @@ pub(crate) const HOSTNAME: &str = "localhost";
 
 /// The lease directories a job's container writes to, and the destination of each:
 /// disk-backed, owned by the container's root, discarded with the lease (the home
-/// directory). The image's root is read-only; these and the tmpfs mounts of [`TMPFS`] are
-/// the places a job writes besides the exec root.
+/// directory). The image's root is read-only; these, the tmpfs at [`RUN_TMPFS`] and the
+/// caller's host mounts (a job's `/tmp` and `/var/tmp` among them) are the places a job
+/// writes besides the exec root.
 pub(crate) const WRITABLE: [(&str, &str); 1] = [("home", "/root")];
 
-/// The places a job gets a size-limited, `noexec` tmpfs, as podman made them.
-const TMPFS: [&str; 3] = ["/tmp", "/var/tmp", "/run"];
+/// The place a job gets a size-limited, `noexec` tmpfs, as podman made it. Its `/tmp` and
+/// `/var/tmp` are not memory: the caller binds a directory on disk there (a host mount).
+const RUN_TMPFS: &str = "/run";
 
 /// The directory of the lease holding [`WRITABLE`]'s directories.
 pub(crate) const WRITABLE_DIR: &str = "rw";
@@ -145,10 +147,10 @@ pub(crate) struct Placement<'a> {
     pub route_wait_secs: u64,
 }
 
-/// The job's tmpfs at `destination` (`/tmp`, `/var/tmp`, `/run`), of `size_mib`, that holds no program (`noexec`), no set-uid
-/// file and no device node, and that anyone may write to (`mode=1777`). It counts against
-/// the lease's memory, as the engine this backend replaces made it
-/// (`--tmpfs <dir>:rw,noexec,nosuid,nodev,size=64m`).
+/// The job's tmpfs at `destination` (`/run`), of `size_mib`, that holds no program
+/// (`noexec`), no set-uid file and no device node, and that anyone may write to
+/// (`mode=1777`). It counts against the lease's memory, as the engine this backend replaces
+/// made it (`--tmpfs <dir>:rw,noexec,nosuid,nodev,size=64m`).
 fn tmp(destination: &str, size_mib: u64) -> Mount {
     let size = format!("size={size_mib}m");
     filesystem(
@@ -161,7 +163,7 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
 /// the exec-root overlay (or the host mount at the exec root in its place; a job with a mounted
 /// root has no overlay, its root's own writable upper covering `/work`), the shared
-/// trees read-only inside it, `/tmp`, [`WRITABLE`], and the host mounts last (each a bind,
+/// trees read-only inside it, `/run`, [`WRITABLE`], and the host mounts last (each a bind,
 /// recursive unless the mount says not, `nosuid` and `nodev`, read-only or read-write as
 /// asked, `noexec` when asked).
 fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
@@ -239,7 +241,7 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             &["rbind", "ro", "nosuid", "nodev"],
         ));
     }
-    mounts.extend(TMPFS.map(|dest| tmp(dest, spec.limits.tmp_mib)));
+    mounts.push(tmp(RUN_TMPFS, spec.limits.run_mib));
     for (name, destination) in WRITABLE {
         let source = spec.dir.join(WRITABLE_DIR).join(name);
         mounts.push(bind(
@@ -362,8 +364,8 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
 /// | no new privileges                        | `process.noNewPrivileges` true                     |
-/// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
-/// | the run's scratch, the job's mounts, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`, `noexec` when asked |
+/// | `/dev/shm` size, `/run` size, no programs in `/run` | the tmpfs `size=`; `/run` also `noexec`  |
+/// | the run's scratch, `/tmp`, the job's mounts, files | `spec.mounts`: binds (recursive unless asked not), `nosuid`, `nodev`, `noexec` when asked |
 /// | the booked GPUs' nodes, no other device  | `linux.devices`; `resources.devices` denies all, allows each node (only with devices) |
 /// | the kernel's default OOM score           | `process.oomScoreAdj`                              |
 /// | hostname `localhost`                     | `hostname`                                         |

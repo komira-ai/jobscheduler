@@ -184,9 +184,11 @@ fn claim_fails_without_an_id_or_a_reading() {
     ));
 }
 
-/// The id of a slot is the base plus the slot, the probe's id is after the last slot's, and
-/// a base that is 0 or leaves the range outside an `i32` is refused (the id of `quotactl`
-/// is a signed int, and 0 is no project).
+/// The id of a slot is the base plus the slot, the probe's id is after the last slot's, the
+/// temporary id of a slot is after the probe's (so a job's temporary directory never shares a
+/// project with any run's scratch or the probe), and a base that is 0 or leaves the whole
+/// range, temporary ids included, outside an `i32` is refused (the id of `quotactl` is a
+/// signed int, and 0 is no project).
 #[test]
 fn ids_are_the_base_plus_the_slot() {
     let ids = ProjectIds::new(0x1000).unwrap();
@@ -194,10 +196,16 @@ fn ids_are_the_base_plus_the_slot() {
     assert_eq!(ids.probe_id().get(), 0x1000 + MAX_SLOTS);
     assert_eq!(ids.of_slot(5).unwrap().to_string(), "4101");
     assert!(ids.of_slot(MAX_SLOTS).is_err());
+    assert_eq!(ids.of_tmp_slot(0).unwrap().get(), 0x1000 + MAX_SLOTS + 1);
+    assert_eq!(
+        ids.of_tmp_slot(MAX_SLOTS - 1).unwrap().get(),
+        0x1000 + 2 * MAX_SLOTS
+    );
+    assert!(ids.of_tmp_slot(MAX_SLOTS).is_err());
     assert!(ProjectIds::new(0).is_err());
-    assert!(ProjectIds::new(i32::MAX as u32 - MAX_SLOTS + 1).is_err());
+    assert!(ProjectIds::new(i32::MAX as u32 - 2 * MAX_SLOTS + 1).is_err());
     assert!(ProjectIds::new(u32::MAX).is_err());
-    assert!(ProjectIds::new(i32::MAX as u32 - MAX_SLOTS).is_ok());
+    assert!(ProjectIds::new(i32::MAX as u32 - 2 * MAX_SLOTS).is_ok());
     assert_eq!(
         ProjectIds::default().of_slot(0).unwrap().get(),
         ProjectIds::DEFAULT_BASE

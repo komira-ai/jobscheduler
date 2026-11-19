@@ -149,6 +149,11 @@ fn every_host_question_is_the_other_runtimes() {
         alone.check_native_egress(&open)
     );
     assert_eq!(with.lease_dir("run-1"), alone.lease_dir("run-1"));
+    fake.keep_tmp_dirs_in(Path::new("/scratch"));
+    assert_eq!(
+        with.tmp_dir("run-1"),
+        Some(PathBuf::from("/scratch/.tmp-fake-run-1"))
+    );
     // A job's layers and mounts are the other runtime's to give and to prepare.
     fake.give_layers();
     fake.mount_in(Path::new("/mounts"));

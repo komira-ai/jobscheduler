@@ -54,6 +54,7 @@ fn a_job_start_env_reaches_the_crun_process() {
         [
             "A=1".to_owned(),
             format!("PATH={DEFAULT_PATH}"),
+            "TMPDIR=/tmp".to_owned(),
             "B=two words".to_owned(),
             "C=1".to_owned(),
         ]
@@ -61,23 +62,45 @@ fn a_job_start_env_reaches_the_crun_process() {
 }
 
 /// Proves a job variable of a name the image also sets replaces the image's value: the
-/// container holds one `A` and one `PATH`, both the job's. Catches the image's value
-/// winning, and both values left in the environment.
+/// container holds one `A` and one `PATH`, both the job's, after the `TMPDIR` the runtime
+/// sets. Catches the image's value winning, and both values left in the environment.
 #[test]
 fn a_job_env_replaces_an_image_variable_of_the_same_name() {
     let node = Node::new("env-replaces");
     let spec = with_env(&node, "e1-hold", &[("A", "2"), ("PATH", "/opt/bin")]);
-    assert_eq!(process_env(&node, &spec), ["A=2", "PATH=/opt/bin"]);
+    assert_eq!(
+        process_env(&node, &spec),
+        ["TMPDIR=/tmp", "A=2", "PATH=/opt/bin"]
+    );
 }
 
-/// Proves a run with no environment gets the image's alone. Catches an empty environment
-/// that changes the bundle.
+/// Proves a job may not name `TMPDIR` (the agent owns it, and sets it to the job's `/tmp`):
+/// a start that names it, handed to the runtime directly, is refused with the wire's own
+/// words before anything is made. Catches a job that points `TMPDIR` off its bounded `/tmp`.
+#[test]
+fn a_job_that_names_tmpdir_is_refused() {
+    let node = Node::new("env-tmpdir");
+    let mut runtime = node.open();
+    let spec = with_env(&node, "e1-exit", &[("TMPDIR", "/scratch/t")]);
+    let why = runtime.create_and_start(&spec).expect_err("refused");
+    let named = BTreeMap::from([("TMPDIR".to_owned(), "/scratch/t".to_owned())]);
+    let wire = js_agent_wire::check_env("env", &named).expect_err("reserved");
+    assert_eq!(why.to_string(), wire.to_string());
+    assert!(runtime.list_labelled().expect("lists").is_empty());
+}
+
+/// Proves a run with no environment gets the image's, and the `TMPDIR` of its `/tmp`, alone.
+/// Catches an empty environment that changes the bundle.
 #[test]
 fn a_job_with_no_env_is_unchanged() {
     let node = Node::new("env-none");
     assert_eq!(
         process_env(&node, &node.spec("e1-hold")),
-        ["A=1".to_owned(), format!("PATH={DEFAULT_PATH}")]
+        [
+            "A=1".to_owned(),
+            format!("PATH={DEFAULT_PATH}"),
+            "TMPDIR=/tmp".to_owned()
+        ]
     );
 }
 

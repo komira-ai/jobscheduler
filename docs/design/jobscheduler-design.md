@@ -683,6 +683,7 @@ Purpose: a job must not be able to harm the host, another job or the object stor
 - The image must be pinned by digest and come from an allowed prefix. Private registry credentials, if configured, go only to the token realm the registry names, over https.
 - For a contained job: capability sets empty, no new privileges, a pinned seccomp profile, masked and read-only paths, a private cgroup namespace, core dumps off.
 - A per-job cgroup with the allocation as limit; out-of-memory is reported only if the job's cgroup says so.
+- A per-job temporary directory (the container's `/tmp` and `/var/tmp`) on the scratch disk, bounded by a filesystem project quota of its own (`--job-tmp-gib`, 1 GiB by default) on every crun agent; it books nothing, and an agent whose scratch filesystem cannot enforce a project quota starts no job (`quota-unavailable`).
 - A per-job scratch directory owned by the job identity, with an optional filesystem project quota (`--scratch-quota`). The farm does not set it: per-job disk allocation is not part of the farm's design, its pools book no disk, and the tierstore on each node is the cache. A pool that books no disk refuses a host that enforces a quota (`shape-not-accepted`, reason `quota-without-pool-disk`), so the pool and its hosts cannot disagree on what a run books.
 - Network: the per-job policy of section 5.8.
 
