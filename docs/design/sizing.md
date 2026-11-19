@@ -79,16 +79,17 @@ of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job 
 
 The estimator is `js-sizing` unchanged: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th
 percentile of CPU used per second of wall time rounded up to a quarter core. A class with too few runs books the cold size:
-`server.cold_cpu_millis` and `server.cold_memory_bytes` when the server's file sets them, each one left out a quarter of the most
-cores or of the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows; never more
-than those most, and at least the class's kill floor. (A class that names a fallback class books that class's estimate in
+`server.cold_cpu_millis` and `server.cold_memory_bytes` (or their flags), each one left out its default: 4 cores and 16 GiB. The
+cold size is never more than the most cores or the most bookable memory (the pool's `memory_schedulable_percent` applied) of the
+hosts the engine knows, and at least the class's kill floor. (A class that names a fallback class books that class's estimate in
 place of the cold size: 7.8.) A class that has an estimate but no CPU sample yet (its only runs were
 memory kills) books the estimator's own unlearned CPU, two cores, and not the cold CPU. Before five runs the memory may only rise from the cold memory. A class whose
 estimate reaches the largest host's bookable memory books all of it and waits for an empty host.
 
-On a farm whose hosts have 88 cores and 251 GiB, a quarter is 22 cores and 62.75 GiB, so a host holds four cold jobs; a client
-that books every build target by its history (CPU and memory 0, the target's name as `size-class`) would run four jobs a host until
-each target had five runs. Such a farm sets the cold size to what an unlearned build step uses (two cores and 8 GiB: 31 a host by
+The default is a fixed size, not a share of the hosts: on a farm whose hosts have 88 cores and 251 GiB a quarter of a host would be
+22 cores and 62.75 GiB, four cold jobs a host, and a client that books every build target by its history (CPU and memory 0, the
+target's name as `size-class`) would run four jobs a host until each target had five runs. At 4 cores and 16 GiB such a host holds
+15 cold jobs by memory. A farm whose unlearned steps are smaller sets a smaller cold size (two cores and 8 GiB: 31 a host by
 memory), and a target that needs more is raised by its runs: a memory kill at the cold size books twice it next, and runs that
 come near it raise the next booking after two runs.
 

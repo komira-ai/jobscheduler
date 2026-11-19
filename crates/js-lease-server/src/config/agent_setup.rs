@@ -38,7 +38,7 @@ pub(crate) struct AgentSetup {
     pub(crate) cpu_slack: CpuSlack,
     /// `--cold-cpu-millis` and `--cold-memory-bytes`, or `server.cold_cpu_millis` and
     /// `server.cold_memory_bytes`: what a job that books nothing books while its class has no
-    /// estimate (each absent one a quarter of the largest host).
+    /// estimate (each absent one its default, 4 cores and 16 GiB).
     pub(crate) cold: ColdSize,
     /// `server.max_lease_wall`: the one up to which the placement engine trusts a wall time
     /// for backfill.
