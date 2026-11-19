@@ -414,9 +414,10 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
 /// runtime held inside the start of a job, twenty more heartbeats are posted and answered,
 /// counted at the transport and not timed, and the start (sent again each time, since the
 /// agent does not list the job) is dropped with a note once the worker's queue is full;
+/// from then on each heartbeat waits a backoff longer than the last instead of the interval;
 /// when the runtime answers the job is created once and listed. It catches a session that
 /// calls the runtime itself, so that a slow engine would stop the heartbeats and the server
-/// would give the host up.
+/// would give the host up, and one that asks a full worker again at once.
 #[test]
 fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     let server = Server::start_pool("jobs_e2e_slow", &[], POOL_RUNS_QUICK_TOML);
@@ -436,11 +437,20 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     }
     rig.machine.world.wait_entered(1);
     let before = counted.load(Ordering::SeqCst);
-    for _ in 0..20 {
-        rig.agent.elapse();
-        assert_eq!(rig.agent.next_wait(), INTERVAL);
-    }
+    let waits: Vec<Duration> = (0..20)
+        .map(|_| {
+            rig.agent.elapse();
+            rig.agent.next_wait()
+        })
+        .collect();
     assert_eq!(counted.load(Ordering::SeqCst) - before, 20);
+    let full = waits.iter().position(|wait| *wait != INTERVAL);
+    let full = full.expect("the worker's queue filled");
+    assert!(
+        waits[full..].windows(2).all(|pair| pair[0] < pair[1]),
+        "{waits:?}"
+    );
+    assert!(waits[full] > Duration::ZERO, "{waits:?}");
     assert!(
         rig.machine.world.created().is_empty(),
         "the runtime has not answered"
