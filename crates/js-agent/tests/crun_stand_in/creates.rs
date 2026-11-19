@@ -290,9 +290,10 @@ fn a_lease_whose_create_is_under_way_is_not_removed() {
 /// worker takes the answer: with run A held in its wiring, `creating` answers A's lease name
 /// while A's control group already exists (so A's processes may run in it), and answers it
 /// still after the create rang its answer but before the poll took it; once the poll took it,
-/// and for a run never begun, it answers none. Catches a runtime that names only the runs in
-/// its books, which leaves a started container's group unnamed to the post-job checks of a
-/// run that ends meanwhile, so the neighbour's processes are counted as that run's leftover.
+/// for a run never begun, and for an id no lease can be named for, it answers none. Catches a
+/// runtime that names only the runs in its books, which leaves a started container's group
+/// unnamed to the post-job checks of a run that ends meanwhile, so the neighbour's processes
+/// are counted as that run's leftover.
 #[test]
 fn a_lease_whose_create_is_under_way_is_named_until_its_answer_is_taken() {
     let node = Node::new("creates-creating");
@@ -308,6 +309,7 @@ fn a_lease_whose_create_is_under_way_is_named_until_its_answer_is_taken() {
     assert_eq!(runtime.creating("ra-wired"), Some(RunHandle(name.clone())));
     assert!(node.cgroup_of(&name).is_dir(), "A's group is made");
     assert_eq!(runtime.creating("rb-never"), None);
+    assert_eq!(runtime.creating(""), None, "a name the grammar refuses");
 
     release.send(Release::Wire).expect("released");
     rung.recv_timeout(LONG).expect("the create answered");

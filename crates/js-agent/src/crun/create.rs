@@ -231,11 +231,9 @@ impl CrunRuntime {
     /// have made the lease's group and started its container already, and until the worker
     /// takes the answer the books do not hold the run.
     pub(super) fn creating_off_worker(&self, run_id: &str) -> Option<RunHandle> {
-        let name = container_name(&self.host_id, run_id).ok()?;
-        self.creates
-            .under_way
-            .contains_key(&name)
-            .then_some(RunHandle(name))
+        // A run id the name grammar refuses was never begun: its empty name is no key.
+        let name = container_name(&self.host_id, run_id).unwrap_or_default();
+        self.creates.holds(&name).then_some(RunHandle(name))
     }
 
     /// What the worker settles of `spec` before its lease is made (see [`Head`]): the checks
