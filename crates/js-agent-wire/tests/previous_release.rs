@@ -292,6 +292,7 @@ fn job_start(id: &str) -> Command {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        fuse: false,
     }))
 }
 
@@ -627,5 +628,40 @@ fn an_old_agent_skips_the_isolation_of_a_host_start() {
     );
     assert!(
         matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "host-41")
+    );
+}
+
+/// Asserts that an agent from before the `fuse` of a job start reads a FUSE start with the
+/// start and the stop beside it intact: the field is skipped, never a decode error. (Such an
+/// agent would run it without the device, which is why a server sends `fuse: true` only to a
+/// host whose hello reports `fuse-jobs`.) Catches a FUSE start that costs an old agent the
+/// reply.
+#[test]
+fn an_old_agent_skips_the_fuse_of_a_fuse_start() {
+    let Command::JobStart(mut spec) = job_start("fuse-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.fuse = true;
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "fuse-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["commands"][0]["fuse"], true);
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("fuse-42", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "fuse-41")
     );
 }

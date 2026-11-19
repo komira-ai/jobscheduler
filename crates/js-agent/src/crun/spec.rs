@@ -57,7 +57,8 @@ pub(super) fn pinned(image: &str) -> Result<PinnedImage, String> {
 /// The container of `run` named `name` over `image`, with its directories and the cgroup
 /// `cgroup_parent`. The program and environment are empty here: the image's config gives
 /// them ([`ImageConfig::apply`](crate::image::ImageConfig::apply)), and the job's
-/// environment goes over the image's after that ([`job_env`]).
+/// environment goes over the image's after that ([`job_env`]). The container is given the FUSE
+/// device when the run asks for it ([`RunSpec::fuse`]).
 ///
 /// The run's scratch directory, its mounts and its files are bound after the exec root, in
 /// that order, as js-contain wants host mounts.
@@ -112,6 +113,7 @@ pub(super) fn container_spec(
         mounts,
         // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
         devices: Vec::new(),
+        fuse: run.fuse,
         mounted_root: None,
         // The job's init waits for the listener of each of its host ports.
         listen_ports: run.host_ports.iter().map(HostPort::job_port).collect(),
@@ -188,6 +190,7 @@ pub(super) fn adopted_spec(
         shared: Vec::new(),
         mounts: Vec::new(),
         devices: Vec::new(),
+        fuse: false,
         mounted_root: None,
         listen_ports: Vec::new(),
     }

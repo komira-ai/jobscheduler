@@ -148,6 +148,11 @@ pub struct RunSpec {
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
+    /// Whether the job is given the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN` of its own
+    /// user namespace, with io_uring allowed. Set by a job start that asks for it
+    /// ([`JobStartSpec::fuse`](js_agent_wire::JobStartSpec::fuse)) and was admitted only
+    /// where the agent was started with `--allow-fuse-jobs`; only the crun runtime gives it.
+    pub fuse: bool,
     /// The network level the job was admitted at: never above the runtime's
     /// [`Runtime::network_ceiling`]. A backend that wires networks gives the container that
     /// level; `none` is loopback only.
@@ -916,6 +921,7 @@ mod tests {
             files: None,
             slot: 0,
             isolation: Isolation::Contained,
+            fuse: false,
             network: JobNetwork::None,
             ports: Vec::new(),
             host_ports: Vec::new(),

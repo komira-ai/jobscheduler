@@ -16,7 +16,9 @@ use oci_spec::runtime::{
 };
 
 use super::devices;
-use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
+use super::hardening::{
+    FUSE_CAPABILITY, MASKED_PATHS, READONLY_PATHS, SeccompError, capability, fuse_seccomp, seccomp,
+};
 use crate::cgroup::{cpu_max, hard_memory_max};
 use crate::container::{ACTION_ID, ContainerLimits, ContainerSpec, HostMount, Isolation};
 use crate::subids::DaemonIds;
@@ -64,6 +66,10 @@ pub enum SpecError {
     /// device: it sees the host's own, and none could be given without changing the host.
     #[error("a host container is given no mount, shared tree or device")]
     HostMounts,
+    /// A host container ([`Isolation::Host`]) was asked to be given the FUSE device: it
+    /// sees the host's own.
+    #[error("a host container is not given the FUSE device: it sees the host's own")]
+    HostFuse,
     /// The seccomp profile could not be built.
     #[error(transparent)]
     Seccomp(#[from] SeccompError),
@@ -361,6 +367,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | a pids limit                             | `resources.pids.limit`                             |
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
+/// | the FUSE device (`spec.fuse`)            | the five sets `CAP_SYS_ADMIN` alone; the seccomp filter resolved for it plus `io_uring_setup`, `io_uring_enter`, `io_uring_register`; `/dev/fuse` 10:229 mode 0666 as a device node, with its device rule |
 /// | no new privileges                        | `process.noNewPrivileges` true                     |
 /// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
 /// | the run's scratch, the job's mounts, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`, `noexec` when asked |
@@ -380,7 +387,8 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// # Errors
 /// `spec.exec_root` or the init's path is not a normalized absolute path, a device's path
 /// is not one below `/dev`, the seccomp profile cannot be resolved for the node's
-/// architecture, or a host container has a mount ([`SpecError::HostMounts`]).
+/// architecture, or a host container has a mount ([`SpecError::HostMounts`]) or is given the
+/// FUSE device ([`SpecError::HostFuse`]).
 pub(crate) fn action_config(
     spec: &ContainerSpec,
     placement: &Placement<'_>,
@@ -397,14 +405,21 @@ pub(crate) fn action_config(
         normalized("device path", &node.path, "/dev/")?;
     }
     // All five sets empty, written out: `crun` gives a process with no `capabilities`
-    // object its own default set.
+    // object its own default set. A job given the FUSE device holds `CAP_SYS_ADMIN` in each,
+    // the ambient set too, since the process is not root.
+    let held: HashSet<_> = spec
+        .fuse
+        .then(|| capability(FUSE_CAPABILITY))
+        .flatten()
+        .into_iter()
+        .collect();
     let capabilities = built(
         LinuxCapabilitiesBuilder::default()
-            .bounding(HashSet::new())
-            .effective(HashSet::new())
-            .permitted(HashSet::new())
-            .inheritable(HashSet::new())
-            .ambient(HashSet::new())
+            .bounding(held.clone())
+            .effective(held.clone())
+            .permitted(held.clone())
+            .inheritable(held.clone())
+            .ambient(held)
             .build(),
     );
     let cwd = if spec.working_directory.is_empty() {
@@ -445,7 +460,7 @@ pub(crate) fn action_config(
         .pids(pids)
         .unified(unified(spec.limits));
     // A container given no device gets no device section, as before devices were given.
-    let given = !spec.devices.is_empty();
+    let given = !devices::given(spec).is_empty();
     if given {
         resources = resources.devices(devices::rules(spec));
     }
@@ -455,7 +470,11 @@ pub(crate) fn action_config(
         .namespaces(namespaces())
         .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
         .resources(built(resources.build()))
-        .seccomp(seccomp(placement.arch, &[])?)
+        .seccomp(if spec.fuse {
+            fuse_seccomp(placement.arch)?
+        } else {
+            seccomp(placement.arch, &[])?
+        })
         .masked_paths(strings(&MASKED_PATHS))
         .readonly_paths(strings(&READONLY_PATHS));
     if given {

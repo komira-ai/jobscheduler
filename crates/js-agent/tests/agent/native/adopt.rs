@@ -204,6 +204,7 @@ fn reopened(dir: &super::Scratch) -> js_agent::lifecycle::Config {
             gpus: std::collections::BTreeSet::from([0, 1]),
         },
         allow_host_jobs: false,
+        allow_fuse_jobs: false,
         mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
         scratch: ScratchRoot::open(&dir.path("scratch")).unwrap(),
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),

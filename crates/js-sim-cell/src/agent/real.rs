@@ -89,6 +89,7 @@ impl RealAgent {
                     .collect(),
             },
             allow_host_jobs: false,
+            allow_fuse_jobs: false,
             mounts,
             scratch,
             files: None,

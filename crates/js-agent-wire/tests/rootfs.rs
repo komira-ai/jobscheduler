@@ -63,6 +63,7 @@ fn start() -> JobStartSpec {
         ],
         host_ports: vec![port(9000, None), port(9443, Some(19443))],
         placed_at_ms: None,
+        fuse: false,
     }
 }
 

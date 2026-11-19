@@ -3,7 +3,8 @@
 # dedicated non-root job user, in a `Delegate=yes` system unit. The tests are
 # crates/js-agent/tests/crun_runtime (every one `#[ignore]`, so no other job runs them), but
 # the GPU test, which needs a host with two NVIDIA GPUs (no hosted runner has one) and is run
-# by hand on one.
+# by hand on one. `this_host_offers_fuse_jobs` is skipped too: it needs a kernel of at least
+# 6.14 and the runners' (ubuntu-24.04) is 6.8; it is run on a farm node.
 #
 # One XFS volume with project quota is mounted for the quota tests (a job's writes to /scratch,
 # /work and /root share one bound).
@@ -108,7 +109,8 @@ jobs:
             "$GITHUB_WORKSPACE/target/debug/xtask" count-run \
             --count-file "$RUNNER_TEMP/crun-runtime.count" -- \
             "$EXE" --include-ignored --test-threads=2 \
-            --skip a_crun_job_sees_only_its_booked_gpu || rc=$?
+            --skip a_crun_job_sees_only_its_booked_gpu \
+            --skip this_host_offers_fuse_jobs || rc=$?
           # systemd-run's exit status is not trusted (it exited 0 after a unit's binary
           # failed): the unit's own result is read whatever it said, and the unit is reset.
           # The count of tests the wrapper wrote must also be at least one.

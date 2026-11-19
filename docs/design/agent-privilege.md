@@ -457,3 +457,51 @@ unit's `Delegate=` and `AmbientCapabilities=` (A); a `hidepid` process
 table; the egress set-up; the `--scratch-quota` flag (the farm does not set it, so Duty 3 does not
 arise there); the farm's kernel and AppArmor policy against any of the above
 (hosted runners differ).
+
+## 8. The FUSE device (`--allow-fuse-jobs`)
+
+A kernel test of a FUSE file system must mount one. The farm's privileged-test environment gives a
+contained job `/dev/fuse` and `CAP_SYS_ADMIN` when the host's operator opted in
+(`docs/runbooks/fuse-jobs.md`). The job's start carries `fuse`; the agent refuses it unless it
+was started with `--allow-fuse-jobs` (`fuse-jobs-not-allowed`).
+
+**Why it is not `isolation = host`.** A host job taints the host for good, shares its network and
+runs as root with every capability and no seccomp filter (`docs/runbooks/host-jobs.md`). A FUSE
+test needs none of that, and a farm cannot spend a host on each. The FUSE job stays a contained
+job: its network is `none`, it is not tainted, it runs in the job's namespaces, and `fuse` with
+`isolation = host` is refused.
+
+**The argument.** `CAP_SYS_ADMIN` is a capability of the container's own user namespace, not of
+the host's: `crun` runs as the non-root job user, and the job's ids map to that user's subordinate
+ids, so it never passes a check the kernel makes against the host's user namespace (loading a
+module, most sysctls, a mount in the host's namespace). The kernel lets a user namespace's root
+mount FUSE (the file system type carries `FS_USERNS_MOUNT`), and the mount is then in the job's
+mount namespace and goes with it. `noNewPrivileges` stays set, so the setuid `fusermount3` is not
+the route: the job mounts with `mount(2)` and an `fd=` option naming the descriptor it opened on
+`/dev/fuse`. The seccomp filter is the pinned profile resolved for `CAP_SYS_ADMIN` (the file and
+its hash do not change), plus `io_uring_setup`, `io_uring_enter` and `io_uring_register`, so FUSE
+over io_uring is usable. The network namespace (loopback only) and the cgroup limits are the same
+as for any contained job, and the masked and read-only paths are set up the same way.
+
+**What the job gains beyond FUSE.** The capability is not limited to FUSE. Inside its own
+namespaces the job can do what a user namespace's root can: mount and unmount any file system type
+the kernel allows there (tmpfs, proc, overlay, FUSE); unmount or remount the masked and read-only
+paths, which `crun` makes inside the job's user namespace so the kernel does not lock them (a
+masked `/proc` entry is then read as the kernel's own check on the job's ids allows); change the
+settings of its own network namespace; and make the calls the profile allows for `CAP_SYS_ADMIN`
+alone (`bpf`, `fanotify_init`, `lookup_dcookie`, `perf_event_open`, `quotactl`, `setdomainname`,
+`sethostname`), each still under the kernel's own checks and sysctls such as
+`kernel.unprivileged_bpf_disabled` and `kernel.perf_event_paranoid`. So a FUSE job reaches more of
+the kernel with a capability than a plain job does, and a kernel bug in that code is a way to the
+host. That is why the device is offered per host, by the operator's flag, and placed only by the
+`fuse-jobs` key: a host that runs code its operator does not trust is not started with
+`--allow-fuse-jobs`.
+
+**What is proven and what is not.** The unit tests show the bundle: the capability sets, the
+device node and its cgroup rule, the exact set of system calls the filter allows beyond the
+default, and the refusal with host isolation. UNVERIFIED in CI: that the kernel lets the job's
+namespace mount FUSE and that the first request on the descriptor is `FUSE_INIT`, that
+`NoNewPrivs` is set and that the job sees only `lo`. The smoke test
+`a_fuse_job_mounts_fuse_in_its_own_namespace_and_reads_init` shows them on a real `crun`; it is
+verified on the farm by running it on a node (hosted runners have `/dev/fuse` and run it too), and
+the kernel's behaviour before 6.14 and with `fuse.enable_uring` is shown only there.

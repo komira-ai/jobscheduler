@@ -148,6 +148,7 @@ impl JsAgent {
                 gpus: Default::default(),
             },
             allow_host_jobs: false,
+            allow_fuse_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(scratch.path()).unwrap(),
             files: None,
@@ -283,6 +284,7 @@ fn job_start(job: &str, allocation: &str) -> JobStartSpec {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        fuse: false,
     }
 }
 

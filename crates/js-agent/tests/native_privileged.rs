@@ -218,6 +218,7 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels: Default::default(),
         bundle: None,
         network: Default::default(),

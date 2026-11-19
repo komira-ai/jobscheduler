@@ -37,6 +37,7 @@ fn start(kind: StartKind) -> JobStartSpec {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        fuse: false,
     }
 }
 

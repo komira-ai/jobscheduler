@@ -520,6 +520,7 @@ fn container() -> ContainerSpec {
             no_exec: false,
         }],
         devices: Vec::new(),
+        fuse: false,
         mounted_root: None,
         listen_ports: Vec::new(),
     }

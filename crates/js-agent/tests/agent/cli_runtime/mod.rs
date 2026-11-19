@@ -165,6 +165,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels,
         bundle: None,
         network: Default::default(),

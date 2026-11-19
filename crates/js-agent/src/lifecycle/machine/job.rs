@@ -63,6 +63,10 @@ pub(super) struct Given {
     /// ([`JobStartSpec::placed_at_ms`](js_agent_wire::JobStartSpec::placed_at_ms)), for the
     /// start's timeline alone; `None` for a run start.
     pub(super) placed_at_ms: Option<u64>,
+    /// The start asks for the FUSE device
+    /// ([`JobStartSpec::fuse`](js_agent_wire::JobStartSpec::fuse)), which the admission gives
+    /// only where the agent reported `fuse-jobs` ([`RunSpec::fuse`]).
+    pub(super) fuse: bool,
 }
 
 /// What a start that waits is waiting for besides its images.
@@ -784,6 +788,7 @@ pub(super) fn run_spec(
         files,
         slot,
         isolation: spec.isolation,
+        fuse: given.fuse,
         network: spec.network,
         ports: spec.ports.clone(),
         host_ports: given.host_ports.clone(),

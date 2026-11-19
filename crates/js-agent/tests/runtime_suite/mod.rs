@@ -234,6 +234,7 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
         files: None,
         slot: 0,
         isolation: js_agent_wire::Isolation::Contained,
+        fuse: false,
         bundle: None,
         labels: std::collections::BTreeMap::from([(
             js_agent::lifecycle::label::RUN.to_owned(),

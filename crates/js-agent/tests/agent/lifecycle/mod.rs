@@ -86,6 +86,8 @@ pub struct Harness {
 #[derive(Default)]
 pub struct Options {
     pub allow_host_jobs: bool,
+    /// The agent reported `fuse-jobs`: a start with `fuse` may run.
+    pub allow_fuse_jobs: bool,
     /// Runs whose post-job check finds something.
     pub findings: Vec<(&'static str, CheckFinding)>,
     /// The fake runtime and the checks note in the log whether the marker exists when they
@@ -110,6 +112,7 @@ impl Harness {
         let dir = Scratch::new(&format!("life-{name}"));
         let scratch = dir.path("scratch");
         let mut config = config_in(&dir, options.allow_host_jobs);
+        config.allow_fuse_jobs = options.allow_fuse_jobs;
         config.bundle = options.bundle;
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
@@ -251,6 +254,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
             gpus: BTreeSet::from([0, 1]),
         },
         allow_host_jobs,
+        allow_fuse_jobs: false,
         mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
         scratch: ScratchRoot::open(&scratch).unwrap(),
         files: Some(FilesRoot::open(&dir.path("files")).unwrap()),

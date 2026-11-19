@@ -89,6 +89,7 @@ fn past_the_wait(name: &str, proc_read: ProcRead) -> (Option<Taint>, Vec<String>
             gpus: BTreeSet::new(),
         },
         allow_host_jobs: false,
+        allow_fuse_jobs: false,
         mounts: MountRoots::new(&[]).expect("no mount roots"),
         scratch: ScratchRoot::open(&private(&node, "life-scratch")).expect("scratch"),
         files: None,

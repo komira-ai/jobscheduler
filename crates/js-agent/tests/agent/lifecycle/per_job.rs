@@ -37,6 +37,7 @@ pub(super) fn start(job_id: &str) -> JobStartSpec {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
@@ -602,4 +603,48 @@ fn a_host_job_without_the_flag_is_still_refused() {
     let created = allowed.fake.created();
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].isolation, Isolation::Host);
+}
+
+/// Proves a job start with `fuse` on an agent that did not report `fuse-jobs` creates nothing
+/// (no container, no booking, no taint) and is refused `fuse-jobs-not-allowed`, and that the
+/// same start on an agent that did reaches the runtime with `fuse` set, as a contained job,
+/// while a plain start reaches it without. Catches an agent that gives a job the FUSE device
+/// on the server's word alone, and a `fuse` that is dropped before the runtime.
+#[test]
+fn a_fuse_job_start_is_refused_without_the_agents_consent() {
+    let fuse_start = |job_id: &str| {
+        let mut spec = start(job_id);
+        spec.fuse = true;
+        job_start(spec)
+    };
+    let mut refused = Harness::new("job-fuse-refused");
+    let events = refused.apply(vec![fuse_start("j1")]);
+    assert_eq!(names(&events), ["refused j1 fuse-jobs-not-allowed"]);
+    assert_eq!(refused.life.free().cpu_millis, 4000);
+    assert!(refused.fake.created().is_empty());
+    assert!(!refused.life.is_tainted());
+
+    let mut allowed = Harness::with(
+        "job-fuse-allowed",
+        Options {
+            allow_fuse_jobs: true,
+            ..Options::default()
+        },
+    );
+    let events = allowed.apply(vec![fuse_start("j1"), job_start(start("j2"))]);
+    assert_eq!(names(&events), ["started j1", "started j2"]);
+    assert!(!allowed.life.is_tainted());
+    let created: Vec<(String, bool, Isolation)> = allowed
+        .fake
+        .created()
+        .iter()
+        .map(|run| (run.run_id.clone(), run.fuse, run.isolation))
+        .collect();
+    assert_eq!(
+        created,
+        [
+            ("j1".to_owned(), true, Isolation::Contained),
+            ("j2".to_owned(), false, Isolation::Contained),
+        ]
+    );
 }

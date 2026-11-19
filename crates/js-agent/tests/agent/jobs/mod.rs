@@ -170,6 +170,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
             gpus: Default::default(),
         },
         allow_host_jobs: false,
+        allow_fuse_jobs: false,
         mounts: MountRoots::new(&[]).unwrap(),
         scratch: ScratchRoot::open(&private(dir, "scratch")).unwrap(),
         files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),

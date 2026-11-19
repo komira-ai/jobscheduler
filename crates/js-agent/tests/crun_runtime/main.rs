@@ -10,8 +10,9 @@
 //! over a tree with no file system) is `#[ignore]`: they need `crun`, `newuidmap`/`newgidmap`, a job user with a
 //! subordinate id range (`JS_JOB_USER`), cgroup v2 with a delegated unit, root, and the
 //! network (the image is busybox, pinned by digest in `JS_TEST_IMAGE`). A missing
-//! prerequisite fails a test, never skips it. They are run by `cargo xtask crun-tests
-//! --job-user <name>`, which starts the binary as root in a `Delegate=yes` unit.
+//! prerequisite fails a test, never skips it. They are run by the `js-agent-crun-runtime`
+//! workflow, which starts the binary as root in a `Delegate=yes` unit (`cargo xtask
+//! crun-tests` runs js-contain's `crun_root` target, not this one).
 //!
 //! No test waits for a clock or asserts on how long anything took: a job that must be up
 //! before it is signalled says so by opening a named pipe the test reads, and a job that
@@ -21,6 +22,7 @@
 mod adopt;
 mod escape;
 mod escape_xfs;
+mod fuse;
 mod gpu;
 mod host;
 mod host_ports;

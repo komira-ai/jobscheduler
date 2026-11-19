@@ -183,6 +183,7 @@ mod tests {
             files: None,
             slot: 0,
             isolation: Default::default(),
+            fuse: false,
             network: Default::default(),
             ports: Vec::new(),
             host_ports: Vec::new(),

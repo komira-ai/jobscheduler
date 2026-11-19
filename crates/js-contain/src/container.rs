@@ -172,6 +172,15 @@ pub struct ContainerSpec {
     /// GPUs a run booked. Empty for a container that is given none, whose bundle then has
     /// no device entry and no device rule.
     pub devices: Vec<DeviceNode>,
+    /// Whether the job is given the FUSE device: `/dev/fuse` (character 10:229, mode 0666)
+    /// and `CAP_SYS_ADMIN` in all five capability sets, a capability of the container's own
+    /// user namespace: power over the container's own namespaces (its mounts, including the
+    /// masked and read-only paths, which it can undo), none over the host's. Its seccomp
+    /// filter is the pinned profile resolved for `CAP_SYS_ADMIN`, plus `io_uring_setup`,
+    /// `io_uring_enter` and `io_uring_register`. The network and `noNewPrivileges` are those
+    /// of any contained job.
+    /// Not allowed with [`Isolation::Host`]: a host container sees the host's own devices.
+    pub fuse: bool,
     /// The ports of the container's loopback whose listeners, made by the daemon in the
     /// container's network namespace, the init waits for before it starts the program
     /// (`js-init --wait-listen`, for at most [`LISTEN_WAIT_SECS`](crate::oci::LISTEN_WAIT_SECS)):
@@ -314,6 +323,7 @@ pub(crate) mod tests {
                 },
             ],
             devices: Vec::new(),
+            fuse: false,
             listen_ports: Vec::new(),
         }
     }

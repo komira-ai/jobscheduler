@@ -351,6 +351,7 @@ impl Cell {
             shared: Vec::new(),
             mounts: shape.mounts,
             devices: Vec::new(),
+            fuse: false,
             mounted_root: None,
             listen_ports: Vec::new(),
         };

@@ -235,6 +235,12 @@
 //!   a server never taints a host for a job it cannot start. [`Config::allow_host_jobs`] is
 //!   the switch the lifecycle honours: it refuses a host start without it and taints the
 //!   host when such a job starts.
+//! - **The FUSE device needs the crun runtime.** Only the crun runtime gives a contained job
+//!   `/dev/fuse` and `CAP_SYS_ADMIN` of its own user namespace (a start with `fuse`), so
+//!   `--allow-fuse-jobs` is refused at start on every other runtime
+//!   ([`crate::platform::FUSE_JOBS_NEED_CRUN`]). [`Config::allow_fuse_jobs`] is the switch the
+//!   lifecycle honours: it is on only where the agent reported `fuse-jobs`, and a start with
+//!   `fuse` is refused without it (`fuse-jobs-not-allowed`) and creates nothing.
 //!
 //! # The threading contract of the runtime seam
 //!
@@ -430,6 +436,9 @@ pub struct Config {
     pub capacity: Capacity,
     /// Whether a start with `isolation = host` may run here.
     pub allow_host_jobs: bool,
+    /// Whether a start with `fuse` may run here: the agent was given `--allow-fuse-jobs` and
+    /// reported `fuse-jobs` (its probe found the kernel and `/dev/fuse` fit).
+    pub allow_fuse_jobs: bool,
     /// The roots a mount may name.
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
@@ -521,6 +530,10 @@ pub struct Local {
     /// `--allow-host-jobs`, which only the crun runtime takes: the one runtime that launches
     /// a host job. The agent reports `host-jobs` only with it.
     pub allow_host_jobs: bool,
+    /// `--allow-fuse-jobs`, which only the crun runtime takes: the one runtime that gives a
+    /// job the FUSE device. The agent reports `fuse-jobs` only with it, and only when its
+    /// probe finds the host fit ([`crate::fuse_env`]).
+    pub allow_fuse_jobs: bool,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -674,6 +687,7 @@ impl Local {
         let taint_recheck = jobs.taint_recheck;
         let egress = std::mem::take(&mut jobs.egress);
         let allow_host_jobs = jobs.allow_host_jobs;
+        let allow_fuse_jobs = jobs.allow_fuse_jobs;
         let providers = jobs.providers();
         Ok(Self {
             watch,
@@ -699,6 +713,7 @@ impl Local {
             silence_stop,
             vm: None,
             allow_host_jobs,
+            allow_fuse_jobs,
         })
     }
 }

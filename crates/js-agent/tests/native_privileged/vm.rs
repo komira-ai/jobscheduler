@@ -57,6 +57,7 @@ fn a_command_runs_in_a_fresh_vm_and_the_vm_is_destroyed() {
         files: None,
         slot: 0,
         isolation: Isolation::Contained,
+        fuse: false,
         labels: [(label::KIND.to_owned(), label::VM_KIND.to_owned())].into(),
         bundle: None,
         network: Default::default(),

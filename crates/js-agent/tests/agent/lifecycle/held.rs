@@ -48,6 +48,7 @@ fn start(job_id: &str) -> JobStartSpec {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),

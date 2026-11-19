@@ -11,6 +11,7 @@
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` | exact |
 //! | `exec` | exact, and a mode name: `container` or `sandbox-exec` |
 //! | `layered-rootfs` | exact: a job with layers, mounts or host ports asks for `true` |
+//! | `fuse-jobs`, `fuse-uring` | exact: a job that needs the FUSE device asks for `true` (`fuse-uring` for FUSE over io_uring) |
 //! | `mount-provider.<name>` | exact: a job with a layer or a mount from the provider `<name>` asks for `true` |
 //! | `xcode` | membership: the node reports a set (one entry per installed Xcode build) and the request names one |
 //! | `vm.image` | membership on the digest: the request names `<name>@sha256:<64 hex>`, the node reports one entry in that form per image it holds, and only the `sha256:<hex>` parts are compared |
@@ -101,7 +102,7 @@ impl fmt::Display for Consumable {
 }
 
 /// Keys compared as exact strings.
-const EXACT_KEYS: [&str; 7] = [
+const EXACT_KEYS: [&str; 9] = [
     "os",
     "os_image",
     "cpu.model",
@@ -109,6 +110,8 @@ const EXACT_KEYS: [&str; 7] = [
     "gpu.kind",
     crate::host::EXEC,
     crate::host::LAYERED_ROOTFS,
+    crate::host::FUSE_JOBS,
+    crate::host::FUSE_URING,
 ];
 
 /// Keys a node reports as a set and a request names one member of.

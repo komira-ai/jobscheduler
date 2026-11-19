@@ -63,6 +63,7 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
         log_sink: None,
         kind: Default::default(),
         isolation: Default::default(),
+        fuse: false,
         layers: Vec::new(),
         mounts: Vec::new(),
         host_ports: Vec::new(),
