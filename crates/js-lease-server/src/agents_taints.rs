@@ -94,9 +94,9 @@ impl Agents {
             CordonFault::Unsaved
         })?;
         let cleared = self.registry.clear_taint(host);
-        if let Some(taint) = &cleared {
-            log_cleared(host, taint, "operator");
-        }
+        cleared
+            .iter()
+            .for_each(|taint| log_cleared(host, taint, "operator"));
         drop(gate);
         self.saved().await?;
         Ok(cleared)

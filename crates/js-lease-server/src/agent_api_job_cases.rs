@@ -555,34 +555,20 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
             assert_eq!(rig.allocation(&queued).step, AllocationStep::Freed, "{id}");
             if round == 0 || round == 5 {
                 let booked = rig.allocation(&queued).booked;
-                memory_of.push(booked);
+                memory_of.push(crate::job_alloc::booked_of(booked).memory_bytes);
             }
         }
     }
-    let [cold, learned, first_bare, last_bare] = memory_of[..] else {
-        panic!("two classes, two samples each");
-    };
+    assert_eq!(memory_of.len(), 4, "two classes, two samples each");
+    let (cold, learned, first_bare, last_bare) =
+        (memory_of[0], memory_of[1], memory_of[2], memory_of[3]);
     assert_eq!(
         first_bare, cold,
         "a class with no history books the cold size"
     );
     assert_eq!(last_bare, cold, "no usage reported: still the cold size");
-    assert_ne!(
-        learned, cold,
-        "five runs with usage size the sixth from history"
+    assert!(
+        learned < cold,
+        "five runs with usage size the sixth from history below the cold size: {learned} < {cold}"
     );
-    let (
-        js_jobs::Booked::Shape {
-            memory_bytes: from_history,
-            ..
-        },
-        js_jobs::Booked::Shape {
-            memory_bytes: at_cold,
-            ..
-        },
-    ) = (learned, cold)
-    else {
-        panic!("a shared job books a shape");
-    };
-    assert!(from_history < at_cold, "{from_history} < {at_cold}");
 }
