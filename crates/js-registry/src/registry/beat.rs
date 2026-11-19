@@ -41,10 +41,18 @@ pub struct HeartbeatCheck {
 }
 
 /// Whether `heartbeat` reports the taint `record` holds as cleared: the taint it names is
-/// the one held, field for field. A host whose held taint differs (a host job's, the
-/// server's own, one the agent never reported) stays tainted.
+/// the one held, field for field; or the one held is the taint a refused start made (reason
+/// `host-tainted`), which only mirrors the agent's own taint and which the agent, clean
+/// again, never reports, so its report of any cleared taint ends it. A host whose held taint
+/// is another (a host job's, one the agent never reported) stays tainted.
 pub(super) fn clears(record: &Record, heartbeat: &Heartbeat) -> bool {
-    record.taint.is_some() && record.taint == heartbeat.taint_cleared
+    let Some(held) = &record.taint else {
+        return false;
+    };
+    let Some(cleared) = &heartbeat.taint_cleared else {
+        return false;
+    };
+    held == cleared || held.reason == refusal_code::HOST_TAINTED
 }
 
 /// The taint the host holds once the beat is recorded: the host's own unless the beat clears

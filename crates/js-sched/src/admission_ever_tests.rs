@@ -47,7 +47,6 @@ fn host(name: &str) -> HostView {
     HostView {
         id: HostId::new(name).unwrap(),
         state: HostState::Serving,
-        tainted: false,
         draining: false,
         total: Resources::new(8000, 32 * GIB, 1, Some("nvidia-a10".to_owned())).unwrap(),
         facts: facts(),
@@ -139,23 +138,20 @@ fn a_busy_capable_host_is_not_a_refusal() {
     }
 }
 
-/// Asserts that a pool whose one fitting host is tainted, or draining, refuses, and that a
-/// clean host beside it admits. Catches a check that ignores the taint or the drain, which
-/// would queue a request for a host nobody will clear.
+/// Asserts that a pool whose one fitting host is draining (leaving the pool) refuses, and
+/// that a serving host beside the draining one admits. Catches a check that ignores the
+/// drain, which would queue a request for a host that is going away.
 #[test]
-fn a_tainted_only_pool_refuses() {
-    let tainted = HostView {
-        tainted: true,
-        ..host("h1")
-    };
+fn a_draining_only_pool_refuses() {
     let draining = HostView {
         draining: true,
         ..host("h1")
     };
-    for hosts in [[tainted.clone()], [draining.clone()]] {
-        assert_eq!(can_ever_serve(&wanted(), &hosts, &[]), Admission::Refuse);
-    }
-    let beside = [tainted, draining, host("h2")];
+    assert_eq!(
+        can_ever_serve(&wanted(), std::slice::from_ref(&draining), &[]),
+        Admission::Refuse
+    );
+    let beside = [draining, host("h2")];
     assert_eq!(can_ever_serve(&wanted(), &beside, &[]), HOST);
 }
 

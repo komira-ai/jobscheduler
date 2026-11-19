@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 use super::VmRuntime;
 use crate::lifecycle::{
@@ -98,6 +98,10 @@ impl Runtime for WithVms {
 
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.owner(id).logs_report(id)
+    }
+
+    fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
+        self.owner(id).usage(id)
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {

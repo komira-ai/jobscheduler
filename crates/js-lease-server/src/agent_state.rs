@@ -72,6 +72,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
 use js_state::{Cond, Store, Txn};
@@ -666,6 +667,56 @@ impl BindingStore {
         let value = value.clone().unwrap_or_default();
         let txn = Txn::new().put(name, value, Cond::Version(row.version));
         host_keys::committed(store.txn(txn))
+    }
+
+    /// Ends the taint the store holds for `host` when the agent reports `cleared`: the stored
+    /// taint is `cleared`, field for field, or one a refused start made (reason
+    /// `host-tainted`, which the agent never reports, so any cleared report ends it; an agent
+    /// still tainted refuses its next start and taints the host again). The binding without
+    /// the taint is committed by the conditional write of [`BindingStore::commit_taint`],
+    /// expecting the taint read, and is then held as stored. Answers the change, or `None`
+    /// when nothing was written: the store holds no binding of `host`, another taint or none,
+    /// and in file mode. Unless the commit is made, what this server holds as stored for
+    /// `host` is left as it was, so a later [`BindingStore::save`] never writes this
+    /// server's binding over a taint the store holds that the registry does not.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read, failed or refused the write: nothing was written.
+    pub(crate) fn end_taint(&self, host: &HostId, cleared: &Taint) -> io::Result<Option<Change>> {
+        let kept = {
+            let written = self.lock();
+            (
+                written.bindings.get(host).cloned(),
+                written.extra.get(host).cloned(),
+            )
+        };
+        let ended = self.stored(host).and_then(|stored| {
+            let ends =
+                |taint: &Taint| taint == cleared || taint.reason == refusal_code::HOST_TAINTED;
+            let stored = stored.filter(|bound| bound.taint().is_some_and(ends));
+            let expected = stored.as_ref().and_then(|bound| bound.taint().cloned());
+            let change = stored.map(|bound| self.change(host, bound.with_taint(None)));
+            let commit = |change| self.commit_taint(change, expected.as_ref());
+            change.as_ref().map_or(Ok(()), commit)?;
+            Ok(change)
+        });
+        match &ended {
+            Ok(Some(change)) => self.applied(change),
+            _ => {
+                let mut written = self.lock();
+                let (binding, extra) = kept;
+                written.bindings.remove(host);
+                written.extra.remove(host);
+                written
+                    .bindings
+                    .extend(binding.map(|binding| (host.clone(), binding)));
+                written
+                    .extra
+                    .extend(extra.map(|extra| (host.clone(), extra)));
+            }
+        }
+        ended
     }
 
     /// Holds `change` as the store holds it once its writes are committed. Nothing in file

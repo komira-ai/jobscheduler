@@ -37,14 +37,14 @@ machines an elastic provider launched can join it.
 - `list` and `observe` are the host table. Present while heard; Unknown on silence, never Absent; Absent only on deregister or removal (5.6).
 - Identity and admission are those of registration.md (join credential, pool exists, tainted set, shape satisfied, `max_machines`).
 
-**Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table and not tainted,
+**Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table (a tainted host is capable: its taint ends, and placement skips it meanwhile),
 not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` or `Whole` class needs the
 host to exist; a `Book` class needs the total to hold the booking); and its latest facts satisfy every constraint of the request (5.13).
 Busy hosts are capable. Lost hosts (silent past the grace, inside the retention window) are capable: the agent registers again with the
 same id and the work waits for it, which is the same stance as 5.6 (silence is Unknown, not Absent). Cordoned and quarantined-by-pressure
-hosts are capable: both end without anyone replacing the machine. **Tainted hosts are not capable**: a taint ends only when an operator
-reimages the machine and clears it (machines.md, 5.12), so waiting for it would be an unbounded wait for an unplanned human action; the
-caller should be told. Draining hosts are not capable for a new request, because they are leaving. A host *reserved* for a whole-node request (5.17) is not
+hosts are capable: both end without anyone replacing the machine. Tainted hosts are capable too: an agent clears a residue or unchecked
+taint itself after clean re-checks, and the operator's `ClearHostTaint` clears any taint (taint-self-clearing.md), so a request waits for
+the clear as it waits behind a cordon; a taint that needs a reimage (a host job's) makes that wait as long as the reimage. Draining hosts are not capable for a new request, because they are leaving. A host *reserved* for a whole-node request (5.17) is not
 draining in this sense: it is not leaving, it stays capable, and it is simply not available to a second reservation or to new work until
 the reservation ends. For a whole-node request, "could ever serve" also needs the pool to offer the class (whole-node.md).
 
@@ -77,7 +77,8 @@ its last path too), is *not* refused at once: a host that restarts deregisters a
 request across a restart would turn routine maintenance into failures. It stays queued for `regain_grace` (a pool key; default 5 minutes
 on the injected clock, counted from the tick the last capable host left). If a capable host registers within it, the request proceeds
 untouched. When the grace passes, the request ends as Refused with `no-capable-host` and the reason `capacity-left`, the same constant as
-a refusal at submit, so a caller handles one code. A tainted last host starts the same grace (an operator can clear it quickly); a
+a refusal at submit, so a caller handles one code. A tainted last host does not start the grace: it is still capable, so the request
+stays queued until the taint ends. Only deregistration or ageing out starts it; a
 longer outage is a refusal, not a wait for ever. Leases already held on a host that is then tainted or evicted follow 5.6 and 5.12
 unchanged; only requests not yet placed are affected. New submissions get no grace: a request submitted while the only capable host is
 restarting is refused and the caller retries, which is the price of an answer that never hangs.
@@ -172,7 +173,7 @@ it bounds the waste to one boot plus one idle period, and any request queued mea
 boot-failure rule.
 
 **Tainted and lost hosts in the hierarchy.** A tainted host is replaced by an acquire in the hierarchy only if it was an elastic host
-(5.12); a tainted registered host is simply gone from the capable set, and the elastic entries (if any) serve the demand. Demand is
+(5.12); a tainted registered host is not placed on, but stays in the capable set at admission, and the elastic entries (if any) serve the demand. Demand is
 computed over the whole pool, not per entry.
 
 **Several clouds, tiers, spot hosts.** `aws`, `gcp`, `azure` and on-prem sources are providers of this one hierarchy; an entry may be a

@@ -378,9 +378,10 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
 
 /// Asserts the taint's path end to end: a container that cannot be removed taints the host;
 /// the next heartbeat carries the taint, the server records it (the host lists it) and
-/// acknowledges it, the agent stops reporting it, and the next job stays queued while the
-/// host is tainted. It catches a taint that never reaches the server, one reported for
-/// ever, and a server that goes on placing work on a host that found residue.
+/// acknowledges it, the agent stops reporting it, and the next job is accepted and stays
+/// queued while the host is tainted, with nothing more created on it. It catches a taint that
+/// never reaches the server, one reported for ever, a server that goes on placing work on a
+/// host that found residue, and one that refuses the job instead of letting it wait.
 #[test]
 fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
     let rig = rig("jobs_e2e_taint", &[]);
@@ -401,11 +402,17 @@ fn a_taint_is_reported_acknowledged_and_new_jobs_are_not_placed() {
         rig.worker.snapshot().taint.is_none(),
         "the agent was told it is known"
     );
-    let refused = rig.queue(1000);
-    assert_eq!(
-        (refused.status, refused.body),
-        (422, json!({ "error": "no-capable-host" }))
-    );
+    // A tainted host stays capable at admission (its taint ends with a clear), so the job is
+    // accepted and waits: placement skips the tainted host, and the next heartbeats start
+    // nothing on it.
+    let waiting = rig.queued(1000);
+    for _ in 0..3 {
+        rig.agent.elapse();
+        rig.agent.next_wait();
+        assert!(rig.worker.settle());
+    }
+    assert_eq!(rig.server.job_state(&waiting), "JOB_STATE_QUEUED");
+    assert_eq!(rig.machine.world.created(), [run.as_str()]);
     // The job that left the container behind stays held for as long as the agent lives, so
     // the agent is not drained here: dropping the rig ends it.
 }

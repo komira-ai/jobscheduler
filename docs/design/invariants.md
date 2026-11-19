@@ -16,10 +16,10 @@ Moved from design.md sections 13.2 and 13.3 to keep that file under its size lim
 ## Admission and hierarchy cases (providers.md)
 
 - A request no host of the pool (and no elastic entry) could ever serve is refused with `no-capable-host`; the same request is queued
-  when a capable host exists and is busy, lost, or cordoned; a tainted, denied or draining host does not make a request capable. Each
+  when a capable host exists and is busy, lost, or cordoned; a tainted host is capable too (its taint ends); a denied or draining host does not make a request capable. Each
   case names the host state it uses.
-- A pool whose `max_machines` is filled with tainted or denied hosts, with an enabled elastic entry, refuses a request with
-  `no-capable-host` (those slots never free); the same pool filled with busy, lost or elastic hosts queues it. An elastic entry that is
+- A pool whose `max_machines` is filled with denied hosts, with an enabled elastic entry, refuses a request with
+  `no-capable-host` (those slots never free); the same pool filled with tainted, busy, lost or elastic hosts queues it. An elastic entry that is
   disabled or has a share of 0 does not count as able to launch. A queued request in a pool that reaches the first state starts
   `regain_grace`, and is refused after it, so no accepted request waits for ever.
 - A queued request whose last capable host leaves is still queued until `regain_grace` has passed on the injected clock, is served if a

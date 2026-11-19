@@ -15,7 +15,9 @@ use js_state::Clock as _;
 use js_types::sched::Resources as Capacity;
 use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
-use super::{ColdSize, JobSizes, SIZE_CLASS_LABEL, bounds_of, class_name, day_of, micros, millis};
+use super::{
+    ColdSize, JobSizes, SIZE_CLASS_LABEL, SizedFrom, bounds_of, class_name, day_of, micros, millis,
+};
 use crate::engine::Settings;
 use crate::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, host, spec_of};
@@ -420,7 +422,12 @@ fn failed_or_cancelled_runs_teach_the_memory_nothing() {
     for prefix in ["failed", "wall", "cancelled", "input"] {
         let end = || end_of(prefix);
         let jobs = runs(&tables, prefix, 5, "build", booked(2000, 4 * GIB), end);
-        let sizes = taught(&jobs, booked(2000, 4 * GIB));
+        let mut sizes = JobSizes::with_cold(MODULE_COLD);
+        sizes.set_bounds(Some(bounds()));
+        for job in &jobs {
+            let taught = sizes.observe(job, booked(2000, 4 * GIB));
+            assert!(!taught, "{} is seen and teaches nothing", job.id);
+        }
         assert_eq!(size(&sizes, &next).1, 4 * GIB, "{prefix}");
     }
 }
@@ -780,6 +787,8 @@ fn a_start_teaches_every_ended_job_and_a_later_pass_each_job_live_then() {
     ] {
         tables.jobs.transition(&releasing, from, to).unwrap();
     }
+    let started = tables.clock.now().as_duration().as_millis();
+    tables.set_ms(u64::try_from(started).unwrap() + 10_000);
     let end = exited(0, 2 * GIB, Duration::from_secs(30));
     tables.jobs.end_job(&releasing, end).unwrap();
     tables.jobs.mark_releasing(&releasing).unwrap();
@@ -890,3 +899,49 @@ mod cold;
 
 #[path = "sizes_fallback_tests.rs"]
 mod fallback;
+
+/// Asserts that only a run that carries its usage teaches a class: five successful runs with a
+/// peak size the class from its own history (booked below the cold size, `sized_from` class)
+/// and each answers `true`; five successful runs of another class whose ended jobs carry no
+/// usage are seen, answer `false` and leave that class cold at the cold size. Catches a run
+/// with no measurement counted as taught (the count that said a whole history was learned when
+/// none of it was) and a class that stays cold for lack of a usage nobody sent.
+#[test]
+fn only_runs_with_usage_teach_a_class_and_the_rest_leave_it_cold() {
+    let tables = Tables::new();
+    let measured = || exited(0, 2 * GIB, Duration::from_secs(30));
+    let unmeasured = || JobEnd::Exited {
+        exit_code: 0,
+        output: Output::default(),
+    };
+    let with = runs(
+        &tables,
+        "with",
+        5,
+        "measured",
+        booked(2000, 4 * GIB),
+        measured,
+    );
+    let without = runs(
+        &tables,
+        "without",
+        5,
+        "bare",
+        booked(2000, 4 * GIB),
+        unmeasured,
+    );
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
+    sizes.set_bounds(Some(bounds()));
+    for job in &with {
+        assert!(sizes.observe(job, booked(2000, 4 * GIB)), "{}", job.id);
+    }
+    for job in &without {
+        assert!(!sizes.observe(job, booked(2000, 4 * GIB)), "{}", job.id);
+    }
+    let next = |class: &str| queued(&format!("next-{class}"), of_class(class, needs(0, 0)));
+    let (heard, silent) = (next("measured"), next("bare"));
+    assert_eq!(sizes.sized_from(&heard, Day(0)), Some(SizedFrom::Class));
+    assert_eq!(size(&sizes, &heard).1, 11 * 256 * MIB);
+    assert_eq!(sizes.sized_from(&silent, Day(0)), Some(SizedFrom::Cold));
+    assert_eq!(size(&sizes, &silent), (2000, 4 * GIB));
+}

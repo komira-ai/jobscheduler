@@ -5,7 +5,8 @@
 
 use js_agent::lifecycle::{Clock, RETIRED_LISTED, label};
 use js_agent_wire::{
-    BookedResources, Command, HeldJob, HeldState, Isolation, JobStartSpec, Outcome, refusal,
+    BookedResources, Command, HeldJob, HeldState, Isolation, JobStartSpec, JobUsage, Outcome,
+    refusal,
 };
 use serde_json::json;
 
@@ -647,4 +648,26 @@ fn a_fuse_job_start_is_refused_without_the_agents_consent() {
             ("j2".to_owned(), false, Isolation::Contained),
         ]
     );
+}
+
+/// Proves what the runtime's control group counted reaches the job's listed result: a job
+/// whose runtime read both counters lists them as `usage` beside its outcome, and a job whose
+/// runtime read none lists no `usage` (never a zero). Catches a result that leaves the
+/// counters out, one that invents a zero for a job that has none, and the counters of one
+/// job on another's result.
+#[test]
+fn a_jobs_usage_reaches_its_result_and_an_unread_one_is_absent() {
+    let mut h = Harness::new("job-usage");
+    h.apply(vec![job_start(start("j1")), job_start(start("j2"))]);
+    let counted = JobUsage {
+        peak_memory_bytes: 3 << 30,
+        cpu_usage_usec: 4_500_000,
+    };
+    h.fake.report_usage("j1", counted);
+    h.fake.exit("j1", 0);
+    h.fake.exit("j2", 0);
+    h.life.step();
+    let result = |job_id: &str| listing(&h, job_id).result.expect("a result");
+    assert_eq!(result("j1").usage, Some(counted));
+    assert_eq!(result("j2").usage, None);
 }

@@ -128,6 +128,7 @@ impl Lifecycle {
                             Err(why) => job.note(code::LOGS_FAILED, why.to_string(), events),
                         }
                         job.logs = runtime.logs_report(&id);
+                        job.usage = runtime.usage(&id);
                     }
                     job.result = Some(result);
                     job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));

@@ -211,7 +211,7 @@ pub use native::{
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{
     BookedResources, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY, HeldJob, JobResult, JobResultAck,
-    JobStartSpec, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+    JobStartSpec, JobUsage, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};

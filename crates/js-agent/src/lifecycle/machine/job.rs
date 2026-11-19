@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    HeldRun, HeldState, HostPort, Isolation, JobSpec, LogReport, NativeSpec, Outcome, RunResult,
-    Taint, refusal,
+    HeldRun, HeldState, HostPort, Isolation, JobSpec, JobUsage, LogReport, NativeSpec, Outcome,
+    RunResult, Taint, refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -347,6 +347,11 @@ pub(super) struct Job {
     /// keyed by job lists it in its result. `None` from a runtime that uploads no live logs,
     /// for a run without a sink, and for a result read back from the state root.
     pub(super) logs: Option<LogReport>,
+    /// What the runtime's control group of the container counted, read with the result: a job
+    /// keyed by job lists it in its result. `None` for a runtime that cannot read it, and for
+    /// a result read back from the state root, which never reports a zero for what it does
+    /// not know.
+    pub(super) usage: Option<JobUsage>,
     pub(super) findings: Vec<Finding>,
     /// When the container started, on the agent's monotonic clock, in microseconds (the
     /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
@@ -583,6 +588,7 @@ impl Job {
             owed: false,
             result: None,
             input_failure: None,
+            usage: None,
             logs: None,
             findings: Vec::new(),
             started_usec: None,
@@ -623,6 +629,7 @@ impl Job {
             logs: None,
             findings: Vec::new(),
             started_usec: None,
+            usage: None,
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
@@ -657,6 +664,7 @@ impl Job {
             owed: false,
             result: None,
             input_failure: None,
+            usage: None,
             logs: None,
             findings: Vec::new(),
             started_usec: now

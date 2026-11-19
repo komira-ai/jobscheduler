@@ -3,7 +3,8 @@
 //! and the pool's launching machine providers, and the one decision a job submit takes from
 //! it before anything is recorded.
 //!
-//! The hosts are read from the registry (taint, drain, cordon and silence). A launching
+//! The hosts are read from the registry (drain, cordon and silence; a taint is not read:
+//! a tainted host is capable). A launching
 //! provider's catalog is read from the server's cache ([`Catalogs::view`]), which the tick
 //! fills: the read calls no provider and answers at once. A catalog the cache has never
 //! fetched is [`CatalogView::Unread`], which counts as "may offer".
@@ -167,8 +168,9 @@ pub(crate) fn provider_view(
 
 /// A host of the registry as admission sees it, on the shape the registry places it on
 /// ([`RegistryView::placement_shape`]: the pool's booking with the host's validated
-/// accelerator facts). It is tainted when it reported a taint or
-/// announces the tainted phase; draining when it is being released ([`HostMark::Releasing`]:
+/// accelerator facts). A taint, reported or announced, does not show: a tainted host is
+/// capable, as its taint ends (the agent clears it, or an operator does) and placement alone
+/// skips it meanwhile. It is draining when it is being released ([`HostMark::Releasing`]:
 /// it is leaving the pool, and nothing ends the mark); lost when it is not live (silent
 /// past its grace, or not heard since a restart). A drain mark ([`HostMark::Draining`]) is
 /// not leaving: [`Registry::undrain`] ends it, as the scaler does for a request that needs
@@ -183,7 +185,6 @@ pub(crate) fn registered(host: &RegistryView) -> HostView {
             host.cordon_until.is_some(),
             !host.leases.is_empty(),
         ),
-        tainted: host.taint.is_some() | (host.phase == js_agent_wire::Phase::Tainted),
         draining: host.mark == Some(HostMark::Releasing),
         total: placed.resources().clone(),
         facts: placed.capabilities().clone(),
