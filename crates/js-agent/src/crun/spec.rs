@@ -3,9 +3,10 @@
 
 use std::path::Path;
 
-use js_agent_wire::{HostPort, LogTail};
+use js_agent_wire::{HostPort, JobUsage, LogTail};
 use js_contain::Isolation;
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
+use js_contain::cgroup_usage::NumaSample;
 use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
 use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
@@ -268,6 +269,18 @@ pub(super) fn end_of(
         }
     };
     exit_of(ended, oom.as_ref())
+}
+
+/// What the lease's `cgroup` counted, read once its processes have exited and before the group
+/// is removed: `memory.peak` and `usage_usec` of `cpu.stat`, read by js-contain. `None` when
+/// either is not readable (cgroup version 1, a kernel without `memory.peak`, a group that is
+/// gone): an unknown is never a zero.
+pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
+    let counted = NumaSample::default().finish(cgroup.dir());
+    Some(JobUsage {
+        peak_memory_bytes: counted.memory_peak_bytes?,
+        cpu_usage_usec: counted.cpu_usage_micros?,
+    })
 }
 
 /// The exit and the tail a run's end becomes: `ended` as js-contain read it, `captured` what

@@ -5,9 +5,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, JobResult, NetworkCeiling, Outcome};
+use js_agent_wire::{
+    HeartbeatReply, HeldJob, HeldState, JobResult, JobUsage, NetworkCeiling, Outcome,
+};
 use js_jobs::{
-    Booked, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResultReason, StartFailure,
+    Booked, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResourceUsage, ResultReason,
+    StartFailure,
 };
 use js_state::StoreError;
 use js_types::{HostId, Resources};
@@ -522,4 +525,47 @@ fn a_refused_start_is_stored_with_its_code_and_counted() {
         assert_eq!(stored.start_failure_detail.as_deref(), stored_detail);
         assert_eq!(*failures.0.lock().unwrap(), [failure], "{detail:?}");
     }
+}
+
+/// A result that carries usage ends the job with that usage stored in its output, whatever the
+/// way it ended (exited, failed, an input failure), as the exact CPU time and peak memory the
+/// agent counted; a result without usage stores none, never a zero. It catches usage dropped
+/// on the way to the stored result (every job then reads as never measured), a unit slip
+/// between microseconds and the stored time, and an unknown made into a zero.
+#[test]
+fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let counted = JobUsage {
+        peak_memory_bytes: 3 << 30,
+        cpu_usage_usec: 4_500_001,
+    };
+    let stored = ResourceUsage {
+        cpu_time: Duration::new(4, 500_001_000),
+        peak_memory_bytes: 3 << 30,
+    };
+    let mut measured = ended(Outcome::Succeeded, Some(0));
+    measured.usage = Some(counted);
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &measured) else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(output.usage, Some(stored));
+    let mut failed = ended(Outcome::Failed, Some(2));
+    failed.usage = Some(counted);
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &failed) else {
+        panic!("a nonzero exit ends exited");
+    };
+    assert_eq!(output.usage, Some(stored));
+    let mut input = ended(Outcome::Succeeded, Some(0));
+    input.usage = Some(counted);
+    input.input_failure = Some("input-unreadable".to_owned());
+    let Some(JobEnd::InputFailed { output, .. }) = end_of(&job, &input) else {
+        panic!("an input failure ends so");
+    };
+    assert_eq!(output.usage, Some(stored));
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &ended(Outcome::Succeeded, Some(0)))
+    else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(output.usage, None);
 }

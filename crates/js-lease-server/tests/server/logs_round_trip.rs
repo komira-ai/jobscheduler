@@ -392,6 +392,7 @@ impl Cell {
             log_tail: None,
             logs: Some(report),
             input_failure: None,
+            usage: None,
         };
         let ended = vec![HeldJob {
             job_id: job.start.job_id.clone(),

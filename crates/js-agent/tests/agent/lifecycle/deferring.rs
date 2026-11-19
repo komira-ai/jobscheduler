@@ -13,7 +13,9 @@ use js_agent::lifecycle::{
     CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, RunHandle,
     RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
-use js_agent_wire::{HostPort, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
+use js_agent_wire::{
+    HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+};
 
 use super::fake::FakeRuntime;
 use super::{Harness, hook};
@@ -176,6 +178,9 @@ impl Runtime for Deferring {
     }
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.inner.logs_report(id)
+    }
+    fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
+        self.inner.usage(id)
     }
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
         self.inner.check_native(native)

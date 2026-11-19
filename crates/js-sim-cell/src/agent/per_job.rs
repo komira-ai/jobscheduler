@@ -346,6 +346,7 @@ impl PerJob {
             log_tail: None,
             logs: None,
             input_failure: None,
+            usage: None,
         }
     }
 

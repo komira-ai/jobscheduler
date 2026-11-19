@@ -73,8 +73,9 @@
 //!   limit or a failed input a failure (which teaches the memory nothing), a cancel a cancel,
 //!   and a stop for memory a kill at its own limit (a contained job's memory limit is its
 //!   booking), which raises the class's floor to twice the booking it died at;
-//! - its peak memory and CPU time are what its host reported; its wall time is from its start
-//!   to its end;
+//! - its peak memory and CPU time are what its host reported in the job's result (`usage`, read
+//!   from the job's control group); a job with none has no peak, and a success with no peak teaches
+//!   the memory nothing; its wall time is from its start to its end;
 //! - a success whose peak came within 5% of its booking counts as having hit its limit, so it
 //!   can hold an estimate at the booking but never lower it (the estimator's own censoring
 //!   rule assumes the build-host limit, half as much again above the booking);
@@ -378,18 +379,36 @@ impl JobSizes {
     /// Teaches the history of `job`'s class, and of its fallback class when it names one, the
     /// run of `job`, which ended booked as `booked`, on the day `job` ended (held until bounds
     /// are known). A job that has not ended, ended with no result (lost, failed to start),
-    /// booked the whole host or never started teaches nothing. Answers whether the run was
-    /// taken.
+    /// booked the whole host or never started teaches nothing. Answers whether the run taught
+    /// the class a memory sample: a run the estimator discards (a success with no measured
+    /// peak or under a second of wall time, a failure, a cancel, a success at or above the
+    /// largest host's memory) is still recorded as seen, but answers `false`. Before any bounds
+    /// are known the run is judged against a host of unlimited memory, so one that would
+    /// reach the largest host's memory is counted until the bounds say otherwise.
     pub fn observe(&mut self, job: &JobRecord, booked: Booked) -> bool {
         let Some((run, day)) = run_of(job, booked) else {
             return false;
         };
+        let taught = self.teaches(job, &run, day);
         if let Some(fallback) = Self::fallback_key_of(job) {
             self.pending.push((fallback, run, day));
         }
         self.pending.push((Self::key_of(job), run, day));
         self.set_bounds(self.bounds);
-        true
+        taught
+    }
+
+    /// Whether the estimator would take `run` of `job` as a memory sample, judged on a summary
+    /// of its own that is then dropped, against the known bounds (a host of unlimited memory
+    /// before any are known).
+    fn teaches(&self, job: &JobRecord, run: &Run, day: Day) -> bool {
+        let bounds = self.bounds.unwrap_or(Bounds {
+            default_memory: DEFAULT_COLD_MEMORY_BYTES,
+            host_memory: u64::MAX,
+            node_cpu_millis: u32::MAX,
+        });
+        let mut trial = Summary::new(Self::key_of(job).basis(), day);
+        trial.observe(run, day, &bounds).memory.is_ok()
     }
 }
 
@@ -566,7 +585,9 @@ impl SchedPlacer {
     /// Teaches the history every ended job `jobs` holds whose allocation is freed, with what it
     /// booked, in the order the jobs ended, and takes the live allocations as those of the last pass: what a
     /// server does once at its start, before its first pass, so that the history outlives a
-    /// restart for as long as the store keeps the jobs. Answers how many runs were taught.
+    /// restart for as long as the store keeps the jobs. Answers how many runs taught a class a
+    /// memory sample ([`JobSizes::observe`]): a job that ended with no measured usage is read
+    /// and not counted.
     ///
     /// # Errors
     /// The first [`JobStoreError`] of a read: nothing is taught.
