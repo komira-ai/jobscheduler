@@ -76,7 +76,11 @@ async fn started_with(
         .into_iter()
         .flat_map(|(flag, path)| [flag.to_owned(), path.display().to_string()]),
     );
-    let mut config = Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap();
+    // The job store's clock is the test's too: the pass judges the queue wait by it.
+    let store_clock = Arc::new(js_state::ManualClock::default());
+    let mut config = Config::from_cli(Cli::try_parse_from(args).unwrap())
+        .unwrap()
+        .with_job_sources(store_clock.clone(), Arc::new(js_jobs::RandomIds));
     config.agent_listen = split.then(|| "127.0.0.1:0".parse().unwrap());
     if split {
         // A hold of a millisecond, so a test can let it run out; one that does not await it to
@@ -102,6 +106,7 @@ async fn started_with(
     };
     jobs.insert_queued(new).unwrap();
     clock.advance(CENTURY);
+    store_clock.advance(CENTURY);
     (running, jobs, id, dir)
 }
 

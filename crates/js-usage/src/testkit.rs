@@ -115,7 +115,7 @@ impl Store for TestStore {
         self.fake.commit_stats()
     }
 
-    fn now(&self) -> StoreTime {
+    fn now(&self) -> Result<StoreTime, js_state::StoreError> {
         self.fake.now()
     }
 }

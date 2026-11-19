@@ -25,7 +25,7 @@ const LATER_TAG: u16 = 902;
 
 /// The store's clock now.
 pub(super) fn now<S: Store>(rig: &Rig<S>) -> StoreTime {
-    rig.store.now()
+    rig.store.now().expect("the store's clock")
 }
 
 /// `secs` seconds after `from`.

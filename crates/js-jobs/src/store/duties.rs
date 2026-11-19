@@ -26,8 +26,10 @@ fn encode(at: StoreTime) -> [u8; 8] {
 }
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
-    /// Claims the periodic duty `duty` for the period that begins at `now`: `true` when this
-    /// call advanced the duty's row to `now + period`, so the caller runs the duty, and `false`
+    /// Claims the periodic duty `duty` for the period that begins now by the store's clock
+    /// ([`Store::now`], read once by the call: the row's due time is shared by every server, so
+    /// no server's own clock judges it): `true` when this call advanced the duty's row to now
+    /// plus `period`, so the caller runs the duty, and `false`
     /// when the duty is not due yet or another server advanced the row first (the row is
     /// advanced with a compare-and-set, so of any number of servers that find it due, one
     /// commits). A server that dies after claiming costs the duty one period, and the next
@@ -38,16 +40,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// another.
     ///
     /// # Errors
-    /// [`JobStoreError::Store`] when the store fails; the caller does not run the duty then.
-    pub fn claim_duty(
-        &self,
-        duty: &str,
-        now: StoreTime,
-        period: Duration,
-    ) -> Result<bool, JobStoreError> {
+    /// [`JobStoreError::Store`] when the store fails, its clock included; nothing is written,
+    /// and the caller does not run the duty then.
+    pub fn claim_duty(&self, duty: &str, period: Duration) -> Result<bool, JobStoreError> {
         if period.is_zero() {
             return Ok(true);
         }
+        let now = self.store.now()?;
         let key = keys::duty(duty);
         let cond = match self.store.get(&key)? {
             None => Cond::Absent,

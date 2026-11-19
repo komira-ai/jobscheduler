@@ -116,7 +116,7 @@ pub fn a_cordon_is_placed_and_renewed_by_its_holder<B: Backend>(backend: &B) {
     let a = host("host-a");
     let key = keys::cordon(&a);
     let before = rig.jobs.written().expect("reads");
-    let opened = rig.store.now();
+    let opened = rig.store.now().expect("the store's clock");
     assert_eq!(
         cordon_host(&rig, &a, secs(100), &by("req-1")),
         Ok(written(cordon_of(100, Some("req-1")), false)),

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_state::{
-    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, Txn, TxnRead, Version,
-    Versioned,
+    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreError, StoreTime, Txn, TxnRead,
+    Version, Versioned,
 };
 use js_types::HostId;
 
@@ -249,6 +249,18 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(jobs)
     }
 
+    /// The store's clock now ([`Store::now`]): the time every deadline, expiry and due time
+    /// of the job tables is stamped and judged by, shared by every server over the store. A
+    /// caller that compares a time read from the tables with a time of its own takes it here,
+    /// once per pass or request, and decides nothing when it fails.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`] when the store cannot read its clock (an unreachable
+    /// database): no reading is made up in its place.
+    pub fn now(&self) -> Result<StoreTime, JobStoreError> {
+        Ok(self.store.now()?)
+    }
+
     /// The same job store keeping each job that ends from now on for `retention` after its
     /// end, in place of [`Retention::DEFAULT`]. The window is applied when a job ends: a job
     /// that ended before keeps the retention end it was given.
@@ -321,13 +333,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         spec: JobSpec,
         priority: i32,
         client: Option<ClientName>,
-    ) -> JobRecord {
-        JobRecord {
+    ) -> Result<JobRecord, JobStoreError> {
+        Ok(JobRecord {
             id,
             spec,
             priority,
             state: JobState::Queued,
-            submitted_at: self.store.now(),
+            submitted_at: self.store.now()?,
             placed_at: None,
             started_at: None,
             ended_at: None,
@@ -343,7 +355,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             queue: QueueTrail::default(),
             carried: Carried::default(),
             start_failure_detail: None,
-        }
+        })
     }
 
     /// The stored job `id` when it is the same job as `spec`, `None` when there is none.
@@ -371,7 +383,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         if let Some(found) = self.same_job(&id, &spec)? {
             return Ok(found);
         }
-        let record = self.queued_record(id, spec, priority, client);
+        let record = self.queued_record(id, spec, priority, client)?;
         let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
         match self.write(txn)? {
             Ok(_) => Ok(Inserted {
@@ -395,7 +407,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<Inserted, JobStoreError> {
         for _ in 0..MINT_TRIES {
             let id = JobId::minted(self.ids.mint()?);
-            let record = self.queued_record(id, spec.clone(), priority, client.cloned());
+            let record = self.queued_record(id, spec.clone(), priority, client.cloned())?;
             let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
             if self.write(txn)?.is_ok() {
                 return Ok(Inserted {
@@ -471,7 +483,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 to: next,
             },
         )?;
-        let now = self.store.now();
+        let now = self.store.now()?;
         let moved = JobRecord {
             state: next,
             started_at: (next == JobState::Running)
@@ -504,7 +516,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         id: &JobId,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let ((job, job_version), (allocation, allocation_version)) = self.prepare_rows(id)?;
-        let now = self.store.now();
+        let now = self.store.now()?;
         let queued = JobRecord {
             state: JobState::Queued,
             host: None,
@@ -544,7 +556,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         if job.state.is_ended() | job.cancel_requested {
             return Ok(job);
         }
-        let now = self.store.now();
+        let now = self.store.now()?;
         let asked = JobRecord {
             cancel_requested: true,
             cancel_requested_at: Some(now),
@@ -627,7 +639,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let freed = AllocationRecord {
             step: AllocationStep::Freed,
-            freed_at: Some(self.store.now()),
+            freed_at: Some(self.store.now()?),
             end_reason: Some(reason),
             ..allocation.clone()
         };

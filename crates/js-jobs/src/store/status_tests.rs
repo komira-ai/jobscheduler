@@ -42,7 +42,7 @@ fn note_queue_applies_the_notes_in_order_at_the_stores_time() {
     let rig = rig(&fake());
     let id = rig.queue("noted");
     rig.clock.advance(Duration::from_secs(42));
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let refused = QueueNote {
         code: QueueCode::FailingOver,
         detail: "refused".to_owned(),

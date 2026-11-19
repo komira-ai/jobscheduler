@@ -50,7 +50,8 @@
 //!
 //! # One context per group
 //!
-//! [`JobApi`] holds what every group shares (the job store and the clock) and one context
+//! [`JobApi`] holds what every group shares (the job store and the server's clock, which the
+//! log pages read; a time of the job tables is read from the store's clock) and one context
 //! per group, `<group>::Ctx`, defined in the group's file and built by `Default` in
 //! [`JobApi::new`]. A group that needs state of its own adds fields to its `Ctx` and sets
 //! them through its builder, `JobApi::with_<group>`, which is in the same file and replaces
@@ -204,8 +205,9 @@ pub struct JobApi {
 }
 
 impl JobApi {
-    /// The job service over the job tables `jobs`, reading time from `clock`, with every
-    /// group's context at its default.
+    /// The job service over the job tables `jobs`, with `clock` the server's (the log pages'
+    /// time; the times of the job tables are the store's), and every group's context at its
+    /// default.
     #[must_use]
     pub fn new(jobs: Arc<ServerJobs>, clock: SharedClock) -> JobApi {
         JobApi {

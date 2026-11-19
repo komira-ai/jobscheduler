@@ -108,7 +108,10 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
         (
             "a restart of a prepare",
             2,
-            Box::new(|| jobs.restart_prepare(&whole, rig.store.now()).map(drop)),
+            Box::new(|| {
+                jobs.restart_prepare(&whole, rig.store.now().expect("the store's clock"))
+                    .map(drop)
+            }),
         ),
         (
             "a release",

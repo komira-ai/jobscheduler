@@ -226,7 +226,7 @@ fn booted(
     store: &Arc<dyn Store>,
     sources: &JobSources,
 ) -> Result<(ServerJobs, usize), JobStoreError> {
-    let boot = store.now();
+    let boot = store.now()?;
     let jobs = JobStore::new(Arc::new(Arc::clone(store)), sources.ids.clone())?;
     let raised = jobs.raise_at_boot(boot)?;
     Ok((jobs, raised))

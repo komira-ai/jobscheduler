@@ -14,7 +14,7 @@ use crate::{
 /// The store's clock, moved on first so this step's time differs from the last one's.
 fn next_reading<S: Store>(rig: &Rig<S>) -> StoreTime {
     rig.tick();
-    rig.store.now()
+    rig.store.now().expect("the store's clock")
 }
 
 fn stored_job<S: Store>(rig: &Rig<S>, id: &JobId) -> JobRecord {
@@ -305,4 +305,101 @@ pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backe
             );
         }
     }
+}
+
+/// A store that cannot read its clock (a database stopped or unreachable) has every
+/// operation that stamps or judges a time fail with the store's error, and write nothing:
+/// a submit, a placement, a move, a cancel, an end, a free, a requeue, the retention tick, a
+/// duty claim, a cordon and the cordon listing. Once the clock reads again, each succeeds.
+/// Catches an operation that stamps a time it did not read (the epoch a failed read once
+/// answered), and one that commits before it reads the clock.
+pub fn nothing_is_written_when_the_store_clock_cannot_be_read<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "nothing_is_written_when_the_store_clock_cannot_be_read";
+    let rig = rig(backend);
+    rig.tick();
+    let queued = rig.queue("t-queued");
+    let placed = rig.placed("t-placed");
+    let running = rig.running("t-running");
+    let ended = rig.running("t-ended");
+    rig.jobs.end_job(&ended, super::cancelled()).expect("ends");
+    let whole = rig.queue_spec("t-whole", whole_host_spec());
+    rig.jobs
+        .place(&whole, host("host-b"), Booked::WholeHost)
+        .expect("placed whole");
+    let before = rig.snapshot();
+
+    let stopped = js_state::StoreError::Disconnected("the database is stopped".to_owned());
+    rig.store.fail_with(stopped.clone());
+    rig.store.fail_clock(true);
+    let lease = std::time::Duration::from_secs(60);
+    let calls: Vec<(&str, Result<(), crate::JobStoreError>)> = vec![
+        (
+            "a submit",
+            rig.jobs
+                .insert_queued(crate::NewJob {
+                    id: Some(super::job_id("t-new")),
+                    spec: super::full_spec(),
+                    priority: 0,
+                    client: None,
+                })
+                .map(drop),
+        ),
+        (
+            "a placement",
+            rig.jobs.place(&queued, host("host-a"), share()).map(drop),
+        ),
+        (
+            "a move",
+            rig.jobs
+                .transition(&placed, JobState::Placed, JobState::Starting)
+                .map(drop),
+        ),
+        ("a cancel", rig.jobs.request_cancel(&running).map(drop)),
+        (
+            "an end",
+            rig.jobs.end_job(&running, super::cancelled()).map(drop),
+        ),
+        (
+            "a free",
+            rig.jobs.free(&ended, EndReason::Cancelled).map(drop),
+        ),
+        (
+            "a requeue",
+            rig.jobs.requeue_failed_prepare(&whole).map(drop),
+        ),
+        ("the retention tick", rig.jobs.tick().map(drop)),
+        (
+            "a duty claim",
+            rig.jobs.claim_duty("expire", lease).map(drop),
+        ),
+        (
+            "a cordon",
+            rig.jobs
+                .cordon_host(&host("host-a"), lease, &js_types::cordon::Asker::Unnamed)
+                .map(drop),
+        ),
+        ("the cordon listing", rig.jobs.cordons().map(drop)),
+    ];
+    let refused = crate::JobStoreError::Store(stopped.clone()).to_string();
+    for (what, answer) in calls {
+        assert_eq!(
+            answer.map_err(|error| error.to_string()),
+            Err(refused.clone()),
+            "{name}: {what} did not answer the store's error without the store's clock"
+        );
+    }
+    assert_eq!(
+        rig.snapshot().0,
+        before.0,
+        "{name}: a call wrote without the store's clock"
+    );
+
+    rig.store.fail_clock(false);
+    rig.jobs
+        .place(&queued, host("host-a"), share())
+        .expect("a placement once the clock reads");
+    rig.jobs.tick().expect("a tick once the clock reads");
 }

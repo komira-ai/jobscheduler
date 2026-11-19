@@ -37,7 +37,11 @@
 //! the cause says ([`js_sched_placer::engine::whole_jobs::failed_prepare`], which applies the
 //! rules of a whole-node lease); after `max_replace` of them it fails to start with
 //! `exclusive-not-ready`. A cause that taints the host (`host-unsafe`) also taints it in the
-//! registry. Nothing here reads a clock: `now` is given.
+//! registry. Every time here is the store's: the tick's pass gives [`expire_prepares`] its
+//! reading, and a heartbeat reads the store's clock ([`js_jobs::JobStore::now`]) only for a step
+//! that stamps a time (a restart's deadline, a failed prepare's bars), so a heartbeat that
+//! changes nothing costs no read. A step whose reading fails writes nothing, and the heartbeat
+//! is answered with the error.
 
 use std::time::Duration;
 
@@ -125,20 +129,21 @@ fn deadline(rules: &WholeNodeConfig, now: StoreTime) -> StoreTime {
 pub(crate) type Taints<'a> = dyn Fn(&HostId) -> bool + 'a;
 
 /// Applies what the heartbeat `beat` of a host says to the placed whole-host jobs the host
-/// holds (the rules of the module docs) at `now`, under `rules`. A terminal failed prepare is
+/// holds (the rules of the module docs), under `rules`, at the store's clock read for each
+/// step that stamps a time. A terminal failed prepare is
 /// told to `metrics`. `taint` taints a host in the registry and answers whether that changed
 /// anything; it is called for the host of a prepare the agent refused with a code that taints
 /// it. Returns whether the registry's taint changed, so the caller persists it.
 ///
 /// # Errors
-/// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
-/// the agent reports again. A job that moved between the read and the commit (a commit answered
+/// The first [`JobStoreError`] of a read (the store's clock included) or a commit; what was
+/// committed before it stays, and the agent reports again. A job that moved between the read and the commit (a commit answered
 /// [`JobStoreError::Stale`]) is such an error too: the heartbeat is answered 500, which writes
 /// nothing more, and the agent's next report is judged against the job as it is then.
 pub(crate) fn serve(
     jobs: &ServerJobs,
     beat: &Beat<'_>,
-    (rules, now): (&WholeNodeConfig, StoreTime),
+    rules: &WholeNodeConfig,
     (metrics, taint): (&dyn MetricsSink, &Taints<'_>),
 ) -> Result<bool, JobStoreError> {
     let mut tainted = false;
@@ -149,13 +154,14 @@ pub(crate) fn serve(
         match step_of(&job, &allocation, beat) {
             Step::Release => cancel_and_free(jobs, &job)?,
             Step::Restart => {
-                jobs.restart_prepare(&job.id, deadline(rules, now))?;
+                jobs.restart_prepare(&job.id, deadline(rules, jobs.now()?))?;
             }
             Step::Start => {
                 jobs.transition(&job.id, JobState::Placed, JobState::Starting)?;
             }
             Step::Fail(code) => {
                 let cause = PrepareCause::Refused(code);
+                let now = jobs.now()?;
                 if fail_prepare(jobs, (&job, &allocation), cause, (rules, now), metrics)? {
                     tainted |= taint(beat.host);
                 }

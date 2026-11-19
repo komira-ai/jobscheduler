@@ -111,6 +111,8 @@ where
     a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read(backend);
     a_duty_is_claimed_by_one_server_for_each_period(backend);
     a_failed_claim_is_an_error_and_claims_nothing(backend);
+    a_duty_is_due_by_the_store_clock(backend);
+    nothing_is_written_when_the_store_clock_cannot_be_read(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
@@ -262,6 +264,8 @@ macro_rules! job_store_tests {
             a_placement_counts_past_a_stray_entry_and_refuses_a_row_it_cannot_read,
             a_duty_is_claimed_by_one_server_for_each_period,
             a_failed_claim_is_an_error_and_claims_nothing,
+            a_duty_is_due_by_the_store_clock,
+            nothing_is_written_when_the_store_clock_cannot_be_read,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,

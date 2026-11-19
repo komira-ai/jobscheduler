@@ -41,7 +41,7 @@ fn injected() -> JobStoreError {
 
 /// The store's clock now.
 fn now<S: Store>(rig: &Rig<S>) -> StoreTime {
-    rig.store.now()
+    rig.store.now().expect("the store's clock")
 }
 
 /// Ends a job at T with a retention of seven days: at T + 7 d - 1 s the store reads the whole

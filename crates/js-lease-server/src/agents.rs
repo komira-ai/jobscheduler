@@ -235,7 +235,7 @@ fn open_hosts(
     let refused = |reason: String| kept.refuse(reason);
     let joins = JoinTokens::in_store(kept.store(), clock.clone(), Box::new(OsSessions));
     let joins = joins.map_err(refused)?;
-    let (store, bindings) = BindingStore::in_store(kept.store()).map_err(refused)?;
+    let (store, bindings) = BindingStore::in_store(kept.store(), clock.clone()).map_err(refused)?;
     Ok((joins, bindings, store))
 }
 
@@ -423,7 +423,7 @@ impl Agents {
     pub(crate) fn kept_in(self, store: Arc<dyn js_state::Store>) -> Self {
         let random = Box::new(js_registry::SequentialSessions::new());
         let joins = JoinTokens::in_store(Arc::clone(&store), self.clock.clone(), random);
-        let (bound, _) = BindingStore::in_store(store).unwrap();
+        let (bound, _) = BindingStore::in_store(store, self.clock.clone()).unwrap();
         Self {
             joins: joins.unwrap(),
             store: bound,

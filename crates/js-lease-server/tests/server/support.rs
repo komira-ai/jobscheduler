@@ -228,6 +228,15 @@ impl Harness {
         Self::over_at(scratch, config, clock).await
     }
 
+    /// A server on `config` whose stores read the harness's clock, as [`Harness::with`]'s do:
+    /// the times the store stamps and the server's are one clock's.
+    pub async fn over_on_one_clock(scratch: Scratch, config: Config) -> Self {
+        let clock = ManualClock::new(Timestamp::from_millis(T0));
+        let reads = Arc::new(StoreReads(clock.clone()));
+        let config = config.with_job_sources(reads, Arc::new(RandomIds));
+        Self::over_at(scratch, config, clock).await
+    }
+
     /// A server on `config`, on `clock`.
     async fn over_at(scratch: Scratch, config: Config, clock: ManualClock) -> Self {
         quiet_logs();
