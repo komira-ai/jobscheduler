@@ -1,7 +1,8 @@
 //! The fallback class ([`SIZE_FALLBACK_LABEL`]): a job whose own class has too few runs is
 //! booked from the history of the class it names there (a build step's kind, where its
 //! `size-class` is its target) before the cold size, and every run teaches both classes. The
-//! host is the module's: eight cores and 16 GiB, where the cold size is two cores and 4 GiB.
+//! host is the module's: eight cores and 16 GiB, where the module's cold size is two cores and
+//! 4 GiB.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -14,8 +15,8 @@ use js_types::{Labels, ManualClock, Resources, Shape, Timestamp};
 
 use super::super::{SIZE_FALLBACK_LABEL, SizedFrom};
 use super::{
-    GIB, JobSizes, MIB, SIZE_CLASS_LABEL, Tables, allocation, booked, bounds, exited, host, needs,
-    of_class, output, pass, queued, ran, size, spec_of, taught,
+    GIB, JobSizes, MIB, MODULE_COLD, SIZE_CLASS_LABEL, Tables, allocation, booked, bounds, exited,
+    host, needs, of_class, output, pass, queued, ran, size, spec_of, taught,
 };
 use crate::engine::Settings;
 use crate::place::SchedPlacer;
@@ -338,7 +339,7 @@ fn a_fallback_class_is_the_class_of_that_name_for_the_jobs_client_and_platform()
 /// job whose size it did not decide.
 #[test]
 fn only_a_job_the_history_sizes_has_a_source() {
-    let mut sizes = JobSizes::new();
+    let mut sizes = JobSizes::with_cold(MODULE_COLD);
     let fresh = step("fresh", "fresh");
     assert_eq!(sizes.sized_from(&fresh, Day(0)), None, "no host known");
     sizes.set_bounds(Some(bounds()));
@@ -428,7 +429,11 @@ fn a_pass_books_a_new_target_from_the_runs_its_kind_had_in_earlier_passes() {
     let _guard = tracing::subscriber::set_default(subscriber);
     let tables = Tables::new();
     let clock = ManualClock::new(Timestamp::from_millis(0));
-    let placer = SchedPlacer::new(Settings::default(), clock);
+    let settings = Settings {
+        cold: MODULE_COLD,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, clock);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
     let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
     placer.engine().host_up(&host("a"), &shape, super::at(0));
@@ -519,8 +524,8 @@ fn a_fallback_with_no_cpu_sample_gives_the_cold_cpu() {
         killed,
     );
     let cold = super::super::ColdSize {
-        cpu_millis: Some(500),
-        memory_bytes: None,
+        cpu_millis: 500,
+        ..MODULE_COLD
     };
     let mut sizes = JobSizes::with_cold(cold);
     sizes.set_bounds(Some(bounds()));
@@ -582,7 +587,11 @@ fn a_start_teaches_each_kind_from_the_ended_jobs_of_its_targets() {
     let tables = Tables::new();
     five_targets(&tables, GIB, Duration::from_secs(10));
     let clock = ManualClock::new(Timestamp::from_millis(0));
-    let placer = SchedPlacer::new(Settings::default(), clock);
+    let settings = Settings {
+        cold: MODULE_COLD,
+        ..Settings::default()
+    };
+    let placer = SchedPlacer::new(settings, clock);
     assert_eq!(placer.learn_ended(&tables.jobs).unwrap(), 5);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
     let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);

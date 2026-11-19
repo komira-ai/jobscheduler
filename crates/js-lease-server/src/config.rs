@@ -12,6 +12,7 @@ use js_system_clock::{SystemClock, SystemMonotonic};
 use js_types::Monotonic;
 
 use js_registry::{OsSessions, SessionSource};
+use js_sched_placer::sizes::{DEFAULT_COLD_CPU_MILLIS, DEFAULT_COLD_MEMORY_BYTES};
 
 use crate::agent_tokens::PoolTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
@@ -182,15 +183,23 @@ pub struct Cli {
     pub cpu_slack: Option<CpuSlack>,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while the
     /// history of its class gives no estimate; above the most cores a registered host has, that
-    /// most. Without the flag, a quarter of those cores. Needs `--agent-pool-config`.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(250..=u64::from(u32::MAX)))]
-    pub cold_cpu_millis: Option<u64>,
+    /// most. Needs `--agent-pool-config`.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_COLD_CPU_MILLIS,
+        value_parser = clap::value_parser!(u64).range(250..=u64::from(u32::MAX))
+    )]
+    pub cold_cpu_millis: u64,
     /// The memory, in bytes from 1073741824 (1 GiB), a queued job that names no memory books
     /// while the history of its class gives no estimate, and the least its class books before
-    /// five runs; above the most bookable memory a registered host has, that most. Without the
-    /// flag, a quarter of that memory. Needs `--agent-pool-config`.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1_073_741_824..))]
-    pub cold_memory_bytes: Option<u64>,
+    /// five runs; above the most bookable memory a registered host has, that most. Needs
+    /// `--agent-pool-config`.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_COLD_MEMORY_BYTES,
+        value_parser = clap::value_parser!(u64).range(1_073_741_824..)
+    )]
+    pub cold_memory_bytes: u64,
     /// Deprecated, and does nothing: no lease is costed by an estimate any more. The flag
     /// is accepted with a warning. Needs `--agent-pool-config`; not allowed with
     /// `--usage-off`.

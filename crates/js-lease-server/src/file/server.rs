@@ -181,8 +181,8 @@ impl AgentKeys {
     }
 
     /// What a job that books nothing books while its class has no estimate:
-    /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one a
-    /// quarter of the largest host.
+    /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one its
+    /// default (4 cores and 16 GiB, [`ColdSize::default`]).
     pub(crate) fn cold(&self) -> ColdSize {
         self.cold
     }
@@ -477,12 +477,23 @@ const COLD_MEMORY_LEAST: u64 = 1 << 30;
 
 /// `cold_cpu_millis` and `cold_memory_bytes`: whole numbers, the CPU from a quarter core
 /// (250) to the most millicores a host can report, the memory from 1 GiB (the least memory
-/// the estimator books). Each left out is `None`.
+/// the estimator books). Each left out is its default ([`ColdSize::default`]).
 fn read_cold(s: &mut Section) -> Result<ColdSize, StartupError> {
     let most_cpu = u64::from(u32::MAX);
+    let default = ColdSize::default();
     Ok(ColdSize {
-        cpu_millis: s.bounded_given("cold_cpu_millis", COLD_CPU_LEAST, most_cpu)?,
-        memory_bytes: s.bounded_given("cold_memory_bytes", COLD_MEMORY_LEAST, u64::MAX)?,
+        cpu_millis: s.bounded(
+            "cold_cpu_millis",
+            COLD_CPU_LEAST,
+            most_cpu,
+            default.cpu_millis,
+        )?,
+        memory_bytes: s.bounded(
+            "cold_memory_bytes",
+            COLD_MEMORY_LEAST,
+            u64::MAX,
+            default.memory_bytes,
+        )?,
     })
 }
 
@@ -565,35 +576,30 @@ mod tests {
     }
 
     /// Asserts that `cold_cpu_millis` and `cold_memory_bytes` are read as given, each on its
-    /// own, from their least (250 and 1 GiB) up to the most CPU (4294967295); that left out they are `None` (a quarter of
-    /// the largest host); and that a value under the least, negative or not an integer is
+    /// own, from their least (250 and 1 GiB) up to the most CPU (4294967295); that left out
+    /// each is its default (4000 and 16 GiB, not anything of a host); and that a value under the least, negative or not an integer is
     /// refused at start naming the key and what it must be. Catches a key that is not read, a
     /// key read into the other dimension, and a cold size of no CPU or under the estimator's
     /// least memory.
     #[test]
     fn the_cold_size_keys_are_read_each_on_its_own_and_refused_out_of_range() {
-        let none = ColdSize::default();
+        let none = ColdSize {
+            cpu_millis: 4000,
+            memory_bytes: 16 << 30,
+        };
         assert_eq!(cold_of(""), Ok(none));
+        assert_eq!(ColdSize::default(), none);
         let farm = "cold_cpu_millis = 2000\ncold_memory_bytes = 8589934592";
         let read = cold_of(farm).unwrap();
-        assert_eq!(
-            (read.cpu_millis, read.memory_bytes),
-            (Some(2000), Some(8 << 30))
-        );
+        assert_eq!((read.cpu_millis, read.memory_bytes), (2000, 8 << 30));
         let least = cold_of("cold_cpu_millis = 250\ncold_memory_bytes = 1073741824").unwrap();
-        assert_eq!(
-            (least.cpu_millis, least.memory_bytes),
-            (Some(250), Some(1 << 30))
-        );
+        assert_eq!((least.cpu_millis, least.memory_bytes), (250, 1 << 30));
         let most = cold_of("cold_cpu_millis = 4294967295").unwrap();
-        assert_eq!(most.cpu_millis, Some(u64::from(u32::MAX)));
+        assert_eq!(most.cpu_millis, u64::from(u32::MAX));
         let cpu = cold_of("cold_cpu_millis = 2000").unwrap();
-        assert_eq!((cpu.cpu_millis, cpu.memory_bytes), (Some(2000), None));
+        assert_eq!((cpu.cpu_millis, cpu.memory_bytes), (2000, 16 << 30));
         let memory = cold_of("cold_memory_bytes = 8589934592").unwrap();
-        assert_eq!(
-            (memory.cpu_millis, memory.memory_bytes),
-            (None, Some(8 << 30))
-        );
+        assert_eq!((memory.cpu_millis, memory.memory_bytes), (4000, 8 << 30));
         let cpu_range = "server.cold_cpu_millis: must be from 250 to 4294967295";
         let memory_range =
             "server.cold_memory_bytes: must be from 1073741824 to 18446744073709551615";
