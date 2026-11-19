@@ -52,7 +52,11 @@ fn injected() -> JobStoreError {
 /// little time, so a cordon read after a write has a few milliseconds less than it was given.
 fn whole(held: Cordon<Duration>) -> Cordon<Duration> {
     Cordon {
-        until: secs(held.until.as_secs() + u64::from(held.until.subsec_nanos() > 0)),
+        until: secs(
+            held.until
+                .as_secs()
+                .saturating_add(u64::from(held.until.subsec_nanos() > 0)),
+        ),
         ..held
     }
 }
@@ -141,13 +145,18 @@ pub fn a_cordon_is_placed_and_renewed_by_its_holder<B: Backend>(backend: &B) {
         "{name}: the holder's renewal did not extend it"
     );
     assert_eq!(
+        cordon_host(&rig, &a, secs(10), &Asker::Unnamed),
+        Ok(written(cordon_of(200, Some("req-1")), true)),
+        "{name}: a request that names no holder and does not extend it changed the holder"
+    );
+    assert_eq!(
         cordon_host(&rig, &a, secs(500), &Asker::Unnamed),
-        Ok(written(cordon_of(500, Some("req-1")), true)),
-        "{name}: a request that names no holder changed the holder"
+        Ok(written(cordon_of(500, None), true)),
+        "{name}: a request that names no holder extended it and left it the holder's"
     );
     assert_eq!(
         cordons(&rig),
-        Ok(BTreeMap::from([(a, cordon_of(500, Some("req-1")))])),
+        Ok(BTreeMap::from([(a, cordon_of(500, None))])),
         "{name}: the row does not hold the cordon in force"
     );
 }
@@ -422,11 +431,12 @@ where
     );
 }
 
-/// A cordon row that does not parse, that a later build wrote, that is live with no expiry or
-/// that is under a key that names no host is refused by every operation that reads it, and
-/// nothing is written over it.
-pub fn a_cordon_row_that_cannot_be_read_is_refused<B: Backend>(backend: &B) {
-    let name = "a_cordon_row_that_cannot_be_read_is_refused";
+/// A cordon row that does not parse, that a later build wrote, or that is live with no expiry
+/// is refused by a cordon and a lift of its host, and nothing is written over it; the list of
+/// cordons keeps such a host out of placement (for ever for a row with no expiry), and passes
+/// over a key that names no host, so one row it cannot read stops no other host's placement.
+pub fn a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force<B: Backend>(backend: &B) {
+    let name = "a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force";
     let rig = rig(backend);
     let a = host("host-a");
     let key = keys::cordon(&a);
@@ -458,26 +468,35 @@ pub fn a_cordon_row_that_cannot_be_read_is_refused<B: Backend>(backend: &B) {
         Err(corrupt(DecodeError::Missing { tag: 0 })),
         "{name}: a live row with no expiry"
     );
+    let for_ever = whole(Cordon {
+        until: Duration::MAX,
+        holder: None,
+    });
     assert_eq!(
         cordons(&rig),
-        Err(corrupt(DecodeError::Missing { tag: 0 })),
-        "{name}: the list over a row with no expiry"
+        Ok(BTreeMap::from([(a.clone(), for_ever.clone())])),
+        "{name}: the list over a row with no expiry keeps the host out"
     );
     assert_eq!(
         rig.raw(&key).map(|row| row.value),
         Some(no_expiry),
         "{name}: a refused request wrote"
     );
+    for unread in [vec![0], vec![LATER_FORMAT]] {
+        rig.put_raw(&key, unread);
+        assert_eq!(
+            cordons(&rig),
+            Ok(BTreeMap::from([(a.clone(), for_ever.clone())])),
+            "{name}: the list over a row it cannot read keeps the host out"
+        );
+    }
     rig.delete_raw(&key);
     let stray = "cordon/not a host";
     rig.put_raw(stray, vec![LATER_FORMAT]);
     assert_eq!(
         cordons(&rig),
-        Err(JobStoreError::Corrupt {
-            key: stray.to_owned(),
-            why: DecodeError::WrongKey
-        }),
-        "{name}: a row under a key that names no host"
+        Ok(BTreeMap::new()),
+        "{name}: a row under a key that names no host is no host's cordon"
     );
 }
 
@@ -531,6 +550,42 @@ pub fn restore_cordon_writes_once_and_never_overwrites<B: Backend>(backend: &B) 
         rig.jobs.restore_cordon(&b, &cordon_of(10, Some("req-2"))),
         Ok(true),
         "{name}: a restore after the lapse"
+    );
+}
+
+/// [`crate::JobStore::restore_cordons`] carries the cordons given into the table, and marks
+/// the store, the first time; a later call writes nothing, so a cordon lifted since (here, by a
+/// lift of its own holder) is not written back, and a cordon given anew is not written either.
+pub fn restore_cordons_carries_the_bindings_once<B: Backend>(backend: &B) {
+    let name = "restore_cordons_carries_the_bindings_once";
+    let rig = rig(backend);
+    let (a, b) = (host("host-a"), host("host-b"));
+    let first = BTreeMap::from([(a.clone(), cordon_of(100, Some("req-1")))]);
+    assert_eq!(
+        rig.jobs.restore_cordons(&first),
+        Ok(true),
+        "{name}: the first"
+    );
+    assert_eq!(
+        cordons(&rig),
+        Ok(first.clone()),
+        "{name}: the first restore wrote its cordons"
+    );
+    assert!(
+        rig.raw(keys::CORDONS_RESTORED).is_some(),
+        "{name}: the store is not marked"
+    );
+    let lifted = uncordon_host(&rig, &a, Some(&holder("req-1")));
+    assert!(lifted.expect("lifts").lifted, "{name}: the lift");
+    let again = BTreeMap::from([
+        (a.clone(), cordon_of(100, Some("req-1"))),
+        (b.clone(), cordon_of(30, None)),
+    ]);
+    assert_eq!(rig.jobs.restore_cordons(&again), Ok(false), "{name}: again");
+    assert_eq!(
+        cordons(&rig),
+        Ok(BTreeMap::new()),
+        "{name}: a later restore wrote a cordon back"
     );
 }
 

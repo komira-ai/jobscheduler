@@ -315,9 +315,11 @@ async fn the_scalers_cordon_is_kept_by_the_job_store() {
 
 /// Asserts the cordons put back at start: a cordon the registry holds (from a binding an
 /// earlier release wrote) with no row is written into the job store with its time left and
-/// holder, a row the store holds already is left as it is, and a store that fails refuses
-/// the start naming the flag. It catches a restart onto this release whose first tick lifts
-/// every cordon an earlier release kept, and a restore that overwrites the store's record.
+/// holder, once for the store, so a cordon lifted since is not written back by a later start;
+/// a row the store holds already is left as it is, and a store that fails refuses the start
+/// naming the flag. It catches a restart onto this release whose first tick lifts every cordon
+/// an earlier release kept, a restart that brings back a cordon lifted through another server,
+/// and a restore that overwrites the store's record.
 #[tokio::test]
 async fn the_cordons_a_binding_brought_back_are_written_into_the_job_store() {
     let (a, _dir, _) = server("cordon-restore", None);
@@ -332,6 +334,12 @@ async fn the_cordons_a_binding_brought_back_are_written_into_the_job_store() {
     let written = jobs.cordons().unwrap()[&h1()].clone();
     assert_eq!(secs(written.until), 60);
     assert_eq!(written.holder, Some(holder("old")));
+    jobs.uncordon_host(&h1(), None).unwrap();
+    restore_cordons(&jobs, &a.registry, FLAG).unwrap();
+    assert!(
+        jobs.cordons().unwrap().is_empty(),
+        "a later start wrote it back"
+    );
 
     let other = tables_over(&store_on(&clock));
     let kept = Cordon {

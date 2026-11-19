@@ -196,8 +196,9 @@ where
     a_cordon_lapses_with_the_store_clock(backend);
     a_lift_ends_a_cordon_by_the_rule(backend);
     a_cordon_request_that_races_or_fails_writes_nothing(backend);
-    a_cordon_row_that_cannot_be_read_is_refused(backend);
+    a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force(backend);
     restore_cordon_writes_once_and_never_overwrites(backend);
+    restore_cordons_carries_the_bindings_once(backend);
     a_placement_on_a_cordoned_host_commits_nothing(backend);
     a_cordon_taken_during_a_placement_makes_it_stale(backend);
     drop_taints_deletes_the_named_rows_in_one_commit(backend);
@@ -346,8 +347,9 @@ macro_rules! job_store_tests {
             a_cordon_lapses_with_the_store_clock,
             a_lift_ends_a_cordon_by_the_rule,
             a_cordon_request_that_races_or_fails_writes_nothing,
-            a_cordon_row_that_cannot_be_read_is_refused,
+            a_cordon_row_that_cannot_be_read_is_refused_and_kept_in_force,
             restore_cordon_writes_once_and_never_overwrites,
+            restore_cordons_carries_the_bindings_once,
             a_placement_on_a_cordoned_host_commits_nothing,
             a_cordon_taken_during_a_placement_makes_it_stale,
             drop_taints_deletes_the_named_rows_in_one_commit,

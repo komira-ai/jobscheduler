@@ -18,8 +18,12 @@
 //! Either way the host's binding is written with the cordon's end (not its holder) once the
 //! request is decided, before the registry takes it, so a restart keeps the cordon: with the
 //! store it is committed, and without it the file is saved after the registry took it. A write
-//! that fails is answered as unsaved; with the job service the cordon holds all the same,
-//! since its row was written first, and the same call repeated is the retry.
+//! that fails is answered as unsaved, and the same call repeated is the retry. With the job
+//! service the row is written first: a cordon then holds on every server all the same, and a
+//! lift whose binding was not written is lifted in the store, and so on every server's passes,
+//! while this server's registry keeps the cordon until its next tick (a repeat of the lift says
+//! it lifted nothing, and the tick's save writes the binding). A request that lost a race with
+//! another server's change of the same cordon is answered as unsaved too, and asked again.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -223,16 +227,16 @@ impl Agents {
 
 /// Writes into the job store `jobs` each cordon the registry holds that the store has no row
 /// for: the cordons a binding brought back at start, which an earlier release kept in the
-/// bindings alone. A row the store holds already is the cordon's record and is left. A write
-/// that fails refuses the start, naming `flag`, as the job store's other reads at start do.
+/// bindings alone. It is done once for the store ([`js_jobs::JobStore::restore_cordons`]): from
+/// then on the store is the cordons' record, and a cordon lifted through another server, or
+/// lifted here before a binding's write failed, is not written back by a later start. A row
+/// the store holds already is left. A write that fails refuses the start, naming `flag`, as the
+/// job store's other reads at start do.
 pub(crate) fn restore_cordons(
     jobs: &ServerJobs,
     registry: &Registry,
     flag: &'static str,
 ) -> Result<(), StartupError> {
-    for (host, cordon) in registry.cordons() {
-        jobs.restore_cordon(&host, &cordon)
-            .map_err(StartupError::because(flag))?;
-    }
-    Ok(())
+    let restored = jobs.restore_cordons(&registry.cordons());
+    restored.map(drop).map_err(StartupError::because(flag))
 }

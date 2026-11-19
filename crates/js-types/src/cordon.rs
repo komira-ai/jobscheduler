@@ -8,8 +8,10 @@
 //! - with no cordon in force, any request places one, until the time it asks for, held by
 //!   the holder it names (or by none);
 //! - a request that names no holder ([`Asker::Unnamed`]: an operator's call, an agent's update
-//!   hook, a requester of an earlier release) extends the cordon in force, never shortening it,
-//!   and leaves its holder as it is;
+//!   hook, a requester of an earlier release) extends the cordon in force, never shortening it;
+//!   when it extends it past its end, the cordon becomes unnamed, so its holder's lift does not
+//!   end what the unnamed requester asked for (a request that does not extend it leaves the
+//!   holder as it is);
 //! - a request of the cordon's own holder ([`Asker::Holder`]) renews it the same way;
 //! - a request of another holder leaves the cordon in force as it is, and says so
 //!   ([`Cordoning::held_by_other`]): a requester that died is not kept alive by the next one,
@@ -26,7 +28,8 @@ use crate::CordonHolder;
 /// Who asks for a cordon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Asker {
-    /// A requester that names no holder: it extends any cordon in force and leaves its holder.
+    /// A requester that names no holder: it extends any cordon in force, and a cordon it
+    /// extends past its end becomes unnamed.
     Unnamed,
     /// The holder named: it places a cordon when none is in force and renews one it holds,
     /// and leaves one that another holds as it is.
@@ -93,6 +96,7 @@ pub fn cordon<T: Ord + Copy>(held: Option<&Cordon<T>>, wanted: T, by: &Asker) ->
         };
     };
     let holder = match by {
+        Asker::Unnamed if wanted > held.until => None,
         Asker::Unnamed => held.holder.clone(),
         Asker::Holder(asker) if held.holder.as_ref() == Some(asker) => held.holder.clone(),
         Asker::Holder(_) => {
@@ -204,19 +208,25 @@ mod tests {
     }
 
     /// Asserts that an unnamed request extends whatever cordon is in force, never shortening
-    /// it, and keeps its holder, as requesters of earlier releases expect. It catches an
-    /// unnamed request that takes the cordon away from its holder or shortens it.
+    /// it: one it extends past its end becomes unnamed, and one it does not extend keeps its
+    /// holder. It catches an operator's long cordon over a holder's short one that the
+    /// holder's lift then ends, and an unnamed request that shortens a cordon or takes it from
+    /// its holder without extending it.
     #[test]
-    fn an_unnamed_request_extends_any_cordon_and_keeps_its_holder() {
+    fn an_unnamed_request_extends_any_cordon_and_unnames_what_it_extends() {
         let extended = cordon(Some(&held(10, Some("run-a"))), 20, &Asker::Unnamed);
         assert_eq!(
             extended,
             Cordoning {
-                cordon: held(20, Some("run-a")),
+                cordon: held(20, None),
                 already: true,
                 held_by_other: false,
             }
         );
+        let within = cordon(Some(&held(30, Some("run-a"))), 20, &Asker::Unnamed);
+        assert_eq!(within.cordon, held(30, Some("run-a")));
+        let same = cordon(Some(&held(20, Some("run-a"))), 20, &Asker::Unnamed);
+        assert_eq!(same.cordon, held(20, Some("run-a")));
         let kept = cordon(Some(&held(30, None)), 20, &Asker::Unnamed);
         assert_eq!(kept.cordon, held(30, None));
     }

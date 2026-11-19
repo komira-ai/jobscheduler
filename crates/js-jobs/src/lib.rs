@@ -73,6 +73,7 @@
 //! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
 //! | `cordon/<host>` | the cordon of `<host>`: the holder it names, if any (the time it lapses is the row's expiry, so a lapsed cordon is an absent row); written by [`JobStore::cordon_host`] and [`JobStore::restore_cordon`], deleted by [`JobStore::uncordon_host`] or by its expiry, listed whole by [`JobStore::cordons`]; checked absent by every placement's transaction; a store written before cordons has none and opens unchanged |
 //! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
+//! | `meta/cordons/restored` | empty: the cordons an earlier release kept only in a server's host bindings were carried into `cordon/` ([`JobStore::restore_cordons`]); no later start carries any again |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
 //! | `idx/job/queued/<id>` | empty: the job is queued (it is under `idx/job/active/` too); a store an earlier build wrote has none until a build that names them opens it |
@@ -120,6 +121,7 @@
 //! | [`JobStore::cordon_host`] | put `cordon/<host>` with the time left as its time to live, if absent or at the version read; nothing when the cordon in force is another holder's |
 //! | [`JobStore::uncordon_host`] | delete `cordon/<host>` at the version read when the rule lifts it; nothing otherwise |
 //! | [`JobStore::restore_cordon`] | put `cordon/<host>` with the time given as its time to live, if absent |
+//! | [`JobStore::restore_cordons`] | nothing when `meta/cordons/restored` is there; else, as [`JobStore::restore_cordon`] for each cordon given (a transaction each), then put `meta/cordons/restored` if absent |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given, whatever it holds, in one transaction; nothing for no hosts |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |

@@ -280,23 +280,34 @@ fn a_named_request_places_and_renews_and_another_holder_leaves_it() {
     assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_200_000)));
 }
 
-/// Asserts that an unnamed request extends a named cordon and leaves its holder, and that a
-/// take-over makes the cordon the asker's. It catches an unnamed request that strips the
-/// holder and a take-over that is refused.
+/// Asserts that an unnamed request that does not extend a named cordon leaves its holder,
+/// that one that extends it makes it unnamed, so the holder's lift leaves it, and that a
+/// take-over makes the cordon the asker's. It catches an operator's longer cordon that the
+/// earlier holder's lift ends, an unnamed request that strips the holder without extending
+/// the cordon, and a take-over that is refused.
 #[test]
-fn an_unnamed_request_keeps_the_holder_and_a_take_over_changes_it() {
+fn an_unnamed_extension_unnames_the_cordon_and_a_take_over_changes_it() {
     let fx = fixture(2);
     fx.join("a", "t");
     fx.registry
         .cordon(&host("a"), secs(100), &by("run-a"))
         .unwrap();
+    let within = fx.registry.cordon(&host("a"), secs(10), &Asker::Unnamed);
+    assert!(!within.unwrap().held_by_other);
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-a"));
     let extended = fx
         .registry
         .cordon(&host("a"), secs(300), &Asker::Unnamed)
         .unwrap();
     assert!(!extended.held_by_other);
     assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_300_000)));
-    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-a"));
+    assert_eq!(holder_of(&fx, "a"), None);
+    let lift = fx
+        .registry
+        .uncordon(&host("a"), Some(&holder("run-a")))
+        .unwrap();
+    assert!(!lift.lifted && lift.held_by_other);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_300_000)));
     let taken = fx
         .registry
         .cordon(&host("a"), secs(10), &Asker::TakeOver(holder("run-b")))

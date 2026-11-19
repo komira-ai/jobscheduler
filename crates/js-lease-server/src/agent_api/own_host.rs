@@ -41,8 +41,8 @@
 //! of placement from then on, even when the binding's write after it fails. Without it, the
 //! binding is written to the agent state file after the registry took it, so the cordon holds
 //! on this server all the same, and until a save succeeds a server restart loses that cordon,
-//! or brings back one that an unsaved uncordon lifted (for at most the [`cordon::MAX_CORDON`]
-//! it was asked for). Every call, the read too, checks the credential with
+//! or brings back one that an unsaved uncordon lifted (for at most the length it was asked for:
+//! [`cordon::MAX_CORDON`] on this route, seven days for an operator's). Every call, the read too, checks the credential with
 //! `JoinTokens::serves`, which renews the host credential: in file mode it may write the join
 //! token file, and a failed write is logged and does not fail the call; with the store the
 //! renewal is left for the tick, and the call makes no store call.

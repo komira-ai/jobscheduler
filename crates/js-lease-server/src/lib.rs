@@ -504,21 +504,25 @@
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
 //!
 //! **Cordon.** A host takes itself out of placement with `POST /v1/hosts/{id}:cordon`, so
-//! that an update of its agent can wait for the lease it holds to end without a new one
-//! arriving. The routes serve the host of the credential and no other: the credential is
-//! the host credential (or the one-time token) that registered the host, and the shared
-//! pool token names no host and is refused. A cordon is a lease the requester sets and
-//! renews: a repeat extends it from the time of the repeat and never shortens it, the
-//! server cuts a request to an hour, and a cordon that is not renewed lifts by itself. A
-//! cordoned host takes no new job; the work it holds, and its runs, go on, and it
-//! reads `leases: 0` and `releasing: false` when they have ended. `already_cordoned` says
-//! whether the host was cordoned before the call, so that a requester lifts only a cordon
-//! it placed (the server does not tell who placed one, and an uncordon lifts any cordon, so a
-//! requester uncordons only after a cordon whose reply said `already_cordoned: false`). There is no
-//! total cap on a cordon that is renewed; a requester that dies leaves it to lapse within its last
-//! `lease_secs`, at most an hour. A cordon is written to the agent state file (with a store setting,
-//! committed to the store) before it is acknowledged and survives a restart; an uncordon is written
-//! the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
+//! that an update of its agent, or an operator's measurement, can wait for the work it holds to
+//! end without new work arriving. The routes serve the host of the credential and no other: the
+//! credential is the host credential (or the one-time token) that registered the host, and the
+//! shared pool token names no host and is refused. A cordon on this route is a lease the
+//! requester sets and renews: a repeat extends it from the time of the repeat and never shortens
+//! it, the server cuts a request to an hour, and a cordon that is not renewed lifts by itself.
+//! A request may name its holder (`holder`): a request of another holder leaves the cordon as it
+//! is and says `held_by_other`, so a requester that died is not kept alive by the next one and
+//! its cordon lapses within its last `lease_secs`; `take_over` makes the cordon the caller's; a
+//! request that names no holder extends any cordon, and one it extends past its end becomes
+//! unnamed; a lift that names a holder ends only that holder's cordon, and one that names none
+//! ends any. `already_cordoned` says whether the host was cordoned before the call. The
+//! operator's `CordonHost` of the job service holds for up to seven days with nothing renewing
+//! it. A cordoned host takes no new job from any server over the same store (with the job
+//! service on, the job store keeps each cordon, and every placement checks it); the work it
+//! holds goes on, and it reads `leases: 0` and `releasing: false` when it has ended. A cordon
+//! is written to the agent state file (with a store setting, committed to the store) and, with
+//! the job service on, to the job store before it is acknowledged, and survives a restart; an
+//! uncordon is written the same way. The routes are served by the agent routes' listener (`agent_listen`, if any).
 //!
 //! A registered host takes work only while it
 //! is live (heard within the grace period) and serving. A host that goes silent reads

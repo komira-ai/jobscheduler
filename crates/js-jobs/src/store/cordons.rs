@@ -9,7 +9,8 @@
 //! [`JobStore::cordon_host`] and [`JobStore::uncordon_host`] decide by the rule of
 //! `js_types::cordon` (who may renew, extend, take over or lift a cordon), on the row as they
 //! read it, and commit at the version they read, so two requests that race commit one and the
-//! other is a [`JobStoreError::CordonConflict`], which the caller retries. A request that the
+//! other is a [`JobStoreError::CordonConflict`], which writes nothing and its caller asks
+//! again. A request that the
 //! rule leaves as it is (the cordon is another holder's) writes nothing.
 //!
 //! The table is additive: a store written before it has no `cordon/` rows and places as
@@ -100,8 +101,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// the time left as its time to live, at its absence or at the version read.
     ///
     /// # Errors
-    /// [`JobStoreError::CordonConflict`] when the row changed before the commit (the caller
-    /// retries); [`JobStoreError::Corrupt`] or [`JobStoreError::UnknownRow`] when the row
+    /// [`JobStoreError::CordonConflict`] when the row changed before the commit (nothing is
+    /// written; the caller asks again); [`JobStoreError::Corrupt`] or [`JobStoreError::UnknownRow`] when the row
     /// cannot be read, or is live with no expiry; [`JobStoreError::Store`].
     pub fn cordon_host(
         &self,
@@ -154,23 +155,26 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         })
     }
 
-    /// Every cordon in force, by host, each with the time it has left by the store's clock.
+    /// Every cordon in force, by host, each with the time it has left by the store's clock:
+    /// what every pass leaves out and every tick puts on the registry. It fails closed, so one
+    /// row it cannot read keeps no other host from placement: a live row that does not parse,
+    /// or that a later build wrote, is a cordon in force with no holder this build can name,
+    /// for the time the row has left (for ever, for a row with no expiry, which every
+    /// placement's check finds in force too); a key that names no host is no host's cordon
+    /// and is passed over.
     ///
     /// # Errors
-    /// [`JobStoreError::Corrupt`] when a row does not parse, is live with no expiry or is under
-    /// a key that names no host; [`JobStoreError::UnknownRow`] when a later build wrote one;
     /// [`JobStoreError::Store`].
     pub fn cordons(&self) -> Result<BTreeMap<HostId, Cordon<Duration>>, JobStoreError> {
         let now = self.store.now();
-        self.store
-            .scan_prefix(keys::CORDON)?
-            .into_iter()
-            .map(|(key, row)| {
-                let host = HostId::new(key.trim_start_matches(keys::CORDON))
-                    .map_err(|_| JobStoreError::row(&key, DecodeError::WrongKey))?;
-                Ok((host, cordon_in(&key, &row, now)?))
-            })
-            .collect()
+        let rows = self.store.scan_prefix(keys::CORDON)?.into_iter();
+        let in_force = |(key, row): (String, Versioned)| {
+            let host = HostId::new(key.trim_start_matches(keys::CORDON)).ok()?;
+            let holder = decode_cordon(&row.value).unwrap_or_default();
+            let until = row.expires_at.map_or(Duration::MAX, |end| end.since(now));
+            Some((host, Cordon { until, holder }))
+        };
+        Ok(rows.filter_map(in_force).collect())
     }
 
     /// Puts the cordon `held` on `host` for the time it has left, if no cordon is in force
@@ -192,6 +196,33 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Cond::Absent,
         );
         Ok(self.write(txn)?.is_ok())
+    }
+
+    /// Puts each of `held`, the cordons a server's host bindings brought back at its start,
+    /// into the table as [`JobStore::restore_cordon`] does, once for the store: the first
+    /// server to do so writes [`keys::CORDONS_RESTORED`] after them, and every later call
+    /// writes nothing and answers `false`. An earlier release kept the cordons only in the
+    /// bindings, so the first start of this one carries them over; after it, the table is the
+    /// cordons' record, and a cordon lifted through any server is not written back from a
+    /// binding that still holds it.
+    ///
+    /// # Errors
+    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`]. A failure before the marker is
+    /// written leaves it absent, so the next start carries the cordons over again.
+    pub fn restore_cordons(
+        &self,
+        held: &BTreeMap<HostId, Cordon<Duration>>,
+    ) -> Result<bool, JobStoreError> {
+        if self.store.get(keys::CORDONS_RESTORED)?.is_some() {
+            return Ok(false);
+        }
+        for (host, cordon) in held {
+            self.restore_cordon(host, cordon)?;
+        }
+        // Another server marking it first is the same end: the commit's answer is not needed.
+        let mark = Txn::new().put(keys::CORDONS_RESTORED, Vec::new(), Cond::Absent);
+        let _marked = self.write(mark)?;
+        Ok(true)
     }
 
     /// Commits `txn`, a write of the cordon row of `host` at the version read: a conflict is

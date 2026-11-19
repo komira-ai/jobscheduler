@@ -28,9 +28,14 @@ into placement before then:
 js host uncordon --server https://<job service> --token-file <operator token> --host-id <id>
 ```
 
-The call extends a cordon already in force (it never shortens one) and lifts any holder's. A
-`js-agent cordon` run on the host meanwhile finds the operator's cordon, prints `kept` and leaves it
-alone. A cordon asked for longer than seven days is cut to seven days; repeat the call to go on.
+The call extends a cordon already in force (it never shortens one) and lifts any holder's. A cordon
+it extends past its end becomes the operator's: a `js-agent cordon` run that held it before finds
+it taken (`kept ... reason=taken_over`) and lifts nothing, and a run started meanwhile finds the
+operator's cordon, prints `kept` and leaves it alone. A cordon asked for longer than seven days is
+cut to seven days; repeat the call to go on.
+
+Every lease server over the store must be of this release for a cordon to keep a host out of every
+placement: an earlier server neither writes the job store's cordon nor checks it when it places.
 
 ## What it does
 
@@ -107,7 +112,11 @@ It extends and lifts only its own cordon:
   not kept alive by the next one: its cordon lapses within its last `--lease-secs`, and the next
   run then places its own.
 - `--take-over` makes the cordon in force the verb's, whoever holds it, and the verb holds and lifts
-  it as its own (the first call only asks for it; the renewals do not).
+  it as its own (the first call only asks for it; the renewals do not). Taken over, an operator's
+  long cordon ends with the verb's window: take one over only to end it.
+- A request that names no holder (an operator's `js host cordon`, or an update of the agent) and
+  extends the verb's cordon past its end makes it unnamed; the verb's next renewal then finds it
+  another's (`taken_over`) and the verb stops without lifting it.
 - A renewal that finds another holder's cordon (the verb's own lapsed, for instance because the
   process was stopped for longer than `--lease-secs`, and another holder's took its place, or it was
   taken over) prints `kept host=<id> reason=taken_over holder=<holder, or ->`, lifts nothing and

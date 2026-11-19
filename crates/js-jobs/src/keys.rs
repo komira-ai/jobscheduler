@@ -41,6 +41,11 @@ pub const HOSTBOOK: &str = "hostbook/";
 /// commits runs the duty for that period.
 pub const PERIODIC: &str = "periodic/";
 
+/// `meta/cordons/restored`: empty, written once by the first server that carried the cordons an
+/// earlier release kept only in its host bindings into the cordon table
+/// ([`crate::JobStore::restore_cordons`]); with it, no later start writes a cordon back.
+pub const CORDONS_RESTORED: &str = "meta/cordons/restored";
+
 /// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
