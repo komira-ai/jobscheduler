@@ -74,8 +74,9 @@ state the host really holds and a re-check that sees no difference does not prov
   pinned too: the seal pins it. So is one the pin file names: when the pin happened in an earlier process, `taint.pinned`
   holds the marker's taint, and a restored residue equal to it, field for field, stays pinned; a pin file that cannot be
   read pins; one that names another taint is a stale file of an operator-cleared taint and is ignored. The decision is
-  `StateRoot::restored_rechecks`, which `TaintState::load` and the update hook share. An operator's clear (`js-agent clear-taint`) keeps
-  `taint.json`, `taint.pinned` and the `owed-*` records aside. The code is `TaintState::load`, `CheckHook::run_restored` and `Integrity::compare`. Not
+  `StateRoot::restored_rechecks`, which `TaintState::load` and the update hook share. An
+  operator's clear (`js-agent clear-taint`) keeps `taint.json`, `taint.pinned` and the `owed-*`
+  records aside. The code is `TaintState::load`, `CheckHook::run_restored` and `Integrity::compare`. Not
   measured: how often an agent restarts with a taint.
 - **Idle.** Every run is over; a run whose checks found the taint (`Blocked`) counts as over, since its container and
   scratch directory are gone and it would otherwise hold the host busy for good.

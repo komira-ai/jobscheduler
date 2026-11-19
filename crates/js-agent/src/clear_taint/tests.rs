@@ -31,6 +31,7 @@ impl Rig {
         fs::create_dir_all(&state).expect("make the state root");
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("0700");
         fs::create_dir_all(dir.path().join("scratch/runs")).expect("make the scratch root");
+        fs::create_dir_all(dir.path().join("scratch/oci/oci-labels")).expect("make the ledger");
         Self { dir }
     }
 
@@ -62,7 +63,6 @@ impl Rig {
 
     /// The ledger holds a sidecar for the lease `name`.
     fn lease(&self, name: &str) {
-        fs::create_dir_all(self.ledger()).expect("make the ledger");
         fs::write(self.ledger().join(format!("{name}.json")), "{}").expect("write a sidecar");
     }
 
@@ -371,11 +371,10 @@ fn a_run_that_lives_defers_the_clear_and_changes_nothing() {
 #[test]
 fn a_lease_made_during_the_stop_starts_the_agent_again_and_defers() {
     let rig = Rig::new("clear-taint-race");
-    rig.pin(&residue());
+    rig.owe("r1");
     let ledger = rig.ledger();
     let fake = Fake::default();
     *fake.on_stop.borrow_mut() = Some(Box::new(move || {
-        fs::create_dir_all(&ledger).expect("make the ledger");
         fs::write(ledger.join("js-h1-r3.json"), "{}").expect("a sidecar");
     }));
     let (status, line, _) = run_on(&fake, &rig.args(&[]));
@@ -383,7 +382,7 @@ fn a_lease_made_during_the_stop_starts_the_agent_again_and_defers() {
     assert_eq!(status, ExitCode::from(75));
     assert_eq!(line["reason"], "run_held");
     assert_eq!(fake.log(), stopped_and_started());
-    assert_eq!(rig.names(), [LOCK_FILE, PIN_FILE]);
+    assert_eq!(rig.names(), [LOCK_FILE, "owed-r1"]);
 }
 
 /// Proves that a unit that does not go down within the wait, or whose stop is refused, fails
@@ -436,8 +435,10 @@ fn a_unit_that_does_not_stop_fails_the_clear_with_nothing_moved() {
 
 /// Proves that a kept name that is taken stops the clear without writing over it: the owed
 /// record before it is kept, the marker stays (the host stays tainted), the detail says what
-/// was kept, and the unit is started again. Catches a move that writes over an earlier kept
-/// file, and one that goes on after a failed move.
+/// was kept, and the unit is left stopped; a first move that fails says nothing was kept.
+/// Catches a move that writes over an earlier kept file, one that goes on after a failed move,
+/// and an agent started with its owed records or pin file gone and its marker left, which
+/// could then clear a taint that must stay.
 #[test]
 fn a_taken_name_stops_the_clear_and_keeps_the_marker() {
     let rig = Rig::new("clear-taint-taken");
@@ -458,12 +459,24 @@ fn a_taken_name_stops_the_clear_and_keeps_the_marker() {
         "{detail}"
     );
     assert!(
-        detail.ends_with(&format!("; kept owed-r1 as owed.r1.{TAIL}")),
+        detail.ends_with(&format!(
+            "; kept owed-r1 as owed.r1.{TAIL}; {UNIT} is left stopped: run the clear again once \
+             the cause is fixed"
+        )),
         "{detail}"
     );
     assert_eq!(fs::read_to_string(&taken).expect("kept"), "earlier");
     assert!(rig.state().join(MARKER_FILE).exists());
-    assert_eq!(fake.log(), stopped_and_started());
+    assert_eq!(fake.log()[..], stopped_and_started()[..3]);
+
+    let rig = Rig::new("clear-taint-taken-first");
+    rig.taint(&residue());
+    fs::write(rig.state().join(format!("taint.json.{TAIL}")), "earlier").expect("taken");
+    let fake = Fake::default();
+    let (status, line, _) = run_on(&fake, &rig.args(&[]));
+    assert_eq!(status, ExitCode::from(1));
+    let detail = line["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("; nothing was kept aside; "), "{detail}");
 }
 
 /// Proves that a record that cannot be written fails the clear after the files were kept,
@@ -472,7 +485,7 @@ fn a_taken_name_stops_the_clear_and_keeps_the_marker() {
 #[test]
 fn a_record_that_cannot_be_written_fails_the_clear_but_starts_the_agent() {
     let rig = Rig::new("clear-taint-record");
-    rig.pin(&residue());
+    rig.taint(&residue());
     fs::write(
         rig.state()
             .join("taint.cleared-1700000000-by-ops.lead.json.tmp"),
@@ -487,7 +500,8 @@ fn a_record_that_cannot_be_written_fails_the_clear_but_starts_the_agent() {
     let detail = line["detail"].as_str().unwrap_or_default();
     assert!(
         detail.starts_with(
-            "cleared the taint (no marker) at 1700000000 by ops.lead: kept taint.pinned as"
+            "cleared the taint (reason residue, check process-as-job-user, run r1) at 1700000000 \
+             by ops.lead: kept taint.json as"
         ),
         "{detail}"
     );
@@ -500,7 +514,7 @@ fn a_record_that_cannot_be_written_fails_the_clear_but_starts_the_agent() {
         "{err}"
     );
     assert_eq!(fake.log(), stopped_and_started());
-    assert!(!rig.state().join(PIN_FILE).exists());
+    assert!(!rig.state().join(MARKER_FILE).exists());
 }
 
 /// Proves that a unit that will not start after a clear fails it, whether the start is
@@ -599,7 +613,7 @@ fn a_state_root_or_a_ledger_that_cannot_be_read_fails_the_clear() {
 
     let rig = Rig::new("clear-taint-ledger");
     rig.taint(&residue());
-    fs::create_dir_all(rig.dir.path().join("scratch/oci")).expect("the store");
+    fs::remove_dir(rig.ledger()).expect("no ledger");
     fs::write(rig.ledger(), "not a directory").expect("a file in the way");
     let (status, line, _) = run_on(&fake, &rig.args(&[]));
     assert_eq!(status, ExitCode::from(1));
@@ -712,6 +726,12 @@ fn the_flags_are_checked_before_anything_is_done() {
     let by = "b".repeat(64);
     let reason = "r".repeat(MAX_REASON);
     let state = longest.state().display().to_string();
+    let scratch = longest
+        .dir
+        .path()
+        .join("scratch/runs")
+        .display()
+        .to_string();
     let args: Vec<OsString> = [
         "js-agent",
         VERB,
@@ -721,6 +741,8 @@ fn the_flags_are_checked_before_anything_is_done() {
         &reason,
         "--state-root",
         &state,
+        "--scratch-root",
+        &scratch,
     ]
     .map(OsString::from)
     .to_vec();
@@ -779,4 +801,76 @@ fn a_host_jobs_taint_is_refused() {
     );
     assert!(fake.log().is_empty());
     assert_eq!(rig.names(), [LOCK_FILE, MARKER_FILE]);
+}
+
+/// Proves that a ledger that is not there (a `--scratch-root` that is not the agent's) fails
+/// the clear with nothing moved and the unit untouched. Catches a mistyped scratch root read
+/// as an agent with no run, which would stop an agent that runs jobs.
+#[test]
+fn a_ledger_that_is_not_there_fails_the_clear() {
+    let rig = Rig::new("clear-taint-no-ledger");
+    rig.taint(&residue());
+    fs::remove_dir(rig.ledger()).expect("no ledger");
+    let fake = Fake::default();
+    let (status, line, _) = run_on(&fake, &rig.args(&[]));
+    assert_eq!(status, ExitCode::from(1));
+    assert_eq!(line["reason"], "state_invalid");
+    let detail = line["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with(&format!("the ledger {}: ", rig.ledger().display())),
+        "{detail}"
+    );
+    assert!(fake.log().is_empty());
+    assert_eq!(rig.names(), [LOCK_FILE, MARKER_FILE]);
+}
+
+/// Proves that a pin file alone (no marker, no owed record: a stale one) is kept aside and
+/// recorded with no taint, and the agent, which is not tainted, is not stopped; a kept name
+/// that is taken fails it with the pin file where it was. Catches a clear that restarts a
+/// healthy agent for a file it ignores.
+#[test]
+fn a_stale_pin_file_is_kept_aside_without_touching_the_agent() {
+    let rig = Rig::new("clear-taint-pin-alone");
+    rig.pin(&residue());
+    let fake = Fake::default();
+    let (status, line, err) = run_on(&fake, &rig.args(&[]));
+    assert_eq!(status, ExitCode::SUCCESS);
+    assert!(fake.log().is_empty(), "{:?}", fake.log());
+    let mut names = vec![
+        LOCK_FILE.to_owned(),
+        "taint.cleared-1700000000-by-ops.lead.json".to_owned(),
+        format!("taint.pinned.{TAIL}"),
+    ];
+    names.sort();
+    assert_eq!(rig.names(), names);
+    let detail = line["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with(&format!(
+            "cleared the taint (no marker) at 1700000000 by ops.lead: kept taint.pinned as \
+             taint.pinned.{TAIL}"
+        )),
+        "{detail}"
+    );
+    assert!(
+        err.starts_with("js-agent clear-taint: cleared the taint (no marker)"),
+        "{err}"
+    );
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(
+            rig.state()
+                .join("taint.cleared-1700000000-by-ops.lead.json"),
+        )
+        .expect("the record"),
+    )
+    .expect("json");
+    assert_eq!(record["taint"], Value::Null);
+
+    let rig = Rig::new("clear-taint-pin-taken");
+    rig.pin(&residue());
+    fs::write(rig.state().join(format!("taint.pinned.{TAIL}")), "earlier").expect("taken");
+    let (status, line, _) = run_on(&fake, &rig.args(&[]));
+    assert_eq!(status, ExitCode::from(1));
+    assert_eq!(line["reason"], "clear_failed");
+    assert!(rig.state().join(PIN_FILE).exists());
+    assert!(fake.log().is_empty());
 }

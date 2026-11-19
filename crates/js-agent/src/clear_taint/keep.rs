@@ -80,11 +80,12 @@ pub(super) fn record_name(stamp: Stamp, who: &Operator) -> String {
     format!("taint.cleared-{}-by-{}.json", stamp.0, who.0)
 }
 
-/// Keeps each of `names` aside in `root`, in order, each under [`kept_name`], and makes the
-/// moves durable. A move never writes over a file: a name that is taken stops the clear.
+/// Keeps each of `names` aside in `root`, in order, each under [`kept_name`]. A move never
+/// writes over a file: a name that is taken stops the clear. The moves are made durable by the
+/// sync of the directory that [`record`] ends with, before the unit is started.
 ///
 /// # Errors
-/// A move or the sync of the directory failed: what was kept before it, and why.
+/// A move failed: what was kept before it, and why.
 pub(super) fn keep_all(
     root: &StateRoot,
     names: &[String],
@@ -109,10 +110,7 @@ pub(super) fn keep_all(
             kept_as,
         });
     }
-    match sync(root) {
-        Ok(()) => Ok(kept),
-        Err(wrong) => Err((kept, format!("the state root could not be synced: {wrong}"))),
-    }
+    Ok(kept)
 }
 
 /// Makes what was created or moved in the state root durable.
@@ -164,7 +162,8 @@ pub(super) fn told(
 }
 
 /// Records the clear in `root` as [`record_name`]: written to a file of its own, synced, and
-/// renamed into place, the directory synced. The record names when, by whom and why, the taint
+/// renamed into place, the directory synced (which also makes the moves of [`keep_all`]
+/// durable). The record names when, by whom and why, the taint
 /// the marker held (null when there was no marker), and each file and the name it is kept
 /// under.
 ///

@@ -31,7 +31,8 @@ own values when they differ.
 The verb:
 
 - does nothing, and says so, when the state root holds no `taint.json`, `taint.pinned` or
-  `owed-*` record;
+  `owed-*` record; a `taint.pinned` alone (stale, of a taint already cleared) is kept aside and
+  recorded without touching the unit;
 - refuses with exit 75 (`run_held`) while the agent runs a job (a lease in its crun ledger):
   run it again once the job has ended. It changes nothing then;
 - stops the unit and waits for it (a tainted agent with no job running exits at once);
@@ -50,12 +51,12 @@ the line's `reason` and `detail` say why, and so does standard error:
 | reason | what happened | what to do |
 |---|---|---|
 | `bad_args` | a flag is wrong | fix the flag |
-| `state_invalid` | the state root, its lock or the ledger cannot be used | read the detail |
+| `state_invalid` | the state root, its lock or the ledger cannot be used (a ledger that is not there means `--scratch-root` is not the agent's) | read the detail |
 | `locked` | another clear is running | wait for it |
 | `host_job` | the taint is a host job's; nothing was done | reimage the machine |
 | `run_held` | a job runs | run it again when the job has ended |
 | `stop_failed` | the unit did not stop within 300 s; nothing moved, the unit was started again | look at the journal, then run it again |
-| `clear_failed` | a file could not be kept aside; the detail says which were, the unit was started again | fix the cause, run it again |
+| `clear_failed` | a file could not be kept aside; the detail says which were; the marker is still there and the unit is left stopped | fix the cause, run it again (it starts the unit) |
 | `record_failed` | the files were kept aside but the record was not written | keep the journal line |
 | `start_failed` | the clear stands but the unit did not start | `systemctl status js-agent-crun` |
 

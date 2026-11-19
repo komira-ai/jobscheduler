@@ -582,7 +582,8 @@
 //! registry; a host that has none changes nothing and writes nothing. The call does not reach
 //! the agent, so an agent whose marker still holds the taint refuses the next start
 //! `host-tainted`, which the server takes as the host's taint again: the operator moves the
-//! agent's `taint.json` and its `owed-*` records aside first. A job with host isolation taints its host when
+//! agent's `taint.json`, `taint.pinned` and its `owed-*` records aside first (`js-agent
+//! clear-taint`, `docs/runbooks/clear-a-taint.md`). A job with host isolation taints its host when
 //! its placement commits (reason `host-job`, `run_id` the job's id; `docs/runbooks/host-jobs.md`),
 //! and its own start is still sent. An agent that cleared a taint stays tainted for the server
 //! until it is acknowledged, so a server that does not know the field (an older release) leaves

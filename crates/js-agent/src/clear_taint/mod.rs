@@ -15,11 +15,14 @@
 //!    ([`LOCK_FILE`]) is taken, so two clears never run at once.
 //! 2. What is to be cleared is read: the marker (`taint.json`), the pin file (`taint.pinned`) and
 //!    the records of owed checks (`owed-*`). When there is none of them the host is not tainted:
-//!    nothing is done and the unit is not touched.
+//!    nothing is done and the unit is not touched. A pin file alone (no marker, no owed record) is
+//!    a stale one of a taint already cleared, which the agent ignores and never writes while it
+//!    is untainted: it is kept aside and recorded (steps 5 and 6) and the unit is not touched.
 //!    A host job's taint (`host-job`) is refused: that machine is reimaged, not cleared.
 //! 3. The agent must hold no run that lives: the crun ledger beside the scratch root (one
 //!    sidecar for each lease, written before the lease is made and removed after the last of it
-//!    is gone) must be empty. A run whose checks found the taint (`Blocked`) has no lease left
+//!    is gone) must be empty. The agent makes the ledger when it starts, so a ledger that is not
+//!    there (a `--scratch-root` that is not the agent's) fails the clear. A run whose checks found the taint (`Blocked`) has no lease left
 //!    and does not count. A run that lives defers the clear (exit 75): a tainted agent starts
 //!    nothing, so the run is one that began before the taint, and the clear waits for it to end.
 //! 4. The unit is stopped, and waited for (at most [`STOP_WAIT`]). A tainted agent that holds
@@ -30,10 +33,13 @@
 //!    unit again and defers the clear, with nothing moved.
 //! 5. The files are kept, never removed, under names that end `.cleared-<unix seconds>-by-<operator>`
 //!    ([`keep`]): each `owed-<run>` first, then `taint.pinned`, then `taint.json` last, so that a
-//!    clear cut short leaves the marker, and with it the taint, until it is run again.
+//!    clear cut short leaves the marker, and with it the taint, until it is run again. A move that
+//!    fails leaves the unit stopped: what was kept before it may be the pin file or the owed
+//!    records that keep the taint from clearing itself, and the agent is not started on the rest.
 //! 6. The clear is recorded in the state root, as `taint.cleared-<unix seconds>-by-<operator>.json`:
 //!    when, by whom, why, the taint the marker held, and each file and the name it is kept
-//!    under. One line on standard error says the same for the unit's journal.
+//!    under. One line on standard error says the same for the unit's journal. The record's sync of
+//!    the directory also makes the moves durable.
 //! 7. The unit is started and waited for (at most [`START_WAIT_SECS`]): the agent starts with no
 //!    taint, and from a new baseline of the host.
 //!
@@ -135,8 +141,8 @@ pub(crate) enum Token {
     RunHeld,
     /// The unit could not be stopped; nothing was moved and the unit was started again.
     StopFailed,
-    /// A file could not be kept aside; the detail says which were, and the unit was started
-    /// again.
+    /// A file could not be kept aside; the detail says which were, and the unit is left
+    /// stopped (the marker is still there).
     ClearFailed,
     /// The files were kept aside but the record could not be written; the unit was started
     /// again.
@@ -302,6 +308,9 @@ fn clear(args: &Args, host: &Host<'_>, err: &mut dyn Write) -> Done {
             .to_owned();
         return Done::failure(Token::HostJob, detail);
     }
+    if found.names == [PIN_FILE] {
+        return pin_alone(&root, args, stamp_of(host), &who, err);
+    }
     let ledger = ledger_of(&args.scratch_root);
     if let Some(done) = leases_defer(&ledger) {
         return done;
@@ -314,29 +323,64 @@ fn clear(args: &Args, host: &Host<'_>, err: &mut dyn Write) -> Done {
     if let Some(done) = leases_defer(&ledger) {
         return started(host, &args.unit, done);
     }
-    let stamp = Stamp::at(host.clock.now_ms());
+    let stamp = stamp_of(host);
     let kept = match keep::keep_all(&root, &found.names, stamp, &who) {
         Ok(kept) => kept,
         Err((kept, wrong)) => {
-            let detail = format!("{wrong}; {}", keep::said(&kept));
-            return started(host, &args.unit, Done::failure(Token::ClearFailed, detail));
+            // The marker is still there, but what was kept before it may be the pin file or
+            // the owed records that keep the taint from clearing itself: the agent is not
+            // started on what is left.
+            let detail = format!(
+                "{wrong}; {}; {} is left stopped: run the clear again once the cause is fixed",
+                keep::said(&kept),
+                args.unit
+            );
+            return Done::failure(Token::ClearFailed, detail);
         }
     };
-    let record = keep::record(
-        &root,
-        stamp,
-        &who,
-        &args.reason,
-        found.taint.as_ref(),
-        &kept,
-    );
-    let told = keep::told(stamp, &who, &args.reason, found.taint.as_ref(), &kept);
+    let done = recorded(&root, args, stamp, &who, found.taint.as_ref(), &kept, err);
+    started(host, &args.unit, done)
+}
+
+/// The stamp of a clear made now.
+fn stamp_of(host: &Host<'_>) -> Stamp {
+    Stamp::at(host.clock.now_ms())
+}
+
+/// Records a clear that kept `kept` aside, and says so on `err`: how it ended, unless the unit
+/// fails to start after it.
+fn recorded(
+    root: &StateRoot,
+    args: &Args,
+    stamp: Stamp,
+    who: &Operator,
+    taint: Option<&js_agent_wire::Taint>,
+    kept: &[keep::Kept],
+    err: &mut dyn Write,
+) -> Done {
+    let record = keep::record(root, stamp, who, &args.reason, taint, kept);
+    let told = keep::told(stamp, who, &args.reason, taint, kept);
     let _ = writeln!(err, "js-agent clear-taint: {told}");
-    let done = match record {
+    match record {
         Ok(name) => Done::success(format!("{told}; recorded in {name}")),
         Err(wrong) => Done::failure(Token::RecordFailed, format!("{told}; the record: {wrong}")),
-    };
-    started(host, &args.unit, done)
+    }
+}
+
+/// The clear of a pin file found with no marker and no owed record: a stale one, of a taint
+/// already cleared, which the agent ignores and never writes while it is not tainted. It is
+/// kept aside and recorded, and the agent, which holds no taint, is left running.
+fn pin_alone(
+    root: &StateRoot,
+    args: &Args,
+    stamp: Stamp,
+    who: &Operator,
+    err: &mut dyn Write,
+) -> Done {
+    match keep::keep_all(root, &[PIN_FILE.to_owned()], stamp, who) {
+        Ok(kept) => recorded(root, args, stamp, who, None, &kept, err),
+        Err((_, wrong)) => Done::failure(Token::ClearFailed, wrong),
+    }
 }
 
 /// Whether `reason` may be recorded: 1 to [`MAX_REASON`] bytes, no control character.
@@ -403,15 +447,12 @@ fn ledger_of(scratch_root: &Path) -> PathBuf {
 }
 
 /// The sidecars in `ledger`, sorted: one for each lease the agent made and has not yet taken
-/// apart. A ledger that is not there has none.
+/// apart. The crun agent makes the ledger when it starts, so a ledger that is not there is a
+/// `--scratch-root` that is not the agent's, and an error: read as empty, it would let the
+/// clear stop an agent that runs jobs.
 fn leases(ledger: &Path) -> io::Result<Vec<String>> {
-    let entries = match fs::read_dir(ledger) {
-        Ok(entries) => entries,
-        Err(wrong) if wrong.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(wrong) => return Err(wrong),
-    };
     let mut names = Vec::new();
-    for entry in entries {
+    for entry in fs::read_dir(ledger)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
         names.extend(name.strip_suffix(".json").map(str::to_owned));
     }
