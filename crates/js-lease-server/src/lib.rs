@@ -573,7 +573,7 @@
 //! `--taint-recheck-ms`): the server clears the host's taint when `taint_cleared` equals the
 //! taint it holds, field for field, commits the binding without it first (as for a report), and
 //! answers `taint_cleared_ack: true` (not `taint_ack`, which answers a taint report, so that a late acknowledgement of the report cannot end the agent's taint before the server has heard of the clear), so the agent stops sending it; a taint a refused start made (reason `host-tainted`) is cleared by a cleared report of
-//! any taint; a cleared report of any other
+//! any taint, in the registry and in the store alike (the taint another server of an update stored); a cleared report of any other
 //! taint (a host job's, say) changes nothing and is acknowledged all the same. A start refused
 //! `host-tainted` in the beat that reports the clear taints nothing: those results predate it.
 //! The second is the operator's `ClearHostTaint` call of the job service (`js host host-taint`),

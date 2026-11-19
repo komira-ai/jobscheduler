@@ -171,3 +171,31 @@ async fn an_agent_clear_of_another_taint_leaves_the_stored_taint() {
     assert_eq!(first.binding("host-a"), before, "nothing was written");
     assert_eq!(first.binding("host-a")["taint_run_id"], "r2");
 }
+
+/// Asserts that an agent's clear reaching a server that does not hold the taint ends the taint
+/// a refused start made (reason `host-tainted`, naming the run, no check) that the store
+/// holds, though the agent reports a different taint cleared: the first server stored it, and
+/// the second is told `r9` cleared. It catches a clear that is acknowledged while the stored
+/// refused-start taint stays, which the agent, clean again, never reports a second time.
+#[tokio::test]
+async fn an_agent_clear_ends_the_stored_taint_a_refused_start_made() {
+    let first = rig("clear_refused_first");
+    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let second = Rig::second(&first, "clear_refused_second");
+    let at_second = second.pooled("host-a", "burst").await.unwrap();
+    let refused = json!({ "reason": "host-tainted", "run_id": "r1" });
+    let reply = first
+        .beat((&first.pool, None), "host-a", &at_first, refused)
+        .await;
+    assert!(reply.unwrap().taint_ack);
+    assert_eq!(first.binding("host-a")["taint_reason"], "host-tainted");
+
+    let cleared = second
+        .beat_clearing("host-a", &at_second, (residue("r9"), Value::Null))
+        .await;
+    assert!(cleared.unwrap().taint_cleared_ack);
+    let stored = first.binding("host-a");
+    for key in ["taint_reason", "taint_check", "taint_run_id"] {
+        assert_eq!(stored[key], Value::Null, "{key}");
+    }
+}

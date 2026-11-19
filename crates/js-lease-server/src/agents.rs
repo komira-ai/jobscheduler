@@ -657,7 +657,8 @@ impl Agents {
     /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
     /// A beat that reports cleared a taint the registry does not hold, on a host the registry
-    /// holds no taint for, ends the taint the store holds when it is that one
+    /// holds no taint for, ends the taint the store holds when it is that one, or the one a
+    /// refused start made (reason `host-tainted`, which the agent never reports)
     /// ([`Agents::end_stored_taint`]): another server over the same store (the two of a
     /// start-first update) was told the taint and stored it, and the agent, told that its
     /// clear was taken, never reports it again.
@@ -697,7 +698,7 @@ impl Agents {
         Ok(Some(gate))
     }
 
-    /// Ends the taint the store holds for `host` when it is `cleared`
+    /// Ends the taint the store holds for `host` when it is `cleared` or a refused start's
     /// ([`BindingStore::end_taint`], whose conditional write never erases a taint another
     /// server stored in between). The registry holds no taint for the host, so nothing changes
     /// in memory. The caller holds [`Agents::host_writes`].

@@ -72,6 +72,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
 use js_state::{Cond, Store, Txn};
@@ -669,8 +670,9 @@ impl BindingStore {
     }
 
     /// Commits the binding the store holds for `host` without its taint when that taint is
-    /// `cleared`, field for field, by the conditional write of [`BindingStore::commit_taint`],
-    /// and holds the binding without it as stored; the change, or `None` when nothing was
+    /// `cleared`, field for field, or the taint a refused start made (reason `host-tainted`),
+    /// which the agent, clean again, never reports and so ends with any cleared taint, by the
+    /// conditional write of [`BindingStore::commit_taint`], and holds the binding without it as stored; the change, or `None` when nothing was
     /// written (the store holds no binding of `host`, another taint or none, and in file mode).
     /// What this server holds as stored for `host` is left as it was unless the commit is made,
     /// so a later [`BindingStore::save`] never writes this server's binding over a taint the
@@ -688,9 +690,12 @@ impl BindingStore {
             )
         };
         let ended = self.stored(host).and_then(|stored| {
-            let stored = stored.filter(|bound| bound.taint() == Some(cleared));
+            let ends =
+                |taint: &Taint| taint == cleared || taint.reason == refusal_code::HOST_TAINTED;
+            let stored = stored.filter(|bound| bound.taint().is_some_and(ends));
+            let expected = stored.as_ref().and_then(|bound| bound.taint().cloned());
             let change = stored.map(|bound| self.change(host, bound.with_taint(None)));
-            let commit = |change| self.commit_taint(change, Some(cleared));
+            let commit = |change| self.commit_taint(change, expected.as_ref());
             change.as_ref().map_or(Ok(()), commit)?;
             Ok(change)
         });
