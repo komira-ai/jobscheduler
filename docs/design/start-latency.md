@@ -69,8 +69,9 @@ before the providers had all answered.
   names is made, and rewritten once it runs. They are what lets a restarted agent adopt or remove
   what a crashed one made.
 - **The other sync writes stay, for the same reason.** The provider record (written and synced before
-  the first `Prepare`, so a restart can release what a provider may hold) and the mount list of the
-  assembly, which is on a `tmpfs` (`/run/js-agent/mounts`), where a sync costs nothing.
+  the first `Prepare`, so a restart can release what a provider may hold; the third part below
+  writes it right after the first `Prepare`s instead) and the mount list of the assembly, which is
+  on a `tmpfs` (`/run/js-agent/mounts`), where a sync costs nothing.
 - **`Prepare` then `Mount` stays two calls.** The provider protocol answers `Prepare` at once and
   `Mount` when the tree can be opened; sending `Mount` before `Prepare` was answered would let the two
   arrive in either order. The second call costs one round trip on the node's socket and one step.
@@ -151,7 +152,7 @@ agents' journals:
 - **The beat after a start ends when the container runs.** The worker rings the sleeper's bell when
   what it publishes holds news for the server: a run or job that runs or ended, a new result, a newly
   retired job id, a taint or its clear (`worker/bell.rs`). A start just taken, listed as `starting`,
-  is not news. The wait after an accepted heartbeat whose reply the worker took ends on the bell
+  is not news (the third part below makes it news). The wait after an accepted heartbeat whose reply the worker took ends on the bell
   (`Session::beats_on_news`, `Sleeper::sleep_or_bell`); every other wait (a backoff, a retry, the
   drain's) does not. So the heartbeat after a start leaves the moment its container runs, carries
   `running`, and is then the heartbeat the server holds for the next placement on the host: a
@@ -182,10 +183,113 @@ agents' journals:
 The farm table after this agent ships (each segment's p50 and p90 on the slow node and a fast one,
 from `js-start-timeline` over the journals of the same kind of cold build).
 
+## Third part: delivery, the provider record, the worker's order, the lookups' threads
+
+### Measured on the farm (before)
+
+js-agent 0.1.280 (with both parts), one node over three hours, 554 starts, from the `Started` lines
+(`placed_at_ms` to the runtime's `running`). That node took every job of the pool while these were
+taken, so its load inflates them.
+
+| Segment | p50 | p90 |
+|---|---|---|
+| placement to `running` | 515 ms | 930 ms (p99 1.8 s) |
+| placement to the reply's arrival | 66 ms | 296 ms |
+| arrival to `admitted` | 3 ms | 117 ms |
+| `admitted` to `resolved` | 204 ms | 423 ms |
+| `resolved` to `created` | 83 ms | 254 ms |
+| the runtime's `begin` to `running` | 38 ms | 76 ms |
+
+### Why, read in the code
+
+- **The heartbeat after a start still waited.** After a reply with a command the agent waits the
+  interval unless the bell rings, and a start just listed as `starting` did not ring it. No heartbeat
+  of the host was held at the server until one of its starts ran, so a placement on a host with a
+  start under way waited for that start's `running`. On a host that takes every job a start is
+  nearly always under way, which is the p90 of the delivery.
+- **The provider record's syncs came before the first `Prepare`.** `Lifecycle::provide` wrote the
+  record (the file synced, renamed, the directory synced) on the worker and only then asked the
+  providers, so those syncs were added to `admitted->provided` in full. A provider begins making its
+  tree only when it has `Prepare`.
+- **A waiting start was stepped behind other jobs' cleanup.** `Lifecycle::step` took each job, in
+  the order they were listed, through its advance, its watch and its cleanup. A start is listed last,
+  so the step that saw its lookups or its create answer ran every older job's cleanup first (its
+  syncs, the container's removal, the scratch removal, the integrity check) before it marked
+  `resolved` or asked the assembly. This is the worker's share of every step of a start on a busy
+  host, and of the p90.
+- **The lookups shared their threads with the assemblies.** The `js-paths` pool's four threads ran
+  the lookups of host paths, the assemblies and the post-job checks in one queue. An assembly holds
+  its thread for as long as its mounts take (for ever on a hung file system), so a burst of starts,
+  or one hung provider tree, kept a later start's lookups waiting for a thread.
+
+### What this part changes
+
+- **A start taken is news.** The worker rings the bell when it lists a run or job as `starting`
+  (`worker/bell.rs`), so the heartbeat after a start leaves as soon as the worker has taken it. It
+  lists the start, so the server sends it no command and holds it: a placement on the host meanwhile
+  is answered on that hold at once. The server holds a beat that lists a job `starting` for
+  `held_beat::STARTING_HOLD` (200 ms, never more than the normal bound) instead of the normal
+  bound, so the start's `running`, which rides on the next heartbeat, reaches the server at most
+  that much after the container runs.
+- **`Prepare` first, then the record.** `Lifecycle::provide` remembers the sources for the release,
+  asks each provider, and then writes the record, in the same call and before the worker steps
+  again. A record that cannot be written still fails the start, and its cleanup releases what was
+  asked. A crash between a `Prepare` and the record leaves a source that no record names: the sweep
+  each provider is asked when the agent starts keeps only the runs the agent adopted, and a start
+  that had no container is not one, so the sweep releases it.
+- **Every start is advanced before any job is watched or cleaned** (`Lifecycle::step`): one pass
+  advances every job, then a second watches and cleans each. A start that settled in the first pass
+  is watched in the second, as before.
+- **The lookups have their own threads** (`crun/fs/pool.rs`): `js-lookups` for the lookups of host
+  paths, `js-paths` for the assemblies and the checks, four threads each. A hung provider tree now
+  holds at most four threads of each.
+
+### Decisions
+
+- **A short hold, not `beat_now` on a reply with a command.** The server sends a start again on
+  every heartbeat until the agent lists it, so a `beat_now` there would ask a slow agent in a loop.
+  A beat that lists the start is answered with nothing, and is held briefly.
+- **200 ms for that hold.** A host with a start under way beats about five times a second, and each
+  beat is a new connection and a commit of the listing at the server. Shorter would add beats;
+  longer would report `running` later. A placement ends the hold at once whatever its bound.
+- **A constant, not a setting.** No operator has a reason to tune it apart from the interval; it is
+  capped by the interval's own hold.
+- **The record stays synced.** Only its place in the admission moves. A restart still finds the
+  record of every start whose admission returned.
+- **Two pools of four, not one larger pool.** One larger pool would still let assemblies take every
+  thread; two keep a lookup from ever queueing behind an assembly.
+- **`Mount` is still sent on the step after `Prepare` is answered.** Sending it from the provider
+  client when `Prepare` answers would save one worker step per source, but it changes how the
+  client's flights are kept and is left for its own change.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes.
+- A new agent with an older server: the beat after a start is held to the older server's normal
+  bound (at most the interval, and 5 s), so `running` is reported up to that much later than before
+  until the server is updated. A new server with an older agent behaves as before: that agent never
+  sends a beat while its only change is a start taken.
+- A start's `running` reaches the server up to 200 ms after the container runs while the host holds
+  a beat (before: at once, but only because no beat was held for the next placement).
+
+### What is left
+
+- The farm table after this agent and server ship, on the busy node and a node at normal load.
+- `Mount` sent by the provider client as soon as `Prepare` is answered (one worker step a source).
+- The connection of each heartbeat (a new TCP and TLS handshake every beat, `js-client`).
+- The p99: the integrity check's settle wait (1 s, on the worker, only after a job that left a
+  process or mount behind) and the image budget's first walk after a restart, both on threads a
+  start waits behind.
+
 ## Tests
 
 The tests drive the lifecycle with counted, ordered fakes and an injected clock; none asserts a
 duration: `tests/agent/lifecycle/concurrent_start.rs` and `timeline.rs` (the order of the waits
 and the line), `crun/fs/fs_tests.rs` (the lookups), `crun/budget_tests.rs` (the turn),
 `tests/agent/provider_client.rs` (the retry), the wire's previous-release test
-(`previous_release_v0_1_208.rs`) and `js-analysis`'s timeline tests.
+(`previous_release_v0_1_208.rs`) and `js-analysis`'s timeline tests. The third part adds
+`tests/agent/lifecycle/providers.rs` (the record after the `Prepare`s, and its failure),
+`concurrent_start.rs` (a start advanced before an older job's cleanup), `crun/fs/fs_tests.rs`
+(lookups answered while every assembly or check thread is held), `worker/bell_tests.rs` and
+`tests/agent/jobs/bell.rs` (a start taken rings the bell), and js-lease-server's
+`agent_api_held_tests.rs` and `held_beat_tests.rs` (which bound a beat is held for).
