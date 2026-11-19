@@ -764,7 +764,8 @@ integrity baseline, so they are no finding.
 **Integrity.** The check runs after a job's container and scratch are gone (`crates/js-agent/src/integrity/mod.rs`), so
 the job's own mounts are already removed. Other jobs' mounts are not, so `new-mount` excludes a mount whose point lies
 under `<mounts>/<lease>/` of a lease the agent holds, as it excludes the other jobs' containers. Any other new mount is
-still a finding.
+still a finding when it is still there after the settle wait (`--settle-ms`): a mount the host or the runtime holds for
+a moment at the job's end is gone by then.
 
 ### 4.7 Admission and the preparing stage
 
