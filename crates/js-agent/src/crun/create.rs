@@ -227,6 +227,15 @@ impl CrunRuntime {
         Created::Done(self.made(answer))
     }
 
+    /// The lease name of the run `run_id` while its create is under way: the create may
+    /// have made the lease's group and started its container already, and until the worker
+    /// takes the answer the books do not hold the run.
+    pub(super) fn creating_off_worker(&self, run_id: &str) -> Option<RunHandle> {
+        // A run id the name grammar refuses was never begun: its empty name is no key.
+        let name = container_name(&self.host_id, run_id).unwrap_or_default();
+        self.creates.holds(&name).then_some(RunHandle(name))
+    }
+
     /// What the worker settles of `spec` before its lease is made (see [`Head`]): the checks
     /// that read its books, its name and its sidecar.
     fn head(&mut self, spec: &RunSpec) -> Result<Head, Fault> {

@@ -354,8 +354,11 @@ pub struct Finished<'a> {
     /// The run.
     pub run_id: &'a str,
     /// The containers of the agent's other jobs that are still on the host (running, or
-    /// exited and not yet removed), and those that could not be removed. What they run and
-    /// mount is not the finished job's, so a check must not count it against the job.
+    /// exited and not yet removed), those whose create is under way off the worker
+    /// ([`Runtime::creating`]: the create may have made the run's control group and started
+    /// its processes before the lifecycle takes its answer), and those that could not be
+    /// removed. What they run and mount is not the finished job's, so a check must not count
+    /// it against the job.
     pub live: &'a [RunHandle],
     /// The slot the finished run held, when it held one.
     pub slot: Option<u32>,

@@ -66,6 +66,11 @@ impl Runtime for WithVms {
         self.other.poll_create(run_id)
     }
 
+    /// The other runtime's, for the same reason.
+    fn creating(&self, run_id: &str) -> Option<RunHandle> {
+        self.other.creating(run_id)
+    }
+
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         self.owner(id).poll(id)
     }

@@ -612,6 +612,10 @@ impl Runtime for CrunRuntime {
         self.poll_off_worker(run_id)
     }
 
+    fn creating(&self, run_id: &str) -> Option<RunHandle> {
+        self.creating_off_worker(run_id)
+    }
+
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
         Ok(self.status_of(&id.0))
     }

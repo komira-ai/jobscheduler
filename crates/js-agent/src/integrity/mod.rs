@@ -185,7 +185,8 @@
 //! # Jobs that run side by side
 //!
 //! The agent runs several jobs at once, so the host at the end of one job holds the
-//! containers of the others. [`Finished::live`] lists their ids; a process whose control
+//! containers of the others. [`Finished::live`] lists their ids, a run whose create is still
+//! under way off the worker among them (its container may already run); a process whose control
 //! group path holds one of them, and a mount whose root, mount point or source does, are
 //! not counted against the finished job. An engine that names its mounts or places its
 //! helper processes without the container id does not match, and the neighbour then shows
@@ -195,6 +196,11 @@
 //! Podman host can taint it when the first of them ends. Run one job at a time there, or
 //! accept that such a host is tainted. This is stated from how the engines work, not from
 //! a measurement on a host.
+//!
+//! Under the direct runner every job runs as the one uid of the job users' range (there are
+//! no slots to tell apart), so a process's uid does not say whose it is: its lease's group
+//! does. A process of the job user in the group of a run in [`Finished::live`] is that run's,
+//! and one outside every such group is a `process-as-job-user` of the finished job.
 //!
 //! The `crun` runtime mounts what a job's file system is made of (its layers, the clones of
 //! its host paths) below a directory of the job's own, `<mounts>/<lease>`, before the job
