@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use js_agent_wire::Taint;
 use js_jobs::HOST_JOB_TAINT;
-use js_registry::Binding;
+use js_registry::{Binding, Registry};
 use js_types::HostId;
 use tracing::{error, info, warn};
 
@@ -94,10 +94,52 @@ impl Agents {
             CordonFault::Unsaved
         })?;
         let cleared = self.registry.clear_taint(host);
+        if let Some(taint) = &cleared {
+            log_cleared(host, taint, "operator");
+        }
         drop(gate);
         self.saved().await?;
         Ok(cleared)
     }
+}
+
+/// Logs that the taint a heartbeat brought for `host` is committed.
+pub(super) fn log_stored(host: &HostId, taint: &Taint) {
+    info!(
+        %host,
+        reason = taint.reason.as_str(),
+        check = taint.check.as_deref(),
+        run_id = taint.run_id.as_deref(),
+        "a host's taint is stored from its heartbeat"
+    );
+}
+
+/// Logs that the taint `taint` of `host` is cleared, `by` the `agent` or the `operator`.
+pub(super) fn log_cleared(host: &HostId, taint: &Taint, by: &'static str) {
+    info!(%host, reason = taint.reason.as_str(), by, "a host's taint is cleared");
+}
+
+/// Puts `binding` of `host` back on the registry ([`Registry::restore_tainted`]), `when` that
+/// is at `start` or at the `hello` of a host the registry did not know, and logs what it put
+/// back: the taint's reason, check and run id and the end of the cordon. The caller has found
+/// the registry without the host, so a host it holds after the call was put back here;
+/// nothing is logged when the registry took nothing (a binding with neither a taint nor a
+/// cordon still to run).
+pub(super) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
+    registry.restore_tainted(host, binding.clone());
+    if registry.own_host(host).is_none() {
+        return;
+    }
+    let taint = binding.taint();
+    info!(
+        %host,
+        when,
+        reason = taint.map(|taint| taint.reason.as_str()),
+        check = taint.and_then(|taint| taint.check.as_deref()),
+        run_id = taint.and_then(|taint| taint.run_id.as_deref()),
+        cordon_until_ms = binding.cordon_until_ms(),
+        "a host's stored taint or cordon is put back"
+    );
 }
 
 /// Puts each taint row of the job store on the binding of its host, when that binding holds

@@ -307,7 +307,7 @@ fn placed_in(
         None => (None, None, None),
     };
     for (host, binding) in &bindings {
-        registry.restore_tainted(host, binding.clone());
+        taints::put_back(&registry, host, binding, "start");
     }
     // A cordon a binding brought back is written into the job store, which keeps the cordons
     // from then on (`agents_cordon`), so the first tick's mirror does not lift it.
@@ -572,7 +572,7 @@ impl Agents {
         let named = host.clone();
         let stored = blocking(move || this.store.stored(&named)).await?;
         if let Some(binding) = stored {
-            self.registry.restore_tainted(host, binding);
+            taints::put_back(&self.registry, host, &binding, "hello");
         }
         Ok(())
     }
@@ -687,7 +687,13 @@ impl Agents {
             return Ok(None);
         }
         let gate = self.host_writes.lock().await;
-        self.keep_taint(&check.host, check.taint).await?;
+        self.keep_taint(&check.host, check.taint.clone()).await?;
+        if let Some(cleared) = heartbeat.taint_cleared.as_ref().filter(|_| check.cleared) {
+            taints::log_cleared(&check.host, cleared, "agent");
+        }
+        if let Some(taint) = &check.taint {
+            taints::log_stored(&check.host, taint);
+        }
         Ok(Some(gate))
     }
 
