@@ -192,6 +192,8 @@ fn prepare(runtime: &mut CrunRuntime, spec: &RunSpec, fs: &JobFs) -> FsPrepared 
     assert_eq!(found, FsPrepared::Ready);
     let lease = runtime.lease_dir(&run).expect("beside the runs");
     std::fs::create_dir_all(&lease).expect("the lease directory");
+    let tmp = runtime.tmp_dir(&run).expect("beside the runs");
+    std::fs::create_dir_all(&tmp).expect("the job's temporary directory");
     settled(|| runtime.assemble_fs(&run, 5000))
 }
 
@@ -271,7 +273,7 @@ fn a_layered_run_is_made_over_its_assembled_root_and_removed_with_its_mounts() {
 }
 
 /// Proves a root of layers alone (no image) runs the job's command as given, with the
-/// default `PATH` under the job's environment, and pins no image of its own. Catches a
+/// default `PATH` and the `TMPDIR` of its `/tmp` under the job's environment, and pins no image of its own. Catches a
 /// layers-only start refused for its empty image, or run with an image's command.
 #[test]
 fn a_root_of_layers_alone_runs_its_command_with_the_default_path() {
@@ -295,12 +297,14 @@ fn a_root_of_layers_alone_runs_its_command_with_the_default_path() {
         config["process"]["args"],
         json!(["/dev/js-init", "--", "/bin/tool", "--go"])
     );
-    // The default `PATH`, then the job's own; the runtime's own variables follow.
+    // The default `PATH`, the job's `TMPDIR`, then the job's own; the runtime's own
+    // variables follow.
     let env = config["process"]["env"].as_array().expect("env");
     assert_eq!(
-        env[..2],
+        env[..3],
         [
             json!(format!("PATH={}", js_agent::image::DEFAULT_PATH)),
+            json!("TMPDIR=/tmp"),
             json!("A=2")
         ]
     );
@@ -597,6 +601,8 @@ fn a_check_held_or_lost_is_waited_for_or_counted_as_unanswered() {
     let plain = node.spec("l13-exit");
     let lease = runtime.lease_dir("l13-exit").expect("beside the runs");
     std::fs::create_dir_all(lease).expect("its lease directory, as the lifecycle makes it");
+    let tmp = runtime.tmp_dir("l13-exit").expect("beside the runs");
+    std::fs::create_dir_all(tmp).expect("its temporary directory, as the lifecycle makes it");
     let bare = runtime
         .create_and_start(&plain)
         .expect("started without sources");
@@ -736,6 +742,8 @@ fn the_lookups_and_the_assembly_ring_the_wake_when_they_answer() {
     assert_eq!(found, FsPrepared::Ready);
     let lease = runtime.lease_dir(&run).expect("beside the runs");
     std::fs::create_dir_all(&lease).expect("the lease directory");
+    let tmp = runtime.tmp_dir(&run).expect("beside the runs");
+    std::fs::create_dir_all(&tmp).expect("the job's temporary directory");
     let assembled = rung_until(&mut || runtime.assemble_fs(&run, 5000));
     assert_eq!(assembled, FsPrepared::Ready);
     runtime.discard_fs(&run).expect("discarded");

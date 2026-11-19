@@ -32,12 +32,12 @@
 //! as an overlay at [`ContainerSpec::exec_root`](crate::container::ContainerSpec::exec_root) (lower: the lease's input root; upper: the lease's
 //! upper directory, which outputs are read from), or the host mount the caller put there in
 //! its place; shared read-only trees
-//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp`, `/var/tmp`
-//! and `/run` as size-limited `noexec` tmpfs mounts; `/root` as a disk directory of the
+//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/run` as a
+//! size-limited `noexec` tmpfs mount; `/root` as a disk directory of the
 //! lease (`spec::WRITABLE`); the host directories of
 //! [`ContainerSpec::mounts`](crate::container::ContainerSpec::mounts) (the run's scratch,
-//! the job's mounts, the run's files) as recursive binds with `nosuid` and `nodev`, and
-//! `noexec` when asked; `/dev`, `/proc`, `/sys` and `/dev/shm` as for any container. The image's
+//! the job's `/tmp` and `/var/tmp`, the job's mounts, the run's files) as binds, recursive
+//! unless asked not, with `nosuid` and `nodev`, and `noexec` when asked; `/dev`, `/proc`, `/sys` and `/dev/shm` as for any container. The image's
 //! tree is read-only; with it as the root, those are where a job writes besides the exec
 //! root. A job holds no
 //! capability, gains no privilege and writes no core dump (`hardening`, `spec`), and

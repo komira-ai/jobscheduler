@@ -271,7 +271,8 @@ agent reports in its hello, as capabilities declared in `crates/js-caps`:
 
 The farm allocates no disk per job: its pools book no `disk_bytes` and name no `scratch-quota`,
 and its agents run without `--scratch-quota`. The tierstore on each node is the cache jobs share,
-so there is no per-job scratch bound to book. The registry keeps the two consistent: a pool that
+so there is no per-job scratch bound to book. (Each job's `/tmp` and `/var/tmp` has a bound of its
+own on every crun agent, `--job-tmp-gib`; it is not booked and needs no pool setting.) The registry keeps the two consistent: a pool that
 books no disk and does not name `scratch-quota` refuses a host that enforces a quota, with
 `shape-not-accepted` and the reason `quota-without-pool-disk`, since it would book nothing for
 runs the host books at its default. A pool that names `scratch-quota` must book disk.

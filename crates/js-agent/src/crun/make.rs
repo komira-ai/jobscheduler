@@ -5,14 +5,14 @@
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::PinnedImage;
-use js_contain::oci::{LeaseDirs, Owner};
+use js_contain::oci::{LeaseDirs, Oci, Owner};
 use js_types::{JobNetwork, Resources};
 
 use super::create::Maker;
-use super::dirs::{make_dir, owned, project_of, take_dir};
+use super::dirs::{TMP_PLACES, make_dir, owned, project_of, take_dir, take_empty_dir};
 use super::fault::Fault;
 use super::fs::Assembled;
-use super::spec::{bare, container_spec, host_spec, job_env};
+use super::spec::{bare, container_spec, host_spec, job_env, tmp_env};
 use super::{CrunRuntime, gpu, net};
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::RunSpec;
@@ -27,6 +27,28 @@ use crate::lifecycle::RunSpec;
 /// it is ready: `crun run` starts after this) and `running` (its sidecar says it runs, and
 /// its network is wired).
 pub(super) type Marks = Vec<(&'static str, u64)>;
+
+/// The job's temporary directory of the lease `name`: `.tmp-<name>` beside the lease's
+/// directory, in the scratch root when the leases are beside the runs.
+fn tmp_dir_of(oci: &Oci, name: &str) -> std::path::PathBuf {
+    super::dirs::tmp_dir_beside(&oci.lease_dirs(name).dir, name)
+}
+
+impl CrunRuntime {
+    /// The job's temporary directory of the lease `name` (see [`tmp_dir_of`]).
+    pub(super) fn tmp_dir_of(&self, name: &str) -> std::path::PathBuf {
+        tmp_dir_of(&self.oci, name)
+    }
+
+    /// The job's temporary directory of the run `run_id` that the lifecycle makes and bounds
+    /// ([`Runtime::tmp_dir`](crate::lifecycle::Runtime::tmp_dir)): one beside the run's
+    /// directory, when the leases are beside the runs; `None` otherwise, or for an id that
+    /// names no lease.
+    pub(super) fn tmp_dir_of_run(&self, run_id: &str) -> Option<std::path::PathBuf> {
+        let name = super::container_name(&self.host_id, run_id).ok()?;
+        self.leases_beside.then(|| self.tmp_dir_of(&name))
+    }
+}
 
 impl Maker {
     /// Marks `step` done now, on the runtime's clock.
@@ -55,9 +77,10 @@ impl Maker {
         gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
+        let tmp = tmp_dir_of(&self.oci, name);
         let mut container = match spec.isolation {
             js_agent_wire::Isolation::Contained => {
-                container_spec(name, spec, image, &lease, cgroup.name())
+                container_spec(name, spec, image, (&lease, Some(&tmp)), cgroup.name())
             }
             js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
         };
@@ -67,6 +90,9 @@ impl Maker {
         match &config {
             Some(config) => config.apply(args, &mut container)?,
             None => bare(args, &mut container),
+        }
+        if container.isolation == js_contain::Isolation::Contained {
+            tmp_env(&mut container);
         }
         job_env(&mut container, &spec.env);
         gpu.apply(&mut container);
@@ -109,6 +135,12 @@ impl Maker {
 
     /// The directories, hand-overs, cgroup and bundle of one lease.
     ///
+    /// A contained lease's job gets its temporary directory ([`tmp_dir_of`]):
+    /// the lifecycle's, taken empty, when the leases are beside the runs (it put it under the
+    /// slot's temporary project), or made here otherwise; given to the job user like the
+    /// lease's directory, with its `tmp` and `var-tmp` made in it and given to the job's own
+    /// host id, as the lease's home is.
+    ///
     /// A host lease ([`Isolation::Host`](js_contain::Isolation::Host)) is the agent's own:
     /// only its directory is made (no overlay, home or input root), and it, the run's scratch
     /// directory and the cgroup's files are given to the agent itself, not to the job user or
@@ -147,6 +179,21 @@ impl Maker {
             };
             made.and_then(|()| chown(&dir, uid, gid))
                 .map_err(|why| Fault::step("make a lease directory", &why))?;
+        }
+        if !host {
+            let tmp = tmp_dir_of(&self.oci, &container.name);
+            let made = match self.leases_beside {
+                true => take_empty_dir(&tmp),
+                false => make_dir(&tmp),
+            };
+            let made = made.and_then(|()| chown(&tmp, job.0, job.1));
+            let inside = TMP_PLACES.iter().map(|(dir, _)| tmp.join(dir));
+            inside
+                .fold(made, |made, dir| {
+                    made.and_then(|()| make_dir(&dir))
+                        .and_then(|()| chown(&dir, job_id.0, job_id.1))
+                })
+                .map_err(|why| Fault::step("make the job's temporary directory", &why))?;
         }
         chown(&spec.scratch, job_id.0, job_id.1)
             .map_err(|why| Fault::step("give the run's scratch directory to the job", &why))?;

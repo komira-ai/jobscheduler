@@ -73,6 +73,7 @@
 //! | `--scratch-quota-failures <n>` | the quota calls (`apply`, a usage read, `clear`) that may fail in a row under `--scratch-quota` before the agent probes the scratch root again; when it no longer enforces project quota the agent starts no run (each start is refused `quota-unavailable`, which taints nothing) and reports it every minute, until a probe passes; from 1, default 3; needs `--scratch-quota` |
 //! | `--scratch-usage-wait-secs <n>` | the seconds a finished run's slot is held for its project's usage to read zero under `--scratch-quota`; after that the slot is parked (it takes no run and is read at every step), the run's place and booked bytes are given back, and the quota counts one failure; from 1 to 86400, default 600; needs `--scratch-quota` |
 //! | `--scratch-abandon-limit <n>` | the slots the agent may give up on (see `--scratch-usage-wait-secs`) over its life under `--scratch-quota`; a run that ends well does not take one back; at the limit no run starts (each start is refused `quota-unavailable`) and the finding `quota-unhealthy` repeats every minute until the agent is restarted, so the operator must watch `quota-usage-abandoned` and look for files held open on the scratch volume; from 1, default 8; needs `--scratch-quota` |
+//! | `--job-tmp-gib <n>` | the GiB of each contained job's `/tmp` and `/var/tmp` with the crun runtime: a directory of the job's own (`.tmp-<lease>` beside the run's directory in the scratch root, its `tmp` bound at `/tmp` and its `var-tmp` at `/var/tmp`, `noexec`, `nosuid`, `nodev`, and `TMPDIR=/tmp`, which a job may not set), on the scratch disk, not in memory, bounded by an XFS project quota of its own (an id per slot, apart from the run's scratch project), so a job that writes more is refused `ENOSPC` and never fills the disk; the directory is removed with the run's. The bytes are not booked from the disk the host offers. With or without `--scratch-quota`: a crun agent whose scratch root cannot enforce a project quota (XFS mounted without `prjquota`) says so at start, reports `quota-unhealthy` every minute and refuses every start `quota-unavailable` until a probe passes. From 1 to 65535, default 1; a Linux host only |
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required unless `--no-jobs` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. With the native runtime (a Mac, which has no tmpfs) the root is used only when the flag is given, is made `0711`, and is not checked for a tmpfs: the files are on disk unless the flag points at a RAM-backed volume; each run's directory and files are given to the run's user (`0500`, files `0400`) before its program starts, its profile denies writes there, and `JS_FILES_DIR` names it. It may not be, hold or lie in the state, scratch or a mount root, the homes of the native users, or a path native runs may not read. Not with `--no-jobs` |
@@ -669,7 +670,11 @@ fn execute(
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
     let mut start = start;
-    let local = match start.take_crun() {
+    // A crun agent gives each contained job a temporary directory, which a project quota
+    // bounds whatever the flags say.
+    let crun = start.take_crun();
+    let bounds_tmp = crun.is_some();
+    let local = match crun {
         Some(settings) => Local::from_cli_crun(&cli, services.euid, settings),
         None => Local::from_cli(&cli, services.euid),
     };
@@ -686,8 +691,10 @@ fn execute(
         .map_err(Failure::Usage)?;
     // What the scratch root's file system can bound a run's disk with. With
     // `--scratch-quota` the operator asked for enforcement, so a file system that cannot
-    // give it ends the agent, with the probe's reason; without the flag the answer is only
-    // logged and nothing is enforced or advertised.
+    // give it ends the agent, with the probe's reason. Without the flag a crun agent still
+    // bounds each job's temporary directory: a file system that cannot is said here, and the
+    // lifecycle starts no run until it can (each start refused `quota-unavailable`, with a
+    // finding). Otherwise the answer is only logged and nothing is enforced or advertised.
     let scratch_quota = match &local.scratch {
         Some(root) => {
             let found = services.machine.scratch_quota(root.path());
@@ -700,13 +707,37 @@ fn execute(
                         probe.reason
                     )));
                 }
-                (true, quota::Mode::Project) => Some(found),
+                (false, quota::Mode::None) if bounds_tmp => {
+                    let _ = writeln!(
+                        err,
+                        "js-agent: warning: the scratch root cannot enforce a project quota, \
+                         which bounds each job's /tmp and /var/tmp ({}): no job starts here \
+                         until it can",
+                        probe.reason
+                    );
+                    Some(jobs::FoundQuota {
+                        quota: found,
+                        probe,
+                        bounds_tmp,
+                    })
+                }
+                (true, quota::Mode::Project) => Some(jobs::FoundQuota {
+                    quota: found,
+                    probe,
+                    bounds_tmp,
+                }),
+                (false, _) if bounds_tmp => Some(jobs::FoundQuota {
+                    quota: found,
+                    probe,
+                    bounds_tmp,
+                }),
                 (false, _) => None,
             }
         }
         None => None,
     };
-    let default_gib = scratch_quota.as_ref().map(|_| local.scratch_default_gib);
+    let default_gib =
+        (local.scratch_quota && scratch_quota.is_some()).then_some(local.scratch_default_gib);
     if default_gib.is_some_and(|gib| (gib << 30) > offer.hello.shape.disk_bytes) {
         let _ = writeln!(
             err,

@@ -173,6 +173,16 @@ pub struct Cli {
     /// `--scratch-quota`.
     #[arg(long, value_name = "N")]
     pub scratch_abandon_limit: Option<u64>,
+    /// The GiB of each contained job's `/tmp` and `/var/tmp` with the crun runtime: a
+    /// directory of the job's own beside its scratch directory in the scratch root, on the
+    /// scratch disk (not memory), bound at both places, and bounded by a project quota of its
+    /// own on the scratch root's file system, so a job that fills it is refused (`ENOSPC`)
+    /// and never fills the disk. With or without `--scratch-quota`; the bytes are not booked
+    /// from the disk the host offers. A scratch root that cannot enforce a project quota
+    /// starts no run (each start is refused `quota-unavailable`, and a finding says why) until
+    /// it can. From 1; default 1.
+    #[arg(long, value_name = "GIB")]
+    pub job_tmp_gib: Option<u64>,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
     /// disk it offers is the free space of that volume when the agent starts minus this
     /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.

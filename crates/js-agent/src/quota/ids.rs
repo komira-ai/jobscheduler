@@ -1,4 +1,5 @@
-//! Project ids: one per run slot, never handed out while the id still holds usage.
+//! Project ids: two per run slot (its scratch and its job's temporary directory), never handed
+//! out while the id still holds usage.
 
 use std::fmt;
 
@@ -26,12 +27,14 @@ impl fmt::Display for ProjectId {
     }
 }
 
-/// The project ids of a host: the slot `n` is the id `base + n`. Two live runs hold two
-/// slots, so they never share an id; a slot is given again only after its cleanup passed,
-/// and [`ProjectIds::claim`] checks that the id reads zero usage before it is used again.
+/// The project ids of a host: the slot `n` is the id `base + n` for its scratch, and
+/// `base + MAX_SLOTS + 1 + n` for its job's temporary directory ([`ProjectIds::of_tmp_slot`]).
+/// Two live runs hold two slots, so they never share an id; a slot is given again only after
+/// its cleanup passed, and [`ProjectIds::claim`] checks that the id reads zero usage before it
+/// is used again.
 ///
-/// The range `base ..= base + MAX_SLOTS` (the last is the probe's) belongs to the agent:
-/// nothing else on the host may use these ids on the scratch file system.
+/// The range `base ..= base + 2 * MAX_SLOTS` (`base + MAX_SLOTS` is the probe's) belongs to the
+/// agent: nothing else on the host may use these ids on the scratch file system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectIds {
     base: u32,
@@ -56,7 +59,7 @@ impl ProjectIds {
     /// The base is 0, or the range does not fit below `i32::MAX`.
     pub fn new(base: u32) -> Result<Self, QuotaError> {
         let fits = base
-            .checked_add(MAX_SLOTS)
+            .checked_add(2 * MAX_SLOTS)
             .is_some_and(|last| i32::try_from(last).is_ok());
         match (base, fits) {
             (0, _) => Err(QuotaError::BadProject("the base may not be 0")),
@@ -77,6 +80,20 @@ impl ProjectIds {
         }
     }
 
+    /// The id of the temporary directory of the job in `slot` (its `/tmp` and `/var/tmp`): a
+    /// project of its own, so the directory has a bound of its own, apart from the run's
+    /// scratch.
+    ///
+    /// # Errors
+    ///
+    /// The slot is `MAX_SLOTS` or more.
+    pub fn of_tmp_slot(&self, slot: u32) -> Result<ProjectId, QuotaError> {
+        match slot < MAX_SLOTS {
+            true => Ok(ProjectId(self.base + MAX_SLOTS + 1 + slot)),
+            false => Err(QuotaError::BadProject("the slot has no project id")),
+        }
+    }
+
     /// The id the probe sets on its test directory: the one after the last slot's.
     pub fn probe_id(&self) -> ProjectId {
         ProjectId(self.base + MAX_SLOTS)
@@ -90,11 +107,19 @@ impl ProjectIds {
     /// The slot has no id, the usage cannot be read, or the id still holds usage
     /// ([`QuotaError::InUse`]).
     pub fn claim(&self, quota: &dyn ScratchQuota, slot: u32) -> Result<ProjectId, QuotaError> {
-        let project = self.of_slot(slot)?;
-        let usage = quota.usage(project)?;
-        match usage.is_zero() {
-            true => Ok(project),
-            false => Err(QuotaError::InUse { project, usage }),
-        }
+        clean(quota, self.of_slot(slot)?)
+    }
+}
+
+/// `project`, if it holds no usage (see [`ProjectIds::claim`]).
+///
+/// # Errors
+///
+/// The usage cannot be read, or the id still holds usage ([`QuotaError::InUse`]).
+pub fn clean(quota: &dyn ScratchQuota, project: ProjectId) -> Result<ProjectId, QuotaError> {
+    let usage = quota.usage(project)?;
+    match usage.is_zero() {
+        true => Ok(project),
+        false => Err(QuotaError::InUse { project, usage }),
     }
 }
