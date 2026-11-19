@@ -18,7 +18,7 @@ use js_agent_wire::{
 use js_logstore::fake::{Action, FakeStore, Policy};
 use js_logstore::{Endpoint, JobPrefix, ManualClock, Stream, Transport};
 
-use crate::node::{LONG, Node};
+use crate::node::{LONG, Node, Ringing};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -343,10 +343,11 @@ fn the_result_is_reported_before_the_final_is_written() {
     let _ = runtime.prepare(&node.image(), None);
     assert_eq!(runtime.wait_prepared(&node.image()), Prepared::Ready);
     live.store.block_puts();
-    let (mut life, _) =
+    let (life, _) =
         Lifecycle::adopt(config, Box::new(runtime), Box::new(Pass), Box::new(Still))
             .expect("adopts");
-    life.apply(&HeartbeatReply {
+    let mut life = Ringing::new(life);
+    life.apply_and_create(&HeartbeatReply {
         commands: vec![Command::JobStart(Box::new(job_start(&node, "j6-big")))],
         ..HeartbeatReply::default()
     });

@@ -111,6 +111,7 @@ use crate::lifecycle::{
 };
 use crate::readiness::{HookWindow, WorkerHook};
 
+mod bell;
 mod nudge;
 mod quiesce;
 
@@ -454,6 +455,8 @@ struct Shared {
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
     /// clock ([`stall_bound`] after it began), plus one; 0 while it waits for an order.
     busy_until: AtomicU64,
+    /// Rung when what the worker publishes holds news for the server (module `bell`).
+    bell: std::sync::OnceLock<Wake>,
 }
 
 /// Marks the worker as ended when the thread leaves, however it leaves. It is dropped
@@ -852,6 +855,7 @@ fn work(
     // plain limit again, moved later by the time the hook really took. (The worker is the
     // only writer of `busy_until` during an order.)
     let (plain, opened) = (Cell::new(0), Cell::new(0));
+    let mut told = Snapshot::of(&life);
     let watch = |window: HookWindow| {
         let limit = shared.busy_until.load(Ordering::SeqCst);
         let now = clock.now_ms();
@@ -926,7 +930,7 @@ fn work(
                 said
             });
         lines.extend(sampled.into_iter().flatten());
-        shared.publish(Snapshot::of(&life), &answers, lines);
+        shared.publish_news(&mut told, (Snapshot::of(&life), &answers, lines));
         shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
             let _ = done.send(());

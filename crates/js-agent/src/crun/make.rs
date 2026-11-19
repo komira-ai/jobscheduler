@@ -8,6 +8,7 @@ use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{LeaseDirs, Owner};
 use js_types::{JobNetwork, Resources};
 
+use super::create::Maker;
 use super::dirs::{make_dir, owned, project_of, take_dir};
 use super::fault::Fault;
 use super::fs::Assembled;
@@ -27,7 +28,7 @@ use crate::lifecycle::RunSpec;
 /// its network is wired).
 pub(super) type Marks = Vec<(&'static str, u64)>;
 
-impl CrunRuntime {
+impl Maker {
     /// Marks `step` done now, on the runtime's clock.
     pub(super) fn mark(&self, marks: &mut Marks, step: &'static str) {
         marks.push((step, (self.hooks.now_ms)()));
@@ -61,7 +62,7 @@ impl CrunRuntime {
             js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
         };
         if let Some(made) = assembled {
-            Self::give(&mut container, made);
+            CrunRuntime::give(&mut container, made);
         }
         match &config {
             Some(config) => config.apply(args, &mut container)?,
@@ -99,7 +100,7 @@ impl CrunRuntime {
             // agent on the image pins it, and the removal is refused.
             self.oci.unpin_image(name)?;
             self.rt.block_on(self.oci.remove_image(image))?;
-            self.pulls.forget(given);
+            self.forget.forget(given);
             self.oci.pin_image(image, name)?;
             ensure().map_err(Fault::Image)?;
         }

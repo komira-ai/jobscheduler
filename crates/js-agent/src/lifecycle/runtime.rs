@@ -346,6 +346,16 @@ pub enum FsPrepared {
     Failed(RuntimeError),
 }
 
+/// How the create of a container the lifecycle asked for stands ([`Runtime::begin_create`],
+/// [`Runtime::poll_create`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Created {
+    /// Done: the container runs, or the create failed and left nothing behind.
+    Done(Result<RunHandle, RuntimeError>),
+    /// Under way off the lifecycle's worker: ask again at the next step.
+    Pending,
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
     /// Begins getting `image` onto the host when it is not there, and says where that
@@ -396,6 +406,23 @@ pub trait Runtime {
     ///
     /// The image cannot be had, the container cannot be created or it cannot start.
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError>;
+
+    /// Begins [`Runtime::create_and_start`] of `spec`, off the lifecycle's worker when the
+    /// runtime can: [`Created::Pending`] when the create goes on beside the worker (the
+    /// runtime rings its [`Wake`] once it is done, and the lifecycle asks
+    /// [`Runtime::poll_create`] at every step until then), or its answer when it is done
+    /// already. The default creates on the caller's thread.
+    fn begin_create(&mut self, spec: &RunSpec) -> Created {
+        Created::Done(self.create_and_start(spec))
+    }
+
+    /// How the create [`Runtime::begin_create`] began for the run `run_id` stands. Once it
+    /// answered [`Created::Done`] the runtime forgets it: a later call answers a failure.
+    /// The default, whose creates are never pending, answers a failure.
+    fn poll_create(&mut self, run_id: &str) -> Created {
+        let why = format!("no create of {run_id} is under way");
+        Created::Done(Err(RuntimeError::new(why)))
+    }
 
     /// Whether the container runs, has exited or is gone, without waiting. A backend maps
     /// the runtime's "no such container" to [`Status::Gone`], not to an error: an error

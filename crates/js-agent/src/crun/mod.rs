@@ -195,6 +195,7 @@ mod budget;
 #[cfg(test)]
 mod budget_tests;
 mod claim;
+mod create;
 mod dirs;
 mod fault;
 pub mod fs;
@@ -243,22 +244,21 @@ use std::time::Duration;
 use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
 use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
-use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, LeaseDirs, Oci, Supervised, stderr_path, stdout_path};
-use js_types::JobNetwork;
+use js_contain::oci::image::ImageSource;
+use js_contain::oci::{GcReport, LeaseDirs, Oci, Supervised};
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
-    Body, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, check_run_env, label,
+    Created, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
 use crate::logs::{LiveLogs, RunLogs};
-use ledger::{Entry, Ledger, Supervisor};
+use ledger::{Entry, Ledger};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
 use pull::Images;
-use spec::{concluded, ctr_of, log_tail_of, pinned};
+use spec::{concluded, ctr_of, log_tail_of};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -322,7 +322,8 @@ pub struct CrunRuntime {
     /// The image store as the pulls and the leases use it, within the image budget.
     images: Arc<Images>,
     pulls: Prefetcher,
-    rt: TokioRuntime,
+    /// The runtime of the calls that wait, shared with the create pool's threads.
+    rt: Arc<TokioRuntime>,
     cgroups: CgroupSettings,
     host_id: String,
     configs: PathBuf,
@@ -338,7 +339,7 @@ pub struct CrunRuntime {
     /// The host's egress; none in mode none.
     egress: Option<Arc<dyn EgressPort>>,
     /// The host ports a job may reach, and the forwarder that offers them.
-    host_ports: (Vec<PortRange>, Forwarder),
+    host_ports: (Vec<PortRange>, Arc<Forwarder>),
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
@@ -347,6 +348,8 @@ pub struct CrunRuntime {
     logs: Option<LiveLogs>,
     /// What jobs' layers and mounts are made with; none for a runtime that gives none.
     fs: Option<fs::Fs>,
+    /// The makes and starts of leases under way off the worker.
+    creates: create::Creates,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -409,7 +412,12 @@ impl CrunRuntime {
         })?;
         let leases_beside = settings.oci.leases_in.is_some();
         let oci = Oci::new(&settings.oci, source, &settings.scratch, &helpers)?;
-        let rt = Builder::new_current_thread().enable_all().build()?;
+        let rt = Arc::new(
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?,
+        );
         let configs = config_dir(&settings.scratch);
         std::fs::create_dir_all(&configs).map_err(|why| CrunError::Configs {
             path: configs.clone(),
@@ -442,7 +450,7 @@ impl CrunRuntime {
             egress: settings.egress,
             host_ports: (
                 settings.host_ports.allowed,
-                Forwarder::new(settings.host_ports.listen),
+                Arc::new(Forwarder::new(settings.host_ports.listen)),
             ),
             hooks,
             runs: BTreeMap::new(),
@@ -450,6 +458,7 @@ impl CrunRuntime {
             swept: SweepReport::default(),
             logs: None,
             fs: settings.fs.map(fs::Fs::open).transpose()?,
+            creates: create::Creates::new()?,
         };
         // No container of this process exists yet: the runs of an earlier process of this
         // agent that still stand are adopted, and the rest of its leases are removed.
@@ -532,181 +541,6 @@ impl CrunRuntime {
         }
     }
 
-    /// Makes the container of `spec` and does not start it: the first half of
-    /// [`Runtime::create_and_start`], for a caller that starts it later (or never, as the
-    /// conformance suite does). Such a container lists as
-    /// [`never_started`](Found::never_started).
-    ///
-    /// # Errors
-    /// As [`Runtime::create_and_start`], and an environment [`check_run_env`] refuses.
-    pub fn stage(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        check_run_env(&spec.env)?;
-        self.make(spec)
-            .map(RunHandle)
-            .map_err(|fault| RuntimeError::new(fault.to_string()))
-    }
-
-    /// Makes the container of `spec`, everything but its start. A failure removes what it
-    /// made.
-    ///
-    /// An image in the store with no kept config is removed and fetched again. That deletes
-    /// the root such an image gives as the lower layer of a container's mounts, so it relies
-    /// on every container of an earlier daemon that still runs on it pinning it (an adopted
-    /// run's pin stays until its removal, and a pinned image is not removed), and on the
-    /// start-up pass that removes the rest of what an earlier agent left (P12b) having run
-    /// before the first run is made. The removal and a fetch of the same image never overlap
-    /// (the image store holds one gate for each digest).
-    ///
-    /// A host job is refused unless the runtime launches them ([`CrunSettings::host_jobs`]),
-    /// and when it names a mount, run files or a GPU; it is not wired, since it has the
-    /// host's network.
-    fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
-        let host = spec.isolation == js_agent_wire::Isolation::Host;
-        if host {
-            if !self.host_jobs {
-                return Err(Fault::NotContained);
-            }
-            if !spec.mounts.is_empty() || spec.files.is_some() {
-                return Err(Fault::HostMounts);
-            }
-            if !spec.gpu_indices.is_empty() {
-                return Err(Fault::HostGpus);
-            }
-        } else {
-            net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
-        }
-        // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
-        let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
-        let Body::Container { image: given, args } = &spec.body else {
-            return Err(Fault::Native);
-        };
-        // What the run's assembly made of its layers and mounts: the run's removal unmounts
-        // it, or, for a run that is not made, the lifecycle's discard (`Runtime::discard_fs`).
-        let assembled = self.fs.as_mut().and_then(|fs| fs.take(&spec.run_id));
-        // A root of layers alone has no image.
-        let image = match given.is_empty() {
-            true => PinnedImage {
-                reference: String::new(),
-                digest: String::new(),
-            },
-            false => pinned(given).map_err(Fault::Image)?,
-        };
-        let name = container_name(&self.host_id, &spec.run_id)
-            .map_err(|_| Fault::Name(spec.run_id.clone()))?;
-        if self.runs.contains_key(&name) {
-            return Err(Fault::InUse(spec.run_id.clone()));
-        }
-        let now = (self.hooks.now_ms)();
-        let mut labels = spec.labels.clone();
-        labels.insert(label::AGENT.to_owned(), self.host_id.clone());
-        labels.insert(label::CREATED_MS.to_owned(), now.to_string());
-        // A restart offers the run its host ports again from this.
-        if let Some(host_ports) = net::host_ports_label(&spec.host_ports) {
-            labels.insert(label::HOST_PORTS.to_owned(), host_ports);
-        }
-        // Before the first thing the sidecar names is made (see the module `ledger`), the
-        // image's pin among them: the next start removes a pin a dead process left, once it
-        // has removed the lease's container.
-        let entry = self.entry_for(spec, &name, (&labels, &image.digest));
-        let mut marks = vec![("begin", now)];
-        self.ledger
-            .record(&entry)
-            .map_err(|why| Fault::step("record the lease's labels", &why))?;
-        self.mark(&mut marks, "recorded");
-        let (container, lease, cgroup) = match self.make_recorded(
-            spec,
-            (given, &image),
-            (args, assembled.as_ref()),
-            (&name, gpu),
-            &mut marks,
-        ) {
-            Ok(made) => made,
-            Err(fault) => {
-                // What the failed step left; none of it is a container. The sidecar goes with
-                // it (the pin last), or stays for the next start when some of it cannot be
-                // removed.
-                let _ = self.ledger.discard(&entry, |entry| self.tear_down(entry));
-                return Err(fault);
-            }
-        };
-        self.runs.insert(
-            name.clone(),
-            Run {
-                spec: container,
-                labels,
-                lease,
-                cgroup,
-                cap: js_contain::hard_memory_max(spec.memory_bytes),
-                backstop: None,
-                state: State::Created,
-                net: match host {
-                    // The host's own network: nothing to wire, nothing to forward.
-                    true => net::Net::asked(JobNetwork::None, Vec::new(), Vec::new()),
-                    false => {
-                        net::Net::asked(spec.network, spec.ports.clone(), spec.host_ports.clone())
-                    }
-                },
-                entry,
-                logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
-                fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
-                marks,
-            },
-        );
-        Ok(name)
-    }
-
-    /// Starts the container `id` that [`CrunRuntime::stage`] made and wires its network. A
-    /// failure leaves it staged, or started with its job held by the init when the network
-    /// could not be wired: the caller removes it, which ends it.
-    ///
-    /// # Errors
-    /// The container is gone or started already, `crun` could not be started, or its
-    /// network could not be wired.
-    pub fn start_staged(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        let _entered = self.rt.enter();
-        let now = (self.hooks.now_ms)();
-        let Some(run) = self.runs.get_mut(&id.0) else {
-            return Err(RuntimeError::new("start: the container is gone"));
-        };
-        if !matches!(run.state, State::Created) {
-            return Err(RuntimeError::new("start: the container was started"));
-        }
-        let started = self
-            .oci
-            .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))
-            .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
-        run.marks.push(("supervised", (self.hooks.now_ms)()));
-        // The capture made both files before the supervisor said it was ready.
-        let files = (stdout_path(&run.lease.dir), stderr_path(&run.lease.dir));
-        run.logs
-            .start(self.logs.as_ref(), (&files.0, &files.1), &run.lease.dir);
-        run.backstop = run.cgroup.parent_ooms().ok();
-        // The supervisor is on the sidecar before anything else is done, in the state still
-        // starting, so a teardown at any point ends it. A failure to write is reported with
-        // the running record's.
-        let named = self
-            .ledger
-            .rewrite(&run.entry.supervised(Supervisor::of(started.id())));
-        let (ports, now_ms) = (
-            (self.egress.as_deref(), &self.host_ports.1),
-            self.hooks.now_ms,
-        );
-        let wired = run
-            .net
-            .attach(ports, &self.oci, (&run.spec, &started), now_ms);
-        // The sidecar says the run runs from here on: a later start adopts it. A failure to
-        // write it leaves the run started, for the caller to remove.
-        run.entry = run.entry.running(now, Supervisor::of(started.id()));
-        let recorded = named.and(self.ledger.rewrite(&run.entry));
-        run.marks.push(("running", (self.hooks.now_ms)()));
-        run.state = State::Running {
-            run: started,
-            since_ms: now,
-        };
-        wired?;
-        recorded.map_err(|why| RuntimeError::new(format!("record the running lease: {why}")))
-    }
-
     /// Reads how the container `name` stands, ending it in the books once its supervisor wrote
     /// the end, and holding a run that ended as running until its sources were checked
     /// ([`CrunRuntime::checked`]).
@@ -748,6 +582,7 @@ impl Runtime for CrunRuntime {
 
     fn set_wake(&mut self, wake: Wake) {
         self.pulls.set_wake(wake.clone());
+        self.creates.set_wake(wake.clone());
         self.fs.iter_mut().for_each(|fs| fs.set_wake(wake.clone()));
     }
 
@@ -768,6 +603,14 @@ impl Runtime for CrunRuntime {
             return Err(why);
         }
         Ok(id)
+    }
+
+    fn begin_create(&mut self, spec: &RunSpec) -> Created {
+        self.begin_off_worker(spec)
+    }
+
+    fn poll_create(&mut self, run_id: &str) -> Created {
+        self.poll_off_worker(run_id)
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {

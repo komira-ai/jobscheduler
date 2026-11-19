@@ -9,8 +9,8 @@ use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
 use super::VmRuntime;
 use crate::lifecycle::{
-    Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
-    Status, Ticket, Wake, Whereabouts, label,
+    Created, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -52,6 +52,18 @@ impl Runtime for WithVms {
             Some(label::VM_KIND) => self.vms.create_and_start(spec),
             _ => self.other.create_and_start(spec),
         }
+    }
+
+    fn begin_create(&mut self, spec: &RunSpec) -> Created {
+        match spec.labels.get(label::KIND).map(String::as_str) {
+            Some(label::VM_KIND) => self.vms.begin_create(spec),
+            _ => self.other.begin_create(spec),
+        }
+    }
+
+    /// The other runtime's: a VM's create answers at once, so none of it is under way.
+    fn poll_create(&mut self, run_id: &str) -> Created {
+        self.other.poll_create(run_id)
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {

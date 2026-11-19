@@ -784,6 +784,10 @@ fn execute(
     let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain, outbox)) = &jobs {
+        // The worker rings the sleeper's bell when it has news, so a start's `running` is
+        // reported at once (`Session::beats_on_news`).
+        let bell = services.sleeper.bell();
+        bell.into_iter().for_each(|bell| worker.ring_on_news(bell));
         session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
