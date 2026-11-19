@@ -9,8 +9,74 @@ The server is `js-server`, the binary of the `js-lease-server` crate. Its store 
 its job tables are `js-jobs`, its placement `js-sched-placer`, its host sessions `js-registry`, its usage `js-usage`. A SQLite
 store is one process's (its file lock, `js-state/src/writer.rs`) and is not what this document is about.
 
-The same rule governs hostkeeper's coordinator, in komira-ai/hostkeeper `docs/design/coordinator-multi-instance.md`. Section 13
+The same rule governs the hostkeeper coordinator's design, `docs/design/coordinator-multi-instance.md` in its repository. Section 13
 of that document lists the decisions already taken for js-server, and section 6 of this one carries them over.
+
+## 0. The shape
+
+js-server instances are stateless, the ordinary shape of a service in front of one database: what one instance knows about a host
+or a job, every instance reads in Postgres, and any instance serves any request of any agent or client. Sections 1 to 12 audit the
+code against this shape and list what is left to build; section 9 marks each gap kept, shrunk, deleted or new (G15, G16) by it.
+
+- **Any instance serves any agent.** The agent opens a connection per request (`js-client/src/client.rs:282`) and the edge sends
+  it to any instance. That instance authenticates the request by the host's certificate (G3) and reads what it needs of the host
+  from rows. No instance owns a host's session, so a request that lands on another instance than the last one is served as it is:
+  there is no hello to repeat, and no `409 unknown-host` or `403 session-mismatch` for a host the database knows. A beat of an
+  epoch the row has passed is still `409 stale-epoch`. An agent says hello when it starts, as today.
+- **A host is rows.**
+  - `node/<host>` (G15): the epoch of its last hello (and the digest of its session secret until G3), its pool, claim, shape,
+    capabilities and labels, its phase and last load reading, whether the first listing since the hello is applied, whether its
+    last listing was clean, the epoch and sequence of its last applied beat, and `heard_at`, the database's `now()` at that beat.
+    These are what the placement engine's hosts and a beat's reply read today from the registry.
+  - `hostbook/<host>`: its booking (Built). `cordon/<host>`: its cordon (Built, #932). `hosts/binding/<host>`: its taint (G4).
+  - `taint/<host>`, `mark/<job>`, `hostmark/<host>`: a host job's taint, a whole-host job's drain, a scale-down mark.
+  - The registry becomes a cache of these rows, refreshed from them, that never decides.
+- **The heartbeat is a row `UPDATE`.** A beat updates `node/<host>` at the version read, guarded by its (epoch, sequence): the
+  sequence is raised by the agent for every attempt and reset by a hello, and an older beat changes nothing and is answered from
+  the current rows. It sets `heard_at = now()`, and every write of its job listing that follows is conditional on the version it
+  wrote (#883's `Checked` store; today each listing step, each end of an unlisted job and each whole-host move is a transaction of
+  its own: `per_job.rs`, `job_loss.rs`, `job_whole.rs`).
+  - The sequence is an optional field the agent adds (G15). An agent that sends none is serialized by the row but not ordered by
+    age: a beat it gave up at its 10 s limit can still commit after a newer one, and its older listing would free a container the
+    host still holds (`per_job.rs`: releasing, ended, not listed). For such an agent a confirmed container is freed only when two
+    applied beats in a row omit it (a count in `node/`).
+  - The reply (starts, stops, acknowledgements) is a function of the rows, so every instance gives the same one. A reply lost on
+    the way is given again by the next beat, on whichever instance takes it: a `starting` whole-host job's start rides on every
+    beat until the host lists it (`per_job.rs` `starts_for`).
+- **The queue is claimed and the host booked conditionally.** A placement claims its job with `SELECT ... FOR UPDATE SKIP LOCKED`
+  and books the host by the conditional write of `hostbook/<host>` (Built, #879). The same transaction checks the host's rows: the
+  cordon (Built), the taint, the ports and the marks (G7). Every instance places over every live host (a `node/` row heard within
+  grace), not over the hosts whose requests it happens to serve.
+- **LISTEN/NOTIFY wakes; rows decide** (G16). After a commit that gives a host work (a placement, a cancel), the instance sends a
+  best-effort `NOTIFY` on one channel, `js_wake`, with the host id as payload, and a submit sends `queue`. An instance holding a
+  beat of that host, or waiting to place, wakes at once instead of at its poll. A lost notification costs one poll (the held beat's
+  5 s, the tick). When the `LISTEN` connection is made again, every held beat is woken once, since it may have missed notices.
+- **Deadlines are the database's `now()`** (G2). Every time that one instance writes and another compares (`heard_at`, queue and
+  start deadlines, retention, a cordon's end, a duty's due time) is the database's clock.
+- **Periodic work is claimed by its due time** (Built, #881). Settling silent hosts, expiry, retention and the feed trim run once a
+  period on whichever instance claims them; settlement judges a host's silence by `heard_at` (G6).
+
+What the shape removes:
+
+- a host's session as one instance's possession, and the hello and `409`/`403` exchange when a request lands on another instance;
+- the per-instance "first listing" and "listing clean" flags, which become `node/` columns: the hello sets "first", and the beat
+  that applies the first listing clears it in its own write (the lose-unlisted and prepare-restart rules still need it);
+- the save of bindings from memory, and the local `gone` map;
+- the connection-ownership rule of komira-ai/jobscheduler#883. Its mechanism, every listing write conditional on the host's row,
+  stays as the beat's guard.
+
+**Its cost.** A heartbeat becomes one short write per host per beat interval (5 s by default, `js-agent-wire/src/lib.rs:225`),
+where today a beat that changes nothing writes nothing. That is about the rate the project owner accepted for the coordinator
+(komira-ai/hostkeeper's design, section 19, decision 4). Through the `Store`, each beat is also a revision and a feed row, taken
+under the commit head behind every claimed placement (3.1). It moves the head that every pass's table cache is judged by
+(`js-jobs/src/store/written.rs`, #880), so a pass is skipped as unchanged only between beats. The other standard form is a plain
+`node` table on the store's own connections (`js-state/src/postgres/extension.rs`, no head, no feed), with
+`UPDATE ... WHERE epoch = $1 AND seq < $2 RETURNING` as the guard. It gives up the same-transaction `Checked` guard of the listing.
+G15 chooses between the two by measuring both at the deployment's host count.
+
+This amends [jobscheduler-design.md](jobscheduler-design.md) section 10.1: "live sessions, session secrets, heartbeat times" are
+rows now (the secret as a digest until G3). The whole-host `Committed`, `Ready` and `Restoring` states stay out of the database: a
+ready or refused report rides on every beat until the job is `starting` (`job_whole.rs`), and `Restoring` is the stored phase.
 
 ## 1. The rule
 
@@ -52,7 +118,7 @@ gives the order in which they are closed. Correctness is argued and tested for a
 
 ## 2. What is already Built
 
-The merged pull requests komira-ai/jobscheduler#874, #877, #878, #879, #880, #881, #923 and #932 put the store, the job tables,
+The merged pull requests komira-ai/jobscheduler#874, #877, #878, #879, #880, #881, #923, #932 and #935 put the store, the job tables,
 placement, the periodic duties and the cordon under the rule:
 
 - **No writer lock and no fence** (#878). A Postgres store takes no lock at start and checks nothing in a commit;
@@ -62,6 +128,11 @@ placement, the periodic duties and the cordon under the rule:
 - **A pass re-reads the tables after any instance's commit** (#880), judged by the store's head revision.
 - **The job pass and the feed trim are duties claimed per period** (#881).
 - **A start that loses a race at the open retries** (#923).
+- **A second server keeps the first's bindings, taints and tokens, and the drain moves agents at once** (#935): the bindings save
+  deletes only what this server's registry held (`js-lease-server/src/agent_state.rs:299`, `:310`), a hello of a host the registry does not
+  know reads its binding row (`js-lease-server/src/agents.rs:567`), a token not held is read by key
+  (`js-lease-server/src/join_tokens_stored.rs:19`), and on SIGTERM the agent listener closes and nothing more is placed
+  (`js-lease-server/src/drain.rs:28`).
 - **A cordon is a row every placement checks** (#932): `cordon/<host>`, decided at the version read and checked absent by every
   placement transaction, whichever server took the cordon (`js-jobs/src/store/cordons.rs:107`, `js-jobs/src/store/whole.rs:190-196`,
   `:290-291`).
@@ -87,42 +158,42 @@ and decides nothing shared). Paths are under `crates/`.
 | The first start imports the files beside the state file once | `js-lease-server/src/store/import.rs:89-90` | marker and rows `Cond::Absent` in one transaction, so one import wins; the loser's `Conflict` refuses its start (exit 2) instead of reading the marker | Built (correctness); Designed (G11: the loser starts) |
 | Row expiry (TTL) | `js-state/src/postgres/tx.rs:146`, `:289` | judged on the database clock inside each transaction | Built |
 | Feed trim | `js-lease-server/src/job_pass.rs:227`, `js-lease-server/src/job_store/feed_trim.rs:44` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
-| An unreachable database | `js-lease-server/src/job_pass.rs:183`, `:210`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's or taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:338`, `:645-649`), both retried by the agent | Built |
+| An unreachable database | `js-lease-server/src/job_pass.rs:183`, `:210`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's binding read or write or a taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:326`, `:354`, `:662-665`), both retried by the agent | Built |
 | `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-930` | answers `StoreTime::ZERO` ("the store trait cannot report a failure here"); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:330`, `:474`, `ending.rs:62`) stamp the epoch until their own write fails | Designed (G2) |
-| Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. The route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; Designed (G13: the edge sees it) |
+| Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. At SIGTERM the agent listener closes, held beats are answered at once and no job is placed (#935, `js-lease-server/src/drain.rs:28`, `server.rs:840`), so agents move at once; the route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; Built (agents leave at once); Designed (G13: the edge sees it) |
 | The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-state/src/postgres/serving.rs:21`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
 
 ### 3.2 Hosts: identity, admission, taint, cordon
 
 | Decision | Where | How it holds | Tag |
 |---|---|---|---|
-| A host proves who it is | `js-lease-server/src/host_cert.rs:86` (`host_of`), `js-lease-server/src/client_verifier.rs:29`, `js-lease-server/src/agent_api/host_cert.rs:34` (`admit`), `js-lease-server/src/agent_api.rs:177`, `:264` | the host certificate hostkeeper issues to an enrolled host, verified against `--agent-client-ca`; the host id is its one DNS SAN (#922). A function of the certificate and the CA, so every instance answers alike | Built |
-| A host without a certificate joins by a join token or a pool token and is given a host credential | `js-lease-server/src/join_tokens.rs:351` (read once at start), `:431` (`identify`), `:526` (`admit_writing`), `:450-470` (mint and its cap), `:662` (revoke), `:724` (renewal), `:637` (give-back), `js-lease-server/src/host_keys.rs:45-55`, `js-lease-server/src/agent_tokens.rs:50` | the token map is read at start and decides from memory, and every use, mint, revoke, renewal and give-back is committed at `Cond::Any` (the comment there still says "the server is the store's one writer"): a token minted or revoked on A is unknown to B, and two instances can admit two hosts with one token | Designed (G3: removed) |
-| A host id is bound to the agent instance of its first hello (`HostBound`) | `js-registry/src/registry.rs:460-467` | judged on the local registry and the bindings read at start; the binding written at `Cond::Any` | Designed (G4) |
-| A refused hello undoes its binding | `js-lease-server/src/agent_state.rs:411-420` | the undo is built from this instance's copy and written at `Cond::Any` | Designed (G4) |
-| Hellos of one host are serialized | `js-lease-server/src/agent_api.rs:277` (`host_writes`) | a process mutex; correct across instances only once G3 removes the token writes and G4 makes the binding writes conditional; then it is an economy | Per instance (after G3, G4) |
-| The bindings are saved | `js-lease-server/src/agents.rs:837` (`save_bindings`), `js-lease-server/src/agent_state.rs:286-297` (`writes_to`) | makes the store equal this instance's registry: puts every differing binding and **deletes every binding this registry no longer holds**, at `Cond::Any`; B's tick can delete a binding live on A | Designed (G4) |
-| A taint a heartbeat reports is stored | `js-lease-server/src/agent_state.rs:478` (`commit_taint`) | `Cond::Version` of the row read, after checking the stored taint is the expected one | Built |
-| Every instance sees a host's taint | `js-lease-server/src/agents.rs:297` (`restore_job_taints`, at start), `js-lease-server/src/sched/jobs_pass.rs:69` (the placer's own registry), `:158` (the hosts filter) | the registry's taint decides placement and is loaded at start only; a host that says hello to B after A stored its taint is clean in B | Designed (G4, G7) |
-| A cordon and its lift | `js-lease-server/src/agents.rs:606` (`keep`), `js-lease-server/src/agents_cordon.rs:141` (`cordon`), `:212` (`mirror_cordons`), `js-jobs/src/store/cordons.rs:107` (`cordon_host`), `js-jobs/src/store/whole.rs:191`, `:291` | with the job service on, the cordon is the row `cordon/<host>` (put with a TTL), decided in the store at the version read (`Cond::Absent` or `Cond::Version`; a lost race is `CordonConflict`, answered `503 cordon-unsaved`), and every placement transaction checks it absent, so a cordon placed on any instance keeps every instance's placement off the host and it lapses by the store's clock; each tick puts the rows on the registry (`mirror_cordons`), so a lift made on B reaches A's listing, scaler and probes at A's next tick. What stays per instance: the binding's cordon end is still rebuilt from the local registry and put at `Cond::Any` (`keep_cordon`), a host held by another instance answers `404` (`held_cordon` reads the local registry), and without the job service the registry decides in memory | Built for placement; Designed (G4) for the binding and the `404` |
+| A host proves who it is | `js-lease-server/src/host_cert.rs:86` (`host_of`), `js-lease-server/src/client_verifier.rs:29`, `js-lease-server/src/agent_api/host_cert.rs:34` (`admit`), `js-lease-server/src/agent_api.rs:181` (`host_cert::admit`), `:271` (`host_cert::check` in the hello), `:407` (in the heartbeat) | the host certificate hostkeeper issues to an enrolled host, verified against `--agent-client-ca`; the host id is its one DNS SAN (#922). A function of the certificate and the CA, so every instance answers alike | Built |
+| A host without a certificate joins by a join token or a pool token and is given a host credential | `js-lease-server/src/join_tokens.rs:353` (read at start), `:421` (`identify`, memory), `js-lease-server/src/join_tokens_stored.rs:19` (`identify_stored`, a row by key), `js-lease-server/src/agent_api/unknown.rs:34` (`identify_single`), `join_tokens.rs:516` (`admit_writing`), `:433-470` (mint; its cap `:450`), `:652` (revoke), `:691` (renewal), `:627` (give-back), `js-lease-server/src/host_keys.rs:45-55`, `js-lease-server/src/agent_tokens.rs:50` | the token map is read at start and decides from memory, and a token not held is read by its row at its first use (#935), so a token minted or a credential issued on A is known to B; every use, mint, revoke, renewal and give-back is still committed at `Cond::Any` (the comment there still says "the server is the store's one writer"): a revoke or use on A is not seen by B once B holds the token, and two instances can admit two hosts with one token | Shrunk by #935 (no `401` for a token another instance minted); Designed (G3: removed) |
+| A host id is bound to the credential and provider instance of its first hello (`HostBound`) | `js-registry/src/registry.rs:460-467` | judged on the local registry and the bindings read at start; the binding written at `Cond::Any`. After G3 the certificate names the host and there is nothing to bind | Designed (G4 until G3, which deletes it) |
+| A refused hello undoes its binding | `js-lease-server/src/agent_state.rs:515-531` (`change`), `js-lease-server/src/agent_api.rs:377-391` (`give_back`) | the undo puts back what this instance's copy holds, which #935 refreshes from the row at the hello of a host the registry does not know (`BindingStore::stored`, `agent_state.rs:418`); it is written at `Cond::Any` | Designed (G4) |
+| Hellos of one host are serialized | `js-lease-server/src/agent_api.rs:284` (`host_writes`; `restore_stored` runs inside it, `:290`) | a process mutex; correct across instances only once G3 removes the token writes and G4 makes the binding writes conditional; then it is an economy | Per instance (after G3, G4) |
+| The bindings are saved | `js-lease-server/src/agents.rs:870` (`save_bindings`), `js-lease-server/src/agent_state.rs:299-320` (`writes_to`, `gone`) | puts every binding of this registry that differs from the copy, at `Cond::Any`, and deletes only a binding this registry held and let go (#935: `Held::held`); a binding it never held, which another instance serves, is left alone. The put still overwrites a taint the other instance stored in a binding it also holds | Shrunk by #935; Designed (G4: the save goes) |
+| A taint a heartbeat reports is stored | `js-lease-server/src/agent_state.rs:561` (`commit_taint`, the `Cond::Version` put at `:582`) | `Cond::Version` of the row read, after checking the stored taint is the expected one | Built |
+| Every instance sees a host's taint | `js-lease-server/src/agents.rs:303` (`restore_job_taints` at start; defined `js-lease-server/src/agents_taints.rs:115`), `:567` (`restore_stored`, at a hello), `js-lease-server/src/sched/jobs_pass.rs:69` (the placer's own registry), `:163` (the hosts filter) | the registry's taint decides placement and is loaded at start and, since #935, at the hello of a host the registry does not know (its binding row is read first), so a host that comes to B from A keeps A's taint; a host B already holds does not see a taint A stores later | Shrunk by #935; Designed (G4, G7) |
+| A cordon and its lift | `js-lease-server/src/agents.rs:639` (`keep`), `js-lease-server/src/agents_cordon.rs:141` (`cordon`), `:212` (`mirror_cordons`), `js-jobs/src/store/cordons.rs:107` (`cordon_host`), `js-jobs/src/store/whole.rs:191`, `:291` | with the job service on, the cordon is the row `cordon/<host>` (put with a TTL), decided in the store at the version read (`Cond::Absent` or `Cond::Version`; a lost race is `CordonConflict`, answered `503 cordon-unsaved`), and every placement transaction checks it absent, so a cordon placed on any instance keeps every instance's placement off the host and it lapses by the store's clock; each tick puts the rows on the registry (`mirror_cordons`), so a lift made on B reaches A's listing, scaler and probes at A's next tick. What stays per instance: the binding's cordon end is still rebuilt from the local registry and put at `Cond::Any` (`keep_cordon`), a host held by another instance answers `404` (`held_cordon` reads the local registry), and without the job service the registry decides in memory | Built for placement; Designed (G4) for the binding and the `404` |
 | An operator clears a host's taint | `js-lease-server/src/agents_taints.rs:86` | the write is conditional (`commit_taint`), but the host must be in this registry: a host held elsewhere answers `404` (fails closed) | Designed (G4) |
 | Host certificate admission (`--agent-client-ca`) | `js-lease-server/src/host_cert.rs:86`, `js-lease-server/src/client_verifier.rs:29` | a function of the certificate and the configured CA | Per instance |
-| The hello rate limit | `js-lease-server/src/agents.rs:69` | a limiter of this process | Per instance |
+| The hello rate limit | `js-lease-server/src/agents.rs:72` | a limiter of this process | Per instance |
 
 ### 3.3 The session and the heartbeat
 
 | Decision | Where | How it holds | Tag |
 |---|---|---|---|
-| Which connection of a host commits its job listing | `js-lease-server/src/agent_api.rs:580-614` (`per_job::serve`, `job_whole::serve`, `lose_unlisted` over the plain job store) | nothing orders two connections: an old connection on A can commit a listing over B's newer one, freeing an allocation the host holds or losing a job it lists | Designed (G1: komira-ai/jobscheduler#883) |
-| A host's first listing after a hello loses the jobs it does not list | `js-lease-server/src/agents.rs:466` (`first_listing`, memory), `js-lease-server/src/agent_api.rs:594`, `js-lease-server/src/job_loss.rs:96-107` | each end is `Cond::Version`, but "first" is this instance's flag; safe once only the newest connection writes. A whole-host job moved to `starting` on a ready report (`js-lease-server/src/job_whole.rs:155`) whose reply, carrying the start, is lost is ended `Lost` by the next first listing without having run; this happens on a one-instance restart too | Designed (G1, G14) |
-| A host's session, epoch, secret, last heard | `js-registry/src/registry.rs:474-525`, `js-registry/src/registry/beat.rs:123` | the instance holding the connection's cache; a beat that reaches another instance is refused (`409 unknown-host` or `403 session-mismatch`) and the agent says hello there | Per instance |
+| Which connection of a host commits its job listing | `js-lease-server/src/agent_api.rs:572-630` (`first_listing` :572, `lose_unlisted` :610, `job_whole::serve` :627, `per_job::serve` :630, over the plain job store) | nothing orders two connections: an old connection on A can commit a listing over B's newer one, freeing an allocation the host holds or losing a job it lists | Designed (G15, which takes #883's `Checked` store) |
+| A host's first listing after a hello loses the jobs it does not list | `js-lease-server/src/agents.rs:474` (`first_listing`, memory), `js-lease-server/src/agent_api.rs:572`, `:610`, `js-lease-server/src/job_loss.rs:96-107` | each end is `Cond::Version`, but "first" is this instance's flag; safe once only the newest connection writes. A whole-host job moved to `starting` on a ready report (`js-lease-server/src/job_whole.rs:155`) whose reply, carrying the start, is lost is ended `Lost` by the next first listing without having run; this happens on a one-instance restart too | Designed (G15: no hello on a change of instance, and the start is sent again by the next beat) |
+| A host's session, epoch, secret, last heard | `js-registry/src/registry.rs:474-525`, `js-registry/src/registry/beat.rs:123` | held by the instance that took the hello; a beat that reaches another instance is refused (`409 unknown-host` or `403 session-mismatch`) and the agent says hello there. Section 0 makes the session the row `node/<host>`, checked on any instance | Designed (G15) |
 | `HostLive` (a second agent process on a live host) | `js-registry/src/registry.rs:468-473` | judged on the local registry: a different agent process that says hello to B while the host is live on A is admitted | Designed (G5) |
 | The pool's machine cap (`PoolFull`) | `js-registry/src/registry.rs:506-515` | counts this registry's hosts: N instances admit N times the cap | Designed (G5) |
 | Whole-host job states (placed, starting, running, prepare deadline) | `js-jobs/src/store/whole.rs:354`, `:359`, `:396`, `js-lease-server/src/job_whole.rs:138` | rows written at `Cond::Version` | Built |
-| The whole-host start's taint and the clock it judges deadlines by | `js-lease-server/src/agent_api.rs:531` (`own.host.taint`), `:608` (`placing.clock.now()`) | the registry's taint and the process clock | Designed (G2, G4) |
+| The whole-host start's taint and the clock it judges deadlines by | `js-lease-server/src/agent_api.rs:547` (`own.host.taint`), `:624` (`placing.clock.now()`) | the registry's taint and the process clock | Designed (G2, G4) |
 | A job's start command, repeated by two instances | `js-lease-server/src/per_job.rs:165`, `js-lease-server/src/job_start.rs:120` | a pure function of the rows; the placement that creates it is claimed | Built |
-| Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agents.rs:495` (`note_listing`, memory), `:507` (`listing_clean`), `js-lease-server/src/sched/jobs_pass.rs:158` | another instance's placement does not know | Designed (G5, G7) |
-| Held beats and their wakes | `js-lease-server/src/held_beat.rs:36` | the process's own wakes; a placement by another instance goes out on the host's next beat | Per instance |
+| Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agents.rs:503` (`note_listing`, memory), `:515` (`listing_clean`), `js-lease-server/src/sched/jobs_pass.rs:163` | another instance's placement does not know | Designed (G15) |
+| Held beats and their wakes | `js-lease-server/src/held_beat.rs:36` | the process's own wakes; a placement by another instance goes out on the host's next beat, at most its hold later; a draining instance ends every hold at once and begins none (#935, `js-lease-server/src/agent_api/held.rs:95-113`) | Per instance; Designed (G16: woken across instances) |
 | Log upload credentials per host | `js-lease-server/src/logs/mod.rs:155-307` | stateless provider credentials; several valid at once; a flip costs a mint | Per instance |
 
 ### 3.4 Placement and the queue
@@ -133,14 +204,14 @@ and decides nothing shared). Paths are under `crates/`.
 | A host is never booked past its room | `js-jobs/src/store/whole.rs:176-209` | the host's live allocations summed in the claimed transaction, `HostFull` when they leave no room, `hostbook/<host>` written at `Cond::Version` | Built |
 | One host job (`isolation=host`) per host | `js-jobs/src/store/whole.rs:289`, `js-jobs/src/store/taints.rs:36` | `taint/<host>` put at `Cond::Absent` in the placing transaction | Built |
 | No job on a cordoned host | `js-jobs/src/store/whole.rs:190-196` (`place_claimed`), `:290-291` (every placement), `js-jobs/src/store/cordons.rs:168` (`cordons`), `js-sched-placer/src/jobs.rs:708-713` | the row `cordon/<host>`, decided at the version read (`cordons.rs`); every placement transaction checks it absent (`HostCordoned` in `place_claimed`, a conflicting commit in `place` and `place_with`), whichever instance took the cordon; each pass also drops the hosts whose cordon the store holds from the open hosts | Built |
-| No contained job beside a host job, no job on a tainted host | `js-sched-placer/src/jobs.rs:931-941` (`open_to_jobs`, registry view), `js-lease-server/src/sched/jobs_pass.rs:158` | the engine's memory only; the placing transaction reads neither the host's taint nor `taint/<host>` (it puts the row for a host job only), and `taint/<host>` is later deleted at `Cond::Any` (`js-jobs/src/store/taints.rs:72`) | Designed (G7) |
+| No contained job beside a host job, no job on a tainted host | `js-sched-placer/src/jobs.rs:931-941` (`open_to_jobs`, registry view), `js-lease-server/src/sched/jobs_pass.rs:163` | the engine's memory only; the placing transaction reads neither the host's taint nor `taint/<host>` (it puts the row for a host job only), and `taint/<host>` is later deleted at `Cond::Any` (`js-jobs/src/store/taints.rs:72`) | Designed (G7) |
 | A host port is held by one job per host | `js-sched-placer/src/jobs.rs:472` | the engine's memory only; the placing transaction does not compare ports | Designed (G7) |
 | A host the scaler drains or releases takes no new job | `js-registry/src/registry/marks.rs:1-25` ("the marks are held in memory only") | a mark in one instance's registry; another instance's placement does not see it | Designed (G7, G9) |
 | One mark row per whole-host job | `js-jobs/src/store/marks.rs:81-94` | `mark/<job>` at `Cond::Absent` or `Cond::Version`, with the job checked at its version | Built |
 | Which host a whole-host job drains | `js-sched-placer/src/whole_jobs.rs:204-210`, `js-sched-placer/src/jobs.rs:741` | each instance chooses over its own hosts and deletes a mark whose host it never heard after its own start plus grace: two instances drain two hosts in turn (the rows stay consistent; the work is wasted) | Designed (G8) |
 | Why a job waits (queue status note) | `js-sched-placer/src/jobs.rs:779`, `js-jobs/src/store/status.rs:38` | conditional, but its text depends on the instance's view, so two instances rewrite it in turn and each rewrite moves the head | Designed (G8) |
 | The tables a pass decides from | `js-sched-placer/src/jobs_seen.rs:192` | a cache judged by the store's head (#880); every placement is re-decided in its transaction | Built |
-| Which hosts an instance places on | `js-lease-server/src/sched/jobs_pass.rs:149` | the hosts whose connection it holds; each host is held by one instance and every instance reads the whole queue | Per instance |
+| Which hosts an instance places on | `js-lease-server/src/sched/jobs_pass.rs:154` (`registry.hosts()`; nothing at all once draining, `:147`) | the hosts whose sessions it holds; section 0 has every instance place over every live `node/` row | Designed (G7) |
 | Queue order | `js-jobs/src/store/queue.rs:20` | a total order of row columns, the same on every instance | Built |
 | Job sizing | `js-sched-placer/src/sizes.rs:545` | from the shared tables; the booking is checked in the transaction | Per instance |
 
@@ -164,15 +235,15 @@ and decides nothing shared). Paths are under `crates/`.
 |---|---|---|---|
 | The job pass (queue expiry, prepare expiry, retention, loss) runs once per period | `js-lease-server/src/job_pass.rs:179-180`, `js-jobs/src/store/duties.rs:42-58` | a due-time claim; each end in the pass is `Cond::Version` (`js-jobs/src/store/ending.rs:89-97`) | Built |
 | The time the pass and the duty claims compare | `js-lease-server/src/job_pass.rs:168-169` | the process clock, against deadlines stamped with the store's clock: a skewed instance ends jobs early or late, or claims a period early | Designed (G2) |
-| Times stored in host rows (join-token and credential expiry, which G3 removes; the binding's cordon end) | `js-lease-server/src/join_tokens.rs:450-455`, `:534-539`, `js-lease-server/src/agents_cordon.rs:127` | stamped and judged with the process clock; with the job service the cordon itself is now a store row `cordon/<host>` whose time to live is the store's (`js-jobs/src/store/cordons.rs:123-128`), so only the binding's copy of the end (`agents_cordon.rs:127`) and the registry's cordon use the process clock | Designed (G2; G3 for the token times) |
+| Times stored in host rows (join-token and credential expiry, which G3 removes; the binding's cordon end) | `js-lease-server/src/join_tokens.rs:440-441`, `:529-544`, `:557`, `js-lease-server/src/agents_cordon.rs:127` | stamped and judged with the process clock; with the job service the cordon itself is now a store row `cordon/<host>` whose time to live is the store's (`js-jobs/src/store/cordons.rs:123-128`), so only the binding's copy of the end (`agents_cordon.rs:127`) and the registry's cordon use the process clock | Designed (G2; G3 for the token times) |
 | A silent host's jobs are lost (settlement) | `js-lease-server/src/job_pass.rs:126` (`gone`), `:179` (while `gone` is not empty the claim is bypassed and the pass runs regardless), `js-lease-server/src/job_alloc.rs:140` | "absent" is this instance's registry forgetting the host; a host connected to another instance is never heard here, so this instance can lose its live work | Designed (G6) |
 | `taint/<host>` rows are dropped once kept | `js-jobs/src/store/taints.rs:72` | `Cond::Any`: a taint row rewritten between the scan and the delete is lost | Designed (G4) |
-| The scaler runs a step | `js-lease-server/src/server.rs:458`, `js-lease-server/src/scaler/mod.rs:189` | every instance with an elastic pool runs its own loop, with no claim | Designed (G9) |
+| The scaler runs a step | `js-lease-server/src/server.rs:658` (`ScalerLoop::spawn`), `:689` (`scaler.tick()`), `js-lease-server/src/scaler/mod.rs:189` | every instance with an elastic pool runs its own loop, with no claim | Designed (G9) |
 | The scaler's records and unremoved hosts | `js-lease-server/src/scaler/kept.rs:51` | read at start, written whole at `Cond::Any`: two scalers overwrite each other | Designed (G9) |
 | The scaler's caps and budgets | `js-scaler/src/budget.rs:88`, `js-scaler/src/caps.rs:97` | judged over this instance's records: N instances spend up to N times a cap | Designed (G9) |
 | The scaler's view of hosts and its drain and release | `js-lease-server/src/scaler/live.rs:98`, `:222`, `:271-302` | this registry's hosts; an acquire id drawn per process | Designed (G9) |
 | Alerts (webhook, log lines) | `js-lease-server/src/alerts.rs:38` | each instance's own; a duplicate notice, not a decision | Per instance |
-| Metrics, TLS and token-file reload | `js-lease-server/src/metrics.rs`, `js-lease-server/src/agents.rs:789-826` (`refresh`: token and client-token reload, `mirror_cordons`, `save_bindings`; the TLS reload is in `js-lease-server/src/tls.rs`, not in `agents.rs`) | each instance's own | Per instance |
+| Metrics, TLS and token-file reload | `js-lease-server/src/metrics.rs`, `js-lease-server/src/agents.rs:822-861` (`refresh`: token and client-token reload, `mirror_cordons`, `save_bindings`; the TLS reload is in `js-lease-server/src/tls.rs`, not in `agents.rs`) | each instance's own | Per instance |
 
 ### 3.7 Usage
 
@@ -196,60 +267,46 @@ cannot be read (section 3.1). G2 makes one clock:
   when it fails. That is rule 4 for time.
 - The job pass, prepare expiry, the duty claims (`job_pass.rs:168-169`), the whole-host start (`agent_api.rs:608`) and the
   binding's cordon end (`agents_cordon.rs:127`) take the store's time, once per pass or request. (Join-token and credential expiry,
-  `join_tokens.rs:450-539`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:741`) is replaced by G8, on this clock.
+  `join_tokens.rs:440-557`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:741`) is replaced by G8, on this clock.
 - The process clock stays for intervals that are the process's own: ticks, backoffs, the hello limiter, the held beat.
 
-One more round trip per pass or request, and none per heartbeat that decides nothing.
+One more round trip per pass or request, and none per heartbeat: its `heard_at` is `now()` inside the beat's own write (section 0, G15).
 
 **Load.** Two costs grow with the fleet, not with the instances. Every claimed decision (a placement) holds the commit head from
 its start (3.1), so the placements of all instances are serialized there; each holds it for one job's rows, and more instances
-spread the same placements without adding any. Presence (section 5) is one small write per host per `presence_refresh`: at the
-default 5 s, 100 hosts are 20 writes a second. Neither is measured here; G5's pull request measures the presence write at the
+spread the same placements without adding any. The heartbeat is a row write per host per beat interval (section 0, its cost): at the
+default 5 s, 100 hosts are 20 writes a second. Neither is measured here; G15's pull request measures the beat's write at the
 deployment's host count, and `js-state/tests/postgres_head_queue.rs` exercises writers queued on the head.
 
 ## 5. Hosts across instances
 
-One host's session is held by one instance at a time. The agent opens a new connection for every request
-(`js-client/src/client.rs:282`, `max_idle_connections(0)`), so each beat goes where the edge sends a new connection; a beat that
-reaches an instance not holding the session is refused, and the agent says hello there. The design keeps that (a session is the holder's cache), and puts in rows what the
-other instances must know about the host:
+Section 0 is the design: a host is its rows, and any instance serves its requests. This section says what each decision about a
+host reads.
 
-- **The connection** (G1, komira-ai/jobscheduler#883): `node/<host>`, written by the hello at the version it read. Its version is
-  the connection's id. Every write of a heartbeat's job listing goes through a store that also checks that row is still at that
-  version (`js-state` `Checked`), so a replaced connection commits nothing and its beat is answered `403 session-mismatch`.
-- **Presence** (G5): the same row gains optional fields, written by the holder: the host's pool, agent instance, its claim and
-  shape as the hello reported them, whether its last listing was clean, and `heard_at`, the store's time of the last applied beat,
-  refreshed at most every `presence_refresh` (a config key, default 5 s; it must stay below half the shortest
-  pool grace, which the server checks once at start, B20, not at run time). Each write goes through the same
-  `Checked` store, so a superseded holder writes nothing. About one small write per host per 5 s, the rate the project owner
-  accepted for the coordinator (komira-ai/hostkeeper's design, section 19, decision 4). This amends
-  [jobscheduler-design.md](jobscheduler-design.md) section 10.1 ("a heartbeat is not a write"): a beat is still not a write;
-  a coarse presence refresh is.
-- **Identity** (G3, G4): a host is its certificate (G3 removes the tokens and host credentials). `hosts/binding/<host>` is read
-  by key in the hello's transaction and written at the version read (`Cond::Version`, `Cond::Absent` for a new row); the registry
-  is its cache. js-server keeps no per-host secret in a row: the session secret is the holding instance's, made at each hello, and
-  a log upload credential is minted per instance from the host id (section 3.3).
-
-What reads presence:
-
-- **Admission** (`no-capable-host`): the union of the live presence rows (heard within grace by the store's time) and this
-  registry. A row read is a necessary condition, so a cache of the rows that is a little old is enough; the refusal is never
+- **The session** (G15): `node/<host>`, written by the hello at the version it read (a first hello at `Cond::Absent`) and by every
+  beat, as section 0 says. A beat on any instance is checked against the row (its epoch, and the session digest until G3) and
+  applied by the guarded `UPDATE`; its listing's writes are conditional on the version that `UPDATE` wrote, through #883's
+  `Checked` store.
+- **Identity** (G3, G4): a host is its certificate. `hosts/binding/<host>` is read by key in the hello's transaction and written at
+  the version read. js-server keeps no per-host secret in a row beyond the digest of the session secret until G3 (after it the certificate proves the host and a beat's `session` is not checked; an old agent process is refused by its epoch, `409 stale-epoch`, which stays): the session string a beat carries is checked against the row like
+  its epoch, and a log upload credential is minted per instance from the host id (section 3.3).
+- **Admission** (`no-capable-host`, G5): the live `node/` rows (heard within grace by the database's time). The refusal is never
   taken on less than the rows.
-- **Host listings and `host_silent_since_ms`**: the presence rows, with this registry decorating the hosts it holds.
-- **`HostLive`**: at a hello whose agent instance differs from the row's, a row heard within grace refuses it as today. The same
-  agent instance takes the host over at once, on every instance: today's refusal of any hello while the local record is live
-  (`js-registry/src/registry.rs:468-473`) is narrowed to a different agent instance, and #883's row makes the newest hello the
-  one whose connection writes. That is what section 6 carries.
-- **`PoolFull`**: the hello of a host new to the pool locks the pool's row `pool/<pool>` (a key read and written at
-  `Cond::Version` in the hello transaction, so two such hellos of one pool are serialized) and counts the pool's live presence
-  rows. A known host is admitted as today.
-- **Settlement** (G6): the claimed job pass reads the presence rows. A host whose `heard_at` is older than grace plus retention by
-  the store's time is lost: each of its live allocations is ended in a transaction that also checks `node/<host>` at the version
-  read, so a hello that lands meanwhile makes the settlement a conflict and nothing is lost. The registry's `gone` map no longer
-  decides, and the job pass no longer bypasses its claim for it (`job_pass.rs:179`). A host whose instance died is settled by
-  whichever instance claims the pass, which is what an instance-local judgement cannot do. G6's tests: a host whose holding
-  instance stops is settled by the other after grace plus retention on an injected store clock, and a hello landing between the
-  read and the end makes the settlement a conflict that loses nothing.
+- **Host listings and `host_silent_since_ms`** (G5): the `node/` rows.
+- **`HostLive`** (G5, G15): a hello of a host whose row was heard within grace is refused as today, judged on the row, so every
+  instance answers alike; the refusal read from the local record (`js-registry/src/registry.rs:468-473`) goes. A hello of the same
+  agent process (its welcome lost) takes the host over at once: G15 adds an optional hello field naming the agent process, which no
+  wire carries today. A new agent process, as after a restart, waits out the grace as now.
+- **`PoolFull`** (G5): the hello of a host new to the pool locks the pool's row `pool/<pool>` (read and written at `Cond::Version`
+  in the hello transaction, so two such hellos of one pool are serialized) and counts the pool's `node/` rows that are not forgotten, as the registry counts its records today (a lost host inside retention counts). A known host is
+  admitted as today.
+- **Settlement** (G6): the claimed job pass reads the `node/` rows. A host read absent by the rule the registry forgets one by today (`heard_at` older than grace plus retention, no taint, no cordon, no work the placer holds on it: `js-registry/src/registry/record.rs:149`, `beat.rs` `forgotten`; silence alone is never absence, `job_pass.rs:113`) by
+  the database's time is lost: each of its live allocations is ended in a transaction that also checks `node/<host>` at the version
+  read, so a beat that lands meanwhile makes the settlement a conflict and nothing is lost. The registry's `gone` map no longer
+  decides, and the job pass no longer bypasses its claim for it (`job_pass.rs:179`). A host is settled the same way whichever
+  instance served it last, or whether that instance is still running. G6's tests: a host whose last instance stops is settled by
+  another after grace plus retention on an injected store clock, and a beat landing between the read and the end makes the
+  settlement a conflict that loses nothing.
 
 ## 6. Decisions already taken for js-server
 
@@ -258,17 +315,19 @@ Carried from komira-ai/hostkeeper's design, section 13:
 | Decision | Here | Tag |
 |---|---|---|
 | A host enrolled in hostkeeper holds one per-host certificate the coordinator controls; no join tokens, no token passing, no per-service certificates, no revocation machinery (a compromised host is unplugged) | the certificate is the identity of every agent request (#922); G3 deletes the token and host-credential paths instead of making them N-safe | Built (the certificate); Designed (G3, the removal) |
-| No agent stickiness beyond TCP keep-alive plus a server-side connection max age | an agent keeps no connection: it opens one per request (`js-client/src/client.rs:282`). A job client may keep one, so the job listener closes a connection older than `client_connection_max_age` (a config key with a default) at the end of a request | Built (agents); Designed (G10, job clients) |
+| No agent stickiness beyond TCP keep-alive plus a server-side connection max age | an agent keeps no connection: it opens one per request (`js-client/src/client.rs:282`). A job client may keep one, so the job listener closes a connection older than `client_connection_max_age` (a config key with a default) at the end of a request | Built (agents: no connection is kept); not needed for job clients, since any instance serves them (G10 deleted) |
 | The job-store cutover is a short pause with a dry-run copy, and a Postgres-to-SQLite export for rollback | #874 shipped the first start over Postgres with an empty job store ("drain the farm") and no copy or export tool | Designed (G12) |
-| A hello with the same credential and agent instance takes the host over at once | #883's connection row makes the newest hello the writer (G1); the registry's `HostLive` still refuses a hello of the same agent while its local record is live, which G5 narrows | Designed (G1, G5) |
+| A hello with the same credential and agent instance takes the host over at once | in section 0 no instance owns the host, so the hello is judged on the row on any instance; the same agent process is recognised by an optional hello field naming it, which G15 adds (none on the wire today); a new agent process waits out the grace, as today | Designed (G15) |
 | Losing one unflushed usage buffer when an instance dies is accepted | the minute buffer flushes every few minutes (`js-usage/src/hub.rs:448`) | Built |
 
 ## 7. Compatibility (B8)
 
-Every change of section 9 is additive but G3's. New key prefixes: `node/` (G1; beside, and not under, the usage rows' `usage/node/`),
-`pool/` (G5), `hostmark/` (G7); new optional fields in the `node/` value (G5) and a stored deadline in the `mark/<job>` value (G8);
+Every change of section 9 is additive but G3's. New key prefixes: `node/` (G15; beside, and not under, the usage rows' `usage/node/`),
+`pool/` (G5), `hostmark/` (G7); new optional fields in the `node/` value (G15) and a stored deadline in the `mark/<job>` value (G8);
 new duty rows under `periodic/` (G9, G11); a usage row per instance beside a host's hour pack (G11; a release before reads the pack alone and misses only the overlap's minutes, as today); new scaler rows under `acquires/scaler/` for a launch and for a pool's brake (G9). No
-existing key is renamed, re-meant or written in a new shape. The binding and scaler-record rows keep their values; what changes is
+existing key is renamed, re-meant or written in a new shape. G15 adds two optional wire fields, the beat's sequence within its
+session and, in the hello, the agent process; an older agent does not send them and an older server ignores them; they are named as
+a change of the wire in that pull request. `NOTIFY` (G16) carries no stored format. The binding and scaler-record rows keep their values; what changes is
 that they are written at the version read, which a reader does not see. An older release ignores the new prefixes. G3 is the one change
 that removes: by the owner's ruling it deletes the join-token mint and revoke, `--agent-token-file`, the host credential a welcome
 carries and the agent's token and credential flags, and refuses an agent request without a certificate. It names that change of
@@ -299,26 +358,27 @@ one store are `js-lease-server/src/sched/jobs_two_servers_tests.rs::two_servers_
 ## 9. The gaps, one pull request each
 
 Each lands after this document, is one subject, changes neither the replica count nor the update order, and turns its rows of section 3 to Built with paths.
-They land in the order of section 12's "Order of safety" (the gaps an update's overlap reaches today first), then by number.
+They land in the order of section 12's "Order of safety" (the gaps an update's overlap reaches today first), then in the table's order.
 
-| # | Pull request | Closes (section 3) | After |
-|---|---|---|---|
-| G1 | **Finish komira-ai/jobscheduler#883** (open, conflicts with `main` in `agent_api.rs`): the connection row `node/<host>` and the `Checked` store; merge `main` into its branch, keep its tests (`two_servers_serve_one_store_place_each_job_once_and_keep_to_the_hosts_cores` among them) | which connection commits a listing; first-listing loss; same agent takes over at once | none |
-| G2 | **One clock**: `try_now`, the store's time for every shared deadline, expiry and due time (section 4) | `Store::now` epoch; the pass's clock; host-row times; the whole-host start's clock | none |
-| G3 | **Host identity is the host certificate**: delete the one-time join tokens (their mint, revoke and use-once paths, the cap of waiting tokens, the give-back of a refused hello), the pool tokens of `--agent-token-file`, and the host credentials a welcome issues and the tick renews; an agent request without a host certificate is refused; the agent's token and credential flags go. Nothing replaces them: the certificate names the host (#922), and no per-host secret is kept in a row (section 5). The scaler's mint and revoke of a launched machine's token (`js-lease-server/src/scaler/live.rs:209`, `:259`) go too, while the scaler is off; G9 launches machines with certificates. It lands once every agent presents a certificate: Linux hosts do (#922), the Macs do not yet, so until then the token hazards of section 12 stay live for the Macs. Open komira-ai/jobscheduler#935 makes `identify` read a token's row by key meanwhile; that goes with the tokens | 3.2: a host without a certificate; 3.6: the token times | none |
-| G4 | **Host bindings are rows**: `HostBound` judged on the binding row read in the hello's transaction (`Cond::Absent` for a first hello, `Cond::Version` otherwise), the registry record's taint taken from that row; a refused hello judged before its binding is written, so there is nothing to undo; `save_bindings` writes only what this instance changed, at the version read, and deletes nothing it did not explicitly forget, the binding's cordon end included; cordon, uncordon and clear taint take the host from the rows, so a host held by another instance is not `404` (`js-lease-server/src/agents_cordon.rs:60-63`, `agents_taints.rs:86`); `taint/<host>` dropped at the version scanned. Parts in open komira-ai/jobscheduler#935: the save deletes only a binding this registry held and let go, and the hello of a host the registry does not know first reads its binding row and takes its taint and cordon; the rest is G4's | 3.2: host bound, undo, saved, taint seen, cordon's `404`, clear taint; 3.5: cordon and clear taint through the API; `taint/` drop | G3: the hello's binding write shares one transaction with the token use until G3 removes it, so G4 makes the write conditional once it is the binding's alone |
-| G5 | **Presence in the connection row** (section 5): pool, agent instance, claim and shape, listing-clean, `heard_at`; `presence_refresh`; admission, host listings, `host_silent_since_ms`, `HostLive` and `PoolFull` read it; `docs/design/jobscheduler-design.md` section 10.1 amended | 3.3: `HostLive`, `PoolFull`, listing-clean; 3.5: admission, listings | G1, G2 |
-| G6 | **Settlement by rows**: the claimed job pass loses a host's allocations by its presence row and `node/<host>` version, never by the local `gone` map; the claim bypass goes | 3.6: settlement | G5 |
-| G7 | **Placement re-checks the host in its transaction**: `place_claimed` reads the host's binding (taint; the cordon is Built, see below), `taint/<host>`, the scale-down mark and the ports of the host's live allocations in the claimed transaction and refuses the host; the scale-down mark becomes a row `hostmark/<host>`, written at `Cond::Version` by whoever marks, the registry mark its cache | 3.4: contained beside host job, taint, ports, scale-down mark (the cordon check is Built: `js-jobs/src/store/whole.rs:190-196`, `:290-291`) | G4, G5 |
-| G8 | **Whole-host drain and queue notes without churn**: a whole-host mark held for a host live on another instance is kept until its stored deadline by the store's time (no `claim_by` from the process's start); the queue note's text says whether any live host could serve the job by the presence rows, not by this instance's hosts | 3.4: which host drains; queue notes | G2, G5 |
-| G9 | **The scaler under the rule**: one step per pool and period by a duty claim (`periodic/scaler/<pool>`); its records and unremoved set written at the row's version, a conflict re-reading and re-deciding the step; each launch a row at `Cond::Absent` before the provider call, its acquire id derived from that row so a repeated call is the same machine; caps and budgets judged in the transaction that writes the launch row, under the pool's scaler row lock; the brake a row, its reset a conditional write; a release written to `hostmark/<host>` before the provider release; a machine it launches joins with a host certificate, since G3 removed the launch token, so the scaler stays off until a launched machine can be enrolled, as it is off on the deployment today | 3.6: scaler step, records, caps, host view; 3.5: brake reset | G2, G3, G7 |
-| G10 | **Job-client connection max age** (section 6): agents already open a connection per request | section 6 | none |
-| G11 | **Usage rows and the import**: the import's loser reads the marker and starts; a host-minute flushed by two instances keeps both: each instance's minutes are kept in a row of its own beside the hour pack (a new key under the host's hour, named by the instance's start), and a reader sums the hour pack and those rows, so a flush retried after a lost reply replaces its own row and never counts twice; the usage prune claimed by `periodic/usage-prune`; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G2 |
-| G12 | **Job-store cutover tools** (section 6): a dry-run copy of `<state file>.jobs` into the store with counts and a checksum per prefix, and an export of the store's job and usage rows to a SQLite file, with the round trip as its test. Moot for a deployment whose job store is already in Postgres with nothing to bring back | section 6 | none |
-| G13 | **Readiness the edge can reach** (section 12): `--ready-listen` accepts a private address as the agent and job listeners do (`js-lease-server/src/config.rs:417`, `js-lease-server/src/config/listen.rs:55`, `:79`), so the edge checks `/readyz` and sends no new connection to an instance from its first `503 draining` (open komira-ai/jobscheduler#935 already moves agents at SIGTERM by closing the agent listener, answers held beats at once and stops placement while draining; job clients still reach the old instance through the hold); the stop grace above `--drain-hold` plus `--drain-timeout` is checked once at deploy (B20), outside this repository | 3.1: readiness; section 12 | none |
-| G14 | **A start whose reply was lost is sent again, not lost**: a whole-host job in `starting` that a first listing does not list stays `starting` until a start deadline by the store's time and its start rides on the next reply; the agent's start is idempotent on the allocation (checked, and made so in `js-agent` first if it is not) | 3.3: first listing | G2 |
-
-After G1 to G11, G13 and G14, any number of instances is safe in steady state and through an update's overlap from this repository's
+| # | Under section 0 | Pull request | Closes (section 3) | After |
+|---|---|---|---|---|
+| G1 | Shrunk into G15: no connection owns a host, so #883's rule that the newest hello owns it and its `503` on a racing hello go; its mechanism, every listing write conditional on `node/<host>`, is G15's guard | ~~Finish komira-ai/jobscheduler#883~~: its `Checked` store and its two-server test (`two_servers_serve_one_store_place_each_job_once_and_keep_to_the_hosts_cores`) move into G15, and #883 is closed in favour of G15 | (now G15) | none |
+| G2 | Kept: section 0's deadlines by `now()` | **One clock**: `try_now`, the store's time for every shared deadline, expiry and due time (section 4) | `Store::now` epoch; the pass's clock; host-row times; the whole-host start's clock | none |
+| G3 | Kept: the certificate is how any instance knows the host | **Host identity is the host certificate**: delete the one-time join tokens (their mint, revoke and use-once paths, the cap of waiting tokens, the give-back of a refused hello), the pool tokens of `--agent-token-file`, and the host credentials a welcome issues and the tick renews; an agent request without a host certificate is refused; the agent's token and credential flags go. Nothing replaces them: the certificate names the host (#922), and no per-host secret is kept in a row (section 5). The scaler's mint and revoke of a launched machine's token (`js-lease-server/src/scaler/live.rs:209`, `:259`) go too, while the scaler is off; G9 launches machines with certificates. It lands once every agent presents a certificate: Linux hosts do (#922), the Macs do not yet, so until then the token hazards of section 12 stay live for the Macs. komira-ai/jobscheduler#935 (Built) reads a token's row by key at its first use (`js-lease-server/src/join_tokens_stored.rs:19`, `js-lease-server/src/agent_api/unknown.rs:34`) meanwhile; that goes with the tokens | 3.2: a host without a certificate; 3.6: the token times | none |
+| G15 | New: section 0's heartbeat | **The heartbeat is a row `UPDATE` on any instance**: the session in `node/<host>` (section 0's fields), written by the hello at the version read and by every beat; a beat guarded by its (epoch, sequence), its listing's writes conditional on the version it wrote, through #883's `Checked` store; two optional, additive wire fields, the beat's sequence and, in the hello, the agent process (so the same process takes the host over at once), the agent sending them first; for an agent that sends no sequence, a confirmed container freed only after two applied beats in a row omit it; the first-listing and listing-clean flags as `node/` columns; the reply built from the rows; no `409 unknown-host` or `403 session-mismatch` for a host the row knows; the registry refreshed from the rows. It measures the beat's write through the `Store` against a plain `node` table and takes the cheaper one that keeps the guard (section 0, its cost). komira-ai/jobscheduler#883 is closed in favour of this pull request, which takes its `Checked` store and its tests; `docs/design/jobscheduler-design.md` section 10.1 amended | 3.3: which connection commits a listing, first listing, the session, listing-clean; the lost whole-host start (was G14) | G2, G3 |
+| G4 | Shrunk: no bindings save is left to make conditional; each change of a binding is its own conditional write where it is decided | **Host bindings are rows, and after G3 only the taint**: until G3, `HostBound` is judged on the binding row read in the hello's transaction (`Cond::Absent` for a first hello, `Cond::Version` otherwise) and a refused hello is judged before its binding is written, so there is nothing to undo; after G3 the certificate names the host, so `HostBound`, the undo, the binding's credential and its copy of the cordon end (`cordon/<host>` is the cordon) go, and the row keeps the taint; the registry holds no bindings to save, so `save_bindings` goes; cordon, uncordon and clear taint take the host from the rows, so a host served by another instance is not `404` (`js-lease-server/src/agents_cordon.rs:60-63`, `agents_taints.rs:86`); `taint/<host>` dropped at the version scanned. Built by komira-ai/jobscheduler#935: the save deletes only a binding this registry held and let go (`js-lease-server/src/agent_state.rs:299`), and the hello of a host the registry does not know reads its binding row first (`js-lease-server/src/agents.rs:567`) | 3.2: host bound, undo, saved, taint seen, cordon's `404`, clear taint; 3.5: cordon and clear taint through the API; `taint/` drop | G3 |
+| G5 | Shrunk: presence is the beat's own `UPDATE` (G15), so no presence write or `presence_refresh` of its own; what is left is the readers | **Decisions read the `node/` rows**: admission, host listings, `host_silent_since_ms`, `HostLive` (judged on the row; the same agent process by G15's hello field) and `PoolFull` (under `pool/<pool>`, counting the rows not forgotten) read the `node/` rows (section 5) | 3.3: `HostLive`, `PoolFull`; 3.5: admission, listings | G15 |
+| G6 | Kept, simpler: silence is `heard_at`, so the local `gone` map and the claim bypass simply go | **Settlement by rows**: the claimed job pass loses a host's allocations by `node/<host>`'s `heard_at` and version, never by the local `gone` map; the claim bypass goes | 3.6: settlement | G15 |
+| G7 | Kept, and every instance places over every live host | **Placement re-checks the host in its transaction, over every live host**: the pass builds the engine's hosts (`host_up`, `heard` with the load, `OpenHost`) from the live `node/` rows it reads before each pass, not from the hosts this instance serves, and the pass's skip rule (`jobs_seen.rs`, engine change counts) counts a changed row, not a local call; `place_claimed` reads the host's binding (taint; the cordon is Built, see below), `taint/<host>`, the scale-down mark and the ports of the host's live allocations in the claimed transaction and refuses the host; the scale-down mark becomes a row `hostmark/<host>`, written at `Cond::Version` by whoever marks, the registry mark its cache | 3.4: contained beside host job, taint, ports, scale-down mark, which hosts an instance places on (the cordon check is Built: `js-jobs/src/store/whole.rs:190-196`, `:290-291`) | G4, G15 |
+| G16 | New: section 0's wake | **LISTEN/NOTIFY wakes held beats and placement**: a placement or cancel `NOTIFY`s the host's channel and a submit the queue's, after the commit, best effort, on one channel; each instance `LISTEN`s on one connection of its own and wakes the held beat of that host or its placement pass; the poll stays the guarantee (`js-state/src/postgres/mod.rs:25`: polling is the baseline). Tests: a placement on one instance ends a beat held on another before its hold; with notifications off, the same beat gets the start at its next poll | 3.3: held beats (a placement elsewhere waits for the next beat) | G15 |
+| G8 | Shrunk: with every instance placing over every host, two instances no longer drain two hosts for one job; left is the mark's deadline on the database's clock | **Whole-host marks on the database's clock**: a whole-host mark is kept until its stored deadline by the database's time (no `claim_by` from the process's start); the queue note's text no longer depends on which instance writes it (G7's pass sees every host), so nothing is left of that part | 3.4: which host drains; queue notes | G2, G7 |
+| G9 | Kept | **The scaler under the rule**: one step per pool and period by a duty claim (`periodic/scaler/<pool>`); its records and unremoved set written at the row's version, a conflict re-reading and re-deciding the step; each launch a row at `Cond::Absent` before the provider call, its acquire id derived from that row so a repeated call is the same machine; caps and budgets judged in the transaction that writes the launch row, under the pool's scaler row lock; the brake a row, its reset a conditional write; a release written to `hostmark/<host>` before the provider release; a machine it launches joins with a host certificate, since G3 removed the launch token, so the scaler stays off until a launched machine can be enrolled, as it is off on the deployment today | 3.6: scaler step, records, caps, host view; 3.5: brake reset | G2, G3, G7 |
+| G11 | Kept, and more needed: with any instance taking any beat, a host's minute is split over instances as a rule, not only at an update | **Usage rows and the import**: the import's loser reads the marker and starts; a host-minute flushed by two instances keeps both: each instance's minutes are kept in a row of its own beside the hour pack (a new key under the host's hour, named by the instance's start), and a reader sums the hour pack and those rows, so a flush retried after a lost reply replaces its own row and never counts twice; the usage prune claimed by `periodic/usage-prune`; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G2 |
+| G12 | Kept: the cutover is not about instances | **Job-store cutover tools** (section 6): a dry-run copy of `<state file>.jobs` into the store with counts and a checksum per prefix, and an export of the store's job and usage rows to a SQLite file, with the round trip as its test. Moot for a deployment whose job store is already in Postgres with nothing to bring back | section 6 | none |
+| G13 | Kept: section 12 | **Readiness the edge can reach** (section 12): `--ready-listen` accepts a private address as the agent and job listeners do (`js-lease-server/src/config.rs:417`, `js-lease-server/src/config/listen.rs:55`, `:79`), so the edge checks `/readyz` and sends no new connection to an instance from its first `503 draining` (Built by komira-ai/jobscheduler#935: agents move at SIGTERM because the agent listener closes, held beats are answered at once, and a draining instance places nothing, `js-lease-server/src/server.rs:840`, `js-lease-server/src/drain.rs:28`; job clients still reach the old instance through the hold); the stop grace above `--drain-hold` plus `--drain-timeout` is checked once at deploy (B20), outside this repository | 3.1: readiness; section 12 | none |
+| G10 | Deleted: an agent keeps no connection, and any instance serves any job client, so a connection age only spreads load (B20: no machinery without a need); a draining instance closes its connections (section 12) | ~~Job-client connection max age~~ | section 6 | none |
+| G14 | Deleted: a start is a function of the rows, so the next beat on any instance carries it again (G15), and with no hello on a change of instance the first-listing rule, a stored `node/` flag cleared in the beat's own writes, runs only after an agent restart, whose listing is the agent's whole account (`per_job.rs` `starts_for` sends a `starting` whole-host job's start on every beat until the host lists it, so a lost reply is sent again) | ~~A start whose reply was lost is sent again~~ | 3.3 (now G15) | none |
+With G2 to G9, G11, G13, G15 and G16 Built, any number of instances is safe in steady state and through an update's overlap from this repository's
 side; the edge's check and the stop grace are the deployment's.
 
 ## 10. Supersession (B22)
@@ -328,7 +388,7 @@ side; the edge's check and the stop grace are the deployment's.
   it found that still holds is in section 3 and section 9.
 - [deployment.md](deployment.md), "(b) later" and "Single active writer, not leader election": a second replica needs no leader,
   no election and no fence; this document is the design. That file gets a pointer here.
-- [jobscheduler-design.md](jobscheduler-design.md) section 10.1, "a heartbeat is not a write", is amended by G5 in its pull request.
+- [jobscheduler-design.md](jobscheduler-design.md) section 10.1, "a heartbeat is not a write", is amended by G15 in its pull request.
 - [configuration.md](configuration.md), "What it keeps": G3 removes the tokens and host credentials from that text and G4 makes
   "read once at start" untrue for the bindings; each changes it.
 - [../lease-server-update.md](../lease-server-update.md) describes the host-native, one-server, stop-first update; the deployment's
@@ -336,8 +396,8 @@ side; the edge's check and the stop grace are the deployment's.
 
 ## 11. Decisions made in this document
 
-- **Settlement needs a presence row.** Settling by `node/<host>`'s version alone would leave a host whose instance died unsettled
-  forever, since no live instance ever heard it. So `heard_at` is written, at the 5 s rate the owner accepted for the coordinator.
+- **Settlement needs `heard_at`.** Settling by `node/<host>`'s version alone would leave a host whose instance died unsettled
+  forever, since no live instance ever heard it. So every beat sets `heard_at = now()` in its own UPDATE (G15), at the 5 s rate the owner accepted for the coordinator.
 - **`PoolFull` takes a row lock per pool, and only for a host new to the pool.** That serializes exactly the hellos that can
   overrun the cap, with no counter to keep in step.
 - **The update hook stays a one-server tool.** It manages the host-native install of `docs/lease-server-update.md`; an
@@ -347,9 +407,13 @@ side; the edge's check and the stop grace are the deployment's.
   does not have.
 - **G3 removes the tokens instead of making them N-safe.** The owner ruled that an enrolled host's certificate is its one
   identity, with no join tokens and no revocation machinery, so the token rows get no conditional writes and no cap lock.
-- **The live hazards go first.** Section 12's list is what an update does to the deployment today; G1, G4, G5, G7 and G11 close
-  it, G2 before G5, G14 closes the lost start, and G3 closes the token hazards once the Macs hold certificates. The work that
-  fixes the overlap (open komira-ai/jobscheduler#935) lands parts of G3, G4 and G13; each row says which part. G13 changes which address a flag accepts; it is not a runtime gate.
+- **The live hazards go first.** Section 12's list is what an update does to the deployment today; G15, G4, G5, G7 and G11 close
+  it, and G3 closes the token hazards once the Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3, G4
+  and G13; each row says which part.
+- **The standard shape (section 0) replaces sessions held by one instance.** The project owner found the earlier text too
+  complicated for something fairly standard. With the heartbeat a row `UPDATE` on any instance, #883's connection ownership (G1),
+  the connection max age (G10) and the lost-start rule (G14) go, and presence (G5), the bindings (G4) and the whole-host drain (G8)
+  shrink; section 9 says which, and why. G13 changes which address a flag accepts; it is not a runtime gate.
 - **G12 stays Designed** although #874 shipped without it, because the owner's decision asks for it. A deployment that has no
   SQLite job store to move needs only the export.
 
@@ -373,18 +437,18 @@ on every update now, whatever section 9 has built.
 
 **What the old instance does on SIGTERM** (Built):
 
-1. `/readyz` answers `503 draining` at once, and the instance keeps serving and ticking for `--drain-hold` (15 s;
-   `js-lease-server/src/server.rs:800`, #876).
+1. `/readyz` answers `503 draining` at once. The agent listener closes (a request in flight is answered, a held beat at once), no job is placed, and the instance keeps serving the job service and ticking for `--drain-hold` (15 s;
+   `js-lease-server/src/server.rs:840`, `js-lease-server/src/drain.rs:28`, #876, #935).
 2. It stops accepting connections. A request in flight is answered and its connection closed (`Connection: close` on HTTP/1.1,
    `GOAWAY` on HTTP/2), an idle connection is closed, and what is still open after `--drain-timeout` (10 s) is cut
-   (`server.rs:813-837`, `js-lease-server/src/listener.rs:286-290`, `:368-392`, `:422-426`).
-3. It ticks once more (`server.rs:837`) and exits. The final tick is the whole tick (`js-lease-server/src/api.rs:187`): the job pass
-   (claimed), the registry's advance, the refresh (token reload, the cordon mirror, the bindings save, the credential flush, the
-   usage tick, the log grants), a placement pass and the taints' keeping; then the usage side's last flush (`server.rs:681-686`).
+   (`server.rs:858-882`, `js-lease-server/src/listener.rs:286-290`, `:368-392`, `:422-426`).
+3. It ticks once more (`server.rs:882`) and exits. The final tick is the whole tick (`js-lease-server/src/api.rs:187`): the job pass
+   (claimed), the registry's advance, the refresh (token reload, the cordon mirror, the bindings save, which since #935 deletes only a binding this registry held and let go, the credential flush, the
+   usage tick, the log grants) and a placement pass that places nothing, because the instance is draining (#935, `js-lease-server/src/sched/jobs_pass.rs:147`); then the usage side's last flush (`server.rs:713-718`).
    The scaler does not run in it. Two hazards below come from this tick.
 
-An agent whose connection was closed or refused retries with its backoff. The instance it reaches holds no session for it, so a
-beat is answered `409 unknown-host` or `403 session-mismatch` and the agent says hello there (`js-agent/src/session.rs:32-45`).
+An agent whose connection was closed or refused retries with its backoff. Today the instance it reaches holds no session for it, so a
+beat is answered `409 unknown-host` or `403 session-mismatch` and the agent says hello there (`js-agent/src/session.rs:32-45`); after G15 it serves the beat from the `node/` row and no hello is repeated.
 Its jobs run on throughout: an agent keeps its jobs without a server for up to `--silence-stop` with no accepted reply (300 s by
 default, `js-agent/src/cli.rs:311-316`), far more than the drain hold and drain timeout (25 s), and on the server's side silence
 ends nothing before grace plus retention ([absence.md](absence.md)).
@@ -394,26 +458,26 @@ ends nothing before grace plus retention ([absence.md](absence.md)).
 | During the overlap | Effect | Closed by |
 |---|---|---|
 | A submit reaches the new instance before the hosts have said hello to it | refused `no-capable-host` (`422`) for good, though the hosts serve on the old instance | G5 |
-| Either instance's tick saves a binding that differs from the copy it last wrote (a lapsed or mirrored cordon end, a forgotten host) | the whole binding row is put or deleted at `Cond::Any` from that instance's copy, so a taint the other instance stored in it is lost, or a host it holds loses its binding | G4 (the delete of a binding never held, and the taint read at a hello, in open komira-ai/jobscheduler#935; the put at `Cond::Any` remains) |
-| A host job placed by one instance is a taint in that instance's memory, and the host's connection moves to the other | the other may place a contained job beside the host job | G4, G7 |
-| A host has a connection on each instance for a moment (a beat in flight to the old one when the agent reconnects to the new one) | the old connection can commit a listing over the new one's | G1 |
-| A host that joins by token (the Macs) presents a host credential or one-time token the other instance issued after it started | the other reads its tokens once at start, answers `401`, and the agent exits (`401` is fatal); one token can also admit two hosts | G3 (removes the tokens; live for the Macs until they hold certificates). Open komira-ai/jobscheduler#935 reads an unknown token's row by key, which ends the `401` until G3 |
-| An agent that said hello to the new instance reaches the old one again (each request opens a new connection, so any may; with open komira-ai/jobscheduler#935, only until the old one's SIGTERM) | its beat is `403 session-mismatch`, and its hello there is `409 host-live` while the old record is within its grace, so the agent backs off | G5 (the same agent takes over at once), G1 |
+| Either instance's tick saves a binding that differs from the copy it last wrote (a lapsed or mirrored cordon end, a forgotten host) | the whole binding row is put or deleted at `Cond::Any` from that instance's copy, so a taint the other instance stored in it is lost, or a host it holds loses its binding | G4 (the delete of a binding never held, and the taint read at a hello: Built by komira-ai/jobscheduler#935; the put at `Cond::Any` remains) |
+| A host job placed by one instance is a taint in that instance's memory, and the host's beats move to the other | the other may place a contained job beside the host job | G4, G7 |
+| A host has a connection on each instance for a moment (a beat in flight to the old one when the agent reconnects to the new one) | the old connection can commit a listing over the new one's | G15 |
+| A host that joins by token (the Macs) presents a host credential or one-time token the other instance issued after it started | the other reads its tokens at start, and a token it does not hold is answered `401` (the agent exits; `401` is fatal) until #935 below; one token can also admit two hosts | G3 (removes the tokens; live for the Macs until they hold certificates). komira-ai/jobscheduler#935 (Built) reads an unknown token's row by key, which ends the `401` until G3 |
+| An agent that said hello to the new instance reaches the old one again (each request opens a new connection, so any may; since komira-ai/jobscheduler#935, only until the old one's SIGTERM) | its beat is `403 session-mismatch`, and its hello there is `409 host-live` while the old record is within its grace, so the agent backs off | G15 (no session to mismatch; the same agent is applied at once) |
 | Both instances admit hosts new to a pool | the pool's cap counts per instance | G5 |
-| `ListHosts` and `GET /v1/hosts` on either instance | each lists only the hosts whose connection it holds | G5 |
-| A whole-host job's start rides on a ready report's reply that is lost (a request cut by the drain, a killed process) | the next first listing ends it `Lost` without its having run | G14 |
+| `ListHosts` and `GET /v1/hosts` on either instance | each lists only the hosts whose session it holds | G5 |
+| A whole-host job's start rides on a ready report's reply that is lost (a request cut by the drain, a killed process) | the next first listing ends it `Lost` without its having run | G15 (was G14) |
 | A host's minute of usage is recorded by both instances (it moved during the minute, and the old instance flushes at exit) | the later flush replaces the minute, so up to a minute of the host's usage rows is lost | G11 |
-| New connections reach the old instance through its drain hold, and are refused by it once it closes its listener, until the edge notices | an agent retries; a job client's request fails and is retried by the client | G13 (open komira-ai/jobscheduler#935 closes the agent listener at SIGTERM, so agents move at once, answers held beats at once and places nothing while draining; the edge's sight of `/readyz` remains), and a stop grace above `--drain-hold` plus `--drain-timeout` plus the final tick, checked once at deploy |
+| New connections reach the old instance through its drain hold, and are refused by it once it closes its listener, until the edge notices | an agent retries; a job client's request fails and is retried by the client | G13 (komira-ai/jobscheduler#935, Built, closes the agent listener at SIGTERM, so agents move at once, answers held beats at once and places nothing while draining; the edge's sight of `/readyz` remains), and a stop grace above `--drain-hold` plus `--drain-timeout` plus the final tick, checked once at deploy |
 
 Not live in an update: settlement by the local registry (G6) needs a host unheard for grace plus retention, far longer than an
 overlap; the clock (G2) is one clock while both tasks run on the one node; the scaler (G9) is off on the deployment; G8 and the
-import and prune parts of G11 are economy; G10 concerns job clients in steady state and is not needed for an update.
+import and prune parts of G11 are economy; G10 is deleted.
 
 **Order of safety.** Each step is relied on only once the one before is Built:
 
 1. Every write conditional and every duty claimed (section 2, Built): two instances never place one job twice, book a host past
    its room or run a duty twice.
-2. The live hazards closed: G1, G4, G5, G7, G14 and G11's minute fold, with G2 before G5 and G14; G3 once the Macs hold certificates.
-   Open komira-ai/jobscheduler#935 lands parts of G3, G4 and G13 ahead of them.
+2. The live hazards closed: G15, G4, G5, G7 and G11's minute fold, with G2 and G3 before G15; G3's removal of the tokens once the
+   Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3, G4 and G13 ahead of them.
 3. The edge sees the drain (G13) and the stop grace covers it, so no connection is refused during an update.
-4. The rest of section 9 (G6, G8 to G10, the rest of G11, G12), which matters for N instances in steady state or for a long overlap, not for one update.
+4. The rest of section 9 (G6, G8, G9, G16, the rest of G11, G12), which matters for N instances in steady state or for a long overlap, not for one update.
