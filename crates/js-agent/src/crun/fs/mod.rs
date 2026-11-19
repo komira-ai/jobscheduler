@@ -7,12 +7,12 @@
 //! lifecycle's worker:
 //!
 //! 1. each host path is opened beneath its root, and a mount's `sub_path` beneath it, on the
-//!    lookups' pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's clock;
-//!    a start with none is ready at the first call, and a later call that adds host paths
+//!    lookups' pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's
+//!    clock; a start with none is ready at the first call, and a later call that adds host paths
 //!    keeps the lookups already begun and asks only the new ones;
 //! 2. once they are open and the images are in the store, the assembly ([`assemble`]) runs
-//!    on the other pool ([`Fs::ask_assembly`]): clones, overlays, targets, each mount listed in
-//!    `<mounts>/<lease>/mounts` ([`list`]) before it is made;
+//!    on the other pool ([`Fs::ask_assembly`]): clones, overlays, targets, each mount listed
+//!    in `<mounts>/<lease>/mounts` ([`list`]) before it is made;
 //! 3. the container takes what was made ([`Fs::take`]); a run never made has it removed
 //!    ([`Fs::discard`]); every end of a run unmounts it from the list ([`Fs::release`]);
 //! 4. after a job that did not succeed, each of its sources is asked whether it still
@@ -102,7 +102,7 @@ pub enum FsError {
         /// Why.
         why: ResolveError,
     },
-    /// The pool's threads could not be made.
+    /// The threads of a pool could not be made.
     #[error("the threads of the host paths: {0}")]
     Threads(#[from] io::Error),
 }
@@ -120,7 +120,7 @@ struct Lookup {
 /// How a [`Lookup`] stands.
 #[derive(Debug)]
 enum Opened {
-    /// Asked of the pool: the answer to come.
+    /// Asked of the lookups' pool: the answer to come.
     Asked(Pending<Result<OwnedFd, NativeRefusal>>),
     /// Open.
     Open(OwnedFd),
@@ -138,7 +138,7 @@ impl Lookup {
 enum Assembly {
     /// Not asked yet: the host paths are being looked up, or are open.
     Unasked,
-    /// Asked of the pool.
+    /// Asked of the assemblies' pool.
     Asked(Pending<Result<Assembled, Unassembled>>),
     /// Made, for the container to take.
     Made(Assembled),
@@ -274,9 +274,9 @@ impl Fs {
     }
 
     /// Begins, or follows, the lookups of the host paths of the run `run_id` (lease `name`):
-    /// each is asked of the lookups' pool at the first call, bounded by [`LOOKUP_MS`] from `now_ms`,
-    /// and the first call polls them as a later one does, so a start with no host path is
-    /// [`FsPrepared::Ready`] at once. [`FsPrepared::Ready`] once every one is open; refused
+    /// each is asked of the lookups' pool at the first call, bounded by [`LOOKUP_MS`] from
+    /// `now_ms`, and the first call polls them as a later one does, so a start with no host path
+    /// is [`FsPrepared::Ready`] at once. [`FsPrepared::Ready`] once every one is open; refused
     /// `input-not-allowed` for a path beneath no root or one that leads out of it by a link,
     /// `input-unavailable` for one that is missing, is not a directory, cannot be searched or
     /// did not answer in time.
@@ -380,9 +380,9 @@ impl Fs {
         ))
     }
 
-    /// Asks the assemblies' pool for the assembly of the run `run_id` (its host paths open), over the
-    /// image's tree `image` and the trees of its image layers (`trees`, base first, one for
-    /// each image layer), in the lease directory `lease`, with `owners`.
+    /// Asks the assemblies' pool for the assembly of the run `run_id` (its host paths open),
+    /// over the image's tree `image` and the trees of its image layers (`trees`, base first,
+    /// one for each image layer), in the lease directory `lease`, with `owners`.
     pub(crate) fn ask_assembly(
         &mut self,
         run_id: &str,
@@ -495,9 +495,9 @@ impl Fs {
             .count()
     }
 
-    /// Asks the assemblies' pool whether each of the `sources` clones of the lease `name` still answers
-    /// ([`PathCalls::answers`]), bounded by [`CHECK_MS`] from `now_ms`: the answer is the
-    /// first that is [unreadable](kernel::unreadable), `None` when all answer.
+    /// Asks the assemblies' pool whether each of the `sources` clones of the lease `name`
+    /// still answers ([`PathCalls::answers`]), bounded by [`CHECK_MS`] from `now_ms`:
+    /// the answer is the first that is [unreadable](kernel::unreadable), `None` when all answer.
     pub(crate) fn check(&self, name: &str, sources: usize, now_ms: u64) -> Pending<Option<String>> {
         let src = self.dir_of(name).join("src");
         let paths = Arc::clone(&self.paths);

@@ -1,7 +1,7 @@
 //! The calls of a job's file system that look at a provider's file system, and so may wait
 //! on it: [`PathCalls`], which the agent makes through [`Kernel`] on a thread of the
-//! `js-paths` pool and a test replaces, and the making of a mount target inside a tree
-//! ([`reach`]).
+//! `js-lookups` or `js-paths` pool and a test replaces, and the making of a mount target
+//! inside a tree ([`reach`]).
 
 use std::fmt;
 use std::io;
