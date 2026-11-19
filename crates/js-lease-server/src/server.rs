@@ -51,7 +51,7 @@ pub struct Running {
     /// The phase the readiness route answers.
     gate: Gate,
     shared: Arc<Shared>,
-    stop: oneshot::Sender<()>,
+    stop: Stop,
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
@@ -67,15 +67,47 @@ pub struct Running {
 /// (`--ready-listen`).
 struct Port {
     addr: SocketAddr,
-    stop: oneshot::Sender<()>,
+    stop: Stop,
     serving: JoinHandle<()>,
 }
 
 impl Port {
     /// Tells the listener to stop; the task to await for its drain.
     fn stop(self) -> JoinHandle<()> {
-        let _ = self.stop.send(());
+        self.stop.send();
         self.serving
+    }
+}
+
+/// The stop of one listener: no new connection from the first [`Stop::send`] on, and each
+/// open one closed once it has answered the request it serves ([`crate::listener`]). Sent
+/// through a shared reference, so the drain stops the agent routes' listener early
+/// ([`Running::hold`]) and the stop after it finds that listener stopping already.
+struct Stop(std::sync::Mutex<Option<oneshot::Sender<()>>>);
+
+impl Stop {
+    fn new(stop: oneshot::Sender<()>) -> Self {
+        Self(std::sync::Mutex::new(Some(stop)))
+    }
+
+    /// Whether the listener was told to stop.
+    #[cfg(test)]
+    fn sent(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+
+    /// Tells the listener to stop; nothing when it was told before.
+    fn send(&self) {
+        let mut stop = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(stop) = stop.take() {
+            let _ = stop.send(());
+        }
     }
 }
 
@@ -114,7 +146,7 @@ async fn ready_port(
     info!(%addr, "serving the readiness route");
     Ok(Port {
         addr,
-        stop,
+        stop: Stop::new(stop),
         serving,
     })
 }
@@ -258,7 +290,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         info!(%addr, "listening for agents");
         Port {
             addr,
-            stop,
+            stop: Stop::new(stop),
             serving: tokio::spawn(serving),
         }
     });
@@ -278,7 +310,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
             info!(%addr, tls = served_tls, "listening for the job service");
             Port {
                 addr,
-                stop,
+                stop: Stop::new(stop),
                 serving: tokio::spawn(serving),
             }
         });
@@ -295,7 +327,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
                 info!(%addr, "serving the metrics");
                 Port {
                     addr,
-                    stop,
+                    stop: Stop::new(stop),
                     serving: tokio::spawn(serving),
                 }
             });
@@ -315,7 +347,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         ready,
         gate,
         shared,
-        stop,
+        stop: Stop::new(stop),
         slots,
         serving: tokio::spawn(serving),
         ticking,
@@ -794,11 +826,24 @@ impl Running {
     }
 
     /// The first half of a stop on a termination signal: the readiness route
-    /// (`--ready-listen`) answers 503 `draining` at once, and the server keeps serving and
-    /// ticking for `--drain-hold`, so a proxy that polls readiness takes it out of rotation
-    /// while requests still succeed. [`Running::shutdown`] is the second half.
+    /// (`--ready-listen`) answers 503 `draining` at once, and the server keeps serving the
+    /// job service and ticking for `--drain-hold`, so a proxy that polls readiness takes it
+    /// out of rotation while requests still succeed. [`Running::shutdown`] is the second half.
+    ///
+    /// The agents leave at once ([`crate::drain`]): the listener that serves the agent routes
+    /// (`server.agent_listen`, or `--listen` when they share it) takes no new connection, each
+    /// request it is serving is answered and its connection closed (within `--drain-timeout`),
+    /// a held heartbeat is answered now, and the server places no more jobs. An agent opens a
+    /// connection for each request, so its next heartbeat reaches another server over the same
+    /// store, which does not know its session and has it say hello there; the agent keeps its
+    /// runs. Without another server the agents retry with their backoff until one starts.
     pub async fn hold(&self) {
         self.gate.drain();
+        self.shared.agents().draining.begin();
+        match &self.agent {
+            Some(agent) => agent.stop.send(),
+            None => self.stop.send(),
+        }
         tokio::time::sleep(self.drain_hold).await;
     }
 
@@ -825,7 +870,7 @@ impl Running {
 
     /// The stop of [`Running::shutdown`] but for the readiness listener.
     async fn stop_serving(mut self) -> io::Result<()> {
-        let _ = self.stop.send(());
+        self.stop.send();
         let ports = [self.agent.take(), self.job.take(), self.metrics.take()];
         let others: Vec<JoinHandle<()>> = ports.into_iter().flatten().map(Port::stop).collect();
         let mut served = self.serving.await.map_err(io::Error::other);

@@ -371,7 +371,7 @@ everything after the image in `docker run` is the server's flags: either the fla
   nothing about a lock: a Postgres store has none.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
-`/readyz` 503 `draining` at once and keeps serving for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed; then it stops
+`/readyz` 503 `draining` at once and keeps serving the job service for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed. The agents leave at the signal: the listener that serves the agent routes (`server.agent_listen`, or `--listen` with every route on it when they share it) takes no new connection and closes each one once it has answered, a held heartbeat is answered at once, and the server places no more jobs, so each agent's next heartbeat reaches the server that took over (it says hello there and keeps its runs) or, with none, retries with its backoff. Then it stops
 accepting, gives the requests in flight `--drain-timeout` (`10s` by default) to finish, cuts what is
 still open, ticks once more and exits 0. Give the engine a stop timeout longer than `--drain-hold`
 plus `--drain-timeout` plus that last tick, for example `docker stop --time 40` with the defaults, so the engine's `SIGKILL` never cuts the drain. A
