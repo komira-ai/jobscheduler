@@ -176,7 +176,7 @@ fn expiry_survives_a_restart_on_the_system_clock() {
         after.expires_at.expect("ttl") > clock.now(),
         "the expiry is in the future"
     );
-    let read_by_store = store.now();
+    let read_by_store = store.now().expect("the store's clock");
     assert!(
         clock.now() >= read_by_store,
         "the store reads the clock it was given"

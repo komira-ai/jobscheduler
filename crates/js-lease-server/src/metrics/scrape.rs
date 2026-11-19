@@ -11,15 +11,12 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_jobs::{AllocationRecord, Booked, JobStoreError, MAX_PAGE};
-use js_state::StoreTime;
-use js_types::Clock;
 use tracing::warn;
 
 use super::Recorder;
 use super::render::{HostSeen, JobsSeen, Snapshot, Split, render};
 use crate::api::{Peer, Shared, not_found, peer_may_read_status};
 use crate::hosts::{HostEntry, HostList, listing};
-use crate::job_pass::store_time;
 use crate::job_store::ServerJobs;
 use crate::util::blocking;
 
@@ -70,23 +67,20 @@ pub(crate) async fn snapshot(
 ) -> Result<Snapshot, JobStoreError> {
     let list = listing(shared);
     let agents = shared.agents();
-    let tables = agents.jobs.clone().map(|jobs| (jobs, agents.clock.clone()));
-    let jobs = match tables {
-        Some((jobs, clock)) => {
-            let now = store_time(clock.now().millis());
-            Some(blocking(move || read_jobs(&jobs, page, now)).await?)
-        }
+    let jobs = match agents.jobs.clone() {
+        Some(jobs) => Some(blocking(move || read_jobs(&jobs, page)).await?),
         None => None,
     };
     Ok(combine(list, jobs))
 }
 
-/// Every job of `jobs` counted by state at `now`, `page` at a time, and the live allocations.
+/// Every job of `jobs` counted by state at the store's clock now (by which each job's submit
+/// was stamped, so its age is one clock's), `page` at a time, and the live allocations.
 fn read_jobs(
     jobs: &ServerJobs,
     page: NonZeroUsize,
-    now: StoreTime,
 ) -> Result<(JobsSeen, Vec<AllocationRecord>), JobStoreError> {
+    let now = jobs.now()?;
     let mut seen = JobsSeen::default();
     let mut resume = None;
     loop {

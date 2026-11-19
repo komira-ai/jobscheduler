@@ -161,7 +161,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let (txn, job) = if job.state.is_ended() {
             (Txn::new(), job)
         } else {
-            self.end_txn(job, version, end, self.store.now())?
+            self.end_txn(job, version, end, self.store.now()?)?
         };
         let txn = match mark {
             Some(row) => txn.delete(key, Cond::Version(row.version)),

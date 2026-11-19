@@ -191,7 +191,8 @@ pub fn every_write_keeps_the_indexes_equal_to_a_scan<B: Backend>(backend: &B) {
                 "a tick"
             }
             _ => {
-                jobs.raise_at_boot(rig.store.now()).expect("the raise runs");
+                jobs.raise_at_boot(rig.store.now().expect("the store's clock"))
+                    .expect("the raise runs");
                 "a boot raise"
             }
         };
@@ -330,6 +331,7 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
     let far = rig
         .store
         .now()
+        .expect("the store's clock")
         .saturating_add(Duration::from_secs(10 * 7 * 24 * 3600));
     // Without file contents, so the boot has nothing of this row's to digest either.
     let active_was = job(&active);
@@ -352,7 +354,7 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
     };
     let dropped_now = AllocationRecord {
         step: AllocationStep::Freed,
-        freed_at: Some(rig.store.now()),
+        freed_at: Some(rig.store.now().expect("the store's clock")),
         end_reason: Some(EndReason::Exited),
         ..allocation(&dropped)
     };
@@ -451,7 +453,7 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
         before,
         "{name}: the tick's collection deleted a booked or unreadable row"
     );
-    let boot = rig.store.now();
+    let boot = rig.store.now().expect("the store's clock");
     assert_eq!(
         rig.jobs
             .raise_deadlines_at_boot(Txn::new(), boot)

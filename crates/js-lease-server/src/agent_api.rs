@@ -91,7 +91,6 @@ use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, Welcome, refusal,
 };
 use js_registry::{Credential, Refusal};
-use js_types::Clock;
 use js_types::{HostId, Resources, Shape};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -106,7 +105,6 @@ use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
 use crate::host_keys::Writes;
 use crate::job_loss;
-use crate::job_pass::store_time;
 use crate::job_store::ServerJobs;
 use crate::job_whole;
 use crate::join_tokens::{Admission, JoinRefusal};
@@ -621,10 +619,9 @@ async fn serve_jobs(
             first,
             tainted,
         };
-        let now = store_time(placing.clock.now().millis());
         let rules = placing.whole_rules();
         let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
-        let serve = |()| job_whole::serve(jobs, &beat, (&rules, now), (metrics, &taint));
+        let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
         let whole = lost.and_then(serve);
         let served = whole.and_then(|taint_changed| {
             let served = per_job::serve(jobs, &context, listed, retired, inputs.room);

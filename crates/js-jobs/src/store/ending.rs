@@ -59,7 +59,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         if job.state.is_ended() {
             return Ok(job);
         }
-        let (txn, ended) = self.end_txn(job, version, end, self.store.now())?;
+        let (txn, ended) = self.end_txn(job, version, end, self.store.now()?)?;
         self.commit(id, txn)?;
         Ok(ended)
     }
@@ -114,7 +114,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         for id in ids {
             read.extend(self.read_job(id)?);
         }
-        self.delete_due(read, self.store.now())
+        self.delete_due(read, self.store.now()?)
     }
 
     /// One pass of the retention sweep (design section 6.1, step 1): walks the job table in
@@ -136,7 +136,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// a job row of a batch changed before its commit (the batches before it stay deleted);
     /// [`JobStoreError::Store`].
     pub fn tick(&self) -> Result<Vec<JobId>, JobStoreError> {
-        let now = self.store.now();
+        let now = self.store.now()?;
         let deleted = self.sweep_jobs(now)?;
         let collected = self.collect_allocations(now)?;
         if !collected.is_empty() {

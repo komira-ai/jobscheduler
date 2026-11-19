@@ -59,8 +59,8 @@ impl Store for Refusing {
         CommitStats::default()
     }
 
-    fn now(&self) -> StoreTime {
-        StoreTime::ZERO
+    fn now(&self) -> Result<StoreTime, StoreError> {
+        Ok(StoreTime::ZERO)
     }
 }
 

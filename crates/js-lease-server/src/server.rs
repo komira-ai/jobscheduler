@@ -455,7 +455,7 @@ pub(crate) fn prepare(
         .into_iter()
         .all(|holds| holds);
     if let Some(store) = &store {
-        store.import(&state_file, records_needed)?;
+        store.import((&state_file, clock), records_needed)?;
     }
     let logs = crate::logs::from_config(&logs, clock);
     let kept = (state_file.as_path(), store.as_ref());

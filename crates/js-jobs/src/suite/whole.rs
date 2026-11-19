@@ -29,7 +29,10 @@ pub(super) fn injected() -> JobStoreError {
 
 /// The store's clock `secs` seconds on.
 pub(super) fn later<S: Store>(rig: &Rig<S>, secs: u64) -> StoreTime {
-    rig.store.now().saturating_add(Duration::from_secs(secs))
+    rig.store
+        .now()
+        .expect("the store's clock")
+        .saturating_add(Duration::from_secs(secs))
 }
 
 /// The placement the engine makes of a whole-host job: [`PREPARE`] to be ready, no wall limit
@@ -92,7 +95,7 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
     let rig = rig(backend);
     let (id, _) = marked(&rig, "pw-marked");
     rig.tick();
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let placement = Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: Some(1200),
@@ -251,8 +254,8 @@ pub fn a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark<B:
     let raced = MarkRecord::new(
         plain.clone(),
         host("host-b"),
-        rig.store.now(),
-        rig.store.now(),
+        rig.store.now().expect("the store's clock"),
+        rig.store.now().expect("the store's clock"),
     );
     let put = raced.clone();
     rig.store.before_next(move || {
@@ -372,7 +375,7 @@ where
 
     let late = rig.queue_spec("cm-late", whole_host_spec());
     let other = rig.other();
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let raced = MarkRecord::new(late.clone(), host("host-b"), now, now);
     let put = raced.clone();
     rig.store.before_next(move || {
@@ -387,7 +390,7 @@ where
     assert_eq!(rig.jobs.get_mark(&late), Ok(Some(raced)));
 
     let (placed, _, _) = placed_whole(&rig, "cm-placed");
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let leftover = MarkRecord::new(placed.clone(), host("host-a"), now, now);
     rig.put_raw(
         &keys::mark(&placed),

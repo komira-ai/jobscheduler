@@ -31,7 +31,7 @@ pub fn a_failed_prepare_requeues_the_job_with_its_count_and_bars<B: Backend>(bac
     rig.tick();
     let second = rig.queue_spec("fp-second", whole_host_spec());
     rig.tick();
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let failed = requeue_with(&rig, 1);
     let commits = rig.store.commit_stats().txns;
     let (queued, freed) = rig
@@ -154,7 +154,7 @@ pub fn the_last_failed_prepare_ends_the_job_failed_to_start<B: Backend>(backend:
     let rig = rig(backend);
     let (id, placed, first) = placed_whole(&rig, "lp");
     rig.tick();
-    let now = rig.store.now();
+    let now = rig.store.now().expect("the store's clock");
     let failed = FailedPrepare {
         terminal: true,
         ..requeue_with(&rig, 3)

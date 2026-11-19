@@ -129,8 +129,13 @@ impl Store for Switch {
         self.inner.commit_stats()
     }
 
-    fn now(&self) -> StoreTime {
-        self.inner.now()
+    /// A failing store cannot read its clock either (its database is gone); a slow call
+    /// is left for the call that reaches the store.
+    fn now(&self) -> Result<StoreTime, StoreError> {
+        match self.failing.load(Ordering::SeqCst) {
+            true => Err(StoreError::Disconnected(GONE.to_owned())),
+            false => self.inner.now(),
+        }
     }
 }
 

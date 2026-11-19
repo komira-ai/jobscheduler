@@ -55,6 +55,15 @@
 //! of a host the registry held and forgot (never of one it did not hold, which another
 //! server may serve), and a cordon that lapsed. Fields of a value that this
 //! build does not know are kept and written back.
+//!
+//! A stored `cordon_until_ms` is a time of the store's clock (milliseconds since the Unix
+//! epoch, as the file's), since another server over the store reads it: the store's clock less
+//! this server's ([`Skew`]) is read from the store at start, at each read of one key, at each
+//! save and before each cordon's commit ([`BindingStore::measure`]), each binding is put on the
+//! store's clock as it is written and back on this server's as it is read, and what is held in
+//! memory is on this server's clock, as the registry's is. A save or read whose store cannot
+//! read its clock fails, writing nothing. The file is one server's and holds this server's
+//! clock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -70,6 +79,7 @@ use js_types::HostId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::clock::SharedClock;
 use crate::config::read_private;
 use crate::error::StartupError;
 use crate::host_keys::{self, BINDINGS, Extra, Writes};
@@ -227,13 +237,18 @@ pub(crate) fn load(path: &Path) -> Result<BTreeMap<HostId, Binding>, StartupErro
 }
 
 /// The keys the first start over a store imports from the file at `path` (none when there is
-/// no file): each binding at `hosts/binding/<host id>`, as the store keeps it. The file is
-/// read as [`load`] reads it, so its refusals stand.
-pub(crate) fn import(path: &Path) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
+/// no file): each binding at `hosts/binding/<host id>`, as the store keeps it, its cordon end
+/// moved from this server's clock (the file's) onto the store's by `skew`. The file is read as
+/// [`load`] reads it, so its refusals stand.
+pub(crate) fn import(path: &Path, skew: Skew) -> Result<Vec<(String, Vec<u8>)>, StartupError> {
     let bindings = load(path)?;
     let extra = Extra::new();
-    let value =
-        |(host, binding): (&HostId, &Binding)| (key(host), stored_value(host, binding, &extra));
+    let value = |(host, binding): (&HostId, &Binding)| {
+        (
+            key(host),
+            stored_value(host, &skew.to_store(binding), &extra),
+        )
+    };
     Ok(bindings.iter().map(value).collect())
 }
 
@@ -263,10 +278,46 @@ fn parse(text: &str) -> Result<BTreeMap<HostId, Binding>, String> {
     Ok(bindings)
 }
 
-/// Where the bindings are kept: the file beside the state file, or the state store.
+/// Where the bindings are kept: the file beside the state file, or the state store, with the
+/// clock of this server that the bindings in memory are on.
 enum Keeper {
     File(PathBuf),
-    Store(Arc<dyn Store>),
+    Store(Arc<dyn Store>, SharedClock),
+}
+
+/// The store's clock less this server's, in milliseconds, as last read: what puts a time of
+/// this server's clock (a cordon end the registry holds) on the store's, and back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Skew(i64);
+
+impl Skew {
+    /// The store's clock less `clock`, read now from `store`.
+    ///
+    /// # Errors
+    /// The store could not read its clock.
+    pub(crate) fn read(store: &dyn Store, clock: &SharedClock) -> io::Result<Skew> {
+        let at = store.now().map_err(io::Error::other)?;
+        let store_ms = i64::try_from(at.as_duration().as_millis()).unwrap_or(i64::MAX);
+        let server_ms = i64::try_from(js_types::Clock::now(clock).millis()).unwrap_or(i64::MAX);
+        Ok(Skew(store_ms.saturating_sub(server_ms)))
+    }
+
+    /// `binding` with its cordon end on the store's clock, from this server's.
+    fn to_store(self, binding: &Binding) -> Binding {
+        let moved = binding
+            .cordon_until_ms()
+            .map(|ms| ms.saturating_add_signed(self.0));
+        binding.clone().with_cordon(moved)
+    }
+
+    /// `binding` with its cordon end on this server's clock, from the store's.
+    fn to_server(self, binding: Binding) -> Binding {
+        let back = self.0.saturating_neg();
+        let moved = binding
+            .cordon_until_ms()
+            .map(|ms| ms.saturating_add_signed(back));
+        binding.with_cordon(moved)
+    }
 }
 
 /// The bindings the file or the store holds, the fields of each stored value that this
@@ -278,18 +329,25 @@ enum Keeper {
 /// save deletes only the binding of a host its registry held and then let go of. A server
 /// that starts beside another therefore leaves every binding the other one serves as it
 /// is.
+///
+/// The bindings held are on this server's clock; `skew` is the store's clock less this
+/// server's as last read, by which a write puts a binding's cordon end on the store's clock
+/// (zero in file mode, which holds this server's).
 #[derive(Default)]
 struct Held {
     bindings: BTreeMap<HostId, Binding>,
     extra: BTreeMap<HostId, Extra>,
     held: BTreeSet<HostId>,
+    skew: Skew,
 }
 
 impl Held {
-    /// The write that makes the store hold `binding` for `host`, or no binding.
+    /// The write that makes the store hold `binding` for `host`, or no binding, its cordon end
+    /// put on the store's clock.
     fn write(&self, host: &HostId, binding: Option<&Binding>) -> (String, Option<Vec<u8>>) {
         let extra = self.extra.get(host).cloned().unwrap_or_default();
-        let value = binding.map(|binding| stored_value(host, binding, &extra));
+        let on_store = binding.map(|binding| self.skew.to_store(binding));
+        let value = on_store.map(|binding| stored_value(host, &binding, &extra));
         (key(host), value)
     }
 
@@ -377,30 +435,54 @@ impl BindingStore {
         }
     }
 
-    /// The bindings `store` holds under `hosts/binding/`, read once at start, and a store
-    /// over them. A value that cannot be read as written is a refusal, as a damaged file is.
+    /// The bindings `store` holds under `hosts/binding/`, read once at start, each put on
+    /// `clock` (this server's), and a store over them. A value that cannot be read as written
+    /// is a refusal, as a damaged file is.
     ///
     /// # Errors
     ///
-    /// The store could not be read, or a value is not a binding (the reason names its key).
+    /// The store could not be read (its clock included), or a value is not a binding (the
+    /// reason names its key).
     pub(crate) fn in_store(
         store: Arc<dyn Store>,
+        clock: SharedClock,
     ) -> Result<(Self, BTreeMap<HostId, Binding>), String> {
-        let mut held = Held::default();
+        let skew = Skew::read(&*store, &clock).map_err(|error| error.to_string())?;
+        let mut held = Held {
+            skew,
+            ..Held::default()
+        };
         for (id, bytes) in host_keys::scan(&*store, BINDINGS)? {
             let named = format!("{BINDINGS}{id}");
             let stored: Stored = host_keys::decode(&named, &bytes)?;
             let read = stored.into_binding(id);
             let (host, binding, extra) = read.map_err(|reason| format!("{named}: {reason}"))?;
             held.extra.insert(host.clone(), extra);
-            held.bindings.insert(host, binding);
+            held.bindings.insert(host, skew.to_server(binding));
         }
         let bindings = held.bindings.clone();
         let kept = Self {
-            keeper: Keeper::Store(store),
+            keeper: Keeper::Store(store, clock),
             written: Mutex::new(held),
         };
         Ok((kept, bindings))
+    }
+
+    /// Reads the store's clock less this server's, which the writes made from here on put
+    /// cordon ends on the store's clock by; nothing in file mode. A blocking call: the cordon
+    /// routes make it before a cordon's commit, as the save and the read of one key do.
+    ///
+    /// # Errors
+    ///
+    /// The store could not read its clock: the skew read before stands, and the caller
+    /// writes nothing.
+    pub(crate) fn measure(&self) -> io::Result<()> {
+        let Keeper::Store(store, clock) = &self.keeper else {
+            return Ok(());
+        };
+        let skew = Skew::read(&**store, clock)?;
+        self.lock().skew = skew;
+        Ok(())
     }
 
     /// The binding the store holds for `host` now, read by its key, which is also held from
@@ -416,9 +498,10 @@ impl BindingStore {
     ///
     /// The store could not be read, or its value is not a binding.
     pub(crate) fn stored(&self, host: &HostId) -> io::Result<Option<Binding>> {
-        let Keeper::Store(store) = &self.keeper else {
+        let Keeper::Store(store, _) = &self.keeper else {
             return Ok(None);
         };
+        self.measure()?;
         let name = key(host);
         let Some(row) = store.get(&name).map_err(io::Error::other)? else {
             // Another server dropped it since it was read: what was read is not what the
@@ -434,6 +517,7 @@ impl BindingStore {
             .into_binding(host.to_string())
             .map_err(|reason| io::Error::other(format!("{name}: {reason}")))?;
         let mut written = self.lock();
+        let binding = written.skew.to_server(binding);
         written.bindings.insert(host.clone(), binding.clone());
         written.extra.insert(host.clone(), extra);
         Ok(Some(binding))
@@ -462,6 +546,7 @@ impl BindingStore {
     where
         F: FnOnce() -> BTreeMap<HostId, Binding>,
     {
+        self.measure()?;
         let mut written = self.lock();
         let bindings = current();
         match &self.keeper {
@@ -472,7 +557,7 @@ impl BindingStore {
                 replace(path, render(&bindings)?.as_bytes())?;
                 written.bindings = bindings;
             }
-            Keeper::Store(store) => {
+            Keeper::Store(store, _) => {
                 host_keys::commit(&**store, written.writes_to(&bindings))?;
                 written.settle(bindings);
             }
@@ -491,7 +576,7 @@ impl BindingStore {
     ///
     /// The file or the store could not be written: it holds what it held.
     pub(crate) fn restore(&self, bindings: &BTreeMap<HostId, Binding>) -> io::Result<()> {
-        let Keeper::Store(store) = &self.keeper else {
+        let Keeper::Store(store, _) = &self.keeper else {
             return self.save(|| bindings.clone());
         };
         let mut written = self.lock();
@@ -515,7 +600,7 @@ impl BindingStore {
     pub(crate) fn change(&self, host: &HostId, after: Binding) -> Change {
         let written = self.lock();
         let before = written.bindings.get(host).cloned();
-        let stored = matches!(self.keeper, Keeper::Store(_));
+        let stored = matches!(self.keeper, Keeper::Store(..));
         let (writes, undo) = match stored && before.as_ref() != Some(&after) {
             true => (
                 vec![written.write(host, Some(&after))],
@@ -541,7 +626,7 @@ impl BindingStore {
     pub(crate) fn commit(&self, writes: Writes) -> io::Result<()> {
         match &self.keeper {
             Keeper::File(_) => Ok(()),
-            Keeper::Store(store) => host_keys::commit(&**store, writes),
+            Keeper::Store(store, _) => host_keys::commit(&**store, writes),
         }
     }
 
@@ -559,7 +644,7 @@ impl BindingStore {
     /// nothing was written, and the heartbeat is answered with an error so that the agent
     /// reports again.
     pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
-        let (Keeper::Store(store), Some((name, value))) = (&self.keeper, change.writes.first())
+        let (Keeper::Store(store, _), Some((name, value))) = (&self.keeper, change.writes.first())
         else {
             return Ok(());
         };
@@ -595,10 +680,19 @@ impl BindingStore {
     }
 
     fn hold(&self, host: &HostId, binding: Option<&Binding>) {
-        if let Keeper::Store(_) = self.keeper {
+        if let Keeper::Store(..) = self.keeper {
             self.lock().hold(host, binding);
         }
     }
+}
+
+/// A clock at the Unix epoch, for the tests whose bindings hold no time of their own: over a
+/// store whose clock is at its origin too, it reads no skew.
+#[cfg(test)]
+pub(crate) fn epoch_clock() -> SharedClock {
+    SharedClock::new(js_types::ManualClock::new(
+        js_types::Timestamp::from_millis(0),
+    ))
 }
 
 /// The text of the file that holds `bindings`.
@@ -641,6 +735,10 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temp, path)?;
     fs::File::open(dir)?.sync_all()
 }
+
+#[cfg(test)]
+#[path = "agent_state_clock_tests.rs"]
+mod clock_tests;
 
 #[cfg(test)]
 mod tests {

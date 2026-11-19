@@ -335,7 +335,7 @@ pub fn c4_store_clock_expiry<B: Backend>(backend: &B) {
     let store = backend.open(Arc::clone(&clock));
     assert_eq!(
         store.now(),
-        clock.now(),
+        Ok(clock.now()),
         "C4 clock: the store must read the injected clock"
     );
 

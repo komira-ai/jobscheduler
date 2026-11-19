@@ -118,12 +118,17 @@ impl Agents {
     }
 
     /// Writes the binding of `host` with the end of `cordon` (or with none), as
-    /// [`Agents::keep`] writes it.
+    /// [`Agents::keep`] writes it. The end is held on this server's clock, as the registry
+    /// holds it, and stored on the store's ([`crate::agent_state`]): the store's clock is read
+    /// first, and a store that cannot read it writes nothing.
     async fn keep_cordon(
         self: &Arc<Self>,
         host: &HostId,
         cordon: Option<&Cordon<Duration>>,
     ) -> Result<(), CordonFault> {
+        let this = Arc::clone(self);
+        let measured = blocking(move || this.store.measure()).await;
+        measured.map_err(CordonFault::unsaved)?;
         let until = cordon.map(|cordon| self.clock.now().plus(cordon.until).millis());
         let kept = self.keep(host, |bound| bound.with_cordon(until)).await;
         kept.map_err(CordonFault::unsaved)

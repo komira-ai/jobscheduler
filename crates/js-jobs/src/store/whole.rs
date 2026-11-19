@@ -128,7 +128,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let claim = [keys::job(id)];
         // The store's time is read before the transaction opens: a call on the store from
         // inside the decision would need a second connection while the decision holds one.
-        let now = self.store.now();
+        let now = self.store.now()?;
         let outcome = self.store.claim_decide(&claim, &mut |read| {
             let decided = self.decide_placement(read, id, (host, booked, placement), capacity, now);
             match decided {
@@ -222,7 +222,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ) -> Result<(Txn, JobRecord, AllocationRecord), JobStoreError> {
         let job = self.job_row(id)?;
         let earlier = self.read_allocation(id)?;
-        let now = self.store.now();
+        let now = self.store.now()?;
         self.build_placement(id, job, earlier, (host, booked, placement), now)
     }
 
@@ -321,7 +321,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         beside: &Beside<'_>,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let ((job, job_version), (allocation, allocation_version)) = self.prepare_rows(id)?;
-        let now = self.store.now();
+        let now = self.store.now()?;
         let FailedPrepare {
             failed_prepares,
             prepare_bars,
