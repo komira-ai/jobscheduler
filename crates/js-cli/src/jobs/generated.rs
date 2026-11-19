@@ -144,7 +144,7 @@ pub(crate) const SURFACE: &[Command] = &[
     Command {
         path: &["host", "cordon"],
         rpc: "CordonHost",
-        doc: "Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. Jobs already on the host go on.",
+        doc: "Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. It holds for its whole length with nothing renewing it, over restarts of the host's agent and of the server. Jobs already on the host go on.",
         idempotency: Idempotency::Unknown,
         request: "jobscheduler.v1.CordonHostRequest",
         response: "jobscheduler.v1.CordonHostResponse",
@@ -152,13 +152,13 @@ pub(crate) const SURFACE: &[Command] = &[
         retry_key: None,
         flags: &[
             Flag { name: "host-id", field: &["host_id"], kind: Kind::Text, repeated: false, required: true, oneof: None, doc: "The id of the host to cordon." },
-            Flag { name: "cordon-secs", field: &["cordon_secs"], kind: Kind::Seconds, repeated: false, required: false, oneof: None, doc: "How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 3600." },
+            Flag { name: "cordon-secs", field: &["cordon_secs"], kind: Kind::Seconds, repeated: false, required: false, oneof: None, doc: "How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 604800 (seven days)." },
         ],
     },
     Command {
         path: &["host", "uncordon"],
         rpc: "UncordonHost",
-        doc: "Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.",
+        doc: "Lifts a host's cordon, whoever placed it. Lifting a host that is not cordoned changes nothing.",
         idempotency: Idempotency::Unknown,
         request: "jobscheduler.v1.UncordonHostRequest",
         response: "jobscheduler.v1.UncordonHostResponse",

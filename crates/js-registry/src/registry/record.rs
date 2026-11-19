@@ -1,5 +1,10 @@
 //! What the registry keeps for each host that said hello, and what it can say of it.
 
+use std::time::Duration;
+
+use js_types::CordonHolder;
+use js_types::cordon::Cordon;
+
 use super::*;
 
 #[derive(Debug)]
@@ -31,6 +36,9 @@ pub(super) struct Record {
     /// takes no new job until then. It outlives a session and, through the file of
     /// bindings, a restart; a lapsed value is a cordon that is over.
     pub(super) cordon: Option<Timestamp>,
+    /// Who holds the cordon, when a request that named a holder placed or took it. Cleared
+    /// with the cordon, and never reported once the cordon has lapsed. Held in memory only.
+    pub(super) cordon_holder: Option<CordonHolder>,
     /// When the host's current session began: the time of the hello that began it. `None`
     /// for a host that has not said hello since a restart. A heartbeat does not move it.
     pub(super) hello_at: Option<Timestamp>,
@@ -59,6 +67,7 @@ impl Record {
             binding: binding.map(|bound| bound.with_taint(None).with_cordon(None)),
             taint,
             cordon,
+            cordon_holder: None,
             hello_at: None,
             runtime: None,
             epoch: 0,
@@ -85,6 +94,28 @@ impl Record {
     /// Whether the host is cordoned at `now`: its cordon has not lapsed.
     pub(super) fn cordoned(&self, now: Timestamp) -> bool {
         self.cordon.is_some_and(|until| until > now)
+    }
+
+    /// The cordon in force at `now`, with the time it has left and its holder; `None` when
+    /// there is none or it has lapsed.
+    pub(super) fn cordon_at(&self, now: Timestamp) -> Option<Cordon<Duration>> {
+        let until = self.cordon.filter(|until| *until > now)?;
+        Some(Cordon {
+            until: Duration::from_millis(until.millis() - now.millis()),
+            holder: self.cordon_holder.clone(),
+        })
+    }
+
+    /// The holder of the cordon in force at `now`; a lapsed cordon's holder is never reported.
+    pub(super) fn cordon_holder_at(&self, now: Timestamp) -> Option<CordonHolder> {
+        self.cordon_at(now)?.holder
+    }
+
+    /// Sets the cordon to `cordon`, whose `until` is the time it has left from `now`, with its
+    /// holder; `None` clears both.
+    pub(super) fn set_cordon(&mut self, cordon: Option<&Cordon<Duration>>, now: Timestamp) {
+        self.cordon = cordon.map(|set| now.plus(set.until));
+        self.cordon_holder = cordon.and_then(|set| set.holder.clone());
     }
 
     pub(super) fn state(&self, now: Timestamp, grace_ms: u64) -> HostState {

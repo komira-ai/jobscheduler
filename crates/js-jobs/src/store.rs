@@ -1,4 +1,4 @@
-//! [`JobStore`]: the job, allocation, mark and taint tables over a state [`Store`].
+//! [`JobStore`]: the job, allocation, mark, taint and cordon tables over a state [`Store`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -22,6 +22,7 @@ use crate::record::{
 };
 use crate::result::{JobEnd, Output, Retention};
 
+mod cordons;
 mod duties;
 mod ending;
 mod hosts;
@@ -32,6 +33,8 @@ mod status;
 mod taints;
 mod whole;
 mod written;
+
+pub use cordons::{CordonWrite, UncordonWrite};
 
 pub use index::Backfill;
 
@@ -414,7 +417,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStore::place_with`] places a job and drops its mark in the same transaction. For a
     /// job that runs on the host itself ([`crate::Isolation::Host`]) the same transaction also
     /// puts `taint/<host>`, which must be absent, so a host a host job already tainted makes
-    /// the placement stale.
+    /// the placement stale. The transaction also checks `cordon/<host>` absent, so a host a
+    /// cordon is in force on makes the placement stale.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not

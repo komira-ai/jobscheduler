@@ -496,12 +496,15 @@ generated paragraph above.
   whole-host booking is the host's whole shape. `booked` is read-only: no call creates or ends
   a booking.
 - `CordonHost` takes a registered host out of placement for `cordon_secs` (300 when absent,
-  cut to 3600, 0 is `INVALID_ARGUMENT` `invalid-cordon`), or renews its cordon without ever
-  shortening it; `already_cordoned` says it was cordoned before. The cordon lapses unless it is
-  renewed. `UncordonHost` lifts it, and changes nothing on a host that is not cordoned. Both
-  are the rules of the host's own `POST /v1/hosts/{id}:cordon` and `:uncordon`, and both answer
-  only once the bindings are written: when they cannot be, the answer is `UNAVAILABLE`
-  `cordon-unsaved` and the change holds on this server all the same. A host the registry does
+  cut to 604800, seven days, 0 is `INVALID_ARGUMENT` `invalid-cordon`), or extends its cordon,
+  whoever holds it, without ever shortening it; `already_cordoned` says it was cordoned before.
+  The cordon holds its whole length with nothing renewing it, over restarts of the host's agent
+  and of the server, and lapses at its end. `UncordonHost` lifts it, whoever placed it, and
+  changes nothing on a host that is not cordoned. Both are the rules of the host's own
+  `POST /v1/hosts/{id}:cordon` and `:uncordon` for a call that names no holder, and both answer
+  only once the cordon is written (with the job service on, to the job store, which every
+  server over it places by, and to the bindings): when it cannot be, the answer is
+  `UNAVAILABLE` `cordon-unsaved`, and the same call again is the retry. A host the registry does
   not hold (a static host, or one that never said hello) is `NOT_FOUND` `unknown-host`.
 - `ClearHostTaint` clears the taint the server stores for a host, so the host is offered jobs
   again: the registry's taint and the host's stored binding, by the compare-and-set a

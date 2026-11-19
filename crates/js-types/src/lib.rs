@@ -33,6 +33,7 @@ mod accel;
 mod booking;
 mod class;
 mod clock;
+pub mod cordon;
 mod digest;
 pub mod env;
 mod ids;
@@ -62,7 +63,9 @@ pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
-pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
+pub use ids::{
+    ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,
+};
 pub use isa::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level, normalise_arch};
 pub use job::{
     ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, OS_VERSION_KEY,

@@ -680,7 +680,7 @@
     "streaming": false
   },
   {
-    "doc": "Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. Jobs already on the host go on.",
+    "doc": "Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. It holds for its whole length with nothing renewing it, over restarts of the host's agent and of the server. Jobs already on the host go on.",
     "flags": [
       {
         "doc": "The id of the host to cordon.",
@@ -694,7 +694,7 @@
         "required": true
       },
       {
-        "doc": "How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 3600.",
+        "doc": "How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 604800 (seven days).",
         "field": [
           "cordon_secs"
         ],
@@ -717,7 +717,7 @@
     "streaming": false
   },
   {
-    "doc": "Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.",
+    "doc": "Lifts a host's cordon, whoever placed it. Lifting a host that is not cordoned changes nothing.",
     "flags": [
       {
         "doc": "The id of the host whose cordon to lift.",

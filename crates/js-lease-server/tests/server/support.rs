@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use js_jobs::RandomIds;
 use js_lease_server::{
     Cli, Config, Limits, Running, SharedClock, StartupError, TickHandle, Ticker, channel_ticker,
     start_with_checks,
@@ -15,6 +16,7 @@ use js_state::Store;
 use js_testkit::dir::TestDir;
 use js_types::{ManualClock, Timestamp};
 use serde_json::Value;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -203,8 +205,14 @@ impl Harness {
 
     /// A server on `args`.
     pub async fn with(scratch: Scratch, args: Vec<OsString>) -> Self {
-        let config = config(args).unwrap();
-        Self::over(scratch, config).await
+        let clock = ManualClock::new(Timestamp::from_millis(T0));
+        // The job store reads the harness's clock too, so a cordon's row lapses, and a row's
+        // times are stamped, at the time the test moves the server to.
+        let reads = Arc::new(StoreReads(clock.clone()));
+        let config = config(args)
+            .unwrap()
+            .with_job_sources(reads, Arc::new(RandomIds));
+        Self::over_at(scratch, config, clock).await
     }
 
     /// A server on the base flags with these connection limits.
@@ -216,8 +224,13 @@ impl Harness {
 
     /// A server on `config`.
     pub async fn over(scratch: Scratch, config: Config) -> Self {
-        quiet_logs();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
+        Self::over_at(scratch, config, clock).await
+    }
+
+    /// A server on `config`, on `clock`.
+    async fn over_at(scratch: Scratch, config: Config, clock: ManualClock) -> Self {
+        quiet_logs();
         let (ticks, ticker) = channel_ticker();
         let (checks, check_ticker) = channel_ticker();
         let shared = SharedClock::new(clock.clone());
@@ -559,4 +572,14 @@ fn kept(h: &Harness, suffix: &str, prefix: &str) -> String {
         format!("{key} {}\n", String::from_utf8_lossy(&row.value))
     };
     rows.map(line).collect()
+}
+
+/// The harness's clock as the job store reads it: the time since the Unix epoch.
+struct StoreReads(ManualClock);
+
+impl js_state::Clock for StoreReads {
+    fn now(&self) -> js_state::StoreTime {
+        let millis = js_types::Clock::now(&self.0).millis();
+        js_state::StoreTime::from_duration(Duration::from_millis(millis))
+    }
 }

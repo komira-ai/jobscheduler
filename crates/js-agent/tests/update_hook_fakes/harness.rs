@@ -651,6 +651,7 @@ impl Lease for Faulted<'_> {
         if self.keeps_cordon {
             return Ok(Uncordoned {
                 lifted: false,
+                held_by_other: false,
                 host: self.world.host()?,
             });
         }

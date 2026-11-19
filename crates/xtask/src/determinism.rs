@@ -729,6 +729,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the cordon daemon's clock behind the Pace trait; the cell runs no cordon",
     },
     Allowed {
+        file: "crates/js-agent/src/cordon/mod.rs",
+        item: "default_holder",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the wall clock in the name a cordon run gives itself when it is given none, so that two runs name different holders; the cell runs no cordon",
+    },
+    Allowed {
         file: "crates/js-agent/src/crun/settings.rs",
         item: "system_now_ms",
         token: Token::SystemTimeNow,

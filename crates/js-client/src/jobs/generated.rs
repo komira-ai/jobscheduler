@@ -74,14 +74,16 @@ impl JobClient {
     }
 
     /// Takes a host out of placement for a time, or extends a cordon already there. A cordon
-    /// lapses unless it is extended. Jobs already on the host go on.
+    /// lapses unless it is extended. It holds for its whole length with nothing renewing it,
+    /// over restarts of the host's agent and of the server. Jobs already on the host go on.
     pub async fn cordon_host(&mut self, request: v1::CordonHostRequest) -> Result<v1::CordonHostResponse, JobError> {
         let (attempt, request) = self.begin(request);
         let answer = tokio::time::timeout(self.limit, self.service.cordon_host(request)).await;
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
-    /// Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
+    /// Lifts a host's cordon, whoever placed it. Lifting a host that is not cordoned changes
+    /// nothing.
     pub async fn uncordon_host(&mut self, request: v1::UncordonHostRequest) -> Result<v1::UncordonHostResponse, JobError> {
         let (attempt, request) = self.begin(request);
         let answer = tokio::time::timeout(self.limit, self.service.uncordon_host(request)).await;

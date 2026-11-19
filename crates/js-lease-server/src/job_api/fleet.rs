@@ -29,11 +29,14 @@
 //! calls.
 //!
 //! The reads change nothing: they take no write lock, write no row, bump no counter and move
-//! no state on. A cordon follows the rules of the host's own route ([`cordon`]): 300 s when
-//! no length is given, cut to 3600 s, zero refused; a repeat renews and never shortens; the
-//! answer waits for the cordon to be durable and is `UNAVAILABLE` `cordon-unsaved` when it
-//! cannot be: in file mode the cordon then holds on this server all the same; with a store
-//! setting it was not committed, and nothing changed. A clear of a host's taint
+//! no state on. A cordon follows the rules of the host's own route ([`cordon`]), as a call
+//! that names no holder: 300 s when no length is given, zero refused; a repeat renews and
+//! never shortens, whoever holds the cordon; and it is cut to seven days
+//! ([`cordon::MAX_OPERATOR_CORDON`]), not the host route's hour, since an operator's cordon is
+//! not renewed: it holds for its whole length, over restarts of the agent and of the server,
+//! until it lapses or `UncordonHost` lifts it (which lifts any holder's). The answer waits for
+//! the cordon to be durable and is `UNAVAILABLE` `cordon-unsaved` when it cannot be (see the
+//! cordon module of `crate::agents` for what holds then). A clear of a host's taint
 //! ([`Hosts::clear_taint`]) is the clear a heartbeat's `taint_cleared` makes, made without the
 //! agent's report: the binding without the taint is committed (by compare-and-set, so a store
 //! that holds another taint refuses it), then the registry forgets the taint. It answers
@@ -55,6 +58,7 @@ use js_proto::v1::{
 };
 use js_registry::{HostMark, HostState};
 use js_types::HostId;
+use js_types::cordon::Asker;
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use tonic::{Request, Response, Status};
 
@@ -262,7 +266,7 @@ pub(super) async fn cordon_host(
 ) -> Result<Response<CordonHostResponse>, Status> {
     let served = served(api)?;
     let request = request.into_inner();
-    let length = cordon::length(request.cordon_secs.map(u64::from));
+    let length = cordon::operator_length(request.cordon_secs.map(u64::from));
     let length = length.ok_or_else(|| Status::invalid_argument(INVALID_CORDON))?;
     let host = known(&request.host_id)?;
     let placed = served.hosts.0.cordon(&host, length).await;
@@ -777,12 +781,12 @@ impl Hosts for Shared {
     }
 
     async fn cordon(&self, host: &HostId, length: Duration) -> Result<bool, Refused> {
-        let cordoned = self.agents().cordon(host, length).await;
+        let cordoned = self.agents().cordon(host, length, Asker::Unnamed).await;
         Ok(cordoned.map_err(refused_cordon)?.placed)
     }
 
     async fn uncordon(&self, host: &HostId) -> Result<bool, Refused> {
-        let uncordoned = self.agents().uncordon(host).await;
+        let uncordoned = self.agents().uncordon(host, None).await;
         Ok(uncordoned.map_err(refused_cordon)?.lifted)
     }
 

@@ -345,6 +345,105 @@ async fn an_uncordon_is_idempotent() {
     assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
 }
 
+/// `host` calls `verb` (`cordon` or `uncordon`) with the body `body`.
+async fn acting(h: &Harness, host: &str, me: &Host, verb: &str, body: Value) -> Reply {
+    own(h, "POST", host, Some(verb), &me.credential, Some(&body)).await
+}
+
+/// Asserts the holder of a cordon on the host's route, with the job service on: a named
+/// cordon reads with its holder (also in `GET /v1/hosts`); another holder's request leaves it
+/// as it is and says `held_by_other`, as does another holder's lift; the holder's renewal
+/// extends it; a request that names no holder keeps its holder when it does not extend it, and
+/// makes it unnamed when it does, so the earlier holder's lift leaves it; a take-over makes it the
+/// caller's, whose lift ends it; and a holder that is not an id, a take-over with no holder
+/// and a field the lift does not have are 400 `invalid-cordon`, changing nothing. It catches
+/// a requester that extends or lifts a cordon another holds, and a holder read loosely.
+#[tokio::test]
+async fn a_cordon_is_renewed_and_lifted_only_by_its_holder() {
+    let h = start_job_hosts_in("cordon_holder", Kept::Files).await;
+    let me = enrolled(&h, "burst-1", "i-1").await;
+    let named = |holder: &str, secs: u64| json!({ "lease_secs": secs, "holder": holder });
+    let placed = acting(&h, "burst-1", &me, "cordon", named("run-1", 60)).await;
+    let placed = placed.json();
+    assert_eq!(
+        (&placed["already_cordoned"], &placed["held_by_other"]),
+        (&json!(false), &json!(false))
+    );
+    assert_eq!(placed["cordon"]["holder"], "run-1");
+    assert_eq!(
+        entry(&hosts(&h).await, "burst-1")["cordon"]["holder"],
+        "run-1"
+    );
+
+    let other = acting(&h, "burst-1", &me, "cordon", named("run-2", 600)).await;
+    let other = other.json();
+    assert_eq!(
+        (&other["already_cordoned"], &other["held_by_other"]),
+        (&json!(true), &json!(true))
+    );
+    assert_eq!(other["cordon"]["expires_at_ms"], T0 + 60_000);
+    assert_eq!(other["cordon"]["holder"], "run-1");
+    let lift = json!({ "holder": "run-2" });
+    let left = acting(&h, "burst-1", &me, "uncordon", lift).await.json();
+    assert_eq!(
+        (&left["lifted"], &left["held_by_other"]),
+        (&json!(false), &json!(true))
+    );
+    assert_eq!(left["cordon"]["holder"], "run-1");
+
+    let renewed = acting(&h, "burst-1", &me, "cordon", named("run-1", 120)).await;
+    assert_eq!(renewed.json()["cordon"]["expires_at_ms"], T0 + 120_000);
+    let within = cordon(&h, "burst-1", &me, 60).await.json();
+    assert_eq!(within["cordon"]["holder"], "run-1");
+    let unnamed = cordon(&h, "burst-1", &me, 180).await.json();
+    assert_eq!(
+        (&unnamed["held_by_other"], unnamed["cordon"].get("holder")),
+        (&json!(false), None)
+    );
+    assert_eq!(unnamed["cordon"]["expires_at_ms"], T0 + 180_000);
+    let lift = json!({ "holder": "run-1" });
+    let left = acting(&h, "burst-1", &me, "uncordon", lift).await.json();
+    assert_eq!(
+        (&left["lifted"], &left["held_by_other"]),
+        (&json!(false), &json!(true))
+    );
+
+    let take = json!({ "lease_secs": 60, "holder": "run-3", "take_over": true });
+    let taken = acting(&h, "burst-1", &me, "cordon", take).await.json();
+    assert_eq!(
+        (&taken["already_cordoned"], &taken["held_by_other"]),
+        (&json!(true), &json!(false))
+    );
+    assert_eq!(taken["cordon"]["holder"], "run-3");
+    assert_eq!(taken["cordon"]["expires_at_ms"], T0 + 180_000);
+
+    let bad = [
+        ("cordon", json!({ "holder": "Not An Id" })),
+        ("cordon", json!({ "take_over": true })),
+        ("cordon", json!({ "holder": "run-4", "take_over": "yes" })),
+        ("uncordon", json!({ "holder": "Not An Id" })),
+        ("uncordon", json!({ "holder": "run-3", "extra": true })),
+    ];
+    for (verb, body) in bad {
+        let refused = acting(&h, "burst-1", &me, verb, body.clone()).await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (400, "invalid-cordon".into()),
+            "{verb} {body}"
+        );
+    }
+    let still = show(&h, "burst-1", &me).await;
+    assert_eq!(still["cordon"]["holder"], "run-3");
+
+    let lift = json!({ "holder": "run-3" });
+    let lifted = acting(&h, "burst-1", &me, "uncordon", lift).await.json();
+    assert_eq!(
+        (&lifted["lifted"], &lifted["held_by_other"]),
+        (&json!(true), &json!(false))
+    );
+    assert!(show(&h, "burst-1", &me).await.get("cordon").is_none());
+}
+
 /// Asserts what the read of a host says: its id, session state, the agent version and the
 /// runtime its hello reported, no lease, no cordon and no taint for a clean host; then,
 /// after a cordon and a taint report, the cordon and the taint. It catches a field the update hook waits on that is missing or wrong.

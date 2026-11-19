@@ -21,6 +21,7 @@ use js_sched_placer::map;
 use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
 use js_state::fake::Fake;
+use js_types::cordon::Asker;
 use js_types::sched::FarmTime;
 use js_types::{ExecMode, HostId, Resources, Shape};
 use js_types::{ManualClock, Timestamp};
@@ -702,12 +703,12 @@ fn the_server_places_queued_jobs_on_the_hosts_the_registry_opens() {
 
     agents
         .registry
-        .cordon(&host("h1"), Duration::from_secs(600))
+        .cordon(&host("h1"), Duration::from_secs(600), &Asker::Unnamed)
         .unwrap();
     queue(&jobs, "job-b", 2, 0);
     agents.place_jobs();
     assert_eq!(state(&jobs, "job-b"), JobState::Queued);
-    agents.registry.uncordon(&host("h1")).unwrap();
+    agents.registry.uncordon(&host("h1"), None).unwrap();
     store.fail_read_after(0);
     agents.place_jobs();
     assert_eq!(state(&jobs, "job-b"), JobState::Queued);

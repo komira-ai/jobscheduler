@@ -7,7 +7,10 @@ mod support;
 use std::time::Duration;
 
 use js_registry::{Binding, MIN_LOST_RETENTION_MS, NotHeld};
-use js_types::Timestamp;
+use std::collections::BTreeMap;
+
+use js_types::cordon::{Asker, Cordon};
+use js_types::{CordonHolder, Timestamp};
 use support::*;
 
 fn secs(n: u64) -> Duration {
@@ -35,7 +38,10 @@ fn until(fx: &Fixture, name: &str) -> Option<Timestamp> {
 fn a_cordoned_host_shows_its_cordon_until_it_lapses() {
     let fx = fixture(2);
     fx.join("a", "t");
-    let placed = fx.registry.cordon(&host("a"), secs(60)).unwrap();
+    let placed = fx
+        .registry
+        .cordon(&host("a"), secs(60), &Asker::Unnamed)
+        .unwrap();
     assert!(placed.placed);
     let lapses = Timestamp::from_millis(1_060_000);
     assert_eq!(placed.host.cordon_until, Some(lapses));
@@ -61,7 +67,10 @@ fn a_cordon_leaves_the_runs_it_finds_and_outlives_them() {
         state: js_agent_wire::HeldState::Running,
     }];
     fx.registry.heartbeat(&listing, &cred("t")).unwrap();
-    let cordoned = fx.registry.cordon(&host("a"), secs(600)).unwrap();
+    let cordoned = fx
+        .registry
+        .cordon(&host("a"), secs(600), &Asker::Unnamed)
+        .unwrap();
     assert!(cordoned.host.host.releasing);
     fx.beat("a", 1);
     let own = fx.registry.own_host(&host("a")).unwrap();
@@ -78,19 +87,30 @@ fn a_cordon_leaves_the_runs_it_finds_and_outlives_them() {
 fn a_repeat_extends_and_never_shortens_and_an_uncordon_repeats() {
     let fx = fixture(2);
     fx.join("a", "t");
-    let first = fx.registry.cordon(&host("a"), secs(100)).unwrap();
+    let first = fx
+        .registry
+        .cordon(&host("a"), secs(100), &Asker::Unnamed)
+        .unwrap();
     assert!(first.placed);
     live_for(&fx, 10);
-    let shorter = fx.registry.cordon(&host("a"), secs(20)).unwrap();
+    let shorter = fx
+        .registry
+        .cordon(&host("a"), secs(20), &Asker::Unnamed)
+        .unwrap();
     assert!(!shorter.placed);
     assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_100_000)));
-    fx.registry.cordon(&host("a"), secs(200)).unwrap();
+    fx.registry
+        .cordon(&host("a"), secs(200), &Asker::Unnamed)
+        .unwrap();
     assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_210_000)));
 
-    assert!(fx.registry.uncordon(&host("a")).unwrap().lifted);
-    assert!(!fx.registry.uncordon(&host("a")).unwrap().lifted);
+    assert!(fx.registry.uncordon(&host("a"), None).unwrap().lifted);
+    assert!(!fx.registry.uncordon(&host("a"), None).unwrap().lifted);
     assert_eq!(until(&fx, "a"), None);
-    let again = fx.registry.cordon(&host("a"), secs(5)).unwrap();
+    let again = fx
+        .registry
+        .cordon(&host("a"), secs(5), &Asker::Unnamed)
+        .unwrap();
     assert!(again.placed);
 }
 
@@ -100,8 +120,11 @@ fn a_repeat_extends_and_never_shortens_and_an_uncordon_repeats() {
 #[test]
 fn an_unknown_host_is_not_held_and_the_read_has_the_hello() {
     let fx = fixture(2);
-    assert_eq!(fx.registry.cordon(&host("a"), secs(5)), Err(NotHeld));
-    assert_eq!(fx.registry.uncordon(&host("a")), Err(NotHeld));
+    assert_eq!(
+        fx.registry.cordon(&host("a"), secs(5), &Asker::Unnamed),
+        Err(NotHeld)
+    );
+    assert_eq!(fx.registry.uncordon(&host("a"), None), Err(NotHeld));
     assert_eq!(fx.registry.own_host(&host("a")), None);
 
     let mut said = hello("a");
@@ -130,9 +153,15 @@ fn a_cordon_survives_what_is_persisted() {
     for name in ["a", "b", "c"] {
         before.join(name, "t");
     }
-    before.registry.cordon(&host("a"), secs(100)).unwrap();
-    before.registry.cordon(&host("b"), secs(100)).unwrap();
-    before.registry.uncordon(&host("b")).unwrap();
+    before
+        .registry
+        .cordon(&host("a"), secs(100), &Asker::Unnamed)
+        .unwrap();
+    before
+        .registry
+        .cordon(&host("b"), secs(100), &Asker::Unnamed)
+        .unwrap();
+    before.registry.uncordon(&host("b"), None).unwrap();
     let saved = before.registry.bindings();
     assert_eq!(saved[&host("a")].cordon_until_ms(), Some(1_100_000));
     assert_eq!(saved[&host("b")].cordon_until_ms(), None);
@@ -168,7 +197,9 @@ fn a_cordon_survives_what_is_persisted() {
 fn restoring_a_host_the_registry_knows_leaves_its_cordon_as_it_is() {
     let fx = fixture(2);
     fx.join("a", "t");
-    fx.registry.cordon(&host("a"), secs(100)).unwrap();
+    fx.registry
+        .cordon(&host("a"), secs(100), &Asker::Unnamed)
+        .unwrap();
     let later = Binding::new(cred("t"), None).with_cordon(Some(9_000_000));
     fx.registry.restore_tainted(&host("a"), later);
     assert_eq!(fx.registry.hosts().len(), 1);
@@ -186,7 +217,9 @@ fn a_cordoned_silent_host_is_kept_until_the_cordon_lapses() {
         .unwrap();
     let fx = fixture_of(config);
     fx.join("a", "t");
-    fx.registry.cordon(&host("a"), secs(3600)).unwrap();
+    fx.registry
+        .cordon(&host("a"), secs(3600), &Asker::Unnamed)
+        .unwrap();
     fx.clock.advance(Duration::from_millis(
         js_agent_wire::DEFAULT_GRACE_MS + MIN_LOST_RETENTION_MS + 1,
     ));
@@ -194,4 +227,260 @@ fn a_cordoned_silent_host_is_kept_until_the_cordon_lapses() {
 
     fx.clock.advance(secs(3600));
     assert!(fx.registry.hosts().is_empty());
+}
+
+fn holder(name: &str) -> CordonHolder {
+    CordonHolder::new(name).unwrap()
+}
+
+fn by(name: &str) -> Asker {
+    Asker::Holder(holder(name))
+}
+
+fn holder_of(fx: &Fixture, name: &str) -> Option<String> {
+    let own = fx.registry.own_host(&host(name)).unwrap();
+    own.cordon_holder.map(|held| held.to_string())
+}
+
+fn left(n: u64) -> Cordon<Duration> {
+    Cordon {
+        until: secs(n),
+        holder: Some(holder("run-m")),
+    }
+}
+
+/// Asserts a named request through the registry: it places a cordon held by its holder, the
+/// holder's own repeat renews it without shortening, another holder's request leaves the
+/// cordon and its time as they were and says so, and a host that is not cordoned reports no
+/// holder. It catches a registry that drops the holder or lets a second holder extend a
+/// cordon.
+#[test]
+fn a_named_request_places_and_renews_and_another_holder_leaves_it() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    assert_eq!(holder_of(&fx, "a"), None);
+    let placed = fx
+        .registry
+        .cordon(&host("a"), secs(100), &by("run-a"))
+        .unwrap();
+    assert!(placed.placed && !placed.held_by_other);
+    assert_eq!(placed.host.cordon_holder, Some(holder("run-a")));
+    let renewed = fx
+        .registry
+        .cordon(&host("a"), secs(200), &by("run-a"))
+        .unwrap();
+    assert!(!renewed.placed && !renewed.held_by_other);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_200_000)));
+    let kept = fx
+        .registry
+        .cordon(&host("a"), secs(900), &by("run-b"))
+        .unwrap();
+    assert!(!kept.placed && kept.held_by_other);
+    assert_eq!(kept.host.cordon_holder, Some(holder("run-a")));
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_200_000)));
+}
+
+/// Asserts that an unnamed request that does not extend a named cordon leaves its holder,
+/// that one that extends it makes it unnamed, so the holder's lift leaves it, and that a
+/// take-over makes the cordon the asker's. It catches an operator's longer cordon that the
+/// earlier holder's lift ends, an unnamed request that strips the holder without extending
+/// the cordon, and a take-over that is refused.
+#[test]
+fn an_unnamed_extension_unnames_the_cordon_and_a_take_over_changes_it() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.registry
+        .cordon(&host("a"), secs(100), &by("run-a"))
+        .unwrap();
+    let within = fx.registry.cordon(&host("a"), secs(10), &Asker::Unnamed);
+    assert!(!within.unwrap().held_by_other);
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-a"));
+    let extended = fx
+        .registry
+        .cordon(&host("a"), secs(300), &Asker::Unnamed)
+        .unwrap();
+    assert!(!extended.held_by_other);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_300_000)));
+    assert_eq!(holder_of(&fx, "a"), None);
+    let lift = fx
+        .registry
+        .uncordon(&host("a"), Some(&holder("run-a")))
+        .unwrap();
+    assert!(!lift.lifted && lift.held_by_other);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_300_000)));
+    let taken = fx
+        .registry
+        .cordon(&host("a"), secs(10), &Asker::TakeOver(holder("run-b")))
+        .unwrap();
+    assert!(!taken.placed && !taken.held_by_other);
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-b"));
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_300_000)));
+}
+
+/// Asserts each lift through the registry: a lift naming another holder leaves the cordon
+/// and says so, one naming the holder ends it and drops the holder, an unnamed lift ends a
+/// named cordon, and a lift of nothing is not held by another. It catches a holder that
+/// lifts another's cordon and a lift that leaves the holder behind.
+#[test]
+fn a_lift_by_a_holder_ends_only_its_own_cordon() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.registry
+        .cordon(&host("a"), secs(100), &by("run-a"))
+        .unwrap();
+    let other = fx
+        .registry
+        .uncordon(&host("a"), Some(&holder("run-b")))
+        .unwrap();
+    assert!(!other.lifted && other.held_by_other);
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-a"));
+    let own = fx
+        .registry
+        .uncordon(&host("a"), Some(&holder("run-a")))
+        .unwrap();
+    assert!(own.lifted && !own.held_by_other);
+    assert_eq!((until(&fx, "a"), holder_of(&fx, "a")), (None, None));
+    let none = fx
+        .registry
+        .uncordon(&host("a"), Some(&holder("run-a")))
+        .unwrap();
+    assert!(!none.lifted && !none.held_by_other);
+    fx.registry
+        .cordon(&host("a"), secs(100), &by("run-a"))
+        .unwrap();
+    assert!(fx.registry.uncordon(&host("a"), None).unwrap().lifted);
+    assert_eq!(holder_of(&fx, "a"), None);
+}
+
+/// Asserts that the holder is kept through a new hello of the host and dropped when the
+/// cordon lapses, so a cordon placed after the lapse by an unnamed request is unnamed. It
+/// catches a hello that forgets the holder and a lapsed cordon whose holder is still
+/// reported.
+#[test]
+fn the_holder_is_kept_through_a_hello_and_dropped_when_the_cordon_lapses() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.registry
+        .cordon(&host("a"), secs(3600), &by("run-a"))
+        .unwrap();
+    fx.pass_grace();
+    fx.hello(&hello("a"), &cred("t")).unwrap();
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-a"));
+    fx.clock.advance(secs(3600));
+    assert_eq!(until(&fx, "a"), None);
+    assert_eq!(holder_of(&fx, "a"), None);
+    fx.registry
+        .cordon(&host("a"), secs(60), &Asker::Unnamed)
+        .unwrap();
+    assert_eq!(holder_of(&fx, "a"), None);
+}
+
+/// Asserts that `set_cordon` sets the cordon exactly as given, its time left from now and its
+/// holder, replaces it with a shorter one, and clears it with `None`; and that a host the
+/// registry does not hold is `NotHeld`. It catches a set that extends instead of replacing.
+#[test]
+fn set_cordon_sets_replaces_and_clears() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    let set = fx
+        .registry
+        .set_cordon(&host("a"), Some(&left(100)))
+        .unwrap();
+    assert_eq!(set.cordon_until, Some(Timestamp::from_millis(1_100_000)));
+    assert_eq!(set.cordon_holder, Some(holder("run-m")));
+    let shorter = Cordon {
+        until: secs(10),
+        holder: None,
+    };
+    let set = fx.registry.set_cordon(&host("a"), Some(&shorter)).unwrap();
+    assert_eq!(set.cordon_until, Some(Timestamp::from_millis(1_010_000)));
+    assert_eq!(set.cordon_holder, None);
+    let cleared = fx.registry.set_cordon(&host("a"), None).unwrap();
+    assert_eq!(cleared.cordon_until, None);
+    assert_eq!(fx.registry.set_cordon(&host("b"), None), Err(NotHeld));
+}
+
+/// Asserts that `mirror_cordons` makes the registry's cordons the map's: it sets a cordon
+/// the registry did not have, replaces one it had, clears the cordon of a host the map does
+/// not list, and ignores a host the registry does not hold. It catches a mirror that only
+/// adds, or that makes a host up.
+#[test]
+fn mirror_cordons_sets_replaces_clears_and_ignores_unknown_hosts() {
+    let fx = fixture(3);
+    for name in ["a", "b", "c"] {
+        fx.join(name, "t");
+    }
+    fx.registry
+        .cordon(&host("b"), secs(500), &by("run-b"))
+        .unwrap();
+    fx.registry
+        .cordon(&host("c"), secs(500), &Asker::Unnamed)
+        .unwrap();
+    let rows = BTreeMap::from([
+        (host("a"), left(100)),
+        (
+            host("b"),
+            Cordon {
+                until: secs(20),
+                holder: None,
+            },
+        ),
+        (host("unknown"), left(100)),
+    ]);
+    fx.registry.mirror_cordons(&rows);
+    assert_eq!(until(&fx, "a"), Some(Timestamp::from_millis(1_100_000)));
+    assert_eq!(holder_of(&fx, "a").as_deref(), Some("run-m"));
+    assert_eq!(until(&fx, "b"), Some(Timestamp::from_millis(1_020_000)));
+    assert_eq!(holder_of(&fx, "b"), None);
+    assert_eq!(until(&fx, "c"), None);
+    assert_eq!(fx.registry.own_host(&host("unknown")), None);
+    assert_eq!(fx.registry.hosts().len(), 3);
+}
+
+/// Asserts that `cordons` lists only the cordons in force, each with its time left and its
+/// holder: a lapsed cordon and an uncordoned host are not there, and the time left shrinks
+/// as the clock moves. It catches a listing that keeps a lapsed cordon or reports the
+/// time it was set for.
+#[test]
+fn cordons_lists_those_in_force_with_their_time_left() {
+    let fx = fixture(3);
+    for name in ["a", "b", "c"] {
+        fx.join(name, "t");
+    }
+    assert!(fx.registry.cordons().is_empty());
+    fx.registry
+        .cordon(&host("a"), secs(100), &by("run-a"))
+        .unwrap();
+    fx.registry
+        .cordon(&host("b"), secs(5), &Asker::Unnamed)
+        .unwrap();
+    fx.clock.advance(secs(10));
+    fx.beat("a", 1);
+    assert_eq!(
+        fx.registry.cordons(),
+        BTreeMap::from([(
+            host("a"),
+            Cordon {
+                until: secs(90),
+                holder: Some(holder("run-a"))
+            }
+        )])
+    );
+}
+
+/// Asserts that the listing's view, which placement reads, follows a mirrored cordon: a host
+/// mirrored as cordoned carries the time it lapses and a host mirrored clear carries none.
+/// It catches a mirror that does not reach the view.
+#[test]
+fn a_mirrored_cordon_is_what_the_placement_view_reads() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.registry
+        .mirror_cordons(&BTreeMap::from([(host("a"), left(60))]));
+    assert_eq!(
+        fx.registry.hosts()[0].cordon_until,
+        Some(Timestamp::from_millis(1_060_000))
+    );
+    fx.registry.mirror_cordons(&BTreeMap::new());
+    assert_eq!(fx.registry.hosts()[0].cordon_until, None);
 }

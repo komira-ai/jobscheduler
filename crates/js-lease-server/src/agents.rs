@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
-use js_registry::{Binding, Cordoned, Credential, HostState, OsSessions, Registry, Uncordoned};
-use js_types::Clock;
+use js_registry::{Binding, Credential, HostState, OsSessions, Registry};
 use js_types::{HostId, ProviderId};
 use tracing::{error, info, warn};
 
+pub(crate) use self::cordons::restore_cordons;
 use self::taints::restore_job_taints;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::{AgentTokens, PoolTokens};
@@ -286,6 +286,7 @@ fn placed_in(
     // the taint (a crash between the placement and the binding's write) gets it from
     // the job store's row first. Its commit failing refuses the start, as a store
     // that cannot be read does.
+    let restore_flag = jobs.as_ref().map(|setup| setup.flag);
     let (jobs, job_feed, job_state) = match jobs {
         Some(setup) => {
             let opened = job_store::open(
@@ -301,6 +302,11 @@ fn placed_in(
     };
     for (host, binding) in &bindings {
         registry.restore_tainted(host, binding.clone());
+    }
+    // A cordon a binding brought back is written into the job store, which keeps the cordons
+    // from then on (`agents_cordon`), so the first tick's mirror does not lift it.
+    if let Some((jobs, flag)) = jobs.as_ref().zip(restore_flag) {
+        restore_cordons(jobs, &registry, flag)?;
     }
     let agents = Agents {
         registry,
@@ -656,60 +662,6 @@ impl Agents {
         Ok(())
     }
 
-    /// Cordons `host` for `lease` (see [`Registry::cordon`]). With the store the cordon is
-    /// committed first and the registry takes it only then; the end committed is read from
-    /// the registry's clock a moment before the registry reads it, so the registry's end can
-    /// be that moment later, which the next tick commits. In file mode the registry takes it
-    /// first and the file is saved after.
-    ///
-    /// # Errors
-    ///
-    /// [`CordonFault::NotHeld`] for a host the registry does not hold;
-    /// [`CordonFault::Unsaved`] when the commit failed (nothing changed), or in file mode when
-    /// the save after it did (the cordon holds on this server).
-    pub(crate) async fn cordon(
-        self: &Arc<Self>,
-        host: &HostId,
-        lease: Duration,
-    ) -> Result<Cordoned, CordonFault> {
-        let gate = self.host_writes.lock().await;
-        let wanted = self.clock.now().plus(lease).millis();
-        let until = |bound: Binding| {
-            let until = bound
-                .cordon_until_ms()
-                .map_or(wanted, |held| held.max(wanted));
-            bound.with_cordon(Some(until))
-        };
-        self.keep(host, until).await.map_err(CordonFault::unsaved)?;
-        let placed = self.registry.cordon(host, lease);
-        drop(gate);
-        let placed = placed.map_err(|_| CordonFault::NotHeld)?;
-        self.saved().await?;
-        Ok(placed)
-    }
-
-    /// Lifts the cordon of `host` (see [`Registry::uncordon`]), committed first with the
-    /// store, as [`Agents::cordon`] places one.
-    ///
-    /// # Errors
-    ///
-    /// As [`Agents::cordon`].
-    pub(crate) async fn uncordon(
-        self: &Arc<Self>,
-        host: &HostId,
-    ) -> Result<Uncordoned, CordonFault> {
-        let gate = self.host_writes.lock().await;
-        let lifted = |bound: Binding| bound.with_cordon(None);
-        self.keep(host, lifted)
-            .await
-            .map_err(CordonFault::unsaved)?;
-        let lifted = self.registry.uncordon(host);
-        drop(gate);
-        let lifted = lifted.map_err(|_| CordonFault::NotHeld)?;
-        self.saved().await?;
-        Ok(lifted)
-    }
-
     /// The save of the file after a cordon or its lift, as a fault when it failed. Nothing
     /// with the store, which committed the change before the registry took it.
     async fn saved(self: &Arc<Self>) -> Result<(), CordonFault> {
@@ -825,7 +777,8 @@ impl Agents {
     /// What every tick does for the agent side: read the join tokens again and drop the
     /// hello limits of those that left the file once they are refilled (a limit that is still
     /// spent stays, whoever it is of, so a certificate host's is not reset), then read the job service's client token
-    /// files again ([`AgentTokens::reload_clients`]), and make the file of bindings current
+    /// files again ([`AgentTokens::reload_clients`]), put the job store's cordons on the
+    /// registry ([`Agents::mirror_cordons`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
     /// force, and their limits; a client token file that cannot be read, or holds no valid
@@ -857,6 +810,7 @@ impl Agents {
                 warn!(%error, "cannot read the client token files again; the client tokens in force stay");
             }
         }
+        self.mirror_cordons().await;
         self.save_bindings().await;
         // A due time that cannot be committed (only a store's commit fails here) is counted
         // with no arm of its own, so every test binary runs the same code of the tick.
@@ -892,6 +846,9 @@ impl Agents {
         saved.is_ok()
     }
 }
+
+#[path = "agents_cordon.rs"]
+mod cordons;
 
 #[path = "agents_taints.rs"]
 mod taints;
