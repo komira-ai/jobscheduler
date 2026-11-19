@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, RunHandle,
+    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
 use js_agent_wire::{HostPort, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange};
 
@@ -59,6 +59,12 @@ impl Control {
     }
 }
 
+/// The name the direct runner gives the lease of run `run_id` (`js-<agent tag>-<run id>`),
+/// which is also its control group's: what [`Deferring`] answers for a create it holds.
+pub fn lease(run_id: &str) -> String {
+    format!("js-0123456789abcdef-{run_id}")
+}
+
 /// The wrapped runtime, with the creates the gate holds.
 pub struct Deferring {
     inner: FakeRuntime,
@@ -79,10 +85,16 @@ impl Deferring {
     /// A harness whose lifecycle runs over a [`Deferring`] runtime around the harness's
     /// fake, and the control of its gate.
     pub fn harness(name: &str) -> (Harness, Control) {
+        Self::harness_checked(name, None)
+    }
+
+    /// As [`Deferring::harness`], with `checks` as the post-job checks instead of the
+    /// scripted ones when given.
+    pub fn harness_checked(name: &str, checks: Option<Box<dyn CheckHook>>) -> (Harness, Control) {
         let mut h = Harness::new(name);
         let (runtime, gate) = Self::around(h.fake.clone());
         let scratch = h.dir.path("scratch");
-        let checks = hook(&h.log, &h.fake, &scratch, &[]);
+        let checks = checks.unwrap_or_else(|| hook(&h.log, &h.fake, &scratch, &[]));
         let (life, _) = Lifecycle::adopt(
             h.config.clone(),
             Box::new(runtime),
@@ -124,6 +136,14 @@ impl Runtime for Deferring {
                 "no create of {run_id} is under way"
             )))),
         }
+    }
+
+    /// The direct runner's name of the run's lease ([`lease`]) while its create is held.
+    fn creating(&self, run_id: &str) -> Option<RunHandle> {
+        let gate = self.gate.0.borrow();
+        gate.under_way
+            .contains_key(run_id)
+            .then(|| RunHandle(lease(run_id)))
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {

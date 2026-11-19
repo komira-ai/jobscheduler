@@ -286,6 +286,43 @@ fn a_lease_whose_create_is_under_way_is_not_removed() {
     assert!(nothing_of(&node, "ra-wired"));
 }
 
+/// Proves the runtime names a lease whose create is under way, from the begin until the
+/// worker takes the answer: with run A held in its wiring, `creating` answers A's lease name
+/// while A's control group already exists (so A's processes may run in it), and answers it
+/// still after the create rang its answer but before the poll took it; once the poll took it,
+/// and for a run never begun, it answers none. Catches a runtime that names only the runs in
+/// its books, which leaves a started container's group unnamed to the post-job checks of a
+/// run that ends meanwhile, so the neighbour's processes are counted as that run's leftover.
+#[test]
+fn a_lease_whose_create_is_under_way_is_named_until_its_answer_is_taken() {
+    let node = Node::new("creates-creating");
+    let (gate, entered) = Gate::new();
+    let release = gate.hold("ra-wired");
+    let (mut runtime, rung) = gated(&node, &gate);
+    assert_eq!(runtime.creating("ra-wired"), None, "not begun");
+    assert_eq!(
+        runtime.begin_create(&wired(&node, "ra-wired")),
+        Created::Pending
+    );
+    let name = entered.recv_timeout(LONG).expect("A reached its wiring");
+    assert_eq!(runtime.creating("ra-wired"), Some(RunHandle(name.clone())));
+    assert!(node.cgroup_of(&name).is_dir(), "A's group is made");
+    assert_eq!(runtime.creating("rb-never"), None);
+
+    release.send(Release::Wire).expect("released");
+    rung.recv_timeout(LONG).expect("the create answered");
+    assert_eq!(
+        runtime.creating("ra-wired"),
+        Some(RunHandle(name.clone())),
+        "answered, not yet taken"
+    );
+    let a = settled(&mut runtime, &rung, "ra-wired").expect("A started");
+    assert_eq!(a.0, name);
+    assert_eq!(runtime.creating("ra-wired"), None, "taken");
+    runtime.remove(&a).expect("A removed");
+    assert!(nothing_of(&node, "ra-wired"));
+}
+
 /// Proves the lifecycle holds a start that waits as starting and lets another job start: with
 /// job A's wiring held, job B (no network) is started, is held as running, and A is still
 /// held as starting; once A is released it starts too. Catches a lifecycle that waits for a
