@@ -602,16 +602,10 @@ fn an_identity_client_takes_no_bearer() {
     assert!(!seen[0].head.to_ascii_lowercase().contains("authorization"));
 }
 
-/// A named pipe at `path`, which a blocking open would wait on forever.
+/// A named pipe at `path`, which a blocking open would wait on forever. `mkfifo`, not rustix's
+/// `mknodat`: rustix has no `mknodat` (nor `mkfifoat`) on macOS, where these tests also run.
 fn make_fifo(path: &std::path::Path) {
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from_raw_mode(0o600),
-        0,
-    )
-    .unwrap();
+    nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 }
 
 /// Asserts that a certificate file that is a named pipe is refused at connect, without

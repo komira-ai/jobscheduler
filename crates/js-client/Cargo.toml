@@ -34,6 +34,9 @@ http-body-util.workspace = true
 hyper.workspace = true
 js-conformance = { path = "../js-conformance" }
 js-testkit = { path = "../js-testkit" }
+# `fs`: the identity tests make a named pipe with `mkfifo`, which macOS has and rustix's
+# `mknodat` does not.
+nix = { workspace = true, features = ["fs"] }
 prost.workspace = true
 rcgen.workspace = true
 # `test-util`: the job client's deadline tests run on a paused clock.
