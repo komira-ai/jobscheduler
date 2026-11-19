@@ -242,30 +242,6 @@
       "type": "overlay"
     },
     {
-      "destination": "/tmp",
-      "options": [
-        "nosuid",
-        "noexec",
-        "nodev",
-        "mode=1777",
-        "size=106m"
-      ],
-      "source": "tmpfs",
-      "type": "tmpfs"
-    },
-    {
-      "destination": "/var/tmp",
-      "options": [
-        "nosuid",
-        "noexec",
-        "nodev",
-        "mode=1777",
-        "size=106m"
-      ],
-      "source": "tmpfs",
-      "type": "tmpfs"
-    },
-    {
       "destination": "/run",
       "options": [
         "nosuid",
@@ -297,6 +273,30 @@
         "nodev"
       ],
       "source": "/scratch/lease-1-2/job",
+      "type": "bind"
+    },
+    {
+      "destination": "/tmp",
+      "options": [
+        "bind",
+        "rw",
+        "nosuid",
+        "nodev",
+        "noexec"
+      ],
+      "source": "/scratch/.tmp-lease-1-2/tmp",
+      "type": "bind"
+    },
+    {
+      "destination": "/var/tmp",
+      "options": [
+        "bind",
+        "rw",
+        "nosuid",
+        "nodev",
+        "noexec"
+      ],
+      "source": "/scratch/.tmp-lease-1-2/var-tmp",
       "type": "bind"
     },
     {
