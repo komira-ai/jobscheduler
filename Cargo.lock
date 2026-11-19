@@ -1274,6 +1274,7 @@ dependencies = [
  "js-conformance",
  "js-proto",
  "js-testkit",
+ "nix 0.31.3",
  "prost",
  "rcgen",
  "rustix",
