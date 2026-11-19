@@ -668,6 +668,50 @@ impl BindingStore {
         host_keys::committed(store.txn(txn))
     }
 
+    /// Commits the binding the store holds for `host` without its taint when that taint is
+    /// `cleared`, field for field, by the conditional write of [`BindingStore::commit_taint`],
+    /// and holds the binding without it as stored; the change, or `None` when nothing was
+    /// written (the store holds no binding of `host`, another taint or none, and in file mode).
+    /// What this server holds as stored for `host` is left as it was unless the commit is made,
+    /// so a later [`BindingStore::save`] never writes this server's binding over a taint the
+    /// store holds that the registry does not.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read, failed or refused the write: nothing was written.
+    pub(crate) fn end_taint(&self, host: &HostId, cleared: &Taint) -> io::Result<Option<Change>> {
+        let kept = {
+            let written = self.lock();
+            (
+                written.bindings.get(host).cloned(),
+                written.extra.get(host).cloned(),
+            )
+        };
+        let ended = self.stored(host).and_then(|stored| {
+            let stored = stored.filter(|bound| bound.taint() == Some(cleared));
+            let change = stored.map(|bound| self.change(host, bound.with_taint(None)));
+            let commit = |change| self.commit_taint(change, Some(cleared));
+            change.as_ref().map_or(Ok(()), commit)?;
+            Ok(change)
+        });
+        match &ended {
+            Ok(Some(change)) => self.applied(change),
+            _ => {
+                let mut written = self.lock();
+                let (binding, extra) = kept;
+                written.bindings.remove(host);
+                written.extra.remove(host);
+                written
+                    .bindings
+                    .extend(binding.map(|binding| (host.clone(), binding)));
+                written
+                    .extra
+                    .extend(extra.map(|extra| (host.clone(), extra)));
+            }
+        }
+        ended
+    }
+
     /// Holds `change` as the store holds it once its writes are committed. Nothing in file
     /// mode, where what the file holds changes only when [`BindingStore::save`] writes it.
     pub(crate) fn applied(&self, change: &Change) {

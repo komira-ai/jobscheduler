@@ -108,3 +108,66 @@ async fn a_clear_of_an_unknown_or_clean_host_writes_nothing() {
     assert_eq!(rig.agents.clear_taint(&clean).await.unwrap(), None);
     assert_eq!(rig.commits(), before);
 }
+
+/// Asserts that an agent's clear reaching a server that does not hold the taint ends the taint
+/// the store holds: a start-first update runs two servers over one store, the host is known
+/// clean to the second, its taint is reported to and stored by the first, and the agent's
+/// heartbeat that reports it cleared reaches the second. The store then holds the binding
+/// without the taint, and a third server started over the store does not put a taint back at
+/// the host's hello. It catches a clear that is acknowledged by a server that changed nothing,
+/// after which the agent stops reporting it and the stored taint keeps the host from every job
+/// through each later start.
+#[tokio::test]
+async fn an_agent_clear_reaching_the_other_server_ends_the_stored_taint() {
+    let first = rig("clear_other_first");
+    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let second = Rig::second(&first, "clear_other_second");
+    let at_second = second.pooled("host-a", "burst").await.unwrap();
+    let reply = first
+        .beat((&first.pool, None), "host-a", &at_first, residue("r1"))
+        .await;
+    assert!(reply.unwrap().taint_ack);
+    assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
+    assert!(second.held("host-a").unwrap().taint().is_none());
+
+    let cleared = second
+        .beat_clearing("host-a", &at_second, (residue("r1"), Value::Null))
+        .await;
+    assert!(cleared.unwrap().taint_cleared_ack);
+    let stored = first.binding("host-a");
+    for key in ["taint_reason", "taint_check", "taint_run_id"] {
+        assert_eq!(stored[key], Value::Null, "{key}");
+    }
+
+    let third = Rig::second(&first, "clear_other_third");
+    third.pooled("host-a", "burst").await.unwrap();
+    let host = HostId::new("host-a").unwrap();
+    let views = third.agents.registry.hosts();
+    let view = views.iter().find(|view| view.id == host).unwrap();
+    assert_eq!(view.taint, None);
+}
+
+/// Asserts that an agent's clear reaching a server that does not hold the taint leaves the
+/// store alone when the store holds another taint than the one cleared: the first server
+/// stored `r2`, the agent reports `r1` cleared to the second, and the store keeps `r2` with
+/// its binding as it was. It catches a clear that erases a taint the agent did not report, such as
+/// a host job's or a newer one.
+#[tokio::test]
+async fn an_agent_clear_of_another_taint_leaves_the_stored_taint() {
+    let first = rig("clear_another_first");
+    let at_first = first.pooled("host-a", "burst").await.unwrap();
+    let second = Rig::second(&first, "clear_another_second");
+    let at_second = second.pooled("host-a", "burst").await.unwrap();
+    let reply = first
+        .beat((&first.pool, None), "host-a", &at_first, residue("r2"))
+        .await;
+    assert!(reply.unwrap().taint_ack);
+
+    let before = first.binding("host-a");
+    let cleared = second
+        .beat_clearing("host-a", &at_second, (residue("r1"), Value::Null))
+        .await;
+    assert!(cleared.unwrap().taint_cleared_ack);
+    assert_eq!(first.binding("host-a"), before, "nothing was written");
+    assert_eq!(first.binding("host-a")["taint_run_id"], "r2");
+}

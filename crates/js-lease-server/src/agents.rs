@@ -656,6 +656,12 @@ impl Agents {
     /// hold until the registry has recorded the beat. Nothing when the beat would record no
     /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
+    /// A beat that reports cleared a taint the registry does not hold, on a host the registry
+    /// holds no taint for, ends the taint the store holds when it is that one
+    /// ([`Agents::end_stored_taint`]): another server over the same store (the two of a
+    /// start-first update) was told the taint and stored it, and the agent, told that its
+    /// clear was taken, never reports it again.
+    ///
     /// # Errors
     ///
     /// The store failed or refused the commit: the taint is not recorded, and the caller
@@ -668,12 +674,36 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
+        let held = self.registry.bindings().remove(&check.host);
+        let untainted = held.as_ref().is_some_and(|bound| bound.taint().is_none());
+        let stray = heartbeat.taint_cleared.as_ref().filter(|_| !check.cleared);
+        let stray = stray.filter(|_| untainted & check.taint.is_none());
+        if let Some(cleared) = stray {
+            let gate = self.host_writes.lock().await;
+            self.end_stored_taint(&check.host, cleared).await?;
+            return Ok(Some(gate));
+        }
         if check.taint.is_none() && !check.cleared {
             return Ok(None);
         }
         let gate = self.host_writes.lock().await;
         self.keep_taint(&check.host, check.taint).await?;
         Ok(Some(gate))
+    }
+
+    /// Ends the taint the store holds for `host` when it is `cleared`
+    /// ([`BindingStore::end_taint`], whose conditional write never erases a taint another
+    /// server stored in between). The registry holds no taint for the host, so nothing changes
+    /// in memory. The caller holds [`Agents::host_writes`].
+    async fn end_stored_taint(self: &Arc<Self>, host: &HostId, cleared: &Taint) -> io::Result<()> {
+        let this = Arc::clone(self);
+        let reason = cleared.reason.clone();
+        let (named, cleared) = (host.clone(), cleared.clone());
+        let ended = blocking(move || this.store.end_taint(&named, &cleared)).await?;
+        if ended.is_some() {
+            info!(%host, reason, "the agent's clear ended the taint another server stored");
+        }
+        Ok(())
     }
 
     /// Commits the binding of `host` with `taint` (none for a clear), when the registry holds
