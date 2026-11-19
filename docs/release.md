@@ -557,6 +557,15 @@ refuses, writing nothing, a descriptor that is absent (hostkeeper's release crea
 adds to it), one of a version newer than 1, one with a part that is not of its form, one whose format has another
 `path`, and one that maps `js-agent` to another directory.
 
+A coordinator reads the descriptor once, when an operator adds the repository (`hkctl repositories
+discover`, then `hkctl repositories add`), and resolves every `macos-pkg` entry from the copy it stored then.
+So the first release whose step writes the `js-agent` entry reaches the Macs only after the repository is
+added again on each coordinator; until then they keep looking in `pkg/js-agent/` and report
+`fetch_failed`. Later releases change nothing in the descriptor and need no such step. The step reads the
+descriptor with the publishing role, so an `AccessDenied` (which it cannot tell from a missing key) while
+`https://packages.komira.ai/hostkeeper-repository.json` answers means the role has no grant on the
+descriptor yet.
+
 **Desired version.** `cargo xtask release desired --pkg-url https://packages.komira.ai/pkg/jobscheduler`
 downloads `<base>/X.Y.Z/SHA256SUMS` and the package over HTTPS and holds the package's SHA-256 to the
 digest the sums list. When both are there it writes the output `set-mac=true` and adds this entry
