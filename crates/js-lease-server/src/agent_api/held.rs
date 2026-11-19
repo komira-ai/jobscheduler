@@ -55,19 +55,6 @@ pub(super) struct Inputs {
 }
 
 impl Inputs {
-    /// How long a reply to this beat is held at most: [`Agents::starting_hold`] when the
-    /// listing has a job `starting`, [`Agents::hold_bound`] when it has none.
-    fn bound(&self, agents: &Agents) -> Duration {
-        let starting = self
-            .listed
-            .iter()
-            .any(|job| job.state == HeldState::Starting);
-        match starting {
-            true => agents.starting_hold,
-            false => agents.hold_bound,
-        }
-    }
-
     /// The context the per-job half builds the starts in, counting into `metrics`.
     pub(super) fn context<'a>(&'a self, metrics: &'a dyn MetricsSink) -> BeatContext<'a> {
         BeatContext {
@@ -83,6 +70,17 @@ impl Inputs {
     }
 }
 
+/// How long a reply to a beat that lists `listed` is held at most: [`Agents::starting_hold`]
+/// when the listing has a job `starting`, [`Agents::hold_bound`] when it has none. (The server
+/// sees jobs only: the registry cancels every run a beat lists, so a reply to a beat that lists
+/// one is never quiet and never held.)
+pub(super) fn limit(agents: &Agents, listed: &[HeldJob]) -> Duration {
+    match listed.iter().any(|job| job.state == HeldState::Starting) {
+        true => agents.starting_hold,
+        false => agents.hold_bound,
+    }
+}
+
 /// What holding one heartbeat's reply needs.
 pub(super) struct Hold {
     /// The watch of the host's heartbeat, taken before the store was read for the reply.
@@ -95,7 +93,7 @@ pub(super) struct Hold {
 
 /// Holds `reply` while it carries nothing (beside the whole-host allocation it names): until a
 /// wake builds a reply with something in it, which replaces its commands and allocation, or
-/// until the bound ([`Inputs::bound`]). A reply says `beat_now` when it carries no command:
+/// until the bound ([`limit`]). A reply says `beat_now` when it carries no command:
 /// one held to the bound, one woken with a new whole-host allocation alone, and one not held
 /// that carries only acknowledgements, a taint acknowledgement or a log credential.
 pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut HeartbeatReply) {
@@ -114,7 +112,7 @@ pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut Heartbeat
     if agents.draining.begun() {
         return;
     }
-    let bound = tokio::time::sleep(hold.inputs.bound(agents));
+    let bound = tokio::time::sleep(limit(agents, &hold.inputs.listed));
     tokio::pin!(bound);
     let draining = agents.draining.begins();
     tokio::pin!(draining);

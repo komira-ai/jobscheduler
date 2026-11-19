@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use js_agent_wire::HeartbeatReply;
+use js_agent_wire::{HeartbeatReply, HeldState};
 use js_jobs::{AllocationStep, JobState};
 
 use crate::job_expiry::JobLimits;
@@ -251,10 +251,28 @@ async fn starting_rig(name: &str, bound: Duration, starting: Duration) -> (Rig, 
     (rig, agent)
 }
 
+/// Asserts which bound a beat's hold takes: the short one when the listing has a job `starting`
+/// (alone or among others), the normal one when it has none or is empty. The two bounds differ,
+/// so the value says which was taken; nothing waits. It catches a hold that takes the normal bound
+/// for a host with a start under way, so the start's `running` reaches the server a hold later,
+/// and the short bound taken for every beat.
+#[test]
+fn a_listing_with_a_starting_job_takes_the_short_bound_and_any_other_the_normal_one() {
+    let (rig, mut agent) = held_rig("held_limit", Duration::from_secs(2));
+    let rig = rig.holding_starting_for(Duration::from_secs(1));
+    let short = Duration::from_secs(1);
+    let normal = Duration::from_secs(2);
+    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), normal);
+    agent.hold("job-1", "alloc-1", HeldState::Running);
+    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), normal);
+    agent.hold("job-2", "alloc-2", HeldState::Starting);
+    assert_eq!(super::held::limit(&rig.agents, &agent.listing()), short);
+}
+
 /// Asserts that a heartbeat that lists a job `starting` is held no longer than the short bound
 /// for such a beat, however long the normal bound is: its reply ends after one wait, empty and
-/// saying `beat_now`. It catches a held beat of a host with a start under way that waits the
-/// whole hold, so the start's `running` reaches the server a hold later.
+/// saying `beat_now`. It shows the hold taking that bound end to end (the choice itself is
+/// asserted by value above: a hold that takes the normal bound here ends too, a bound later).
 #[tokio::test]
 async fn a_beat_that_lists_a_starting_job_ends_at_the_short_bound() {
     let (rig, agent) = starting_rig("held_starting_short", LONG, Duration::ZERO).await;

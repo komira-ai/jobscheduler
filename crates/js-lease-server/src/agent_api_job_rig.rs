@@ -595,10 +595,13 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
-    /// This rig's server holding a heartbeat's reply with nothing to send for `bound` at most.
+    /// This rig's server holding a heartbeat's reply with nothing to send for `bound` at most,
+    /// whatever the beat lists (a beat that lists a job `starting` is held for less only when
+    /// the test says so with [`Rig::holding_starting_for`]).
     pub(crate) fn holding_for(mut self, bound: std::time::Duration) -> Rig {
         let mut agents = Arc::try_unwrap(self.agents).ok().unwrap();
         agents.hold_bound = bound;
+        agents.starting_hold = bound;
         self.agents = Arc::new(agents);
         self
     }
