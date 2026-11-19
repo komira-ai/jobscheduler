@@ -141,7 +141,7 @@ pub(super) fn restore_job_taints(
         }
         kept.push(host);
     }
-    store.save(|| merged.clone()).map_err(|error| {
+    store.restore(&merged).map_err(|error| {
         StartupError::new(flag, format!("cannot write the host bindings: {error}"))
     })?;
     *bindings = merged;

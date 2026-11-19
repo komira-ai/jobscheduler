@@ -183,8 +183,19 @@ async fn authenticate(
         .and_then(|value| value.to_str().ok())
         .and_then(bearer);
     let pooled = given.and_then(|given| agents.identify_pooled(given));
-    let single = || given.and_then(|given| agents.joins.identify(given));
-    match (pooled, single()) {
+    let single = match (&pooled, given) {
+        (None, Some(given)) => identify_single(&agents, given).await,
+        _ => Ok(None),
+    };
+    let single = match single {
+        Ok(single) => single,
+        Err(error) => {
+            warn!(%error, "agent request refused: its token could not be read from the store");
+            return Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
+                .into_response();
+        }
+    };
+    match (pooled, single) {
         (Some((credential, pool)), _) => {
             request.extensions_mut().insert(credential);
             request.extensions_mut().insert(TokenPool(pool));
@@ -198,6 +209,19 @@ async fn authenticate(
         }
         (None, None) => StatusCode::UNAUTHORIZED.into_response(),
     }
+}
+
+/// The credential of the one-time token or host credential `given`: from the tokens this
+/// server holds, or else from the store's row of it, which a token another server minted or
+/// a credential it issued after this server started is in
+/// ([`crate::join_tokens::JoinTokens::identify_stored`]).
+async fn identify_single(agents: &Arc<Agents>, given: &str) -> Result<Option<Credential>, String> {
+    if let Some(known) = agents.joins.identify(given) {
+        return Ok(Some(known));
+    }
+    let this = Arc::clone(agents);
+    let given = given.to_owned();
+    blocking(move || this.joins.identify_stored(&given)).await
 }
 
 async fn hello(
@@ -280,6 +304,10 @@ async fn serve_hello_in(
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
+    agents.restore_stored(&host).await.map_err(|error| {
+        warn!(%error, host = %hello.host_id, "agent hello refused: the host's binding could not be read");
+        Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
+    })?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;

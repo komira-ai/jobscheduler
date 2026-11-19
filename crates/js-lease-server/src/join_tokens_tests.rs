@@ -660,3 +660,13 @@ fn a_revoke_that_drops_nothing_writes_nothing() {
     assert_eq!(joins.revoke(&instance("never-minted")), Ok(0));
     assert!(joins.identify(&minted.token).is_some());
 }
+
+/// Asserts that the tokens of a file read no row by key: a token the file does not hold is
+/// unknown, with no error, whether or not it was ever minted elsewhere. It catches a file-mode
+/// server that fails a request for a token it does not hold instead of answering it unknown.
+#[test]
+fn the_file_reads_no_row_by_key() {
+    let (_dir, path) = scratch("joins_stored_file");
+    let (joins, _clock) = tokens(&path);
+    assert_eq!(joins.identify_stored(&"x".repeat(40)), Ok(None));
+}
