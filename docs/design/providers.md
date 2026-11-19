@@ -77,7 +77,8 @@ its last path too), is *not* refused at once: a host that restarts deregisters a
 request across a restart would turn routine maintenance into failures. It stays queued for `regain_grace` (a pool key; default 5 minutes
 on the injected clock, counted from the tick the last capable host left). If a capable host registers within it, the request proceeds
 untouched. When the grace passes, the request ends as Refused with `no-capable-host` and the reason `capacity-left`, the same constant as
-a refusal at submit, so a caller handles one code. A tainted last host starts the same grace (an operator can clear it quickly); a
+a refusal at submit, so a caller handles one code. A tainted last host does not start the grace: it is still capable, so the request
+stays queued until the taint ends. Only deregistration or ageing out starts it; a
 longer outage is a refusal, not a wait for ever. Leases already held on a host that is then tainted or evicted follow 5.6 and 5.12
 unchanged; only requests not yet placed are affected. New submissions get no grace: a request submitted while the only capable host is
 restarting is refused and the caller retries, which is the price of an answer that never hangs.
