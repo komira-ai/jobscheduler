@@ -32,7 +32,7 @@
 //! |---|---|---|
 //! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs and not of the uid of a slot whose job is still running; one of the finished job's own slot's uid is named as that slot's leftover | residue |
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs, and in a control group a job can be in (the agent's own group or below it, a group that names a container, or no unified path; see [What the host does while jobs run](#what-the-host-does-while-jobs-run)): what a child that outlived its parent looks like | residue |
-//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
+//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source) and is still there after the settle wait, other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
 //! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
 //! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
@@ -42,12 +42,12 @@
 //! A new process and a new mount count only when they are not the host's own (see
 //! [What the host does while jobs run](#what-the-host-does-while-jobs-run)).
 //!
-//! A new process counts only when it is still there after the settle wait
-//! ([`Integrity::with_settle`], `--settle-ms`): the checks that would call one a job's
-//! leftover look again after the wait and judge the processes of the first look that are
-//! still there. The service manager's fork of a unit (its parent is `init` for the moment
-//! before it is moved into the unit's control group), and a process that is ending, are
-//! gone by then; a job's leftover is not.
+//! A new process or mount counts only when it is still there after the settle wait
+//! ([`Integrity::with_settle`], `--settle-ms`): checks that would call one a job's leftover
+//! look again after the wait and judge what of the first look is still there. The service
+//! manager's fork of a unit (parent `init` until it is moved into the unit's group), a
+//! process that is ending, and a mount a host's test or a runtime's unwinding holds for a
+//! moment are gone by then; a job's leftover is not.
 //!
 //! A check that cannot run is a finding, never a skipped check. When several things are
 //! found, the code is the first's (in the order of the table) and the detail holds all of
@@ -180,7 +180,7 @@
 //!
 //! What is not on this list still counts: Kubernetes pods, a container engine's other
 //! mounts, and a service started in a scope. A host with such churn can still be tainted
-//! when it overlaps a job's end.
+//! when what it made at a job's end outlives the settle wait.
 //!
 //! # Jobs that run side by side
 //!
@@ -627,8 +627,8 @@ pub struct Integrity {
     /// when it cannot be read). The agent is never a job's leftover: a re-check of a taint
     /// read from the marker judges processes the baseline holds, the agent's among them.
     agent_pid: Option<u32>,
-    /// How long a process the checks would call a job's leftover must go on before it is
-    /// one (`--settle-ms`); zero looks once.
+    /// How long a process or mount the checks would call a job's leftover must go on before
+    /// it is one (`--settle-ms`); zero looks once.
     settle: Duration,
 }
 
@@ -678,13 +678,12 @@ impl Integrity {
         Ok(this)
     }
 
-    /// The same checks, which count a process the baseline did not have as a job's leftover
-    /// (`process-as-job-user`, `daemonised-child`) only when it is still there `wait` after
-    /// they first saw it: the checks look again then, and keep of the processes of the
-    /// first look the ones still there. A host's own process that lives for a moment (the
-    /// service manager's fork of a timer's unit, whose parent is `init` until it is moved
-    /// into the unit's control group) is gone by then; a job's leftover is not. With no wait
-    /// (what [`Integrity::start`] gives) the checks look once.
+    /// The same checks, which count a process or mount the baseline did not have as a job's
+    /// leftover (`process-as-job-user`, `daemonised-child`, `new-mount`) only when it is still
+    /// there `wait` after they first saw it: the checks look again then, and keep of the
+    /// first look what is still there. A host's own process or mount that lives for a moment
+    /// (the service manager's fork of a timer's unit, a FUSE test's mount) is gone by then;
+    /// a job's leftover is not. With no wait (what [`Integrity::start`] gives) they look once.
     #[must_use]
     pub fn with_settle(self, wait: Duration) -> Self {
         Self {
@@ -757,12 +756,12 @@ impl Integrity {
         }
     }
 
-    /// The host after `job`, and what differs from the baseline. A process that would be a
-    /// leftover of the job is looked at again after the settle wait, and only the processes
-    /// of the first look that are still there are judged; the second look is the host that
-    /// is compared. A process that starts during the wait is judged by the next check, and
-    /// is not in the baseline this one may take. `restored` is the re-check of a taint read
-    /// from the marker at start (see `Integrity::compare`).
+    /// The host after `job`, and what differs from the baseline. A process or mount that would
+    /// be a leftover of the job is looked at again after the settle wait, and only what of
+    /// the first look is still there is judged; the second look is the host that is compared.
+    /// A process or mount that starts during the wait is judged by the next check, and is not
+    /// in the baseline this one may take. `restored` is the re-check of a taint read from the
+    /// marker at start (see `Integrity::compare`).
     fn look(
         &self,
         job: &Finished<'_>,
@@ -773,7 +772,7 @@ impl Integrity {
         let leftover = found.iter().any(|problem| {
             matches!(
                 problem.code,
-                code::PROCESS_AS_JOB_USER | code::DAEMONISED_CHILD
+                code::PROCESS_AS_JOB_USER | code::DAEMONISED_CHILD | code::NEW_MOUNT
             )
         });
         if self.settle.is_zero() || !leftover {
@@ -785,6 +784,10 @@ impl Integrity {
         later
             .processes
             .retain(|process| seen.contains(&process.key()));
+        // A mount of the baseline that was remounted during the wait is not one that arrived.
+        later
+            .mounts
+            .retain(|mount| first.mounts.contains(mount) || self.baseline.mounts.contains(mount));
         let found = self.compare(&later, job, restored);
         Ok((later, found))
     }

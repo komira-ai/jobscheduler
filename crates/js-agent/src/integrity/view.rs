@@ -122,8 +122,8 @@ pub trait HostView {
     fn file(&self, path: &str) -> Result<String, String>;
 
     /// Lets the host go on for `wait` before the checks look at it again (they look twice at
-    /// what they would call a job's leftover process: see [`Integrity::with_settle`]). The
-    /// default does not wait.
+    /// what they would call a job's leftover process or mount: see
+    /// [`Integrity::with_settle`]). The default does not wait.
     ///
     /// [`Integrity::with_settle`]: super::Integrity::with_settle
     fn settle(&self, wait: Duration) {
