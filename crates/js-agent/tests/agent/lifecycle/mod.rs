@@ -41,6 +41,7 @@ mod providers_restart;
 pub mod quota;
 mod quota_health;
 mod reach;
+mod removing;
 mod results;
 mod rootfs;
 mod rules;
@@ -331,10 +332,12 @@ pub fn reply_json(body: &Value) -> HeartbeatReply {
     serde_json::from_value(body.clone()).unwrap()
 }
 
-/// Events as short texts, so a test reads an order at a glance.
+/// Events as short texts, so a test reads an order at a glance. The timeline of a cleanup
+/// that passed ([`Event::Cleaned`], after `freed`) is left out: the tests of it read it whole.
 pub fn names(events: &[Event]) -> Vec<String> {
     events
         .iter()
+        .filter(|event| !matches!(event, Event::Cleaned { .. }))
         .map(|event| match event {
             Event::Adopted { run_id } => format!("adopted {run_id}"),
             Event::Started { run_id, .. } => format!("started {run_id}"),
@@ -351,6 +354,7 @@ pub fn names(events: &[Event]) -> Vec<String> {
                 taint.reason
             ),
             Event::SlotFreed { run_id } => format!("freed {run_id}"),
+            Event::Cleaned { run_id, .. } => format!("cleaned {run_id}"),
             Event::Finding(finding) => format!(
                 "finding {} {}",
                 finding.run_id.as_deref().unwrap_or("-"),

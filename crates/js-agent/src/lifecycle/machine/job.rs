@@ -17,7 +17,9 @@ use crate::lifecycle::runtime::{
     Body, Exit, Found, JobFs, ResolvedMount, RunHandle, RunSpec, Ticket,
 };
 use crate::lifecycle::taint::{TaintState, reason};
-use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
+use crate::lifecycle::{
+    Capacity, CheckFinding, CleanupTimeline, Event, Finding, code, detail, label,
+};
 use crate::logs::Sink;
 
 /// Where a job is. The container's id travels with the stages that need it.
@@ -116,6 +118,12 @@ pub(super) struct Waiting {
 }
 
 impl Stage {
+    /// Whether the job is in its cleanup: its container, its scratch directory or its
+    /// checks are still to be done.
+    pub(super) fn cleaning(&self) -> bool {
+        matches!(self, Self::Removing(_) | Self::Scratch | Self::Checks)
+    }
+
     /// The container of a job that is still on the host.
     pub(super) fn container(&self) -> Option<&RunHandle> {
         match self {
@@ -315,6 +323,18 @@ pub(super) struct Stuck {
     pub(super) slot: Option<u32>,
 }
 
+/// Where a finished job's cleanup stands, beside its stage.
+#[derive(Default)]
+pub(super) struct Cleaning {
+    /// When the first step took the job into its cleanup, on the lifecycle's clock.
+    pub(super) since_ms: Option<u64>,
+    /// What [`Event::Cleaned`] carries, filled in as the steps are done.
+    pub(super) timeline: CleanupTimeline,
+    /// The run's directories are gone: a step that waits for the quota to read no usage
+    /// does not remove them again.
+    pub(super) dirs_removed: bool,
+}
+
 pub(super) struct Job {
     /// The run id, or the job id of a job keyed by job.
     pub(super) run_id: String,
@@ -379,6 +399,8 @@ pub(super) struct Job {
     /// The agent gave up waiting for the usage: the slot is parked, not released, when the
     /// cleanup passes.
     pub(super) slot_parked: bool,
+    /// Where its cleanup stands, once it ended.
+    pub(super) cleaning: Cleaning,
 }
 
 /// Microseconds in a millisecond.
@@ -599,6 +621,7 @@ impl Job {
             adopted: false,
             usage_held: None,
             slot_parked: false,
+            cleaning: Cleaning::default(),
         }
     }
 
@@ -637,6 +660,7 @@ impl Job {
             adopted: false,
             usage_held: None,
             slot_parked: false,
+            cleaning: Cleaning::default(),
         }
     }
 
@@ -677,6 +701,7 @@ impl Job {
             adopted: true,
             usage_held: None,
             slot_parked: false,
+            cleaning: Cleaning::default(),
         })
     }
 

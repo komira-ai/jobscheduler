@@ -361,6 +361,16 @@ pub enum Created {
     Pending,
 }
 
+/// How the removal of a container the lifecycle asked for stands ([`Runtime::removing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// Done: the container and everything its run made are gone, or the removal failed and
+    /// the runtime still holds the container, for a later removal.
+    Done(Result<(), RuntimeError>),
+    /// Under way off the lifecycle's worker: ask again at the next step.
+    Pending,
+}
+
 /// What the lifecycle needs of a container runtime.
 pub trait Runtime {
     /// Begins getting `image` onto the host when it is not there, and says where that
@@ -462,6 +472,17 @@ pub trait Runtime {
     ///
     /// The runtime cannot remove it.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError>;
+
+    /// Begins, or follows, [`Runtime::remove`] of the container `id`, off the lifecycle's
+    /// worker when the runtime can: [`Removal::Pending`] while the removal goes on beside
+    /// the worker (the runtime rings its [`Wake`] once it is done, and the lifecycle asks
+    /// again at every step until then), or its answer once it is done. The runtime forgets a
+    /// removal once it answered [`Removal::Done`]: a later call begins another. While one
+    /// is under way the runtime refuses a create of the same run, and a [`Runtime::remove`]
+    /// of the same container. The default removes on the caller's thread.
+    fn removing(&mut self, id: &RunHandle) -> Removal {
+        Removal::Done(self.remove(id))
+    }
 
     /// Every container carrying the run label ([`label::RUN`]) and this agent's label
     /// ([`label::AGENT`], the host id the backend puts on every container it makes), running

@@ -24,7 +24,6 @@
 pub(crate) mod assemble;
 pub(crate) mod kernel;
 mod list;
-pub(crate) mod pool;
 
 #[cfg(test)]
 mod assemble_tests;
@@ -42,9 +41,9 @@ use std::sync::Arc;
 use js_agent_wire::{Layer, refusal};
 use js_contain::job_fs::{MountCalls, ResolveError, make_private_dir, open_root};
 
+use crate::pool::{self, Pending, Poll, Pool};
 pub(crate) use assemble::{Assembled, Lower, Owners, Plan, Unassembled};
 pub use kernel::{Kernel, PathCalls};
-use pool::{Pending, Poll, Pool};
 
 use crate::lifecycle::{FsPrepared, HostSource, JobFs, MountRoots, NativeRefusal, RuntimeError};
 
@@ -157,6 +156,23 @@ struct Prep {
     assembly: Assembly,
 }
 
+/// What a thread of the removal pool unmounts a lease's file system with ([`Fs::releaser`]).
+pub(crate) struct Releaser {
+    calls: Arc<dyn MountCalls + Send + Sync>,
+    /// Where the leases' directories of mounts are.
+    dir: PathBuf,
+}
+
+impl Releaser {
+    /// [`Fs::release`] of the lease `name`.
+    ///
+    /// # Errors
+    /// A mount could not be removed, or the list read: the directory and the list stay.
+    pub(crate) fn release(&self, name: &str) -> Result<(), String> {
+        list::release(self.calls.as_ref(), &self.dir.join(name))
+    }
+}
+
 /// The file systems of a runtime's runs; see the [module](self).
 pub(crate) struct Fs {
     dir: PathBuf,
@@ -244,7 +260,7 @@ impl Fs {
             paths: settings.paths,
             image_allow: settings.image_allow,
             lookups: Pool::named(pool::THREADS, "js-lookups")?,
-            pool: Pool::new(pool::THREADS)?,
+            pool: Pool::named(pool::THREADS, "js-paths")?,
             preps: BTreeMap::new(),
         })
     }
@@ -481,7 +497,16 @@ impl Fs {
     /// # Errors
     /// A mount could not be removed, or the list read: the directory and the list stay.
     pub(crate) fn release(&self, name: &str) -> Result<(), String> {
-        list::release(self.calls.as_ref(), &self.dir_of(name))
+        self.releaser().release(name)
+    }
+
+    /// What unmounts the mounts of a lease off the worker ([`Releaser::release`]): the calls
+    /// and the directory of the mounts, and nothing else of the file systems.
+    pub(crate) fn releaser(&self) -> Releaser {
+        Releaser {
+            calls: Arc::clone(&self.calls),
+            dir: self.dir.clone(),
+        }
     }
 
     /// The number of host paths the lease `name` cloned, from its list: those at

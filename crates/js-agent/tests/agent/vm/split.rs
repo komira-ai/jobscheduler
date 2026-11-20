@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Wake, Whereabouts, label,
+    Created, FsPrepared, JobFs, Prepared, Removal, RunHandle, Runtime, Status, Wake, Whereabouts,
+    label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
@@ -101,6 +102,36 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     assert_eq!(fake.stops().len(), 1);
     with.remove(&on_host).unwrap();
     assert!(fake.gone("run-plain"));
+}
+
+/// Asserts that a removal is asked of the runtime that holds the run: a container's of the
+/// other runtime, whose answer the router passes on (pending while that runtime's gate holds
+/// it, then done, the container gone), and a VM run's of the VM runtime, which destroys the
+/// VM at once. Catches a router that keeps the trait's default and removes a container on
+/// the caller's thread, and a VM run's removal sent to the other runtime.
+#[test]
+fn a_removal_is_asked_of_the_runtime_that_holds_the_run() {
+    let driver = Arc::new(FakeDriver::new().answering(ExecEnd::Exited(2), "vm out", ""));
+    let fake = FakeRuntime::new(&Log::default(), &ManualClock::default());
+    let (other, gate) = Deferring::around(fake.clone());
+    let mut with = WithVms::new(VmRuntime::new(driver.clone()), Box::new(other));
+    let in_vm = with.create_and_start(&spec("run-vm", &["make"])).unwrap();
+    let mut plain = spec("run-plain", &["make"]);
+    plain.labels.remove(label::KIND);
+    let on_host = with.create_and_start(&plain).unwrap();
+
+    gate.hold_removal(&on_host.0);
+    assert_eq!(with.removing(&on_host), Removal::Pending);
+    assert_eq!(gate.removal_asks(&on_host.0), 1);
+    assert!(!fake.gone("run-plain"));
+    gate.release_removal(&on_host.0);
+    assert_eq!(with.removing(&on_host), Removal::Done(Ok(())));
+    assert!(fake.gone("run-plain"));
+
+    assert_eq!(ended(&mut with, &driver, &in_vm), super::runtime_exit(2));
+    assert_eq!(with.removing(&in_vm), Removal::Done(Ok(())));
+    assert_eq!(driver.steps_of(&vm("run-vm")).last(), Some(&Step::Destroy));
+    assert_eq!(gate.removal_asks(&in_vm.0), 0);
 }
 
 /// Asserts that the create of a VM run is begun by the VM runtime, which answers at once

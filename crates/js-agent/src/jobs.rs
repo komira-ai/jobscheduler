@@ -148,6 +148,7 @@ pub fn start(
         readiness: seams.readiness,
         silence_stop: Some(silence_stop),
         vm,
+        cleanup_threads: crate::pool::THREADS,
     })
     .map_err(|why| format!("{flag}: {why}"))?;
     worker.take_lines().iter().for_each(|line| {

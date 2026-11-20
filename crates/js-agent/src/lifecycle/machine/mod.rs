@@ -18,6 +18,7 @@ mod provided;
 mod provider_record;
 mod providing;
 mod rootfs;
+mod run_dirs;
 mod silence;
 mod slots;
 mod tails;
@@ -153,6 +154,9 @@ pub struct Lifecycle {
     wake: Wake,
     /// The timelines of the starts admitted and not yet started or ended (`timeline`).
     starting: BTreeMap<String, StartTimeline>,
+    /// The removals of finished runs' directories, on the lifecycle's pool when it has one
+    /// ([`Lifecycle::with_cleanup_threads`]).
+    run_dirs: run_dirs::RunDirs,
 }
 
 impl Lifecycle {
@@ -165,6 +169,19 @@ impl Lifecycle {
             blind_wait: wait,
             ..self
         }
+    }
+
+    /// The same lifecycle, removing each finished run's directories (its scratch directory
+    /// and those beside it) on a pool of `threads` threads (`js-scratch`) instead of on the
+    /// thread that steps it: the job waits in its cleanup until the pool answers, and the
+    /// pool rings the lifecycle's wake ([`Lifecycle::with_wake`]) when it has. Without it
+    /// the removal runs on the stepping thread.
+    ///
+    /// # Errors
+    /// A thread could not be made.
+    pub fn with_cleanup_threads(self, threads: usize) -> std::io::Result<Self> {
+        let run_dirs = run_dirs::RunDirs::pooled(threads, self.wake.clone())?;
+        Ok(Self { run_dirs, ..self })
     }
 
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be
@@ -261,8 +278,11 @@ impl Lifecycle {
     /// job as far through its cleanup as it will go, and tries again to remove the
     /// containers no job stands for that could not be removed. Every start is advanced
     /// before any job is watched or cleaned, so a start that waits is never behind another
-    /// job's cleanup (its fsyncs, its removals, its checks) in the same step; a start that
-    /// has settled to running is watched in that step. Call it on every tick.
+    /// job's cleanup (its fsyncs, its checks) in the same step; a start that has settled to
+    /// running is watched in that step. The container's removal and the removal of the
+    /// run's directories are asked of the runtime's and the lifecycle's threads when they
+    /// have them, and the step takes their answer once they rang the wake: the step does not
+    /// wait for them. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it

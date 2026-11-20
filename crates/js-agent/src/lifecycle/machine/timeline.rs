@@ -26,13 +26,14 @@ pub(super) fn mark_at(
 }
 
 impl Lifecycle {
-    /// Gives the runtime, and the providers attached from now on
-    /// ([`Lifecycle::attach_providers`]), `wake` to ring when work they do off the worker is
-    /// done: the worker that steps this lifecycle steps it at once, and a start that waited
-    /// on that work goes on.
+    /// Gives the runtime, the pool of the cleanup ([`Lifecycle::with_cleanup_threads`]) and the
+    /// providers attached from now on ([`Lifecycle::attach_providers`]), `wake` to ring when
+    /// work they do off the worker is done: the worker that steps this lifecycle steps it at
+    /// once, and a start or a cleanup that waited on that work goes on.
     #[must_use]
     pub fn with_wake(mut self, wake: Wake) -> Self {
         self.runtime.set_wake(wake.clone());
+        self.run_dirs.set_wake(&wake);
         self.wake = wake;
         self
     }

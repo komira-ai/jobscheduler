@@ -93,6 +93,16 @@ fn a_runtime_that_says_nothing_creates_on_the_callers_thread() {
     );
 }
 
+/// Asserts that a runtime that keeps the trait's defaults removes on the caller's thread:
+/// `removing` answers what `remove` does, at once and never pending. Catches a default that
+/// answers pending for a removal nobody runs, which would hold the run's slot for good.
+#[test]
+fn a_runtime_that_says_nothing_removes_on_the_callers_thread() {
+    let mut bare = Bare;
+    let id = RunHandle("c1".to_owned());
+    assert_eq!(bare.removing(&id), Removal::Done(Ok(())));
+}
+
 /// Catches the host paths of a start counted in another order than the runtime's sources
 /// (a layer's after a mount's), a read-write mount not marked as writing, a `sub_path`
 /// lost, an image layer taken for a host path or the other way round, and a layer or a
