@@ -312,7 +312,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// - the rows `beside` gives for the freed allocation are put, as [`JobStore::free_with`]
     ///   puts them;
     /// - the job's `mark/<id>` is deleted at the version read, or its absence is a
-    ///   precondition when there is none.
+    ///   precondition when there is none;
+    /// - any start of the allocation is deleted from the host's dispatch queue, at the version
+    ///   read (a placed whole-host job is queued none, and is sent no stop).
     ///
     /// Returns the job and the allocation as written.
     ///

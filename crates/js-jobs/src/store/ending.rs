@@ -44,7 +44,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`Retention`](crate::Retention); a booked allocation of the job moves to releasing in
     /// the same transaction (design section 8, row 25), so the job and its allocation never
     /// disagree. Every end goes through here: [`JobStore::transition`] makes no end, and the
-    /// cancel of a queued job ([`JobStore::request_cancel`]) ends it here too.
+    /// cancel of a queued job ([`JobStore::request_cancel`]) ends it here too. The same
+    /// transaction deletes the job's start from its host's dispatch queue and, for an end the
+    /// server decided rather than the host reported, queues a stop when the start may have
+    /// reached the host (the `dispatch` module of the store says when).
     ///
     /// Ending a job that has already ended writes nothing and returns the stored record: the
     /// first result and retention end stand.
@@ -53,7 +56,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::NotFound`]; [`JobStoreError::IllegalTransition`] when the job's state
     /// cannot end that way (an exit of a job that is not running, a start failure from a state
     /// the design does not name for it); [`JobStoreError::Stale`] when the job or its
-    /// allocation changed before the commit; as for any read and write.
+    /// allocation changed before the commit, or a server handed out the job's start in between;
+    /// as for any read and write.
     pub fn end_job(&self, id: &JobId, end: JobEnd) -> Result<JobRecord, JobStoreError> {
         let (job, version) = self.job_row(id)?;
         if job.state.is_ended() {
@@ -124,9 +128,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// One pass of the retention sweep (design section 6.1, step 1): walks the job table in
     /// key order, [`SWEEP_BATCH`](crate::SWEEP_BATCH) rows at a time, and deletes the jobs
     /// of each batch that are past their retention end by the store's clock, read once at
-    /// the start of the pass, one transaction per batch. It reads no system time: the time is
-    /// the store's [`Clock`](js_state::Clock). A row a later build wrote is left as it is and
-    /// logged. It returns the ids it deleted.
+    /// the start of the pass, one transaction per batch, with their dispatch messages. It reads
+    /// no system time: the time is the store's [`Clock`](js_state::Clock). A row a later build
+    /// wrote is left as it is and logged. It returns the ids it deleted.
     ///
     /// Then it deletes at most one batch of freed allocation rows whose free is the store's
     /// allocation retention or more before that time ([`JobStore::with_allocation_retention`]),

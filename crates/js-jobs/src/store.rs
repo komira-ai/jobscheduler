@@ -572,11 +572,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             (self.without_mark(txn, id)?, next)
         } else {
             let txn = index::put_job(Txn::new(), Some(&job), &asked, Cond::Version(job_version))?;
-            let allocation = self.read_allocation(id)?.map(|(allocation, _)| allocation);
-            (
-                self.queue_stop(txn, &job, allocation.as_ref(), true, now)?,
-                asked,
-            )
+            (self.stop_on_cancel(txn, &job, now)?, asked)
         };
         self.commit(id, txn)?;
         Ok(next)

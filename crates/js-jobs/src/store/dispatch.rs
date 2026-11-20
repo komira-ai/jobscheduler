@@ -9,11 +9,12 @@
 //!   writes none.
 //! - **A stop** is written in the transaction that asks for a placed job's cancel
 //!   ([`JobStore::request_cancel`]) or that ends a job by the server's own decision (a loss, a
-//!   start or queue timeout, a failed prepare, a cancel of a job its host no longer holds): every
-//!   end but the ones the host reported, which the host has already acted on. It is written only
-//!   when the start may have reached the host: the start was handed out, or no start is queued
-//!   (it was acknowledged, or an earlier release placed the job and queued none) for a job whose
-//!   start was due. A start never handed out is deleted instead, and nothing is sent.
+//!   start timeout, a failed prepare, a cancel of a job its host no longer holds): every end but
+//!   the ones the host reported, which the host has already acted on. It is written only when the
+//!   start may have reached the host: the start was handed out, the job is starting or running
+//!   (the heartbeat's reply carries starts too), or no start is queued (it was acknowledged, or
+//!   an earlier release placed the job and queued none) for a job whose start was due. A start
+//!   never handed out of a job not yet starting is deleted instead, and nothing is sent.
 //! - **Every end deletes the job's start**, so no start outlives its job, and the retention sweep
 //!   deletes the rest of a job's messages with its row ([`JobStore::tick`]).
 //! - **A claim** ([`JobStore::claim_dispatch`]) takes each due message of a host in its own
@@ -21,9 +22,9 @@
 //!   one message at once, and holds it for a lease on the store's clock; a message not
 //!   acknowledged by then is handed out again. Delivery is at least once: the agent's start is
 //!   idempotent on the job id, fenced by the allocation id.
-//! - **An acknowledgement** ([`JobStore::ack_dispatch`]) names allocations and deletes the
-//!   messages of them that were handed out; one already gone, or never handed out, is left as it
-//!   is.
+//! - **An acknowledgement** ([`JobStore::ack_dispatch`]) names messages by allocation and kind
+//!   and deletes those that were handed out; one already gone, or never handed out, is left as
+//!   it is.
 //!
 //! A row this build cannot read (a later build's, or one that does not parse) is left as it is
 //! and logged: no claim hands it out, no acknowledgement deletes it, and no end counts it.
@@ -228,26 +229,27 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    /// The agent of `host` acknowledges the messages of `allocations`: every message of the host
-    /// for one of them that was handed out ([`DispatchMessage::claimed_by`]) is deleted, in one
-    /// transaction, and their number returned. An allocation with no such message (acknowledged
-    /// already, never queued, or another host's) changes nothing, and neither does a message not
-    /// yet handed out, which the agent has not seen: a stop queued after its start was handed out
-    /// stays queued when the agent acknowledges the start.
+    /// The agent of `host` acknowledges the messages `acks` names, each by its allocation and
+    /// its kind: every message of the host so named that was handed out
+    /// ([`DispatchMessage::claimed_by`]) is deleted, in one transaction, and their number
+    /// returned. A name with no such message (acknowledged already, never queued, or another
+    /// host's) changes nothing, and neither does a message not yet handed out, which the agent
+    /// has not seen. The kind keeps an acknowledgement of a start from deleting the stop of the
+    /// same allocation, which the agent may not have seen even when a server handed it out.
     ///
     /// # Errors
     /// [`JobStoreError::Store`]; nothing is deleted then.
     pub fn ack_dispatch(
         &self,
         host: &HostId,
-        allocations: &[AllocationId],
+        acks: &[(AllocationId, DispatchKind)],
     ) -> Result<usize, JobStoreError> {
-        let named: BTreeSet<AllocationId> = allocations.iter().copied().collect();
+        let named: BTreeSet<(AllocationId, DispatchKind)> = acks.iter().copied().collect();
         let mut txn = Txn::new();
         let mut acked = 0;
         for (key, _, message) in self.queue_of(host)? {
-            let seen = message.claimed_by.is_some() & named.contains(&message.allocation_id);
-            if seen {
+            let name = (message.allocation_id, message.kind);
+            if message.claimed_by.is_some() & named.contains(&name) {
                 // A message's key is never used again, so whatever claim it holds now, it is
                 // the message the agent saw: the delete needs no precondition.
                 txn = txn.delete(key, Cond::Any);
@@ -302,9 +304,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// at the version read (a claim in between makes the commit stale), and, when `stop` (the
     /// end is the server's decision, not the host's report), a stop queued at `now` if the
     /// start may have reached the host and no stop is queued yet. The start may have reached it
-    /// when it was handed out, or when none is queued for a job whose start was due (a
-    /// whole-host job's start is not due until it is starting) and whose cancel, which would
-    /// have decided this already, was not asked for before.
+    /// when it was handed out, when the job is starting or running, or when none is queued for a
+    /// job whose start was due (a whole-host job's start is not due until it is starting) and
+    /// whose cancel, which would have decided this already, was not asked for before.
     pub(super) fn queue_stop(
         &self,
         txn: Txn,
@@ -333,12 +335,27 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         }
         let due = !((job.spec.needs == Needs::WholeHost) & (job.state == JobState::Placed));
-        let reached = handed_out | (!started & due & !job.cancel_requested);
+        let started_on_host = matches!(job.state, JobState::Starting | JobState::Running);
+        let reached = handed_out | started_on_host | (!started & due & !job.cancel_requested);
         if !(stop & reached & !stopped) {
             return Ok(txn);
         }
         let message = DispatchMessage::new(DispatchKind::Stop, allocation, now);
         put_message(txn, &message, Cond::Absent)
+    }
+
+    /// `txn`, which asks for the cancel of `job` (as read before it), with its allocation's
+    /// queue brought in line as [`JobStore::queue_stop`] does for a decision of the server.
+    pub(super) fn stop_on_cancel(
+        &self,
+        txn: Txn,
+        job: &JobRecord,
+        now: StoreTime,
+    ) -> Result<Txn, JobStoreError> {
+        let allocation = self
+            .read_allocation(&job.id)?
+            .map(|(allocation, _)| allocation);
+        self.queue_stop(txn, job, allocation.as_ref(), true, now)
     }
 
     /// `txn` with every readable message of the jobs of `jobs` deleted, whatever claim it holds:
@@ -376,6 +393,30 @@ mod tests {
         fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
             Err(StoreError::Failed("the scan failed".to_owned()))
         }
+    }
+
+    /// A view that holds no row.
+    struct Empty;
+
+    impl TxnRead for Empty {
+        fn get(&mut self, _key: &str) -> Result<Option<Versioned>, StoreError> {
+            Ok(None)
+        }
+
+        fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Catches a claim that invents a message whose row is gone by the time its transaction
+    // reads it (a store answers such a claim `Held` before it decides; the decision does not
+    // rest on that): it claims nothing and writes nothing.
+    #[test]
+    fn a_claim_of_a_message_already_gone_claims_nothing() {
+        let at = StoreTime::ZERO;
+        let decided = decide_claim(&mut Empty, "dispatch/host-a/x", "server-1", (at, at));
+        assert_eq!(decided.map(|found| found.is_none()), Ok(true));
+        assert_eq!(Empty.scan_prefix("dispatch/"), Ok(Vec::new()));
     }
 
     // Catches a claim that takes a failed read for an absent message (and so answers nothing

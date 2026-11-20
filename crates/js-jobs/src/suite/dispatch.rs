@@ -202,22 +202,28 @@ pub fn a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock<B: Ba
     );
 }
 
-/// An acknowledgement deletes the named allocations' messages that were handed out, in one
-/// commit: a second acknowledgement, one of an unknown allocation, one on another host and an
+/// An acknowledgement deletes the named messages (allocation and kind) that were handed out, in
+/// one commit: a second acknowledgement, one of an unknown allocation, one on another host and an
 /// empty one change nothing and write nothing; a message never handed out is kept, and so is a
-/// stop queued after its start was handed out when the agent acknowledges that start. Catches an
-/// acknowledgement that deletes what the agent never saw, and one that is not idempotent.
+/// stop queued after its start was handed out, whether or not a server has handed the stop out,
+/// when the agent acknowledges that start. Catches an acknowledgement that deletes what the agent
+/// never saw, and one that is not idempotent.
 pub fn an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing<B: Backend>(
     backend: &B,
 ) {
     let name = "an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing";
     let rig = rig(backend);
     let a = host("host-a");
+    let start = |allocation| (allocation, DispatchKind::Start);
     let (_, one) = placed_on(&rig, "ack-a", "host-a");
     let (_, two) = placed_on(&rig, "ack-b", "host-a");
     assert_eq!(claim_all(&rig).len(), 2, "{name}");
     let commits = rig.store.commit_stats().txns;
-    assert_eq!(rig.jobs.ack_dispatch(&a, &[one, one]), Ok(1), "{name}");
+    assert_eq!(
+        rig.jobs.ack_dispatch(&a, &[start(one), start(one)]),
+        Ok(1),
+        "{name}"
+    );
     assert_eq!(
         rig.store.commit_stats().txns,
         commits + 1,
@@ -233,10 +239,11 @@ pub fn an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing<B: B
     let before = rig.snapshot();
     let unknown = AllocationId::from_bits([9; 16]);
     for (on, named) in [
-        (&a, vec![one]),
-        (&a, vec![unknown]),
-        (&a, vec![three]),
-        (&host("host-b"), vec![two]),
+        (&a, vec![start(one)]),
+        (&a, vec![start(unknown)]),
+        (&a, vec![start(three)]),
+        (&a, vec![(two, DispatchKind::Stop)]),
+        (&host("host-b"), vec![start(two)]),
         (&a, Vec::new()),
     ] {
         assert_eq!(
@@ -246,7 +253,11 @@ pub fn an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing<B: B
         );
     }
     assert_eq!(rig.snapshot(), before, "{name}: an ack of nothing wrote");
-    assert_eq!(rig.jobs.ack_dispatch(&a, &[two, three]), Ok(1), "{name}");
+    assert_eq!(
+        rig.jobs.ack_dispatch(&a, &[start(two), start(three)]),
+        Ok(1),
+        "{name}"
+    );
     assert_eq!(
         allocations(&queue(&rig, "host-a")),
         BTreeSet::from([three]),
@@ -256,14 +267,20 @@ pub fn an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing<B: B
     let (id, four) = placed_on(&rig, "ack-d", "host-a");
     claim_all(&rig);
     rig.jobs.request_cancel(&id).expect("asks for the cancel");
+    let stop = (four, DispatchKind::Stop);
     assert_eq!(
-        rig.jobs.ack_dispatch(&a, &[four]),
+        rig.jobs.ack_dispatch(&a, &[start(four), stop]),
         Ok(0),
         "{name}: a stop not yet sent"
     );
     assert_eq!(of_job(&rig, &id), [(DispatchKind::Stop, false)], "{name}");
     assert_eq!(claim_all(&rig).len(), 1, "{name}: the stop is handed out");
-    assert_eq!(rig.jobs.ack_dispatch(&a, &[four]), Ok(1), "{name}");
+    assert_eq!(
+        rig.jobs.ack_dispatch(&a, &[start(four)]),
+        Ok(0),
+        "{name}: the start's ack deleted a stop handed out since"
+    );
+    assert_eq!(rig.jobs.ack_dispatch(&a, &[stop]), Ok(1), "{name}");
     assert_eq!(of_job(&rig, &id), [], "{name}");
 }
 
@@ -459,9 +476,9 @@ pub fn a_whole_host_job_queues_its_start_when_it_moves_to_starting<B: Backend>(b
 }
 
 /// Each way a job ends, or its cancel is asked for, leaves its host's queue as the start's fate
-/// says: a start never handed out is deleted and nothing is sent; a start handed out, or one
-/// acknowledged (or never queued, by an earlier release) for a job whose start was due, is
-/// replaced by one stop; an end the host reported sends none; a cancel already decided sends no
+/// says: a start never handed out is deleted and nothing is sent; a start handed out, one of a job
+/// the host reports running (the heartbeat's reply carried it), or one acknowledged (or never
+/// queued, by an earlier release) for a job whose start was due, is replaced by one stop; an end the host reported sends none; a cancel already decided sends no
 /// second stop; a whole-host job not yet starting sends none. Catches an orphan start, a stop
 /// for a job that never reached its host or that the host already ended, and two stops.
 pub fn an_end_leaves_a_stop_only_where_the_start_may_have_reached_the_host<B: Backend>(
@@ -471,7 +488,10 @@ pub fn an_end_leaves_a_stop_only_where_the_start_may_have_reached_the_host<B: Ba
     let rig = rig(backend);
     let a = host("host-a");
     let stop = [(DispatchKind::Stop, false)];
-    let ack = |allocation| rig.jobs.ack_dispatch(&a, &[allocation]).expect("acks");
+    let ack = |allocation| {
+        let start = (allocation, DispatchKind::Start);
+        rig.jobs.ack_dispatch(&a, &[start]).expect("acks")
+    };
 
     let (never, _) = placed_on(&rig, "e-never", "host-a");
     rig.jobs.request_cancel(&never).expect("asks");
@@ -527,6 +547,22 @@ pub fn an_end_leaves_a_stop_only_where_the_start_may_have_reached_the_host<B: Ba
         of_job(&rig, &waited),
         [],
         "{name}: a timeout of a start never sent"
+    );
+
+    let reported = rig.running("e-reported");
+    rig.jobs.request_cancel(&reported).expect("asks");
+    assert_eq!(
+        of_job(&rig, &reported),
+        stop,
+        "{name}: cancel of a running job whose start went by the heartbeat"
+    );
+    rig.jobs
+        .end_and_free(&reported, JobEnd::Lost, EndReason::HostAbsent)
+        .expect("loses");
+    assert_eq!(
+        of_job(&rig, &reported),
+        stop,
+        "{name}: a second stop at its loss"
     );
 
     let ran = rig.running("e-ran");
@@ -705,7 +741,9 @@ pub fn a_dispatch_row_of_another_build_is_read_or_left<B: Backend>(backend: &B) 
         BTreeSet::from([allocation]),
         "{name}"
     );
-    rig.jobs.ack_dispatch(&a, &[allocation]).expect("acks");
+    rig.jobs
+        .ack_dispatch(&a, &[(allocation, DispatchKind::Start)])
+        .expect("acks");
     rig.jobs.request_cancel(&id).expect("asks");
     assert_eq!(
         rig.raw(&unreadable).map(|row| row.value),
@@ -762,12 +800,17 @@ pub fn a_failed_claim_or_ack_changes_nothing_and_says_so<B: Backend>(backend: &B
     );
     let held = rig.snapshot().0;
     rig.store.fail_next();
-    let failed = rig.jobs.ack_dispatch(&a, &[allocation]);
+    let failed = rig
+        .jobs
+        .ack_dispatch(&a, &[(allocation, DispatchKind::Start)]);
     assert_eq!(failed, injected(), "{name}: a failed acknowledgement");
     assert_eq!(
         rig.snapshot().0,
         held,
         "{name}: a failed acknowledgement deleted"
     );
-    assert_eq!(rig.jobs.ack_dispatch(&a, &[allocation]), Ok(1), "{name}");
+    let acked = rig
+        .jobs
+        .ack_dispatch(&a, &[(allocation, DispatchKind::Start)]);
+    assert_eq!(acked, Ok(1), "{name}");
 }
