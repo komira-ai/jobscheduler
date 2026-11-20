@@ -139,5 +139,6 @@ fn the_hold_of_a_reply_is_the_pools_interval_up_to_five_seconds() {
         );
         let agents = assembled.unwrap();
         assert_eq!(agents.hold_bound, std::time::Duration::from_secs(held));
+        assert_eq!(agents.starting_hold, crate::held_beat::STARTING_HOLD);
     }
 }

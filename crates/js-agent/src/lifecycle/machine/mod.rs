@@ -241,18 +241,25 @@ impl Lifecycle {
     }
 
     /// Lets the jobs make progress: stops every job when the server has been silent for the
-    /// bound ([`Lifecycle::stop_on_silence`]), watches each running container and its
-    /// wall-time limit, then takes each finished job as far through its cleanup as it will
-    /// go, and tries again to remove the containers no job stands for that could not be
-    /// removed. Call it on every tick.
+    /// bound ([`Lifecycle::stop_on_silence`]), takes each job that waits to start one step
+    /// on, watches each running container and its wall-time limit, then takes each finished
+    /// job as far through its cleanup as it will go, and tries again to remove the
+    /// containers no job stands for that could not be removed. Every start is advanced
+    /// before any job is watched or cleaned, so a start that waits is never behind another
+    /// job's cleanup (its fsyncs, its removals, its checks) in the same step; a start that
+    /// has settled to running is watched in that step. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it
         // happened, and the agent refuses starts and frees no slot until it is written.
         let _ = self.taint.persist();
         self.watch_silence(&mut events);
+        // The jobs are only ever added at the end and a settled start replaces its own entry,
+        // so the indexes stay valid from one pass to the next.
         for index in 0..self.jobs.len() {
             self.advance(index, &mut events);
+        }
+        for index in 0..self.jobs.len() {
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
         }

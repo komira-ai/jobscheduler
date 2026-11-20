@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use js_types::HostId;
 
-use super::{MAX_HOLD, Wakes, Watch, hold_bound};
+use super::{
+    MAX_HOLD, STARTING_HOLD, STARTING_WINDOW_MS, Starts, Wakes, Watch, hold_bound, starting_hold,
+};
 
 /// Whether `watch` holds a wake already: its wait ends without yielding.
 async fn woken_now(watch: &Watch) -> bool {
@@ -26,6 +28,18 @@ fn a_reply_is_held_for_the_interval_up_to_five_seconds() {
     assert_eq!(hold_bound(Duration::from_secs(1)), Duration::from_secs(1));
     assert_eq!(hold_bound(Duration::from_secs(30)), Duration::from_secs(5));
     assert_eq!(MAX_HOLD, Duration::from_secs(5));
+}
+
+/// Asserts that a reply to a beat that lists a job `starting` is held for 200 ms, and never
+/// longer than the normal hold of the same interval. It catches a short hold that outlasts a
+/// short interval, and one that is not short next to the interval agents beat at.
+#[test]
+fn a_reply_to_a_starting_beat_is_held_for_the_short_bound_or_the_normal_one_if_shorter() {
+    assert_eq!(STARTING_HOLD, Duration::from_millis(200));
+    assert_eq!(starting_hold(Duration::from_secs(1)), STARTING_HOLD);
+    assert_eq!(starting_hold(Duration::from_secs(30)), STARTING_HOLD);
+    let short = Duration::from_millis(50);
+    assert_eq!(starting_hold(short), short);
 }
 
 /// Asserts that a wake that comes before the hold begins is kept, so the hold that follows
@@ -69,4 +83,33 @@ fn each_wait_of_a_held_reply_is_counted() {
     wakes.waiting();
     wakes.waiting();
     assert_eq!((*early.borrow(), *wakes.waits().borrow()), (2, 2));
+}
+
+/// Asserts what [`Starts::young`] says of a host's listing over time: a job first seen
+/// `starting` is young until the window has passed since then, and not from that moment on; a
+/// second job newly listed is young while the first is not; a listing without `starting` jobs is
+/// not young; and a job left out of a listing is forgotten, so listed again it is young again.
+/// It catches a window counted from each beat rather than from the job's first sight (a start
+/// that waits for minutes then keeps its host beating five times a second), one off by one at
+/// its end, and a job that is never forgotten.
+#[test]
+fn a_start_takes_the_short_hold_for_the_window_from_when_a_hold_first_saw_it() {
+    let starts = Starts::default();
+    let (a, b) = (host("host-a"), host("host-b"));
+    assert!(!starts.young(&a, &[], 100));
+    assert!(starts.young(&a, &["job-1"], 100));
+    assert!(starts.young(&a, &["job-1"], 100 + STARTING_WINDOW_MS - 1));
+    assert!(!starts.young(&a, &["job-1"], 100 + STARTING_WINDOW_MS));
+    // Another host's starts are its own.
+    assert!(starts.young(&b, &["job-1"], 100 + STARTING_WINDOW_MS));
+    let later = 100 + STARTING_WINDOW_MS + 500;
+    assert!(starts.young(&a, &["job-1", "job-2"], later));
+    assert!(!starts.young(&a, &["job-1", "job-2"], later + STARTING_WINDOW_MS));
+    // job-1 is left out, then listed again: it counts from then.
+    let again = later + 2 * STARTING_WINDOW_MS;
+    assert!(!starts.young(&a, &["job-2"], again));
+    assert!(starts.young(&a, &["job-1", "job-2"], again));
+    // A listing with none forgets the host.
+    assert!(!starts.young(&a, &[], again));
+    assert!(starts.young(&a, &["job-2"], again + 1));
 }

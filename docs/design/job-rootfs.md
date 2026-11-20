@@ -778,7 +778,7 @@ three things, each on a thread pool that is not the lifecycle worker:
 
 - **its images**, the image and every image layer, each through the prefetcher (single flight per image; `prepare`
   takes the set and answers `Ready` when all are);
-- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of four threads (`js-paths`) with a bound of 60 s
+- **its host paths**, each resolved (4.2, steps 1 and 2) on a pool of four threads of their own (`js-lookups`) with a bound of 60 s
   each; a path that is missing or unreadable is `input-unavailable` at once, and one that has not answered by the bound
   is `input-unavailable` then;
 - **the assembly**, once both are ready: the lease directory, its quota, the clones (4.2, step 3), the targets, the
@@ -1018,9 +1018,10 @@ a job spent creating is visible already: `Job.times.started_at_ms - Job.times.pl
 which includes the heartbeat that carried the start. Nothing new is reported.
 
 Why the lookups and mounts stay off the lifecycle worker: a lookup on a FUSE file system blocks in the kernel until
-the file system answers, and one that has hung never returns; the worker serves every other job. The `js-paths` pool
-has four threads and makes none on demand, so a hung provider holds at most four threads, and further lookups wait their
-60 s and fail `input-unavailable`. A thread stuck in the kernel stays stuck until the file system answers or is
+the file system answers, and one that has hung never returns; the worker serves every other job. The `js-lookups` pool
+has four threads and makes none on demand, so a hung provider holds at most four of them, and further lookups wait their
+60 s and fail `input-unavailable`. The assemblies and the after-exit checks run on a second pool of four (`js-paths`), so
+an assembly held by a hung file system never delays another start's lookups. A thread stuck in the kernel stays stuck until the file system answers or is
 unmounted; that is the provider's to fix, and the host reports it only through failed starts.
 
 ## 8. Failures
@@ -1257,7 +1258,7 @@ One subject per pull request, in this order; each names its tests from section 1
    overlay the agent mounts for a root and for a copy-on-write mount, the unmounts, `remove_tree`'s mount rule, the
    private `<mounts>`; the root suite cases. `MOUNT_ATTR_NOEXEC`, `HostMount`'s `noexec` flag and the `sub_path` open
    of 4.2 are part of the same calls and the same spec entry.
-5. **The `crun` agent's file system** (`js-agent`): admission, the `js-paths` pool and the preparing stage, the
+5. **The `crun` agent's file system** (`js-agent`): admission, the `js-lookups` and `js-paths` pools and the preparing stage, the
    multi-image prepare, the assembly, the list of mounts and every cleanup path, the integrity exclusion,
    `--image-allow-loopback`, accepting `--mount-root`/`--mount-root-ro` with `crun`, the after-exit check, the kernel
    check and the `layered-rootfs` report. `no_exec` and `sub_path` are carried through the assembly as the mode is.

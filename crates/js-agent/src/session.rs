@@ -80,10 +80,11 @@
 //!   server sends everything again, and the next heartbeat waits a backoff that grows while
 //!   the worker stays full ([`Backoff`]), so a full worker is not asked again at once.
 //! - The wait after a heartbeat whose reply the worker took ends as soon as the worker has
-//!   news for the server: a job that runs, or ended ([`Session::beats_on_news`],
-//!   [`Worker::ring_on_news`]). So a start's `running` reaches the server the moment its
-//!   container runs, not an interval after the reply that carried the start, and the
-//!   heartbeat that carries it is then the one the server holds for the next placement.
+//!   news for the server: a job taken as a start, that runs, or ended
+//!   ([`Session::beats_on_news`], [`Worker::ring_on_news`]). So the heartbeat after a start
+//!   leaves once the worker has taken it, not an interval after the reply that carried it, and
+//!   it is the one the server holds for the next placement; a start's `running` reaches the
+//!   server the moment its container runs, on the heartbeat that follows.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told. A `taint_cleared_ack` counts only when the
@@ -569,7 +570,7 @@ impl<'a> Session<'a> {
     }
 
     /// Whether the wait the last [`Session::tick`] asked for may end as soon as the worker
-    /// has news for the server (a job that runs, or ended: [`Worker::ring_on_news`]): the
+    /// has news for the server (a job taken, that runs, or ended: [`Worker::ring_on_news`]): the
     /// wait after a heartbeat the server accepted and whose reply the worker took. A wait
     /// after a failure, a refusal or a reply the worker had no room for runs its course.
     pub fn beats_on_news(&self) -> bool {

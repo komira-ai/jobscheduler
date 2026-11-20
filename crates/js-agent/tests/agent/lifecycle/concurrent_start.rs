@@ -14,7 +14,7 @@ use super::fake::UNIX_ORIGIN_MS;
 use super::fake_providers::{FakeProviders, IMAGE, mount, provided_mount, rig, tree, with_mount};
 use super::per_job::{job_start, listing};
 use super::rootfs::layered;
-use super::{Harness, names};
+use super::{Harness, cleanup, job, names};
 
 /// The lines the shared log holds that begin with one of `kinds`, in order.
 fn logged(h: &Harness, kinds: &[&str]) -> Vec<String> {
@@ -300,4 +300,40 @@ fn a_start_with_providers_and_no_host_paths_starts_when_they_answer() {
             ("created", 10),
         ]
     );
+}
+
+/// Asserts that when a job that ended and awaits its cleanup is listed before a start whose
+/// lookups have answered, one step asks the runtime to resolve and then to assemble the
+/// start before it removes the older job's container, that the removal and the rest of the
+/// older job's cleanup still complete in that step, and that the start is created at the
+/// next step. Catches a waiting start held behind the cleanup of the jobs that were
+/// admitted before it.
+#[test]
+fn a_waiting_start_is_advanced_before_the_cleanup_of_older_jobs() {
+    let (mut h, _providers) = rig("conc-before-cleanup", |_| {});
+    h.start(job("old"));
+    h.fake.exit("old", 0);
+    h.fake.resolve_answers("j1", FsPrepared::Pending);
+    let spec = layered(&h, "j1");
+    h.apply(vec![job_start(spec)]);
+    h.fake.resolve_answers("j1", FsPrepared::Ready);
+    let before = h.log.borrow().len();
+    let events = names(&h.life.step());
+    assert_eq!(
+        events,
+        [vec!["result old".to_owned()], cleanup("old")].concat(),
+        "the older job is cleaned in the same step"
+    );
+    let log = h.log.borrow()[before..].to_vec();
+    let position = |prefix: &str| {
+        log.iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix} is not in {log:?}"))
+    };
+    assert!(position("resolve j1") < position("assemble j1"), "{log:?}");
+    assert!(position("assemble j1") < position("remove"), "{log:?}");
+    assert!(h.fake.gone("old"));
+    assert!(!h.scratch_of("old").exists());
+    assert_eq!(names(&h.life.step()), ["started j1"]);
+    assert_eq!(listing(&h, "j1").state, HeldState::Running);
 }
