@@ -167,8 +167,8 @@ fn commands_alone_leave_a_ready_lease_hold_as_it_is() {
     assert_eq!(h.life.exclusive(), Some(LEASE));
     assert_eq!(
         prepare(&mut h).0,
-        Quiet::Busy,
-        "a is held until acknowledged"
+        Quiet::Ready,
+        "the hold is still ready: the host is not prepared again"
     );
     assert_eq!(checks_of(&h, LEASE), 1);
 }
