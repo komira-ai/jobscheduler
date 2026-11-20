@@ -20,6 +20,7 @@ use serde_json::json;
 
 use super::*;
 use crate::clock::SharedClock;
+use crate::join_tokens::JoinRefusal;
 
 fn instance() -> InstanceIdentity {
     InstanceIdentity {

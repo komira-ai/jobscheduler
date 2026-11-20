@@ -26,6 +26,7 @@ use crate::api::Shared;
 use crate::api::rig::Lines;
 use crate::clock::SharedClock;
 use crate::config::parse_token;
+use crate::join_tokens::JoinRefusal;
 use crate::join_tokens::JoinTokens;
 
 #[path = "agent_api_store_clear_tests.rs"]
