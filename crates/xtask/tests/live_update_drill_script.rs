@@ -1,10 +1,11 @@
 //! The held script `tools/held/live-update-drill/live_update_drill.sh`, run by `bash` with
 //! stand-ins first on `PATH`: a `js` that answers the host and job listings from files of the
 //! test (the hosts after the update once the stand-in `docker` has run), a `docker` that
-//! writes the arguments it was given and exits with the status it is told, and a `sleep` that
-//! returns at once. So each test pins what the script would run, that a dry run is the
-//! default and changes nothing, what the verdict of an update is, and what it refuses (exit 2,
-//! with `docker` never run). Nothing reaches a server or a Swarm.
+//! writes the arguments it was given and exits with the status it is told, a `sleep` that
+//! returns at once and, for one test, a `wc` that pads its count as macOS's does. So each test
+//! pins what the script would run, that a dry run is the default and changes nothing, what the
+//! verdict of an update is, and what it refuses (exit 2, with `docker` never run). Nothing
+//! reaches a server or a Swarm.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -135,6 +136,16 @@ impl Rig {
         }
     }
 
+    /// Puts a `wc` first on `PATH` that counts the lines of its input and pads the count to
+    /// eight columns, as `wc -l` on macOS does.
+    fn pad_wc(&self) {
+        install_script(
+            &self.dir.join("bin/wc"),
+            "#!/bin/sh\nn=0\nwhile IFS= read -r _; do n=$((n + 1)); done\nprintf '%8d\\n' \"$n\"\n",
+            "755",
+        );
+    }
+
     fn run(&self, more: &[&str]) -> Ran {
         self.run_with(&self.args(more), 0)
     }
@@ -179,6 +190,23 @@ fn a_dry_run_reads_and_changes_nothing() {
         ran.js[1],
         format!("{flags} job list --states running --page-size 500")
     );
+}
+
+/// Asserts that the counts the script prints are bare numbers when `wc -l` pads its count
+/// with spaces, as it does on macOS: a dry run prints `hosts taking jobs: 2` and
+/// `jobs running: 2` exactly. It catches a drill that prints `wc`'s output as it came.
+#[test]
+fn a_count_that_wc_pads_is_printed_bare() {
+    let rig = Rig::quiet("padded");
+    rig.pad_wc();
+    let ran = rig.run(&[]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    let hosts = format!(
+        "hosts taking jobs: 2 (in {})",
+        rig.dir.join("out/hosts-before.txt").display()
+    );
+    let lines: Vec<&str> = ran.stdout.lines().collect();
+    assert_eq!(lines[..2], [hosts.as_str(), "jobs running: 2"], "{ran:?}");
 }
 
 /// Asserts that an update that loses nothing passes: `docker` is told to update the service
