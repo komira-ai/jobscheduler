@@ -14,6 +14,8 @@ use crate::load;
 use crate::refusal::{Refusal, ShapeFault};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 
+mod admit;
+mod adopt;
 mod beat;
 mod cordon;
 mod marks;
@@ -24,6 +26,7 @@ mod view;
 
 use record::Record;
 
+pub use adopt::{Adopted, NodeSession};
 pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 pub use marks::Busy;
@@ -419,148 +422,6 @@ impl Registry {
         credential: &Credential,
     ) -> Result<Welcome, Refusal> {
         self.admit(hello, credential, true)
-    }
-
-    /// [`Registry::hello`], binding the host to `credential` over another credential's
-    /// binding when `rebind` is set and the host is not live.
-    fn admit(
-        &self,
-        hello: &Hello,
-        credential: &Credential,
-        rebind: bool,
-    ) -> Result<Welcome, Refusal> {
-        let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
-        let protocol = hello.negotiate().map_err(Refusal::Invalid)?;
-        hello.validate().map_err(Refusal::Invalid)?;
-        let pool = self.pool_named(&hello.pool).ok_or(Refusal::UnknownPool)?;
-        let config = self.pool_at(pool);
-        let now = self.shared.clock.now();
-        let mut state = self.lock_at(now);
-        if state.reserved.contains(&host) {
-            return Err(Refusal::HostListed);
-        }
-        let known = state.records.get(&host);
-        // A host put back after a restart is in no pool until it says hello: its binding
-        // says who may.
-        if known.is_some_and(|record| record.pool.is_some_and(|held| held != pool)) {
-            return Err(Refusal::HostListed);
-        }
-        let kept_binding = known.and_then(|record| record.binding.clone());
-        let kept_taint = known.and_then(|record| record.taint.clone());
-        let kept_cordon = known.and_then(|record| record.cordon);
-        let kept_cordon_holder = known.and_then(|record| record.cordon_holder.clone());
-        let kept_leaving = known.and_then(|record| record.leaving);
-        let kept_leaving = match state.ending.contains(&host) {
-            true => Some(marks::Leaving::Releasing),
-            false => kept_leaving,
-        };
-        let instance = hello.instance.as_ref();
-        let rebinding = rebind
-            && kept_binding
-                .as_ref()
-                .is_some_and(|bound| bound.credential() != credential);
-        let bound_elsewhere = kept_binding
-            .as_ref()
-            .is_some_and(|bound| !bound.admits(credential, instance));
-        if bound_elsewhere && !rebinding {
-            return Err(Refusal::HostBound);
-        }
-        let live = known.is_some_and(|record| {
-            record.state(now, self.pool_of(record).grace_ms()) == HostState::Live
-        });
-        if live {
-            return Err(Refusal::HostLive);
-        }
-        let prior_epoch = known.map(|record| record.epoch);
-        let floor = config.shape();
-        if let Some(exec) = config.exec() {
-            let contract = HostContract::new(exec, floor.resources().gpus() > 0);
-            contract.check(&hello.capabilities)?;
-        }
-        let claim = hello.to_shape().ok();
-        let offers_floor = claim
-            .as_ref()
-            .is_some_and(|claim| claim.satisfies(floor.resources(), floor.capabilities()));
-        if !offers_floor {
-            return Err(Refusal::ShapeNotAccepted(ShapeFault::BelowFloor));
-        }
-        // A pool that names `scratch-quota` books a default for every job without disk, so
-        // a host must report one that counts and fits the pool's disk: otherwise its jobs
-        // without disk would book nothing, or never fit.
-        let quota_pool = floor.capabilities().contains_key(SCRATCH_QUOTA);
-        let default = quota_default(&hello.capabilities);
-        let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
-        if [quota_pool, !fits].into_iter().all(|ok| ok) {
-            return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit));
-        }
-        // A host that enforces a quota books a default for every job without disk, so a
-        // pool that books no disk (and does not name `scratch-quota`) would count 0 for
-        // jobs the host counts at its default, and the server would admit what the agent
-        // refuses. Such a host is refused rather than booked wrongly.
-        let books_no_disk = floor.resources().disk_bytes() == 0;
-        if [!quota_pool, books_no_disk, default.is_some()]
-            .into_iter()
-            .all(|ok| ok)
-        {
-            return Err(Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk));
-        }
-        let held = state.records.values();
-        // A host put back after a restart counts as the first pool's, as it is listed.
-        let in_pool = held
-            .filter(|record| record.pool.unwrap_or(0) == pool)
-            .count();
-        let room = in_pool < config.max_machines();
-        if ![prior_epoch.is_some(), room].into_iter().any(|ok| ok) {
-            return Err(Refusal::PoolFull);
-        }
-        let epoch = prior_epoch.unwrap_or(0).saturating_add(1);
-        let secret = self
-            .shared
-            .sessions
-            .fresh()
-            .map(|bytes| secret_text(&bytes))
-            .ok_or(Refusal::SessionUnavailable)?;
-        config.list_claimed(&mut state.book, host.clone(), claim.as_ref());
-        let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
-        state.records.insert(
-            host.clone(),
-            Record {
-                pool: Some(pool),
-                binding: Some(match kept_binding {
-                    Some(kept) if !rebinding => kept,
-                    _ => Binding::new(credential.clone(), instance.cloned()),
-                }),
-                epoch,
-                session: Some(SessionDigest::of(&secret)),
-                phase: hello.phase,
-                heard: Some(now),
-                seated: None,
-                agent_version: Some(hello.agent_version.clone()),
-                labels: hello.labels.clone(),
-                held,
-                beats: 0,
-                taint: kept_taint,
-                cordon: kept_cordon,
-                cordon_holder: kept_cordon_holder,
-                hello_at: Some(now),
-                runtime: hello.capabilities.get(RUNTIME).cloned(),
-                leaving: kept_leaving,
-                claim,
-                load: load::Kept::default(),
-            },
-        );
-        // The placer sees the host as the book lists it.
-        let listed = state.book.shape_of(&host).cloned();
-        listed.iter().for_each(|shape| self.tell_up(&host, shape));
-        Ok(Welcome {
-            protocol,
-            epoch,
-            heartbeat_interval_ms: config.heartbeat_interval_ms(),
-            grace_ms: config.grace_ms(),
-            pool: config.name().to_string(),
-            session: secret,
-            host_credential: None,
-        })
     }
 
     /// Records that a host is alive in its session, with the phase it announces. A host
