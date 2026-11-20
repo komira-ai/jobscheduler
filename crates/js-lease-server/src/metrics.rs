@@ -7,7 +7,9 @@
 //!   queue, from its submit to its placement), each start failure by its code, each job lost,
 //!   each pass over the job tables the server makes itself that failed, so its write did not
 //!   commit (the job pass, a placement, a heartbeat's job listing), how long each job pass
-//!   took, and each launch the scaler ran (whatever its answer, a refusal made before the
+//!   took, where each pass over the queued jobs took the job tables from (read from the store,
+//!   kept from the last read, or kept with the jobs this server's submits recorded since added
+//!   to them), and each launch the scaler ran (whatever its answer, a refusal made before the
 //!   provider is called included) and each that failed over (a `capacity` or `quota` refusal,
 //!   after which the next pass tries another offer). A start failure or a loss is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
@@ -36,6 +38,7 @@ use std::time::Duration;
 
 use js_elastic::{Acquired, Refusal, RefusalCode};
 use js_jobs::StartFailure;
+use js_sched_placer::engine::TablesFrom;
 use js_types::Monotonic;
 
 pub(crate) use scrape::router;
@@ -53,6 +56,8 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     fn store_write_failed(&self);
     /// A job pass took `took`.
     fn job_pass_took(&self, took: Duration);
+    /// A pass over the queued jobs took the job tables `from` there.
+    fn job_tables(&self, from: TablesFrom);
     /// The scaler ran a launch of a machine for the pool `pool`, answered `answer`.
     fn acquire_answered(&self, pool: &str, answer: &Acquired);
 }
@@ -68,15 +73,16 @@ impl MetricsSink for NoMetrics {
     fn job_lost(&self) {}
     fn store_write_failed(&self) {}
     fn job_pass_took(&self, _: Duration) {}
+    fn job_tables(&self, _: TablesFrom) {}
     fn acquire_answered(&self, _: &str, _: &Acquired) {}
 }
 
-/// The sink it holds, as the placer's job pass reports to it: each placement it committed
-/// and each whose commit failed.
+/// The sink it holds, as the placer's job pass reports to it: each placement it committed,
+/// each whose commit failed, and where the pass took the job tables from.
 pub(crate) struct PassSink<'a>(pub(crate) &'a dyn MetricsSink);
 
-// The pass's trait is named by its path, so that its two methods never meet the sink's own in
-// a call here.
+// The pass's trait is named by its path, so that its methods never meet the sink's own in a
+// call here.
 impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
     fn job_placed(&self, waited: Duration) {
         self.0.job_placed(waited);
@@ -84,6 +90,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn store_write_failed(&self) {
         self.0.store_write_failed();
+    }
+
+    fn job_tables(&self, from: TablesFrom) {
+        self.0.job_tables(from);
     }
 }
 
@@ -271,6 +281,18 @@ const FAILURE_CODES: [&str; 5] = [
     "input-unavailable",
 ];
 
+/// Where a pass took the job tables from, in the order they are written, as the metric spells
+/// them.
+const TABLES_FROM: [&str; 3] = ["store", "kept", "submitted"];
+
+fn tables_slot(from: TablesFrom) -> usize {
+    match from {
+        TablesFrom::Store => 0,
+        TablesFrom::Kept => 1,
+        TablesFrom::Submitted => 2,
+    }
+}
+
 fn failure_slot(failure: StartFailure) -> usize {
     match failure {
         StartFailure::NoCapacity => 0,
@@ -310,6 +332,7 @@ pub(crate) struct Recorder {
     lost: AtomicU64,
     store_write_failures: AtomicU64,
     job_pass: Histogram,
+    job_tables: [AtomicU64; 3],
     acquires: Mutex<BTreeMap<String, Acquires>>,
 }
 
@@ -322,6 +345,7 @@ impl Default for Recorder {
             lost: AtomicU64::new(0),
             store_write_failures: AtomicU64::new(0),
             job_pass: Histogram::new(JOB_PASS),
+            job_tables: Default::default(),
             acquires: Mutex::default(),
         }
     }
@@ -347,6 +371,10 @@ impl MetricsSink for Recorder {
 
     fn job_pass_took(&self, took: Duration) {
         self.job_pass.observe(took);
+    }
+
+    fn job_tables(&self, from: TablesFrom) {
+        self.job_tables[tables_slot(from)].fetch_add(1, Ordering::Relaxed);
     }
 
     fn acquire_answered(&self, pool: &str, answer: &Acquired) {
