@@ -59,9 +59,11 @@
 //! instance), not against a holder of the token, who can name the instance too. The
 //! client token can mint for any instance id.
 //!
-//! A hello that the registry then refuses gives the use back
-//! ([`JoinTokens::release_writing`]): the token stays unused for the instance. The server
-//! takes its hellos one at a time, from the use to the registry's answer and the release
+//! The server judges a hello before it takes the use of a token
+//! ([`js_registry::Registry::check_hello`]), so a hello the registry refuses uses nothing. One the
+//! registry refuses after all (a race inside the process, between the check and the answer) gives
+//! the use back ([`JoinTokens::release_writing`]): the token stays unused for the instance. The
+//! server takes its hellos one at a time, from the use to the registry's answer and the release
 //! ([`crate::agents::Agents::host_writes`]), so no other hello of the host is served in
 //! between. The release still leaves the use standing when a hello of the same host was
 //! admitted with the token since the use (the host may then be registered with it, and the
@@ -127,7 +129,7 @@ use std::time::Duration;
 
 use js_agent_wire::{HostCredential, InstanceIdentity};
 use js_registry::{Credential, SessionSource};
-use js_state::Store;
+use js_state::{Cond, Revision, Store};
 use js_types::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -356,7 +358,7 @@ impl JoinTokens {
         random: Box<dyn SessionSource>,
     ) -> Result<Self, String> {
         let mut entries = Entries::new();
-        for (hash, bytes) in host_keys::scan(&*store, JOINS)? {
+        for (hash, bytes, _) in host_keys::scan(&*store, JOINS)? {
             let (hash, entry) = stored_entry(hash, &bytes)?;
             entries.insert(hash, entry);
         }
@@ -397,10 +399,12 @@ impl JoinTokens {
     }
 
     /// Makes the file hold `next`, or commits to the store the rows `next` changes from
-    /// `held` with `extra` in one transaction.
-    fn write(&self, held: &Entries, next: &Entries, extra: Writes) -> io::Result<()> {
+    /// `held` with `extra` in one transaction, whose revision is answered (none in file mode).
+    /// The rows `next` changes are written first and `extra` after them, so the revision is
+    /// the version of the last write of `extra` (the host's binding, a put).
+    fn write(&self, held: &Entries, next: &Entries, extra: Writes) -> io::Result<Option<Revision>> {
         match &self.keeper {
-            Keeper::File(path) => replace(path, render(next)?.as_bytes()),
+            Keeper::File(path) => replace(path, render(next)?.as_bytes()).map(|()| None),
             Keeper::Store(store) => {
                 let mut writes = changes(held, next);
                 writes.extend(extra);
@@ -409,10 +413,11 @@ impl JoinTokens {
         }
     }
 
-    /// Commits `extra` alone to the store; nothing in file mode, which has no such writes.
-    fn write_extra(&self, extra: Writes) -> io::Result<()> {
+    /// Commits `extra` alone to the store, and answers the revision; nothing in file mode,
+    /// which has no such writes.
+    fn write_extra(&self, extra: Writes) -> io::Result<Option<Revision>> {
         match &self.keeper {
-            Keeper::File(_) => Ok(()),
+            Keeper::File(_) => Ok(None),
             Keeper::Store(store) => host_keys::commit(&**store, extra),
         }
     }
@@ -490,7 +495,8 @@ impl JoinTokens {
         instance: Option<&InstanceIdentity>,
         issue: bool,
     ) -> Result<Admitted, JoinRefusal> {
-        self.admit_writing(credential, host, instance, issue, Writes::new())
+        let admitted = self.admit_writing(credential, host, instance, issue, Writes::new());
+        admitted.map(|(admitted, _)| admitted)
     }
 
     /// Lets the hello of `host`, naming `instance`, register with the token or host
@@ -512,7 +518,8 @@ impl JoinTokens {
     /// `extra` is what the store commits with the use, in the same transaction: the host's
     /// binding (always empty in file mode). For a token that already registered its host it
     /// is committed alone, when there is any; a failed commit refuses the hello, as a failed
-    /// write of the use does.
+    /// write of the use does. The revision of the commit comes with the answer: the version of
+    /// the binding row it wrote (`extra` is written last), none when nothing was committed.
     pub(crate) fn admit_writing(
         &self,
         credential: &Credential,
@@ -520,7 +527,7 @@ impl JoinTokens {
         instance: Option<&InstanceIdentity>,
         issue: bool,
         extra: Writes,
-    ) -> Result<Admitted, JoinRefusal> {
+    ) -> Result<(Admitted, Option<Revision>), JoinRefusal> {
         let now = self.clock.now().millis();
         let key = credential.to_hex();
         let mut entries = self.lock();
@@ -535,11 +542,12 @@ impl JoinTokens {
             let held = entries.get_mut(&key).and_then(|entry| entry.used.as_mut());
             held.into_iter().for_each(|used| used.again_served = true);
             self.renew(&mut entries, &key, now);
-            self.write_extra(extra).map_err(unsaved)?;
-            return Ok(Admitted {
+            let revision = self.write_extra(extra).map_err(unsaved)?;
+            let admitted = Admitted {
                 admission: Admission::Again,
                 issued: None,
-            });
+            };
+            return Ok((admitted, revision));
         }
         if entry.expires_at_ms <= now {
             return Err(JoinRefusal::Expired);
@@ -571,12 +579,13 @@ impl JoinTokens {
                 )
             }
         };
-        self.write(&entries, &next, extra).map_err(unsaved)?;
+        let revision = self.write(&entries, &next, extra).map_err(unsaved)?;
         *entries = next;
-        Ok(Admitted {
+        let admitted = Admitted {
             admission: Admission::Fresh,
             issued,
-        })
+        };
+        Ok((admitted, revision))
     }
 
     /// A new host credential when `issue`, drawn from the operating system's random bytes;
@@ -635,7 +644,7 @@ impl JoinTokens {
             return false;
         };
         match self.write(&entries, &next, extra) {
-            Ok(()) => {
+            Ok(_) => {
                 *entries = next;
                 true
             }
@@ -700,7 +709,7 @@ impl JoinTokens {
         let mut next = entries.clone();
         next.insert(key.to_owned(), renewed);
         match self.write(entries, &next, Writes::new()) {
-            Ok(()) => *entries = next,
+            Ok(_) => *entries = next,
             Err(err) => error!(error = %err, "cannot write the join tokens"),
         }
     }
@@ -725,7 +734,7 @@ impl JoinTokens {
         let mut next = entries.clone();
         next.extend(renewed);
         match self.write(&entries, &next, Writes::new()) {
-            Ok(()) => {
+            Ok(_) => {
                 *entries = next;
                 due.clear();
                 true
@@ -749,11 +758,11 @@ fn unsaved(err: io::Error) -> JoinRefusal {
 /// stored, and changes nothing).
 fn changes(held: &Entries, next: &Entries) -> Writes {
     let gone = held.keys().filter(|hash| !next.contains_key(*hash));
-    let gone = gone.map(|hash| (format!("{JOINS}{hash}"), None));
+    let gone = gone.map(|hash| (format!("{JOINS}{hash}"), None, Cond::Any));
     let changed = next.iter().filter_map(|(hash, entry)| {
         let value = stored_value(entry);
         let same = held.get(hash).map(stored_value) == Some(value.clone());
-        (!same).then(|| (format!("{JOINS}{hash}"), Some(value)))
+        (!same).then(|| (format!("{JOINS}{hash}"), Some(value), Cond::Any))
     });
     gone.chain(changed).collect()
 }

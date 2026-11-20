@@ -104,6 +104,7 @@ use axum::routing::{get, post};
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, Welcome, refusal};
 use js_jobs::{JobStoreError, NodeRow};
 use js_registry::{Credential, Refusal};
+use js_state::Revision;
 use js_types::{HostId, Resources, Shape};
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
@@ -296,30 +297,29 @@ async fn serve_hello_in(
     // and the release of a refused one, so no other hello of the host comes in between.
     let gate = agents.host_writes.lock().await;
     // The binding the registry will hold once it admits the hello. With the store, when the
-    // store does not hold it yet, it is committed before the registry is asked: with the use
-    // of the token in one transaction, or alone for a pool token. A known host's binding is
-    // held already, and nothing is written for it.
+    // store does not hold it yet, it is committed before the registry admits the hello: with the
+    // use of the token in one transaction, or alone for a pool token, and conditional on the row
+    // the refresh below read (absent, or at its version), so a binding another server wrote in
+    // between refuses the hello and the agent says hello again. A known host's binding is held
+    // already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     let restored = rows::refresh(agents, &host).await;
     restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
+    // The hello is judged on what the registry holds now, which the rows just refreshed, before
+    // anything is written: a refused hello uses no token and writes no binding, so there is
+    // nothing to undo.
+    let judged = agents
+        .registry
+        .check_hello(&hello, &who, certified.is_some());
+    judged.map_err(|refusal| refused_hello(&hello, &refusal))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
-    let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
-    agents.applied(&change);
+    let (fresh_use, issued, revision) =
+        take_hello(agents, one_time.as_ref(), &hello, writes).await?;
+    agents.applied(&change, revision);
     between();
-    let mut welcome = match admit_hello(agents, certified.is_some(), &hello, &who) {
-        Ok(welcome) => welcome,
-        Err(refusal) => {
-            give_back(agents, fresh_use, &hello.host_id, &change).await;
-            warn!(
-                code = refusal.code(),
-                reason = refusal.reason(),
-                host = %hello.host_id,
-                "agent hello refused: {refusal}"
-            );
-            return Err(Refused::of(&refusal));
-        }
-    };
+    let admitting = (certified.is_some(), &hello, &who);
+    let mut welcome = admit_written(agents, admitting, (fresh_use.clone(), &change)).await?;
     if let Err(refused) = rows::hello_row(agents, &host, &hello, &mut welcome).await {
         give_back(agents, fresh_use, &hello.host_id, &change).await;
         return Err(refused);
@@ -336,6 +336,17 @@ async fn serve_hello_in(
     Ok(Json(welcome))
 }
 
+/// The answer to a hello the registry refused, logged as the route logs it.
+fn refused_hello(hello: &Hello, refusal: &Refusal) -> Refused {
+    warn!(
+        code = refusal.code(),
+        reason = refusal.reason(),
+        host = %hello.host_id,
+        "agent hello refused: {refusal}"
+    );
+    Refused::of(refusal)
+}
+
 /// The refusal of a hello whose host's stored binding could not be read: 503
 /// `state-write-failed`, which the agent retries.
 fn unread_binding(host: &str, error: &io::Error) -> Refused {
@@ -343,17 +354,21 @@ fn unread_binding(host: &str, error: &io::Error) -> Refused {
     Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
 }
 
-/// What a hello's token takes before the registry is asked, with `writes` (the host's
-/// binding, with the store) in the same commit: the use that was fresh, to give back if the
-/// registry refuses, and the host credential issued. One refusal for every failure, so
-/// that [`serve_hello`] has no arm that only a failed commit takes: every test binary runs
-/// the same code of it.
+/// What a hello's token takes once the registry would admit the hello, with `writes` (the
+/// host's binding, with the store, conditional on the version of the row the hello was judged
+/// on) in the same commit: the use that was fresh, to give back if the registry refuses after
+/// all, the host credential issued, and the revision of the commit (the binding's version).
+/// One refusal for every failure, a binding another server wrote since it was read among them
+/// (the agent says hello again, and the next hello reads the row afresh), so that
+/// [`serve_hello`] has no arm that only a failed commit takes: every test binary runs the same
+/// code of it.
 ///
 /// A one-time token registers the host that names its instance, and only that host
-/// thereafter. The token is consumed before the registry is asked, so that two hellos
-/// cannot both pass; a hello the registry then refuses (the pool is full, the host id is
-/// bound to another credential) gives the use back, and the token stays unused for its
-/// instance. A hello that says it keeps a host credential, and registers its host with an
+/// thereafter. The registry has judged the hello already ([`serve_hello_in`] asks it before
+/// anything is taken), so a refused hello uses nothing. The token is consumed before the registry
+/// admits the hello, so that two hellos cannot both pass; a hello the registry then still refuses
+/// (a race in this process, which the host writes' gate keeps to the seam of the route) gives the
+/// use back, and the token stays unused for its instance. A hello that says it keeps a host credential, and registers its host with an
 /// unused token, retires the token in the same step and is answered with the credential:
 /// the token alone opens nothing from then on. When the registry refuses that hello the
 /// credential goes back with the use, since the answer that carries it is not sent. The
@@ -363,14 +378,14 @@ async fn take_hello(
     one_time: Option<&Credential>,
     hello: &Hello,
     writes: Writes,
-) -> Result<(Option<Credential>, Option<HostCredential>), Refused> {
+) -> Result<(Option<Credential>, Option<HostCredential>, Option<Revision>), Refused> {
     let Some(presented) = one_time else {
         let committed = agents.commit_hosts(writes).await;
-        committed.map_err(|error| {
+        let revision = committed.map_err(|error| {
             warn!(%error, host = %hello.host_id, "agent hello refused: the binding could not be committed");
             Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
         })?;
-        return Ok((None, None));
+        return Ok((None, None, revision));
     };
     let instance = hello.instance.clone();
     let host = hello.host_id.clone();
@@ -378,26 +393,49 @@ async fn take_hello(
     let admitted = agents
         .admit_join(presented.clone(), (host, instance), asked, writes)
         .await;
-    let admitted = admitted.map_err(|refusal| {
+    let (admitted, revision) = admitted.map_err(|refusal| {
         warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
         Refused::join(refusal)
     })?;
     let fresh = (admitted.admission == Admission::Fresh).then(|| presented.clone());
-    Ok((fresh, admitted.issued))
+    Ok((fresh, admitted.issued, revision))
 }
 
-/// The compensation of a hello the registry refused after [`take_hello`]: the fresh use of
-/// the token, when there was one, and the host's binding `change` go back in one
-/// transaction. When it fails both stay, as the store holds them. Apart from
-/// [`serve_hello`], so that the route has no arm that only one kind of token takes: every
-/// test binary runs the same code of it.
+/// The registry's admission of a hello whose token's use and binding are committed. The registry
+/// can still refuse what it judged admissible a moment ago, when something outside the host
+/// writes' gate (the scaler, a test's seam) changed it in between, and then the compensation
+/// ([`give_back`], with the use `fresh_use` and the binding `change`) runs and the refusal is the
+/// answer. Apart from [`serve_hello_in`] so that the route's own lines are the ones every
+/// test binary runs, and only a race reaches the compensation's.
+async fn admit_written(
+    agents: &Arc<Agents>,
+    (certified, hello, who): (bool, &Hello, &Credential),
+    (fresh_use, change): (Option<Credential>, &Change),
+) -> Result<Welcome, Refused> {
+    match admit_hello(agents, certified, hello, who) {
+        Ok(welcome) => Ok(welcome),
+        Err(refusal) => {
+            give_back(agents, fresh_use, &hello.host_id, change).await;
+            Err(refused_hello(hello, &refusal))
+        }
+    }
+}
+
+/// The compensation of a hello the registry refused after [`take_hello`], which only a race
+/// inside this process reaches: [`serve_hello_in`] judged the hello before it wrote anything
+/// ([`js_registry::Registry::check_hello`]), so a hello the registry refuses then was admissible
+/// when it was judged and something changed the registry since. The fresh use of the token,
+/// when there was one, and the host's binding `change` go back in one transaction, the binding
+/// at the version the change's commit wrote. When it fails both stay, as the store holds them.
+/// Apart from [`serve_hello`], so that the route has no arm that only one kind of token takes:
+/// every test binary runs the same code of it.
 async fn give_back(
     agents: &Arc<Agents>,
     fresh_use: Option<Credential>,
     host: &str,
     change: &Change,
 ) {
-    let undo = change.undo.clone();
+    let undo = agents.store.undo(change);
     let given_back = match fresh_use {
         Some(presented) => agents.release_join(presented, host.to_owned(), undo).await,
         None => agents.commit_hosts(undo).await.is_ok(),

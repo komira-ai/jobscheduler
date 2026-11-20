@@ -27,6 +27,9 @@ use crate::job_store::ServerIds;
 #[path = "agent_api_rows_beat_tests.rs"]
 mod beat;
 
+#[path = "agent_api_rows_binding_tests.rs"]
+mod binding;
+
 /// Session secrets that start at a number of the server's own, so that two servers never
 /// make the same secret and a secret a server checks is the one the row's digest holds.
 struct Secrets(AtomicU64);

@@ -269,7 +269,13 @@ async fn a_lost_welcome_leaves_no_way_in_and_the_revoke_clears_the_file() {
     .await;
     drop(sent.expect("the first hello is admitted"));
     assert!(agents.joins.identify(&minted.token).is_none());
-    for host in ["host-a", "host-b"] {
+    // The registry judges first: the host it admitted is live, whoever asks; another host is
+    // one it would admit, so the retired token is what refuses it.
+    for (host, refused_as) in [
+        ("host-a", (409, "host-live")),
+        ("host-b", (403, "join-token-expired")),
+        ("host-c", (403, "join-token-expired")),
+    ] {
         let retry = serve_hello(
             &agents,
             who.clone(),
@@ -279,10 +285,7 @@ async fn a_lost_welcome_leaves_no_way_in_and_the_revoke_clears_the_file() {
         )
         .await;
         let refused = retry.expect_err("the retired token registers nothing");
-        assert_eq!(
-            (refused.status.as_u16(), refused.error),
-            (403, "join-token-expired")
-        );
+        assert_eq!((refused.status.as_u16(), refused.error), refused_as);
     }
     assert_eq!(rows(&dir), 1);
     assert_eq!(agents.joins.revoke(&instance()), Ok(1));

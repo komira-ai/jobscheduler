@@ -75,14 +75,16 @@ impl Agents {
     ///
     /// # Errors
     ///
-    /// [`CordonFault::NotHeld`] for a host the registry does not hold;
-    /// [`CordonFault::Unsaved`] when the commit failed or was refused (nothing changed), or in
+    /// [`CordonFault::NotHeld`] for a host the registry does not hold and the rows do not
+    /// know ([`Agents::take_from_rows`]); [`CordonFault::Unsaved`] when the rows could not be
+    /// read, the commit failed or was refused (nothing changed), or in
     /// file mode when the save after it did (the clear holds on this server).
     pub(crate) async fn clear_taint(
         self: &Arc<Self>,
         host: &HostId,
     ) -> Result<Option<Taint>, CordonFault> {
         let gate = self.host_writes.lock().await;
+        self.take_from_rows(host).await?;
         let held = self.registry.own_host(host).ok_or(CordonFault::NotHeld)?;
         if held.host.taint.is_none() {
             drop(gate);
@@ -140,6 +142,23 @@ pub(crate) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, wh
         cordon_until_ms = binding.cordon_until_ms(),
         "a host's stored taint or cordon is put back"
     );
+}
+
+/// Takes what the store holds in `binding`, the row of `host` as read `when`, into the registry:
+/// [`put_back`] for a host the registry does not know, and for one it knows the taint of the
+/// binding when the registry holds none ([`Registry::taint_host`]; the first taint a host has
+/// stands, so a taint the registry holds is not replaced). A write of the host's binding made
+/// from what the registry holds would otherwise put a binding without the taint over the row
+/// that holds it.
+pub(crate) fn take_in(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
+    if registry.own_host(host).is_none() {
+        put_back(registry, host, binding, when);
+        return;
+    }
+    let taint = binding.taint().cloned();
+    if taint.is_some_and(|taint| registry.taint_host(host, taint)) {
+        info!(%host, when, "a taint another server stored is taken into the registry");
+    }
 }
 
 /// Puts each taint row of the job store on the binding of its host, when that binding holds

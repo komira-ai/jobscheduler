@@ -35,6 +35,9 @@ mod clear;
 #[path = "agent_api_host_cert_tests.rs"]
 mod host_cert;
 
+#[path = "agent_api_judged_tests.rs"]
+mod judged;
+
 #[path = "agent_api_overlap_tests.rs"]
 mod overlap;
 
@@ -323,17 +326,16 @@ async fn hello_consumes_the_token_and_binds_the_host_in_one_commit() {
     );
 }
 
-/// Asserts that a hello the registry refuses after the token's use was committed (it names
-/// another pool) is answered with the registry's refusal, and its compensating transaction
-/// gives the token back and takes the binding away: two commits in all, the stored row
-/// unused, no binding, the token serving no host, and the token then registers a host of
-/// the pool. A hello that asked for a host credential gets the token back too, with no
-/// credential row left. It catches a refused hello that leaves the token consumed (an
-/// instance stranded until its boot time runs out) or the binding of a host the registry
-/// never admitted.
+/// Asserts that a hello the registry refuses (it names another pool) is judged before anything
+/// is taken: the answer is the registry's refusal, the store takes no commit at all, the
+/// token's row stays unused, no binding is written, the token serves no host, and the token
+/// then registers a host of the pool. A hello that asked for a host credential leaves no
+/// credential row either. It catches a refused hello that uses the token or writes a binding
+/// first and takes them back after (an instance stranded when the take-back fails, a binding
+/// of a host the registry never admitted in the store between the two commits).
 #[tokio::test]
-async fn a_registry_refused_hello_returns_the_token_by_compensation() {
-    let rig = rig("compensated");
+async fn a_registry_refused_hello_takes_no_token_and_writes_nothing() {
+    let rig = rig("judged_first");
     let who = rig.mint();
     let before = rig.commits();
     let refused = rig.hello(&who, "host-a", "elsewhere").await;
@@ -342,7 +344,7 @@ async fn a_registry_refused_hello_returns_the_token_by_compensation() {
         (refused.status.as_u16(), refused.error),
         (403, Refusal::UnknownPool.code())
     );
-    assert_eq!(rig.commits(), before + 2, "the use and its compensation");
+    assert_eq!(rig.commits(), before, "nothing was taken or written");
     assert_eq!(rig.row(&who)["used_by"], Value::Null);
     assert_eq!(rig.binding("host-a"), Value::Null);
     let unused = rig.agents.joins.serves(&who, "host-a");
@@ -354,41 +356,12 @@ async fn a_registry_refused_hello_returns_the_token_by_compensation() {
     let token_row = format!("hosts/join/{}", who.to_hex());
     assert_eq!(rig.keys("hosts/"), [token_row]);
     assert_eq!(rig.row(&who)["used_by"], Value::Null);
+    assert_eq!(rig.commits(), before);
 
     rig.hello(&who, "host-a", "burst")
         .await
         .expect("the token is good");
     assert_eq!(rig.row(&who)["used_by"], "host-a");
-}
-
-/// Asserts what a failed compensation leaves (its commit fails after the use was
-/// committed): the token consumed by the host and the host's binding, both in the store and
-/// in memory (the token serves that host and refuses another as used). Both or neither
-/// holds; the host joins again with a new token for its instance, and its binding then
-/// moves to that token. It catches a failed compensation that gives the token back in
-/// memory alone (a restart would take it away again) or drops one of the two.
-#[tokio::test]
-async fn a_failed_compensation_leaves_the_binding_and_the_consumed_token() {
-    let rig = rig("compensation_failed");
-    let who = rig.mint();
-    rig.store.fail_after(1);
-    let refused = rig.hello(&who, "host-a", "elsewhere").await;
-    assert_eq!(refused.expect_err("refused").status.as_u16(), 403);
-    assert_eq!(rig.row(&who)["used_by"], "host-a");
-    assert_eq!(rig.binding("host-a")["credential"], who.to_hex().as_str());
-    assert_eq!(rig.agents.joins.serves(&who, "host-a"), Ok(()));
-    let other = rig.hello(&who, "host-b", "burst").await;
-    let other = other.expect_err("the token is the host's");
-    assert_eq!(
-        (other.status.as_u16(), other.error),
-        (403, "join-token-used")
-    );
-
-    let fresh = rig.mint();
-    rig.hello(&fresh, "host-a", "burst")
-        .await
-        .expect("the host joins again");
-    assert_eq!(rig.binding("host-a")["credential"], fresh.to_hex().as_str());
 }
 
 /// Asserts that a heartbeat that brings a taint has it committed with the host's binding
@@ -517,11 +490,11 @@ async fn a_cordon_whose_store_cannot_read_its_clock_is_unsaved() {
 }
 
 /// Asserts that the hot path reads and writes no store: with the store's next commit and
-/// next read both set to fail, a known host's hello (after a silence past its grace, with
-/// the token that registered it), a heartbeat, a read of the host book and the host's read
-/// of itself all succeed, and the commit and the read are still set to fail afterwards. It
-/// catches a store call on any of them: the call would have been the one to fail, or would
-/// have used the failure up.
+/// next read both set to fail, a heartbeat, a read of the host book and the host's read of
+/// itself all succeed, and the commit and the read are still set to fail afterwards. (A hello
+/// reads its host's binding row, which it is judged on: a known host's hello is
+/// `a_known_hosts_hello_reads_its_binding_row_and_writes_nothing`.) It catches a store call on
+/// any of them: the call would have been the one to fail, or would have used the failure up.
 #[tokio::test]
 async fn heartbeat_and_host_book_reads_make_no_store_call() {
     let rig = rig("no_calls");
@@ -529,11 +502,10 @@ async fn heartbeat_and_host_book_reads_make_no_store_call() {
     rig.hello(&who, "host-a", "burst").await.unwrap();
     rig.clock.advance(Duration::from_secs(60));
     let shared = shared_over(&rig);
-    rig.store.fail_after(0);
-    rig.store.fail_read_after(0);
-
     let welcome = rig.hello(&who, "host-a", "burst").await;
     let welcome = welcome.expect("a known host's hello");
+    rig.store.fail_after(0);
+    rig.store.fail_read_after(0);
     let one_time = (&who, Some(who.clone()));
     let reply = rig.beat(one_time, "host-a", &welcome, Value::Null).await;
     assert!(!reply.expect("a heartbeat").taint_ack);
@@ -597,12 +569,12 @@ async fn concurrent_hellos_with_one_token_admit_exactly_one() {
 /// Asserts that a hello with the pool's token commits the host's binding alone before the
 /// registry is asked: when the commit fails it is refused 503 `state-write-failed`, with a
 /// warning naming the failure, and the registry holds nothing; a hello the registry refuses
-/// takes its binding back in a second commit; an admitted one leaves the binding to the
-/// pool token's digest. It catches a pool token's binding left to the file-mode save after
-/// the hello (a crash in between would lose it) and a binding kept for a host the registry
-/// refused.
+/// commits nothing (it is judged before the binding is written); an admitted one leaves the
+/// binding to the pool token's digest. It catches a pool token's binding left to the file-mode
+/// save after the hello (a crash in between would lose it) and a binding written for a host the
+/// registry refused.
 #[tokio::test]
-async fn a_pool_token_hello_commits_the_binding_first_and_takes_it_back_when_refused() {
+async fn a_pool_token_hello_commits_its_binding_alone_and_none_when_refused() {
     let rig = rig("pooled");
     rig.store.fail_next();
     let lines = Lines::default();
@@ -624,7 +596,7 @@ async fn a_pool_token_hello_commits_the_binding_first_and_takes_it_back_when_ref
     let before = rig.commits();
     let refused = rig.pooled("host-b", "elsewhere").await;
     assert_eq!(refused.expect_err("another pool").status.as_u16(), 403);
-    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(rig.commits(), before);
     assert_eq!(rig.binding("host-b"), Value::Null);
 
     rig.pooled("host-a", "burst").await.expect("admitted");

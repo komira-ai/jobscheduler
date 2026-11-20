@@ -71,8 +71,8 @@ fn a_cordon_end_is_stored_on_the_store_clock_and_read_on_each_servers_own() {
     let (first_clock, first) = server_clock(4_000_000);
     let (a, _) = BindingStore::in_store(Arc::clone(&dynamic), first).unwrap();
     let change = a.change(&host(), cordoned(4_000_000 + LEFT_MS));
-    a.commit(change.writes.clone()).unwrap();
-    a.applied(&change);
+    let revision = a.commit(change.writes.clone()).unwrap();
+    a.applied(&change, revision);
     assert_eq!(stored_end(&store), Some(STORE_MS + LEFT_MS));
 
     // What the store's clock leaves of the cordon (the commit's sync moved that clock on) is

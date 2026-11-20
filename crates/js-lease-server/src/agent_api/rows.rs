@@ -45,19 +45,20 @@ use crate::agents::{Agents, taints};
 use crate::job_store::ServerJobs;
 use crate::util::blocking;
 
-/// Puts what the store holds of `host` into the registry before its hello is judged or its
-/// heartbeat checked: the taint or cordon of its binding, as [`Agents::restore_stored`] does,
-/// and, with the job tables, the session its row holds ([`js_registry::Registry::adopt`]),
-/// which the registry takes when it holds no newer one. Without the job tables this is
-/// [`Agents::restore_stored`].
+/// Puts what the store holds of `host` into the registry before its hello is judged, its
+/// heartbeat checked, or a cordon, a lift or a clear of its taint is decided: the taint or
+/// cordon of its binding, as [`Agents::restore_stored`] does, and, with the job tables, the
+/// session its row holds ([`js_registry::Registry::adopt`]), which the registry takes when it
+/// holds no newer one. The binding is read with its version, which the hello's write of the
+/// binding is conditional on. Without the job tables this is [`Agents::restore_stored`].
 ///
 /// # Errors
 ///
 /// The binding, the row or the store's clock could not be read: the call is refused with an
 /// error the agent retries, and nothing is judged on less than the store holds.
-pub(super) async fn refresh(agents: &Arc<Agents>, host: &HostId) -> io::Result<()> {
+pub(crate) async fn refresh(agents: &Arc<Agents>, host: &HostId) -> io::Result<()> {
     let Some(jobs) = agents.jobs.clone() else {
-        return agents.restore_stored(host).await;
+        return agents.restore_stored(host, "hello").await;
     };
     let this = Arc::clone(agents);
     let named = host.clone();
@@ -70,7 +71,7 @@ pub(super) async fn refresh(agents: &Arc<Agents>, host: &HostId) -> io::Result<(
     .await?;
     let (binding, row, now) = read;
     if let Some(binding) = &binding {
-        taints::put_back(&agents.registry, host, binding, "store");
+        taints::take_in(&agents.registry, host, binding, "store");
     }
     if let Some(row) = row {
         let record = row.record;
