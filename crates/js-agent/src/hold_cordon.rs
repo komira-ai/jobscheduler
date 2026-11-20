@@ -44,7 +44,7 @@ use crate::lifecycle::Clock;
 use crate::lifecycle::hold;
 use crate::lifecycle::taint::StateRoot;
 use crate::login::Login;
-use crate::own_host::{Cordoned, Lease, LeaseError, MAX_CORDON_SECS};
+use crate::own_host::{Cordoned, HttpLease, Lease, LeaseError, MAX_CORDON_SECS, RequestLimit};
 
 /// The length of each cordon request, in seconds: the longest the server grants.
 pub const HOLD_LEASE_SECS: u64 = MAX_CORDON_SECS;
@@ -220,4 +220,27 @@ pub fn login(registered: &Login, root: &Path) -> Login {
         Ok(Some(_)) => Login::Token(file.path()),
         _ => registered.clone(),
     }
+}
+
+/// The daemon's [`Connect`]: the own-host routes of `server` (trusting `ca_cert`) as `host`,
+/// with the credential [`login`] chooses from what the agent registered with
+/// (`registered`) and the state root at `root`, each call bounded by
+/// [`RequestLimit::DEFAULT`]. The error is what `js-client` says of the flag or file it
+/// could not use.
+///
+/// # Errors
+///
+/// The text of the client's error: an unusable server address, credential file or
+/// certificate.
+pub fn connect_http(
+    server: &str,
+    registered: &Login,
+    ca_cert: Option<&Path>,
+    host: &str,
+    root: &Path,
+) -> Result<Box<dyn Lease>, String> {
+    let chosen = login(registered, root);
+    HttpLease::connect(server, &chosen, ca_cert, host, RequestLimit::DEFAULT)
+        .map(|lease| Box::new(lease) as Box<dyn Lease>)
+        .map_err(|why| why.to_string())
 }

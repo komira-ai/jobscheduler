@@ -11,11 +11,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use js_agent::hold_cordon::{
-    Connect, HOLD_LEASE_SECS, HOLD_RENEW, HOLD_RETRY, Keeper, Seams, login,
+    Connect, HOLD_LEASE_SECS, HOLD_RENEW, HOLD_RETRY, Keeper, Seams, connect_http, login,
 };
 use js_agent::lifecycle::hold::{self, HOLD_FILE};
 use js_agent::lifecycle::{Clock, StateRoot};
-use js_agent::own_host::{CordonView, Cordoned, HostReading, Lease, LeaseError, Uncordoned};
+use js_agent::own_host::{
+    CordonView, Cordoned, HostReading, HttpLease, Lease, LeaseError, RequestLimit, Uncordoned,
+};
 use js_agent::{CREDENTIAL_FILE, CredentialFile, CredentialStore, Login};
 use js_agent_wire::HostCredential;
 use js_client::HostIdentity;
@@ -131,7 +133,7 @@ impl Server {
             lease: None,
             releasing: false,
             mark: None,
-            cordon: cordoned.then(|| CordonView {
+            cordon: cordoned.then_some(CordonView {
                 expires_at_ms: 4_600_000,
                 expires_in_ms: Some(HOLD_LEASE_SECS * 1000),
                 holder: None,
@@ -556,4 +558,44 @@ fn a_token_login_stays_the_token_file_without_a_usable_credential() {
     let unreadable = private(&scratch, "unreadable");
     fs::create_dir(unreadable.join(CREDENTIAL_FILE)).unwrap();
     assert_eq!(login(&registered, &unreadable), registered);
+}
+
+/// The server the connect tests name: a loopback address with port 0, which a connect never
+/// reaches (no request is sent).
+const NO_SERVER: &str = "http://127.0.0.1:0";
+
+/// The daemon's connect fails with the client's own text, unchanged, when the credential it
+/// would present cannot be used: here a token file that is not there and a state root that
+/// holds no host credential. It catches a connect that hides why it failed, or that turns a
+/// credential it cannot read into a connection.
+#[test]
+fn the_daemons_connect_says_what_the_client_could_not_use() {
+    let scratch = Scratch::new("hold-cordon-connect-fails");
+    let root = private(&scratch, "state");
+    let registered = Login::Token(scratch.path("absent-token"));
+    let expected =
+        match HttpLease::connect(NO_SERVER, &registered, None, "h1", RequestLimit::DEFAULT) {
+            Ok(_) => panic!("a token file that is not there connects"),
+            Err(why) => why.to_string(),
+        };
+    match connect_http(NO_SERVER, &registered, None, "h1", &root) {
+        Ok(_) => panic!("the daemon's connect took a token file that is not there"),
+        Err(why) => assert_eq!(why, expected),
+    }
+}
+
+/// The daemon's connect makes a connection when the credential can be used: the host
+/// credential the state root holds, chosen over a token file that is not there. Nothing is
+/// sent. It catches a connect that presents the token file when the state root holds a
+/// credential.
+#[test]
+fn the_daemons_connect_uses_the_state_roots_credential() {
+    let scratch = Scratch::new("hold-cordon-connect-works");
+    let root = private(&scratch, "state");
+    let credential = HostCredential::parse(CREDENTIAL).expect("a host credential");
+    CredentialFile::in_dir(&root)
+        .save(&credential)
+        .expect("save the credential");
+    let registered = Login::Token(scratch.path("absent-token"));
+    assert!(connect_http(NO_SERVER, &registered, None, "h1", &root).is_ok());
 }

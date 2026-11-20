@@ -374,7 +374,6 @@ pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
 pub use login::Login;
-use own_host::{HttpLease, Lease, RequestLimit};
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
@@ -863,19 +862,8 @@ fn execute(
     }
     // The cordon of a held host is asked on the lease server the agent registers with, with
     // the credential it registered with, after each exchange (see `hold_cordon`).
-    let connect = |root: &Path| {
-        let login = hold_cordon::login(&login, root);
-        let lease = HttpLease::connect(
-            &cli.server,
-            &login,
-            ca_cert,
-            &host_id,
-            RequestLimit::DEFAULT,
-        );
-        lease
-            .map(|lease| Box::new(lease) as Box<dyn Lease>)
-            .map_err(|why| why.to_string())
-    };
+    let connect =
+        |root: &Path| hold_cordon::connect_http(&cli.server, &login, ca_cert, &host_id, root);
     let hold_clock = services.machine.clock();
     let mut keeper = held_root.as_ref().map(|state| {
         Keeper::new(KeeperSeams {
