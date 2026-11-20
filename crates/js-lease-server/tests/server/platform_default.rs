@@ -71,6 +71,7 @@ fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
     );
     for host in hosts {
         let hello = Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: (*host).into(),
             pool: "rack".into(),

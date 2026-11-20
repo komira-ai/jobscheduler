@@ -71,6 +71,7 @@ fn full_node() -> NodeRecord {
         claim: Some(claim()),
         shape: Some(booked()),
         labels: pairs(&[("os", "linux"), ("rack", "r1")]),
+        agent_process: Some("proc-9".to_owned()),
         state: NodeState {
             phase: Phase::Draining,
             load: Some(load()),
@@ -97,6 +98,7 @@ fn bare_node() -> NodeRecord {
         claim: None,
         shape: None,
         labels: BTreeMap::new(),
+        agent_process: None,
         state: NodeState {
             phase: Phase::Serving,
             load: None,
@@ -255,6 +257,7 @@ fn the_node_layout_is_pinned() {
             12,
             framed(&[b"job-1", &1u32.to_be_bytes(), b"job-2", &2u32.to_be_bytes()]),
         ),
+        (13, b"proc-9".to_vec()),
     ];
     fields.extend(shape_fields(20, 2000, 4096, 2, "a100", 9, &[b"zone", b"a"]));
     fields.extend(shape_fields(
@@ -319,6 +322,7 @@ fn a_row_with_only_the_required_fields_reads_as_the_defaults() {
             claim: None,
             shape: None,
             labels: BTreeMap::new(),
+            agent_process: None,
             state: NodeState {
                 phase: Phase::Quarantined,
                 load: None,
@@ -506,4 +510,24 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             "field {tag}"
         );
     }
+}
+
+// Catches an agent process lost or invented by the codec: a row written before the field
+// (the required fields only) reads with none, a record with one reads it back, a record with
+// none writes no tag 13, and a text that is not UTF-8 is refused.
+#[test]
+fn the_agent_process_is_optional_and_additive() {
+    assert_eq!(
+        decode_node(&required_only()).map(|node| node.agent_process),
+        Ok(None),
+        "a row from before the field"
+    );
+    let mut node = bare_node();
+    assert_eq!(field_of(&node_row(&node), 13), None);
+    node.agent_process = Some("proc-1".to_owned());
+    let row = node_row(&node);
+    assert_eq!(field_of(&row, 13), Some(b"proc-1".to_vec()));
+    assert_eq!(decode_node(&row), Ok(node));
+    let bad = with(&row, 13, &[0xff, 0xfe]);
+    assert!(decode_node(&bad).is_err(), "a text that is not UTF-8");
 }

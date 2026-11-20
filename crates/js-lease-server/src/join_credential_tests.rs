@@ -320,57 +320,6 @@ fn a_credential_the_file_refuses_retires_nothing() {
     assert!(entries.values().all(|entry| entry.replaces.is_none()));
 }
 
-/// The use that issued a credential is given back when the registry refuses the hello:
-/// the credential is unknown, the token is unused again for its instance and keeps its
-/// first expiry (it is not extended), and a later hello can be given a credential. A
-/// release by another host, or of a token nobody swapped, changes nothing, and neither
-/// does a release for a host whose instance holds a credential of another token. It
-/// catches a refused hello that leaves the host with a retired token and a credential it
-/// never received, and a release that frees another host's credential.
-#[test]
-fn a_release_takes_the_credential_back_and_returns_the_token() {
-    let (_dir, path) = scratch("release");
-    let (joins, clock) = tokens(&path);
-    let one = swapped(&joins, "i-1", "host-a");
-    let two = swapped(&joins, "i-2", "host-b");
-    joins.release(&one.token, "host-b");
-    joins.release(&Credential::of_token("never-minted"), "host-a");
-    assert_eq!(joins.serves(&one.digest, "host-a"), Ok(()));
-    joins.release(&one.token, "host-a");
-    assert!(joins.identify(one.secret.expose()).is_none());
-    assert!(joins.identify(&one.token_text).is_some());
-    assert_eq!(joins.serves(&two.digest, "host-b"), Ok(()));
-    let text = fs::read_to_string(&path).unwrap();
-    assert_eq!(text.matches("replaces").count(), 1, "{text}");
-    assert!(!text.contains("host-a"), "{text}");
-    drop(text);
-
-    let next = joins.admit_with(&one.token, "host-c", Some(&instance("i-1")), true);
-    let issued = next.unwrap().issued.unwrap();
-    assert_ne!(issued, one.secret);
-    joins.release(&one.token, "host-c");
-    clock.advance(Duration::from_secs(31 * 60));
-    assert_eq!(
-        joins.admit_with(&one.token, "host-c", Some(&instance("i-1")), true),
-        Err(JoinRefusal::Expired)
-    );
-}
-
-/// A release the file refuses keeps the use and the credential, as for a token: the
-/// credential serves its host and the token stays retired, in step with what a restart
-/// would read.
-#[test]
-fn a_release_the_file_refuses_keeps_the_credential() {
-    let (_dir, path) = scratch("release_unwritable");
-    let (joins, _) = tokens(&path);
-    let one = swapped(&joins, "i-1", "host-a");
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
-    joins.release(&one.token, "host-a");
-    assert!(joins.identify(one.secret.expose()).is_some());
-    assert!(joins.identify(&one.token_text).is_none());
-}
-
 /// A row of a host credential reads back as written, and two faults are refused by name: a
 /// replaced-token digest that is not 64 lower-case hex digits, and a credential row with no
 /// host. It catches a start that reads a credential as an unused token, which would let the

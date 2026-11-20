@@ -11,13 +11,11 @@
 
 use axum::extract::Request;
 use axum::http::StatusCode;
-use js_agent_wire::{Hello, Welcome};
-use js_registry::{Credential, Refusal};
+use js_registry::Credential;
 use js_types::HostId;
 use tracing::warn;
 
 use super::Refused;
-use crate::agents::Agents;
 use crate::host_cert::CertHost;
 
 /// The code of the 403 a request about another host than its certificate's is answered with.
@@ -52,19 +50,4 @@ pub(super) fn check(certified: Option<&CertifiedHost>, host: &str) -> Result<(),
         ));
     }
     Ok(())
-}
-
-/// The registry's answer to `hello`: a hello with a host certificate (`certified`) may move
-/// a host that is not live from another credential onto the certificate's
-/// ([`js_registry::Registry::hello_as_certified_host`]).
-pub(super) fn admit_hello(
-    agents: &Agents,
-    certified: bool,
-    hello: &Hello,
-    who: &Credential,
-) -> Result<Welcome, Refusal> {
-    match certified {
-        true => agents.registry.hello_as_certified_host(hello, who),
-        false => agents.registry.hello(hello, who),
-    }
 }

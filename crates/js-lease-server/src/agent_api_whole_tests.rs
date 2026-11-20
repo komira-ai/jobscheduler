@@ -24,6 +24,11 @@ pub(super) const SECOND: Duration = Duration::from_secs(1);
 /// The prepare timeout of [`rules`].
 pub(super) const PREPARE: Duration = Duration::from_secs(600);
 
+/// How far the store's clock moves between a beat's arrival and its listing's first read of
+/// it: the beat's own row write (`beat_node`) commits first, and each store call moves the
+/// test store's clock one millisecond.
+const BEAT_ROW: Duration = Duration::from_millis(2);
+
 /// A pool of up to two whole hosts with the default timings, that fails a job after two failed
 /// prepares.
 pub(super) fn rules() -> WholeNodeConfig {
@@ -126,7 +131,9 @@ async fn prepare_timed(rig: &Rig, agent: &mut FakeAgent, id: &str) -> (JobId, St
     let job = queue_whole(rig, id, 600);
     place_all(rig);
     assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
-    let at = now(rig);
+    // The deadline is read from the store's clock by the beat's listing, after the beat's own
+    // row write moved it.
+    let at = now(rig).saturating_add(BEAT_ROW);
     beat(rig, agent).await;
     assert_eq!(agent.phase, Phase::Preparing);
     (job, at)
@@ -205,7 +212,8 @@ async fn cancel_while_preparing_frees_after_preparing_ends() {
     let reply = beat(&rig, &mut agent).await;
     assert_eq!((stops(&reply), starts(&reply).len()), (vec![], 0));
     assert_eq!(reply.exclusive, None);
-    assert_eq!(rig.commits(), before);
+    // Nothing of the job moves: only the beat's two row writes (beat_node, settle_node).
+    assert_eq!(rig.commits(), before + 2);
     assert_eq!(rig.states(&job), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.job(&job).cancel_requested);
     assert_eq!(agent.phase, Phase::Restoring);
@@ -214,7 +222,7 @@ async fn cancel_while_preparing_frees_after_preparing_ends() {
     let before = rig.commits();
     let reply = beat(&rig, &mut agent).await;
     // The cancel's free, and the pass's queue status of the job it could not place.
-    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(rig.commits(), before + 4);
     assert_eq!(
         rig.job(&queued).queue.code(),
         js_types::QueueCode::WaitingForCapacity
@@ -270,8 +278,8 @@ async fn failed_prepare_requeues_and_then_fails_after_max_replace() {
     let before = rig.commits();
     let reply = beat(&rig, &mut agent).await;
     // The requeue, and the pass's queue status of the requeued job, which waits for a whole
-    // host again.
-    assert_eq!(rig.commits(), before + 2);
+    // host again, and the beat's two row writes (beat_node, settle_node).
+    assert_eq!(rig.commits(), before + 4);
     assert_eq!(reply.exclusive, None);
     let requeued = rig.job(&job);
     assert_eq!(requeued.state, JobState::Queued);
@@ -452,7 +460,8 @@ async fn a_hello_restarts_the_prepare_of_a_placed_whole_host_job() {
     // The agent restarts: the host is silent past the grace, then says hello.
     rig.advance(120 * SECOND);
     rig.register("host-a", true);
-    let hello_at = now(&rig);
+    // The beat's listing reads the clock after the beat's own row write moved it.
+    let hello_at = now(&rig).saturating_add(BEAT_ROW);
     rig.beat(&agent).await.unwrap();
     let restarted = rig.allocation(&job);
     assert_eq!(
@@ -495,7 +504,8 @@ async fn a_hello_does_not_reset_a_running_whole_host_job() {
     rig.register("host-a", true);
     let before = rig.commits();
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before);
+    // Nothing of the job moves: only the beat's two row writes (beat_node, settle_node).
+    assert_eq!(rig.commits(), before + 2);
     assert_eq!(reply.exclusive, Some(lease(&rig, &job)));
     assert_eq!(
         rig.states(&job),

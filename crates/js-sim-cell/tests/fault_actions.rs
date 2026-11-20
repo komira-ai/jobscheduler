@@ -159,8 +159,8 @@ fn a_restart_the_server_refuses_fails_the_seed_as_a_failure_to_start() {
 }
 
 /// Asserts that a restart of the server in a cell keeps the agents, the client and the
-/// ledger: the agent that ran a job before the restart is answered `unknown-host` by the
-/// new server, says hello again and is listed live, the run is launched once, the
+/// ledger: the agent that ran a job before the restart keeps its session (the new server
+/// serves it from the host's row, so it is never answered `unknown-host`) and is listed live, the run is launched once, the
 /// verdict the agent read on its result is in the cell's ledger, and no restart was
 /// refused. Catches a restart that drops the agents, replays the ledger, or leaves the
 /// new server unreachable from the agents.
@@ -185,7 +185,9 @@ fn a_restarted_server_keeps_the_agents_and_the_ledger() {
     assert!(cell.server().is_some_and(ServerNode::is_up));
     run_to(&mut cell, 60_000);
     let counters = cell.counters(0).expect("an agent");
-    assert!(counters.get(Counter::UnknownHost) >= 1, "{counters:?}");
+    // The host's session is its row in the store, so the restarted server serves the old
+    // session's beats and the agent is never told it is unknown.
+    assert_eq!(counters.get(Counter::UnknownHost), 0, "{counters:?}");
     let host = js_types::HostId::new("h000").expect("a host id");
     let listed = cell.observations().server.hosts.get(&host);
     assert!(listed.is_some_and(|host| !host.lost), "listed live again");
