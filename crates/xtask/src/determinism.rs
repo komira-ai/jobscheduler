@@ -708,6 +708,13 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
 /// never takes.
 pub const ALLOWED: &[Allowed] = &[
     Allowed {
+        file: "crates/js-agent/src/agent_process.rs",
+        item: "draw",
+        token: Token::Getrandom,
+        sites: 1,
+        reason: "the agent program's process id, drawn once when the program starts its session; the cell builds its agents' sessions itself and gives them no process id",
+    },
+    Allowed {
         file: "crates/js-agent/src/backoff.rs",
         item: "SystemJitter::up_to",
         token: Token::Getrandom,
