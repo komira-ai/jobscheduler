@@ -248,7 +248,7 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
 - **Every start is advanced before any job is watched or cleaned** (`Lifecycle::step`): one pass
   advances every job, then a second watches and cleans each. A start that settled in the first pass
   is watched in the second, as before.
-- **The lookups have their own threads** (`crun/fs/pool.rs`): `js-lookups` for the lookups of host
+- **The lookups have their own threads** (`crun/fs/pool.rs`, now `pool.rs`): `js-lookups` for the lookups of host
   paths, `js-paths` for the assemblies and the checks, four threads each. A hung provider tree now
   holds at most four threads of each.
 
@@ -297,6 +297,101 @@ Read with `js-start-timeline` over that node's `journalctl -u js-agent-crun` for
   process or mount behind) and the image budget's first walk after a restart, both on threads a
   start waits behind.
 
+## Fourth part: a finished job's cleanup off the worker
+
+### Measured on the farm (before)
+
+js-agent 0.1.288 (with the first three parts), a burst of about 8,900 starts over twenty minutes on
+four nodes, from the agents' journals (`journalctl -u js-agent-crun`):
+
+| Segment | p50 | p90 |
+|---|---|---|
+| arrival to `taken` (the reply waiting in the worker's queue) | 2.0 s | 7.0 s |
+| placement to the reply's arrival | 116 ms | 10.3 s |
+
+Both rows are `js-start-timeline`'s over the burst's `Started` lines (`received->taken` and
+`placed->received`). The agents logged `the job worker is busy: an answer was dropped` 127 to 154
+times per node in the same window (counted with `grep -c` over each node's journal). At light load
+the same `received->taken` row is 0 ms p50 and 3 ms p90.
+
+### Why, read in the code
+
+- **The cleanup ran on the worker.** `Lifecycle::step` takes each finished job through its cleanup
+  (`lifecycle/machine/cleanup.rs`), and two of its stages were synchronous calls on the worker's
+  one thread: `Stage::Removing` called `Runtime::remove` (for `crun`: the end of the supervisor,
+  `crun delete`, the unmount of the run's file system, the removal of its cgroup, of its lease
+  directory with the writable layers and of its temporary directory, its pins and its synced
+  sidecar), and `Stage::Scratch` removed the run's scratch directory and the directories beside it
+  (one system call for each entry of the tree the job wrote).
+- **A busy host finishes jobs several times a second**, and every step after an order took those
+  removals on. A reply waited in the worker's queue for as long as they took (`taken`); once 16
+  replies waited, the next was dropped and sent again after the session's backoff, which is the
+  placement-to-arrival p90.
+- The journal says when a job's cleanup events were printed, not how long each took, so the share
+  of each removal in a step is read in the code, not measured. The line below measures it from now
+  on.
+
+### What this part changes
+
+- **The container's removal runs off the worker.** `Runtime::removing` begins the removal, or
+  follows the one under way, and answers `Removal::Pending` until it is done. `CrunRuntime` runs it
+  on a pool of four threads (`js-remove`, `crun/remove.rs`): the run is taken out of the runtime's
+  books and given to the thread, a removal that fails gives it back (the next removal goes over it
+  again from the start, as before), and the pool rings the worker's wake when it answers, as the
+  create does. While a removal is under way its lease's name is refused to a create and to a
+  `Runtime::remove`. The trait's default removes on the caller's thread, so the other runtimes are
+  unchanged; the VM router asks the runtime that holds the run.
+- **The run's directories are removed off the worker.** The lifecycle removes them on a pool of four
+  threads of its own (`js-scratch`, `Lifecycle::with_cleanup_threads`, `lifecycle/machine/run_dirs.rs`)
+  and rings the wake when done. What the runtime mounted for a run it never made (`discard_fs`) is
+  still discarded on the worker first: it is the runtime's own state. A removal that is done is not
+  made again while the quota waits for the project's usage to read zero.
+- **The order and the outcomes are unchanged.** The record that the checks are owed is written on the
+  worker before either removal is asked, so a restart while one runs still taints the host
+  (`check-owed`). A removal that fails taints `cleanup-failed` with the same check as before, and
+  the slot stays booked; the job waits in its stage, with its slot booked, while a removal runs.
+- **The cleanup is measured.** When a run's cleanup passes, the lifecycle logs
+  `job: Cleaned { run_id, timeline: CleanupTimeline { steps, worker_ms } }`: the milliseconds after
+  the run entered its cleanup at which the container (`removed`), the directories (`scratch`) and
+  the checks (`checks`) were done, and the milliseconds the worker spent on the cleanup itself
+  (`docs/runbooks/start-timeline.md`).
+
+### Decisions
+
+- **Pools of their own, not `js-paths`.** The `js-paths` threads run the assemblies, which hold a
+  thread for as long as their mounts take (for ever on a hung file system), and a burst of starts
+  keeps them busy. Removals queued there would make a start's assembly wait behind finished jobs'
+  removals, moving the wait from `taken` to `ready`; the third part split the lookups from the
+  assemblies for the same reason. Four threads each, the size of the pools beside them.
+- **The scratch pool is the lifecycle's, not the runtime's.** The run's directories are the
+  lifecycle's (its scratch root and files root), and the lifecycle runs on macOS too, where there is
+  no `crun`; so the pool module moved from `crun/fs/pool.rs` to `pool.rs`.
+- **No deadline.** A removal that hangs in the kernel holds its thread and its job, which stays in
+  its cleanup with its slot booked, as a hung create holds its start; before, it held the whole
+  worker until the watchdog ended the agent.
+- **A plan setting, not always on.** `Plan::cleanup_threads` is four in the agent and 0 in the worker
+  tests that look at a run's cleanup as soon as the worker settled; 0 removes on the worker as
+  before.
+- **The owed record, the checks and the quota stay on the worker.** The record must be on disk before
+  anything is removed. The checks read the books of every job on the host. The quota's calls are
+  system calls of microseconds that read and change the slot's state.
+
+### Compatibility and failure modes
+
+- No wire, record or configuration format changes; the journal gains the `Cleaned` line. The
+  `Started` line is unchanged, so `js-start-timeline` reads it as before.
+- A crash while a removal runs off the worker leaves what a crash during a removal on the worker
+  left: the owed record (the next start taints the host) and the lease's sidecar (the start-up pass
+  removes the lease).
+- A thread that panics during a removal loses the run it was given: the removal answers a failure
+  (the host is tainted `cleanup-failed`) and the next removal takes the lease apart by its sidecar.
+
+### What is left
+
+- The farm measurement after this agent ships: `received->taken` p50 in a burst of the same size,
+  `the job worker is busy` counts, and the `Cleaned` lines' `worker_ms` against their steps.
+- The post-job checks and the owed record's syncs still run on the worker, once for each job.
+
 ## Tests
 
 The tests drive the lifecycle with counted, ordered fakes and an injected clock; none asserts a
@@ -308,4 +403,8 @@ and the line), `crun/fs/fs_tests.rs` (the lookups), `crun/budget_tests.rs` (the 
 `concurrent_start.rs` (a start advanced before an older job's cleanup), `crun/fs/fs_tests.rs`
 (lookups answered while every assembly or check thread is held), `worker/bell_tests.rs` and
 `tests/agent/jobs/bell.rs` (a start taken rings the bell), and js-lease-server's
-`agent_api_held_tests.rs` and `held_beat_tests.rs` (which bound a beat is held for).
+`agent_api_held_tests.rs` and `held_beat_tests.rs` (which bound a beat is held for). The fourth part
+adds `tests/agent/lifecycle/removing.rs` (a start taken while a removal runs, the cleanup's
+timeline, failures and a restart while a removal runs), `tests/crun_stand_in/removes.rs` (`crun`'s
+removals off the worker), `lifecycle/machine/run_dirs.rs`'s unit tests and `tests/agent/vm/split.rs`
+(the router).
