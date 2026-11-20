@@ -68,7 +68,7 @@
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | run a start with `isolation = host`: an OCI container run by `crun` as root in the host's own namespaces (pid, network, mount, IPC, UTS, cgroup; no user namespace), with the host's `/` as its root and every capability, in a cgroup of its own below its lease's, which accounts and limits it and whose kill ends it whole on a stop or a cancel. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine runs contained jobs only); the agent then reports `host-jobs`. The server taints a host for good when it places a host job, and the machine must be reimaged before it is used again (docs/runbooks/host-jobs.md). Without the flag a start with `isolation = host` is refused (`host-jobs-not-allowed`) and creates nothing |
 //! | `--allow-fuse-jobs` | give a contained job that asks for it (a start with `fuse`) the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN` of its own user namespace (never the host's), with `io_uring_setup`, `io_uring_enter` and `io_uring_register` allowed in its seccomp filter; its network, `noNewPrivileges` and masked paths are unchanged. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine does not give the device). The agent reports `fuse-jobs` when the kernel is at least 6.14 and `/dev/fuse` is the FUSE device (char 10:229), and `fuse-uring` besides when the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0; otherwise it warns at start, naming what is missing, and reports neither. Without the flag such a start is refused (`fuse-jobs-not-allowed`) and creates nothing (docs/runbooks/fuse-jobs.md) |
-//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it |
+//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it. It also holds the hold file `hold`, written by the step that drains the host for an update: while it is there the agent starts no work (each start is refused `host-held`) and keeps its host cordoned on the lease server, from its first hello on, across restarts (see [`lifecycle::hold`] and [`hold_cordon`]) |
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; Linux build only, and not with `--no-jobs`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount. With the crun runtime it is a prefix of the host paths a job start's layers and mounts name (the longest wins; a link is followed only inside it), opened when the agent starts, and a run start's mount of a named root is refused (`invalid-mount`). With the native runtime (a Mac) it is the root a job start's mounts of host paths lie beneath once their links are followed (checked when the host paths are looked up, so a link inside a root that leads out is refused `input-not-allowed`), and every root is a read deny of every run: a run reads only the mounts it was given, which its profile grants back; keep nothing a job reads without mounting it (a tool) under a root, and a `--bundle-store` or a files root may not lie under one |
 //! | `--mount-root-ro <name>=<path>` | like `--mount-root`, in the same namespace of names, but a start with a read-write mount from it is refused (`invalid-mount`; a job start's, `input-not-allowed`) and nothing is created; it may be on the scratch root's file system under `--scratch-quota`; the `st_dev` comparison sees a root's own device only, not a scratch device mounted below a root (a submount a recursive bind brings along), so the operator must guarantee there is none; on a Mac it is a read deny of every run as `--mount-root` is, and a read-write mount whose canonical path lies beneath it is refused `input-not-allowed` |
@@ -315,6 +315,7 @@ pub mod flags_file;
 pub mod fuse_env;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
+pub mod hold_cordon;
 mod host;
 pub mod host_ports;
 mod identity;
@@ -367,6 +368,7 @@ pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
+use hold_cordon::{Keeper, Seams as KeeperSeams};
 pub use host::{Offer, StoreView, offer};
 pub use identity::{IdentityFlags, IdentitySourceKind};
 pub use jobs::DRAIN_SETTLE;
@@ -380,7 +382,7 @@ pub use readiness::{
 pub use registry_credentials::{
     CREDENTIALS_MAX, ImageAllowError, RegistryCredentials, RegistryCredentialsError,
 };
-pub use run::{Exit, Sleeper, Wake, drive};
+pub use run::{Exit, Sleeper, Wake, drive, drive_holding};
 pub use session::{
     CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
 };
@@ -705,6 +707,9 @@ fn execute(
         None => Local::from_cli(&cli, services.euid),
     };
     let mut local = local.map_err(Failure::Usage)?;
+    // The state root the hold file is read from (see `hold_cordon`), kept before the jobs
+    // take `local`: an agent with no state root is never held.
+    let held_root = local.state.clone();
     platform::complete(&mut local, &cli, &start).map_err(Failure::Usage)?;
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
@@ -841,6 +846,7 @@ fn execute(
         .map(|(worker, ..)| WorkerHost::new(worker.handle()));
     let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let cell = dispatch::Cell::new(kept);
+    let host_id = offer.hello.host_id.clone();
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain, outbox)) = &jobs {
         // The worker rings the sleeper's bell when it has news, so a start taken and its
@@ -864,6 +870,21 @@ fn execute(
     if let Some(grant) = log_grant {
         session = session.with_log_grant(grant);
     }
+    // The cordon of a held host is asked on the lease server the agent registers with, with
+    // the credential it registered with, after each exchange (see `hold_cordon`).
+    let connect =
+        |root: &Path| hold_cordon::connect_http(&cli.server, &login, ca_cert, &host_id, root);
+    let hold_clock = services.machine.clock();
+    let mut keeper = held_root.as_ref().map(|state| {
+        Keeper::new(KeeperSeams {
+            state,
+            // The owner the state root and the lifecycle's look at the hold file check for.
+            owner: rustix::process::geteuid().as_raw(),
+            host: &host_id,
+            connect: &connect,
+            clock: &*hold_clock,
+        })
+    });
     // The dispatch poller runs beside the heartbeat loop for as long as the loop does.
     let dial = dispatch::Dial {
         connector: services.dispatch,
@@ -876,7 +897,7 @@ fn execute(
             let (cell, dial) = (&cell, &dial);
             scope.spawn(move || dispatch::serve(cell, dial, worker, Box::new(SystemJitter)));
         }
-        let exit = drive(&mut session, &mut *services.sleeper, err);
+        let exit = drive_holding(&mut session, &mut *services.sleeper, err, keeper.as_mut());
         cell.close();
         exit
     });

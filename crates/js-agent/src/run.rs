@@ -43,7 +43,8 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::session::{Drain, Fatal, Session, Step};
+use crate::hold_cordon::Keeper;
+use crate::session::{Drain, Fatal, Note, Session, Step};
 use crate::worker::Snapshot;
 
 /// How a wait ended.
@@ -93,6 +94,18 @@ pub enum Exit {
 /// Every note, and every line the session's worker wants printed, goes to `log` as one
 /// line.
 pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn Write) -> Exit {
+    drive_holding(session, sleeper, log, None)
+}
+
+/// [`drive`], stepping `keeper` (the cordon of a held host, see [`crate::hold_cordon`]) after
+/// each exchange and before its wait, and telling it when the exchange was an accepted
+/// hello. The keeper's lines go to `log` too.
+pub fn drive_holding(
+    session: &mut Session<'_>,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+    mut keeper: Option<&mut Keeper<'_>>,
+) -> Exit {
     loop {
         let step = session.tick();
         print(session, log);
@@ -102,6 +115,11 @@ pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn
             Step::Wait { after, note } => {
                 note.iter().for_each(|note| {
                     let _ = writeln!(log, "js-agent: {note}; next in {}ms", after.as_millis());
+                });
+                let hello = matches!(note, Some(Note::Registered { .. }));
+                let held = keeper.as_deref_mut().map(|keeper| keeper.step(hello));
+                held.into_iter().flatten().for_each(|line| {
+                    let _ = writeln!(log, "js-agent: {line}");
                 });
                 // The wait after an accepted heartbeat ends early when the worker has news
                 // for the server (a job that runs, or ended); no other wait does.

@@ -14,11 +14,18 @@
 //! anything in it.
 //!
 //! hostkeeper makes no state directory for a hook: it passes `state_dir` on as one more value
-//! of the manifest's `[params]` and never looks at it. [`Held::open_or_make`] therefore makes it,
-//! mode 0700, when it is not there, and holds it to the same rules: only the directory itself,
-//! never one above it, made in its parent through the descriptor the walk checked (so a link
-//! put in its place is never followed), the parent synced so the new entry survives a crash.
-//! [`Held::open`] makes nothing.
+//! of the manifest's `[params]` and never looks at it, and on a host the service was never
+//! installed on the directories above it are not there either (a Mac's
+//! `/Library/Application Support/js-agent`). [`Held::open_or_make`] therefore makes every
+//! directory of the path that is not there, the state directory mode 0700 and each one above it
+//! mode 0755, all in the group the hook runs as, and holds them to the same rules as directories
+//! that were there. Each is made in its parent through the descriptor the walk checked (so a
+//! link put in its place is never followed): made under a name of its own (`.<name>.making`),
+//! given its group and mode, renamed to its name only if nothing is there, the parent synced so
+//! the new entry survives a crash. So a crash leaves either nothing at the name or a finished
+//! directory, never one the checks refuse. The group is set and not inherited because a Mac
+//! gives a new directory its parent's group (`admin` under `/Library/Application Support`),
+//! which the state directory's `root:root` check refuses. [`Held::open`] makes nothing.
 //!
 //! The directory is opened once, walking down from `/` one component at a time without
 //! following a link, and checked through the descriptor it was opened as. The lock, the
@@ -32,7 +39,7 @@
 //! schema is newer than [`Document::SCHEMA`] is read-only: it is not loaded, and it is not
 //! overwritten or moved.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -41,10 +48,11 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, flock, fsync, mkdirat, openat,
-    renameat, renameat_with, statat, unlinkat,
+    AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, fchmod, fchown, flock, fsync,
+    mkdirat, openat, renameat, renameat_with, statat, unlinkat,
 };
 use rustix::io::Errno;
+use rustix::process::getegid;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -313,22 +321,66 @@ fn refusal<D: Document>(path: &Path, last: bool, refused: Refused) -> StateError
     }
 }
 
-/// Makes the directory `name` of `parent`, mode 0700, unless something is at that name already
-/// (what it is, the open after this judges), and syncs `parent` so that the new entry survives a
-/// crash.
-fn make_dir_at(parent: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
-    match mkdirat(parent, name, Mode::RWXU) {
-        Ok(()) => fsync(parent).map_err(io::Error::from),
-        Err(Errno::EXIST) => Ok(()),
-        Err(errno) => Err(errno.into()),
+/// The mode [`Held::open_or_make`] gives the state directory it makes.
+const STATE_DIR_MODE: Mode = Mode::RWXU;
+
+/// The mode [`Held::open_or_make`] gives a directory above the state directory it makes: the
+/// owner's alone to write, open to read for the rest (a package's files go into it as well).
+const ANCESTOR_MODE: Mode = Mode::from_raw_mode(0o755);
+
+/// The name a directory `name` is made under before it is put at its own (see
+/// [`make_dir_at`]).
+fn making_name(name: &OsStr) -> OsString {
+    let mut making = OsString::from(".");
+    making.push(name);
+    making.push(".making");
+    making
+}
+
+/// Makes the directory `name` of `parent`, which is not there, with the permission bits `mode`
+/// and in the group the hook runs as, and syncs `parent` so that the new entry survives a crash.
+///
+/// It is made at [`making_name`] first (or taken from there when a make that was killed left it
+/// there), given its group and mode through its descriptor, and only then renamed to `name`,
+/// never over anything that is there: what appears at `name` is finished. Another maker that put
+/// something at `name` meanwhile is an error, as anything else that fails is.
+fn make_dir_at(parent: BorrowedFd<'_>, name: &OsStr, mode: Mode) -> io::Result<()> {
+    let making = making_name(name);
+    match mkdirat(parent, &making, Mode::RWXU) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(errno) => return Err(errno.into()),
+    }
+    let made = openat(parent, &making, DIR_FLAGS, Mode::empty())?;
+    fchown(&made, None, Some(getegid()))?;
+    fchmod(&made, mode)?;
+    renameat_with(parent, &making, parent, name, RenameFlags::NOREPLACE)?;
+    fsync(parent).map_err(io::Error::from)
+}
+
+/// Opens the directory `name` of `parent` ([`open_dir_at`]). With `make`, when nothing is at
+/// `name`, it is made first ([`make_dir_at`]): mode 0700 when it is the state directory (`last`)
+/// and 0755 when it is one above it. Not generic, so that every hook's walk runs the same code.
+fn enter_dir_at(
+    parent: BorrowedFd<'_>,
+    name: &OsStr,
+    make: bool,
+    last: bool,
+) -> Result<OwnedFd, Refused> {
+    match open_dir_at(parent, name) {
+        Err(Refused::Io(error)) if make && error.kind() == io::ErrorKind::NotFound => {
+            let mode = if last { STATE_DIR_MODE } else { ANCESTOR_MODE };
+            make_dir_at(parent, name, mode).map_err(Refused::Io)?;
+            open_dir_at(parent, name)
+        }
+        opened => opened,
     }
 }
 
 /// Opens `dir` by walking down from `/`, one component at a time and without following a
 /// link, holding each ancestor to [`check_ancestor`] before going into it and the last
 /// directory to [`check_dir`]. Every look is at an open descriptor, never at a path, so what
-/// is checked is what is returned. With `make`, the last directory is made in its checked
-/// parent first when nothing is at its name ([`make_dir_at`]).
+/// is checked is what is returned. With `make`, a directory of the path that is not there is
+/// made in its checked parent ([`make_dir_at`]), then opened and checked as one that was.
 fn open_checked<D: Document>(
     dir: &Path,
     stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
@@ -361,10 +413,7 @@ fn open_checked<D: Document>(
         })?;
         here.push(part);
         let last = parts.clone().next().is_none();
-        if last && make {
-            make_dir_at(fd.as_fd(), part.as_os_str()).map_err(at(&here))?;
-        }
-        fd = open_dir_at(fd.as_fd(), part.as_os_str())
+        fd = enter_dir_at(fd.as_fd(), part.as_os_str(), make, last)
             .map_err(|refused| refusal(&here, last, refused))?;
     }
 }
@@ -427,14 +476,14 @@ impl<D: Document> Held<D> {
         Held::open_dir(dir, stat, false)
     }
 
-    /// [`Held::open`], having first made `dir` (mode 0700, owned by the user the hook runs as)
-    /// when nothing is at its path: the first step of a first install under hostkeeper finds no
-    /// directory, since hostkeeper makes none. Only `dir` itself is made, in the parent the walk checked;
-    /// a directory above it that is not there is still [`StateError::Io`] naming it. What is made
-    /// is held to the same rules as a directory that was there.
+    /// [`Held::open`], having first made every directory of `dir`'s path that is not there: `dir`
+    /// mode 0700, each one above it mode 0755, owned by the user the hook runs as and in its
+    /// group. The first step of a first install under hostkeeper finds none, since hostkeeper
+    /// makes none. Each is made in the parent the walk checked, and what is made is held to the
+    /// same rules as a directory that was there; nothing is made in a parent the checks refuse.
     ///
     /// # Errors
-    /// As [`Held::open`]; [`StateError::Io`] naming `dir` when it cannot be made.
+    /// As [`Held::open`]; [`StateError::Io`] naming the directory that cannot be made.
     pub fn open_or_make(
         dir: &Path,
         stat: &dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,

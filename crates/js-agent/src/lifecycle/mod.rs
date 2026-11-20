@@ -183,6 +183,12 @@
 //!   ([`CheckHook::run_restored`]); any other restored taint stays until an operator moves
 //!   the marker. See [`taint`] for the rules and
 //!   `docs/design/taint-self-clearing.md` for the reasons.
+//! - **A held host starts nothing** (see [`hold`]). While the hold file is in the state
+//!   root (the drain of an update wrote it), every `Start` and job start is answered
+//!   `failed_to_start` with the code `host-held`, after the taint's refusal: the host is not
+//!   tainted for it, and the file is looked at for each start, so its removal lets the next
+//!   start run. A file there that is not the agent's own, or that group or others have
+//!   permission on, is refused as a hold and holds the host all the same.
 //! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
 //!   not start on this host and will not; the server must not send it to this host again
 //!   (see `refusal::HOST_TAINTED`), and must treat a `Start` refused with it as the host's
@@ -268,6 +274,7 @@
 mod codes;
 mod event;
 mod finding;
+pub mod hold;
 mod job_fs;
 mod machine;
 mod mount_providers;

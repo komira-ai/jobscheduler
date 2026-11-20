@@ -39,6 +39,7 @@ use self::held::Records;
 use self::job::{Given, Job, Keyed, Retired, Stage, Stuck, blind_taint, host_taint};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
+use super::hold;
 use super::quota::QuotaHealth;
 use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
 use super::taint::TaintState;
@@ -467,6 +468,10 @@ impl Lifecycle {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
+        }
+        // A held host (its hold file is there) starts nothing, and is not tainted for it.
+        if let Some(why) = hold::read_own(&self.config.state).why() {
+            return Err(no(refusal::HOST_HELD, &why));
         }
         // A bundle is judged before the native body it belongs to, so a host without the
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's

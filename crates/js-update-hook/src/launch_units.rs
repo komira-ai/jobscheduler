@@ -58,12 +58,13 @@
 //! after the reads is left to the steps to judge: it reads `inactive`, or `failed` if it has
 //! ended badly.
 //!
-//! # `kickstart -k` and the token file
+//! # `kickstart -k` and the gate file
 //!
 //! `kickstart` runs the service "regardless of its configured launch conditions" (launchctl(1)),
-//! so on a loaded, idle agent it **bypasses** the `KeepAlive` `PathState` condition on the
-//! token file (`/etc/js-agent/token`) that `bootstrap` honours. An agent kicked without its
-//! token would start, fail, and read `failed`: a fault of the host blamed on the release.
+//! so on a loaded, idle agent it **bypasses** the `KeepAlive` `PathState` condition on the gate
+//! file (js-agent's is its flags file, `/etc/js-agent/flags`) that `bootstrap` honours. An agent
+//! kicked without it would start, fail, and read `failed`: a fault of the host blamed on the
+//! release.
 //! [`LaunchUnits::with_gate`] names the file, and `start` then refuses to kick an idle service
 //! while the file is absent, with an error naming the file. `bootstrap` is not checked: launchd
 //! applies the condition itself and leaves the daemon idle.
@@ -289,7 +290,7 @@ impl LaunchUnits<'_> {
         }
     }
 
-    /// `kickstart` ignores the `KeepAlive` condition on the token file: refuse it while the
+    /// `kickstart` ignores the `KeepAlive` condition on the gate file: refuse it while the
     /// file is absent.
     fn allow_kick(&self, unit: &str) -> Result<(), PortError> {
         match self.gate {
