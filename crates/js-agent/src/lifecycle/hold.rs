@@ -39,7 +39,6 @@
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
 
 use super::taint::StateRoot;
 
