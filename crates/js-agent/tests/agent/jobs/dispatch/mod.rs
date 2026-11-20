@@ -5,6 +5,7 @@
 //! another thread is for an event with a hang guard. The poller's thread, the session's cell
 //! and the whole agent are in `threads`.
 
+mod live;
 mod threads;
 
 use std::time::Duration;

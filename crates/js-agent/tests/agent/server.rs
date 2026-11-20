@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 use crate::jobs::fake::FakeMachine;
-use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted};
+use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted, run_on_polling};
 
 /// The wall time the server's clock starts at.
 pub const T0: u64 = 1_000_000;
@@ -166,6 +166,30 @@ impl Server {
             extra,
             pool,
         )
+    }
+
+    /// A server on a first boot over the pool file `pool` whose state store, and the job
+    /// tables in it, is a SQLite file of its scratch directory (`--store`), so that
+    /// [`Server::store`] gives a test the rows the server keeps.
+    #[cfg(target_os = "linux")]
+    pub fn start_stored(name: &str, pool: &'static str) -> Self {
+        let scratch = Scratch::new(name);
+        let line = format!("sqlite:{}", scratch.path("state.db").display());
+        let file = scratch.write("store", &line, 0o600);
+        let extra = vec![
+            "--store".to_owned(),
+            file.display().to_string(),
+            "--allow-sqlite-store".to_owned(),
+        ];
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let clock = ManualClock::new(Timestamp::from_millis(T0));
+        launch(runtime, scratch, clock, "initialise", extra, pool)
+    }
+
+    /// The state store the server keeps its rows in (a server started with `--store`).
+    #[cfg(target_os = "linux")]
+    pub fn store(&self) -> Arc<dyn js_state::Store> {
+        self.running.store().expect("the server was given a store")
     }
 
     /// Stops the server and starts another over its files, as the program does after a
@@ -373,6 +397,9 @@ impl Sleeper for Gate {
     }
 }
 
+/// The connector of the dispatch poll's transports, when a test gives one.
+type Dispatch = Arc<dyn Connector + Send + Sync>;
+
 /// An agent running on a thread, held at each of its waits until the test lets it go.
 pub struct Agent {
     slept: Receiver<Duration>,
@@ -462,7 +489,34 @@ impl Agent {
             ]);
         }
         let machine = Arc::new(FakeMachine::new());
-        Self::run_args(args, host, connector, machine, false)
+        Self::run_args(args, host, (connector, None), machine, false)
+    }
+
+    /// [`Agent::spawn_on`] with the connector of the dispatch poll's transports given: the
+    /// heartbeat loop uses `connector`, and the poller makes its own through `dispatch`.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_polling(
+        url: String,
+        token: PathBuf,
+        extra: &[&str],
+        host: fn() -> Host,
+        connectors: (
+            impl Connector + Send + 'static,
+            Arc<dyn Connector + Send + Sync>,
+        ),
+        machine: Arc<FakeMachine>,
+    ) -> Self {
+        let (connector, dispatch) = connectors;
+        let mut args = vec![
+            "--server".to_owned(),
+            url,
+            "--token-file".to_owned(),
+            token.to_str().unwrap().to_owned(),
+            "--pool".to_owned(),
+            "macs".to_owned(),
+        ];
+        args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        Self::run_args(args, host, (connector, Some(dispatch)), machine, false)
     }
 
     fn launch(
@@ -485,16 +539,17 @@ impl Agent {
             args.extend(["--pool".to_owned(), "macs".to_owned()]);
         }
         args.extend(extra.iter().map(|flag| (*flag).to_owned()));
-        Self::run_args(args, host, connector, machine, defaulted)
+        Self::run_args(args, host, (connector, None), machine, defaulted)
     }
 
     fn run_args(
         args: Vec<String>,
         host: fn() -> Host,
-        connector: impl Connector + Send + 'static,
+        connectors: (impl Connector + Send + 'static, Option<Dispatch>),
         machine: Arc<dyn Machine>,
         defaulted: bool,
     ) -> Self {
+        let (connector, dispatch) = connectors;
         let (tell, worker) = channel();
         let (slept, waits) = channel();
         let (go, gate) = channel();
@@ -507,6 +562,11 @@ impl Agent {
                 let _ = tell.send(worker);
             };
             let jobs = (machine, Some(&hook as &dyn Fn(Handle)));
+            if let Some(dispatch) = dispatch {
+                let dispatch: &(dyn Connector + Sync) = &*dispatch;
+                let connectors = (&connector as &dyn Connector, dispatch);
+                return run_on_polling(&args, &host(), connectors, &mut sleeper, jobs);
+            }
             let run = if defaulted { run_on_defaulted } else { run_on };
             run(&args, &host(), &connector, &mut sleeper, &mut Lowest, jobs)
         });
