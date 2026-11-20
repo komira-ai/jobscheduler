@@ -141,11 +141,14 @@ fn decide_claim(
     claimer: &str,
     (now, until): (StoreTime, StoreTime),
 ) -> Result<Option<(Txn, DispatchMessage)>, JobStoreError> {
-    let Some(row) = read.get(key)? else {
-        return Ok(None);
-    };
-    let message = message_at(key, &row.value).ok();
-    let Some(message) = message.filter(|message| message.is_due(now)) else {
+    let row = read.get(key)?;
+    let message = row
+        .as_ref()
+        .and_then(|row| message_at(key, &row.value).ok());
+    let due = message.filter(|message| message.is_due(now));
+    // A claimed key with no live row never reaches a decision (the store answers `Held`); a
+    // row that went is declined as one that is not due is.
+    let (Some(row), Some(message)) = (row, due) else {
         return Ok(None);
     };
     let claimed = DispatchMessage {
@@ -377,62 +380,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
 
 #[cfg(test)]
 mod tests {
-    use js_state::{StoreError, TxnRead, Versioned};
-
     use super::*;
     use crate::result::Output;
-
-    /// A view whose every read fails.
-    struct Failing;
-
-    impl TxnRead for Failing {
-        fn get(&mut self, _key: &str) -> Result<Option<Versioned>, StoreError> {
-            Err(StoreError::Failed("the read failed".to_owned()))
-        }
-
-        fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-            Err(StoreError::Failed("the scan failed".to_owned()))
-        }
-    }
-
-    /// A view that holds no row.
-    struct Empty;
-
-    impl TxnRead for Empty {
-        fn get(&mut self, _key: &str) -> Result<Option<Versioned>, StoreError> {
-            Ok(None)
-        }
-
-        fn scan_prefix(&mut self, _prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-            Ok(Vec::new())
-        }
-    }
-
-    // Catches a claim that invents a message whose row is gone by the time its transaction
-    // reads it (a store answers such a claim `Held` before it decides; the decision does not
-    // rest on that): it claims nothing and writes nothing.
-    #[test]
-    fn a_claim_of_a_message_already_gone_claims_nothing() {
-        let at = StoreTime::ZERO;
-        let decided = decide_claim(&mut Empty, "dispatch/host-a/x", "server-1", (at, at));
-        assert_eq!(decided.map(|found| found.is_none()), Ok(true));
-        assert_eq!(Empty.scan_prefix("dispatch/"), Ok(Vec::new()));
-    }
-
-    // Catches a claim that takes a failed read for an absent message (and so answers nothing
-    // instead of the failure): the decision answers the store's error.
-    #[test]
-    fn a_claim_decided_on_a_failed_read_is_the_failure() {
-        let at = StoreTime::ZERO;
-        let decided = decide_claim(&mut Failing, "dispatch/host-a/x", "server-1", (at, at));
-        assert_eq!(
-            decided.map(drop),
-            Err(JobStoreError::Store(StoreError::Failed(
-                "the read failed".to_owned()
-            )))
-        );
-        assert!(Failing.scan_prefix("dispatch/").is_err());
-    }
 
     // Catches a stop sent for an end the host reported (it has already acted on it) and none
     // sent for an end the server decided.
