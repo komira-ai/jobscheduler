@@ -5,7 +5,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{Isolation, JobSpec, JobState, NewJob};
+use js_jobs::interfere::Read;
+use js_jobs::{Isolation, JobSpec, JobState, JobStore, NewJob, RandomIds};
 use js_proto::v1::{self, SubmitJobRequest};
 use tonic::Request;
 
@@ -144,4 +145,72 @@ async fn a_retry_and_a_service_that_does_not_place_leave_the_job_queued() {
     assert_eq!(retried.state(), v1::JobState::Queued);
     assert_eq!(rig.job(&id("job-r")).state, JobState::Queued);
     assert_eq!(rig.jobs.live_allocations().unwrap(), Vec::new());
+}
+
+/// The prefix of the one scan of each job table a pass takes: the queued jobs, the live
+/// allocations, the marks and the cordons.
+const TABLE_SCANS: [&str; 4] = ["idx/job/queued/", "idx/alloc/host/", "mark/", "cordon/"];
+
+/// The scans of the job tables `rig`'s store was asked for since the last call, in order.
+fn table_scans(rig: &Rig) -> Vec<String> {
+    let reads = rig.store.take_reads().into_iter();
+    let scans = reads.filter_map(|read| match read {
+        Read::Scan(prefix) => Some(prefix),
+        Read::Get(_) => None,
+    });
+    scans
+        .filter(|prefix| TABLE_SCANS.contains(&prefix.as_str()))
+        .collect()
+}
+
+/// Asserts that a submit into an empty queue, after a pass that read the tables and wrote
+/// nothing, is answered `placed` with one scan of a job table in the call: the read of the
+/// queue that decides, before the commit, that nothing is ahead of the job. The pass in the
+/// call takes the tables it read before with the job added, and reads none of the four. It
+/// catches a pass that reads them all again for the call's own insert.
+#[tokio::test]
+async fn a_submit_after_a_quiet_pass_is_placed_with_no_read_of_the_tables() {
+    let rig = placing_rig("submit_no_reread");
+    let api = api(&rig, true);
+    rig.agents.place_jobs();
+    let _ = table_scans(&rig);
+    let job = submit(&api, wire("job-q")).await;
+    assert_eq!(
+        (job.state(), job.host_id.as_str()),
+        (v1::JobState::Placed, "host-a")
+    );
+    assert_eq!(table_scans(&rig), ["idx/job/queued/"]);
+}
+
+/// Asserts that a commit of another server over the same store, between the pass's read and
+/// the submit, makes the pass in the call read the four tables again, and place the job: the
+/// submit's commit is not the only write since. It catches tables kept past another server's
+/// write, which leave its job out of the pass.
+#[tokio::test]
+async fn a_submit_after_another_servers_write_reads_the_tables_again() {
+    let rig = placing_rig("submit_other_write");
+    let api = api(&rig, true);
+    rig.agents.place_jobs();
+    let other = JobStore::new(Arc::clone(&rig.store), RandomIds).unwrap();
+    let elsewhere = NewJob {
+        id: Some(id("job-o")),
+        spec: spec(),
+        priority: -1,
+        client: None,
+    };
+    other.insert_queued(elsewhere).unwrap();
+    let _ = table_scans(&rig);
+    let job = submit(&api, wire("job-s")).await;
+    assert_eq!(
+        (job.state(), job.host_id.as_str()),
+        (v1::JobState::Placed, "host-a")
+    );
+    let read_again = [
+        "idx/job/queued/",
+        "idx/alloc/host/",
+        "idx/job/queued/",
+        "mark/",
+        "cordon/",
+    ];
+    assert_eq!(table_scans(&rig), read_again);
 }

@@ -244,5 +244,5 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE,
-    MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, UncordonWrite, Written, queue_order,
+    MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, Step, UncordonWrite, Written, queue_order,
 };

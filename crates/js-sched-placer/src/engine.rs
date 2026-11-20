@@ -38,6 +38,7 @@ use crate::sizes::{ColdSize, JobSizes};
 pub mod jobs;
 #[path = "jobs_seen.rs"]
 pub(crate) mod jobs_seen;
+pub use jobs_seen::TablesFrom;
 #[path = "whole.rs"]
 pub mod whole;
 #[path = "whole_jobs.rs"]

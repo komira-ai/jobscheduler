@@ -150,8 +150,8 @@ The scheduling logic decides a placement and writes what the host must do as a m
   start never handed out of a job not yet starting is deleted instead. Every end deletes its job's start, and the retention sweep deletes a job's messages with its row. Stops and cancels use
   the same queue. Built at the store (G19), and the route that hands it out is Built (next item): the key `js-jobs/src/keys.rs:51`, the record
   `js-jobs/src/record.rs:661` and its row `js-jobs/src/codec/dispatch_fields.rs`; the start written by
-  `js-jobs/src/store/whole.rs:307` (every placement) and `js-jobs/src/store.rs:498` (a whole-host job's move to starting); the
-  stops and the deleted starts by `js-jobs/src/store/dispatch.rs:310`, called from `js-jobs/src/store.rs:576` (a cancel),
+  `js-jobs/src/store/whole.rs:307` (every placement) and `js-jobs/src/store.rs:500` (a whole-host job's move to starting); the
+  stops and the deleted starts by `js-jobs/src/store/dispatch.rs:310`, called from `js-jobs/src/store.rs:578` (a cancel),
   `js-jobs/src/store/ending.rs:106` (every end), `js-jobs/src/store/hosts.rs:88` (an end that frees) and
   `js-jobs/src/store/whole.rs:384` (a failed prepare).
 - **Dispatch is an agent route that the agent long-polls through the edge.** `POST /v1/agent/dispatch` (a `POST`, not a `GET`: the
@@ -162,7 +162,7 @@ The scheduling logic decides a placement and writes what the host must do as a m
   `js-lease-server/src/agent_api/dispatch.rs:97` (`poll`; mounted at `js-lease-server/src/agent_api.rs:160`), the claim
   `dispatch.rs:248` (`claim_round`) and the hold `dispatch.rs:207` (`hand_out`), over the wire `js-agent-wire/src/dispatch.rs`. The
   session is judged as a beat's is and nothing is recorded (`Registry::check_heartbeat`). A held poll wakes on a placement this
-  instance commits (`js-lease-server/src/sched/jobs_pass.rs:189`, its own wake beside the held beat's:
+  instance commits (`js-lease-server/src/sched/jobs_pass.rs:199`, its own wake beside the held beat's:
   `js-lease-server/src/dispatch_state.rs:19`) and reads the queue again every `server.dispatch_recheck_ms` (500 ms), so a message
   another instance wrote reaches it within that until G16's `NOTIFY` wakes it; a drain answers it empty at once and a claim after
   the drain began is never made.
@@ -278,13 +278,13 @@ and decides nothing shared). Paths are under `crates/`.
 | Revisions are minted in commit order, with no gap in the change feed | `js-state/src/postgres/tx.rs:191` (a tail), `:156` (`hold_head`) | `LOCK TABLE head` in a plain transaction's tail, so bodies run at once and tails queue; a claimed decision holds it from its start | Built |
 | A claimed row is decided by one transaction | `js-state/src/postgres/claim.rs:98`, `js-state/src/postgres/session.rs:155-157` | the commit head taken first (`hold_head`), then the claimed row `FOR UPDATE SKIP LOCKED` (a held row is skipped, never waited for); the decision's reads are what its commit finds. This serializes the decisions of every instance on the head; their bodies are short (one job, one host's rows) | Built |
 | A schema migration is applied once by racing installers | `js-state/src/postgres/schema.rs:80` | `pg_advisory_xact_lock` inside the applying transaction, version re-read under it; the server itself only judges the schema | Built |
-| The job store's schema row is written once | `js-jobs/src/store.rs:229-237` | `Cond::Absent`; a conflict re-reads the row | Built |
+| The job store's schema row is written once | `js-jobs/src/store.rs:227-235` | `Cond::Absent`; a conflict re-reads the row | Built |
 | The index backfill and the boot raise of deadlines at open | `js-lease-server/src/job_store.rs:195` (`booted_until_won`), `js-jobs/src/store/ending.rs:286`, `:336` | each write at `Cond::Version`; a beaten open retries (#923); a raise is a max, so a second start only delays deadlines | Built |
 | The first start imports the files beside the state file once | `js-lease-server/src/store/import.rs:99-100` | marker and rows `Cond::Absent` in one transaction, so one import wins; the loser's `Conflict` refuses its start (exit 2) instead of reading the marker | Built (correctness); Designed (G11: the loser starts) |
 | Row expiry (TTL) | `js-state/src/postgres/tx.rs:146`, `:289` | judged on the database clock inside each transaction | Built |
 | Feed trim | `js-lease-server/src/job_pass.rs:242`, `js-lease-server/src/job_store/feed_trim.rs:44` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
 | An unreachable database | `js-lease-server/src/job_pass.rs:190`, `:225`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's binding read or write or a taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:349`, `:377`, `:643-646`), both retried by the agent | Built |
-| `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-931` | fails with the read's error (`Store::now` returns `Result<StoreTime, StoreError>`, `js-state/src/store.rs:121`); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:344`, `:489`, `ending.rs:62`, `:147`) fail with it and write nothing | Built (#938) |
+| `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-931` | fails with the read's error (`Store::now` returns `Result<StoreTime, StoreError>`, `js-state/src/store.rs:121`); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:343`, `:491`, `ending.rs:62`, `:147`) fail with it and write nothing | Built (#938) |
 | Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. At SIGTERM the agent listener closes, held beats are answered at once and no job is placed (#935, `js-lease-server/src/drain.rs:28`, `server.rs:840`), so agents move at once; the route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; on SIGTERM the instance stops pulling and finishes what it pulled (section 0.1); a dispatch poll that has claimed is answered with its claim, a held one is answered empty at once and none claims after the drain began (Built, G19: `js-lease-server/src/agent_api/dispatch.rs:97`) |
 | The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-state/src/postgres/serving.rs:21`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
 
@@ -335,7 +335,7 @@ and decides nothing shared). Paths are under `crates/`.
 | One mark row per whole-host job | `js-jobs/src/store/marks.rs:81-94` | `mark/<job>` at `Cond::Absent` or `Cond::Version`, with the job checked at its version | Built |
 | Which host a whole-host job drains | `js-sched-placer/src/whole_jobs.rs:204-210`, `js-sched-placer/src/jobs.rs:741` | each instance chooses over its own hosts and deletes a mark whose host it never heard after its own start plus grace: two instances drain two hosts in turn (the rows stay consistent; the work is wasted) | Not a gap: churn, the rows stay consistent (G8 deleted) |
 | Why a job waits (queue status note) | `js-sched-placer/src/jobs.rs:779`, `js-jobs/src/store/status.rs:38` | conditional, but its text depends on the instance's view, so two instances rewrite it in turn and each rewrite moves the head | Not a gap: cosmetic (G8 deleted) |
-| The tables a pass decides from | `js-sched-placer/src/jobs_seen.rs:192` | a cache judged by the store's head (#880); every placement is re-decided in its transaction | Built |
+| The tables a pass decides from | `js-sched-placer/src/jobs_seen.rs:221` | a cache judged by the store's head (#880), with the job of this instance's own submit added to it when that commit is the only one since (`js-sched-placer/src/jobs_seen.rs:260`, `js-jobs/src/store/written.rs`); every placement is re-decided in its transaction | Built |
 | Which hosts an instance places on | `js-lease-server/src/sched/jobs_rows.rs:140` (`offered`, read before each pass from `JobStore::live_nodes_reusing`, `:188`), `js-lease-server/src/sched/jobs_pass.rs:129` (`pass_over_queue`: nothing once draining, `:133`) | every host whose `node/` row is live (heard within the longest grace by the store's clock), whichever instance took its hello, and every host this instance's registry holds live; the pass's skip rule sees a changed row as a changed host it offers | Built |
 | No two instances pull one queue element | `js-jobs/src/store/whole.rs:142-146` (the job's claim), `js-jobs/src/store/dispatch.rs:202` (a dispatch message's claim) | `SELECT ... FOR UPDATE SKIP LOCKED` on the job; on a dispatch message, the same with `claim_until` (section 0.1) | Built (jobs; messages at the store; G19: the route that claims them, `js-lease-server/src/agent_api/dispatch.rs:248`) |
 | Queue order | `js-jobs/src/store/queue.rs:20` | a total order of row columns, the same on every instance | Built |
@@ -346,8 +346,8 @@ and decides nothing shared). Paths are under `crates/`.
 | Decision | Where | How it holds | Tag |
 |---|---|---|---|
 | A client-chosen job id is recorded once | `js-jobs/src/store.rs:378-389` | `Cond::Absent`; a conflict answers from the stored job | Built |
-| A minted job id is unique | `js-jobs/src/store.rs:404-413` | random ids, `Cond::Absent`, retried on a collision | Built |
-| A cancel racing a placement on another instance | `js-jobs/src/store.rs:556-580` | `Cond::Version`; the loser writes nothing; the cancel writes its stop message in its own transaction | Built (its stop message at the store; G19: the stop's delivery, `js-lease-server/src/agent_api/dispatch.rs:268`) |
+| A minted job id is unique | `js-jobs/src/store.rs:406-415` | random ids, `Cond::Absent`, retried on a collision | Built |
+| A cancel racing a placement on another instance | `js-jobs/src/store.rs:560-584` | `Cond::Version`; the loser writes nothing; the cancel writes its stop message in its own transaction | Built (its stop message at the store; G19: the stop's delivery, `js-lease-server/src/agent_api/dispatch.rs:268`) |
 | Job reads, results, logs | `js-lease-server/src/job_api/read.rs:220`, `js-lease-server/src/job_api/logs.rs:239-249` | read from the rows; a follow polls the row, no local wake decides | Built |
 | A submit is refused `no-capable-host` | `js-lease-server/src/admit.rs:110` (`can_ever_serve`), `js-lease-server/src/node_rows.rs:57` (`read`), `js-lease-server/src/job_api/submit.rs:264` | judged over this instance's registry and every host's `node/` row not forgotten, so a host that said hello to another instance counts; a failed read of the rows admits (the refusal is never taken on less than the rows). Since #940 a tainted host counts as capable (`js-sched/src/admission_ever.rs`) | Built |
 | `ListHosts`, `GET /v1/hosts`, a job's `host_silent_since_ms` | `js-lease-server/src/hosts.rs:352` (`listing_with_rows`), `js-lease-server/src/job_api/read.rs:163` | the listings merge this registry's hosts with the hosts known only by their rows; `host_silent_since_ms` is still this instance's registry | Built (listings); Designed (G5: `host_silent_since_ms`) |
@@ -384,7 +384,7 @@ and decides nothing shared). Paths are under `crates/`.
 
 ## 4. Time
 
-Rule 3 is Built for the job store (#938), and not yet for the marks, presence, join tokens or usage minutes. The job rows are stamped with the store's clock (`js-jobs/src/store.rs:344`, `ending.rs:147`), but the pass,
+Rule 3 is Built for the job store (#938), and not yet for the marks, presence, join tokens or usage minutes. The job rows are stamped with the store's clock (`js-jobs/src/store.rs:343`, `ending.rs:147`), but the pass,
 the heartbeat and the host rows compare with the process clock (section 3.6), and `Store::now` answers the epoch when the database
 cannot be read (section 3.1). G2 makes one clock:
 
@@ -392,7 +392,7 @@ cannot be read (section 3.1). G2 makes one clock:
   when it fails. That is rule 4 for time.
 - The job pass (`job_pass.rs:197`, `jobs.now()`), prepare expiry, the duty claims (`claim_duty(duty, period)` reads the clock itself, `js-jobs/src/store/duties.rs:46-52`), the whole-host start (`job_whole::serve`, only for a step that stamps a time) and the
   binding's cordon end (`agent_state.rs` `Skew`, the store's clock less the server's, read at start, at each save and before a cordon's commit) take the store's time (Built, #938). (Join-token and credential expiry,
-  `join_tokens.rs:440-557`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:741`, still the process clock) is replaced by a stored deadline on this clock, by G7, which places over every live host (G8 is deleted).
+  `join_tokens.rs:440-557`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:743`, still the process clock) is replaced by a stored deadline on this clock, by G7, which places over every live host (G8 is deleted).
 - The process clock stays for intervals that are the process's own: ticks, backoffs, the hello limiter, the held beat.
 
 One more round trip per pass or request, and none per heartbeat: its `heard_at` is `now()` inside the beat's own write (section 0, G15).
@@ -580,7 +580,7 @@ on every update now, whatever section 9 has built.
    (`server.rs:858-882`, `js-lease-server/src/listener.rs:286-290`, `:368-392`, `:422-426`).
 3. It ticks once more (`server.rs:882`) and exits. The final tick is the whole tick (`js-lease-server/src/api.rs:187`): the job pass
    (claimed), the registry's advance, the refresh (token reload, the cordon mirror, the bindings save, which since #935 deletes only a binding this registry held and let go, the credential flush, the
-   usage tick, the log grants) and a placement pass that places nothing, because the instance is draining (#935, `js-lease-server/src/sched/jobs_pass.rs:147`); then the usage side's last flush (`server.rs:713-718`).
+   usage tick, the log grants) and a placement pass that places nothing, because the instance is draining (#935, `js-lease-server/src/sched/jobs_pass.rs:157`); then the usage side's last flush (`server.rs:713-718`).
    The scaler does not run in it. Two hazards below come from this tick.
 
 An agent whose connection was closed or refused retries with its backoff. Today the instance it reaches holds no session for it, so a

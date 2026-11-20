@@ -27,7 +27,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
-use js_jobs::{HOST_JOB_TAINT, JobId};
+use js_jobs::{HOST_JOB_TAINT, Inserted, JobId};
 use js_registry::{Registry, WholeNodeConfig};
 use js_types::Clock;
 use js_types::HostId;
@@ -121,6 +121,16 @@ impl Agents {
     /// the registry first either way, so a changed row brings the pass back.
     pub(crate) fn place_jobs_after_beat(&self) -> Vec<(HostId, JobId)> {
         self.pass_over_queue(Pass::IfChanged)
+    }
+
+    /// Tells the placer of the job a submit just recorded, `inserted`, so that the next pass
+    /// takes the job tables the last one read with the job added, rather than reading them
+    /// again, when that commit is the only write of the job store since
+    /// ([`SchedPlacer::note_inserted`](super::place::SchedPlacer::note_inserted)). Whether it
+    /// was added; never for an agent side without a placer.
+    pub(crate) fn note_inserted(&self, inserted: &Inserted) -> bool {
+        let placer = self.placer.as_ref();
+        placer.is_some_and(|placer| placer.note_inserted(inserted))
     }
 
     /// [`Agents::place_jobs`], or [`Agents::place_jobs_after_beat`] as `pass` says. Nothing

@@ -117,7 +117,7 @@ use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
 use super::whole_jobs::{WholeJobStep, WholeJobs};
-use super::{Engine, Placed, recovered_as};
+use super::{Engine, Placed, TablesFrom, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
 use crate::sizes::{bounds_of, day_of};
@@ -132,13 +132,15 @@ pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
 }
 
 /// What a pass tells the server's metrics: each committed placement, with how long its job
-/// waited since its submit, and each write of the pass whose commit failed.
+/// waited since its submit, each write whose commit failed, and where it took the job tables.
 pub trait PassMetrics {
     /// A queued job was placed, `waited` after it was submitted.
     fn job_placed(&self, waited: Duration);
     /// A write of the pass failed (a placement's commit, or a whole-host job's mark): it did
     /// not land.
     fn store_write_failed(&self);
+    /// The pass took the job tables `from` there ([`TablesFrom`]); by default, nothing is told.
+    fn job_tables(&self, _from: TablesFrom) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -700,7 +702,7 @@ impl SchedPlacer {
         hosts: &JobHosts<'_>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
-        let tables = self.tables(jobs)?;
+        let tables = self.tables(jobs, metrics)?;
         // A host whose cordon the job store holds takes no new job, whichever server placed the
         // cordon (the registry knows another server's only from its tick). Each cordon lapses
         // by the clock, so it is judged at this pass.
