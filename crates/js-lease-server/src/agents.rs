@@ -898,10 +898,36 @@ impl Agents {
     /// changed by itself (a host it forgot, a cordon that lapsed) or took without a commit.
     /// True when the file or the store holds what the registry has bound (a taint report is
     /// acknowledged only then).
+    /// Whether a server may still serve `host` by its session row (`node/<host>`): the row was
+    /// heard, by the store's clock, within the grace and lost retention of its pool
+    /// ([`js_registry::Registry::kept_for`]), the window after which a registry forgets a
+    /// silent host. Then its binding is not deleted because this server's registry let go of it
+    /// (it heard the host last when it took its session from the row; another server has
+    /// heard it since). A row that cannot be read, or of a pool this server does not have,
+    /// counts as served: a binding is never deleted on less than the store holds. False
+    /// without the job tables and for a host with no row.
+    fn served(&self, host: &HostId) -> bool {
+        let Some(jobs) = &self.jobs else {
+            return false;
+        };
+        let heard = |row: js_jobs::NodeRow| {
+            let kept = self.registry.kept_for(&row.record.pool);
+            let now = jobs.now().ok();
+            let silent = now.map(|now| now.since(row.record.heard_at));
+            kept.zip(silent).is_none_or(|(kept, silent)| silent <= kept)
+        };
+        jobs.read_node(host)
+            .map_or(true, |row| row.is_some_and(heard))
+    }
+
     pub(crate) async fn save_bindings(self: &Arc<Self>) -> bool {
         let gate = self.host_writes.lock().await;
         let this = Arc::clone(self);
-        let saved = blocking(move || this.store.save(|| this.registry.bindings())).await;
+        let saved = blocking(move || {
+            let served = |host: &HostId| this.served(host);
+            this.store.save(|| this.registry.bindings(), &served)
+        })
+        .await;
         // A row another server wrote since this one read it was left as it is: the taint it
         // holds is the registry's from here on, and the binding is written over it by the next
         // save, or not at all when the two agree.

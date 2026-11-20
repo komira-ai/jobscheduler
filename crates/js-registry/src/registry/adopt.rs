@@ -43,6 +43,17 @@ pub enum Adopted {
 }
 
 impl Registry {
+    /// How long a host of the pool named `pool` is kept after it was last heard before it is
+    /// forgotten: the pool's grace and its lost retention. `None` for a pool the registry does
+    /// not have. A caller that holds when another server last heard a host compares with this,
+    /// as the registry does with its own record.
+    #[must_use]
+    pub fn kept_for(&self, pool: &str) -> Option<Duration> {
+        let config = self.pool_at(self.pool_named(pool)?);
+        let kept = config.grace_ms().saturating_add(config.lost_retention_ms());
+        Some(Duration::from_millis(kept))
+    }
+
     /// Takes the session of `host` that another server's hello wrote into the registry, as
     /// if its hello had been admitted here, when the registry holds no record of the host,
     /// holds one awaiting its first hello, or holds one of an older epoch than
@@ -51,9 +62,11 @@ impl Registry {
     /// the placer as a hello does. The host counts as heard `node.silent_for` ago.
     ///
     /// No admission check runs: the row is the decision another server already made. A
-    /// record of the same or a newer epoch is kept as it is ([`Adopted::Kept`]), so a cache
-    /// never moves back; a pool the registry does not have changes nothing
-    /// ([`Adopted::UnknownPool`]).
+    /// record in session at the same or a newer epoch is kept as it is ([`Adopted::Kept`]), so
+    /// a live session in the cache never moves back; a record with no session (awaiting, or
+    /// abandoned because the store could not record its hello) takes the row's session
+    /// whatever its epoch, since the row is then the only session there is. A pool the
+    /// registry does not have changes nothing ([`Adopted::UnknownPool`]).
     pub fn adopt(&self, host: &HostId, node: NodeSession) -> Adopted {
         let Some(pool) = self.pool_named(&node.pool) else {
             return Adopted::UnknownPool;

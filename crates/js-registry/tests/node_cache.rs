@@ -332,3 +332,19 @@ fn advance_forgets_an_adopted_host_silent_past_the_retention() {
     fx.registry.advance();
     assert!(fx.registry.hosts().is_empty());
 }
+
+/// Catches a window that differs from the one the registry forgets a silent host by (a server
+/// that deletes a binding another server still serves, or keeps one past its retention): the
+/// window of the pool named is its grace and lost retention, and a pool the registry does not
+/// have has none.
+#[test]
+fn a_pool_keeps_a_silent_host_for_its_grace_and_retention() {
+    let fx = fixture(2);
+    assert_eq!(
+        fx.registry.kept_for("builders"),
+        Some(Duration::from_millis(
+            DEFAULT_GRACE_MS + DEFAULT_LOST_RETENTION_MS
+        ))
+    );
+    assert_eq!(fx.registry.kept_for("elsewhere"), None);
+}

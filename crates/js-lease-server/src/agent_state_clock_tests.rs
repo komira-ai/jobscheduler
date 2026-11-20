@@ -87,7 +87,8 @@ fn a_cordon_end_is_stored_on_the_store_clock_and_read_on_each_servers_own() {
     first_clock.set(Timestamp::from_millis(4_000_000 + 3_600_000));
     let renewed = cordoned(4_000_000 + 3_600_000 + 2 * LEFT_MS);
     let saved_at = store_ms(&store);
-    a.save(|| BTreeMap::from([(host(), renewed)])).unwrap();
+    a.save(|| BTreeMap::from([(host(), renewed)]), &|_| false)
+        .unwrap();
     assert_eq!(stored_end(&store), Some(saved_at + 2 * LEFT_MS));
 }
 
@@ -103,10 +104,10 @@ fn a_save_of_unchanged_bindings_writes_nothing_when_the_skew_moves() {
     let (a, read) = BindingStore::in_store(Arc::clone(&dynamic), shared).unwrap();
     assert!(read.is_empty());
     let bindings = BTreeMap::from([(host(), cordoned(4_000_000 + LEFT_MS))]);
-    a.save(|| bindings.clone()).unwrap();
+    a.save(|| bindings.clone(), &|_| false).unwrap();
     let txns = store.commit_stats().txns;
     clock.set(Timestamp::from_millis(4_000_250));
-    a.save(|| bindings.clone()).unwrap();
+    a.save(|| bindings.clone(), &|_| false).unwrap();
     assert_eq!(store.commit_stats().txns, txns);
 }
 
@@ -132,11 +133,11 @@ fn a_store_that_cannot_read_its_clock_moves_no_binding_between_the_clocks() {
     assert!(a.stored(&host()).is_err());
     assert!(a.measure().is_err());
     let bindings = BTreeMap::from([(host(), cordoned(4_000_000 + LEFT_MS))]);
-    assert!(a.save(|| bindings.clone()).is_err());
+    assert!(a.save(|| bindings.clone(), &|_| false).is_err());
     assert_eq!(store.scan_prefix("").unwrap(), before);
 
     store.fail_clock(false);
     let saved_at = store_ms(&store);
-    a.save(|| bindings.clone()).unwrap();
+    a.save(|| bindings.clone(), &|_| false).unwrap();
     assert_eq!(stored_end(&store), Some(saved_at + LEFT_MS));
 }

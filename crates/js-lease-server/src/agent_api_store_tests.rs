@@ -727,7 +727,7 @@ fn stored_hosts_keep_the_fields_a_newer_build_wrote() {
     // The server's clock is at the epoch: the end is written on the store's, as far past the
     // store's reading as it is past the server's.
     let store_ms = u64::try_from(store.now().unwrap().as_duration().as_millis()).unwrap();
-    bindings.save(|| cordoned).unwrap();
+    bindings.save(|| cordoned, &|_| false).unwrap();
     let written = store.get("hosts/binding/host-a").unwrap().unwrap().value;
     let written: Value = serde_json::from_slice(&written).unwrap();
     let expected = json!({

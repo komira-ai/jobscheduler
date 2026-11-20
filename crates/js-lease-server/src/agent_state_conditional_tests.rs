@@ -64,7 +64,7 @@ fn a_save_that_loses_a_version_keeps_the_row_and_writes_the_others() {
             (other.clone(), bound("b", false)),
         ])
     };
-    assert!(a.save(|| both("a", false)).unwrap().is_empty());
+    assert!(a.save(|| both("a", false), &|_| false).unwrap().is_empty());
 
     // The other server stores a taint in the row this server wrote.
     b.stored(&host()).unwrap();
@@ -77,7 +77,7 @@ fn a_save_that_loses_a_version_keeps_the_row_and_writes_the_others() {
     // that changed: the first put is refused, the second is written.
     let cordoned = bound("a", false).with_cordon(Some(9_000));
     let changed = BTreeMap::from([(host(), cordoned), (other.clone(), bound("c", false))]);
-    let lost = a.save(|| changed.clone()).unwrap();
+    let lost = a.save(|| changed.clone(), &|_| false).unwrap();
     assert_eq!(lost.len(), 1);
     assert_eq!((&lost[0].0, lost[0].1.taint().is_some()), (&host(), true));
     assert_eq!(stored_taint(&store).as_deref(), Some("residue"));
@@ -91,7 +91,7 @@ fn a_save_that_loses_a_version_keeps_the_row_and_writes_the_others() {
     // Held as read, the host's binding is written at the version of the row now.
     let taken = bound("a", true).with_cordon(Some(9_000));
     let again = BTreeMap::from([(host(), taken), (other, bound("c", false))]);
-    assert!(a.save(|| again.clone()).unwrap().is_empty());
+    assert!(a.save(|| again.clone(), &|_| false).unwrap().is_empty());
     let row = store.get("hosts/binding/host-a").unwrap().unwrap();
     assert!(
         String::from_utf8(row.value)
@@ -111,16 +111,16 @@ fn a_put_over_a_deleted_row_is_made_again_and_a_delete_over_a_rewritten_row_is_n
     let store = shared_store();
     let a = server(&store);
     let one = BTreeMap::from([(host(), bound("a", false))]);
-    a.save(|| one.clone()).unwrap();
+    a.save(|| one.clone(), &|_| false).unwrap();
     store
         .inner()
         .txn(Txn::new().delete("hosts/binding/host-a", Cond::Any))
         .unwrap()
         .unwrap();
     let cordoned = BTreeMap::from([(host(), bound("a", false).with_cordon(Some(9_000)))]);
-    assert!(a.save(|| cordoned.clone()).unwrap().is_empty());
+    assert!(a.save(|| cordoned.clone(), &|_| false).unwrap().is_empty());
     assert!(store.get("hosts/binding/host-a").unwrap().is_none());
-    assert!(a.save(|| cordoned.clone()).unwrap().is_empty());
+    assert!(a.save(|| cordoned.clone(), &|_| false).unwrap().is_empty());
     assert!(store.get("hosts/binding/host-a").unwrap().is_some());
 
     // Another server rewrites the row; this registry lets the host go.
@@ -129,11 +129,11 @@ fn a_put_over_a_deleted_row_is_made_again_and_a_delete_over_a_rewritten_row_is_n
     let change = b.change(&host(), bound("a", true));
     let revision = b.commit(change.writes.clone()).unwrap();
     b.applied(&change, revision);
-    let lost = a.save(BTreeMap::new).unwrap();
+    let lost = a.save(BTreeMap::new, &|_| false).unwrap();
     assert_eq!(lost.len(), 1);
     assert_eq!(stored_taint(&store).as_deref(), Some("residue"));
     let commits = store.commit_stats().txns;
-    assert!(a.save(BTreeMap::new).unwrap().is_empty());
+    assert!(a.save(BTreeMap::new, &|_| false).unwrap().is_empty());
     assert_eq!(
         store.commit_stats().txns,
         commits,
@@ -150,7 +150,7 @@ fn a_restore_is_refused_over_a_row_another_server_wrote_since_the_scan() {
     let store = shared_store();
     let first = server(&store);
     first
-        .save(|| BTreeMap::from([(host(), bound("a", false))]))
+        .save(|| BTreeMap::from([(host(), bound("a", false))]), &|_| false)
         .unwrap();
     let starting = server(&store);
     let rival = server(&store);

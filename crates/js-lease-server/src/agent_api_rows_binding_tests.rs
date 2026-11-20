@@ -284,3 +284,44 @@ async fn a_hosts_read_of_itself_takes_the_host_from_the_rows() {
     let unread = read(&c.agents, "host-a").await.map(drop).unwrap_err();
     assert_eq!(said(&unread), (503, "cordon-unsaved"));
 }
+
+/// Asserts that a server whose registry lets go of a host another server serves leaves the
+/// host's binding row alone: server B takes `host-a`'s session from the row at one beat, the
+/// host then beats only server A, and once B's registry has forgotten the host (silent to B for
+/// longer than its pool's grace and retention) B's tick deletes nothing, because the row says
+/// A heard the host since. Once the host is silent to every server for that long, the server
+/// that last served it deletes its binding as before. It catches a save that deletes the
+/// binding of a live host another server serves (its credential and taint gone from the store,
+/// so a restart of that server finds the host unbound).
+#[tokio::test]
+async fn a_binding_another_server_still_serves_is_not_deleted_when_this_one_forgets_it() {
+    let world = World::new();
+    let a = world.server("binding_forgotten_a", Kind::KEPT);
+    let b = world.server("binding_forgotten_b", Kind::KEPT);
+    let session = a.join("host-a").await;
+    b.beat(&session, Some(1), Vec::new()).await.unwrap();
+    assert_eq!(b.holds("host-a"), Some(session.epoch));
+    // B's tick while it holds the host saves its bindings, the host's among them.
+    b.agents.refresh().await;
+    let pool = world.row("host-a").record.pool;
+    let window = b.agents.registry.kept_for(&pool).unwrap();
+    let step = window / 3;
+    for seq in 2..=5 {
+        world.advance(step);
+        a.beat(&session, Some(seq), Vec::new()).await.unwrap();
+    }
+    b.agents.refresh().await;
+    assert_eq!(b.holds("host-a"), None, "B's registry forgot the host");
+    assert!(
+        row(&world, "host-a").is_some(),
+        "B kept the binding A serves"
+    );
+
+    world.advance(window + step);
+    a.agents.refresh().await;
+    assert_eq!(a.holds("host-a"), None, "A's registry forgot the host");
+    assert!(
+        row(&world, "host-a").is_none(),
+        "the silent host's binding went"
+    );
+}

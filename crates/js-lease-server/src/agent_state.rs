@@ -436,11 +436,18 @@ impl Held {
         &mut self,
         store: &dyn Store,
         bindings: BTreeMap<HostId, Binding>,
+        served: &dyn Fn(&HostId) -> bool,
     ) -> io::Result<Vec<(HostId, Binding)>> {
         let pending = self.writes_to(&bindings);
         self.held.extend(bindings.into_keys());
         let mut lost = Vec::new();
         for Pending { host, after, write } in pending {
+            // A host this registry let go of that a server still serves (its session row is
+            // there) keeps its binding: the row is left to that server, and is not this one's.
+            if after.is_none() && served(&host) {
+                self.hold(&host, None);
+                continue;
+            }
             match host_keys::commit_one(store, write) {
                 Ok(revision) => self.wrote(&host, after.as_ref(), revision),
                 Err(error) if host_keys::refused_key(&error).is_some() => {
@@ -672,7 +679,11 @@ impl BindingStore {
     /// # Errors
     ///
     /// The file or the store could not be written, or a row could not be read again.
-    pub(crate) fn save<F>(&self, current: F) -> io::Result<Vec<(HostId, Binding)>>
+    pub(crate) fn save<F>(
+        &self,
+        current: F,
+        served: &dyn Fn(&HostId) -> bool,
+    ) -> io::Result<Vec<(HostId, Binding)>>
     where
         F: FnOnce() -> BTreeMap<HostId, Binding>,
     {
@@ -688,7 +699,7 @@ impl BindingStore {
                 written.bindings = bindings;
                 Ok(Vec::new())
             }
-            Keeper::Store(store, _) => written.save_each(&**store, bindings),
+            Keeper::Store(store, _) => written.save_each(&**store, bindings, served),
         }
     }
 
@@ -709,7 +720,7 @@ impl BindingStore {
     /// refused, and the next one reads the rows again.
     pub(crate) fn restore(&self, bindings: &BTreeMap<HostId, Binding>) -> io::Result<()> {
         let Keeper::Store(store, _) = &self.keeper else {
-            return self.save(|| bindings.clone()).map(drop);
+            return self.save(|| bindings.clone(), &|_| false).map(drop);
         };
         let mut written = self.lock();
         let changed = bindings

@@ -712,7 +712,7 @@ pub const ALLOWED: &[Allowed] = &[
         item: "draw",
         token: Token::Getrandom,
         sites: 1,
-        reason: "the agent program's process id, drawn once when the program starts its session; the cell builds its agents' sessions itself and gives them no process id",
+        reason: "the agent program's process id, drawn once when the program starts its session; the cell builds its agents' sessions itself and names each process from its host and generation, with no random source",
     },
     Allowed {
         file: "crates/js-agent/src/backoff.rs",

@@ -45,10 +45,13 @@ fn the_snapshot_is_taken_under_the_lock() {
     bindings.insert(host("a"), bound("token-a", None));
     let mut locked = false;
     store
-        .save(|| {
-            locked = store.written.try_lock().is_err();
-            bindings.clone()
-        })
+        .save(
+            || {
+                locked = store.written.try_lock().is_err();
+                bindings.clone()
+            },
+            &|_| false,
+        )
         .unwrap();
     assert!(locked, "the snapshot was read before the store's lock");
     assert_eq!(load(&path).unwrap(), bindings);
