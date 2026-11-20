@@ -2,7 +2,7 @@
 //! hostkeeper's daemon runs one: its step runner (`hostkeeper_steps::StepRunner`) writes the
 //! params file and orders the steps, and its systemd launcher builds each step's `systemd-run`
 //! line and keeps what the hook printed. All of it is hostkeeper's code at the revision the
-//! workspace pins (v0.1.194). The order's inputs are the hook's bounds and params of the native
+//! workspace pins. The order's inputs are the hook's bounds and params of the native
 //! manifest that `cargo xtask release desired` writes into the targets ([`BOUNDS`] and
 //! [`DECLARED_PARAMS`]); the package's files are in the version directory below `tree/`, as the
 //! native installer keeps them, and the hook is the `/usr/bin/js-agent` of that tree (the pinned
@@ -247,6 +247,9 @@ impl Host {
             staged: Staged::seal(dir).unwrap(),
             previous: None,
             hook_binary: PathBuf::from(HOOK),
+            // The manifest's hook command is the program alone: every step is run bare.
+            hook_args: Vec::new(),
+            previous_hook: None,
             bounds: BOUNDS,
             declared_params: Params::parse_declared(DECLARED_PARAMS).unwrap(),
             min_updater_protocol: None,
@@ -334,7 +337,7 @@ verify_deadline_secs = 9000
 verify_timeout_secs = 615
 "#;
 
-/// A first install: hostkeeper 0.1.194 orders js-agent on a host where nothing has made
+/// A first install: hostkeeper's pinned runner orders js-agent on a host where nothing has made
 /// the hook's state directory. The params file it writes is read by the hook as it is, `prepare`
 /// makes the state directory (root's alone, mode 0700) and the update runs to the end:
 /// `prepare`, `cutover`, `verify` and `cleanup`, each in the bare form hostkeeper runs a step

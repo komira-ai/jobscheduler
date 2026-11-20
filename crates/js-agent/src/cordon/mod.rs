@@ -100,8 +100,8 @@ use crate::{
     SystemSleeper, Wake, exit, host_id, machine_id,
 };
 pub use args::{Args, parse_holder, parse_window};
-pub(crate) use hold::CREDENTIAL_CODES;
 use hold::CREDENTIAL_ERROR;
+pub(crate) use hold::{CREDENTIAL_CODES, idle};
 pub use hold::{IDLE_POLL, Outcome, Plan, hold};
 
 /// The first argument that selects the verb.

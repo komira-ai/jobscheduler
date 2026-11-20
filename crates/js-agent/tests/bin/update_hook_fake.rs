@@ -15,6 +15,10 @@
 //! previous release before `rollback`, behind no kill point, the world's ports seen through the fault the test arranged for
 //! the step, kill points in the harness's protocol, the hang guard on the clock, and a watchdog
 //! thread that ends a step which stops making progress (`update_hook_fakes::watchdog`).
+//!
+//! `drain` and `resume` (the steps of a maintenance run) run over the world itself: the lease
+//! server, the unit manager and the host facts, the hold file in the world's state root, the
+//! harness's kill points before each change, and the hang guard on the clock.
 
 #![allow(dead_code)]
 
@@ -28,11 +32,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use js_agent::update_hook::step::{self, Env, TokenFacts};
+use js_agent::update_hook::step::{self, Env, MaintainEnv, TokenFacts};
 #[cfg(target_os = "linux")]
 use js_agent::update_hook::{
-    Clock, DirStat, Done, Host, Invocation, Lease, Manager, NoGate, Outcome, Params, Ports, Step,
-    run,
+    Clock, DirStat, Done, DrainParams, Host, Invocation, Lease, MaintainInvocation,
+    MaintenanceStep, Manager, NoGate, Outcome, Params, Ports, Step, run,
 };
 
 #[cfg(target_os = "linux")]
@@ -223,6 +227,33 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
     done
 }
 
+/// Runs `drain` or `resume` over the fakes: the lease server, the unit manager and the host
+/// facts are the world itself, the hold file is the world's state root, and the kill points are
+/// the harness's. The hang guard holds the waits to [`Guard::budget_of_maintenance`], which
+/// check 9 (a host that is idle, or a deadline that has passed) never reaches. These steps keep
+/// no record, no fault is arranged for them and no defect applies: the update steps' ports of
+/// [`Faulted`] are for the five steps of an update.
+#[cfg(target_os = "linux")]
+fn fake_maintain(setup: &Setup, invocation: &MaintainInvocation, params: &DrainParams) -> Done {
+    // The kill points are the env's own, one before each change: the world has none of its own.
+    let world = World::new(&setup.world, &setup.control, Box::new(NoGate));
+    let root = world.state_root();
+    let gate = gate(setup);
+    let guard = Guard::new(&world, Guard::budget_of_maintenance(invocation.step), &hung);
+    let env = MaintainEnv {
+        lease: &world,
+        holds: &root,
+        units: &world,
+        facts: &world,
+        clock: &guard,
+        gate: &gate,
+    };
+    match invocation.step {
+        MaintenanceStep::Drain => step::drain(&env, params),
+        MaintenanceStep::Resume => step::resume(&env, params),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     let mut args: Vec<OsString> = std::env::args_os().collect();
@@ -259,6 +290,9 @@ fn main() -> ExitCode {
         watchdog::watch(&watchdog::events, &mut wait, &stalled);
     });
     let body = |invocation: &Invocation, params: &Params| fake_step(&setup, invocation, params);
+    let maintain = |invocation: &MaintainInvocation, params: &DrainParams| {
+        fake_maintain(&setup, invocation, params)
+    };
     let mut sink = std::io::sink();
     let mut stdout = std::io::stdout();
     let out: &mut dyn std::io::Write = if setup.defect == Some(Defect::NoLastLine) {
@@ -266,7 +300,15 @@ fn main() -> ExitCode {
     } else {
         &mut stdout
     };
-    let code = run(&args, out, &mut std::io::stderr(), &Host { step: &body });
+    let code = run(
+        &args,
+        out,
+        &mut std::io::stderr(),
+        &Host {
+            step: &body,
+            maintain: &maintain,
+        },
+    );
     watchdog::finish();
     code
 }

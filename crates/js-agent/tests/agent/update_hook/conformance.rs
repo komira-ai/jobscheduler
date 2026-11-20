@@ -258,6 +258,20 @@ impl FakeService for AgentHost {
     fn residue(&self, sandbox: &Sandbox) -> io::Result<Vec<String>> {
         residue_of(sandbox, self.operator_cordon)
     }
+
+    /// A job's lease on the host, which the lease server never ends by itself: the work a `drain`
+    /// past its deadline must leave as it is. On a first install there is no agent and the
+    /// server knows no host, so there is no work to put in flight.
+    fn start_work(&mut self, sandbox: &Sandbox) -> io::Result<bool> {
+        if self.first_install {
+            return Ok(false);
+        }
+        Self::world(sandbox).alter_host(|host| {
+            host.leases = 1;
+            host.lease = Some("lease-1".to_owned());
+        });
+        Ok(true)
+    }
 }
 
 /// Puts the unit the release `dir` carries in its `units` directory.
@@ -300,6 +314,9 @@ pub(super) fn agent_step(step: Step) -> js_agent::update_hook::Step {
         Step::Rollback => Agent::Rollback,
         Step::Cleanup => Agent::Cleanup,
         Step::Uninstall => unreachable!("the harness runs no uninstall: the package declares none"),
+        Step::Drain | Step::Resume => {
+            unreachable!("drain and resume are no step of an update: the agent's Step has none")
+        }
     }
 }
 
@@ -351,7 +368,7 @@ fn run_form<T>(
 
 /// Runs `checks` on the hook with `fake` behind the verb (`update-hook <step>`) and with the bare
 /// step, and requires the two to give the same result.
-fn run<T: PartialEq + std::fmt::Debug>(
+pub(super) fn run<T: PartialEq + std::fmt::Debug>(
     name: &str,
     fake: AgentHost,
     checks: impl Fn(&mut Conformance<'_>) -> Result<T, Violation>,

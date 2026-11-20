@@ -472,12 +472,28 @@ SHA-256 as the pin, and the manifest:
 |---|---|
 | `package` | `js-agent` |
 | `hook.command` | `/usr/bin/js-agent update-hook` (hostkeeper runs it from the staged copy of the package) |
+| `hook.drain`, `hook.resume` | `drain`, `resume`: the words of the two maintenance steps hostkeeper calls around a run that needs the host quiet (see below) |
 | `hook.timeoutSecs` | prepare 3900, cutover 4320, verify 615, rollback 8220, cleanup 120; no uninstall: hostkeeper refuses an uninstall order of the agent |
 | `hook.verifyDeadlineSecs`, `hook.cleanupRetries` | 9000, 3 |
 | `run` | `js-agent-crun.service` |
 | `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
+
+The two maintenance steps. `drain` writes the hold file in the agent's state root, cordons the
+host on the lease server and returns once the host is idle (no lease, no running job, not
+releasing, no mark). It has no bound unless the run gives a deadline; once the deadline passes
+with the host not idle it puts the host back and exits 75 with the reason `drain_deadline`. A host
+that is idle succeeds whatever the deadline. `resume` removes the hold file and lifts the cordon,
+unless the host was cordoned before `drain`; when the host's facts changed since `drain` and the
+host is idle it restarts the agent first. `resume` on a host that has no hold file changes
+nothing and does not call the lease server.
+
+A hostkeeper coordinator older than komira-ai/hostkeeper#468 refuses a manifest with these two
+fields on its JSON gateway (it refuses unknown fields), so a hostkeeper release carrying that
+change must be deployed before a js-agent release with these fields sets `desired`. A daemon that
+predates the two steps ignores the fields and never runs them, so `minHostkeeper` is not raised
+for them.
 
 When the release's signed Mac package is published (`--pkg-url`, below) the targets also hold a
 `macos-arm64` entry of the installer `macos-pkg`, with the Mac form of this manifest; when it is not,
@@ -593,6 +609,7 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 |---|---|
 | `package` | `com.komira.js-agent` |
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
+| `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
 | `run` | the launchd labels `js-agent` and `js-agent.session` (the agent and its root helper) |
 | `params.unit`, `params.helper_unit` | `js-agent`, `js-agent.session` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |

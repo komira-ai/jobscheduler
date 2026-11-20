@@ -144,3 +144,13 @@ fn the_reason_of_a_verify_that_heard_no_hello_is_this_exact_token() {
 fn the_reason_of_a_first_install_that_cannot_be_rolled_back_is_this_exact_token() {
     assert_eq!(Reason::NoPreviousRelease.as_str(), "no_previous_release");
 }
+
+/// Asserts that the reasons of a maintenance run are these exact tokens, which the updater's
+/// journal keeps. It catches a renamed token.
+#[test]
+fn the_reasons_of_drain_and_resume_are_these_exact_tokens() {
+    assert_eq!(Reason::DrainDeadline.as_str(), "drain_deadline");
+    assert_eq!(Reason::HoldFailed.as_str(), "hold_failed");
+    assert!(Reason::ALL.contains(&Reason::DrainDeadline));
+    assert!(Reason::ALL.contains(&Reason::HoldFailed));
+}

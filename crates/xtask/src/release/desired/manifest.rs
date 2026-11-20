@@ -21,6 +21,16 @@ pub const MIN_HOSTKEEPER: &str = "0.1.225";
 /// The program of the hook, an absolute path of the package, and its arguments.
 pub const HOOK_COMMAND: [&str; 2] = ["/usr/bin/js-agent", "update-hook"];
 
+/// The word of the hook's `drain` step in the manifest (`hook.drain`): hostkeeper's maintenance
+/// runs call the hook with it to cordon the host and wait until it is idle. A test holds it equal
+/// to the name of `js_agent::update_hook::MaintenanceStep::Drain`.
+pub const HOOK_DRAIN: &str = "drain";
+
+/// The word of the hook's `resume` step in the manifest (`hook.resume`): the call that ends a
+/// maintenance run and puts the host back. A test holds it equal to the name of
+/// `js_agent::update_hook::MaintenanceStep::Resume`.
+pub const HOOK_RESUME: &str = "resume";
+
 /// The unit hostkeeper starts, stops and observes.
 pub const RUN_UNIT: &str = "js-agent-crun.service";
 
@@ -183,6 +193,8 @@ fn manifest_of(package: &str, command: &[&str], run: &[&str], params: Value) -> 
         "package": package,
         "hook": {
             "command": command,
+            "drain": HOOK_DRAIN,
+            "resume": HOOK_RESUME,
             "timeoutSecs": {
                 "prepare": int64(PREPARE_SECS),
                 "cutover": int64(CUTOVER_SECS),
