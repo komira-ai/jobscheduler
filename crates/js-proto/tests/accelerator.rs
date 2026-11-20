@@ -203,6 +203,7 @@ fn new_spec() -> JobSpec {
                 form_factor: Some("sxm".to_owned()),
             }),
             isolation: Isolation::Unspecified as i32,
+            xcode: String::new(),
         }),
         ..JobSpec::default()
     }

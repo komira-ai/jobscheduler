@@ -234,6 +234,9 @@ pub(crate) struct Start {
     bundles: Option<Arc<crate::bundle::Placer>>,
     /// The VM backend, when `--vm-driver` turned it on.
     vm: Option<crate::vm::VmSettings>,
+    /// The Xcodes the hello lists ([`crate::host::Offer::xcodes`]), which the native runtime
+    /// runs a job that names one with.
+    xcodes: Vec<crate::xcode::Xcode>,
 }
 
 impl Start {
@@ -271,6 +274,7 @@ pub(crate) fn open(
             None => Ok(Start {
                 bundles: None,
                 vm: None,
+                xcodes: Vec::new(),
             }),
         };
     }
@@ -292,20 +296,24 @@ pub(crate) fn open(
     Ok(Start {
         bundles,
         vm: vm.map_err(Failure::Usage)?,
+        xcodes: Vec::new(),
     })
 }
 
 /// The checks a Linux build makes once the host is described: a macOS build made its own
-/// before ([`open`]).
+/// before ([`open`]); it keeps the Xcodes the hello lists for the runtime.
 pub(crate) fn check(
     _cli: &Cli,
     _services: &Services<'_>,
     _image_allow: Vec<js_oci::Allow>,
-    _gpus: &[u32],
+    (_gpus, xcodes): (&[u32], &[crate::xcode::Xcode]),
     opened: Opened,
     _err: &mut dyn Write,
 ) -> Result<Start, Failure> {
-    Ok(opened)
+    Ok(Start {
+        xcodes: xcodes.to_vec(),
+        ..opened
+    })
 }
 
 /// The `--image-allow` entries of `cli`, each with its `credentials`: what a bundle named by
@@ -465,6 +473,7 @@ pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<()
                 Some(store) => native.with_bundles(Arc::clone(store))?,
                 None => native,
             };
+            let native = native.with_xcodes(start.xcodes.clone());
             Some(Backend::Native(native.with_log_file_cap(cli.log_file_cap)))
         }
         None => None,
@@ -559,7 +568,9 @@ pub(crate) fn runtime(
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
     };
-    let runtime = runtime.with_live_logs(native.logs().live());
+    let runtime = runtime
+        .with_xcodes(native.xcodes().to_vec())
+        .with_live_logs(native.logs().live());
     Ok((Box::new(runtime), Vec::new()))
 }
 

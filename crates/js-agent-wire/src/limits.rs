@@ -115,6 +115,11 @@ pub const MAX_BUNDLE_CAPABILITY_DIGESTS: usize = 16;
 /// Longest value of the capability [`BUNDLE_CAPABILITY`], in bytes: that many digests of 71
 /// bytes (`sha256:` and 64 hex digits) and the commas between them.
 pub const MAX_BUNDLE_CAPABILITY_VALUE_LEN: usize = MAX_BUNDLE_CAPABILITY_DIGESTS * 72 - 1;
+/// The capability a Mac reports the builds of its installed Xcodes under (`16C5032a`), each
+/// a build id ([`crate::is_xcode_build`]), ascending and joined with `,`, which a build never
+/// holds; absent when it has none. A job start names one of them
+/// ([`crate::JobStartSpec::xcode`]).
+pub const XCODE_CAPABILITY: &str = "xcode";
 /// Most bundle digests in a [`crate::Caps`] frame.
 pub const MAX_CAPS_BUNDLES: usize = 256;
 /// Most Xcode builds in a [`crate::Caps`] frame.

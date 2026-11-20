@@ -210,6 +210,10 @@ impl CommandRunner for FakeCommands {
 pub struct FakeFiles {
     files: BTreeMap<String, String>,
     links: BTreeMap<String, String>,
+    /// The names in each directory that can be listed.
+    dirs: BTreeMap<PathBuf, Vec<String>>,
+    /// Directories that exist and cannot be listed.
+    unlistable: Vec<PathBuf>,
     /// What the files read for their owner and mode (`--host-id-from-facts`) are.
     facts: BTreeMap<String, js_agent::flags_file::FileFacts>,
     /// Paths under a prefix share a device.
@@ -229,6 +233,21 @@ impl FakeFiles {
     /// mode).
     pub fn with_facts(mut self, path: &str, facts: js_agent::flags_file::FileFacts) -> Self {
         self.facts.insert(path.to_owned(), facts);
+        self
+    }
+
+    /// The directory `dir` holds the entries `names`.
+    pub fn with_dir(mut self, dir: &str, names: &[&str]) -> Self {
+        self.dirs.insert(
+            PathBuf::from(dir),
+            names.iter().map(|name| (*name).to_owned()).collect(),
+        );
+        self
+    }
+
+    /// The directory `dir` exists and cannot be listed (permission denied).
+    pub fn with_unlistable_dir(mut self, dir: &str) -> Self {
+        self.unlistable.push(PathBuf::from(dir));
         self
     }
 
@@ -272,6 +291,16 @@ impl FakeFiles {
 }
 
 impl FileReader for FakeFiles {
+    fn entries(&self, dir: &Path) -> std::io::Result<Vec<String>> {
+        if self.unlistable.iter().any(|denied| denied == dir) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        self.dirs
+            .get(dir)
+            .cloned()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
     fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
         self.facts
             .get(path.to_string_lossy().as_ref())

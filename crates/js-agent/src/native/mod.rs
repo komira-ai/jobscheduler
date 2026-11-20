@@ -150,6 +150,7 @@ mod outputs;
 mod pf;
 mod profile;
 mod settings;
+mod xcode;
 
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -290,6 +291,7 @@ pub struct NativeRuntime {
     plans: mounts::Plans,
     /// The bundle store, on an agent that has one.
     bundles: Option<Arc<Placer>>,
+    xcodes: xcode::Table,
     journal: Journal,
     /// The helper said it needs its boot reset again (it restarted under this agent).
     reset_needed: bool,
@@ -368,6 +370,7 @@ impl NativeRuntime {
             runs: BTreeMap::new(),
             plans: BTreeMap::new(),
             bundles: None,
+            xcodes: BTreeMap::new(),
             journal,
             reset_needed: false,
             hand_over: files::lchown(),
@@ -460,7 +463,7 @@ impl NativeRuntime {
         spec: &RunSpec,
         native: &NativeSpec,
         (id, lease, uid): (LeaseId, &str, u32),
-        (pinned, plans): (Option<Pinned>, &[mounts::MountPlan]),
+        (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
         let home = self.config.homes.join(user_name(id));
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
@@ -480,7 +483,7 @@ impl NativeRuntime {
             .map_err(|why| RuntimeError::new(why.to_string()))?;
         let (native, mut env) = match &pinned {
             Some(pinned) => {
-                let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp))
+                let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp, dev.as_deref()))
                     .map_err(|why| fail(&"the bundle", &why))?;
                 let body = NativeSpec {
                     program: prepared.program,
@@ -490,7 +493,7 @@ impl NativeRuntime {
                 };
                 (body, prepared.env)
             }
-            None => (native.clone(), env::plain(native, &tmp)),
+            None => (native.clone(), env::plain(native, &tmp, dev.as_deref())),
         };
         let files = spec.files.as_deref();
         if let Some(dir) = files {
@@ -678,6 +681,7 @@ impl Runtime for NativeRuntime {
         check_run_env(&spec.env)?;
         env::check_body(native)?;
         cwd::check(&native.cwd).map_err(|why| RuntimeError::new(why.to_string()))?;
+        let dev = xcode::developer_dir(&self.xcodes, spec.xcode.as_deref())?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
@@ -705,7 +709,7 @@ impl Runtime for NativeRuntime {
             }
         };
         let plans = self.plans.remove(&spec.run_id).unwrap_or_default();
-        match self.launch(spec, native, (id, &lease, uid), (pinned, &plans)) {
+        match self.launch(spec, native, (id, &lease, uid), (pinned, &plans, dev)) {
             Ok(run) => {
                 self.runs.insert(lease.clone(), run);
                 Ok(RunHandle(lease))
@@ -885,6 +889,10 @@ impl Runtime for NativeRuntime {
     /// With a bundle store, the image of a start with a `run` is the bundle it runs from.
     fn runs_image_runs(&self) -> bool {
         self.bundles.is_some()
+    }
+
+    fn check_xcode(&self, build: &str) -> Result<(), NativeRefusal> {
+        xcode::check(&self.xcodes, build)
     }
 
     /// Refuses, before anything is made: a level above the agent's ceiling

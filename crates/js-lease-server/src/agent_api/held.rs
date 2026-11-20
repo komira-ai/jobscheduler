@@ -29,7 +29,8 @@ use js_types::{Clock, HostId, Resources, Shape};
 use tracing::warn;
 
 use crate::admit::{
-    reported_mount_providers, reports_dispatch_poll, reports_host_jobs, reports_layered_rootfs,
+    reported_mount_providers, reported_xcodes, reports_dispatch_poll, reports_host_jobs,
+    reports_layered_rootfs,
 };
 use crate::agents::Agents;
 use crate::held_beat::Watch;
@@ -81,6 +82,7 @@ pub(super) struct Inputs {
     pub(super) host_jobs: bool,
     pub(super) layered_rootfs: bool,
     pub(super) mount_providers: Vec<String>,
+    pub(super) xcodes: Vec<String>,
     /// Whether the host's agent polls dispatch (and the server holds the job tables, as it
     /// does when it has these inputs): the reply leaves out what the queue carries.
     pub(super) polls_dispatch: bool,
@@ -111,6 +113,7 @@ impl Inputs {
             host_jobs: reports_host_jobs(capabilities),
             layered_rootfs: reports_layered_rootfs(capabilities),
             mount_providers: reported_mount_providers(capabilities),
+            xcodes: reported_xcodes(capabilities),
             polls_dispatch: reports_dispatch_poll(capabilities),
             booked: facts.booked.clone(),
             logs,
@@ -128,6 +131,7 @@ impl Inputs {
             host_jobs: self.host_jobs,
             layered_rootfs: self.layered_rootfs,
             mount_providers: &self.mount_providers,
+            xcodes: &self.xcodes,
             shape: Some(&self.booked),
             logs: self.logs.as_deref(),
             polls_dispatch: self.polls_dispatch,

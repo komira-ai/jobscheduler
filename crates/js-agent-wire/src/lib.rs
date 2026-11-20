@@ -185,7 +185,9 @@ pub mod refusal;
 mod rootfs;
 mod run;
 
-pub use caps::{Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
+pub use caps::{
+    Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability, is_xcode_build,
+};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use dispatch::{

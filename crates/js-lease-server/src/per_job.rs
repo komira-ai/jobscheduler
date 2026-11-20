@@ -110,6 +110,9 @@ pub(crate) struct BeatContext<'a> {
     /// ([`js_caps::mount_provider_key`]); a start whose job requires one of them is built only
     /// for a host that reported it.
     pub(crate) mount_providers: &'a [String],
+    /// The builds of the Xcodes the host's agent reported ([`js_caps::XCODE`], split on `,`);
+    /// a start whose job names a build is built only for a host that reported it.
+    pub(crate) xcodes: &'a [String],
     /// What the registry books for the host, which a start of the whole host books; `None`
     /// when it is not known.
     pub(crate) shape: Option<&'a Resources>,

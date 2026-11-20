@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use js_agent_wire::limits::MAX_DISK_BYTES;
+use js_agent_wire::limits::{MAX_DISK_BYTES, XCODE_CAPABILITY};
 use js_agent_wire::{
     EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Hello, InstanceIdentity, Phase, ProtocolRange,
     WireShape,
@@ -31,6 +31,9 @@ pub struct Offer {
     pub hello: Hello,
     /// Warnings, such as a failed GPU probe.
     pub warnings: Vec<String>,
+    /// The Xcodes the hello's `xcode` capability was made from (all that were found, ascending
+    /// by build; empty off a Mac), which the native runtime runs jobs with.
+    pub xcodes: Vec<crate::xcode::Xcode>,
 }
 
 /// The value of a flag that only lowers: the detected amount when the flag is absent, the
@@ -210,7 +213,9 @@ pub struct StoreView<'a> {
 }
 
 /// Detects the host and applies the flags. A Mac also reports its operating system's major
-/// version as `os_version` (read by the `os_version` module). A host that has a bundle store (`store`) also
+/// version as `os_version` (read by the `os_version` module) and the builds of its installed
+/// Xcodes as `xcode` (read by the [`crate::xcode`] module; none, no key), and the Xcodes it
+/// found are in [`Offer::xcodes`]. A host that has a bundle store (`store`) also
 /// reports `bundle-root` and `bundle` (see [`crate::bundle`]), and the disk it offers (the
 /// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
 /// `floor((free - max(0, budget - used) - low_water) / GiB)`.
@@ -236,6 +241,13 @@ pub fn offer(
     let mut capabilities = capabilities(platform, &cli.capabilities)?;
     let (os_version, os_version_warning) = os_version::report(platform, runner);
     capabilities.extend(os_version.map(|major| (OS_VERSION.to_owned(), major)));
+    let (xcodes, mut xcode_warnings) = match platform.is_macos() {
+        true => crate::xcode::probe(files),
+        false => (Vec::new(), Vec::new()),
+    };
+    let (xcode_value, xcode_limit_warning) = crate::xcode::hello_value(&xcodes);
+    xcode_warnings.extend(xcode_limit_warning);
+    capabilities.extend(xcode_value.map(|builds| (XCODE_CAPABILITY.to_owned(), builds)));
     if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
         return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
     }
@@ -251,7 +263,7 @@ pub fn offer(
     let (disk_bytes, advisory, disk_warning) = disk(cli, runner, kept_back);
     capabilities.extend(advisory);
     let long_values = store.is_some_and(|view| view.long_values);
-    let reported = store.map(|view| report(view.settings, view.host, view.long_values));
+    let reported = store.map(|view| report(view.settings, view.host, view.long_values, &xcodes));
     capabilities.extend(
         reported
             .iter()
@@ -301,10 +313,12 @@ pub fn offer(
             .warnings
             .into_iter()
             .chain(os_version_warning)
+            .chain(xcode_warnings)
             .chain(disk_warning)
             .chain(reserve_warning.flatten())
             .chain(image_warning.flatten())
             .chain(reported.into_iter().flat_map(|found| found.warnings))
             .collect(),
+        xcodes,
     })
 }

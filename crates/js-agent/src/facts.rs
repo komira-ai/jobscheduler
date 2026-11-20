@@ -100,6 +100,15 @@ pub trait FileReader {
     /// followed): the facts file of `--host-id-from-facts`, and the flags file of the cordon
     /// verb's `--flags-file`, are read through this.
     fn facts(&self, path: &Path) -> io::Result<FileFacts>;
+
+    /// The names of the entries of the directory at `dir`, links not followed, in no
+    /// particular order, or the system's error: a directory that is not there is
+    /// [`io::ErrorKind::NotFound`].
+    ///
+    /// # Errors
+    ///
+    /// The directory cannot be listed.
+    fn entries(&self, dir: &Path) -> Result<Vec<String>, io::Error>;
 }
 
 impl FileReader for Box<dyn FileReader> {
@@ -121,6 +130,10 @@ impl FileReader for Box<dyn FileReader> {
 
     fn facts(&self, path: &Path) -> io::Result<FileFacts> {
         (**self).facts(path)
+    }
+
+    fn entries(&self, dir: &Path) -> Result<Vec<String>, io::Error> {
+        (**self).entries(dir)
     }
 }
 
@@ -478,6 +491,12 @@ impl FileReader for SystemFiles {
 
     fn facts(&self, path: &Path) -> io::Result<FileFacts> {
         flags_file::read_system(path)
+    }
+
+    fn entries(&self, dir: &Path) -> Result<Vec<String>, io::Error> {
+        std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|found| found.file_name().to_string_lossy().into_owned()))
+            .collect()
     }
 
     #[cfg(target_os = "linux")]
