@@ -145,8 +145,9 @@ fn hold_failure(error: PortError) -> Done {
 }
 
 /// Takes the lock, loads the record and holds it to the rules; `None` if there is none. The
-/// state directory is made (mode 0700) when it is not there: hostkeeper makes none, so the first
-/// step of a first install finds none (see [`Held::open_or_make`]).
+/// state directory is made (mode 0700) when it is not there, with every directory above it that
+/// is not there (mode 0755): hostkeeper makes none, so the first step of a first install finds
+/// none (see [`Held::open_or_make`]).
 fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
     let (held, record) = open_unchecked(env, params)?;
     if let Some(record) = &record {

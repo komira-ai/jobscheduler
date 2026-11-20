@@ -1,5 +1,5 @@
 //! The `launchctl` unit port: the command lines it runs, how it reads `launchctl print`, the
-//! labels it refuses, the wait after a start and the token-file gate on a kickstart. Every
+//! labels it refuses, the wait after a start and the gate file a kickstart waits for. Every
 //! command goes through a scripted runner, so nothing here touches a real launchd.
 
 use std::cell::RefCell;
@@ -778,9 +778,9 @@ fn the_default_clock_is_used_when_none_is_given() {
 /// A kickstart of an idle loaded agent is refused, with the exact message, while the gate file
 /// is absent; once it exists the kick goes.
 #[test]
-fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_token_file_is_absent() {
+fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_gate_file_is_absent() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "launchd-gate");
-    let gate = tmp.path().join("token");
+    let gate = tmp.path().join("flags");
     let tool = Script::default()
         .print_answers(vec![
             Ok(print_with("not running", "")),
@@ -798,7 +798,7 @@ fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_token_file_is_absent(
         )))
     );
     assert_eq!(tool.calls(), [print_line(LABEL)]);
-    std::fs::write(&gate, "token").unwrap();
+    std::fs::write(&gate, "--pool=farm\n").unwrap();
     units.start(LABEL).unwrap();
     assert_eq!(
         tool.calls()[1..],
@@ -808,9 +808,9 @@ fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_token_file_is_absent(
 
 /// A bootstrap is not checked against the gate: launchd applies the condition itself.
 #[test]
-fn a_bootstrap_is_left_to_launchds_own_gate_on_the_token_file() {
+fn a_bootstrap_is_left_to_launchds_own_path_state_gate() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "launchd-gate-bootstrap");
-    let gate = tmp.path().join("token");
+    let gate = tmp.path().join("flags");
     let tool = Script::default()
         .print_answers(vec![
             Err(GONE.to_owned()),
@@ -829,9 +829,9 @@ fn a_bootstrap_is_left_to_launchds_own_gate_on_the_token_file() {
 
 /// A running service is not kicked and its gate is not consulted.
 #[test]
-fn a_running_service_is_left_alone_though_the_token_file_is_absent() {
+fn a_running_service_is_left_alone_though_the_gate_file_is_absent() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "launchd-gate-running");
-    let gate = tmp.path().join("token");
+    let gate = tmp.path().join("flags");
     let tool = Script::default().prints(&[&print_with("running", "")]);
     LaunchUnits::new(&tool)
         .with_gate(&gate)
@@ -845,6 +845,6 @@ fn a_running_service_is_left_alone_though_the_token_file_is_absent() {
 fn gate_reports_the_file_that_was_given_and_none_by_default() {
     let tool = Script::default();
     assert_eq!(LaunchUnits::new(&tool).gate(), None);
-    let path = Path::new("/etc/js-agent/token");
+    let path = Path::new("/etc/js-agent/flags");
     assert_eq!(LaunchUnits::new(&tool).with_gate(path).gate(), Some(path));
 }

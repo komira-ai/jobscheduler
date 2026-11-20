@@ -482,16 +482,16 @@ impl StateView for Root {
 pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     stop: &'a StopRunner,
-    token_file: &'a Path,
+    flags_file: &'a Path,
 ) -> PlatformUnits<'a> {
-    launch_units(commands, stop, token_file)
+    launch_units(commands, stop, flags_file)
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     _stop: &'a StopRunner,
-    _token_file: &'a Path,
+    _flags_file: &'a Path,
 ) -> PlatformUnits<'a> {
     super::SystemUnits::new(commands)
 }
@@ -505,18 +505,19 @@ const MANAGER: Manager = if cfg!(target_os = "macos") {
 
 /// The units of a Mac: `launchctl` through `commands`, `bootout` through `stop` (it waits for the
 /// agent to exit, which its plist allows [`AGENT_EXIT_TIMEOUT_SECS`], so `stop` must wait
-/// longer: see [`StopRunner`]), and a kickstart held back while the agent's token file (the
-/// `token_file` param, which the plist's `KeepAlive` also waits on) is absent. Built for the
+/// longer: see [`StopRunner`]), and a kickstart held back while the host's flags file (the
+/// `flags_file` param, which the plist's `KeepAlive` also waits on) is absent. The gate is the
+/// flags file, not the join token: a Mac that joins by its host certificate has no token. Built for the
 /// tests on every platform, so that a test off a Mac checks the wiring the Mac's hook runs with.
 #[cfg(any(target_os = "macos", test))]
 fn launch_units<'a>(
     commands: &'a dyn CommandRunner,
     stop: &'a dyn CommandRunner,
-    token_file: &'a Path,
+    flags_file: &'a Path,
 ) -> super::LaunchUnits<'a> {
     super::LaunchUnits::new(commands)
         .with_stop_runner(stop)
-        .with_gate(token_file)
+        .with_gate(flags_file)
 }
 
 /// Runs the step the invocation names on this machine.
@@ -528,7 +529,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
-    let units = platform_units(&commands, &stop, &params.token_file);
+    let units = platform_units(&commands, &stop, &params.flags_file);
     // A flags file that cannot be read names no host certificate: a first install then goes by
     // the join token as before, and a step that asks the lease server ends with the reason.
     let flags = read_flags(&params.flags_file, machine);
@@ -729,17 +730,17 @@ mod tests {
     /// Asserts the wiring of a Mac's units: a read, an `is_active` and the start of a running
     /// service each print the service through the commands; a stop prints it through the
     /// commands and boots it out through the stop runner, which runs nothing else; and the
-    /// kickstart waits on the agent's token file. It catches units built without the stop
+    /// kickstart waits on the host's flags file. It catches units built without the stop
     /// runner or the gate, or with the two runners swapped or one runner for both.
     #[test]
-    fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_token()
+    fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_flags()
      {
         let label = "com.example.agent";
-        let token = Path::new("/etc/example/token");
+        let flags = Path::new("/etc/example/flags");
         let print = format!("{LAUNCHCTL} print system/{label}");
         let commands = Noting::default();
         let stop = Noting::default();
-        let units = launch_units(&commands, &stop, token);
+        let units = launch_units(&commands, &stop, flags);
         assert_eq!(units.show(label).unwrap().active, "active");
         assert!(units.is_active(label).unwrap());
         units.start(label).unwrap();
@@ -750,7 +751,7 @@ mod tests {
             [format!("{LAUNCHCTL} bootout system/{label}")]
         );
         assert_eq!(*commands.seen.borrow(), vec![print; 4]);
-        assert_eq!(units.gate(), Some(token));
+        assert_eq!(units.gate(), Some(flags));
         // The fake's other entry, which the units never use, answers as `run` does.
         let other = Noting::default();
         assert_eq!(

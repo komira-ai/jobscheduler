@@ -12,10 +12,14 @@ use js_agent::update_hook::{
 };
 use js_testkit::dir::TestDir;
 
+/// The params of a host the hook cannot keep its state on, whoever runs the test: the state
+/// directory's parent is `/dev/null`, a device file, which every Unix has and the hook refuses
+/// as not a directory without making or changing anything. (A parent that is merely not there
+/// would be made by the hook, as on a first install, and only a root test could make it.)
 const PARAMS: &str = concat!(
     "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
     "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
-    "unit = \"js-agent-crun.service\"\nstate_dir = \"/nowhere/js-agent-update\"\n",
+    "unit = \"js-agent-crun.service\"\nstate_dir = \"/dev/null/js-agent-update\"\n",
     "release_link = \"/nowhere/current\"\nflags_file = \"/nowhere/flags\"\n",
     "token_file = \"/nowhere/token\"\nstate_root = \"/nowhere/state\"\nruntime = \"crun\"\n",
     "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
@@ -300,7 +304,7 @@ fn an_unreadable_or_incomplete_params_file_runs_no_step() {
 }
 
 #[test]
-fn every_step_of_a_machine_ends_state_invalid_when_the_state_directory_is_not_there() {
+fn every_step_of_a_machine_ends_state_invalid_when_the_state_directory_cannot_be_made() {
     let (_dir, params) = params_file("hook-verb-machine", PARAMS);
     let stat = |_: &std::path::Path, fd: std::os::fd::BorrowedFd<'_>| fd_stat(fd);
     let own_id = || Err("unused".to_owned());
@@ -330,7 +334,7 @@ fn every_step_of_a_machine_ends_state_invalid_when_the_state_directory_is_not_th
             let line = last_line(&ran.out);
             assert_eq!(line["reason"], "state_invalid", "{step}");
             assert!(
-                line["detail"].as_str().unwrap().contains("/nowhere"),
+                line["detail"].as_str().unwrap().contains("/dev/null"),
                 "{step}: {line}"
             );
             assert_eq!(line["class"], "release");
@@ -375,7 +379,7 @@ fn the_binary_prints_one_valid_last_line_and_exits_1() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
-        let detail = "/nowhere: No such file or directory (os error 2)";
+        let detail = "above the state directory, /dev/null: is not a directory";
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
             format!("js-agent update-hook: prepare failed: state_invalid: {detail}\n")
