@@ -119,11 +119,15 @@ pub const MAC_HOOK_COMMAND: [&str; 2] = [
 /// The launchd labels hostkeeper runs on a Mac: the agent and its root helper.
 pub const MAC_RUN: [&str; 2] = ["js-agent", "js-agent.session"];
 
-/// The Mac hook's `params`: the keys of [`PARAMS`] and `helper_unit`, with the Mac's paths and
-/// the `native` runtime; the bounds are the Linux ones.
-pub const MAC_PARAMS: [(&str, Param); 18] = [
+/// The Mac hook's `params`: the keys of [`PARAMS`], `helper_unit` and the two parts of the
+/// host setup `prepare` makes (`socket_group`, the group the helper's plist names, and
+/// `scratch_root`, the agent plist's `--scratch-root`), with the Mac's paths and the `native`
+/// runtime; the bounds are the Linux ones.
+pub const MAC_PARAMS: [(&str, Param); 20] = [
     ("unit", Param::Text("js-agent")),
     ("helper_unit", Param::Text("js-agent.session")),
+    ("socket_group", Param::Text("_jsagent")),
+    ("scratch_root", Param::Text("/var/db/js-agent/scratch")),
     (
         "state_dir",
         Param::Text("/Library/Application Support/js-agent/update"),

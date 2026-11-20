@@ -11,23 +11,55 @@
 //!
 //! A host whose params name no helper is untouched. A helper is a launchd matter: the params of
 //! a systemd host that name one are refused by every step (`bad_params`) before anything is read
-//! or done.
+//! or done, and so are those that name a part of a Mac's host setup (`socket_group`,
+//! `scratch_root`; see `host_setup`).
 
 use std::path::Path;
 
-use crate::update_hook::{Done, Held, LAUNCHCTL, Manager, Params, Reason, Record};
+use crate::update_hook::{
+    Done, HELPER_UNIT_KEY, Held, LAUNCHCTL, Manager, Params, Reason, Record, SCRATCH_ROOT_KEY,
+    SOCKET_GROUP_KEY,
+};
 
 use super::cutover::{bring_up_unit, environment};
 use super::{Env, failure};
 
-/// Refuses a params table that names a helper on a host that is not under launchd.
+/// Refuses a params table that names a helper, or a part of a Mac's host setup, on a host that
+/// is not under launchd: the first such key, in the order `helper_unit`, `socket_group`,
+/// `scratch_root`.
 pub(super) fn refuse_without_launchd(env: &Env<'_>, params: &Params) -> Result<(), Done> {
-    match (&params.settings.helper_unit, env.manager) {
-        (Some(helper), Manager::Systemd) => Err(failure(
+    if env.manager == Manager::Launchd {
+        return Ok(());
+    }
+    let named = [
+        (
+            HELPER_UNIT_KEY,
+            params.settings.helper_unit.clone(),
+            "only a launchd host has a helper job",
+        ),
+        (
+            SOCKET_GROUP_KEY,
+            params.settings.socket_group.clone(),
+            "only a launchd host's setup makes the group",
+        ),
+        (
+            SCRATCH_ROOT_KEY,
+            params
+                .scratch_root
+                .as_ref()
+                .map(|root| root.display().to_string()),
+            "only a launchd host's setup gives it a volume",
+        ),
+    ];
+    match named
+        .into_iter()
+        .find_map(|(key, value, why)| value.map(|value| (key, value, why)))
+    {
+        Some((key, value, why)) => Err(failure(
             Reason::BadParams,
-            format!("helper_unit {helper:?} is set, and only a launchd host has a helper job"),
+            format!("{key} {value:?} is set, and {why}"),
         )),
-        _ => Ok(()),
+        None => Ok(()),
     }
 }
 

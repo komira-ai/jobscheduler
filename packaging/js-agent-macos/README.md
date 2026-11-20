@@ -81,7 +81,9 @@ installer and points its `current` link at the release, then runs the hook's `cu
 and `cleanup` (`/Library/Application Support/js-agent/bin/js-agent update-hook`), with the
 params of the manifest: the unit
 `js-agent`, the helper unit `js-agent.session`, the state directory above, the release link
-under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files and the state root.
+under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files, the state root, the
+helper's socket group and the scratch root (the last two name the host setup `prepare` makes,
+see "Not done yet").
 On a first install `prepare` finds no state directory and none of the directories above it
 (the package is not installed yet), and makes them: `js-agent` mode 0755 and `update` mode 0700,
 root's. A Mac joins by hostkeeper's host certificate: the flags file names it (`--host-cert`,
@@ -225,6 +227,10 @@ Known limits:
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized, and no program in it is signed with a Developer ID (the package
   is; `js-vmm` is signed ad hoc with its entitlement).
-- The agent's state and scratch directories (`/var/db/js-agent/{state,scratch}`, on separate
-  volumes, as the agent requires), `/etc/js-agent/flags` and the helper's socket group are
-  host setup, not the package's; the hook makes only its own state directory.
+- The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
+  root, from its params (`socket_group`, `scratch_root`): the helper's socket group
+  `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root
+  `/var/db/js-agent/scratch` on an APFS volume of its own (`js-agent-scratch`, named in
+  `/etc/fstab`), as the agent requires. `/etc/js-agent/flags` comes from the group's config
+  package. The setup has run against fakes of `dscl`, `dseditgroup` and `diskutil` only, never
+  on a Mac.

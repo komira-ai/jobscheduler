@@ -8,7 +8,7 @@
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
 //!    is `state_invalid` (1), except a record of another target that never took the host, which
 //!    is superseded (see [`supersede`](super::supersede)): moved aside just before the new record
-//!    is first written (5), and named in the detail of the step's last line. The state
+//!    is first written (6), and named in the detail of the step's last line. The state
 //!    directory is made, mode 0700, when it is not there, and so is every directory above it
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
@@ -27,13 +27,19 @@
 //!    the token file is a regular file of the hook's user, mode 0600 or 0400. Otherwise the
 //!    step defers (75, `join_token_missing`, a reason that is a shipped wire value) and the
 //!    detail names the file to fix;
-//! 5. the record is written, with the cordon marked as ours *before* it is placed unless the
+//! 5. on a Mac whose params ask for it, first install or update, the host setup (see
+//!    [`host_setup`](super::host_setup)): the helper's socket group, the agent's state root and
+//!    a scratch root on a volume of its own are made when they are not there. A part that cannot
+//!    be read or made defers (75, `host_setup_missing`), naming it, before the record is
+//!    written or the host cordoned: the agent cannot start without it, so the step defers here
+//!    rather than letting `cutover` fail after its commit;
+//! 6. the record is written, with the cordon marked as ours *before* it is placed unless the
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;
-//! 6. the wait: poll the host, renewing the cordon we placed after each pause and never
+//! 7. the wait: poll the host, renewing the cordon we placed after each pause and never
 //!    asking for more than the cap allows.
 //!
-//! A first install has no agent to drain and no host the lease server knows: it ends after 5.
+//! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
 //! An update compares the unit the staged release carries with the one the previous release
 //! carried (the installed one, see [`plan`](crate::update_hook::plan)). A difference is recorded
@@ -49,6 +55,7 @@ use crate::update_hook::{
     Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
+use super::host_setup::set_up;
 use super::supersede::{judge, set_aside};
 use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save, success};
 
@@ -84,6 +91,7 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     if params.previous_version.is_none() {
         join_token(env, params)?;
     }
+    set_up(env, params)?;
     // The record of another target goes aside only now, when the new one is about to be
     // written: a refusal before this point leaves the host as it found it.
     if let Some(aside) = &aside {
@@ -153,6 +161,7 @@ fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
         return match host_files_problem(env, identity) {
             Some(problem) => Err(deferred(
                 params,
+                Reason::JoinTokenMissing,
                 format!(
                     "the host certificate and key named in {}: {problem}; fix it to install the agent",
                     params.flags_file.display()
@@ -175,6 +184,7 @@ fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     };
     Err(deferred(
         params,
+        Reason::JoinTokenMissing,
         format!(
             "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
             file.display()
@@ -219,12 +229,14 @@ fn owner_only_problem(facts: &TokenFacts, euid: u32) -> Option<String> {
     (facts.uid != euid).then(|| format!("must be owned by uid {euid}, not {}", facts.uid))
 }
 
-/// The deferral of a first install that cannot authenticate yet, with nothing changed.
-fn deferred(params: &Params, detail: String) -> Done {
+/// The deferral of a host that cannot take the release yet, for `reason`: a first install that
+/// cannot authenticate (`join_token_missing`, with nothing changed), or a Mac whose host setup is
+/// not complete (`host_setup_missing`). The coordinator retries after `defer_retry_secs`.
+pub(super) fn deferred(params: &Params, reason: Reason, detail: String) -> Done {
     Done {
         outcome: Outcome::Deferred,
         report: Report {
-            reason: Some(Reason::JoinTokenMissing),
+            reason: Some(reason),
             class: Class::Environment,
             retry_after_secs: Some(params.defer_retry_secs),
             detail: Some(detail),
