@@ -872,3 +872,50 @@ async fn a_poll_that_is_not_the_hosts_own_is_refused() {
     );
     assert_eq!(queued(&rig)[0].claimed_by, None, "nothing was claimed");
 }
+
+/// Asserts that a dispatch poll that reaches another server than the one that took the host's
+/// hello is served: the second server's registry has never heard the host, takes the session
+/// from the host's row, judges the poll's secret against it and hands out what is due. It
+/// catches a poll refused `unknown-host` on any server but the hello's (the agent would say
+/// hello again there, and its next listing would be judged a first one).
+#[tokio::test]
+async fn a_poll_that_reaches_another_server_than_the_hello_is_served() {
+    let first = server("dispatch_rows_first", "first");
+    let other = whole_over(
+        "dispatch_rows_second",
+        (rules(), None),
+        Some(&first),
+        START_MS,
+    );
+    let other = timed(other, Duration::ZERO, NEVER);
+    other.agents.dispatching.set_claimer("second".to_owned());
+    let job = first.place("job-a", "host-a");
+    let reply = sent(&other, body(&first, "host-a", Vec::new()), (None, None)).await;
+    assert_eq!(names(&reply.unwrap()), vec![start(job.as_str())]);
+    let session = other
+        .agents
+        .registry
+        .own_host(&host())
+        .map(|own| own.host.epoch);
+    assert_eq!(
+        session,
+        Some(first.sessions["host-a"].0),
+        "the row's session was taken"
+    );
+
+    // A third server whose read of the row fails refuses the poll with what the agent retries.
+    let third = whole_over(
+        "dispatch_rows_third",
+        (rules(), None),
+        Some(&first),
+        START_MS,
+    );
+    let third = timed(third, Duration::ZERO, NEVER);
+    first.store.fail_read_after(0);
+    let refused = sent(&third, body(&first, "host-a", Vec::new()), (None, None)).await;
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+}
