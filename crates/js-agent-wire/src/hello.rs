@@ -338,6 +338,15 @@ pub struct Hello {
         with = "signed_identity"
     )]
     pub identity: Option<SignedIdentity>,
+    /// The agent process that sends the hello: an id the agent draws once when it starts and
+    /// sends in every hello of that process, an id of [`limits::MAX_ID_LEN`] bytes of
+    /// `[A-Za-z0-9._-]`, leading alphanumeric. A server that holds the host live in a session
+    /// whose hello named the same process takes the hello at once instead of refusing it
+    /// `host-live`: the process says hello again only because it lost its session, so no other
+    /// process holds the host. Absent from an agent that predates the field, and a server from
+    /// before the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_process: Option<String>,
 }
 
 /// The wire form of [`Hello::identity`]: the object `{"document", "signature"}`. The type is
@@ -477,6 +486,9 @@ impl Hello {
         self.check_accelerator(at)?;
         check::labels(at.field("labels"), &self.labels)?;
         crate::heartbeat::check_held(at.field("held"), &self.held)?;
+        if let Some(process) = &self.agent_process {
+            check::ident(at.field("agent_process"), process)?;
+        }
         match &self.identity {
             Some(identity) => check_identity(at, identity),
             None => Ok(()),

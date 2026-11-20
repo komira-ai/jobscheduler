@@ -284,8 +284,9 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     settled.a.end(&ending, Outcome::Succeeded, Some(0));
     let reply = settled.rig.beat(&settled.a).await.unwrap();
     settled.a.take(&reply);
-    // The beat's own write (the free) commits; the placement after it fails.
-    settled.rig.store.fail_after(1);
+    // The beat's own writes (its node row, the free, the listing's flags) commit; the
+    // placement after them fails.
+    settled.rig.store.fail_after(3);
     settled.rig.beat(&settled.a).await.unwrap();
     assert_eq!(settled.state("c-third"), JobState::Queued);
     let (_, again) = settled.beat(&settled.b).await;

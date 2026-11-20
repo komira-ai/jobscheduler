@@ -161,6 +161,9 @@ async fn job_agent(h: &Harness, host: &str) -> Session {
         "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 },
         "capabilities": { "per-job": "true", "arch": "x86_64" },
         "phase": "serving",
+        // After the restore the row of a host the snapshot holds is live: the same process's
+        // hello replaces it where another's would be refused `host-live`.
+        "agent_process": format!("process-of-{host}"),
     });
     shared_agent(h, &hello).await
 }

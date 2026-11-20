@@ -389,6 +389,10 @@ impl Rig {
         let mut body = hello_body_of(host);
         body["instance"] = json!({ "provider": "burst", "instance_id": name });
         body["accepts_host_credential"] = json!(true);
+        // One agent process per host: after a server restart over the same store, whose row
+        // holds the live session, its hello replaces that session instead of being refused
+        // `host-live`.
+        body["agent_process"] = json!(format!("process-of-{host}"));
         if flag("--container-bin").is_some() {
             body["capabilities"]["runtime"] = json!("container");
             body["capabilities"]["exec"] = json!("container");
