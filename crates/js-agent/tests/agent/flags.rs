@@ -202,6 +202,8 @@ fn detected_capabilities_and_bad_labels_are_refused() {
         said.contains("--capability: os_version is detected"),
         "{said}"
     );
+    let said = refused(&["--capability", "xcode=16C5032a"], &mac_host());
+    assert!(said.contains("--capability: xcode is detected"), "{said}");
     let said = refused(&["--label", "jobscheduler.dev/pool=other"], &mac_host());
     assert!(said.contains("the hello is not acceptable"), "{said}");
 }

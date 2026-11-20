@@ -4,10 +4,12 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use js_agent::bundle::{HostXcode, Settings, hello_capabilities, report, reserve_bytes};
+use js_agent::xcode::Xcode;
 use js_agent::{Cli, Platform};
 use js_agent_wire::limits::MAX_BUNDLE_CAPABILITY_DIGESTS;
 use js_agent_wire::{ReadModel, limits};
@@ -257,9 +259,10 @@ fn settings(host: &FakeHost) -> Settings {
 }
 
 /// The frame for a local consumer carries the same facts as the hello: the digests as the
-/// store lists them, the root, the open read model and the Xcode builds the host found, each
-/// once and in order; and it is a valid frame. It catches a consumer told something other
-/// than the scheduler.
+/// store lists them, the root, the open read model and the Xcode builds the probe found, each
+/// once and in order, never more than the frame takes, and not the host's own Xcode catalog
+/// (which is for the bundle Xcode need); and it is a valid frame. It catches a consumer told
+/// something other than the scheduler.
 #[test]
 fn the_caps_frame_carries_the_facts_of_the_hello() {
     let host = FakeHost::new();
@@ -270,9 +273,14 @@ fn the_caps_frame_carries_the_facts_of_the_hello() {
     };
     host.set(|s| {
         s.held = Ok(vec![digest('a'), digest('b')]);
-        s.xcodes = vec![xcode("16C5032a"), xcode("15F31d"), xcode("16C5032a")];
+        s.xcodes = vec![xcode("99Z9")];
     });
-    let reported = report(&settings(&host), &*host, true);
+    let probed = |build: &str| Xcode {
+        build: build.to_owned(),
+        app: PathBuf::from(format!("/Applications/Xcode-{build}.app")),
+    };
+    let found = [probed("16C5032a"), probed("15F31d"), probed("16C5032a")];
+    let reported = report(&settings(&host), &*host, true, &found);
     assert!(reported.warnings.is_empty());
     let caps = reported.caps;
     assert_eq!(caps.validate(), Ok(()));
@@ -280,6 +288,13 @@ fn the_caps_frame_carries_the_facts_of_the_hello() {
     assert_eq!(caps.bundle_root, STORE);
     assert_eq!(caps.read_model, ReadModel::Open);
     assert_eq!(caps.xcode, ["15F31d", "16C5032a"]);
+    let many: Vec<Xcode> = (0..limits::MAX_CAPS_XCODES + 4)
+        .map(|n| probed(&format!("16A{n:03}")))
+        .collect();
+    let capped = report(&settings(&host), &*host, true, &many).caps;
+    assert_eq!(capped.xcode.len(), limits::MAX_CAPS_XCODES);
+    assert_eq!(capped.xcode[0], "16A000");
+    assert_eq!(capped.validate(), Ok(()));
     let hello = hello_capabilities(&caps, true);
     assert_eq!(
         hello,
@@ -357,7 +372,7 @@ fn a_host_that_cannot_run_a_bundle_advertises_nothing() {
     assert!(hello["capabilities"].get("bundle").is_none());
     assert!(hello["capabilities"].get("bundle-root").is_none());
     assert!(ran.err.contains("cannot run a bundle"), "{}", ran.err);
-    let reported = report(&settings(&store), &*store, true);
+    let reported = report(&settings(&store), &*store, true, &[]);
     assert_eq!(reported.caps, js_agent_wire::Caps::default());
 }
 
@@ -393,13 +408,13 @@ fn only_permitted_digests_are_advertised() {
     ];
     let cli = Cli::try_parse_from(args).unwrap();
     let settings = Settings::from_cli(&cli, &mac(), &*host).unwrap().unwrap();
-    let reported = report(&settings, &*host, true);
+    let reported = report(&settings, &*host, true, &[]);
     assert_eq!(reported.caps.bundles, [digest('a')]);
     assert!(reported.warnings.is_empty());
     host.set(|s| {
         s.files.remove(std::path::Path::new("/etc/js/allow"));
     });
-    let reported = report(&settings, &*host, true);
+    let reported = report(&settings, &*host, true, &[]);
     assert!(reported.caps.bundles.is_empty());
     assert!(
         reported.warnings[0].contains("allow list cannot be read"),
@@ -410,7 +425,7 @@ fn only_permitted_digests_are_advertised() {
     host.set(|s| {
         s.files.remove(std::path::Path::new("/etc/js/deny"));
     });
-    let reported = report(&settings, &*host, true);
+    let reported = report(&settings, &*host, true, &[]);
     assert!(reported.caps.bundles.is_empty());
     assert!(
         reported.warnings[0].contains("deny list cannot be read"),
@@ -419,7 +434,7 @@ fn only_permitted_digests_are_advertised() {
     );
     host.file("/etc/js/deny", "");
     host.file("/etc/js/allow", "garbage\n");
-    let reported = report(&settings, &*host, true);
+    let reported = report(&settings, &*host, true, &[]);
     assert!(reported.caps.bundles.is_empty());
     assert!(
         reported.warnings[0].contains("allow list is malformed"),

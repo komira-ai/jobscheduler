@@ -1,6 +1,6 @@
 //! What the agent says about its bundles, and the disk it keeps back for them.
 
-use js_agent_wire::limits::{BUNDLE_CAPABILITY, MAX_BUNDLE_CAPABILITY_DIGESTS};
+use js_agent_wire::limits::{BUNDLE_CAPABILITY, MAX_BUNDLE_CAPABILITY_DIGESTS, MAX_CAPS_XCODES};
 use js_agent_wire::{Caps, bundle_capability};
 use js_caps::BUNDLE_ROOT;
 
@@ -10,6 +10,7 @@ use std::path::Path;
 use super::host::BundleHost;
 use super::list::parse_digests;
 use super::settings::{Settings, Trust};
+use crate::xcode::Xcode;
 
 /// The facts about the store, and what went wrong reading them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,9 +22,17 @@ pub struct Reported {
 }
 
 /// The facts a host with `settings` reports: the manifest digests the store holds, its root,
-/// the read model and the Xcode builds the host found. A store that cannot be listed
-/// reports no bundle and warns, so a job is never placed on a guess.
-pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> Reported {
+/// the read model and the builds of the Xcodes the host's probe found (`xcodes`, from
+/// [`crate::xcode::probe`]: at most [`MAX_CAPS_XCODES`] of them, ascending and distinct, in
+/// [`Caps::xcode`]; the host's own Xcode catalog, [`BundleHost::xcodes`], is for the bundle
+/// Xcode need and not reported). A store that cannot be listed reports no bundle and warns,
+/// so a job is never placed on a guess.
+pub fn report(
+    settings: &Settings,
+    host: &dyn BundleHost,
+    long_values: bool,
+    xcodes: &[Xcode],
+) -> Reported {
     if !host.can_run() {
         let why = "--bundle-store: this agent cannot run a bundle (it runs no native jobs, or its \
                    store did not open), so it reports no bundle and no bundle-root";
@@ -50,9 +59,10 @@ pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> 
             bundles.len()
         ));
     }
-    let mut xcode: Vec<String> = host.xcodes().into_iter().map(|found| found.build).collect();
+    let mut xcode: Vec<String> = xcodes.iter().map(|found| found.build.clone()).collect();
     xcode.sort();
     xcode.dedup();
+    xcode.truncate(MAX_CAPS_XCODES);
     let caps = Caps {
         bundles,
         bundle_root: settings.store.to_string_lossy().into_owned(),

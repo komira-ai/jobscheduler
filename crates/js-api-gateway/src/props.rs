@@ -151,9 +151,10 @@ fn constraints() -> impl Strategy<Value = Constraints> {
         proptest::option::of(accelerator()),
         variant(3),
         text(),
+        text(),
     )
         .prop_map(
-            |(os, arch, exec, isa_level, accelerator, isolation, os_version)| Constraints {
+            |(os, arch, exec, isa_level, accelerator, isolation, os_version, xcode)| Constraints {
                 os,
                 arch,
                 exec,
@@ -161,6 +162,7 @@ fn constraints() -> impl Strategy<Value = Constraints> {
                 os_version,
                 accelerator,
                 isolation,
+                xcode,
             },
         )
 }

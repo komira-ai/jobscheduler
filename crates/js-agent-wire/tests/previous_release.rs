@@ -293,6 +293,7 @@ fn job_start(id: &str) -> Command {
         host_ports: Vec::new(),
         placed_at_ms: None,
         fuse: false,
+        xcode: None,
     }))
 }
 
@@ -666,5 +667,40 @@ fn an_old_agent_skips_the_fuse_of_a_fuse_start() {
     );
     assert!(
         matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "fuse-41")
+    );
+}
+
+/// Asserts that an agent from before the `xcode` of a job start reads an Xcode start with the
+/// start and the stop beside it intact: the field is skipped, never a decode error. (Such an
+/// agent would run it with the host's selected Xcode, which is why a server sends `xcode` only
+/// to a host whose hello lists the build.) Catches an Xcode start that costs an old agent the
+/// reply.
+#[test]
+fn an_old_agent_skips_the_xcode_of_an_xcode_start() {
+    let Command::JobStart(mut spec) = job_start("xcode-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.xcode = Some("16C5032a".to_owned());
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "xcode-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["commands"][0]["xcode"], "16C5032a");
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("xcode-42", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "xcode-41")
     );
 }

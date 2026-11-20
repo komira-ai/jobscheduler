@@ -20,11 +20,12 @@
 //! | [`FUSE_JOBS`] | [`FLAG_SET`] | the agent runs contained jobs that ask for FUSE (`--allow-fuse-jobs`), its kernel is at least 6.14, and `/dev/fuse` is the kernel's FUSE device (char 10:229) |
 //! | [`FUSE_URING`] | [`FLAG_SET`] | as [`FUSE_JOBS`], and the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0, so FUSE over io_uring is usable; reported only together with [`FUSE_JOBS`] |
 //! | [`OS_VERSION`] | the major version of the host's operating system, a decimal number such as `26` | the agent runs on macOS and could read the version |
+//! | [`XCODE`] | the builds of the Xcodes installed in `/Applications`, ascending, comma-separated | the agent runs on macOS and found at least one Xcode |
 //! | `mount-provider.<name>` ([`mount_provider_key`]) | [`FLAG_SET`] | the agent reports layered rootfs and was given the node-local provider `<name>` (`--mount-provider`) |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
-//! much free disk), [`LAYERED_ROOTFS`], [`FUSE_JOBS`], [`FUSE_URING`] and a `mount-provider.<name>` key (the same
-//! value); see [`crate::Request`]. The provider keys are a family, not names, so they are
+//! much free disk), [`LAYERED_ROOTFS`], [`FUSE_JOBS`], [`FUSE_URING`], a `mount-provider.<name>` key (the same
+//! value) and [`XCODE`] (one build the host has); see [`crate::Request`]. The provider keys are a family, not names, so they are
 //! not among [`DETECTED_KEYS`]: [`is_mount_provider_key`] says whether a key is one.
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
@@ -50,6 +51,12 @@ pub const EXEC: &str = js_types::EXEC_KEY;
 /// A job names the least version it needs under it, and a host is capable when it reports
 /// that major version or a later one.
 pub const OS_VERSION: &str = js_types::OS_VERSION_KEY;
+
+/// The capability key of the Xcodes a Mac's agent found: their builds (`16C5032a`, the
+/// `ProductBuildVersion` of each `Xcode*.app`), ascending and comma-separated in the one
+/// value a hello holds per key. A job names one build under it, and a host is capable when
+/// that build is among its builds (membership, not equality).
+pub const XCODE: &str = "xcode";
 
 /// The capability key of the free disk, in whole GiB, of the volume jobs work on.
 pub const DISK_GIB: &str = js_types::DISK_GIB_KEY;
@@ -136,7 +143,7 @@ pub fn is_mount_provider_key(key: &str) -> bool {
 }
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 14] = [
+pub const DETECTED_KEYS: [&str; 15] = [
     RUNTIME,
     GPU_TOOLKIT,
     GPU_PASSTHROUGH,
@@ -151,6 +158,7 @@ pub const DETECTED_KEYS: [&str; 14] = [
     FUSE_JOBS,
     FUSE_URING,
     OS_VERSION,
+    XCODE,
 ];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.

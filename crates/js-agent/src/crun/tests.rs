@@ -106,6 +106,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         ports: Vec::new(),
         host_ports: Vec::new(),
         log_sink: None,
+        xcode: None,
     }
 }
 

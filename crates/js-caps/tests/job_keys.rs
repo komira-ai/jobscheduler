@@ -2,7 +2,7 @@
 
 use js_caps::{
     Consumable, DETECTED_KEYS, DISK_GIB, EXEC, FUSE_JOBS, FUSE_URING, LAYERED_ROOTFS, NodeCaps,
-    ReportError, Request, RequestError, Unmet,
+    ReportError, Request, RequestError, Unmet, XCODE,
 };
 
 fn req(props: &[(&str, &str)]) -> Result<Request, RequestError> {
@@ -112,11 +112,12 @@ fn a_report_with_a_bad_disk_is_refused() {
     assert!(node(&[("disk-gib", "lots")]).is_err());
 }
 
-/// Asserts that the detected keys are exactly these fourteen, and that a request may name only
-/// `disk-gib`, `exec`, `layered-rootfs`, `fuse-jobs` and `fuse-uring` of them (the layered
-/// root because the server asks for it of a job with layers, mounts or host ports, the FUSE
-/// keys of a job that needs the FUSE device): each of the other nine is refused as an
-/// unknown key, naming it. It catches a detected key added without the agent detecting it, and a host
+/// Asserts that the detected keys are exactly these fifteen, and that a request may name only
+/// `disk-gib`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring` and `xcode` of them (the
+/// layered root because the server asks for it of a job with layers, mounts or host ports,
+/// the FUSE keys of a job that needs the FUSE device, `xcode` of a job that names a build):
+/// each of the other nine is refused as an unknown key, naming it. It catches a detected key
+/// added without the agent detecting it, and a host
 /// property a request could ask for though no agent reports it, so that a job naming it
 /// could be placed nowhere.
 #[test]
@@ -136,11 +137,12 @@ fn a_request_names_only_some_detected_keys() {
         "fuse-jobs",
         "fuse-uring",
         "os_version",
+        "xcode",
     ];
     assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
     for key in DETECTED_KEYS
         .iter()
-        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS, FUSE_JOBS, FUSE_URING].contains(key))
+        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS, FUSE_JOBS, FUSE_URING, XCODE].contains(key))
     {
         let refused = req(&[(key, "true")]);
         assert_eq!(refused, Err(RequestError::UnknownKey((*key).to_owned())));
@@ -151,6 +153,7 @@ fn a_request_names_only_some_detected_keys() {
         (LAYERED_ROOTFS, "true"),
         (FUSE_JOBS, "true"),
         (FUSE_URING, "true"),
+        (XCODE, "16C5032a"),
     ];
     assert!(req(&named).is_ok());
 }

@@ -201,6 +201,7 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
         host_ports: Vec::new(),
         env: Vec::new(),
         log_sink: None,
+        xcode: None,
     }
 }
 
