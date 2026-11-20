@@ -208,6 +208,7 @@ mod ledger_tests;
 mod make;
 mod net;
 mod pull;
+mod remove;
 mod rootfs;
 mod settings;
 mod spec;
@@ -236,7 +237,6 @@ pub use wire::{
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -251,8 +251,8 @@ use tokio::runtime::{Builder, Runtime as TokioRuntime};
 use crate::cli_runtime::container_name;
 use crate::host_ports::Forwarder;
 use crate::lifecycle::{
-    Created, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    Created, Exit, FilesRoot, Found, FsPrepared, JobFs, Prefetcher, Prepared, Removal, RunHandle,
+    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger};
@@ -350,6 +350,8 @@ pub struct CrunRuntime {
     fs: Option<fs::Fs>,
     /// The makes and starts of leases under way off the worker.
     creates: create::Creates,
+    /// The removals of leases under way off the worker.
+    removals: remove::Removals,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -459,6 +461,7 @@ impl CrunRuntime {
             logs: None,
             fs: settings.fs.map(fs::Fs::open).transpose()?,
             creates: create::Creates::new()?,
+            removals: remove::Removals::new()?,
         };
         // No container of this process exists yet: the runs of an earlier process of this
         // agent that still stand are adopted, and the rest of its leases are removed.
@@ -583,6 +586,7 @@ impl Runtime for CrunRuntime {
     fn set_wake(&mut self, wake: Wake) {
         self.pulls.set_wake(wake.clone());
         self.creates.set_wake(wake.clone());
+        self.removals.set_wake(wake.clone());
         self.fs.iter_mut().for_each(|fs| fs.set_wake(wake.clone()));
     }
 
@@ -657,68 +661,18 @@ impl Runtime for CrunRuntime {
             .map_err(|_| RuntimeError::new(format!("{} still runs after its kill", spec.name)))
     }
 
-    /// Removes the container and everything its lease made. A handle this process does not
-    /// hold is a leftover of an earlier process: it is removed if the ledger holds it as
-    /// this agent's, nothing happens if the ledger does not know it, and the call fails
-    /// (and changes nothing) if its sidecar is another agent's or is not well formed, or a
-    /// create of it is under way.
+    /// Removes the container and everything its lease made on the caller's thread (the
+    /// module `remove`). A handle this process does not hold is a leftover of an earlier
+    /// process: it is removed if the ledger holds it as this agent's, nothing happens if the
+    /// ledger does not know it, and the call fails (and changes nothing) if its sidecar is
+    /// another agent's or is not well formed, or a create or a removal of it is under way.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        let (rt, oci, kill_wait) = (&self.rt, &self.oci, self.hooks.kill_wait);
-        let fs = &self.fs;
-        let Some(run) = self.runs.get_mut(&id.0) else {
-            // Not held by this process: the leftover of an earlier one, if the ledger has
-            // it, and nothing otherwise.
-            return self.remove_leftover(&id.0).map(|_| ()).map_err(|why| {
-                RuntimeError::new(format!("remove the leftovers of {}: {why}", id.0))
-            });
-        };
-        let failed =
-            |what: &str, why: &dyn std::fmt::Display| RuntimeError::new(format!("{what}: {why}"));
-        if let State::Running { run: running, .. } = &mut run.state
-            && running.try_end().is_none()
-        {
-            // Removed while it runs: ended by force, as a stop that spent its grace.
-            let _ = run.cgroup.kill();
-            let ended =
-                rt.block_on(async { tokio::time::timeout(kill_wait, running.wait()).await });
-            if ended.is_err() {
-                let forced = rt.block_on(async {
-                    tokio::time::timeout(kill_wait.max(FORCE_FLOOR), running.force()).await
-                });
-                forced.map_err(|_| {
-                    failed(
-                        "end the supervisor",
-                        &format!("process {} is still there", running.id().pid),
-                    )
-                })?;
-            }
-        }
-        run.net.release(&id.0);
-        // No progress record is written from here on: a file made in the lease directory while
-        // it is removed below would stop the removal.
-        run.logs.leave();
-        oci.remove(&id.0)
-            .map_err(|why| failed("delete the container", &why))?;
-        // After `crun delete` and before the lease directory, which holds the writable layers.
-        let released = fs.as_ref().map_or(Ok(()), |fs| fs.release(&id.0));
-        released.map_err(|why| failed("unmount the run's file system", &why))?;
-        run.cgroup
-            .remove()
-            .map_err(|why| failed("remove the lease's cgroup", &why))?;
-        if let Err(why) = js_contain::remove::remove_tree(&run.lease.dir)
-            && why.kind() != io::ErrorKind::NotFound
-        {
-            return Err(failed("remove the lease directory", &why));
-        }
-        dirs::remove_tmp_beside(&run.lease.dir, &id.0)
-            .map_err(|why| failed("remove the job's temporary directory", &why))?;
-        self.unpin_all(&id.0)
-            .map_err(|why| failed("remove the image's pin", &why))?;
-        self.ledger
-            .forget(&id.0)
-            .map_err(|why| failed("remove the lease's sidecar", &why))?;
-        self.runs.remove(&id.0);
-        Ok(())
+        self.remove_now(id)
+    }
+
+    /// On a thread of the removal pool (the module `remove`).
+    fn removing(&mut self, id: &RunHandle) -> Removal {
+        self.remove_off_worker(id)
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {

@@ -1,7 +1,9 @@
 //! A runtime whose create of the runs a test names is under way (`Pending`) until the test
-//! releases it, as a crun create on its pool is; every other call, and every other run, is
-//! the wrapped [`FakeRuntime`]'s. Nothing here waits: the create is the wrapped runtime's
-//! `create_and_start`, made at the step after the release.
+//! releases it, as a crun create on its pool is, and whose removal of the containers a test
+//! names is under way until the test releases it, as a crun removal on its pool is; every
+//! other call, and every other run, is the wrapped [`FakeRuntime`]'s. Nothing here waits: the
+//! create is the wrapped runtime's `create_and_start`, and the removal its `remove`, made at
+//! the step after the release.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,14 +12,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, RunHandle,
-    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, Removal,
+    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
 };
 use js_agent_wire::{
     HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
 };
 
-use super::fake::FakeRuntime;
+use super::fake::{FakeRuntime, ManualClock};
 use super::{Harness, hook};
 
 /// What the test and the runtime share.
@@ -33,6 +35,15 @@ struct Gate {
     begun: Vec<String>,
     /// How many times `poll_create` was called, by run.
     polls: BTreeMap<String, u32>,
+    /// The containers whose removal is to stay pending.
+    removals_held: BTreeSet<String>,
+    /// The containers whose removal was released.
+    removals_released: BTreeSet<String>,
+    /// How many times `removing` was called, by container.
+    removal_asks: BTreeMap<String, u32>,
+    /// The clock a removal moves and by how much, as a `crun delete` and the removal of a
+    /// lease's directories take on a busy disk.
+    remove_takes: Option<(ManualClock, u64)>,
 }
 
 /// The test's hand on the gate of a [`Deferring`] runtime.
@@ -58,6 +69,29 @@ impl Control {
     /// How often the lifecycle asked about the create of `run_id`.
     pub fn polls(&self, run_id: &str) -> u32 {
         self.0.borrow().polls.get(run_id).copied().unwrap_or(0)
+    }
+
+    /// From now on the removal of the container `id` (the fake's handle, `c1` for the first
+    /// container) stays pending until [`Control::release_removal`].
+    pub fn hold_removal(&self, id: &str) {
+        self.0.borrow_mut().removals_held.insert(id.to_owned());
+    }
+
+    /// The removal of the container `id` is done at the next ask: the wrapped runtime
+    /// removes it then.
+    pub fn release_removal(&self, id: &str) {
+        self.0.borrow_mut().removals_released.insert(id.to_owned());
+    }
+
+    /// Every removal the wrapped runtime makes moves `clock` by `ms`, on the thread that
+    /// asks for it.
+    pub fn remove_takes(&self, clock: &ManualClock, ms: u64) {
+        self.0.borrow_mut().remove_takes = Some((clock.clone(), ms));
+    }
+
+    /// How often the lifecycle asked about the removal of the container `id`.
+    pub fn removal_asks(&self, id: &str) -> u32 {
+        self.0.borrow().removal_asks.get(id).copied().unwrap_or(0)
     }
 }
 
@@ -168,7 +202,21 @@ impl Runtime for Deferring {
         self.inner.stop(id, grace)
     }
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
+        if let Some((clock, ms)) = &self.gate.0.borrow().remove_takes {
+            clock.advance(*ms);
+        }
         self.inner.remove(id)
+    }
+    /// Pending while the gate holds the removal of `id`, and the wrapped runtime's `remove`
+    /// otherwise.
+    fn removing(&mut self, id: &RunHandle) -> Removal {
+        let mut gate = self.gate.0.borrow_mut();
+        *gate.removal_asks.entry(id.0.clone()).or_default() += 1;
+        if gate.removals_held.contains(&id.0) && !gate.removals_released.contains(&id.0) {
+            return Removal::Pending;
+        }
+        drop(gate);
+        Removal::Done(self.remove(id))
     }
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         self.inner.list_labelled()
