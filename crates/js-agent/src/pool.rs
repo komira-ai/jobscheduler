@@ -1,8 +1,13 @@
-//! The pools of the threads that make the calls of a job's file system that may wait on a
-//! provider's file system, off the lifecycle's worker: `js-lookups` for the lookups of host
-//! paths, and `js-paths` for the mounts of an assembly and the check of a job's sources after
-//! it ended. They are two so that an assembly (which holds a thread for as long as its mounts
-//! take, for ever on a hung file system) or a check never delays another start's lookups.
+//! The pools of threads that make the agent's calls that may wait on a disk, a process or a
+//! file system, off the lifecycle's worker. Each pool has its own threads, so a call that
+//! hangs in one never delays the calls of another:
+//!
+//! - `js-lookups`: the lookups of a job's host paths (`crun`'s file systems);
+//! - `js-paths`: the mounts of an assembly and the check of a job's sources after it ended;
+//! - `js-create`: the make and start of a lease (`crun`'s creates);
+//! - `js-remove`: the removal of a lease once its job ended (`crun`'s removals);
+//! - `js-scratch`: the removal of a finished run's scratch directory and the directories
+//!   beside it (the lifecycle's own, [`Lifecycle::with_cleanup_threads`]).
 //!
 //! A call on a FUSE file system blocks in the kernel until the file system answers, and one
 //! that has hung never returns. A pool has a fixed number of threads and makes none on
@@ -13,6 +18,8 @@
 //!
 //! A task that answered rings the pool's [`Wake`] ([`Pool::set_wake`]), so the lifecycle's
 //! worker asks for the answer at once instead of at its next step.
+//!
+//! [`Lifecycle::with_cleanup_threads`]: crate::lifecycle::Lifecycle::with_cleanup_threads
 
 use std::io;
 use std::panic::AssertUnwindSafe;
@@ -36,14 +43,6 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// A pool of `threads` threads named `js-paths`.
-    ///
-    /// # Errors
-    /// A thread could not be made.
-    pub(crate) fn new(threads: usize) -> io::Result<Self> {
-        Self::named(threads, "js-paths")
-    }
-
     /// A pool of `threads` threads named `name`.
     ///
     /// # Errors

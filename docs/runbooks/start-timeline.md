@@ -64,6 +64,24 @@ cgroup made, limited and given to the job user), `bundle` (its bundle written), 
 supervisor made its files and said it is ready) and `running` (its sidecar says it runs and its
 network is wired).
 
+## The cleanup's line (`Cleaned`)
+
+When a run's cleanup has passed (its container and directories are gone, its post-job checks
+passed and its slot is free), the agent logs one more line for it:
+
+```
+js-agent: job: Cleaned { run_id: "<run>", timeline: CleanupTimeline { steps: [("removed", <ms>), ("scratch", <ms>), ("checks", <ms>)], worker_ms: <ms> } }
+```
+
+`steps` are the milliseconds, on the agent's monotonic clock, after the step that took the run into
+its cleanup (the step after its container ended) at which the step that did each was done:
+`removed` (the container and its lease are gone), `scratch` (the run's scratch directory and the
+directories beside it are gone) and `checks` (the post-job checks passed and the slot is free).
+`worker_ms` is the time the job worker itself spent on the run's cleanup, summed over the steps.
+`crun` removes the container off the worker and the agent removes the directories off it, so their
+time is in `steps` and not in `worker_ms`; what is left in `worker_ms` (the record of the owed
+checks, the quota and the checks) is time every reply waiting in the worker's queue waited too.
+
 ## What the line does not hold
 
 `crun run` starts after `supervised`: it makes the container's namespaces and mounts (the overlay

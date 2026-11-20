@@ -29,7 +29,7 @@ use js_contain::oci::{SupervisorId, supervisor_path};
 use js_types::{JobNetwork, PortMap};
 use serde_json::{Value, json};
 
-use crate::node::{LONG, NoImages, Node, PID};
+use crate::node::{LONG, NoImages, Node, PID, Ringing};
 
 /// A lifecycle clock a test moves. Clones share one reading.
 #[derive(Clone, Default)]
@@ -873,7 +873,9 @@ fn a_runtime_with_an_egress_still_reports_a_job_that_ended_while_no_agent_ran() 
     assert!(second.swept().removed.is_empty(), "{:?}", second.swept());
 
     let clock = Moving::default();
-    let (mut life, _) = lifecycle(&node, second, &clock, LONG);
+    let (life, _) = lifecycle(&node, second, &clock, LONG);
+    // The container is removed off the caller's thread: the runtime rings when it is gone.
+    let mut life = Ringing::new(life);
     for _ in 0..2 {
         life.step();
         let jobs = life.held_jobs();
@@ -899,6 +901,7 @@ fn a_runtime_with_an_egress_still_reports_a_job_that_ended_while_no_agent_ran() 
     };
     let _events = life.apply(&reply);
     life.step();
+    life.until(|life| life.held_jobs().is_empty());
     assert!(life.held_jobs().is_empty(), "{:?}", life.held_jobs());
 }
 

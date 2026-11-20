@@ -536,11 +536,14 @@ impl CrunRuntime {
     }
 
     /// Removes the lease `name` of an earlier process, if the ledger holds it as this
-    /// agent's. Returns whether it did. Refused while a create of the name is under way: its
-    /// lease is being made.
+    /// agent's. Returns whether it did. Refused while a create of the name is under way (its
+    /// lease is being made) or a removal of it is (a thread holds its run).
     pub(super) fn remove_leftover(&self, name: &str) -> Result<bool, String> {
         if self.creates.holds(name) {
             return Err("a create of it is under way".to_owned());
+        }
+        if self.removals.holds(name) {
+            return Err("a removal of it is under way".to_owned());
         }
         match self.ledger.read(name) {
             None => Ok(false),
