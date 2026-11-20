@@ -357,6 +357,25 @@ fn make_dir_at(parent: BorrowedFd<'_>, name: &OsStr, mode: Mode) -> io::Result<(
     fsync(parent).map_err(io::Error::from)
 }
 
+/// Opens the directory `name` of `parent` ([`open_dir_at`]). With `make`, when nothing is at
+/// `name`, it is made first ([`make_dir_at`]): mode 0700 when it is the state directory (`last`)
+/// and 0755 when it is one above it. Not generic, so that every hook's walk runs the same code.
+fn enter_dir_at(
+    parent: BorrowedFd<'_>,
+    name: &OsStr,
+    make: bool,
+    last: bool,
+) -> Result<OwnedFd, Refused> {
+    match open_dir_at(parent, name) {
+        Err(Refused::Io(error)) if make && error.kind() == io::ErrorKind::NotFound => {
+            let mode = if last { STATE_DIR_MODE } else { ANCESTOR_MODE };
+            make_dir_at(parent, name, mode).map_err(Refused::Io)?;
+            open_dir_at(parent, name)
+        }
+        opened => opened,
+    }
+}
+
 /// Opens `dir` by walking down from `/`, one component at a time and without following a
 /// link, holding each ancestor to [`check_ancestor`] before going into it and the last
 /// directory to [`check_dir`]. Every look is at an open descriptor, never at a path, so what
@@ -394,15 +413,8 @@ fn open_checked<D: Document>(
         })?;
         here.push(part);
         let last = parts.clone().next().is_none();
-        let opened = match open_dir_at(fd.as_fd(), part.as_os_str()) {
-            Err(Refused::Io(error)) if make && error.kind() == io::ErrorKind::NotFound => {
-                let mode = if last { STATE_DIR_MODE } else { ANCESTOR_MODE };
-                make_dir_at(fd.as_fd(), part.as_os_str(), mode).map_err(at(&here))?;
-                open_dir_at(fd.as_fd(), part.as_os_str())
-            }
-            opened => opened,
-        };
-        fd = opened.map_err(|refused| refusal(&here, last, refused))?;
+        fd = enter_dir_at(fd.as_fd(), part.as_os_str(), make, last)
+            .map_err(|refused| refusal(&here, last, refused))?;
     }
 }
 
