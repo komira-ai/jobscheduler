@@ -9,8 +9,9 @@
 //!    is `state_invalid` (1), except a record of another target that never took the host, which
 //!    is superseded (see [`supersede`](super::supersede)): moved aside just before the new record
 //!    is first written (5), and named in the detail of the step's last line. The state
-//!    directory is made, mode 0700, when it is not there: hostkeeper makes none, so a first
-//!    install finds none;
+//!    directory is made, mode 0700, when it is not there, and so is every directory above it
+//!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
+//!    Mac, not even `/Library/Application Support/js-agent`);
 //! 2. a taint the restarted agent will not re-check, or an `owed-*` record, halts (76); a taint
 //!    it will re-check (a residue of a process the pin file does not name, see
 //!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
