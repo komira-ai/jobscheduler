@@ -1,8 +1,8 @@
 //! The bytes of a dispatch message row (`dispatch/<host>/<seq>`, [`DispatchMessage`]): the same
 //! format byte and tag-length-value fields as a job or allocation row, with the tags of
 //! [`dispatch_tag`], and the same additive rules (B8): a tag this build does not know is carried,
-//! an optional tag the row lacks (the start body, the claim) reads as `None`, and a format byte or a kind this build does
-//! not know is [`DecodeError::Newer`].
+//! an optional tag the row lacks (the start body, the claim) reads as `None`, and a format byte
+//! or a kind this build does not know is [`DecodeError::Newer`].
 //!
 //! The start body is the agent's own [`JobStartSpec`] as the agent protocol writes it (JSON),
 //! whose fields change only additively too: a field a later build adds is ignored here, as an
