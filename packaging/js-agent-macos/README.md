@@ -67,19 +67,25 @@ The file must be a regular file owned by root, not writable by group or others.
 `--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
 coordinator enrolled the Mac under, so one file serves every Mac of the group.
 
-Neither runs at load. `KeepAlive` holds each while `/etc/js-agent/token` exists, so the
-daemons start when the host is given its join token, and launchd starts one again after
+Neither runs at load. `KeepAlive` holds each while the flags file `/etc/js-agent/flags`
+exists, so the daemons start when the host has its flags, and launchd starts one again after
 every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
 `/Library/Application Support/js-agent/log/js-agent.err.log`.
 
 ## What hostkeeper does
 
-For the service `js-agent` of the release's desired state for the group, hostkeeper
-installs the package with the system installer, then runs the update hook, `/Library/Application
-Support/js-agent/bin/js-agent update-hook`, with the params of the manifest: the unit
+For the service `js-agent` of the release's desired state for the group, hostkeeper runs the
+update hook's `prepare` from the staged package tree, then installs the package with the system
+installer and points its `current` link at the release, then runs the hook's `cutover`, `verify`
+and `cleanup` (`/Library/Application Support/js-agent/bin/js-agent update-hook`), with the
+params of the manifest: the unit
 `js-agent`, the helper unit `js-agent.session`, the state directory above, the release link
 under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files and the state root.
-The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
+On a first install `prepare` finds no state directory and none of the directories above it
+(the package is not installed yet), and makes them: `js-agent` mode 0755 and `update` mode 0700,
+root's. A Mac joins by hostkeeper's host certificate: the flags file names it (`--host-cert`,
+`--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`), and then no token file is
+needed. The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
 the helper's daemon and the agent's from the release tree with `launchctl` while the agent
 is stopped, the helper before the agent. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
@@ -135,7 +141,7 @@ rollback_timeout_secs = 420
 
 `unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
 exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
-`/etc/js-agent/token` is absent. The unit port has run against a fake of `launchctl` only.
+`/etc/js-agent/flags` is absent. The unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 
@@ -206,8 +212,8 @@ Known limits:
   prints of a daemon that crashed (its `last exit code`), the time a `bootstrap` takes to start
   the daemon, and `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and
   from what the fake says, not from a Mac. `kickstart -k` runs a daemon whatever its `KeepAlive`
-  condition says, so the port refuses it while `/etc/js-agent/token` is absent.
+  condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
 - The agent's state and scratch directories (`/var/db/js-agent/{state,scratch}`, on separate
-  volumes, as the agent requires), `/etc/js-agent/flags`, the join token and the helper's
-  socket group are host setup, not the package's.
+  volumes, as the agent requires), `/etc/js-agent/flags` and the helper's socket group are
+  host setup, not the package's; the hook makes only its own state directory.
