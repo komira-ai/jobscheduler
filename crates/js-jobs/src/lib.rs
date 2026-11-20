@@ -1,4 +1,4 @@
-//! The job, allocation, mark, taint and cordon tables, as typed records over the `js-state`
+//! The job, allocation, mark, taint, cordon and node tables, as typed records over the `js-state`
 //! [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
@@ -37,6 +37,12 @@
 //! server took, and every placement's transaction checks the row absent: a placement on a
 //! cordoned host commits nothing.
 //!
+//! A **node** row is a host's presence ([`NodeRecord`]): its session, what its hello announced
+//! and what its last applied beat left, with `heard_at` on the store's clock, so a beat that
+//! reaches any server sharing the store is judged on the same row ([`JobStore::hello_node`],
+//! [`JobStore::beat_node`], [`JobStore::read_node`], [`JobStore::live_nodes`],
+//! [`JobStore::forget_node`]).
+//!
 //! # Results and retention
 //!
 //! A result keeps, beside the tails, the length of each output stream and the bytes each
@@ -73,6 +79,7 @@
 //! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
 //! | `cordon/<host>` | the cordon of `<host>`: the holder it names, if any (the time it lapses is the row's expiry, so a lapsed cordon is an absent row); written by [`JobStore::cordon_host`] and [`JobStore::restore_cordon`], deleted by [`JobStore::uncordon_host`] or by its expiry, listed whole by [`JobStore::cordons`]; checked absent by every placement's transaction; a store written before cordons has none and opens unchanged |
 //! | `hostbook/<host>` | the reservation row of `<host>`: the allocation id of the last placement made with [`JobStore::place_reserving`], whose version is what a placement's picture of the host is checked against; an earlier build has none, and a host with none is placed on as one whose row is absent |
+//! | `node/<host>` | the [`NodeRecord`] of `<host>`: its session (the epoch of its last hello and the digest of that hello's secret), what the hello announced, its phase, load and listing flags, the epoch and sequence of the last applied beat and `heard_at`, the store's clock at the last hello or applied beat; written by [`JobStore::hello_node`] and [`JobStore::beat_node`], deleted by [`JobStore::forget_node`]; a store written before nodes has none and opens unchanged |
 //! | `meta/cordons/restored` | empty: the cordons an earlier release kept only in a server's host bindings were carried into `cordon/` ([`JobStore::restore_cordons`]); no later start carries any again |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
@@ -122,6 +129,9 @@
 //! | [`JobStore::uncordon_host`] | delete `cordon/<host>` at the version read when the rule lifts it; nothing otherwise |
 //! | [`JobStore::restore_cordon`] | put `cordon/<host>` with the time given as its time to live, if absent |
 //! | [`JobStore::restore_cordons`] | nothing when `meta/cordons/restored` is there; else, as [`JobStore::restore_cordon`] for each cordon given (a transaction each), then put `meta/cordons/restored` if absent |
+//! | [`JobStore::hello_node`] | put `node/<host>` if absent or at the version read, with the next epoch; a lost race reads the row again |
+//! | [`JobStore::beat_node`] | put `node/<host>` at the version read, when the beat's (epoch, sequence) is the row's to take; nothing otherwise; a lost race reads the row again and judges the beat on it |
+//! | [`JobStore::forget_node`] | delete `node/<host>` at the version given; nothing when the row is not at it |
 //! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given, whatever it holds, in one transaction; nothing for no hosts |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
@@ -165,6 +175,7 @@ mod ids;
 #[cfg(any(test, feature = "test-support"))]
 pub mod interfere;
 pub mod keys;
+mod node;
 mod queue;
 mod record;
 mod result;
@@ -182,6 +193,9 @@ pub use error::JobStoreError;
 pub use ids::{
     AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, JobId, JobIdError,
     MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
+};
+pub use node::{
+    AppliedBeat, Beat, LoadReading, NodeHello, NodeRecord, NodeRow, NodeState, SessionDigest,
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
