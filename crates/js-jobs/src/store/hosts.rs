@@ -47,12 +47,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// it, so the job and its allocation never disagree and the host is not left booked. A job
     /// that has already ended keeps its first end and only its allocation is freed; an
     /// allocation already freed keeps its first reason; when both are so, nothing is written.
+    /// An end this call makes changes the host's dispatch queue as [`JobStore::end_job`]'s does.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`], [`JobStoreError::NoAllocation`];
     /// [`JobStoreError::IllegalTransition`] when the job's state cannot end that way;
-    /// [`JobStoreError::Stale`] when either row changed before the commit; as for any read and
-    /// write.
+    /// [`JobStoreError::Stale`] when either row changed before the commit, or a server handed out
+    /// the job's start in between; as for any read and write.
     pub fn end_and_free(
         &self,
         id: &JobId,
@@ -83,6 +84,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let job = if job.state.is_ended() {
             job
         } else {
+            let stop = !super::dispatch::told_by_host(&end);
+            txn = self.queue_stop(txn, &job, Some(&allocation), stop, now)?;
             let to = end.state();
             ensure(
                 may_move(job.state, to),
