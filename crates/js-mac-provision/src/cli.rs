@@ -510,7 +510,8 @@ mod tests {
         let (r, text) = run(&install_from_file(dir.path(), &file), &pf);
         assert!(r.unwrap());
         assert_eq!(text, "installed com.apple/other for uids 600-699\n");
-        assert!(pf.calls()[0].starts_with("-a com.apple/other -f "));
+        let load = format!("-a com.apple/other -f {}", dir.join("pool.pf").display());
+        assert!(pf.calls().contains(&load), "{:?}", pf.calls());
         let named = format!("{other}--native-pfctl=/nonexistent/pfctl\n");
         write_flags(&file, &named);
         let calls = pf.calls().len();
