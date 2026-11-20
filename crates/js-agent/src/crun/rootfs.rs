@@ -14,13 +14,13 @@ use js_contain::oci::image::published_root;
 use tokio::runtime::Runtime as TokioRuntime;
 
 use super::CrunRuntime;
-use super::fs::pool::{Pending, Poll};
 use super::fs::{Assembled, Fs, Owners};
 use super::ledger::{Failed, Reason, Removed, SweepReport};
 use super::pull::Images;
 use super::spec::pinned;
 use crate::cli_runtime::container_name;
 use crate::lifecycle::{Exit, FsPrepared, JobFs, RuntimeError, Status};
+use crate::pool::{Pending, Poll};
 
 /// The name of the pin of the image of a lease's layer `k`.
 pub(super) fn layer_pin(name: &str, k: usize) -> String {
@@ -175,15 +175,7 @@ impl CrunRuntime {
     /// runtime that gives no layers has none of the latter), and its hold on the image
     /// budget.
     pub(super) fn unpin_all(&self, name: &str) -> Result<(), String> {
-        let pins = std::iter::once(name.to_owned())
-            .chain((0..limits::MAX_LAYERS).map(|k| layer_pin(name, k)));
-        let unpinned: Result<Vec<()>, _> = pins
-            .map(|pin| {
-                self.images.release(&pin);
-                self.oci.unpin_image(&pin)
-            })
-            .collect();
-        unpinned.map(drop).map_err(|why| why.to_string())
+        unpin_lease(&self.images, &self.oci, name)
     }
 
     /// Unmounts every mount of the lease `name` from its list and removes its directory of
@@ -309,4 +301,19 @@ impl CrunRuntime {
             )),
         }
     }
+}
+
+/// Removes the pins of the lease `name` from `oci`, its image's and its image layers', and
+/// its hold on the budget of `images` ([`CrunRuntime::unpin_all`], and a removal off the
+/// worker).
+pub(super) fn unpin_lease(images: &Images, oci: &Oci, name: &str) -> Result<(), String> {
+    let pins =
+        std::iter::once(name.to_owned()).chain((0..limits::MAX_LAYERS).map(|k| layer_pin(name, k)));
+    let unpinned: Result<Vec<()>, _> = pins
+        .map(|pin| {
+            images.release(&pin);
+            oci.unpin_image(&pin)
+        })
+        .collect();
+    unpinned.map(drop).map_err(|why| why.to_string())
 }

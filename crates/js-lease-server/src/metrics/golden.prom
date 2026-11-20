@@ -55,6 +55,11 @@ js_job_pass_duration_seconds_bucket{le="5"} 2
 js_job_pass_duration_seconds_bucket{le="+Inf"} 2
 js_job_pass_duration_seconds_sum 0.033
 js_job_pass_duration_seconds_count 2
+# HELP js_job_tables_total Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, or kept with the jobs this server's submits recorded since added to them.
+# TYPE js_job_tables_total counter
+js_job_tables_total{from="store"} 1
+js_job_tables_total{from="kept"} 2
+js_job_tables_total{from="submitted"} 3
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3
