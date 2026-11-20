@@ -709,7 +709,7 @@ fn p6_needs_the_signature_it_asks_about() {
         *sys.sig.borrow_mut() = Ok(sig);
         let r = p6(&ctx(&sys, &work));
         assert_eq!(r.status, Status::NeedsManual);
-        assert!(r.reason.expect("reason").contains("sign-darwin"));
+        assert!(r.reason.expect("reason").contains("pkg entitle-macos"));
     }
     *sys.sig.borrow_mut() = Err("no codesign".into());
     assert_eq!(p6(&ctx(&sys, &work)).status, Status::Error);

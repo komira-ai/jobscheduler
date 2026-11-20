@@ -8,8 +8,9 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 ## Where things stand
 
 - `.github/workflows/js-agent-macos-pkg.yml` builds `js-agent-<version>-macos-arm64.pkg` on a hosted Apple silicon
-  runner and signs it. Its `build` job stages the payload, reads the cdhash of the `js-agent` binary, builds the
-  component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs on main,
+  runner and signs it. Its `build` job signs `js-vmm` ad hoc with the virtualization entitlement (`cargo xtask pkg
+  entitle-macos`, `vm-launcher-signing.md`), stages the payload, reads the cdhash of the `js-agent` binary, builds the
+  component with `pkgbuild` (no scripts) and checks it, signatures included, with `cargo xtask pkg check-macos`. Its `sign` job runs on main,
   by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
@@ -70,6 +71,7 @@ group wheel; directories are 0755 unless noted.
 | `/Library/Application Support/js-agent/bin/js-agent` | 0755 | the agent |
 | `/Library/Application Support/js-agent/bin/js-mac-session` | 0755 | the root helper |
 | `/Library/Application Support/js-agent/bin/js-mac-provision` | 0755 | the plist generator |
+| `/Library/Application Support/js-agent/bin/js-vmm` | 0755 | the VM launcher (`--vm-driver`), signed ad hoc with the hardened runtime and `com.apple.security.virtualization` |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 | |
 | `/Library/Application Support/js-agent/log/` | dir | empty; the daemons' logs |
 | `/Library/Application Support/js-agent/update/` | dir 0700 | empty; the update hook's `state_dir` |
@@ -80,7 +82,9 @@ The parent directories `Library`, `Library/Application Support`, `Library/Launch
 `Library/Application Support/js-agent` and its `bin` are entries of the payload too. `cargo xtask pkg stage-macos
 --version V --bin-dir D --license L --agent-plist A --session-plist S --out O` writes `O/root/...` and no
 `O/scripts`; `cargo xtask pkg check-macos --pkg P --version V` refuses anything but exactly this payload (modes, root
-as owner), any script, and another identifier or version.
+as owner), any script, another identifier or version, and a program whose signature `codesign --verify --strict`
+refuses, whose entitlements are not exactly its own (`entitlements_of`: `js-vmm` the virtualization entitlement, the
+others none), or that has an entitlement and no hardened runtime.
 
 - The labels are `js-agent` and `js-agent.session` (`crates/js-mac-provision/src/daemon.rs`: `AGENT_LABEL`,
   `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). The two `js-mac-provision` verbs
@@ -212,6 +216,10 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 
 - Unsigned, or signed by an identity a Mac does not list: the order fails `signature` on that Mac; nothing is
   installed, and Linux hosts are unaffected.
+- A `js-vmm` without the virtualization entitlement or the hardened runtime, a program whose signature does not
+  verify, or a program with an entitlement it should not have: `pkg check-macos` refuses the package in `build`, so it
+  is never signed or uploaded. A launcher without the entitlement would fail every VM start with `VZErrorDomain`
+  code 2.
 - A `Bom` that does not match the payload, an entry not root's or with a setuid bit, a `run` label without its plist,
   or a `PackageInfo` that does not match: `stage` refuses it. `pkg check-macos` refuses the same shapes in CI, before
   the release.

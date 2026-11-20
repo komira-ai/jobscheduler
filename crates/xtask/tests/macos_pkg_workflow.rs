@@ -1,6 +1,7 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
 //! read as it is in the repository. Two jobs: `build` runs in the release's beta stage and by hand
-//! (never on a pull request), holds no secret and signs nothing, and builds a hostkeeper
+//! (never on a pull request), holds no secret and signs no package (its one signature is
+//! `js-vmm`'s ad hoc one from `pkg entitle-macos`, which needs no key), and builds a hostkeeper
 //! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
 //! plist naming the agent of the same package by its cdhash); `sign` runs only on main (by hand,
 //! or in the release's call that asks for it), in the protected environment `pkg-signing`, takes
@@ -186,12 +187,15 @@ fn every_action_is_pinned_to_a_commit_and_both_jobs_run_on_macos_15() {
     );
 }
 
+/// The build job's one signature is `pkg entitle-macos`'s ad hoc one, which needs no key: it
+/// names no secret, opens no keychain and signs no package.
 #[test]
-fn the_build_job_names_no_secret_and_signs_nothing() {
+fn the_build_job_names_no_secret_and_signs_with_no_key() {
     let text = read(WORKFLOW);
     let build = job_text(&text, "build");
     assert!(!build.contains("secret"), "the build job mentions a secret");
     for word in [
+        "--keychain",
         "productsign",
         "notarytool",
         "stapler",
@@ -524,9 +528,10 @@ fn no_command_expands_an_expression() {
 /// One line per way the workflow `text` is not the build of a hostkeeper `macos-pkg` package that
 /// is then signed with `productsign` alone: the package has no script and the file name of the
 /// design, the root helper's plist names the agent of the same package by its cdhash, the agent's
-/// plist is the fixed one, the signing is one `productsign --timestamp` with the identity found
-/// in the temporary keychain, nothing is notarized, and the artifacts are the two the release
-/// reads.
+/// plist is the fixed one, js-vmm is built and given its entitlement by `pkg entitle-macos` once,
+/// between its build and the staging, no program is signed by the workflow's own `codesign`,
+/// the signing is one `productsign --timestamp` with the identity found in the temporary
+/// keychain, nothing is notarized, and the artifacts are the two the release reads.
 fn package_problems(text: &str) -> Vec<String> {
     let all = jobs(text);
     let build = all.get("build").map_or(String::new(), |j| j.join("\n"));
@@ -574,6 +579,23 @@ fn package_problems(text: &str) -> Vec<String> {
     want(
         build.contains("if [ \"$staged\" != \"$cdhash\" ]"),
         "the cdhash of the staged js-agent is not compared with the one in the plist",
+    );
+    want(
+        build.contains("cargo build --locked --release -p js-vmm --bin js-vmm")
+            && build.contains("for bin in js-agent js-mac-session js-mac-provision js-vmm; do"),
+        "js-vmm is not built for the package",
+    );
+    let entitle = build.find("run: cargo xtask pkg entitle-macos --bin-dir target/release");
+    let built = build.find("-p js-vmm --bin js-vmm");
+    let staged = build.find("cargo xtask pkg stage-macos");
+    want(
+        matches!((built, entitle, staged), (Some(b), Some(e), Some(s)) if b < e && e < s)
+            && build.matches("pkg entitle-macos").count() == 1,
+        "js-vmm is not given its entitlement once, after it is built and before it is staged",
+    );
+    want(
+        !body.contains("codesign --force") && !body.contains("codesign -f"),
+        "the workflow signs a program itself, not with pkg entitle-macos",
     );
     want(
         !body.contains("notarytool") && !body.contains("stapler") && !body.contains("xcrun"),
@@ -668,6 +690,36 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "the identity is not the one Developer ID Installer certificate",
         ),
         (
+            "          cargo build --locked --release -p js-vmm --bin js-vmm\n",
+            "",
+            "js-vmm is not built for the package",
+        ),
+        (
+            "js-mac-provision js-vmm; do",
+            "js-mac-provision; do",
+            "js-vmm is not built for the package",
+        ),
+        (
+            "      - name: Entitle js-vmm\n        run: cargo xtask pkg entitle-macos --bin-dir target/release\n",
+            "",
+            "js-vmm is not given its entitlement once",
+        ),
+        (
+            "      - name: Build the package\n",
+            "      - name: Entitle js-vmm late\n        run: cargo xtask pkg entitle-macos --bin-dir target/release\n      - name: Build the package\n",
+            "js-vmm is not given its entitlement once",
+        ),
+        (
+            "      - name: Build the package\n",
+            "      - name: Sign js-vmm by hand\n        run: /usr/bin/codesign --force --sign - --entitlements e.plist target/release/js-vmm\n      - name: Build the package\n",
+            "the workflow signs a program itself",
+        ),
+        (
+            "      - name: Build the package\n",
+            "      - name: Sign js-vmm by hand\n        run: /usr/bin/codesign -f -s - target/release/js-vmm\n      - name: Build the package\n",
+            "the workflow signs a program itself",
+        ),
+        (
             "      - name: The signed package is the package\n",
             "      - name: Notarize\n        run: /usr/bin/xcrun notarytool submit x\n      - name: The signed package is the package\n",
             "something is notarized",
@@ -717,4 +769,30 @@ fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
     assert!(release.contains(
         "    uses: ./.github/workflows/js-agent-macos-pkg.yml\n    with:\n      version: ${{ needs.plan.outputs.version }}\n      sign: true\n"
     ));
+}
+
+/// The one entitle step moved after the staging, or before the build of js-vmm: the count stays
+/// one, and the order alone is what the lint names.
+#[test]
+fn an_entitle_step_out_of_order_is_named() {
+    let text = read(WORKFLOW);
+    let step = "      - name: Entitle js-vmm\n        run: cargo xtask pkg entitle-macos --bin-dir target/release\n";
+    assert!(text.contains(step));
+    let without = text.replacen(step, "", 1);
+    for anchor in [
+        "      - name: Build the package\n",
+        "      - name: Build the programs\n",
+    ] {
+        assert!(without.contains(anchor), "{anchor:?}");
+        let moved = without.replacen(anchor, &format!("{step}{anchor}"), 1);
+        assert_eq!(
+            moved.matches("run: cargo xtask pkg entitle-macos").count(),
+            1
+        );
+        assert_eq!(
+            package_problems(&moved),
+            ["js-vmm is not given its entitlement once, after it is built and before it is staged"],
+            "{anchor:?}"
+        );
+    }
 }

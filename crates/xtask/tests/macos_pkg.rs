@@ -11,7 +11,8 @@ use clap::Parser;
 use js_mac_provision::daemon::{BIN_DIR, Daemon};
 use js_testkit::dir::TestDir;
 use xtask::macpkg::{
-    Entry, Error, IDENTIFIER, Inspected, Kind, StageArgs, entries, problems, stage, verdict,
+    Entry, Error, IDENTIFIER, Inspected, Kind, PROGRAMS, Signature, StageArgs, entries, problems,
+    stage, verdict,
 };
 
 const VERSION: &str = "1.2.3";
@@ -46,6 +47,7 @@ fn the_payload_holds_the_programs_the_plists_and_two_directories() {
         "Library/Application Support/js-agent/bin/js-agent",
         "Library/Application Support/js-agent/bin/js-mac-session",
         "Library/Application Support/js-agent/bin/js-mac-provision",
+        "Library/Application Support/js-agent/bin/js-vmm",
         "Library/Application Support/js-agent/LICENSE",
         "Library/LaunchDaemons/js-agent.plist",
         "Library/LaunchDaemons/js-agent.session.plist",
@@ -74,7 +76,7 @@ fn the_payload_list_and_the_errors_can_be_copied_compared_and_printed() {
 fn programs_are_0755_data_is_0644_and_the_hooks_state_directory_is_0700() {
     let all = entries();
     let prefix = "Library/Application Support/js-agent";
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in PROGRAMS {
         assert_eq!(entry(&all, &format!("{prefix}/bin/{program}")).mode, 0o755);
     }
     assert_eq!(entry(&all, &format!("{prefix}/LICENSE")).mode, 0o644);
@@ -169,7 +171,7 @@ fn sources(name: &str) -> Sources {
     let at = dir.path().to_path_buf();
     let bin = at.join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in PROGRAMS {
         std::fs::write(bin.join(program), format!("bytes of {program}")).unwrap();
         std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o600))
             .unwrap();
@@ -231,7 +233,7 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
         assert_eq!(mode_of(&root.join(&e.path)), e.mode, "{}", e.path);
     }
     let bin = root.join("Library/Application Support/js-agent/bin");
-    for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
+    for program in PROGRAMS {
         assert_eq!(
             std::fs::read_to_string(bin.join(program)).unwrap(),
             format!("bytes of {program}")
@@ -319,6 +321,20 @@ fn the_program_refuses_a_package_it_cannot_read_with_status_1() {
     assert!(out.stdout.is_empty());
 }
 
+/// On a Mac the verb fails on a directory without `js-vmm` (codesign finds nothing to sign);
+/// elsewhere it fails before looking, since only a Mac has codesign. Either way: status 1, the
+/// reason on standard error, nothing on standard output.
+#[test]
+fn the_program_refuses_to_entitle_a_directory_without_js_vmm_with_status_1() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["pkg", "entitle-macos", "--bin-dir", "/nonexistent/bin"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("xtask: "));
+    assert!(out.stdout.is_empty());
+}
+
 // ---- check ----
 
 fn bom_of(all: &[Entry]) -> String {
@@ -336,6 +352,27 @@ fn bom_of(all: &[Entry]) -> String {
     text
 }
 
+/// What `codesign` prints of a program as the workflow leaves it: `js-vmm` signed ad hoc with
+/// the hardened runtime and the virtualization entitlement, the others as the linker signed them.
+fn good_signature(program: &str) -> Signature {
+    let (flags, entitlements) = if program == "js-vmm" {
+        (
+            "0x10002(adhoc,runtime)",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>",
+        )
+    } else {
+        ("0x20002(adhoc,linker-signed)", "")
+    };
+    Signature {
+        program: program.to_owned(),
+        verified: Ok(()),
+        display: format!(
+            "Executable=/x/{program}\nCodeDirectory v=20400 size=1 flags={flags} hashes=1+0 location=embedded\n"
+        ),
+        entitlements: entitlements.to_owned(),
+    }
+}
+
 fn good() -> Inspected {
     Inspected {
         bom: bom_of(&entries()),
@@ -343,6 +380,7 @@ fn good() -> Inspected {
         package_info: format!(
             "<pkg-info format-version=\"2\" identifier=\"{IDENTIFIER}\" version=\"{VERSION}\" install-location=\"/\"/>"
         ),
+        signatures: PROGRAMS.iter().map(|p| good_signature(p)).collect(),
     }
 }
 
@@ -510,6 +548,199 @@ fn a_package_info_of_another_identifier_or_version_is_refused() {
 fn reading_a_package_needs_a_mac() {
     let args = Check::parse_from(["check", "--pkg", "/x.pkg", "--version", VERSION]).args;
     assert_eq!(xtask::macpkg::check(&args), Err(Error::NeedsMac));
+}
+
+// ---- signatures ----
+
+#[test]
+fn js_vmm_alone_carries_an_entitlement_and_it_is_the_virtualization_one() {
+    use xtask::macpkg::{VIRTUALIZATION, entitlements_of};
+    assert_eq!(VIRTUALIZATION, "com.apple.security.virtualization");
+    for program in PROGRAMS {
+        let want: &[&str] = if program == "js-vmm" {
+            &[VIRTUALIZATION]
+        } else {
+            &[]
+        };
+        assert_eq!(entitlements_of(program), want, "{program}");
+    }
+}
+
+#[test]
+fn the_entitlements_file_sets_each_key_to_true_and_nothing_else() {
+    use xtask::macpkg::entitlements_plist;
+    for keys in [
+        &[][..],
+        &["com.apple.security.virtualization"][..],
+        &["a.b", "c.d"][..],
+    ] {
+        let text = entitlements_plist(keys);
+        let dict = plist::Value::from_reader_xml(text.as_bytes())
+            .unwrap()
+            .into_dictionary()
+            .unwrap();
+        let read: Vec<(String, plist::Value)> = dict.into_iter().collect();
+        let want: Vec<(String, plist::Value)> = keys
+            .iter()
+            .map(|k| ((*k).to_owned(), plist::Value::Boolean(true)))
+            .collect();
+        assert_eq!(read, want, "{text}");
+    }
+}
+
+/// A change to one program's signature.
+type Change = Box<dyn Fn(&mut Signature)>;
+
+/// Each way a program's signature can leave what the package needs, with the one line that
+/// names it, in full.
+#[test]
+fn each_way_a_programs_signature_is_wrong_is_named_in_full() {
+    let entitled = |xml: &str| {
+        format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{xml}</dict></plist>")
+    };
+    let virt = "<key>com.apple.security.virtualization</key>";
+    let cases: Vec<(&str, Change, String)> = vec![
+        (
+            "js-vmm",
+            Box::new(|s| s.verified = Err("a sealed resource is missing\n".to_owned())),
+            "bin/js-vmm: codesign --verify --strict refuses it: a sealed resource is missing"
+                .to_owned(),
+        ),
+        (
+            "js-agent",
+            Box::new(|s| s.verified = Err("code object is not signed at all".to_owned())),
+            "bin/js-agent: codesign --verify --strict refuses it: code object is not signed at all"
+                .to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(|s| s.entitlements = String::new()),
+            "bin/js-vmm: carries the entitlements {}, not {\"com.apple.security.virtualization\": \"true\"}"
+                .to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(move |s| s.entitlements = entitled(&format!("{virt}<false/>"))),
+            "bin/js-vmm: carries the entitlements {\"com.apple.security.virtualization\": \"Boolean(false)\"}, not {\"com.apple.security.virtualization\": \"true\"}"
+                .to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(move |s| {
+                s.entitlements = entitled(&format!(
+                    "{virt}<true/><key>com.apple.security.get-task-allow</key><true/>"
+                ));
+            }),
+            "bin/js-vmm: carries the entitlements {\"com.apple.security.get-task-allow\": \"true\", \"com.apple.security.virtualization\": \"true\"}, not {\"com.apple.security.virtualization\": \"true\"}"
+                .to_owned(),
+        ),
+        (
+            "js-mac-session",
+            Box::new(move |s| s.entitlements = entitled(&format!("{virt}<true/>"))),
+            "bin/js-mac-session: carries the entitlements {\"com.apple.security.virtualization\": \"true\"}, not {}"
+                .to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(|s| s.display = s.display.replace("(adhoc,runtime)", "(adhoc)")),
+            "bin/js-vmm: is not signed with the hardened runtime".to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(|s| s.display = "code object is not signed at all\n".to_owned()),
+            "bin/js-vmm: is not signed with the hardened runtime".to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(|s| s.entitlements = "<plist><dict><key>x</key>".to_owned()),
+            "bin/js-vmm: cannot read its entitlements: ".to_owned(),
+        ),
+        (
+            "js-vmm",
+            Box::new(|s| {
+                s.entitlements = "<?xml version=\"1.0\"?><plist version=\"1.0\"><array/></plist>"
+                    .to_owned();
+            }),
+            "bin/js-vmm: cannot read its entitlements: it is not a dictionary".to_owned(),
+        ),
+    ];
+    for (program, change, says) in cases {
+        let mut p = good();
+        let at = p
+            .signatures
+            .iter()
+            .position(|s| s.program == program)
+            .unwrap();
+        change(&mut p.signatures[at]);
+        let found = refused(&p);
+        assert_eq!(found.len(), 1, "{program}: {found:?}");
+        if says.ends_with(": ") {
+            // The parser's own words follow; the line is ours up to them.
+            assert!(found[0].starts_with(&says), "{found:?}");
+        } else {
+            assert_eq!(found[0], says);
+        }
+    }
+}
+
+#[test]
+fn a_program_whose_signature_was_not_read_is_refused() {
+    for program in PROGRAMS {
+        let mut p = good();
+        p.signatures.retain(|s| s.program != program);
+        assert_eq!(
+            refused(&p),
+            [format!("bin/{program}: its signature was not read")]
+        );
+    }
+    // A signature read for something that is not a program of the package is no stand-in.
+    let mut p = good();
+    p.signatures[3].program = "vfkit".to_owned();
+    assert_eq!(refused(&p), ["bin/js-vmm: its signature was not read"]);
+}
+
+#[test]
+fn the_flags_are_read_from_the_flags_field_alone() {
+    // `runtime` in the path is not the flag; the flags field is the one that counts.
+    let mut p = good();
+    p.signatures[3].display =
+        "Executable=/x/(adhoc,runtime)/js-vmm\nCodeDirectory flags=0x2(adhoc) hashes=1\n"
+            .to_owned();
+    assert_eq!(
+        refused(&p),
+        ["bin/js-vmm: is not signed with the hardened runtime"]
+    );
+    // A program with no entitlement needs no hardened runtime.
+    let mut p = good();
+    p.signatures[0].display = "flags=0x2(adhoc)\n".to_owned();
+    assert_eq!(problems(&p, VERSION), Vec::<String>::new());
+}
+
+#[test]
+fn signatures_can_be_copied_compared_and_printed_and_unsigned_says_what_is_wrong() {
+    let s = good_signature("js-vmm");
+    assert_eq!(s.clone(), s);
+    assert!(format!("{s:?}").starts_with("Signature { program: \"js-vmm\""));
+    assert_eq!(
+        Error::Unsigned(vec!["a".to_owned(), "b".to_owned()]).to_string(),
+        "the signed program is not as the package needs it: a; b"
+    );
+    assert_eq!(
+        Error::NeedsMac.to_string(),
+        "pkg check-macos and pkg entitle-macos run pkgutil, lsbom and codesign, which only a Mac has"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn signing_js_vmm_needs_a_mac() {
+    #[derive(Parser)]
+    struct Entitle {
+        #[command(flatten)]
+        args: xtask::macpkg::EntitleArgs,
+    }
+    let args = Entitle::parse_from(["entitle", "--bin-dir", "/x"]).args;
+    assert_eq!(xtask::macpkg::entitle(&args), Err(Error::NeedsMac));
 }
 
 #[test]

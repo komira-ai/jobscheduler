@@ -61,7 +61,7 @@ above, nothing else. A fake `VmRuntime` (13.1) is the executable spec.
 | `--vm-boot-timeout`, `--vm-log-cap`, `--vm-transfer-cap` | bounds on boot, on spooled log bytes and on archives over the channel |
 | `--vm-allow-shares`, `--vm-allow-writable-shares` | read-only virtual shares, and writable ones (both off) |
 
-**Built so far** (`js-agent::vm`, the `js-vm-lease` seam, `js-vmm`'s `lease_system`): `--vm-driver` (the signed `js-vmm` binary, which the
+**Built so far** (`js-agent::vm`, the `js-vm-lease` seam, `js-vmm`'s `lease_system`): `--vm-driver` (the signed `js-vmm` binary, which the js-agent macOS package installs, `vm-launcher-signing.md`, and which the
 agent starts through the disclaiming spawner as `js-vmm lease`, one process per VM, and drives over a JSON-lines protocol) and `--vm-store` (the base image in
 `base`, the clones under `runs/`) turn the backend on, on a Mac beside `--native-helper-socket`; there is no `--vms`: the count is
 fixed at two, what macOS lets one host run, and the hello reports it as `vm.slots` with `vm.max_cpus` and `vm.max_mem_gib` (the

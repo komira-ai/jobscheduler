@@ -1,21 +1,22 @@
 # js-agent on a Mac
 
 A signed installer package (`js-agent-<version>-macos-arm64.pkg`, identifier
-`com.komira.js-agent`) that lays down the agent, its root helper and the install-time tool,
-and the plists of the two LaunchDaemons that run them. It is a hostkeeper `macos-pkg`
+`com.komira.js-agent`) that lays down the agent, its root helper, the install-time tool and the
+VM launcher `js-vmm`, and the plists of the two LaunchDaemons that run the first two. It is a hostkeeper `macos-pkg`
 service: hostkeeper downloads it from the release's desired state, checks its digest, and
 installs it. The package runs no script (no preinstall, no postinstall), so installing it
 changes nothing but its files.
 
 It is built by `.github/workflows/js-agent-macos-pkg.yml` and read back by
 `cargo xtask pkg check-macos`; `cargo xtask pkg stage-macos` is the one place that lists
-what the package holds (`crates/xtask/src/macpkg.rs`).
+what the package holds, and `entitlements_of` the one place that says which program carries
+which entitlement (`crates/xtask/src/macpkg.rs`).
 
 ## What is installed
 
 | path | mode |
 |---|---|
-| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision}` | 0755 |
+| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision,js-vmm}` | 0755 |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 |
 | `/Library/Application Support/js-agent/log/` | 0755, empty; launchd writes the daemons' logs here |
 | `/Library/Application Support/js-agent/update/` | 0700, empty; the update hook's state directory |
@@ -91,6 +92,15 @@ is stopped, the helper before the agent. A rollback restores the previous releas
 come back. Nothing in the package does any of this at install time.
 
 ## Signing
+
+`js-vmm` starts virtual machines, which Virtualization.framework allows only to a process whose
+signature carries the entitlement `com.apple.security.virtualization`. The `build` job signs it
+ad hoc, with the hardened runtime and that one entitlement (`cargo xtask pkg entitle-macos
+--bin-dir target/release`), after building it and before staging; ad hoc needs no key. The other
+programs keep the linker's ad hoc signature and carry no entitlement. `pkg check-macos` reads each
+program's signature back from the package and refuses one that `codesign --verify --strict`
+refuses, other entitlements than the program's own, or an entitled program without the hardened
+runtime. Why ad hoc and not a Developer ID: `docs/design/vm-launcher-signing.md`.
 
 The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
@@ -213,7 +223,8 @@ Known limits:
   the daemon, and `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and
   from what the fake says, not from a Mac. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
-- The package is not notarized.
+- The package is not notarized, and no program in it is signed with a Developer ID (the package
+  is; `js-vmm` is signed ad hoc with its entitlement).
 - The agent's state and scratch directories (`/var/db/js-agent/{state,scratch}`, on separate
   volumes, as the agent requires), `/etc/js-agent/flags` and the helper's socket group are
   host setup, not the package's; the hook makes only its own state directory.

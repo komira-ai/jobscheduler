@@ -40,7 +40,7 @@ mod tests {
     const ENT: &str = r#"<?xml version="1.0"?><plist><dict><key>com.apple.security.virtualization</key><true/></dict></plist>"#;
 
     /// Catches a reader that misses ad hoc, the hardened runtime or the entitlement when
-    /// all three are there (the shape `sign-darwin` produces).
+    /// all three are there (the shape `cargo xtask pkg entitle-macos` produces).
     #[test]
     fn the_signed_shape_is_recognized() {
         let s = parse(
