@@ -848,6 +848,7 @@ impl SchedPlacer {
                     prepare_timeout,
                     wall_limit_secs: None,
                     queue: noted.placed(job, host),
+                    start: None,
                 };
                 let capacity = capacity_of(hosts, host);
                 let placed = jobs.place_claimed(job, host, Booked::WholeHost, &placement, capacity);

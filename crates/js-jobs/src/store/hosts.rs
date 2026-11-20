@@ -83,6 +83,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let job = if job.state.is_ended() {
             job
         } else {
+            let stop = !super::dispatch::told_by_host(&end);
+            txn = self.queue_stop(txn, &job, Some(&allocation), stop, now)?;
             let to = end.state();
             ensure(
                 may_move(job.state, to),

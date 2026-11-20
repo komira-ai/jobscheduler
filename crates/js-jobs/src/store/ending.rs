@@ -84,18 +84,22 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             },
         )?;
         let before = job.clone();
+        let stop = !super::dispatch::told_by_host(&end);
         let ended = ended(job, end, now, self.retention);
         let id = &ended.id;
         let mut txn = put_job(Txn::new(), Some(&before), &ended, Cond::Version(version))?;
-        if let Some((allocation, version)) = self.read_allocation(id)?
+        let read = self.read_allocation(id)?;
+        if let Some((allocation, version)) = &read
             && allocation.step == AllocationStep::Booked
         {
             let releasing = AllocationRecord {
                 step: AllocationStep::Releasing,
                 ..allocation.clone()
             };
-            txn = put_allocation(txn, Some(&allocation), &releasing, Cond::Version(version))?;
+            txn = put_allocation(txn, Some(allocation), &releasing, Cond::Version(*version))?;
         }
+        let allocation = read.map(|(allocation, _)| allocation);
+        let txn = self.queue_stop(txn, &before, allocation.as_ref(), stop, now)?;
         Ok((txn, ended))
     }
 
@@ -193,7 +197,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// Deletes, in one transaction at the versions read, the jobs of `read` past their
-    /// retention end at `now`, and returns their ids; with none, commits nothing.
+    /// retention end at `now`, with their dispatch messages, and returns their ids; with none,
+    /// commits nothing.
     fn delete_due(
         &self,
         read: Vec<(JobRecord, Version)>,
@@ -204,9 +209,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         for (job, version) in read {
             if past_retention(&job, now) {
                 txn = delete_job(txn, &job, version);
-                due.push(job.id);
+                due.push(job);
             }
         }
+        let txn = self.drop_messages(txn, &due)?;
+        let due: Vec<JobId> = due.into_iter().map(|job| job.id).collect();
         if let Some(first) = due.first() {
             self.commit(first, txn)?;
         }

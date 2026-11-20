@@ -1,4 +1,5 @@
-//! The job, allocation, mark, taint and cordon tables, as typed records over the `js-state`
+//! The job, allocation, mark, taint and cordon tables and the dispatch queue, as typed records
+//! over the `js-state`
 //! [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
@@ -36,6 +37,13 @@
 //! [`JobStore::restore_cordon`]), so every server that shares the store sees a cordon any
 //! server took, and every placement's transaction checks the row absent: a placement on a
 //! cordoned host commits nothing.
+//!
+//! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
+//! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the
+//! move to starting for a whole-host job), and a stop, queued by a cancel or by an end the
+//! server decided. Any server hands a host's due messages out ([`JobStore::claim_dispatch`]),
+//! holding each for a lease on the store's clock, and deletes them when the agent acknowledges
+//! them ([`JobStore::ack_dispatch`]); an end deletes its job's start.
 //!
 //! # Results and retention
 //!
@@ -185,9 +193,10 @@ pub use ids::{
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, EndReason,
-    Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord,
-    JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, DispatchKind,
+    DispatchMessage, EndReason, Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint,
+    Isolation, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs, NetworkPolicy,
+    StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

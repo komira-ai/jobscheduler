@@ -1,4 +1,4 @@
-//! The bytes of the job, allocation, mark and taint rows (`mark_fields`, `host_fields`).
+//! The bytes of the job, allocation, mark, taint and dispatch rows (and their `*_fields` modules).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -40,6 +40,7 @@ use crate::record::{
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 
+pub(crate) mod dispatch_fields;
 mod file_fields;
 mod host_fields;
 mod mark_fields;
@@ -60,9 +61,8 @@ pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation
-/// tag 47 in `host_fields`, the queue tags 48 to 53 in `queue_fields`, 54 to 58 in
-/// `rootfs_fields`).
+/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation tag
+/// 47 in `host_fields`, the queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
