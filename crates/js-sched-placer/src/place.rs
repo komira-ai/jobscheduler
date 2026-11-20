@@ -39,7 +39,7 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
-use super::engine::jobs_seen::{Read, Seen};
+use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
@@ -70,7 +70,7 @@ pub struct SchedPlacer {
     pub(crate) seen: Mutex<Option<Seen>>,
     /// The job tables the last pass read ([`SchedPlacer::tables`]). Its lock is a leaf, held
     /// while the tables are read.
-    pub(crate) tables: Mutex<Option<Read>>,
+    pub(crate) tables: Mutex<Option<Kept>>,
     /// How many passes over the queued jobs were skipped, counted for the tests.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) skipped: AtomicU64,
