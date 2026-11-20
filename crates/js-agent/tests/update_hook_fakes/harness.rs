@@ -20,9 +20,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent::CommandRunner;
+use js_agent::update_hook::step::{RESTART_HELLO_SECS, RESTART_STOP_SECS};
 use js_agent::update_hook::{
-    Clock, Cordoned, Gate, HostReading, Lease, LeaseError, Link, PortError, RECORD_FILE, Record,
-    StateView, Step, Uncordoned, UnitState, Units,
+    Clock, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MaintenanceStep, PortError,
+    RECORD_FILE, Record, StateView, Step, Uncordoned, UnitState, Units,
 };
 use js_agent_wire::Taint;
 
@@ -68,6 +69,18 @@ pub const fn timeout_secs(step: Step) -> u64 {
         Step::Verify => 615,
         Step::Rollback => 8220,
         Step::Cleanup => 120,
+    }
+}
+
+/// The bound the hang guard holds the waits of `drain` and `resume` to. The updater declares
+/// none for them: a `drain` waits as long as the work takes, so its bound here is an hour, far
+/// past every wait of check 9 (which waits for nothing: the host is idle, or the deadline has
+/// passed); a `resume` waits at most for the agent's unit to stop and for its new hello.
+#[must_use]
+pub const fn maintain_timeout_secs(step: MaintenanceStep) -> u64 {
+    match step {
+        MaintenanceStep::Drain => 3600,
+        MaintenanceStep::Resume => RESTART_STOP_SECS + RESTART_HELLO_SECS + 60,
     }
 }
 
@@ -418,6 +431,12 @@ impl<'a> Guard<'a> {
     #[must_use]
     pub fn budget_of(step: Step) -> Duration {
         Duration::from_secs(timeout_secs(step))
+    }
+
+    /// The bound of a maintenance step ([`maintain_timeout_secs`]).
+    #[must_use]
+    pub fn budget_of_maintenance(step: MaintenanceStep) -> Duration {
+        Duration::from_secs(maintain_timeout_secs(step))
     }
 
     /// The waits asked for so far.

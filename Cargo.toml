@@ -142,13 +142,14 @@ tonic-prost-build = { version = "0.14.9", default-features = false, features = [
 tower = { version = "0.5.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
-# hostkeeper's own code, from its public repository at one pinned commit of main (v0.1.194): the
+# hostkeeper's own code, from its public repository at one pinned commit of main: the merge of
+# komira-ai/hostkeeper#468, which comes after v0.1.383 and is in no tag yet. The
 # hook contract and its conformance harness (`hostkeeper-hook`, a dev-dependency of js-agent,
 # whose tests drive `js-agent update-hook` through the harness), the daemon's step runner
 # (`hostkeeper-steps`, a dev-dependency of js-agent, whose tests run a first install of the
 # package as a native entry through it).
-hostkeeper-hook = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
-hostkeeper-steps = { git = "https://github.com/komira-ai/hostkeeper", rev = "cd015c39cc62c768f8c96d2771b9c077bf1a8270" }
+hostkeeper-hook = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
+hostkeeper-steps = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
 # Reads the validity of the certificate a TLS reload brings (js-lease-server); in the lock

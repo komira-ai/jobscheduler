@@ -290,22 +290,12 @@ impl Params {
     /// # Errors
     /// [`ParamsError`]: the text is not a flat table of scalars with the required keys.
     pub fn parse(text: &str) -> Result<Params, ParamsError> {
-        let table: toml::Table = text
-            .parse()
-            .map_err(|e: toml::de::Error| ParamsError::Syntax(e.message().to_owned()))?;
-        if let Some((key, _)) = table.iter().find(|(_, value)| !is_scalar(value)) {
-            return Err(ParamsError::NotScalar(key.clone()));
-        }
+        let table = table_of(text)?;
         let cordon_lease_secs = positive(&table, CORDON_LEASE_KEY)?;
         let cordon_max_secs = positive(&table, CORDON_MAX_KEY)?;
         let drain_wait_secs = positive(&table, DRAIN_WAIT_KEY)?;
         let defer_retry_secs = required_seconds(&table, DEFER_RETRY_KEY)?;
-        if cordon_lease_secs < MIN_CORDON_LEASE_SECS {
-            return Err(ParamsError::LeaseTooShort {
-                lease: cordon_lease_secs,
-                min: MIN_CORDON_LEASE_SECS,
-            });
-        }
+        long_enough(cordon_lease_secs)?;
         if cordon_max_secs < drain_wait_secs {
             return Err(ParamsError::CapBelowWait {
                 cap: cordon_max_secs,
@@ -338,16 +328,53 @@ impl Params {
     }
 }
 
+/// The table of a params file's text: TOML, a flat table of scalars.
+///
+/// # Errors
+/// [`ParamsError::Syntax`] or [`ParamsError::NotScalar`].
+pub(super) fn table_of(text: &str) -> Result<toml::Table, ParamsError> {
+    let table: toml::Table = text
+        .parse()
+        .map_err(|e: toml::de::Error| ParamsError::Syntax(e.message().to_owned()))?;
+    if let Some((key, _)) = table.iter().find(|(_, value)| !is_scalar(value)) {
+        return Err(ParamsError::NotScalar(key.clone()));
+    }
+    Ok(table)
+}
+
+/// A cordon's lease of at least [`MIN_CORDON_LEASE_SECS`], three polls.
+///
+/// # Errors
+/// [`ParamsError::LeaseTooShort`].
+pub(super) fn long_enough(cordon_lease_secs: u64) -> Result<(), ParamsError> {
+    if cordon_lease_secs < MIN_CORDON_LEASE_SECS {
+        return Err(ParamsError::LeaseTooShort {
+            lease: cordon_lease_secs,
+            min: MIN_CORDON_LEASE_SECS,
+        });
+    }
+    Ok(())
+}
+
+/// `unit`: a name that is not empty.
+///
+/// # Errors
+/// [`ParamsError::Missing`], [`ParamsError::NotText`] or [`ParamsError::Empty`].
+pub(super) fn unit_of(table: &toml::Table) -> Result<String, ParamsError> {
+    let unit = string_of(table, UNIT_KEY)?.ok_or(ParamsError::Missing(UNIT_KEY))?;
+    if unit.is_empty() {
+        return Err(ParamsError::Empty(UNIT_KEY.to_owned()));
+    }
+    Ok(unit)
+}
+
 /// The unit, the record's directory, the runtime and the bounds of the table.
 fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     let state_dir = required_path(table, STATE_DIR_KEY)?;
     if !is_plain(&state_dir) {
         return Err(ParamsError::NotPlain(STATE_DIR_KEY.to_owned()));
     }
-    let unit = string_of(table, UNIT_KEY)?.ok_or(ParamsError::Missing(UNIT_KEY))?;
-    if unit.is_empty() {
-        return Err(ParamsError::Empty(UNIT_KEY.to_owned()));
-    }
+    let unit = unit_of(table)?;
     let helper_unit = string_of(table, HELPER_UNIT_KEY)?;
     if helper_unit
         .as_deref()
@@ -419,7 +446,7 @@ pub(super) fn is_scalar(value: &toml::Value) -> bool {
 }
 
 /// `key` as a whole, non-negative number of seconds; `None` when it is absent.
-fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
+pub(super) fn seconds(table: &toml::Table, key: &str) -> Result<Option<u64>, ParamsError> {
     table
         .get(key)
         .map(|value| {
