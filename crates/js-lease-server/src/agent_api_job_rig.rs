@@ -265,25 +265,25 @@ impl Logs {
 }
 
 /// The store under a server's job tables, and the tables.
-type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
+pub(crate) type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
 
 /// What a [`logging_rig`] gives a server beyond [`rig_on`]'s: the grace after which a silent
 /// host is lost (the pool's own when `None`), the grants it mints with, the job tables of a
 /// server that ran before (fresh ones when `None`), and the clock of fresh tables (the rig's
 /// clock when `None`).
 #[derive(Default)]
-struct Extra {
-    grace_ms: Option<u64>,
-    logs: Option<Arc<LogGrants>>,
-    tables: Option<Tables>,
-    store_clock: Option<Arc<StoreClock>>,
-    whole: Option<WholePool>,
+pub(crate) struct Extra {
+    pub(crate) grace_ms: Option<u64>,
+    pub(crate) logs: Option<Arc<LogGrants>>,
+    pub(crate) tables: Option<Tables>,
+    pub(crate) store_clock: Option<Arc<StoreClock>>,
+    pub(crate) whole: Option<WholePool>,
 }
 
 /// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
 /// settings, and the longest wall time its scheduler trusts for backfill, when it backfills.
 #[derive(Clone)]
-struct WholePool {
+pub(crate) struct WholePool {
     rules: WholeNodeConfig,
     backfill: Option<std::time::Duration>,
 }
@@ -394,7 +394,7 @@ pub(crate) fn two_clock_rig(name: &str, limits: JobLimits) -> (Rig, ManualClock)
 /// A server named `name` (`(with_jobs, placing)` as [`rig_of`]) holding its jobs to the limits
 /// of `kept` and keeping each ended job for its retention, on the server clock `shared`, its
 /// store on `clock`, with what `extra` adds.
-fn rig_on(
+pub(crate) fn rig_on(
     name: &str,
     (with_jobs, placing): (bool, bool),
     (limits, retention): (JobLimits, Retention),

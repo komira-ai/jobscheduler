@@ -962,6 +962,10 @@ mod store_tests;
 pub(crate) mod job_rig;
 
 #[cfg(test)]
+#[path = "agent_api_peer_rig.rs"]
+pub(crate) mod peer_rig;
+
+#[cfg(test)]
 #[path = "agent_api_job_tests.rs"]
 mod job_tests;
 

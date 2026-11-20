@@ -315,3 +315,7 @@ mod tests;
 #[cfg(test)]
 #[path = "submit_place_tests.rs"]
 mod place_tests;
+
+#[cfg(test)]
+#[path = "submit_rows_tests.rs"]
+mod rows_tests;

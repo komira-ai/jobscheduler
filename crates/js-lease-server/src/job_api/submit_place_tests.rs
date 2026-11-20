@@ -23,7 +23,11 @@ const LONG: Duration = Duration::from_secs(60);
 /// The job service over `rig`'s tables, admitting over its registry's hosts, its submit placing
 /// with `rig`'s pass when `placing`.
 fn api(rig: &Rig, placing: bool) -> JobApi {
-    let admission = JobAdmission::new(Admit::default(), rig.agents.registry.clone());
+    let admission = JobAdmission::new(
+        Admit::default(),
+        rig.agents.registry.clone(),
+        Arc::clone(&rig.jobs),
+    );
     let ctx = Ctx::served(CEILING, Arc::new(admission));
     let ctx = match placing {
         true => ctx.placing(Arc::clone(&rig.agents)),

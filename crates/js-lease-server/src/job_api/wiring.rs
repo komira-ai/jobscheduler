@@ -76,7 +76,11 @@ pub(crate) fn from_server(
     let jobs = agents.jobs.clone()?;
     let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
     let read = read::Ctx::default().with_silence(silence);
-    let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
+    let admission = JobAdmission::new(
+        state.admit().clone(),
+        agents.registry.clone(),
+        Arc::clone(&jobs),
+    );
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
     let submit = submit.placing(Arc::clone(agents));
     let shared: Arc<Shared> = Arc::clone(state);
