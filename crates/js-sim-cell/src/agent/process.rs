@@ -302,6 +302,10 @@ impl Book {
 
 /// One agent process.
 pub(super) struct Process {
+    /// The id the process names in every hello ([`Hello::agent_process`]): the host and
+    /// the count of processes the host has had, so it is the same across the hellos of one
+    /// process, differs between processes, and draws no randomness.
+    id: String,
     agent: Behind,
     session: Option<Session>,
     /// The hellos not yet answered, with when each was sent.
@@ -330,8 +334,9 @@ pub(super) struct Process {
 impl Process {
     /// A fresh process: the agent `spec` names, holding nothing, not welcomed; `None` for
     /// a real agent that could not be made.
-    pub(super) fn new(spec: &AgentSpec) -> Option<Self> {
+    pub(super) fn new(spec: &AgentSpec, generation: u64) -> Option<Self> {
         Behind::of(spec).map(|agent| Self {
+            id: format!("sim-{}-{generation}", spec.host.as_str()),
             agent,
             session: None,
             hellos: BTreeMap::new(),
@@ -463,6 +468,7 @@ impl Process {
 
     fn hello(&mut self, spec: &AgentSpec, io: &mut Io) {
         let hello = Hello {
+            agent_process: Some(self.id.clone()),
             protocol: ProtocolRange::THIS,
             host_id: spec.host.as_str().to_owned(),
             pool: spec.pool.clone(),
@@ -517,6 +523,7 @@ impl Process {
             });
         }
         let beat = Heartbeat {
+            seq: Some(session.seq),
             host_id: spec.host.as_str().to_owned(),
             epoch: session.epoch,
             session: session.secret.clone(),
@@ -533,6 +540,7 @@ impl Process {
             retired_jobs: listing.retired.clone(),
             log_grant_state: None,
         };
+        let beat = io.profile.shape_beat(beat);
         if let Some(agent) = self.agent.fake() {
             agent.heartbeat();
         }

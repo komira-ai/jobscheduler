@@ -70,7 +70,21 @@ pub(crate) fn secret_text(bytes: &[u8; SECRET_BYTES]) -> String {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SessionDigest([u8; 32]);
 
+/// The SHA-256 digest the registry keeps of a session secret: what [`Registry::adopt`]
+/// takes in a [`NodeSession`], so a caller can store it in a row beside the session.
+///
+/// [`Registry::adopt`]: crate::Registry::adopt
+/// [`NodeSession`]: crate::NodeSession
+pub fn session_digest(secret: &str) -> [u8; 32] {
+    SessionDigest::of(secret).0
+}
+
 impl SessionDigest {
+    /// The digest whose bytes are `bytes`, as [`session_digest`] returns them.
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub(crate) fn of(secret: &str) -> Self {
         Self(sha2::Sha256::digest(secret.as_bytes()).into())
     }
@@ -102,5 +116,14 @@ mod tests {
         assert!(digest.matches("secret"));
         assert!(!digest.matches("secreT"));
         assert!(!digest.matches(""));
+    }
+
+    /// The exported digest is the one the registry keeps, and a digest rebuilt from its bytes
+    /// matches the same secret. It catches a stored digest that no heartbeat can match.
+    #[test]
+    fn the_exported_digest_round_trips_through_its_bytes() {
+        let rebuilt = SessionDigest::from_bytes(session_digest("secret"));
+        assert!(rebuilt.matches("secret"));
+        assert!(!rebuilt.matches("other"));
     }
 }

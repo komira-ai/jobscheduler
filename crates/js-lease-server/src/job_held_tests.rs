@@ -85,7 +85,7 @@ fn beat(
         state: HeldState::ExitedUnacked,
         result: Some(listed),
     }];
-    serve(jobs, &context, &listing, &[], 8)
+    serve(jobs, &context, &listing, &[], 8, None)
 }
 
 /// The verdict on the one result a heartbeat of the host of `allocation` lists, refused with

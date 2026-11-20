@@ -234,20 +234,67 @@ fn the_pool_token_and_an_unknown_token_are_refused_as_credential_errors() {
     }
 }
 
-/// Asserts what a restarted server says to a host that has not said hello since: the
-/// credential is still the host's (it was saved with the binding) and the registry holds no
-/// such host, so the client reports `UnknownHost` and the verb ends with status 1 saying the
-/// server holds no such host. It catches an unknown host reported as a refused credential,
-/// which would send an operator to the wrong place.
+/// Asserts what a restarted server says to a host that said hello before the restart: the
+/// server holds the host's session in its row (the job tables persist), so with no hello since
+/// the host's own credential places a cordon on it (live, epoch 1, the session it had), the
+/// read then shows the cordon, the lift is served and the verb ends with status 0. It catches a restarted
+/// server that answers a host it can read from its rows as unknown, which would make the
+/// operator's cordon fail until the agent's next hello.
 #[test]
-fn a_restarted_server_that_has_not_heard_the_host_is_an_unknown_host() {
+fn a_restarted_server_serves_the_host_its_rows_hold() {
+    let Enrolled {
+        server,
+        state,
+        _files,
+        agent: _agent,
+    } = enrol("cordon_http_restarted");
+    let server = server.restart();
+    let url = server.url();
+    let credential = state.join(CREDENTIAL_FILE);
+    let lease = HttpLease::connect(
+        &url,
+        &Login::Token(credential),
+        None,
+        "mac-1",
+        RequestLimit::DEFAULT,
+    )
+    .unwrap();
+    let placed = lease.cordon(60).unwrap();
+    assert!(!placed.already_cordoned);
+    assert_eq!((placed.host.state.as_str(), placed.host.epoch), ("live", 1));
+    assert!(lease.host().unwrap().cordon.is_some());
+    lease.uncordon().unwrap();
+
+    let state_flag = state.display().to_string();
+    let flags = [
+        "--server",
+        &url,
+        "--state-root",
+        &state_flag,
+        "--host-id",
+        "mac-1",
+        "--for",
+        "1h",
+    ];
+    let ran = verb(&flags, &mut FakePace::new());
+    assert_eq!(ran.status, code(0), "{}", ran.err);
+}
+
+/// Asserts what a server whose job tables hold no row for the host says to it: the credential
+/// is still the host's (it was saved with the binding) and the tables hold no such host, so
+/// the client reports `UnknownHost` and the verb ends with status 1 saying the server holds
+/// no such host. It catches an unknown host reported as a refused credential, which would send
+/// an operator to the wrong place.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_server_whose_tables_hold_no_row_for_the_host_says_unknown_host() {
     let Enrolled {
         server,
         state,
         _files,
         agent: _agent,
     } = enrol("cordon_http_unknown");
-    let server = server.restart();
+    let server = server.restart_forgetting_jobs();
     let url = server.url();
     let credential = state.join(CREDENTIAL_FILE);
     let lease = HttpLease::connect(
