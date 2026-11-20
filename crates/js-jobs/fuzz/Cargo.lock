@@ -209,6 +209,7 @@ dependencies = [
  "js-agent-wire",
  "js-state",
  "js-types",
+ "serde_json",
  "sha2",
  "thiserror",
  "tracing",

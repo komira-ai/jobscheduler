@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use std::sync::atomic::Ordering;
 
+use js_agent_wire::JobStartSpec;
 use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version};
 use js_types::{HostId, QueueNote};
 
@@ -43,6 +44,12 @@ pub struct Placement {
     /// in the same transaction (`docs/design/queue-status.md`): what pass 2 told it since the
     /// last pass, then its placement.
     pub queue: Vec<QueueNote>,
+    /// The start the host's agent is sent for this placement, kept in the start message the
+    /// placement queues for the host ([`crate::DispatchMessage::start`]); its job id, allocation
+    /// id and placement time are set to the placement's own. `None`: the message carries no
+    /// body. A whole-host placement queues no start (its job starts once its host is ready), so
+    /// this is not kept for one.
+    pub start: Option<JobStartSpec>,
 }
 
 /// How a failed whole-host prepare ends, as the placement engine decided it
@@ -287,6 +294,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
         let txn = super::taints::with_taint(txn, &placed, &allocation.host)?;
+        let txn = super::dispatch::with_start(txn, &allocation, placement.start, now)?;
         // A host with a cordon in force is placed on by no one: the commit conflicts.
         let txn = txn.check(keys::cordon(&allocation.host), Cond::Absent);
         Ok((txn, placed, allocation))
@@ -304,7 +312,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// - the rows `beside` gives for the freed allocation are put, as [`JobStore::free_with`]
     ///   puts them;
     /// - the job's `mark/<id>` is deleted at the version read, or its absence is a
-    ///   precondition when there is none.
+    ///   precondition when there is none;
+    /// - any start of the allocation is deleted from the host's dispatch queue, at the version
+    ///   read (a placed whole-host job is queued none, and is sent no stop).
     ///
     /// Returns the job and the allocation as written.
     ///
@@ -359,6 +369,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Cond::Version(allocation_version),
         )?;
         let txn = self.without_mark(with_rows(txn, beside(&freed)), id)?;
+        let txn = self.queue_stop(txn, &job, Some(&allocation), true, now)?;
         self.commit(id, txn)?;
         Ok((after, freed))
     }
