@@ -426,6 +426,7 @@ fn a_boxed_reader_reads_like_the_reader_inside() {
     let inner = FakeFiles::default()
         .with("/a", "text")
         .with_link("/l", "target")
+        .with_dir("/apps", &["Xcode.app"])
         .disk_under(Path::new("/disk"));
     let boxed: Box<dyn FileReader> = Box::new(inner.clone());
     assert_eq!(boxed.read("/a"), Ok("text".to_owned()));
@@ -434,6 +435,10 @@ fn a_boxed_reader_reads_like_the_reader_inside() {
     assert_eq!(boxed.device(Path::new("/a")), inner.device(Path::new("/a")));
     assert_eq!(boxed.is_tmpfs(Path::new("/run/x")), Ok(true));
     assert_eq!(boxed.is_tmpfs(Path::new("/disk/x")), Ok(false));
+    let listed = boxed.entries(Path::new("/apps")).map_err(|err| err.kind());
+    assert_eq!(listed, Ok(vec!["Xcode.app".to_owned()]));
+    let missing = boxed.entries(Path::new("/none")).map_err(|err| err.kind());
+    assert_eq!(missing, Err(std::io::ErrorKind::NotFound));
 }
 
 /// Asserts that dropped minutes are reported to the operator, since the wire has no field
