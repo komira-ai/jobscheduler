@@ -79,7 +79,6 @@ impl Live {
         let Some(jobs) = &self.agents.jobs else {
             return;
         };
-        self.agents.note_node_epoch(host, None);
         let forgot = (0..TRIES).try_fold(false, |done, _| match done {
             true => Ok(true),
             false => match jobs.read_node(host)? {

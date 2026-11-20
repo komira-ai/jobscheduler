@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_types::HostId;
 
 use crate::agent_api::job_rig::{FakeAgent, Rig};
-use crate::agent_api::rows_tests::{hello, refusal, two_servers};
+use crate::agent_api::pool_tests::{hello, refusal, two_servers};
 use crate::api::rig::{Lines, process_sink};
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -54,7 +54,6 @@ async fn silent_hosts_rows_are_forgotten_and_the_pool_has_room_again() {
     first.tick();
 
     assert_eq!(rowed(&first), Vec::<String>::new());
-    assert_eq!(first.agents.node_epoch(&host("host-1")), None);
     let text = lines.take();
     assert!(
         text.contains("the rows of silent hosts were forgotten"),

@@ -165,11 +165,33 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 encode_node(&record)?,
                 Cond::Absent,
             );
+            // A write of the pool's row besides the node row: a write of the tables, counted.
             if let Ok(commit) = self.write(txn)? {
                 let version = Version(commit.revision.0);
+                self.note_node(host, Some(record.state.last_listing_clean));
                 return Ok(NodeRow { record, version });
             }
         }
+    }
+
+    /// Whether a hello of `host` into the pool `pool`, which holds at most `cap` hosts, would be
+    /// admitted by [`JobStore::hello_node_in_pool`] as the rows stand now: `host` has a row (it
+    /// is not new to the pool), or the pool's rows are fewer than `cap`. A read that writes
+    /// nothing, for judging a hello before anything of it is written; the hello's own write
+    /// decides it again, so two hellos that both read room still admit one.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`].
+    pub fn pool_admits(
+        &self,
+        host: &HostId,
+        pool: &str,
+        cap: usize,
+    ) -> Result<bool, JobStoreError> {
+        if self.read_node(host)?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.rows_of_pool(pool)? < cap)
     }
 
     /// How many rows this build can read name the pool `pool`.
@@ -221,45 +243,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 return Ok(Beat::Applied(row));
             }
         }
-    }
-
-    /// [`JobStore::beat_node`] of a beat that writes `state`, with no sequence, when it changes
-    /// the row: the row's session is `epoch` and its state is not `state`, or the row was last
-    /// heard `every` or longer ago by the store's clock. A beat that changes neither writes
-    /// nothing and is `None`, so a host whose state stands still moves its row once per
-    /// `every`, not once per beat. A write that only moves when the host was heard is left out
-    /// of [`JobStore::written`] when nothing else was committed or written around it, so it
-    /// does not make the callers that cached the tables read them again.
-    ///
-    /// # Errors
-    /// As [`JobStore::beat_node`].
-    pub fn refresh_node(
-        &self,
-        host: &HostId,
-        epoch: u64,
-        state: &NodeState,
-        every: Duration,
-    ) -> Result<Option<Beat>, JobStoreError> {
-        if let Some(row) = self.read_node(host)? {
-            let now = self.store.now()?;
-            let fresh = row.record.heard_at.saturating_add(every) > now;
-            if (row.record.epoch == epoch) & (row.record.state == *state) & fresh {
-                return Ok(None);
-            }
-        }
-        // Only the hearing moves when the row the write read holds `state` already.
-        let unchanged = std::cell::Cell::new(false);
-        self.hearing(|| {
-            let beat = self.beat_node(host, epoch, None, |read| {
-                unchanged.set(read.state == *state);
-                state.clone()
-            })?;
-            let wrote = match &beat {
-                Beat::Applied(row) => Some(row.version).filter(|_| unchanged.get()),
-                _ => None,
-            };
-            Ok((Some(beat), wrote))
-        })
     }
 
     /// Every host's row this build can read, heard lately or not, in host order, with the
@@ -324,10 +307,34 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 continue;
             }
             if matches!(outcome, Claim::Committed(_)) {
+                self.note_node(&host, None);
                 forgotten.push(host);
             }
         }
         Ok(forgotten)
+    }
+
+    /// Writes the row `row` again with its state replaced by `state`, at the version `row` was
+    /// read or written at: the way a beat, after the writes of its listing (made through
+    /// [`JobStore::guarded`] at that version), records in its own write that the first listing
+    /// is applied, whether the listing was clean, and the missing counts. The epoch, session,
+    /// the hello's fields (the agent process included), the last beat, `heard_at` and the
+    /// fields a later build wrote are kept. Returns the row as written, with its new version,
+    /// or `None` when the row is not at that version any more (another beat or hello was
+    /// applied, or the row was forgotten) and nothing was written.
+    ///
+    /// # Errors
+    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`]. Nothing is written.
+    pub fn settle_node(
+        &self,
+        row: &NodeRow,
+        state: NodeState,
+    ) -> Result<Option<NodeRow>, JobStoreError> {
+        let record = NodeRecord {
+            state,
+            ..row.record.clone()
+        };
+        self.put_node(record, Some(row))
     }
 
     /// Every host's row heard within `grace` by the store's clock (its `heard_at` at most
@@ -379,7 +386,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::Store`].
     pub fn forget_node(&self, host: &HostId, at: Version) -> Result<bool, JobStoreError> {
         let txn = Txn::new().delete(keys::node(host), Cond::Version(at));
-        Ok(self.write(txn)?.is_ok())
+        let deleted = self.write_node(txn)?.is_ok();
+        if deleted {
+            self.note_node(host, None);
+        }
+        Ok(deleted)
     }
 
     /// Writes `record` as its host's row at the absence or version of `read`: the row as
@@ -395,9 +406,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             node_cond(read),
         );
         // The transaction writes the one row, so its revision is the row's new version.
-        Ok(self.write(txn)?.ok().map(|commit| NodeRow {
-            record,
-            version: Version(commit.revision.0),
+        Ok(self.write_node(txn)?.ok().map(|commit| {
+            let clean = record.state.last_listing_clean;
+            self.note_node(&record.host, Some(clean));
+            NodeRow {
+                record,
+                version: Version(commit.revision.0),
+            }
         }))
     }
 }
@@ -421,6 +436,7 @@ fn hello_record(
         claim: hello.claim.clone(),
         shape: hello.shape.clone(),
         labels: hello.labels.clone(),
+        agent_process: hello.agent_process.clone(),
         state: NodeState {
             phase: hello.phase,
             load: None,

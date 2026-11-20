@@ -362,7 +362,7 @@ fn gce_source_requests_configured_audience() {
 
 /// Asserts that with the default flags, and with `--identity-source none` given, the hello
 /// is byte for byte the one the agent sent before the flag existed (the checked-in fixture):
-/// no `identity` key, nothing else moved. It catches an agent that sends an empty identity
+/// no `identity` key, nothing else moved (but the random `agent_process`). It catches an agent that sends an empty identity
 /// by default, and any other change to the default hello.
 #[test]
 fn no_source_hello_is_unchanged() {
@@ -370,7 +370,12 @@ fn no_source_hello_is_unchanged() {
         DEFAULT_FLAGS.to_vec(),
         [&DEFAULT_FLAGS[..], &["--identity-source", "none"]].concat(),
     ] {
-        let encoded = serde_json::to_string_pretty(&hello_of(&extra)).unwrap() + "\n";
+        // The process id is drawn at random for each run: the fixture predates it, so it is
+        // checked as a 32-character id and taken out before the byte comparison.
+        let mut sent = hello_of(&extra);
+        let process = sent.as_object_mut().unwrap().remove("agent_process");
+        assert_eq!(process.and_then(|id| id.as_str().map(str::len)), Some(32));
+        let encoded = serde_json::to_string_pretty(&sent).unwrap() + "\n";
         assert_eq!(encoded, DEFAULT_HELLO, "{extra:?}");
     }
 }

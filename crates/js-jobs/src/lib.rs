@@ -57,10 +57,8 @@
 //! [`JobStore::forget_node`]), and listed by [`JobStore::live_nodes`] and [`JobStore::nodes`]: every
 //! server places over the live rows, whichever server took the host's hello. A hello of a host
 //! new to its pool is counted against the pool's cap over every server's rows
-//! ([`JobStore::hello_node_in_pool`]), a beat writes the row when it changes it or it is old
-//! ([`JobStore::refresh_node`]; a refresh of only when the host was heard is left out of
-//! [`JobStore::written`], so it makes no cache of the tables read them again), and a row silent
-//! long enough that holds nothing is deleted ([`JobStore::forget_silent_nodes`]).
+//! ([`JobStore::hello_node_in_pool`]), and a row silent long enough that holds nothing is
+//! deleted ([`JobStore::forget_silent_nodes`]).
 //!
 //! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
 //! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the
@@ -161,7 +159,6 @@
 //! | [`JobStore::hello_node`] | put `node/<host>` if absent or at the version read, with the next epoch; a lost race reads the row again |
 //! | [`JobStore::beat_node`] | put `node/<host>` at the version read, when the beat's (epoch, sequence) is the row's to take; nothing otherwise; a lost race reads the row again and judges the beat on it |
 //! | [`JobStore::hello_node_in_pool`] | as [`JobStore::hello_node`] for a host that has a row; for one that has none, put `node/<host>` if absent and `pool/<pool>` if absent or at the version read, when the pool's rows are fewer than its cap; nothing otherwise |
-//! | [`JobStore::refresh_node`] | as [`JobStore::beat_node`] with no sequence, when the beat changes the row's state or the row is older than the period given; nothing otherwise |
 //! | [`JobStore::forget_node`] | delete `node/<host>` at the version given; nothing when the row is not at it |
 //! | [`JobStore::forget_silent_nodes`] | per silent host, claim `node/<host>` and delete it at the version read when the host holds no live allocation, taint, cordon or mark; nothing otherwise |
 //! | [`JobStore::mark_host`] | put `hostmark/<host>` if absent or at the version read |

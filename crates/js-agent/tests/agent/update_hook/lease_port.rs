@@ -256,17 +256,38 @@ fn the_machine_lease_reads_a_session_end_and_the_next_session_of_a_live_host() {
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
-/// Asserts what a restarted server that has not heard the host since says through the port:
-/// the read, the cordon and the uncordon are each the typed `UnknownHost` (the server's 409
+/// Asserts what a restarted server says through the port to a host that said hello before the
+/// restart: its row holds the session, so the cordon is placed on the live host, the read shows
+/// it and the uncordon lifts it. It catches a restarted server that answers a host its rows hold as unknown,
+/// which would make `prepare` refuse with `lease_unreachable` until the agent's next hello.
+#[test]
+fn a_restarted_server_serves_the_host_its_rows_hold_through_the_port() {
+    let enrolled = enrol("hook_lease_port_restarted");
+    let server = enrolled.server.restart();
+    let url = server.url();
+    let lease = lease(
+        &reach(&url, Some(enrolled.state.clone()), None),
+        RequestLimit::DEFAULT,
+    );
+    let placed = lease.cordon(60).unwrap();
+    assert_eq!((placed.host.state.as_str(), placed.host.epoch), ("live", 1));
+    assert!(lease.host().unwrap().cordon.is_some());
+    assert!(lease.uncordon().is_ok());
+    assert!(lease.host().unwrap().cordon.is_none());
+    assert_eq!(server.host("mac-1")["state"], "live");
+}
+
+/// Asserts what a server whose job tables hold no row for the host says through the port: the
+/// read, the cordon and the uncordon are each the typed `UnknownHost` (the server's 409
 /// `unknown-host`), and `prepare` over the machine refuses with exit 1, `lease_unreachable`,
-/// class environment and a detail naming the 409, writes no record and leaves the server's
-/// listing with the host only by the `node/` row the first process wrote (no session of it is
-/// made). It catches an unknown host taken as a host with no cordon (a step that goes
+/// class environment and a detail naming the 409, writes no record and leaves the server with
+/// no such host. It catches an unknown host taken as a host with no cordon (a step that goes
 /// on as if it had drained), reported as a refused credential, or blamed on the release.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_host_the_server_does_not_know_is_the_typed_unknown_host_and_prepare_refuses() {
     let enrolled = enrol("hook_lease_port_unknown");
-    let server = enrolled.server.restart();
+    let server = enrolled.server.restart_forgetting_jobs();
     let url = server.url();
     let lease = lease(
         &reach(&url, Some(enrolled.state.clone()), None),
@@ -288,15 +309,7 @@ fn a_host_the_server_does_not_know_is_the_typed_unknown_host_and_prepare_refuses
     assert_eq!(done.report.class, Class::Environment);
     assert_eq!(done.report.detail.as_deref(), Some(UNKNOWN));
     assert!(!tree.record().exists(), "nothing was written");
-    let hosts = server.get("/v1/hosts");
-    let listed: Vec<&serde_json::Value> = hosts["hosts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| &entry["id"])
-        .collect();
-    assert_eq!(listed, [&serde_json::json!("mac-1")], "{hosts}");
-    assert_eq!(lease.host().unwrap_err(), LeaseError::UnknownHost);
+    assert_eq!(server.get("/v1/hosts")["hosts"], serde_json::json!([]));
 }
 
 /// Asserts that the port reads its bearer from the file `token_file` names when the state root

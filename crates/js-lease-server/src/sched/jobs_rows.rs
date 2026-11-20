@@ -2,11 +2,11 @@
 //! before each pass (design `multi-instance.md`, G7): every host whose `node/` row is live (heard
 //! within the longest grace of the pools by the store's clock), whichever server took its hello,
 //! and every host this server's registry holds live. A host is offered when its row (or, for a
-//! host held here without one, the registry's record) says it serves, its last listing was
-//! clean, and no row closes it: no `taint/<host>` row, no binding that holds a taint, no
-//! `hostmark/<host>` row. A host this server's registry also holds is closed too by what the
-//! registry holds of it (a taint, a scale-down mark, a release under way, a cordon in force, an
-//! unclean listing). The store's cordons are dropped by the placer itself.
+//! host held here without one, the registry's record) says it serves, and no row closes it: no
+//! row that says its last listing was not clean ([`js_jobs::JobStore::unclean_nodes`]), no
+//! `taint/<host>` row, no binding that holds a taint, no `hostmark/<host>` row. A host this server's registry also holds is closed too by what the
+//! registry holds of it (a taint, a scale-down mark, a release under way, a cordon in force).
+//! The store's cordons are dropped by the placer itself.
 //!
 //! These reads choose what the pass tries; the placement's own transaction decides on the rows
 //! it reads ([`js_jobs::JobStore::place_claimed`]), so a host closed after the reads is refused
@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_agent_wire::{Phase, Taint};
 use std::sync::{Arc, PoisonError};
 
-use js_jobs::{Capacity, HOST_JOB_TAINT, HostTaint, JobId, NodeRow, Written};
+use js_jobs::{Capacity, HOST_JOB_TAINT, HostTaint, JobId, NodeRow};
 use js_registry::{Binding, HostState, HostView};
 use js_sched::ceiling::ceiling_of;
 use js_sched_placer::place::SchedPlacer;
@@ -51,8 +51,6 @@ pub(super) struct Offered {
 /// The store's rows a pass offers hosts by, with where the store stood when they were read.
 #[derive(Debug)]
 pub(crate) struct RowsRead {
-    /// Where the job store's writes and the store's head stood before the reads.
-    written: Written,
     /// The live `node/` rows, by host.
     live: BTreeMap<HostId, NodeRow>,
     /// The shape the engine places each live row's host as ([`engine_shape`]), for the rows
@@ -62,6 +60,9 @@ pub(crate) struct RowsRead {
     taints: BTreeMap<HostId, HostTaint>,
     /// The hosts a `hostmark/` row marks.
     marks: BTreeSet<HostId>,
+    /// The hosts whose row says their last listing was not clean
+    /// ([`js_jobs::JobStore::unclean_nodes`]).
+    unclean: BTreeSet<HostId>,
     /// The bindings the store holds (none in file mode).
     stored: BTreeMap<HostId, Binding>,
 }
@@ -82,7 +83,7 @@ pub(super) fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
 }
 
 /// What the pass knows of one host before it is offered: its booked shape, its claim, and
-/// whether it serves and its last listing was clean.
+/// whether it serves.
 struct Seen<'a> {
     shape: &'a Shape,
     claim: Option<&'a Shape>,
@@ -104,7 +105,7 @@ fn engine_shape(agents: &Agents, row: &NodeRow) -> Option<Shape> {
 }
 
 /// The row's view of a host, placed by the engine as `engine` ([`engine_shape`]): open when the
-/// host serves and its last listing was clean. `None` for a row the engine places no host of.
+/// host serves. `None` for a row the engine places no host of.
 fn seen_by_row<'a>(row: &'a NodeRow, engine: Option<&'a Shape>) -> Option<Seen<'a>> {
     let record = &row.record;
     let (shape, engine) = record.shape.as_ref().zip(engine)?;
@@ -112,7 +113,7 @@ fn seen_by_row<'a>(row: &'a NodeRow, engine: Option<&'a Shape>) -> Option<Seen<'
     Some(Seen {
         shape,
         claim: record.claim.as_ref(),
-        open: (state.phase == Phase::Serving) & state.last_listing_clean,
+        open: state.phase == Phase::Serving,
         engine: Some(engine),
     })
 }
@@ -132,8 +133,9 @@ fn open_here(view: &HostView, now: Timestamp, live: bool) -> bool {
 impl Agents {
     /// The hosts the next pass offers, read from the job store and this server's registry at
     /// `now` (the module says how), with each offered host the placer does not know yet told to
-    /// it ([`SchedPlacer::host_seen`]). The store's rows are read afresh, and kept for
-    /// [`Agents::offered_after_beat`].
+    /// it ([`SchedPlacer::host_seen`]). The store's rows are read afresh, each `node/` row taken
+    /// from the last read while it stands at the version it had then
+    /// ([`js_jobs::JobStore::live_nodes_reusing`]).
     ///
     /// # Errors
     /// A read of the store failed, said in words: the pass places nothing.
@@ -147,36 +149,8 @@ impl Agents {
         Ok(self.offered_from(&read, placer, now))
     }
 
-    /// [`Agents::offered`] for a heartbeat's pass: the rows the last read kept are used again
-    /// when nothing was committed to the store since they were read (its head and this job
-    /// store's writes stand where they stood, [`js_jobs::JobStore::written`]), so a beat that
-    /// changes nothing reads the store's head and no table. A row that ages out of the grace
-    /// with no commit in between leaves at the next read: the tick's pass reads afresh.
-    ///
-    /// # Errors
-    /// As [`Agents::offered`].
-    pub(super) fn offered_after_beat(
-        &self,
-        jobs: &ServerJobs,
-        placer: &SchedPlacer,
-        now: Timestamp,
-    ) -> Result<Offered, String> {
-        let written = jobs.written().map_err(|error| error.to_string())?;
-        let kept = self
-            .rows_read
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let read = match kept.filter(|read| read.written == written) {
-            Some(read) => read,
-            None => self.read_rows(jobs)?,
-        };
-        Ok(self.offered_from(&read, placer, now))
-    }
-
     /// The rows a pass offers by, read now, and kept for the next heartbeat's pass.
     fn read_rows(&self, jobs: &ServerJobs) -> Result<Arc<RowsRead>, String> {
-        let written = jobs.written().map_err(|error| error.to_string())?;
         // The rows the last read decoded are taken again at the versions they had then.
         let kept = self
             .rows_read
@@ -197,16 +171,17 @@ impl Agents {
             .collect();
         let taints = jobs.host_taints().map_err(|error| error.to_string())?;
         let marks = jobs.host_marks().map_err(|error| error.to_string())?;
+        let unclean = jobs.unclean_nodes().map_err(|error| error.to_string())?;
         let stored = self
             .store
             .scan_stored()
             .map_err(|error| error.to_string())?;
         let read = Arc::new(RowsRead {
-            written,
             live,
             engines,
             taints,
             marks: marks.into_keys().collect(),
+            unclean,
             stored: stored.unwrap_or_default(),
         });
         *self
@@ -223,6 +198,7 @@ impl Agents {
             engines,
             taints,
             marks,
+            unclean,
             stored,
             ..
         } = read;
@@ -271,8 +247,9 @@ impl Agents {
             };
             let tainted = binding_of(host).is_some_and(|bound| bound.taint().is_some());
             let closed = taints.contains_key(host) | marks.contains(host) | tainted;
+            let closed = closed | unclean.contains(host);
             let here = view.is_none_or(|view| open_here(view, now, row.is_some()));
-            if !(seen.open & !closed & here & self.listing_clean(host)) {
+            if !(seen.open & !closed & here) {
                 continue;
             }
             // A host of a provider the Default platform does not list is no candidate here.

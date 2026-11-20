@@ -92,8 +92,9 @@ const SCALER_SETTLE: Duration = Duration::from_secs(900);
 
 /// Proves that a restart of the server over its store keeps every host binding and every
 /// job (design section 6.7): six hosts of the pool's token and one joined with a minted
-/// token are seated before the restart with runs in flight; after it every one of them says
-/// hello again and is seated once, under the same host id; the token used before the
+/// token are seated before the restart with runs in flight; after it every one of them keeps its
+/// session (served from its host row, never answered `unknown-host`) and is seated once,
+/// under the same host id; the token used before the
 /// restart is refused as used to another host after it (`h007` is answered 403 and never
 /// seated) and the token minted and never used still admits its host (`h008`); every item
 /// reaches one terminal answer and no run is launched twice (`at-most-one-launch`). The
@@ -122,8 +123,23 @@ pub fn restart(store: Store) -> Scenario {
             "the token used before the restart is refused",
             used_token_refused,
         )
-        .witness("unknown_host", |c| c.get(Counter::UnknownHost) >= 1)
+        .expect_that(
+            "no host lost its session to the restart",
+            sessions_survive_the_restart,
+        )
         .settle_within(RESTART_SETTLE)
+}
+
+/// What a restart over the store must not cost an agent: a host's session is its row in the
+/// store, so the restarted server serves the old session's beats. No heartbeat of any agent
+/// was answered `unknown-host`.
+fn sessions_survive_the_restart(cell: &mut Cell) -> Option<String> {
+    let agents = 0..cell.agent_count();
+    let unknown: u64 = agents
+        .filter_map(|index| cell.counters(index))
+        .map(|counters| counters.get(Counter::UnknownHost))
+        .sum();
+    (unknown > 0).then(|| format!("{unknown} heartbeats answered unknown-host after the restart"))
 }
 
 /// Proves that a hello that consumes a join token commits the host's binding with it

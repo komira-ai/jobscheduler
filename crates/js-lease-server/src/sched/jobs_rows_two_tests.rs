@@ -335,9 +335,12 @@ fn a_scale_down_mark_one_server_set_stops_the_other_placing_on_the_host() {
 
 /// Asserts the pool's cap over every server's rows: the pool holds three hosts of a cap of
 /// four, all admitted by server A, and A and B each take a hello of a different new host at
-/// once (a barrier releases both). Exactly one is admitted, the other is refused `pool-full`
-/// and its registry holds no host of that name, and the store holds four rows. It catches a
-/// cap counted over each server's own hosts, which admits both and so a fifth host.
+/// once (a barrier releases both). Exactly one is admitted and the store holds four rows. The
+/// other is refused: `pool-full` when it was judged after the first's row was written, or, when
+/// both were judged with room left, `503 state-write-failed` at its row's write, and then
+/// `pool-full` at its next hello, before anything of that hello is written. Its registry holds
+/// no live host of that name either way. It catches a cap counted over each server's own hosts,
+/// which admits both and so a fifth host, and a loser of the race that is admitted on retry.
 #[test]
 fn two_servers_admit_one_host_into_a_pool_one_below_its_cap() {
     let database = test_database();
@@ -362,9 +365,12 @@ fn two_servers_admit_one_host_into_a_pool_one_below_its_cap() {
         .into_iter()
         .filter_map(|answer| answer.as_ref().err())
         .collect();
-    assert_eq!(
-        refusals,
-        [&json!({ "error": "pool-full" })],
+    let lost = [
+        json!({ "error": "pool-full" }),
+        json!({ "error": "state-write-failed" }),
+    ];
+    assert!(
+        (refusals.len() == 1) && lost.contains(refusals[0]),
         "{first:?} {second:?}"
     );
     let (_, rows) = a.jobs().nodes().unwrap();
@@ -373,11 +379,20 @@ fn two_servers_admit_one_host_into_a_pool_one_below_its_cap() {
         true => (a.agents(), "host-4"),
         false => (b.agents(), "host-5"),
     };
-    let held: Vec<String> = loser
+    assert_eq!(
+        say_hello(loser, name, &[]),
+        Err(json!({ "error": "pool-full" })),
+        "the loser's next hello"
+    );
+    assert_eq!(a.jobs().nodes().unwrap().1.len(), 4);
+    // A loser at its row's write keeps the record the registry gave up the session of
+    // (`Registry::abandon`), never heard, so it is no host the pass offers.
+    let live: Vec<String> = loser
         .registry
         .hosts()
         .iter()
+        .filter(|view| view.state == js_registry::HostState::Live)
         .map(|view| view.id.to_string())
         .collect();
-    assert!(!held.iter().any(|held| held == name), "{held:?}");
+    assert!(!live.iter().any(|live| live == name), "{live:?}");
 }

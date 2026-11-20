@@ -46,14 +46,14 @@ fn ids(body: &Value) -> Vec<&str> {
 /// Asserts that the listing of a server lists a host only a row knows (it said hello to
 /// another server) beside its own, each once and in id order, with the state from when it was
 /// last heard, the phase, shape and capabilities, labels and no registry-only fields; and that
-/// a host in both the registry and the rows is listed as the registry sees it. Catches a
+/// a host in both the registry and the rows (each host whose hello it took) is listed as the
+/// registry sees it. Catches a
 /// listing that shows only the hosts a server took the hello of, and one that lists a host
 /// twice.
 #[tokio::test]
 async fn the_listing_shows_a_host_only_a_row_knows_once() {
     let mut first = clocked_rig("hosts_rows_a", false, NEVER);
     first.join("host-a", false).await;
-    first.join("host-c", false).await;
     let mut second = peer_of("hosts_rows_b", &first);
     second.join("host-b", false).await;
     second.join("host-c", false).await;

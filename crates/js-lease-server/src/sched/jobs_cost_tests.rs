@@ -157,8 +157,8 @@ impl Counted {
 }
 
 /// Asserts that a heartbeat with an unchanged listing, from a host whose state the registry
-/// holds as it was, runs no pass: it reads no job table space, no host rows (the last pass's
-/// are used again) and none of the queued jobs' rows, and runs no placement round. Before, every such heartbeat read every active job and
+/// holds as it was, runs no pass: it reads no job table space and none of the queued jobs'
+/// rows, and runs no placement round. Before, every such heartbeat read every active job and
 /// ran a round for every queued job.
 #[tokio::test]
 async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round() {
@@ -166,11 +166,6 @@ async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round()
     for agent in [&settled.a, &settled.b] {
         let (_, counted) = settled.beat(agent).await;
         assert_eq!(counted.table_scans(), Vec::<&str>::new(), "{counted:?}");
-        // The hosts' rows the last pass read are used again: nothing was committed since.
-        let hosts = ["node/", "taint/", "hostmark/", "hosts/binding/"];
-        let hosts = hosts.map(|prefix| Read::Scan(prefix.to_owned()));
-        let read_hosts = counted.reads.iter().any(|read| hosts.contains(read));
-        assert!(!read_hosts, "{counted:?}");
         for id in &QUEUED[2..] {
             assert!(!counted.read_job(id), "{id} was read: {counted:?}");
         }
@@ -292,8 +287,9 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     settled.a.end(&ending, Outcome::Succeeded, Some(0));
     let reply = settled.rig.beat(&settled.a).await.unwrap();
     settled.a.take(&reply);
-    // The beat's own write (the free) commits; the placement after it fails.
-    settled.rig.store.fail_after(1);
+    // The beat's own writes (its node row, the free, the listing's flags) commit; the
+    // placement after them fails.
+    settled.rig.store.fail_after(3);
     settled.rig.beat(&settled.a).await.unwrap();
     assert_eq!(settled.state("c-third"), JobState::Queued);
     let (_, again) = settled.beat(&settled.b).await;

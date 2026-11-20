@@ -1,11 +1,10 @@
 //! What a server needs of the registry to keep and read the hosts' `node/` rows in the job
-//! store (design `multi-instance.md`, G5 and G7): the times that judge a row live, refresh it
-//! and forget it, a pool's machine cap and booking rule, the session digest a hello wrote,
-//! and the withdrawal of a hello that the rows refused after the registry admitted it.
+//! store (design `multi-instance.md`, G5 and G7): the times that judge a row live and forget
+//! it, and a pool's machine cap and booking rule.
 
 use std::time::Duration;
 
-use js_types::{HostId, Shape};
+use js_types::Shape;
 
 use super::Registry;
 use crate::config::{PoolConfig, placement_shape};
@@ -21,14 +20,6 @@ impl Registry {
     pub fn longest_grace(&self) -> Duration {
         let ms = self.pools().map(PoolConfig::grace_ms).max().unwrap_or(0);
         Duration::from_millis(ms)
-    }
-
-    /// Half the shortest grace of the pools this registry serves: how often a beat whose host's
-    /// state stands still writes its row, so that the row of a host that beats is never older
-    /// than its grace.
-    pub fn refresh_every(&self) -> Duration {
-        let ms = self.pools().map(PoolConfig::grace_ms).min().unwrap_or(0);
-        Duration::from_millis(ms / 2)
     }
 
     /// The longest grace plus the longest lost-host retention of the pools this registry
@@ -60,34 +51,5 @@ impl Registry {
         let at = self.pool_named(pool)?;
         let by_hello = self.pool_at(at).places_by_hello();
         Some(placement_shape(booked, claim, by_hello))
-    }
-
-    /// The SHA-256 of the session secret the last hello of `host` was given, when the registry
-    /// holds the host and gave it one.
-    pub fn session_digest(&self, host: &HostId) -> Option<[u8; 32]> {
-        let state = self.lock();
-        let record = state.records.get(host)?;
-        record.session.as_ref().map(|digest| digest.bytes())
-    }
-
-    /// Takes back the hello of `host` that the registry admitted as its first (`epoch` 1), when
-    /// something the registry does not judge refused it afterwards (the pool's cap counted over
-    /// every server's rows): the record and its place in the host book go, and the placer is
-    /// told the host is gone. `true` when it was taken back; a host whose record is of another
-    /// epoch, or that the registry does not hold, is left as it is.
-    pub fn withdraw_first_hello(&self, host: &HostId, epoch: u64) -> bool {
-        let mut guard = self.lock();
-        let first = guard
-            .records
-            .get(host)
-            .is_some_and(|record| (record.epoch == epoch) & (epoch == 1));
-        if !first {
-            return false;
-        }
-        guard.book.remove_free(host);
-        guard.records.remove(host);
-        drop(guard);
-        self.tell_gone(host);
-        true
     }
 }

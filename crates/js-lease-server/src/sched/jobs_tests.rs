@@ -435,11 +435,11 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         state: HeldState::Starting,
         result: None,
     }];
-    let clean = serve(&jobs, &context, &[], &[], 8).unwrap();
+    let clean = serve(&jobs, &context, &[], &[], 8, None).unwrap();
     assert_eq!(clean.commands.len(), 1);
     assert!(matches!(clean.commands[0], Command::JobStart(_)));
     assert!(format!("{:?}", clean.commands[0]).contains("job_id: \"job-a\""));
-    let listed = serve(&jobs, &context, &holds, &[], 8).unwrap();
+    let listed = serve(&jobs, &context, &holds, &[], 8, None).unwrap();
     assert!(listed.commands.is_empty());
     let step = jobs.get_allocation(&a).unwrap().unwrap().step;
     assert_eq!(step, AllocationStep::Booked);
@@ -520,7 +520,7 @@ fn only_absent_frees_an_allocation() {
                     state: HeldState::ExitedUnacked,
                     result: None,
                 }];
-                serve(&jobs, &context, &holds, &[], 8).unwrap();
+                serve(&jobs, &context, &holds, &[], 8, None).unwrap();
             }
         }
         let placed = pass(&placer, &jobs, &["host-a"]);
@@ -728,8 +728,16 @@ fn a_pass_whose_job_tables_cannot_be_read_places_nothing_and_the_next_one_does()
     let (agents, store, _dir) = served("jobs-tables-unread");
     let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
     queue(&jobs, "job-a", 2, 0);
-    // The hosts' `node/`, `taint/` and `hostmark/` rows are read; the tables after them fail.
-    store.fail_read_after(3);
+    // The pass reads the hosts first, as many reads as a read of them makes once the rows were
+    // read whole; the read after those, of the job tables, fails.
+    let placer = agents.placer.as_ref().unwrap();
+    let now = js_types::Clock::now(&agents.clock);
+    agents.offered(&jobs, placer, now).unwrap();
+    store.take_reads();
+    let now = js_types::Clock::now(&agents.clock);
+    agents.offered(&jobs, placer, now).unwrap();
+    let hosts = store.take_reads().len();
+    store.fail_read_after(hosts);
     agents.place_jobs();
     assert_eq!(state(&jobs, "job-a"), JobState::Queued);
     agents.place_jobs();

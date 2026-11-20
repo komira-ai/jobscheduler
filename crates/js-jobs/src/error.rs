@@ -42,6 +42,13 @@ pub enum JobStoreError {
     /// The id source failed.
     #[error(transparent)]
     Mint(#[from] MintError),
+    /// The host's node row moved past the version the beat wrote: a newer beat or hello of the
+    /// host was applied, so this beat's listing changes nothing more.
+    #[error("the node row of host {host} moved past the version the beat wrote")]
+    NodeMoved {
+        /// The host.
+        host: HostId,
+    },
     /// The job or its allocation changed between the operation's read and its commit.
     #[error("job {id} changed while the operation ran")]
     Stale {

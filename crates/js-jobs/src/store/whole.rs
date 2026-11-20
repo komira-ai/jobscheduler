@@ -128,7 +128,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
     /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`];
     /// [`JobStoreError::HostCordoned`]; [`JobStoreError::HostTainted`];
-    /// [`JobStoreError::HostMarked`]; [`JobStoreError::PortTaken`].
+    /// [`JobStoreError::HostMarked`]; [`JobStoreError::PortTaken`]. On a guarded view
+    /// ([`JobStore::guarded`]) the commit also checks the node row, and a row that moved is
+    /// [`JobStoreError::NodeMoved`].
     pub fn place_claimed(
         &self,
         id: &JobId,
@@ -147,6 +149,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let decided = self.decide_placement(read, id, (host, booked, placement), capacity, now);
             match decided {
                 Ok((txn, job, allocation)) => {
+                    let txn = self.guard_txn(txn);
                     placed = Some((job, allocation));
                     Some(txn)
                 }
@@ -160,6 +163,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         match (outcome?, placed, failed) {
             (Claim::Committed(_), Some(placed), _) => Ok(placed),
             (_, _, Some(error)) => Err(error),
+            (Claim::Conflict(conflict), _, _) => Err(self
+                .refuse_moved(conflict)
+                .err()
+                .unwrap_or(JobStoreError::Stale { id: id.clone() })),
             _ => Err(JobStoreError::Stale { id: id.clone() }),
         }
     }

@@ -22,7 +22,7 @@
 //! - the headline: about 670 (`cell/jobs_headline.rs`);
 //! - the restart: [`RESTART_HOSTS`] beating every 5 s for [`RESTART_AT`] plus
 //!   [`RESTART_SETTLE`], 490 s, less the [`RESTART_AT`] minus [`STOP_AT`] the server is
-//!   down, make about 370, with a hello from every host after the restart besides.
+//!   down, make about 370, with no hello after the restart (the sessions are rows in the store).
 //!
 //! The headline and the restart are smaller than a farm of hosts: every scenario here runs
 //! in the pull request's `test` and `coverage` jobs, which a slow scenario must not hold
@@ -40,8 +40,8 @@ use js_sim_cell::actions::{
     set_bus_faults, stop_server, submit_work,
 };
 use js_sim_cell::{
-    Call, CallKind, Counter, Expect, HowEnded, ItemId, JobFront, LostAnswer, Scenario, ServerSpec,
-    Shape, Work,
+    Call, CallKind, Cell, Counter, Expect, HowEnded, ItemId, JobFront, LostAnswer, Route, Scenario,
+    ServerSpec, Shape, Work,
 };
 
 /// Every scenario of the family runs over this many seeds.
@@ -274,17 +274,35 @@ fn the_headline_over_jobs() {
     }
 }
 
+/// What a restart over the store must not cost an agent: a host's session is its row in the
+/// store, so the restarted server serves the old session's beats. No heartbeat of any agent
+/// was answered `unknown-host`, and no agent said hello more than the once it did at the
+/// start.
+fn sessions_survive_the_restart(cell: &mut Cell) -> Option<String> {
+    let agents = cell.agent_count();
+    let unknown: u64 = (0..agents)
+        .filter_map(|index| cell.counters(index))
+        .map(|counters| counters.get(Counter::UnknownHost))
+        .sum();
+    let hellos = cell
+        .server()
+        .map_or(0, |server| server.answered_total(Route::Hello));
+    (unknown > 0 || hellos > agents as u64)
+        .then(|| format!("{unknown} unknown-host answers and {hellos} hellos from {agents} agents"))
+}
+
 /// Covers section 8, rows 3 (a restart with a job in flight: the host keeps it and lists
 /// it, and the client reads the job) and 36 (a restart ends no running job and a queued
 /// job keeps waiting; the outage here is 30 s, not longer than a queue wait). Four hosts
 /// run 32 jobs and four more wait queued when the server is stopped for 30 s and
-/// started again over its own directory and store (`--boot resume`); the hosts are told
-/// they are unknown, say hello again and list what they hold. States that after the
+/// started again over its own directory and store (`--boot resume`); the hosts keep their
+/// sessions (the server serves them from the host rows) and list what they hold. States that after the
 /// restart every job is still in the server's table and none has ended
 /// (`jobs-read`, `jobs-ended` at [`RESTART_CHECK_AT`]); and at the end that every job
 /// succeeded, for the client and in the server's table, that no job was launched twice
-/// under any allocation, and that no allocation is left booked or releasing. The witness
-/// shows the restart reached the hosts: a heartbeat was answered `unknown-host`. Red for
+/// under any allocation, and that no allocation is left booked or releasing. A statement
+/// shows no host lost its session: no heartbeat was answered `unknown-host` and no host said
+/// hello again. Red for
 /// a restarted server that forgets a job or ends it (`jobs-read`, `jobs-ended`, the
 /// counts of successes), loses a running job its host lists again (`jobs-in`), places a
 /// job again (`each-job-launched-once`, `one-allocation-per-job`), or leaves an
@@ -311,7 +329,10 @@ fn a_server_restart_with_jobs_in_flight_loses_no_job() {
         .expect(Expect::jobs_in_state(jobs, JobState::Succeeded))
         .expect(Expect::each_job_launched_once())
         .expect(Expect::no_allocation_live())
-        .witness("unknown_host", |c| c.get(Counter::UnknownHost) >= 1)
+        .expect_that(
+            "no host lost its session to the restart",
+            sessions_survive_the_restart,
+        )
         .settle_within(RESTART_SETTLE)
         .run_seeds(SEEDS);
 }

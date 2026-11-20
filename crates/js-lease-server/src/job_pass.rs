@@ -239,15 +239,11 @@ impl Agents {
 
     /// Forgets the `node/` rows of the hosts silent for longer than the registry's
     /// [`Registry::forget_after`] that hold nothing ([`js_jobs::JobStore::forget_silent_nodes`]),
-    /// so a pool's cap counts only rows not forgotten, and drops the epochs this server noted
-    /// for them. The hosts forgotten are logged; a store that fails is logged, and the next
-    /// period forgets them.
+    /// so a pool's cap counts only rows not forgotten. The hosts forgotten are logged; a store
+    /// that fails is logged, and the next period forgets them.
     fn forget_silent_rows(&self, jobs: &ServerJobs) {
         match jobs.forget_silent_nodes(self.registry.forget_after()) {
             Ok(forgotten) => {
-                forgotten
-                    .iter()
-                    .for_each(|host| self.note_node_epoch(host, None));
                 if !forgotten.is_empty() {
                     let hosts: Vec<&str> = forgotten.iter().map(HostId::as_str).collect();
                     info!(hosts = ?hosts, "the rows of silent hosts were forgotten");

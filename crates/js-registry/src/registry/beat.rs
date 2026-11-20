@@ -244,6 +244,7 @@ mod tests {
 
     fn hello() -> Hello {
         Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "a".into(),
             pool: "builders".into(),
@@ -270,6 +271,7 @@ mod tests {
 
     fn heartbeat(session: String) -> Heartbeat {
         Heartbeat {
+            seq: None,
             host_id: "a".into(),
             epoch: 1,
             session,

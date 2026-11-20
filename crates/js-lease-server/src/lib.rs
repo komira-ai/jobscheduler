@@ -641,8 +641,11 @@
 //! agent says hello again. An awaiting host whose agent has not returned is forgotten,
 //! binding included, once the grace period and `lost_retention` have passed since the
 //! restart that put it back; the next tick writes the file of bindings (or the store)
-//! without it. An agent whose heartbeat reaches a restarted server is answered 409
-//! `unknown-host` and says hello.
+//! without it. With the job tables, which a restart keeps (in the store, or in `.jobs` beside
+//! the state file), a host's session is its row `node/<host>`: an agent whose heartbeat
+//! reaches a restarted server is served, its session taken from the row, and says no hello.
+//! Without them, or for a host the rows do not hold, the heartbeat is answered 409
+//! `unknown-host` and the agent says hello.
 //!
 //! What lets a host keep its id against any join-token holder after a restart is the
 //! binding of the host id to the credential and instance it was admitted with. The server

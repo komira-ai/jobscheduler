@@ -121,7 +121,7 @@ fn a_start_logs_the_taints_and_cordons_it_puts_back() {
     ]);
     let file = state_path(&state, ".agents");
     BindingStore::new(file, BTreeMap::new())
-        .save(|| kept)
+        .save(|| kept, &|_| false)
         .unwrap();
     let lines = Lines::default();
     process_sink();

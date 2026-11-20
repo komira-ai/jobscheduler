@@ -101,6 +101,7 @@ impl World {
             shape,
             labels: Default::default(),
             phase,
+            agent_process: None,
         };
         self.jobs.hello_node(&host(host_name), &hello).unwrap()
     }
@@ -192,7 +193,6 @@ fn a_read_offers_the_open_hosts_of_the_rows_and_the_registry_and_no_closed_one()
     registry
         .cordon(&host("held-cordon"), lease, &holder)
         .unwrap();
-    w.agents.note_listing(&host("held-unclean"), false);
     for name in [
         "held-open",
         "held-taint",
@@ -218,18 +218,16 @@ fn a_read_offers_the_open_hosts_of_the_rows_and_the_registry_and_no_closed_one()
     w.row("far-no-shape", "burst", None, Phase::Serving);
     w.row("far-other-pool", "elsewhere", Some(shape()), Phase::Serving);
     w.row("far-draining", "burst", Some(shape()), Phase::Draining);
-    let unclean = w.serving_row("far-unclean");
-    let state = NodeState {
-        phase: Phase::Serving,
-        load: None,
-        first_listing_pending: false,
-        last_listing_clean: false,
-        missing_in_a_row: Default::default(),
-    };
-    let every = Duration::from_secs(3600);
-    w.jobs
-        .refresh_node(&host("far-unclean"), unclean.record.epoch, &state, every)
-        .unwrap();
+    w.serving_row("far-unclean");
+    // Rows whose last listing was not clean, as the beat that applied it settles them.
+    for name in ["held-unclean", "far-unclean"] {
+        let row = w.jobs.read_node(&host(name)).unwrap().unwrap();
+        let state = NodeState {
+            last_listing_clean: false,
+            ..row.record.state.clone()
+        };
+        assert!(w.jobs.settle_node(&row, state).unwrap().is_some());
+    }
     // Taints and marks the rows hold.
     placed(
         &w.jobs,
@@ -261,14 +259,36 @@ fn a_read_offers_the_open_hosts_of_the_rows_and_the_registry_and_no_closed_one()
     w.bind("far-garbage", b"not json");
     w.bind_with("far-bad-credential", json!({ "credential": "short" }));
 
-    // A read that fails at any of the four tables says so, and the pass places nothing.
-    for reads_before in 0..4 {
+    // A read that fails at any read of the hosts (the `node/`, `taint/` and `hostmark/` rows,
+    // the unclean hosts and the stored bindings, five reads or more) says so, and the pass
+    // places nothing; the read past the last one is the first that answers.
+    let mut reads_before = 0;
+    let offered = loop {
         w.store.fail_read_after(reads_before);
-        let error = w.offered().unwrap_err();
-        assert!(error.contains(INJECTED), "{reads_before}: {error}");
+        match w.offered() {
+            Ok(offered) => break offered,
+            Err(error) => assert!(error.contains(INJECTED), "{reads_before}: {error}"),
+        }
+        reads_before += 1;
+    };
+    w.store.fail_read_after(usize::MAX);
+    assert!(reads_before >= 5, "{reads_before}");
+    // Once the unclean hosts were read whole, a pass reads only the rows that changed since;
+    // a failure at any of those reads, the changed row's included, places nothing either.
+    let changed = w.jobs.read_node(&host("far-open")).unwrap().unwrap();
+    let state = changed.record.state.clone();
+    assert!(w.jobs.settle_node(&changed, state).unwrap().is_some());
+    let mut again = 0;
+    while let Err(error) = {
+        w.store.fail_read_after(again);
+        w.offered()
+    } {
+        assert!(error.contains(INJECTED), "{again}: {error}");
+        again += 1;
     }
+    w.store.fail_read_after(usize::MAX);
+    assert!(again >= 5, "{again}");
 
-    let offered = w.offered().unwrap();
     let names = |hosts: &mut dyn Iterator<Item = String>| hosts.collect::<BTreeSet<String>>();
     let open = names(&mut offered.open.keys().map(ToString::to_string));
     assert_eq!(
@@ -350,22 +370,4 @@ fn the_scan_of_stored_bindings_returns_the_readable_ones() {
     w.store.fail_read_after(0);
     let error = w.agents.store.scan_stored().unwrap_err();
     assert!(error.to_string().contains(INJECTED), "{error}");
-}
-
-/// Asserts that a pass whose read of the store's head fails says so and offers nothing, both
-/// when it reads the rows afresh and when a heartbeat's pass asks whether the rows it kept
-/// still stand. It catches a failed head read taken as a store that has not moved, which would
-/// offer hosts by rows that may be stale.
-#[test]
-fn a_store_head_that_cannot_be_read_offers_nothing() {
-    let w = world("rows_head", true);
-    w.store.fail_next_head();
-    let error = w.offered().unwrap_err();
-    assert!(error.contains(INJECTED), "{error}");
-    w.offered().unwrap();
-    w.store.fail_next_head();
-    let now = Timestamp::from_millis(T0);
-    let error = w.agents.offered_after_beat(&w.jobs, &w.placer, now);
-    let error = error.unwrap_err();
-    assert!(error.contains(INJECTED), "{error}");
 }

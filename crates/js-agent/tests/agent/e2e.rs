@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use js_agent::{Connector, Dialer, Login, Session, Step};
 use js_agent_wire::ProtocolRange;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::server::{CLIENT_TOKEN, JOIN, OtherMajors, Redirect, Server, Spy};
 use crate::support::{AMD_MAC, Host, PROFILER_CMD, Scratch, code, hello, lowest, mac_host};
@@ -181,15 +181,17 @@ fn refused_hello_is_fatal_per_code() {
     first.stop();
 }
 
-/// Asserts that after the server restarts (a new process over the same files) the agent's
-/// next heartbeat is refused as an unknown host, it says hello again at once and is
-/// admitted, and the host is live again. The restarted server's registry holds no host until
-/// the agent says hello (nothing booked on it is kept); its listing names the host meanwhile by
-/// the `node/` row the first process wrote, live within the grace, as it lists a host whose
-/// hello another server took. It catches an agent that heartbeats a dead session for ever. That a running job outlives the restart is asserted with a container
-/// agent in `jobs/e2e.rs`.
+/// Asserts that after the server restarts (a new process over the same files) the agent keeps
+/// its session: the restarted server serves its next heartbeat from the host's row (the wait
+/// stays the heartbeat interval, not the immediate retry of a refused beat), the agent says no
+/// second hello, and the host is live in the new server's listing. It catches an agent that
+/// heartbeats a dead session for ever, and a restarted server that refuses a beat of a session
+/// its rows hold (409 unknown-host), which would cost a second hello. That the server's answer
+/// for a host its tables do not hold is still the agent's cue to say hello again is asserted
+/// in `server_that_lost_the_host_makes_the_agent_say_hello_again`. That a running job outlives
+/// the restart is asserted with a container agent in `jobs/e2e.rs`.
 #[test]
-fn server_restart_agent_reregisters() {
+fn server_restart_agent_keeps_its_session() {
     let server = Server::start("e2e_restart", &[]);
     let address = Arc::new(Mutex::new(server.url()));
     let agent = crate::server::Agent::spawn(
@@ -205,14 +207,40 @@ fn server_restart_agent_reregisters() {
 
     let server = server.restart();
     *address.lock().unwrap() = server.url();
+    agent.elapse();
+    assert_eq!(agent.next_wait(), secs(5), "the beat is served");
+    assert_eq!(server.host("mac-1")["state"], "live");
+    agent.elapse();
+    assert_eq!(agent.next_wait(), secs(5));
+    let ran = agent.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(!ran.err.contains("unknown-host"), "{}", ran.err);
+}
+
+/// Asserts that when the server restarts and its job tables are gone, so it holds no row of
+/// the host, the agent's next heartbeat is refused as an unknown host, it says hello again at
+/// once and is admitted, and the host is live again. It catches an agent that heartbeats a
+/// dead session for ever.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_that_lost_the_host_makes_the_agent_say_hello_again() {
+    let server = Server::start("e2e_restart_lost", &[]);
+    let address = Arc::new(Mutex::new(server.url()));
+    let agent = crate::server::Agent::spawn(
+        server.url(),
+        server.join_file(),
+        &["--host-id", "mac-1"],
+        mac_host,
+        Redirect(address.clone()),
+    );
+    agent.next_wait();
+    agent.elapse();
+    agent.next_wait();
+
+    let server = server.restart_forgetting_jobs();
+    *address.lock().unwrap() = server.url();
     let hosts = server.get("/v1/hosts");
-    let listed: Vec<(&Value, &Value)> = hosts["hosts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| (&entry["id"], &entry["state"]))
-        .collect();
-    assert_eq!(listed, [(&json!("mac-1"), &json!("live"))], "{hosts}");
+    assert!(hosts["hosts"].as_array().unwrap().is_empty(), "{hosts}");
     agent.elapse();
     assert_eq!(agent.next_wait(), Duration::ZERO);
     agent.elapse();

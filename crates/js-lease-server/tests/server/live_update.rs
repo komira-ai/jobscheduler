@@ -90,25 +90,16 @@ impl Agent {
         runs.chain(ends).collect()
     }
 
-    /// One heartbeat to `server`, as the agent sends it: its session and its whole listing.
-    /// A start it is sent is counted and run (once: a start of a job it runs or ran is
-    /// counted only); an acknowledged result is let go of. A server that does not know the
-    /// session (409) has the agent say hello there at once and beat again, as the agent does.
+    /// One heartbeat to `server`, as the agent sends it: its session and its whole listing,
+    /// whichever server took its hello. A start it is sent is counted and run (once: a start
+    /// of a job it runs or ran is counted only); an acknowledged result is let go of. Every
+    /// server over the store serves the session, so any refusal (a 409 `unknown-host` or a
+    /// 403 `session-mismatch` that would send the agent to say hello again) fails the test.
     async fn beat(&mut self, server: &Harness) {
         let session = self.session.as_ref().expect("the agent said hello");
         let mut body = session.beat();
         body["jobs"] = json!(self.listing());
         let reply = post(server, "/v1/agent/heartbeat", Some(JOIN), &body).await;
-        if reply.status == 409 {
-            assert_eq!(
-                reply.json(),
-                json!({ "error": "unknown-host" }),
-                "{}",
-                self.host
-            );
-            self.hello(server).await;
-            return Box::pin(self.beat(server)).await;
-        }
         assert_eq!(reply.status, 200, "{}: {}", self.host, reply.body);
         let reply = reply.json();
         let (starts, stops) = commands(&reply);
@@ -155,14 +146,17 @@ async fn submit(server: &Harness, id: &str) {
 /// third, empty host says hello to the first; the first is then stopped as a termination
 /// signal stops it. From the signal on the first places nothing (a job submitted to it then
 /// stays queued through its tick, though the third host has room), each agent's next
-/// heartbeat reaches the second server, which does not know the session, and the agent says
-/// hello there once and keeps its runs; the host that had not been told its starts is told
-/// them by the second server, under the allocations the first booked. After the first has
-/// stopped the second server has placed the two queued jobs on the third host (whose row it
-/// reads, though the host said hello to the first), and every host ends its jobs. In the end
-/// every job succeeded, each was started under one allocation on one host, each agent said
-/// hello twice (once to each server), and no agent was told to stop a job. It catches a job lost or ended at the move (a first listing
-/// on the second server, the first server's last tick), a job placed twice or on two hosts,
+/// heartbeat reaches the second server, which serves the session the first took from the
+/// hosts' rows (no `unknown-host`, no second hello), and the agent keeps its runs; the host
+/// that had not been told its starts is told them by the second server, under the allocations
+/// the first booked. By the time the first has stopped (its last tick included), the second
+/// server has placed the two queued jobs on the third host (whose row it reads, though the host
+/// said hello to the first), and every host ends its jobs. In the end every
+/// job succeeded, each was started under one allocation on one host, each agent said hello
+/// once in all, and no agent was told to stop a job. It catches a beat the second server
+/// refuses because another server took the hello (the agent would say hello again and its
+/// first listing there would lose what it runs), a job lost or ended at the move (a first
+/// listing on the second server, the first server's last tick), a job placed twice or on two hosts,
 /// a start the second server does not send for a placement the first made, a job left queued
 /// or placed forever, and a draining server that goes on placing.
 #[test]
@@ -270,7 +264,7 @@ fn an_update_during_live_jobs_loses_doubles_and_strands_nothing() {
                         .push((&host.host, allocation));
                 }
             }
-            assert_eq!(host.hellos, 2, "{}: one hello to each server", host.host);
+            assert_eq!(host.hellos, 1, "{}: one hello in all", host.host);
             assert!(
                 host.running.is_empty() && host.ended.is_empty(),
                 "{}",
@@ -294,9 +288,9 @@ fn residue(run: &str) -> Value {
 }
 
 /// Asserts that an agent's clear of its taint ends the taint for good when the clear reaches
-/// the other server of an update: the host says hello to both servers, its taint is reported
-/// to the first, which stores it, and the heartbeat that reports it cleared reaches the second,
-/// which acknowledges the clear. The first is then stopped, and a third server started over the
+/// the other server of an update: the host says hello to the first server, its taint is
+/// reported to the first, which stores it, and the heartbeat of the same session that reports
+/// it cleared reaches the second, which acknowledges the clear. The first is then stopped, and a third server started over the
 /// store (a later restart) lists the host untainted after its hello and places a job on it. It
 /// catches a clear acknowledged by a server that does not hold the taint and left in the store,
 /// which every later start puts back on the host, so that it takes no job though its agent is
@@ -308,16 +302,15 @@ fn an_agent_clear_that_reaches_the_other_server_ends_the_taint() {
     Runtime::new().unwrap().block_on(async {
         let first = server(&url, "live_update_clear_first").await;
         let second = server(&url, "live_update_clear_second").await;
-        let at_first = job_agent(&first, &job_hello("burst-1")).await;
-        let at_second = job_agent(&second, &job_hello("burst-1")).await;
+        let session = job_agent(&first, &job_hello("burst-1")).await;
 
-        let mut tainted = at_first.beat();
+        let mut tainted = session.beat();
         tainted["taint"] = residue("r1");
         let reply = post(&first, "/v1/agent/heartbeat", Some(JOIN), &tainted).await;
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.json()["taint_ack"], true);
 
-        let mut cleared = at_second.beat();
+        let mut cleared = session.beat();
         cleared["taint_cleared"] = residue("r1");
         let reply = post(&second, "/v1/agent/heartbeat", Some(JOIN), &cleared).await;
         assert_eq!(reply.status, 200, "{}", reply.body);

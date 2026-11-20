@@ -32,6 +32,7 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod failures;
+mod guarded;
 mod host_rows;
 mod hosts;
 mod idempotency;
@@ -52,6 +53,7 @@ mod rows;
 mod scrub;
 mod silence;
 mod taints;
+mod unclean;
 mod whole;
 
 pub use claimed::*;
@@ -62,6 +64,7 @@ pub use cordons::*;
 pub use dispatch::*;
 pub use duties::*;
 pub use failures::*;
+pub use guarded::*;
 pub use host_rows::*;
 pub use hosts::*;
 pub use idempotency::*;
@@ -82,6 +85,7 @@ pub use rows::*;
 pub use scrub::*;
 pub use silence::*;
 pub use taints::*;
+pub use unclean::*;
 pub use whole::*;
 
 /// Runs every check of the suite against `backend`, one after another.
@@ -111,6 +115,13 @@ where
     live_on_lists_the_live_allocations_of_one_host(backend);
     two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
+    a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
+    a_conflict_on_another_row_is_not_the_node_moving(backend);
+    a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving(backend);
+    a_guarded_view_shares_the_write_count_of_its_store(backend);
+    a_guarded_claimed_placement_honours_the_node_guard(backend);
+    settle_node_writes_at_the_version_and_keeps_the_other_fields(backend);
+    the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
@@ -240,9 +251,8 @@ where
     drop_taints_keeps_other_jobs_rows_and_reads_again_after_a_lost_version(backend);
     a_pool_admits_new_hosts_up_to_its_cap_and_a_known_host_always(backend);
     an_admission_that_loses_the_pool_row_counts_again(backend);
+    pool_admits_judges_as_the_admission_does_and_writes_nothing(backend);
     two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one(backend);
-    a_refresh_writes_only_a_changed_state_or_a_stale_row(backend);
-    a_refresh_of_the_hearing_alone_leaves_the_reading_standing(backend);
     live_nodes_reusing_takes_only_rows_at_the_stored_version(backend);
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
@@ -297,6 +307,13 @@ macro_rules! job_store_tests {
             live_on_lists_the_live_allocations_of_one_host,
             two_servers_beating_one_host_at_once_apply_each_beat_once,
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
+            a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
+            a_conflict_on_another_row_is_not_the_node_moving,
+            a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving,
+            a_guarded_view_shares_the_write_count_of_its_store,
+            a_guarded_claimed_placement_honours_the_node_guard,
+            settle_node_writes_at_the_version_and_keeps_the_other_fields,
+            the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
             heard_at_is_the_store_clock_and_judges_live_nodes,
@@ -426,9 +443,8 @@ macro_rules! job_store_tests {
             drop_taints_keeps_other_jobs_rows_and_reads_again_after_a_lost_version,
             a_pool_admits_new_hosts_up_to_its_cap_and_a_known_host_always,
             an_admission_that_loses_the_pool_row_counts_again,
+            pool_admits_judges_as_the_admission_does_and_writes_nothing,
             two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one,
-            a_refresh_writes_only_a_changed_state_or_a_stale_row,
-            a_refresh_of_the_hearing_alone_leaves_the_reading_standing,
             live_nodes_reusing_takes_only_rows_at_the_stored_version,
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,

@@ -24,6 +24,7 @@ pub(super) fn hello_in(pool: &str) -> NodeHello {
         shape: None,
         labels: std::collections::BTreeMap::new(),
         phase: Phase::Serving,
+        agent_process: None,
     }
 }
 
@@ -235,4 +236,40 @@ pub fn two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one<B: Ba
             .count();
         assert_eq!(held, 3, "{name}: round {round}: the pool's rows");
     }
+}
+
+/// [`crate::JobStore::pool_admits`] answers what [`crate::JobStore::hello_node_in_pool`] would,
+/// writing nothing: a host new to the pool while the pool holds fewer than `cap` rows, not at
+/// the cap, and a host that has a row whatever the count; the rows of another pool are not
+/// counted, and a read that fails is the store's error. Catches a judge that admits a new host
+/// at the cap (the hello would then write a binding and be refused only at its row), one that
+/// refuses a known host's re-hello, and one that writes.
+pub fn pool_admits_judges_as_the_admission_does_and_writes_nothing<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "pool_admits_judges_as_the_admission_does_and_writes_nothing";
+    let rig = rig(backend);
+    let hello = hello_in("pool-a");
+    let admits =
+        |host_name: &str, cap: usize| rig.jobs.pool_admits(&host(host_name), "pool-a", cap);
+    assert_eq!(admits("host-1", 1), Ok(true), "{name}: an empty pool");
+    assert_eq!(admits("host-1", 0), Ok(false), "{name}: a cap of 0");
+    rig.jobs
+        .hello_node_in_pool(&host("host-1"), &hello, 1)
+        .expect("below the cap");
+    rig.jobs
+        .hello_node_in_pool(&host("elsewhere-1"), &hello_in("pool-b"), 9)
+        .expect("another pool");
+    let before = rig.snapshot();
+    assert_eq!(admits("host-2", 1), Ok(false), "{name}: at the cap");
+    assert_eq!(admits("host-2", 2), Ok(true), "{name}: one below the cap");
+    assert_eq!(
+        admits("host-1", 1),
+        Ok(true),
+        "{name}: a known host at the cap"
+    );
+    assert_eq!(rig.snapshot(), before, "{name}: a judgement wrote");
+    rig.store.fail_read_after(0);
+    assert!(admits("host-2", 2).is_err(), "{name}: a failed read");
 }

@@ -69,6 +69,7 @@ pub(crate) fn write_row(jobs: &ServerJobs, row: &Row<'_>, phase: Phase) {
         shape: row.booked.then(|| shape_with(&[("arch", "x86_64")])),
         labels: BTreeMap::from([("zone".to_owned(), "z1".to_owned())]),
         phase,
+        agent_process: None,
     };
     jobs.hello_node(&HostId::new(row.host).unwrap(), &hello)
         .unwrap();

@@ -26,7 +26,7 @@ impl BindingStore {
         };
         let skew = self.lock().skew;
         let mut found = BTreeMap::new();
-        for (id, bytes) in host_keys::scan(&**store, BINDINGS).map_err(io::Error::other)? {
+        for (id, bytes, _) in host_keys::scan(&**store, BINDINGS).map_err(io::Error::other)? {
             let named = format!("{BINDINGS}{id}");
             let read = host_keys::decode::<Stored>(&named, &bytes)
                 .and_then(|stored| stored.into_binding(id));

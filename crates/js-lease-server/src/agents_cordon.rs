@@ -24,6 +24,12 @@
 //! while this server's registry keeps the cordon until its next tick (a repeat of the lift says
 //! it lifted nothing, and the tick's save writes the binding). A request that lost a race with
 //! another server's change of the same cordon is answered as unsaved too, and asked again.
+//!
+//! The binding's write is conditional on the version of the host's binding row, read first
+//! ([`Agents::keep`]), so a cordon never overwrites a binding another server wrote (a taint it
+//! stored is taken into the registry first); a write that loses its version is answered as unsaved
+//! too. A host the registry does not hold is taken from the rows first ([`Agents::take_from_rows`]),
+//! so a host another server serves is served; a host no row knows is `NotHeld`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -64,6 +70,25 @@ impl Agents {
             until: Duration::from_millis(until.millis().saturating_sub(own.now.millis())),
             holder: own.cordon_holder,
         }))
+    }
+
+    /// Takes `host` from the store's rows into the registry when the registry does not hold it
+    /// and the server holds the job tables: the node row and the binding of a host another
+    /// server serves ([`crate::agent_api::rows::refresh`], the one the hello reads them with),
+    /// so that a request about the host is decided on what the store holds, and a host held by
+    /// another server is not `404`. A host no row and no binding knows stays unheld, and a
+    /// server without the job tables decides on its registry alone. The caller holds
+    /// [`Agents::host_writes`].
+    ///
+    /// # Errors
+    /// [`CordonFault::Unsaved`] when the rows could not be read: nothing is decided on less
+    /// than the store holds.
+    pub(crate) async fn take_from_rows(self: &Arc<Self>, host: &HostId) -> Result<(), CordonFault> {
+        if self.jobs.is_none() || self.registry.own_host(host).is_some() {
+            return Ok(());
+        }
+        let read = crate::agent_api::rows::refresh(self, host).await;
+        read.map_err(CordonFault::unsaved)
     }
 
     /// Decides the cordon request of `by` for `lease` on `host`: in the job store when the
@@ -141,8 +166,9 @@ impl Agents {
     ///
     /// # Errors
     ///
-    /// [`CordonFault::NotHeld`] for a host the registry does not hold;
-    /// [`CordonFault::Unsaved`] when the job store's write or the binding's commit failed, or
+    /// [`CordonFault::NotHeld`] for a host the registry does not hold and the rows do not know
+    /// ([`Agents::take_from_rows`]); [`CordonFault::Unsaved`] when the rows could not be read,
+    /// the job store's write or the binding's commit failed, or
     /// in file mode when the save after it did (the module docs say what holds then).
     pub(crate) async fn cordon(
         self: &Arc<Self>,
@@ -151,6 +177,7 @@ impl Agents {
         by: Asker,
     ) -> Result<Cordoned, CordonFault> {
         let gate = self.host_writes.lock().await;
+        self.take_from_rows(host).await?;
         let (this, id) = (Arc::clone(self), host.clone());
         let decided = blocking(move || this.decide_cordon(&id, lease, &by)).await?;
         if !decided.held_by_other {
@@ -179,6 +206,7 @@ impl Agents {
         holder: Option<CordonHolder>,
     ) -> Result<Uncordoned, CordonFault> {
         let gate = self.host_writes.lock().await;
+        self.take_from_rows(host).await?;
         let (this, id) = (Arc::clone(self), host.clone());
         let decided = blocking(move || this.decide_uncordon(&id, holder.as_ref())).await;
         let (done, after) = decided?;

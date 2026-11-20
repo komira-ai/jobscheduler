@@ -1,5 +1,4 @@
 //! The reads and the upkeep of the presence table that a placement over rows relies on:
-//! [`crate::JobStore::refresh_node`] (a beat that writes only when it changes the row),
 //! [`crate::JobStore::nodes`] (every readable row) and
 //! [`crate::JobStore::forget_silent_nodes`] (the rows of hosts that went silent and hold
 //! nothing).
@@ -10,13 +9,12 @@ use js_state::conformance::Backend;
 use js_state::{Store, StoreError};
 use js_types::HostId;
 
-use super::nodes::applied_row;
 use super::pools::hello_in;
 use super::{Rig, cancelled, host, rig, share};
 use crate::codec::{FORMAT, LATER_FORMAT, encode_cordon, encode_taint};
 use crate::interfere::INJECTED;
 use crate::record::ScaleMark;
-use crate::{Beat, EndReason, HostTaint, JobStoreError, NodeState};
+use crate::{EndReason, HostTaint, JobStoreError};
 
 /// `secs` seconds.
 fn secs(secs: u64) -> Duration {
@@ -33,145 +31,6 @@ fn hello_of<S: Store>(rig: &Rig<S>, name: &str) {
 /// Whether the row of `name` is there.
 fn has_row<S: Store>(rig: &Rig<S>, name: &str) -> bool {
     rig.jobs.read_node(&host(name)).expect("reads").is_some()
-}
-
-/// A beat that writes the state it is given only when it changes the row: with no row it is
-/// "no session" and writes nothing; with the row's state and a row heard less than `every` ago
-/// it writes nothing and is `None`; with another state, or a row heard `every` ago or longer,
-/// it writes (the row's time moves to the store's now); with another epoch than the row's it is
-/// the answer a beat of that epoch gets; a row that cannot be read and a clock that cannot be
-/// read are errors. Catches a beat written on every call (a row rewritten once per beat), one
-/// skipped when the state changed or the row went stale, and one that judges an epoch it should
-/// pass to the row's check.
-pub fn a_refresh_writes_only_a_changed_state_or_a_stale_row<B: Backend>(backend: &B)
-where
-    B::Store: 'static,
-{
-    let name = "a_refresh_writes_only_a_changed_state_or_a_stale_row";
-    let rig = rig(backend);
-    let a = host("host-a");
-    let every = secs(10);
-    let standing = NodeState {
-        phase: js_agent_wire::Phase::Serving,
-        load: None,
-        first_listing_pending: true,
-        last_listing_clean: true,
-        missing_in_a_row: std::collections::BTreeMap::new(),
-    };
-    let before = rig.snapshot().0;
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 1, &standing, every),
-        Ok(Some(Beat::NoSession(None))),
-        "{name}: no row"
-    );
-    assert_eq!(rig.snapshot().0, before, "{name}: a beat with no row wrote");
-
-    let hello = rig
-        .jobs
-        .hello_node(&a, &hello_in("pool-a"))
-        .expect("a hello");
-    assert_eq!(hello.record.state, standing, "{name}: the state of a hello");
-    let before = rig.snapshot();
-    rig.clock.advance(secs(9));
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 1, &standing, every),
-        Ok(None),
-        "{name}: an unchanged state within the interval"
-    );
-    assert_eq!(
-        rig.snapshot().1,
-        before.1,
-        "{name}: an unchanged state made a commit"
-    );
-    assert_eq!(
-        rig.snapshot().0,
-        before.0,
-        "{name}: an unchanged state wrote"
-    );
-
-    rig.clock.advance(secs(1));
-    let stale = applied_row(
-        rig.jobs
-            .refresh_node(&a, 1, &standing, every)
-            .expect("reads")
-            .expect("a row heard `every` ago is refreshed"),
-    );
-    assert_eq!(
-        (
-            stale.record.state.clone(),
-            stale.record.heard_at > hello.record.heard_at
-        ),
-        (standing.clone(), true),
-        "{name}: a stale row keeps its state and moves its time"
-    );
-    assert_eq!(
-        rig.jobs.read_node(&a),
-        Ok(Some(stale.clone())),
-        "{name}: the row answered is the row stored"
-    );
-
-    let changed = NodeState {
-        first_listing_pending: false,
-        ..standing.clone()
-    };
-    let moved = applied_row(
-        rig.jobs
-            .refresh_node(&a, 1, &changed, every)
-            .expect("reads")
-            .expect("a changed state is written"),
-    );
-    assert_eq!(
-        (moved.record.state.clone(), moved.version > stale.version),
-        (changed.clone(), true),
-        "{name}: a changed state"
-    );
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 1, &changed, every),
-        Ok(None),
-        "{name}: the changed state, now standing"
-    );
-
-    let before = rig.snapshot().0;
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 2, &changed, every),
-        Ok(Some(Beat::NoSession(Some(moved.clone())))),
-        "{name}: an epoch the row has not reached"
-    );
-    let newer = rig
-        .jobs
-        .hello_node(&a, &hello_in("pool-a"))
-        .expect("a second hello");
-    assert_eq!(newer.record.epoch, 2, "{name}: the second epoch");
-    let before_stale = rig.snapshot().0;
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 1, &newer.record.state, every),
-        Ok(Some(Beat::StaleEpoch(newer))),
-        "{name}: an epoch the row has left, with the state standing"
-    );
-    assert_eq!(
-        rig.snapshot().0,
-        before_stale,
-        "{name}: a refused beat wrote"
-    );
-    assert_ne!(before, before_stale, "{name}: the second hello wrote");
-
-    rig.put_raw("node/host-later", vec![LATER_FORMAT]);
-    assert_eq!(
-        rig.jobs
-            .refresh_node(&host("host-later"), 1, &standing, every),
-        Err(JobStoreError::UnknownRow {
-            key: "node/host-later".to_owned()
-        }),
-        "{name}: a row this build cannot read"
-    );
-    rig.store.fail_clock(true);
-    assert_eq!(
-        rig.jobs.refresh_node(&a, 2, &standing, every),
-        Err(JobStoreError::Store(StoreError::Failed(
-            INJECTED.to_owned()
-        ))),
-        "{name}: a clock that cannot be read"
-    );
 }
 
 /// [`crate::JobStore::nodes`] lists every row it can read in host order, those heard lately and
@@ -400,103 +259,6 @@ pub fn forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_bind
         ))),
         "{name}: a clock that cannot be read"
     );
-}
-
-/// Asserts what a refresh that only moves when a host was heard does to
-/// [`crate::JobStore::written`]: committed alone, directly on the head, the reading stands as it
-/// was before it, read once or twice; the job store's next write (a refresh that changes the
-/// state, or one whose commit fails) moves it; and on a store that tells its head, another
-/// server's commit moves it, both after such a refresh and when it lands just before the
-/// refresh commits. Catches a refresh
-/// that makes every cache of the tables read them again (each beat's pass would then read every
-/// table once per host's hearing), and a reading that hides a commit that changed a row.
-pub fn a_refresh_of_the_hearing_alone_leaves_the_reading_standing<B: Backend>(backend: &B)
-where
-    B::Store: 'static,
-{
-    let name = "a_refresh_of_the_hearing_alone_leaves_the_reading_standing";
-    let rig = rig(backend);
-    let tells_head = rig.store.head().expect("the head reads").is_some();
-    let every = secs(10);
-    let a = host("host-a");
-    hello_of(&rig, "host-a");
-    let read = rig.jobs.read_node(&a).expect("reads").expect("a row");
-    let standing = read.record.state.clone();
-    rig.clock.advance(every);
-    let before = rig.jobs.written().expect("reads");
-    let heard = applied_row(
-        rig.jobs
-            .refresh_node(&a, 1, &standing, every)
-            .expect("reads")
-            .expect("a row heard `every` ago is refreshed"),
-    );
-    assert!(
-        heard.record.heard_at > read.record.heard_at,
-        "{name}: heard"
-    );
-    assert_eq!(rig.jobs.written(), Ok(before), "{name}: the hearing alone");
-    assert_eq!(rig.jobs.written(), Ok(before), "{name}: read again");
-
-    let changed = NodeState {
-        first_listing_pending: !standing.first_listing_pending,
-        ..standing.clone()
-    };
-    rig.jobs
-        .refresh_node(&a, 1, &changed, every)
-        .expect("reads")
-        .expect("a changed state is written");
-    let moved = rig.jobs.written().expect("reads");
-    assert_ne!(moved, before, "{name}: a changed state");
-
-    rig.clock.advance(every);
-    rig.jobs
-        .refresh_node(&a, 1, &changed, every)
-        .expect("reads")
-        .expect("refreshed");
-    assert_eq!(
-        rig.jobs.written(),
-        Ok(moved),
-        "{name}: the next hearing alone"
-    );
-
-    // Another server's commit is seen where the store tells its head, and only there (a store
-    // that does not is one only this job store writes).
-    rig.other()
-        .hello_node(&host("host-b"), &hello_in("pool-a"))
-        .expect("another server's hello");
-    let other = rig.jobs.written().expect("reads");
-    assert_eq!(
-        other != moved,
-        tells_head,
-        "{name}: another server's commit after a hearing"
-    );
-
-    rig.clock.advance(every);
-    let second = rig.other();
-    rig.store.before_next(move || {
-        second
-            .hello_node(&host("host-c"), &hello_in("pool-a"))
-            .expect("another server's hello");
-    });
-    rig.jobs
-        .refresh_node(&a, 1, &changed, every)
-        .expect("reads")
-        .expect("refreshed");
-    let after = rig.jobs.written().expect("reads");
-    assert_eq!(
-        after != other,
-        tells_head,
-        "{name}: another server's commit just before a hearing"
-    );
-
-    // A refresh whose commit fails is an error, and its write is counted as any other.
-    rig.clock.advance(every);
-    rig.store.fail_after(0);
-    assert!(
-        rig.jobs.refresh_node(&a, 1, &changed, every).is_err(),
-        "{name}: a failed commit"
-    );
-    assert_ne!(rig.jobs.written(), Ok(after), "{name}: the failed write");
 }
 
 /// Asserts that [`crate::JobStore::live_nodes_reusing`] takes a row from the rows it is given

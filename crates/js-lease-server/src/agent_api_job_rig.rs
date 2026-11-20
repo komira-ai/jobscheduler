@@ -139,7 +139,11 @@ pub(crate) struct Rig {
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
     pub(crate) who: Credential,
+    /// The epoch and session each host was given.
     pub(crate) sessions: BTreeMap<String, (u64, String)>,
+    /// The sequence of the rig's last heartbeat: each one the rig sends carries the next, unless
+    /// the rig plays an agent that sends none ([`Rig::unsequenced`]).
+    seq: Option<std::sync::atomic::AtomicU64>,
     /// The GPUs of each host the rig's hosts announce.
     gpus: u64,
     _dir: TestDir,
@@ -472,6 +476,7 @@ pub(crate) fn rig_on(
         store,
         who,
         sessions: BTreeMap::new(),
+        seq: Some(std::sync::atomic::AtomicU64::new(0)),
         gpus,
         _dir: dir,
     }
@@ -560,12 +565,6 @@ impl Rig {
             .insert(host.to_owned(), (welcome.epoch, welcome.session));
     }
 
-    /// Notes the session `welcome` gave `host`, which [`Rig::beat`] then beats in.
-    pub(crate) fn note_session(&mut self, host: &str, welcome: &Welcome) {
-        let session = (welcome.epoch, welcome.session.clone());
-        self.sessions.insert(host.to_owned(), session);
-    }
-
     /// Registers `host` past the route, as [`Rig::register`] does, as an agent that reports
     /// the `per-job` and `log-upload` capabilities: a host whose hello the registry holds and
     /// whose hello the log side never saw.
@@ -608,6 +607,12 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
+    /// This rig playing an agent that sends no beat sequence (an agent from before the field).
+    pub(crate) fn unsequenced(mut self) -> Rig {
+        self.seq = None;
+        self
+    }
+
     /// This rig's server holding a heartbeat's reply with nothing to send for `bound` at most,
     /// whatever the beat lists (a beat that lists a job `starting` is held for less only when
     /// the test says so with [`Rig::holding_starting_for`]).
@@ -639,7 +644,9 @@ impl Rig {
             "phase": "serving",
         }))
         .unwrap();
-        let welcome = self.agents.registry.hello(&hello, &self.who).unwrap();
+        let mut welcome = self.agents.registry.hello(&hello, &self.who).unwrap();
+        let host_id = HostId::new(host).unwrap();
+        super::rows::record_hello(&self.agents, &host_id, &hello, &mut welcome).unwrap();
         self.sessions
             .insert(host.to_owned(), (welcome.epoch, welcome.session));
     }
@@ -656,7 +663,10 @@ impl Rig {
         taint: Option<Taint>,
     ) -> Result<HeartbeatReply, Refused> {
         let (epoch, session) = self.sessions[&agent.host].clone();
+        let seq = self.seq.as_ref();
+        let seq = seq.map(|seq| seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
         let sent = Heartbeat {
+            seq,
             host_id: agent.host.clone(),
             epoch,
             session,
