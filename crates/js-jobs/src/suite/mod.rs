@@ -107,6 +107,7 @@ where
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
     a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
     a_conflict_on_another_row_is_not_the_node_moving(backend);
+    a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving(backend);
     a_guarded_view_shares_the_write_count_of_its_store(backend);
     a_guarded_claimed_placement_honours_the_node_guard(backend);
     settle_node_writes_at_the_version_and_keeps_the_other_fields(backend);
@@ -272,6 +273,7 @@ macro_rules! job_store_tests {
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
             a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
             a_conflict_on_another_row_is_not_the_node_moving,
+            a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving,
             a_guarded_view_shares_the_write_count_of_its_store,
             a_guarded_claimed_placement_honours_the_node_guard,
             settle_node_writes_at_the_version_and_keeps_the_other_fields,

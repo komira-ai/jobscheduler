@@ -129,6 +129,36 @@ where
     );
 }
 
+/// A guarded view whose write conflicts on a job row, when a newer beat moved the node row in
+/// the same commit that recorded that job (two servers committed one listing step of a host
+/// at once), is [`JobStoreError::NodeMoved`]: the store names one key of the conflict, which
+/// may be the job's, and the view reads the node row again to tell. Catches a beat overtaken
+/// by a newer one of the same listing answered as a failed write (a 500 and a retry) instead of
+/// from the rows.
+pub fn a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving";
+    let rig = rig(backend);
+    let node = host("host-g");
+    let said = rig.jobs.hello_node(&node, &hello()).expect("a hello");
+    let guarded = rig.jobs.guarded(&node, said.version);
+    let other = rig.other();
+    let (beaten, epoch) = (node.clone(), said.record.epoch);
+    rig.store.before_next(move || {
+        other
+            .beat_node(&beaten, epoch, Some(2), |row| row.state.clone())
+            .expect("the newer beat");
+        other.insert_queued(new_job("g-race")).expect("the other's");
+    });
+    assert_eq!(
+        guarded.insert_queued(new_job("g-race")).map(drop),
+        Err(JobStoreError::NodeMoved { host: node }),
+        "{name}: a write overtaken by a newer beat was not answered as the row moving"
+    );
+}
+
 /// A guarded view shares its store's write count: a write through either moves the one count
 /// both read ([`crate::JobStore::written`]), a refused guarded write counts too, and the two
 /// readings carry one instance number. Catches a view that counts its writes apart (a reader

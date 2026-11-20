@@ -3,7 +3,7 @@
 //! a newer beat or hello of the host has been applied (design `multi-instance.md`, section 0
 //! and G15).
 
-use js_state::{Cond, Conflict, Txn, Version};
+use js_state::{Cond, Conflict, Store, Txn, Version};
 use js_types::HostId;
 
 use super::JobStore;
@@ -45,7 +45,7 @@ impl<S, I: Clone> JobStore<S, I> {
     }
 }
 
-impl<S, I> JobStore<S, I> {
+impl<S: Store, I> JobStore<S, I> {
     /// `txn` with the check of the guard's node row, or `txn` itself for a job store that is
     /// not guarded.
     pub(super) fn guard_txn(&self, txn: Txn) -> Txn {
@@ -55,16 +55,31 @@ impl<S, I> JobStore<S, I> {
         }
     }
 
-    /// `Ok(conflict)` for a conflict that is not on the guard's row, for the caller to answer;
-    /// [`JobStoreError::NodeMoved`] for one that is.
+    /// `Ok(conflict)` for a conflict the caller answers; [`JobStoreError::NodeMoved`] when the
+    /// guard's row has moved. A transaction that conflicts on several keys reports one of them,
+    /// which need not be the guard's: a newer beat that committed the same job change as this
+    /// one moves both that job's row and the node row. So a guarded view that loses any write
+    /// reads the node row again, and a row no longer at the guard's version (or gone) is the
+    /// move, whatever key the store named.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NodeMoved`]; [`JobStoreError::Store`] when the node row cannot be read.
     pub(super) fn refuse_moved(&self, conflict: Conflict) -> Result<Conflict, JobStoreError> {
-        match &self.guard {
-            Some(guard) if conflict.key == keys::node(&guard.host) => {
-                Err(JobStoreError::NodeMoved {
-                    host: guard.host.clone(),
-                })
-            }
-            _ => Ok(conflict),
+        let Some(guard) = &self.guard else {
+            return Ok(conflict);
+        };
+        let key = keys::node(&guard.host);
+        let on_guard = conflict.key == key;
+        let moved = on_guard
+            || self
+                .store
+                .get(&key)?
+                .is_none_or(|row| row.version != guard.at);
+        match moved {
+            true => Err(JobStoreError::NodeMoved {
+                host: guard.host.clone(),
+            }),
+            false => Ok(conflict),
         }
     }
 }
