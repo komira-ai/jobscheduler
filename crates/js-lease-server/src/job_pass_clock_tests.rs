@@ -230,14 +230,19 @@ async fn a_hello_restarts_a_whole_host_prepare_on_the_store_clock() {
     let refused = rig.beat(&agent).await.unwrap_err();
     let body = serde_json::to_value(&refused).unwrap();
     let status = axum::response::IntoResponse::into_response(refused).status();
+    // The beat's own row write is stamped from the store's clock and is the first to need it:
+    // 503, before the listing is read, and the deadline stays where it was.
     assert_eq!(
         (status.as_u16(), &body["error"]),
-        (500, &serde_json::json!("state-write-failed"))
+        (503, &serde_json::json!("state-write-failed"))
     );
     assert_eq!(rig.allocation(&id).prepare_deadline, placed);
 
     rig.store.fail_clock(false);
-    let hello_at = js_state::Store::now(&*rig.store).unwrap();
+    // The deadline is read after the beat's own row write moved the store's clock on.
+    let hello_at = js_state::Store::now(&*rig.store)
+        .unwrap()
+        .saturating_add(Duration::from_millis(2));
     rig.beat(&agent).await.unwrap();
     let timeout = Duration::from_millis(rig.agents.whole_rules().prepare_timeout_ms);
     assert_eq!(
@@ -255,7 +260,9 @@ async fn a_hello_restarts_a_whole_host_prepare_on_the_store_clock() {
     let commits = rig.commits();
     let refused = rig.beat(&agent).await.unwrap_err();
     let status = axum::response::IntoResponse::into_response(refused).status();
-    assert_eq!(status.as_u16(), 500);
+    // The beat's row write needs the clock first, so the refusal is its 503 and nothing at all
+    // is written.
+    assert_eq!(status.as_u16(), 503);
     assert_eq!(
         rig.commits(),
         commits,

@@ -242,7 +242,7 @@ async fn the_listener_stops_with_the_server() {
 /// room and is queued (201) and, while the first runs, a heartbeat carries no command and
 /// the second still reads `JOB_STATE_QUEUED`;
 /// once the agent reports the first exited the result is accepted, and after a heartbeat
-/// that no longer lists it and a tick the next heartbeat reply carries the second job's start, while the first reads
+/// that no longer lists it (two, from an agent that sends no beat sequence) and a tick the next heartbeat reply carries the second job's start, while the first reads
 /// `JOB_STATE_SUCCEEDED`. A job that wants a GPU is refused 422 `no-capable-host`, and a whole-host job cancelled
 /// while queued reads `JOB_STATE_CANCELLED`.
 /// It catches a host given to a second job while the first still runs, and one that stays
@@ -282,9 +282,12 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
         json!([{ "job_id": "held-1", "ack": "ACCEPTED" }]),
         "{ended}"
     );
-    // The host is free once a heartbeat no longer lists the first job.
-    let freed = beat_with(&h, &agent, &[]).await;
-    assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
+    // This agent sends no beat sequence, so the host is free once two applied heartbeats in a
+    // row no longer list the first job: the first omission only counts.
+    for _ in 0..2 {
+        let freed = beat_with(&h, &agent, &[]).await;
+        assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
+    }
     h.ticks.step().await;
     let (started, _) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-2");

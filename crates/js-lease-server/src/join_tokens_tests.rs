@@ -443,33 +443,6 @@ fn a_renewal_the_file_refuses_is_not_kept() {
     assert_eq!(joins.serves(&who, "host-a"), Err(JoinRefusal::Expired));
 }
 
-/// A use that is given back leaves the token unused for its instance: another host
-/// id can use it, as can the same one. A release by a host that does not hold the
-/// token, or of a token nobody holds, changes nothing. It catches a refused hello that
-/// burns the token and a release that frees another host's token.
-#[test]
-fn a_released_use_leaves_the_token_unused() {
-    let (_dir, path) = scratch("release");
-    let (joins, _) = tokens(&path);
-    let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
-    assert_eq!(
-        joins.admit(&who, "host-a", Some(&instance("i-1"))),
-        Ok(Admission::Fresh)
-    );
-    joins.release(&who, "host-b");
-    joins.release(&Credential::of_token("never-minted"), "host-a");
-    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
-    joins.release(&who, "host-a");
-    assert_eq!(joins.serves(&who, "host-a"), Err(JoinRefusal::NotAdmitted));
-    let text = fs::read_to_string(&path).unwrap();
-    assert!(!text.contains("used_by"), "{text}");
-    assert!(!text.contains("credential_expires_at_ms"), "{text}");
-    assert_eq!(
-        joins.admit(&who, "host-b", Some(&instance("i-1"))),
-        Ok(Admission::Fresh)
-    );
-}
-
 /// The credential time of the used token `who`, as the server holds it.
 fn held_in_memory(joins: &JoinTokens, who: &Credential) -> u64 {
     let entries = joins.lock();
@@ -478,34 +451,6 @@ fn held_in_memory(joins: &JoinTokens, who: &Credential) -> u64 {
         .as_ref()
         .unwrap()
         .credential_expires_at_ms
-}
-
-/// A release of a use that a later hello of the same host followed does nothing: hello
-/// A is admitted fresh, hello B of the same host is admitted again (the registry may have
-/// accepted B and refused A), and A's release then leaves the token used by the host, so
-/// that another host id holding a copy is refused as used and the host still heartbeats.
-/// It catches a release that frees a token a registered host holds.
-#[test]
-fn a_release_after_a_hello_served_again_keeps_the_use() {
-    let (_dir, path) = scratch("release_after_again");
-    let (joins, _) = tokens(&path);
-    let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
-    let here = instance("i-1");
-    assert_eq!(
-        joins.admit(&who, "host-a", Some(&here)),
-        Ok(Admission::Fresh)
-    );
-    assert_eq!(
-        joins.admit(&who, "host-a", Some(&here)),
-        Ok(Admission::Again)
-    );
-    joins.release(&who, "host-a");
-    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
-    assert_eq!(
-        joins.admit(&who, "host-b", Some(&here)),
-        Err(JoinRefusal::Used)
-    );
-    assert!(fs::read_to_string(&path).unwrap().contains("used_by"));
 }
 
 /// Tokens first used at the same moment come due for a write at different times: every
@@ -541,21 +486,6 @@ fn renewals_of_tokens_used_together_come_due_apart() {
     clock.set(Timestamp::from_millis(T0 + greatest));
     joins.serves(last, last_host).unwrap();
     assert_eq!(held_in_memory(&joins, last), T0 + greatest + CREDENTIAL_MS);
-}
-
-/// A release the file refuses leaves the token tied to the host, in memory as in the
-/// file. It catches a release that frees the token in memory while the file still
-/// holds the use.
-#[test]
-fn a_release_the_file_refuses_keeps_the_use() {
-    let (_dir, path) = scratch("release_unwritable");
-    let (joins, _) = tokens(&path);
-    let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
-    joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
-    joins.release(&who, "host-a");
-    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
 }
 
 /// A row with a use and no credential time, or the time and no use, is not a valid

@@ -330,8 +330,8 @@ async fn a_stuck_start_ends_start_timeout_and_frees_after_confirmation() {
     );
     assert_eq!(
         rig.commits(),
-        before + 2,
-        "the free, then the next job's placement"
+        before + 4,
+        "the free, then the next job's placement, and the beat's two row writes"
     );
     assert_eq!(rig.job(&next).state, JobState::Placed);
 
@@ -430,8 +430,10 @@ async fn a_lost_host_shows_silence_and_ends_nothing() {
     let mut agent = FakeAgent::new("host-a");
     let running = started(&rig, &mut agent, "job-run", true).await;
     let starting = started(&rig, &mut agent, "job-start", false).await;
-    agent_beat(&rig, &mut agent).await;
+    // The silence runs from the instant the beat's row write stamped, which is before the
+    // writes and clock reads after it moved the store clock on.
     let heard = now_ms(&rig);
+    agent_beat(&rig, &mut agent).await;
     for id in [&running, &starting] {
         assert_eq!(get_job(&api, id).await.unwrap().host_silent_since_ms, None);
     }

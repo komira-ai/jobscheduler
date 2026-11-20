@@ -33,13 +33,13 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 - `Hello`: `protocol` (a `ProtocolRange` of majors), `host_id`, `pool`, `agent_version`, `instance`, `shape` (`WireShape`),
   `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`, `identity` (the cloud's
   signed identity of the machine, `{"document", "signature"}` as its metadata service served them, `js_elastic::SignedIdentity`;
-  sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet).
+  sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet), and `agent_process` (the id of the agent process: 32 lowercase hex characters the agent draws once per process and sends in every hello of it, in the id grammar; a server that holds the host live in a session whose hello named the same process takes the hello at once instead of refusing `host-live`; absent from an older agent, ignored by an older server).
 - `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
   cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `exclusive_ready`,
   `exclusive_refused`, `load` (`NodeLoad`, telemetry: a malformed one reads as absent), `disk_gib`, and the per-job lists `jobs`
-  (`HeldJob`, each with its `JobResult`) and `retired_jobs`.
+  (`HeldJob`, each with its `JobResult`) and `retired_jobs`, and `seq` (the beat's sequence in its session: raised for every heartbeat the agent sends, a retry included, starting at 1 after each welcome; a server applies a beat only when its `seq` is newer than the newest it applied; absent from an older agent, ignored by an older server).
 - `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `exclusive`, and the per-job lists `job_acks`
   (`JobResultAck`) and `retired_acks`.
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job

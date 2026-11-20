@@ -58,6 +58,7 @@ mod runtime_conformance;
 mod runtime_suite;
 mod server;
 mod session;
+mod session_seq;
 mod skew;
 mod support;
 #[cfg(target_os = "linux")]

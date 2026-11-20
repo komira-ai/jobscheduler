@@ -10,13 +10,16 @@
 //! What the previous release's hello says that this one's does not:
 //!
 //! - `agent_version` is `0.1.0`;
+//! - it names no `agent_process` in its hello and no `seq` in its heartbeats (the fields
+//!   came after that release), so a server serves it as an agent that does not number its
+//!   beats;
 //! - `accepts_host_credential` is `true` (it matters only to a host that joins with a
 //!   one-time token, and the cell's hosts join with the pool's shared one);
 //! - the capabilities `start-fence`, `runtime`, `exec`, `os`, `egress` and `arch` beside
 //!   the ones the shape and the per-job messages give, a capability the shape already
 //!   names keeping the shape's value.
 
-use js_agent_wire::{Hello, ProtocolRange, START_FENCE_CAPABILITY};
+use js_agent_wire::{Heartbeat, Hello, ProtocolRange, START_FENCE_CAPABILITY};
 
 /// The agent version of the previous release's recorded hello.
 const PREVIOUS_VERSION: &str = "0.1.0";
@@ -58,6 +61,7 @@ impl AgentProfile {
             Self::PreviousRelease => {
                 PREVIOUS_VERSION.clone_into(&mut hello.agent_version);
                 hello.accepts_host_credential = true;
+                hello.agent_process = None;
                 let named = &mut hello.capabilities;
                 for (key, value) in PREVIOUS_CAPABILITIES {
                     named
@@ -68,5 +72,14 @@ impl AgentProfile {
             Self::ProtocolAhead => hello.protocol = AHEAD,
         }
         hello
+    }
+
+    /// `beat` as an agent of this profile sends it: the previous release does not number its
+    /// heartbeats.
+    pub(super) fn shape_beat(self, mut beat: Heartbeat) -> Heartbeat {
+        if self == Self::PreviousRelease {
+            beat.seq = None;
+        }
+        beat
     }
 }

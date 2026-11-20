@@ -121,6 +121,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 claim: hello.claim.clone(),
                 shape: hello.shape.clone(),
                 labels: hello.labels.clone(),
+                agent_process: hello.agent_process.clone(),
                 state: NodeState {
                     phase: hello.phase,
                     load: None,
@@ -184,6 +185,29 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
+    /// Writes the row `row` again with its state replaced by `state`, at the version `row` was
+    /// read or written at: the way a beat, after the writes of its listing (made through
+    /// [`JobStore::guarded`] at that version), records in its own write that the first listing
+    /// is applied, whether the listing was clean, and the missing counts. The epoch, session,
+    /// the hello's fields (the agent process included), the last beat, `heard_at` and the
+    /// fields a later build wrote are kept. Returns the row as written, with its new version,
+    /// or `None` when the row is not at that version any more (another beat or hello was
+    /// applied, or the row was forgotten) and nothing was written.
+    ///
+    /// # Errors
+    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`]. Nothing is written.
+    pub fn settle_node(
+        &self,
+        row: &NodeRow,
+        state: NodeState,
+    ) -> Result<Option<NodeRow>, JobStoreError> {
+        let record = NodeRecord {
+            state,
+            ..row.record.clone()
+        };
+        self.put_node(record, Some(row))
+    }
+
     /// Every host's row heard within `grace` by the store's clock (its `heard_at` at most
     /// `grace` before the store's time now), with its version, in host order. A row this
     /// build cannot read (a later build's, one that does not parse, or one under another
@@ -214,7 +238,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::Store`].
     pub fn forget_node(&self, host: &HostId, at: Version) -> Result<bool, JobStoreError> {
         let txn = Txn::new().delete(keys::node(host), Cond::Version(at));
-        Ok(self.write(txn)?.is_ok())
+        let deleted = self.write_node(txn)?.is_ok();
+        if deleted {
+            self.note_node(host, None);
+        }
+        Ok(deleted)
     }
 
     /// Writes `record` as its host's row at the absence or version of `read`: the row as
@@ -230,9 +258,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             node_cond(read),
         );
         // The transaction writes the one row, so its revision is the row's new version.
-        Ok(self.write(txn)?.ok().map(|commit| NodeRow {
-            record,
-            version: Version(commit.revision.0),
+        Ok(self.write_node(txn)?.ok().map(|commit| {
+            let clean = record.state.last_listing_clean;
+            self.note_node(&record.host, Some(clean));
+            NodeRow {
+                record,
+                version: Version(commit.revision.0),
+            }
         }))
     }
 }
