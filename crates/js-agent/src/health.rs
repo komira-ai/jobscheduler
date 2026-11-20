@@ -16,7 +16,9 @@
 //!    lost the session and the agent has not said hello again;
 //! 2. the lease server holds a taint for the host (the `host_taint` of the last reply it
 //!    accepted, with its reason, check and run id);
-//! 3. the agent holds a taint (the `tainted` of the last heartbeat it sent).
+//! 3. the agent holds a taint (the `tainted` of the last heartbeat it sent), with what changed
+//!    in one line when the check that found it said so (`the agent holds a taint on this host:
+//!    <detail>`; the detail's control characters are spaces, so the reason stays one line).
 //!
 //! The session feeds it ([`Session::with_health`](crate::Session::with_health)) and nothing
 //! else does. It never acts on the verdict: the taints are shown, not obeyed, so a verdict
@@ -95,6 +97,8 @@ struct State {
     admitted: bool,
     /// The last heartbeat sent said the agent holds a taint.
     own: bool,
+    /// What changed, in one line, as the agent's taint says it; none when it says none.
+    own_detail: Option<String>,
     /// The taint the last accepted reply said the lease server holds.
     server: Option<Taint>,
     /// The verdict the last line was printed for.
@@ -110,7 +114,7 @@ impl State {
         let reasons = [
             (!self.admitted).then_some(NO_SESSION.to_owned()),
             self.server.as_ref().map(server_reason),
-            self.own.then_some(OWN_TAINT.to_owned()),
+            self.own.then(|| own_reason(self.own_detail.as_deref())),
         ];
         reasons
             .into_iter()
@@ -127,6 +131,22 @@ impl State {
             self.logged = Some(now);
         }
     }
+}
+
+/// The reason the agent's own taint gives: the fixed words, and `detail` after them when the
+/// taint has one.
+fn own_reason(detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!("{OWN_TAINT}: {detail}"),
+        None => OWN_TAINT.to_owned(),
+    }
+}
+
+/// `text` as one line: each control character (a line break included) is a space.
+pub(crate) fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The reason the lease server's taint gives: what it names, and nothing else of it.
@@ -178,9 +198,19 @@ impl Health {
         self.update(|state| state.admitted = admitted);
     }
 
-    /// Whether the heartbeat just sent said the agent holds a taint.
-    pub fn own_taint(&self, tainted: bool) {
-        self.update(|state| state.own = tainted);
+    /// Whether the heartbeat just sent said the agent holds a taint, and what changed when the
+    /// check that found it said so (`detail`, taken as one line: its control characters are
+    /// spaces, and a detail that is blank says nothing). The detail of a host that is not
+    /// tainted is not kept.
+    pub fn own_taint(&self, tainted: bool, detail: Option<&str>) {
+        let detail = detail
+            .map(one_line)
+            .filter(|line| !line.trim().is_empty())
+            .filter(|_| tainted);
+        self.update(|state| {
+            state.own = tainted;
+            state.own_detail = detail;
+        });
     }
 
     /// The taint the lease server holds for the host, as the last reply it sent said; `None`

@@ -110,20 +110,30 @@ tainted host. The scheduler never untaints on a `Result`, a hello or a heartbeat
 other new lease or job. The agent's marker and report below are the second path, and the only one for a finding after a contained job.
 
 **Post-job checks.** After every job, contained or host, the agent runs cheap checks against a baseline it recorded when the host was
-last known clean (at agent start, and after each job that passed). This list is a minimum; a check may be added later (additively, R3),
-and none is removed without a decision:
+last known clean (at agent start, and after each job that passed). This list is a minimum; a check may be added later (additively, R3).
+A check taints only for something a contained job could have left behind that the sandbox cannot prevent and that would affect a later
+job (the owner's ruling; the table of what taints and what does not is in taint-self-clearing.md, What taints and what is noted). What
+the host does itself while jobs run, a package install by its updater above all (it changes `/etc/passwd` and `/etc/group`, may mount,
+start services and load modules), never taints:
 
-- *stray processes*: any process started during the job that is outside the job's cgroup or still alive after the container is gone
-  (including a daemonised child, when it is in a group a job can be in: see taint-self-clearing.md, A process outside the groups a job can be in), and any process running as the job's user after the job ends;
-- *host changes*: a file created or changed outside the allowed roots (the agent's scratch, cache and output roots), compared by a bounded
-  listing and digest of a configured watch list of directories; the set of mounts (`/proc/self/mountinfo`) against the baseline; the user
-  and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline, where a module the agent's own job runtime loads on first use (`overlay`, and `veth` and `nft_nat` when the agent wires jobs' networks) is not a job's when it is new, and an unload of any module is a finding;
-- *cleanup failure*: the container or its scratch directory could not be removed, a cgroup could not be emptied, or the slot could not be
-  freed; for a VM job, the VM could not be stopped or its clone deleted;
+- *stray processes* (taint): any process running as a job's user (a host uid of the range the jobs' user namespaces map onto) after the
+  job ends, which can only be a sandbox failure; it clears itself when the process ends. A process with parent `init` in a group a job
+  can be in (a daemonised child: see taint-self-clearing.md, A process outside the groups a job can be in) is only noted, since a
+  contained job's orphans die with its pid namespace and what the check catches is the runtime's and the host's own processes;
+- *host changes* (noted, never a taint): a file created or changed in a configured watch list of directories, which no contained job can
+  write (a watch directory may not hold or lie in a mount root, the scratch root or the state root), compared by a bounded listing and
+  digest; a mount that was not at the baseline (`/proc/self/mountinfo`), which a job's own mount namespace cannot make; a change of the
+  user and group database, which a job cannot write; a loaded or unloaded kernel module (`/proc/modules`), which a job cannot load or
+  unload (`init_module`, `finit_module` and `delete_module` are refused). Each is one journal line naming what changed, and the
+  baseline takes it, so it is not named again after every job;
+- *cleanup failure* (taint): the container or its scratch directory could not be removed, a cgroup could not be emptied, or the slot could
+  not be freed; for a VM job, the VM could not be stopped or its clone deleted;
 - *VM store* (an agent with a VM backend): a directory in the VM store that is neither a base image nor the clone of a run the
   agent holds, or a hypervisor driver process the agent does not account for (5.14).
 
-Any finding taints the host, whatever the job declared. A check that cannot run (an unreadable file) is a finding; it is never skipped.
+A finding of a check that taints taints the host, whatever the job declared. The process check that cannot run (an unreadable process
+table) taints as unchecked, and clears itself when it can run again; it is never skipped. An input of a check that does not taint that
+cannot be read is a note, and its value is taken as the baseline's. A host job taints `host-job` whatever the checks find.
 
 **Taint is sticky and reported by the agent.** The agent writes a taint marker under its state root before it reports, so a restart does
 not clear it, and it sends the taint in its `Heartbeat` (reason code, the lease id of the job, the check that found it) until the

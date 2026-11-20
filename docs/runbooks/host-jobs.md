@@ -3,7 +3,9 @@
 A job normally runs in a container. A job submitted with `isolation = host` runs on the machine
 itself, for work that has to change the machine and cannot do that from inside a container. Such a
 job leaves the machine in a state nobody can vouch for, so the scheduler taints the machine for
-good when the job is placed.
+good when the job is placed. The taint is `host-job`, the agent makes it too on the job's completion, and it does not depend on
+what the post-job checks find: they taint only for what a contained job can leave behind, so a host job, which can change
+anything on the machine, is not left to them.
 
 ## What the scheduler does
 

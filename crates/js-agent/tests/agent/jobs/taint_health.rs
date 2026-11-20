@@ -53,6 +53,25 @@ fn tainted_worker(dir: &Scratch, machine: &FakeMachine) -> js_agent::Worker {
     worker
 }
 
+/// The lines among `lines` that say the host was tainted.
+fn tainted_lines(lines: &[String]) -> Vec<&str> {
+    let tainted = lines.iter().filter(|line| line.starts_with("tainted: "));
+    tainted.map(String::as_str).collect()
+}
+
+/// A worker that holds a taint a check found: a run that exited and whose post-job check could
+/// not read the host's processes.
+fn unread_worker(dir: &Scratch, machine: &FakeMachine) -> js_agent::Worker {
+    let worker = start(dir, machine);
+    machine.world.fail("processes", u32::MAX);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    machine.world.exit("r1", 0);
+    assert!(worker.handle().settle());
+    assert!(worker.snapshot().taint.is_some());
+    worker
+}
+
 fn verdict(health: &Health) -> String {
     health.verdict().to_string()
 }
@@ -229,4 +248,54 @@ fn a_reply_that_carries_only_the_servers_taint_is_not_delivered_to_the_worker() 
     assert_eq!(verdict(&health), SERVER_TAINT);
     machine.world.release();
     assert!(worker.handle().settle());
+}
+
+/// Asserts that a taint says what changed in one line wherever it is shown: the worker's line
+/// for the new taint names the reason, the check, the run and the check's detail (and, for a
+/// taint no check found, leaves the detail out), the snapshot keeps the detail for the
+/// session, the health route's reason follows the heartbeat that carries the taint with the
+/// detail after the fixed words, and the heartbeat does not carry the detail. It catches a
+/// taint line that is the Debug text of the event, a health reason that hides its cause,
+/// and a detail that leaks into the wire message.
+#[test]
+fn a_taint_says_what_changed_in_the_log_and_on_the_health_route() {
+    let dir = Scratch::new("jobs-taint-detail");
+    let machine = FakeMachine::new();
+    let worker = unread_worker(&dir, &machine);
+    let detail = worker.snapshot().taint_detail.unwrap();
+    assert!(
+        detail.starts_with("the check could not run: ")
+            && detail.contains("the fake host's process listing fails"),
+        "{detail}"
+    );
+    let lines = worker.take_lines();
+    let tainted = tainted_lines(&lines);
+    let said = format!("tainted: unchecked (check processes-unreadable, run r1): {detail}");
+    assert_eq!(tainted, [said.as_str()], "{lines:?}");
+
+    let (mut script, sent) = Script::new(vec![welcome(1), taint_ack(), beat_ok()]);
+    let health = Health::default();
+    let mut session = Session::new(hello("h1"), &mut script, lowest())
+        .with_jobs(&worker, DRAIN)
+        .with_health(&health);
+    session.tick();
+    session.tick();
+    assert_eq!(verdict(&health), format!("{OWN_TAINT}: {detail}"));
+    assert!(
+        !sent.borrow()[1].1.to_string().contains("listing fails"),
+        "{}",
+        sent.borrow()[1].1
+    );
+
+    let dir = Scratch::new("jobs-taint-no-detail");
+    let machine = FakeMachine::new();
+    let worker = tainted_worker(&dir, &machine);
+    assert_eq!(worker.snapshot().taint_detail, None);
+    let lines = worker.take_lines();
+    let tainted = tainted_lines(&lines);
+    assert_eq!(
+        tainted,
+        ["tainted: cleanup-failed (check container-remove-failed, run r1)"],
+        "{lines:?}"
+    );
 }

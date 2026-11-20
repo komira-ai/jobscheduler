@@ -84,11 +84,48 @@ fn the_lease_servers_taint_names_its_reason_check_and_run() {
 #[test]
 fn the_agents_own_taint_makes_the_host_not_placeable() {
     let health = admitted();
-    health.own_taint(true);
+    health.own_taint(true, None);
     assert_eq!(health.verdict(), not_placeable(OWN_TAINT));
     assert_eq!(
         health.take_lines(),
         [format!("health: not placeable: {OWN_TAINT}")]
+    );
+}
+
+/// Asserts that the agent's own taint names what changed when the check that found it said so,
+/// as one line (a control character is a space, a blank detail says nothing), that the reason
+/// follows a detail that changes and falls back to the bare text when the next beat has none,
+/// and that a detail of a host that is not tainted is not kept. It catches a taint that
+/// hides its cause from the route, a multi-line body made of a process's name, and a stale
+/// detail left behind after the taint went.
+#[test]
+fn the_agents_own_taint_names_what_changed_in_one_line() {
+    let health = admitted();
+    health.own_taint(true, Some("pid 7 (sleep, state S) is running"));
+    let named = format!("{OWN_TAINT}: pid 7 (sleep, state S) is running");
+    assert_eq!(health.verdict(), not_placeable(&named));
+    health.own_taint(true, Some("mount /mnt/a\nb\t(ext4)\r"));
+    assert_eq!(
+        health.verdict(),
+        not_placeable(&format!("{OWN_TAINT}: mount /mnt/a b (ext4) "))
+    );
+    health.own_taint(true, Some(" \n "));
+    assert_eq!(health.verdict(), not_placeable(OWN_TAINT));
+    health.own_taint(true, None);
+    assert_eq!(health.verdict(), not_placeable(OWN_TAINT));
+    health.own_taint(false, Some("left over from a taint that cleared"));
+    assert_eq!(health.verdict(), Verdict::Placeable);
+    health.own_taint(true, None);
+    assert_eq!(health.verdict(), not_placeable(OWN_TAINT));
+    assert_eq!(
+        health.take_lines(),
+        [
+            format!("health: not placeable: {named}"),
+            format!("health: not placeable: {OWN_TAINT}: mount /mnt/a b (ext4) "),
+            format!("health: not placeable: {OWN_TAINT}"),
+            "health: placeable".to_owned(),
+            format!("health: not placeable: {OWN_TAINT}"),
+        ]
     );
 }
 
@@ -99,13 +136,13 @@ fn the_agents_own_taint_makes_the_host_not_placeable() {
 fn the_reasons_come_in_order_and_the_host_is_placeable_when_all_are_gone() {
     let health = Health::default();
     health.server_taint(Some(residue()));
-    health.own_taint(true);
+    health.own_taint(true, None);
     assert_eq!(health.verdict(), not_placeable(NO_SESSION));
     health.admitted(true);
     assert_eq!(health.verdict(), not_placeable(SERVER_RESIDUE));
     health.server_taint(None);
     assert_eq!(health.verdict(), not_placeable(OWN_TAINT));
-    health.own_taint(false);
+    health.own_taint(false, None);
     assert_eq!(health.verdict(), Verdict::Placeable);
     health.admitted(false);
     assert_eq!(health.verdict(), not_placeable(NO_SESSION));
@@ -120,13 +157,13 @@ fn one_line_is_kept_for_each_change_of_the_verdict() {
     let health = Health::default();
     health.admitted(true);
     health.admitted(true);
-    health.own_taint(false);
+    health.own_taint(false, None);
     health.server_taint(Some(residue()));
     health.server_taint(Some(residue()));
-    health.own_taint(true);
+    health.own_taint(true, None);
     health.server_taint(Some(taint("host-job", None, None)));
     health.server_taint(None);
-    health.own_taint(false);
+    health.own_taint(false, None);
     let lines = health.take_lines();
     let expected = [
         "health: not placeable: no session with the lease server".to_owned(),
@@ -208,7 +245,7 @@ fn the_route_answers_the_verdict_on_get_healthz_and_404_to_anything_else() {
         respond(&health, b"GET /healthz HTTP/1.1\r"),
         PLACEABLE_ANSWER
     );
-    health.own_taint(true);
+    health.own_taint(true, None);
     let body = format!("not placeable: {OWN_TAINT}\n");
     let refused = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\

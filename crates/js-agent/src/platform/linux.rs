@@ -297,20 +297,18 @@ pub struct Flags {
     #[arg(long, value_name = "127.0.0.1:PORT/PREFIX")]
     pub image_allow_loopback: Vec<String>,
     /// How many milliseconds the agent lets the host settle before it counts what it sees
-    /// against a job: a process or mount that was not on the host before the job counts as
-    /// the job's leftover (`daemonised-child`, `process-as-job-user`, `new-mount`) only when it
-    /// is still there this long after the check first saw it, and a running run whose control
+    /// against a job: a process of a job's user that was not on the host before the job counts as the job's
+    /// leftover (`process-as-job-user`) only when it is still there this long after the check
+    /// first saw it (the processes and mounts the host adds of its own are logged, not judged), and a running run whose control
     /// group the runtime cannot name taints the host as unchecked only when it is still so
     /// this long after the first step that saw it. A host's own short-lived processes and
     /// mounts at the moment a job ends and a container read as running a step after it
-    /// exited are neither. By default 1000;
-    /// from 1 to 60000. Not with `--no-jobs`.
+    /// exited are neither. By default 1000; from 1 to 60000. Not with `--no-jobs`.
     #[arg(long, value_name = "MILLISECONDS")]
     pub settle_ms: Option<u64>,
     /// How many milliseconds the agent waits between the re-checks of a taint it may clear
     /// itself: a taint that a check judged (a process that outlived a job, or a check that
-    /// could not read its input; never a failed removal, owed checks, or a change of mounts,
-    /// users, groups, modules or a watched directory) is re-checked while no run is held, and
+    /// could not read its input; a process of a job's user that outlived a job, a check that could not read its input, or a marker an older agent wrote for a check that no longer taints; never a failed removal, owed checks or a host job. What a re-check notes does not fail it) is re-checked while no run is held, and
     /// ends after two clean re-checks this far apart and the server's acknowledgement of the
     /// clear; the marker is kept as `taint.json.cleared-<time>` and the clear is logged. A
     /// process still there keeps the host tainted. By default 60000; from 1 to 3600000. Not
@@ -942,10 +940,9 @@ pub(crate) fn runtime(
 /// is read from (or why there is none).
 pub(crate) type Checks = (Box<dyn CheckHook>, Result<String, &'static str>);
 
-/// The post-job checks of `backend`'s jobs, which watch `watch`, wait `settle` for the host to
-/// settle and do not call the modules the job runtime loads a job's
-/// ([`integrity::runtime_modules`], by whether the backend wires jobs); and the cgroup
-/// directory the usage of the leases is read from (or why there is none).
+/// The post-job checks of `backend`'s jobs, which watch `watch` and wait `settle` for the host
+/// to settle; and the cgroup directory the usage of the leases is read from (or why there is
+/// none).
 ///
 /// # Errors
 ///
@@ -957,14 +954,7 @@ pub(crate) fn checks(
     settle: Duration,
 ) -> Result<Checks, String> {
     let settings = backend.settings();
-    // The kernel loads the modules of the job runtime on a first job, which the baseline may
-    // predate: a crun agent that wires jobs (its egress is started, which only the ceilings
-    // `allow-list` and `open` do) loads `veth` and `nft_nat` besides `overlay`. The egress
-    // starts when the claims are taken, before the checks are made.
-    let wired = settings.crun().is_some_and(|plan| plan.egress.is_some());
-    let integrity = Integrity::start(machine.view(), settings.uid(), watch)?
-        .with_settle(settle)
-        .with_runtime_modules(integrity::runtime_modules(wired));
+    let integrity = Integrity::start(machine.view(), settings.uid(), watch)?.with_settle(settle);
     // The engines give each slot a user of its own; every crun job runs as the one id of the
     // job user's range, so there are no slots to tell apart.
     let integrity = match settings.crun() {

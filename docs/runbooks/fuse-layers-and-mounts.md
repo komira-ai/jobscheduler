@@ -253,7 +253,7 @@ sha256, beside a `<sha256>.meta` of its own), and the node tierstore's `tierstor
 | The read-write mount's commit is an upload | `aws s3api get-object --bucket <bucket> --key cas/b/e2e/<nonce>/result <file>` gets `result` and a line end; the `mv` returned only after the upload | **LIVE** |
 | The upload reaches the service | the receiver's `pv` says 1.00 GiB | **LIVE** |
 | The run's directories are removed | the agent's journal has `js-agent: job: ContainerRemoved`, `ScratchRemoved` and `ChecksPassed` lines for the run; then `ls -A /var/lib/js-agent/scratch/runs` shows neither `<run>` nor `.lease-js-<tag>-<run>`, `ls -A /run/js-agent/mounts` is empty, and `grep -c 'js-agent/mounts/' /proc/self/mountinfo` prints 0 (the agent's own bind of `/run/js-agent/mounts` itself stays while it runs) | **LIVE**; **CI** (the unmounts and `remove_tree`, `job_fs::remove_tree_does_not_cross_a_bind_of_the_same_file_system`) |
-| The integrity check passes | `js-agent: job: ChecksPassed { run_id: "<run>" }` and no `Tainted` or `Finding` line; `GET /v1/hosts` shows no `taint` | **LIVE** |
+| The integrity check passes | `js-agent: job: ChecksPassed { run_id: "<run>" }` and no `tainted:` line (a `Finding` line for a note, such as a new mount of the host's, does not taint); `GET /v1/hosts` shows no `taint` | **LIVE** |
 
 ### The FUSE service restarts while no job runs
 

@@ -18,8 +18,8 @@ pub enum Reason {
     Locked,
     /// The state directory, the record or the settings are not as the hook requires.
     StateInvalid,
-    /// The agent holds a taint a restart does not re-check (anything but a residue of a process
-    /// that its pin file does not name): no version can repair it (exit 76).
+    /// The agent holds a taint a restart does not re-check (anything but a residue of a post-job
+    /// check that its pin file does not name): no version can repair it (exit 76).
     Tainted,
     /// A job's post-job checks are owed: no version can repair it (exit 76).
     OwedCheck,

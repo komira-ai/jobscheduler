@@ -422,7 +422,19 @@ impl Job {
     /// Taints the host for this job (the first taint stays) and writes the marker. A marker
     /// that cannot be written is a finding of the job; the host is tainted all the same.
     pub(super) fn taint(&mut self, state: &mut TaintState, taint: Taint, events: &mut Vec<Event>) {
-        if let Err(why) = state.seal(taint, events) {
+        self.taint_saying(state, taint, None, events);
+    }
+
+    /// As [`Job::taint`], for a taint that says what changed in one line, `detail`: the first
+    /// taint keeps it, and the worker's line and the health route name it.
+    pub(super) fn taint_saying(
+        &mut self,
+        state: &mut TaintState,
+        taint: Taint,
+        detail: Option<String>,
+        events: &mut Vec<Event>,
+    ) {
+        if let Err(why) = state.seal(taint, detail, events) {
             self.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
         }
     }

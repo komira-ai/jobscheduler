@@ -88,13 +88,15 @@ impl Lifecycle {
                                 Whereabouts::NoProcess => job.blind_since = Some(now),
                                 Whereabouts::Elsewhere(group) => {
                                     job.blind_told = true;
-                                    job.taint(taint, cgroup_not_found_taint(&job.run_id), events);
                                     let message = format!(
                                         "run {}: its container group was not found within the \
                                          settle wait of {blind_wait_ms} ms, and its first process \
                                          runs in {group}",
                                         job.run_id
                                     );
+                                    let tainted = cgroup_not_found_taint(&job.run_id);
+                                    let said = Some(message.clone());
+                                    job.taint_saying(taint, tainted, said, events);
                                     job.note(code::CGROUP_NOT_FOUND, message, events);
                                 }
                             }
@@ -335,66 +337,75 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Checks => match checks.run(&Finished {
-                    run_id: &run_id,
-                    live: &live,
-                    slot: job.slot,
-                    live_slots: &live_slots,
-                    held_mounts: &held_mounts,
-                }) {
-                    // A marker that is not on disk yet (it could not be written when the
-                    // host was tainted) holds the slot, whatever the job left; so does a
-                    // record of the owed checks that cannot be removed.
-                    Ok(()) => {
-                        if let Err(why) = taint.persist() {
-                            job.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
-                            return;
-                        }
-                        if let Err(why) = config.state.settle(&run_id) {
-                            job.note(code::OWED_FAILED, why.to_string(), events);
-                            return;
-                        }
-                        events.push(Event::ChecksPassed {
-                            run_id: run_id.clone(),
-                        });
-                        job.stage = Stage::Freed;
-                        // The cleanup passed: no container, no scratch directory and no
-                        // process of the slot's uid. Only here does the slot come back.
-                        match (job.slot, job.slot_parked) {
-                            (Some(slot), true) => slots.park(slot),
-                            (Some(slot), false) => slots.release(slot),
-                            (None, _) => {}
-                        }
-                        events.push(Event::SlotFreed {
-                            run_id: run_id.clone(),
-                        });
+                Stage::Checks => {
+                    let verdict = checks.run(&Finished {
+                        run_id: &run_id,
+                        live: &live,
+                        slot: job.slot,
+                        live_slots: &live_slots,
+                        held_mounts: &held_mounts,
+                    });
+                    // What the check saw change that does not taint the host is logged first,
+                    // whatever it returned: it never taints, holds the job or quarantines a slot.
+                    for note in checks.notes() {
+                        job.note(note.code, note.detail, events);
                     }
-                    Err(found) => {
-                        // `detail()` is cut, whoever built the finding.
-                        let message = match &found {
-                            CheckFinding::Residue { .. } => found.detail().to_owned(),
-                            CheckFinding::Unchecked { .. } => {
-                                format!("the check could not run: {}", found.detail())
+                    match verdict {
+                        // A marker that is not on disk yet (it could not be written when the
+                        // host was tainted) holds the slot, whatever the job left; so does a
+                        // record of the owed checks that cannot be removed.
+                        Ok(()) => {
+                            if let Err(why) = taint.persist() {
+                                job.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
+                                return;
                             }
-                        };
-                        job.taint(taint, check_taint(&run_id, &found), events);
-                        job.note(found.code(), message, events);
-                        job.stage = Stage::Blocked;
-                        // Whatever the check found may be a process of the slot's uid: the
-                        // slot takes no new run.
-                        if let Some(slot) = job.slot {
-                            slots.quarantine(slot);
+                            if let Err(why) = config.state.settle(&run_id) {
+                                job.note(code::OWED_FAILED, why.to_string(), events);
+                                return;
+                            }
+                            events.push(Event::ChecksPassed {
+                                run_id: run_id.clone(),
+                            });
+                            job.stage = Stage::Freed;
+                            // The cleanup passed: no container, no scratch directory and no
+                            // process of the slot's uid. Only here does the slot come back.
+                            match (job.slot, job.slot_parked) {
+                                (Some(slot), true) => slots.park(slot),
+                                (Some(slot), false) => slots.release(slot),
+                                (None, _) => {}
+                            }
+                            events.push(Event::SlotFreed {
+                                run_id: run_id.clone(),
+                            });
                         }
-                        // The checks have run. The record that they were owed goes once
-                        // the taint is on disk; until then it stays, so that a crash
-                        // still taints the host at the next start. If it cannot be
-                        // removed it stays and taints a restart that is tainted already.
-                        if taint.persist().is_ok() {
-                            let _ = config.state.settle(&run_id);
+                        Err(found) => {
+                            // `detail()` is cut, whoever built the finding.
+                            let message = match &found {
+                                CheckFinding::Residue { .. } => found.detail().to_owned(),
+                                CheckFinding::Unchecked { .. } => {
+                                    format!("the check could not run: {}", found.detail())
+                                }
+                            };
+                            let tainted = check_taint(&run_id, &found);
+                            job.taint_saying(taint, tainted, Some(message.clone()), events);
+                            job.note(found.code(), message, events);
+                            job.stage = Stage::Blocked;
+                            // Whatever the check found may be a process of the slot's uid: the
+                            // slot takes no new run.
+                            if let Some(slot) = job.slot {
+                                slots.quarantine(slot);
+                            }
+                            // The checks have run. The record that they were owed goes once
+                            // the taint is on disk; until then it stays, so that a crash
+                            // still taints the host at the next start. If it cannot be
+                            // removed it stays and taints a restart that is tainted already.
+                            if taint.persist().is_ok() {
+                                let _ = config.state.settle(&run_id);
+                            }
+                            return;
                         }
-                        return;
                     }
-                },
+                }
                 Stage::Preparing(_) | Stage::Running(_) | Stage::Blocked | Stage::Freed => return,
             }
         }

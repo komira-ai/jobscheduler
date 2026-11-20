@@ -7,9 +7,11 @@
 //!
 //! Run as root on a Linux host whose agent runs with the crun runtime (the defaults are the
 //! paths and the unit of the packaged `js-agent-crun.service`; give the unit's own when they
-//! differ). A taint the agent does not clear itself (see [`taint`](crate::lifecycle::taint))
-//! ends only when the host is reimaged or an operator moves the marker aside; this is that move,
-//! made the one way:
+//! differ). A taint whose cause is gone clears itself (a process of a job's user that ended, a
+//! check input that can be read again, a marker an older agent wrote for a change that the checks
+//! now only note) and needs none of this. A taint the agent does not clear itself (see
+//! [`taint`](crate::lifecycle::taint)) ends only when the host is reimaged or an operator moves
+//! the marker aside; this is that move, made the one way:
 //!
 //! 1. The state root is opened as the agent opens it, and a lock in it
 //!    ([`LOCK_FILE`]) is taken, so two clears never run at once.

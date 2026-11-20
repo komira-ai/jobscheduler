@@ -590,7 +590,7 @@ impl<'a> Session<'a> {
         let tainted = jobs.tainted.unwrap_or_default();
         self.health
             .iter()
-            .for_each(|health| health.own_taint(tainted));
+            .for_each(|health| health.own_taint(tainted, jobs.taint_detail.as_deref()));
         let message = self.heartbeat_message(live, lease, jobs, load);
         let sent = self.post(HEARTBEAT_PATH, message);
         if let Some(outbox) = &self.usage {

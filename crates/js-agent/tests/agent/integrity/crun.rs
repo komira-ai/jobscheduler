@@ -7,7 +7,9 @@
 use js_agent::integrity::{FakeHost, Integrity, code};
 use js_agent::lifecycle::CheckHook as _;
 
-use super::{JOB_UID, after, beside, process, started};
+use super::{
+    JOB_UID, after, codes, noted_after, noted_beside, process, quiet, quiet_beside, started,
+};
 
 /// The agent's group: beside `actions/`, as the delegated tree makes it.
 const AGENT: &str = "0::/system.slice/js.service/supervisor\n";
@@ -23,12 +25,12 @@ fn host_and_checks() -> (FakeHost, Integrity) {
     (host, checks)
 }
 
-/// Asserts that a process of a job, left after its lease ended, counts wherever the lease's
+/// Asserts that a process of a job, left after its lease ended, is noted wherever the lease's
 /// group sits: `<lease>/ctr` and a group below it, the lease's own group, the `actions/`
 /// group itself, and a `<lease>/ctr` with no `actions/` in the path. The agent's group is
 /// beside `actions/` here, under a system service the checks otherwise treat as the host's:
 /// a process there passed unseen. It catches a rule that knows a container only by an
-/// engine's name, which lets a leftover job process pass after every run.
+/// engine's name, which leaves a job's process out of the log after every run.
 #[test]
 fn a_job_process_left_under_actions_counts() {
     for cgroup in [
@@ -41,16 +43,19 @@ fn a_job_process_left_under_actions_counts() {
     ] {
         let (host, mut checks) = host_and_checks();
         host.start_process(process(300, 1, 0, 900, cgroup));
-        let found = after(&mut checks, "r1").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup}"
+        );
     }
 }
 
 /// Asserts that names which only look like the direct runner's do not make a host service's
 /// process a job's: a group that starts like `actions`, a `ctr` that is not a lease's
 /// child, a lease group that has a longer name than `ctr` below it, and a parent that only
-/// ends in `lease-`. It catches a substring match, which would taint a node for what its own
-/// services do.
+/// ends in `lease-`. It catches a substring match, which would log a line for what the host's
+/// own services do.
 #[test]
 fn lookalike_names_are_the_hosts() {
     for cgroup in [
@@ -65,7 +70,7 @@ fn lookalike_names_are_the_hosts() {
     ] {
         let (host, mut checks) = host_and_checks();
         host.start_process(process(300, 1, 0, 900, cgroup));
-        assert!(after(&mut checks, "r1").is_ok(), "{cgroup}");
+        assert!(quiet(&mut checks, "r1"), "{cgroup}");
     }
 }
 
@@ -81,22 +86,24 @@ fn ctr_of(run: &str) -> String {
 }
 
 /// Asserts that a neighbour's container, still running when a job ends, is not the job's
-/// stray, and the job's own is: with `r2` running, its init in `<its leaf>/ctr` passes, and a
-/// process left in `<the job's leaf>/ctr` is found. It catches a rule that excuses every
+/// stray, and the job's own is: with `r2` running, its init in `<its leaf>/ctr` is no note,
+/// and a process left in `<the job's leaf>/ctr` is a `daemonised-child` note. It catches a rule that excuses every
 /// `<lease>/ctr` (a concurrent job would hide a leftover) and one that excuses none (a
-/// concurrent job would taint the node).
+/// concurrent job would fill the log).
 #[test]
 fn a_neighbours_ctr_is_not_a_stray_and_the_jobs_own_is() {
     let (host, mut checks) = host_and_checks();
     host.start_process(process(300, 1, 0, 900, &ctr_of("r2")));
-    assert!(beside(&mut checks, "r1", &[&leaf("r2")]).is_ok());
+    assert!(quiet_beside(&mut checks, "r1", &[&leaf("r2")]));
     host.start_process(process(301, 1, 0, 901, &ctr_of("r1")));
-    let found = beside(&mut checks, "r1", &[&leaf("r2")]).unwrap_err();
-    assert_eq!(found.code(), code::DAEMONISED_CHILD);
+    assert_eq!(
+        codes(&noted_beside(&mut checks, "r1", &[&leaf("r2")])),
+        [code::DAEMONISED_CHILD]
+    );
 }
 
 /// Asserts that a live container is named by a whole path component, not by a substring: with
-/// `run-3-1` running, a process left in the group of the finished `run-3-12` is found, and
+/// `run-3-1` running, a process left in the group of the finished `run-3-12` is noted, and
 /// one in the group of `run-3-1` is not. Server run ids are `run-<term>-<count>`, so one is
 /// often a prefix of another. It catches a neighbour's handle excusing the leftover of any
 /// run whose id it is a prefix of.
@@ -104,17 +111,17 @@ fn a_neighbours_ctr_is_not_a_stray_and_the_jobs_own_is() {
 fn a_live_handle_excuses_its_own_group_and_not_a_longer_name() {
     let (host, mut checks) = host_and_checks();
     host.start_process(process(300, 1, 0, 900, &ctr_of("run-3-1")));
-    assert!(beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).is_ok());
+    assert!(quiet_beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]));
     host.start_process(process(301, 1, 0, 901, &ctr_of("run-3-12")));
-    let found = beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).unwrap_err();
-    assert_eq!(found.code(), code::DAEMONISED_CHILD);
-    assert!(found.detail().contains("pid 301"), "{found:?}");
-    assert!(!found.detail().contains("pid 300"), "{found:?}");
+    let notes = noted_beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]);
+    assert_eq!(codes(&notes), [code::DAEMONISED_CHILD]);
+    assert!(notes[0].detail.starts_with("pid 301"), "{notes:?}");
+    assert!(!notes[0].detail.contains("pid 300"), "{notes:?}");
 }
 
 /// Asserts the same for mounts: the mounts of a running container's lease directory (the
 /// handle is a component of the mount's point) are not the finished job's, and a mount in
-/// the directory of a longer name is a `new-mount`. Engines' scopes and ids are components
+/// the directory of a longer name is a `new-mount` note. Engines' scopes and ids are components
 /// too: `libpod-<id>.scope` names the container `<id>`, and `libpod-<id>2.scope` does not.
 #[test]
 fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
@@ -127,11 +134,11 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
     let under = |run: &str| format!("/var/lib/js/leases/{}/rootfs", leaf(run));
     let (host, mut checks) = host_and_checks();
     host.mount(mount(under("run-3-1")));
-    assert!(beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).is_ok());
+    assert!(quiet_beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]));
     host.mount(mount(under("run-3-12")));
-    let found = beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]).unwrap_err();
-    assert_eq!(found.code(), code::NEW_MOUNT);
-    assert!(found.detail().contains(&leaf("run-3-12")), "{found:?}");
+    let notes = noted_beside(&mut checks, "run-3-12", &[&leaf("run-3-1")]);
+    assert_eq!(codes(&notes), [code::NEW_MOUNT]);
+    assert!(notes[0].detail.contains(&leaf("run-3-12")), "{notes:?}");
 
     for (cgroup, excused) in [
         ("0::/machine.slice/libpod-9e1.scope", true),
@@ -146,7 +153,7 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
         let mut checks = started(&host, vec![]);
         host.start_process(process(400, 1, 0, 950, cgroup));
         assert_eq!(
-            beside(&mut checks, "r1", &["9e1"]).is_ok(),
+            quiet_beside(&mut checks, "r1", &["9e1"]),
             excused,
             "{cgroup}"
         );
@@ -158,7 +165,8 @@ fn a_live_handle_excuses_its_own_mounts_and_not_a_longer_names() {
 /// user's included): a background pull can have one running when another job's check runs.
 /// Not the runner's: a group that only starts like `helpers`, an `actions/helpers` pair
 /// that is not the real actions group (one below a lease's `ctr`, or below a lease's
-/// group), and a lease that has `helpers` in it.
+/// group), and a lease that has `helpers` in it; there a process of the job user is a
+/// finding and one of root, whose parent is `init`, is a `daemonised-child` note.
 #[test]
 fn a_helper_container_is_the_runners() {
     for cgroup in [
@@ -169,7 +177,7 @@ fn a_helper_container_is_the_runners() {
         for uid in [0, JOB_UID] {
             let (host, mut checks) = host_and_checks();
             host.start_process(process(300, 1, uid, 900, cgroup));
-            assert!(after(&mut checks, "r1").is_ok(), "{cgroup} uid {uid}");
+            assert!(quiet(&mut checks, "r1"), "{cgroup} uid {uid}");
         }
     }
     for cgroup in [
@@ -179,11 +187,16 @@ fn a_helper_container_is_the_runners() {
         "0::/system.slice/js.service/ctr/actions/helpers/x",
         "0::/system.slice/js.service/actions/js-0123456789abcdef-r1/actions/helpers/x",
     ] {
-        for uid in [0, JOB_UID] {
-            let (host, mut checks) = host_and_checks();
-            host.start_process(process(301, 1, uid, 901, cgroup));
-            assert!(after(&mut checks, "r1").is_err(), "{cgroup} uid {uid}");
-        }
+        let (host, mut checks) = host_and_checks();
+        host.start_process(process(301, 1, 0, 901, cgroup));
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup} uid 0"
+        );
+        let (host, mut checks) = host_and_checks();
+        host.start_process(process(301, 1, JOB_UID, 901, cgroup));
+        assert!(after(&mut checks, "r1").is_err(), "{cgroup} uid {JOB_UID}");
     }
 }
 
@@ -201,7 +214,7 @@ fn the_runners_own_processes_are_noise_and_nothing_wider() {
     let (host, mut checks) = host_and_checks();
     host.start_process(process(310, AGENT_PID, JOB_UID, 910, own));
     host.start_process(process(311, 310, JOB_UID, 911, own));
-    assert!(after(&mut checks, "r1").is_ok(), "crun and its child");
+    assert!(quiet(&mut checks, "r1"), "crun and its child");
 
     for (what, ppid, cgroup) in [
         ("orphaned", 1, own),
@@ -242,9 +255,9 @@ fn holding(
 /// Asserts that a mount whose point lies below the directory where the runtime mounts the
 /// file system of another job the agent holds (`<mounts>/<lease>`, a job that has no
 /// container yet among them) is not the finished job's, and is kept out of the baseline, so
-/// that one left there once that job is no longer held is a `new-mount`; and that a mount at
+/// that one left there once that job is no longer held is a `new-mount` note; and that a mount at
 /// that directory itself, below a directory whose name only begins like it, or anywhere
-/// else, is a `new-mount`. Catches a waiting job's clones and overlays taken for its
+/// else, is a `new-mount` note. Catches a waiting job's clones and overlays taken for its
 /// neighbour's leftovers, and a held lease that excuses a mount of any name it prefixes.
 #[test]
 fn a_mount_below_a_held_jobs_mounts_is_its_and_no_other_jobs() {
@@ -258,13 +271,15 @@ fn a_mount_below_a_held_jobs_mounts_is_its_and_no_other_jobs() {
     let (host, mut checks) = host_and_checks();
     host.mount(mount(&format!("{held}/src/0")));
     host.mount(mount(&format!("{held}/rootfs")));
-    assert!(holding(&mut checks, "run-4-2", &[&held]).is_ok());
-    // No longer held, its leftover is found by the next check: it never joined the baseline.
-    let found = holding(&mut checks, "run-4-3", &[]).unwrap_err();
-    assert_eq!(found.code(), code::NEW_MOUNT);
+    assert_eq!(holding(&mut checks, "run-4-2", &[&held]), Ok(()));
+    assert!(checks.notes().is_empty(), "the held job's own");
+    // No longer held, its leftover is noted by the next check: it never joined the baseline.
+    assert_eq!(holding(&mut checks, "run-4-3", &[]), Ok(()));
+    let notes = checks.notes();
+    assert_eq!(codes(&notes), [code::NEW_MOUNT]);
     assert!(
-        found.detail().contains(&format!("{held}/rootfs")),
-        "{found:?}"
+        notes[0].detail.contains(&format!("{held}/rootfs")),
+        "{notes:?}"
     );
     for point in [
         held.clone(),
@@ -273,7 +288,7 @@ fn a_mount_below_a_held_jobs_mounts_is_its_and_no_other_jobs() {
     ] {
         let (host, mut checks) = host_and_checks();
         host.mount(mount(&point));
-        let found = holding(&mut checks, "run-4-2", &[&held]).unwrap_err();
-        assert_eq!(found.code(), code::NEW_MOUNT, "{point}");
+        assert_eq!(holding(&mut checks, "run-4-2", &[&held]), Ok(()));
+        assert_eq!(codes(&checks.notes()), [code::NEW_MOUNT], "{point}");
     }
 }

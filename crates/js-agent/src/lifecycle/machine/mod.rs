@@ -280,7 +280,7 @@ impl Lifecycle {
         }
         self.retry_stuck(&mut events);
         self.retry_providers(&mut events);
-        self.recheck_taint();
+        self.recheck_taint(&mut events);
         self.retry_parked(&mut events);
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
@@ -666,7 +666,7 @@ impl Lifecycle {
             Isolation::Contained => Ok(()),
             Isolation::Host => self
                 .taint
-                .seal(host_taint(&spec.run_id), events)
+                .seal(host_taint(&spec.run_id), None, events)
                 .map_err(|why| (detail::TAINT_FAILED, why.to_string())),
         }
     }

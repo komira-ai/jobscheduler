@@ -10,7 +10,8 @@ use js_agent_wire::Taint;
 pub struct Finding {
     /// The run it is about, when it is about one.
     pub run_id: Option<String>,
-    /// One of [`code`](super::code), or the code of a [`CheckFinding`](super::CheckFinding).
+    /// One of [`code`](super::code), or the code of a [`CheckFinding`](super::CheckFinding) or
+    /// of a [`CheckNote`](super::CheckNote).
     pub code: &'static str,
     /// What the runtime, the file system or the check said.
     pub message: String,
@@ -134,12 +135,21 @@ pub enum Event {
     /// The host is tainted from now on, and this is why (the first taint stays). It is
     /// pushed once the marker has been tried and before the findings that follow from the
     /// same cause; a failure to write the marker is a [`Finding`] after it.
-    Tainted(Taint),
+    Tainted {
+        /// The taint, as the marker holds it and the heartbeat reports it.
+        taint: Taint,
+        /// What changed, in one line, when a check's finding said so (its detail, with the
+        /// words "the check could not run" for a check that did not run); none for a taint
+        /// that no check found (a host job, a container that cannot be removed); the
+        /// `cgroup-not-found` taint carries its message.
+        detail: Option<String>,
+    },
     /// The slot is free again.
     SlotFreed {
         /// The run.
         run_id: String,
     },
-    /// Something to look at; see [`Finding`]. Reported once for each code of a run.
+    /// Something to look at; see [`Finding`]. Reported once for each code of a run; a check's
+    /// notes are one each at every call of the check that saw a change, and taint nothing.
     Finding(Finding),
 }

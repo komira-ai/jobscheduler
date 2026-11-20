@@ -367,6 +367,11 @@ pub struct Snapshot {
     /// clears itself has been acknowledged it is. `None` only in the default snapshot of a
     /// session with no worker, which says nothing about it.
     pub tainted: Option<bool>,
+    /// What changed, in one line, as the check that found the taint said it
+    /// ([`Lifecycle::taint_detail`]); none when the host is not tainted, for a taint no check
+    /// found and for one read from the marker at start. Kept for the health route: the
+    /// heartbeat does not carry it.
+    pub taint_detail: Option<String>,
     /// Every job a job start began, with its result until acknowledged.
     pub jobs: Vec<HeldJob>,
     /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
@@ -383,6 +388,7 @@ impl Snapshot {
             taint: life.pending_taint(),
             taint_cleared: life.pending_taint_clear(),
             tainted: Some(life.is_tainted()),
+            taint_detail: life.taint_detail(),
             jobs: life.held_jobs(),
             retired_jobs: life.retired_jobs(),
             blocked: life.blocked(),
