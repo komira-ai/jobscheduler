@@ -29,6 +29,7 @@ mod ending;
 mod hosts;
 mod index;
 mod marks;
+mod nodes;
 mod queue;
 mod status;
 mod taints;

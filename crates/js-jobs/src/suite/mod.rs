@@ -38,6 +38,7 @@ mod indexes;
 mod lifecycle;
 mod logs;
 mod marks;
+mod nodes;
 mod paging;
 mod placement;
 mod prepare;
@@ -64,6 +65,7 @@ pub use indexes::*;
 pub use lifecycle::*;
 pub use logs::*;
 pub use marks::*;
+pub use nodes::*;
 pub use paging::*;
 pub use placement::*;
 pub use prepare::*;
@@ -101,6 +103,13 @@ where
     booked_on_sums_the_live_allocations_of_a_host(backend);
     placement_books_the_jobs_host_ports(backend);
     live_on_lists_the_live_allocations_of_one_host(backend);
+    two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
+    a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
+    a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
+    a_beat_through_one_server_is_read_by_another(backend);
+    heard_at_is_the_store_clock_and_judges_live_nodes(backend);
+    a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field(backend);
+    forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing(backend);
     a_claimed_placement_books_only_what_the_host_has_room_for(backend);
     a_whole_host_and_a_share_exclude_each_other_in_the_placement(backend);
     a_job_another_writer_placed_is_not_placed_again(backend);
@@ -264,6 +273,13 @@ macro_rules! job_store_tests {
             booked_on_sums_the_live_allocations_of_a_host,
             placement_books_the_jobs_host_ports,
             live_on_lists_the_live_allocations_of_one_host,
+            two_servers_beating_one_host_at_once_apply_each_beat_once,
+            a_beat_or_hello_that_loses_its_version_reads_the_row_again,
+            a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
+            a_beat_through_one_server_is_read_by_another,
+            heard_at_is_the_store_clock_and_judges_live_nodes,
+            a_node_row_without_the_optional_fields_reads_and_keeps_a_later_builds_field,
+            forget_node_deletes_only_the_row_it_read_and_a_failed_write_changes_nothing,
             a_claimed_placement_books_only_what_the_host_has_room_for,
             a_whole_host_and_a_share_exclude_each_other_in_the_placement,
             a_job_another_writer_placed_is_not_placed_again,

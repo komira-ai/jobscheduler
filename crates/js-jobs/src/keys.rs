@@ -50,6 +50,13 @@ pub const PERIODIC: &str = "periodic/";
 /// order ([`crate::JobStore::claim_dispatch`]). No `idx/` space names them.
 pub const DISPATCH: &str = "dispatch/";
 
+/// `node/<host>`: a host's presence ([`crate::NodeRecord`]): its session, what its hello
+/// announced and what its last applied beat left, written by [`crate::JobStore::hello_node`]
+/// and [`crate::JobStore::beat_node`] at the version read and deleted by
+/// [`crate::JobStore::forget_node`]. Beside, and not under, the usage rows' `usage/node/`. No
+/// `idx/` space names it.
+pub const NODE: &str = "node/";
+
 /// `meta/cordons/restored`: empty, written once by the first server that carried the cordons an
 /// earlier release kept only in its host bindings into the cordon table
 /// ([`crate::JobStore::restore_cordons`]); with it, no later start writes a cordon back.
@@ -87,6 +94,12 @@ pub fn taint(host: &HostId) -> String {
 #[must_use]
 pub fn cordon(host: &HostId) -> String {
     format!("{CORDON}{host}")
+}
+
+/// The key of the presence row of `host`.
+#[must_use]
+pub fn node(host: &HostId) -> String {
+    format!("{NODE}{host}")
 }
 
 /// The key of the row of the periodic duty `duty`.
@@ -308,6 +321,7 @@ mod tests {
             "mark/j-1",
             "taint/host-a",
             "cordon/host-a",
+            "node/host-a",
         ] {
             assert_eq!(indexed_row(other), None, "{other}");
         }
@@ -328,6 +342,8 @@ mod tests {
             None,
             "a cordon row has no unread entry"
         );
+        assert_eq!(node(&host), "node/host-a");
+        assert_eq!(unread(&node(&host)), None, "a node row has no unread entry");
     }
 
     // Catches dispatch keys that do not sort in the order a host's agent must take them: by the

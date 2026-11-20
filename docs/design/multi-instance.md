@@ -150,8 +150,8 @@ The scheduling logic decides a placement and writes what the host must do as a m
   start never handed out of a job not yet starting is deleted instead. Every end deletes its job's start, and the retention sweep deletes a job's messages with its row. Stops and cancels use
   the same queue. Built at the store, the route still Designed (G19): the key `js-jobs/src/keys.rs:51`, the record
   `js-jobs/src/record.rs:661` and its row `js-jobs/src/codec/dispatch_fields.rs`; the start written by
-  `js-jobs/src/store/whole.rs:297` (every placement) and `js-jobs/src/store.rs:497` (a whole-host job's move to starting); the
-  stops and the deleted starts by `js-jobs/src/store/dispatch.rs:310`, called from `js-jobs/src/store.rs:575` (a cancel),
+  `js-jobs/src/store/whole.rs:297` (every placement) and `js-jobs/src/store.rs:498` (a whole-host job's move to starting); the
+  stops and the deleted starts by `js-jobs/src/store/dispatch.rs:310`, called from `js-jobs/src/store.rs:576` (a cancel),
   `js-jobs/src/store/ending.rs:106` (every end), `js-jobs/src/store/hosts.rs:88` (an end that frees) and
   `js-jobs/src/store/whole.rs:372` (a failed prepare).
 - **Dispatch is an agent route that the agent long-polls through the edge.** `GET /v1/agent/dispatch`, on the agent listener, goes
@@ -256,13 +256,13 @@ and decides nothing shared). Paths are under `crates/`.
 | Revisions are minted in commit order, with no gap in the change feed | `js-state/src/postgres/tx.rs:191` (a tail), `:156` (`hold_head`) | `LOCK TABLE head` in a plain transaction's tail, so bodies run at once and tails queue; a claimed decision holds it from its start | Built |
 | A claimed row is decided by one transaction | `js-state/src/postgres/claim.rs:98`, `js-state/src/postgres/session.rs:155-157` | the commit head taken first (`hold_head`), then the claimed row `FOR UPDATE SKIP LOCKED` (a held row is skipped, never waited for); the decision's reads are what its commit finds. This serializes the decisions of every instance on the head; their bodies are short (one job, one host's rows) | Built |
 | A schema migration is applied once by racing installers | `js-state/src/postgres/schema.rs:80` | `pg_advisory_xact_lock` inside the applying transaction, version re-read under it; the server itself only judges the schema | Built |
-| The job store's schema row is written once | `js-jobs/src/store.rs:228-236` | `Cond::Absent`; a conflict re-reads the row | Built |
+| The job store's schema row is written once | `js-jobs/src/store.rs:229-237` | `Cond::Absent`; a conflict re-reads the row | Built |
 | The index backfill and the boot raise of deadlines at open | `js-lease-server/src/job_store.rs:195` (`booted_until_won`), `js-jobs/src/store/ending.rs:286`, `:336` | each write at `Cond::Version`; a beaten open retries (#923); a raise is a max, so a second start only delays deadlines | Built |
 | The first start imports the files beside the state file once | `js-lease-server/src/store/import.rs:99-100` | marker and rows `Cond::Absent` in one transaction, so one import wins; the loser's `Conflict` refuses its start (exit 2) instead of reading the marker | Built (correctness); Designed (G11: the loser starts) |
 | Row expiry (TTL) | `js-state/src/postgres/tx.rs:146`, `:289` | judged on the database clock inside each transaction | Built |
 | Feed trim | `js-lease-server/src/job_pass.rs:242`, `js-lease-server/src/job_store/feed_trim.rs:44` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
 | An unreachable database | `js-lease-server/src/job_pass.rs:190`, `:225`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's binding read or write or a taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:324`, `:352`, `:659-662`), both retried by the agent | Built |
-| `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-931` | fails with the read's error (`Store::now` returns `Result<StoreTime, StoreError>`, `js-state/src/store.rs:121`); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:343`, `:488`, `ending.rs:62`, `:147`) fail with it and write nothing | Built (#938) |
+| `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-931` | fails with the read's error (`Store::now` returns `Result<StoreTime, StoreError>`, `js-state/src/store.rs:121`); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:344`, `:489`, `ending.rs:62`, `:147`) fail with it and write nothing | Built (#938) |
 | Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. At SIGTERM the agent listener closes, held beats are answered at once and no job is placed (#935, `js-lease-server/src/drain.rs:28`, `server.rs:840`), so agents move at once; the route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; on SIGTERM the instance stops pulling and finishes what it pulled (section 0.1; G19 for dispatch) |
 | The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-state/src/postgres/serving.rs:21`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
 
@@ -289,7 +289,7 @@ and decides nothing shared). Paths are under `crates/`.
 |---|---|---|---|
 | Which connection of a host commits its job listing | `js-lease-server/src/agent_api.rs:570-627` (`first_listing` :570, `lose_unlisted` :608, `job_whole::serve` :624, `per_job::serve` :627, over the plain job store) | nothing orders two connections: an old connection on A can commit a listing over B's newer one, freeing an allocation the host holds or losing a job it lists | Designed (G15, which takes #883's `Checked` store) |
 | A host's first listing after a hello loses the jobs it does not list | `js-lease-server/src/agents.rs:474` (`first_listing`, memory), `js-lease-server/src/agent_api.rs:570`, `:608`, `js-lease-server/src/job_loss.rs:96-107` | each end is `Cond::Version`, but "first" is this instance's flag; safe once only the newest connection writes. A whole-host job moved to `starting` on a ready report (`js-lease-server/src/job_whole.rs:160`) whose reply, carrying the start, is lost is ended `Lost` by the next first listing without having run; this happens on a one-instance restart too | Designed (G15: no hello on a change of instance, and the start is sent again by the next beat) |
-| A host's session, epoch, secret, last heard | `js-registry/src/registry.rs:474-525`, `js-registry/src/registry/beat.rs:131` | held by the instance that took the hello; a beat that reaches another instance is refused (`409 unknown-host` or `403 session-mismatch`) and the agent says hello there. Section 0 makes the session the row `node/<host>`, checked on any instance | Designed (G15) |
+| A host's session, epoch, secret, last heard | `js-registry/src/registry.rs:474-525`, `js-registry/src/registry/beat.rs:131` | held by the instance that took the hello; a beat that reaches another instance is refused (`409 unknown-host` or `403 session-mismatch`) and the agent says hello there. Section 0 makes the session the row `node/<host>`, checked on any instance. The row and its store interface are Built in `js-jobs` (`src/node.rs`, `src/store/nodes.rs`: `hello_node`, `beat_node` guarded by (epoch, sequence), `read_node`, `live_nodes`, `forget_node`; `heard_at` on the store's clock); no server uses them yet | Store Built; server Designed (G15) |
 | `HostLive` (a second agent process on a live host) | `js-registry/src/registry.rs:468-473` | judged on the local registry: a different agent process that says hello to B while the host is live on A is admitted | Designed (G5) |
 | The pool's machine cap (`PoolFull`) | `js-registry/src/registry.rs:506-515` | counts this registry's hosts: N instances admit N times the cap | Designed (G5) |
 | Whole-host job states (placed, starting, running, prepare deadline) | `js-jobs/src/store/whole.rs:364`, `:369`, `:407`, `js-lease-server/src/job_whole.rs:143` | rows written at `Cond::Version` | Built |
@@ -323,9 +323,9 @@ and decides nothing shared). Paths are under `crates/`.
 
 | Decision | Where | How it holds | Tag |
 |---|---|---|---|
-| A client-chosen job id is recorded once | `js-jobs/src/store.rs:377-388` | `Cond::Absent`; a conflict answers from the stored job | Built |
-| A minted job id is unique | `js-jobs/src/store.rs:403-412` | random ids, `Cond::Absent`, retried on a collision | Built |
-| A cancel racing a placement on another instance | `js-jobs/src/store.rs:555-579` | `Cond::Version`; the loser writes nothing; the cancel writes its stop message in its own transaction | Built (its stop message at the store); Designed (G19: the stop's delivery) |
+| A client-chosen job id is recorded once | `js-jobs/src/store.rs:378-389` | `Cond::Absent`; a conflict answers from the stored job | Built |
+| A minted job id is unique | `js-jobs/src/store.rs:404-413` | random ids, `Cond::Absent`, retried on a collision | Built |
+| A cancel racing a placement on another instance | `js-jobs/src/store.rs:556-580` | `Cond::Version`; the loser writes nothing; the cancel writes its stop message in its own transaction | Built (its stop message at the store); Designed (G19: the stop's delivery) |
 | Job reads, results, logs | `js-lease-server/src/job_api/read.rs:220`, `js-lease-server/src/job_api/logs.rs:239-249` | read from the rows; a follow polls the row, no local wake decides | Built |
 | A submit is refused `no-capable-host` | `js-lease-server/src/admit.rs:94-108`, `js-lease-server/src/job_api/submit.rs:264` | judged over this instance's registry: a host held by another instance is invisible, so a job it could run is refused for good. Since #940 a tainted host counts as capable (`js-sched/src/admission_ever.rs`, `HostView.tainted` is gone), so a taint alone refuses nothing; placement still skips it | Designed (G5) |
 | `ListHosts`, `GET /v1/hosts`, a job's `host_silent_since_ms` | `js-lease-server/src/hosts.rs:283`, `js-lease-server/src/job_api/read.rs:165` | this instance's registry: the answer depends on which instance is asked | Designed (G5) |
@@ -362,7 +362,7 @@ and decides nothing shared). Paths are under `crates/`.
 
 ## 4. Time
 
-Rule 3 is Built for the job store (#938), and not yet for the marks, presence, join tokens or usage minutes. The job rows are stamped with the store's clock (`js-jobs/src/store.rs:343`, `ending.rs:147`), but the pass,
+Rule 3 is Built for the job store (#938), and not yet for the marks, presence, join tokens or usage minutes. The job rows are stamped with the store's clock (`js-jobs/src/store.rs:344`, `ending.rs:147`), but the pass,
 the heartbeat and the host rows compare with the process clock (section 3.6), and `Store::now` answers the epoch when the database
 cannot be read (section 3.1). G2 makes one clock:
 
