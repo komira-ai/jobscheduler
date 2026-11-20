@@ -16,8 +16,8 @@ of that document lists the decisions already taken for js-server, and section 6 
 
 js-server instances are stateless, the ordinary shape of a service in front of one database: what one instance knows about a host
 or a job, every instance reads in Postgres, and any instance serves any request of any agent or client. Sections 1 to 12 audit the
-code against this shape and list what is left to build; section 9 marks each gap kept, shrunk, deleted or new (G15 to G18) by it. Section 0.1 splits js-server into a stateless
-JobScheduler, to which the shape below applies, and a JobManager that places and runs the periodic work under a lease.
+code against this shape and list what is left to build; section 9 marks each gap kept, shrunk, deleted or new (G15, G16 and G19) by it. Sections 0.1 and 0.2 say which instances may pull from
+the queue (two rules) and how a placement reaches its host (a dispatch queue the agent pulls).
 
 - **Any instance serves any agent.** The agent opens a connection per request (`js-client/src/client.rs:282`) and the edge sends
   it to any instance. That instance authenticates the request by the host's certificate (G3) and reads what it needs of the host
@@ -46,16 +46,18 @@ JobScheduler, to which the shape below applies, and a JobManager that places and
     beat until the host lists it (`per_job.rs` `starts_for`).
 - **The queue is claimed and the host booked conditionally.** A placement claims its job with `SELECT ... FOR UPDATE SKIP LOCKED`
   and books the host by the conditional write of `hostbook/<host>` (Built, #879). The same transaction checks the host's rows: the
-  cordon (Built), the taint, the ports and the marks (G7). The manager places over every live host (a `node/` row heard within
-  grace), not over the hosts whose requests it happens to serve. Since section 0.1 the placer is the JobManager holding the lease,
-  and its placement transaction also checks the lease.
-- **LISTEN/NOTIFY wakes; rows decide** (G16; whom it wakes is in section 0.2). After a commit that gives a host work (a placement, a cancel), the committing instance sends a
-  best-effort `NOTIFY`: on the manager channel for a submit, a free in a listing, a cancel and a lease release (it wakes the lease holder only; a standby acts on a release), and on the host channel with the host id for a placement (it wakes the scheduler holding that host's beat) (section 0.2, G16). A held beat wakes at once instead of at its poll. A lost notification costs one poll (the held beat's
-  5 s, the tick). When the `LISTEN` connection is made again, every held beat is woken once, since it may have missed notices.
+  cordon (Built), the taint, the ports and the marks (G7). Any instance places (section 0.1), over every live host (a `node/` row
+  heard within grace), not over the hosts whose requests it happens to serve, and writes the start as a dispatch message (section
+  0.2) in the same transaction.
+- **LISTEN/NOTIFY wakes; rows decide** (G16). After its commit, an instance sends a best-effort `NOTIFY`: on the queue channel for
+  a submit, a free in a listing and a cancel (it wakes the instances' placement), and on the host channel with the host's id for a
+  dispatch message (it wakes the instance holding that host's dispatch poll). A lost notification costs one poll (the dispatch
+  poll's 5 s, the tick). When the `LISTEN` connection is made again, every held poll is woken once, since it may have missed
+  notices.
 - **Deadlines are the database's `now()`** (G2). Every time that one instance writes and another compares (`heard_at`, queue and
   start deadlines, retention, a cordon's end, a duty's due time) is the database's clock.
-- **Periodic work is the manager's** (section 0.1). Settling silent hosts, expiry, retention and the feed trim run on the manager that
-  holds the lease, and their transactions check it (`trim_feed` and `reap_expired` take no transaction: they remove only what is past its time and are safe twice). The due-time claim of #881 (Built) is deleted with G17: the lease already serializes the duties, and G9 and G11 take no claim either. Settlement judges a host's silence by `heard_at` (G6).
+- **Periodic work is claimed by its due time** (Built, #881). Settling silent hosts, expiry, retention and the feed trim run once a
+  period on whichever instance claims them; settlement judges a host's silence by `heard_at` (G6).
 
 What the shape removes:
 
@@ -79,86 +81,98 @@ This amends [jobscheduler-design.md](jobscheduler-design.md) section 10.1: "live
 rows now (the secret as a digest until G3). The whole-host `Committed`, `Ready` and `Restoring` states stay out of the database: a
 ready or refused report rides on every beat until the job is `starting` (`job_whole.rs`), and `Restoring` is the stored phase.
 
-### 0.1 Two roles: the JobScheduler and the JobManager
+### 0.1 Pulling from the queue
 
-Decided by the project owner (2026-11-19): js-server has two roles.
+Decided by the project owner (2026-11-19). No state lives outside Postgres, so an old instance need not stay alive. Heartbeats,
+the job API and dispatch all go through the edge to any instance. All the scheduling logic stays in js-server, with all the usage
+data. A live update has two rules, and nothing else:
 
-- **The JobScheduler** is the job API and the agent API: submit, get, cancel and list, and the agent's hello and heartbeat. It is
-  stateless over Postgres, and any number of copies run at once. Every rule of section 0 above is the scheduler's. It places no
-  job. A submit commits the queued job and wakes the manager; a beat commits its listing (frees included) and wakes it too.
-- **The JobManager** is the placer and the periodic work. It takes queued jobs (the claim with `SKIP LOCKED`), books the host
-  (`hostbook/<host>`), and writes the start that the next beat's reply carries. It runs the duties: expiry, retention, settling
-  silent hosts, the feed trim, the usage prune, the scaler and its catalog refresh, and `keep_taints` (the taint is G7's row written in the placement transaction; the binding save goes with G4).
+1. **No two instances pull the same queue element.** A queued job is claimed with `SELECT ... FOR UPDATE SKIP LOCKED` and the host
+   booked by the conditional write of `hostbook/<host>` (Built, #879). A dispatch message is claimed the same way, with a
+   `claim_until` column (section 0.2).
+2. **On SIGTERM an instance stops pulling, finishes what it already pulled, and exits.** It claims no more jobs or messages,
+   answers the dispatch polls it holds (the claim and the reply of an element it pulled), commits, and then stops. The stop grace
+   covers one dispatch and the drain hold, so the instance is never killed mid-flight. The agent and job listeners and the drain
+   hold of #935 stay as they are (section 12).
 
-Where the rest of today's tick goes (`js-lease-server/src/api.rs:187`, `agents.rs:865`): the JobScheduler keeps the token reload and the limiter, `mirror_cordons`, `save_bindings`, `joins.flush`, the usage tick (a beat's minutes) and the log-grants tick (grants ride the hello and the beat reply). `registry.advance` (marks and prepare deadlines of the hosts a copy serves) is the scheduler's; G15 and G7 make what it decides rows. A manager serves no job or agent route; it keeps the readiness route (`--ready-listen`): `starting`, then `ready` once its row is written (standby or active) and its loop runs, then `draining`. A start-first update waits for it, and a manager whose loop stops frees the lease and exits.
-- **One binary, a role flag.** `--role scheduler|manager|both` (config key `server.role`, default `both`; like every setting, a flag or a key of the config file, never both). `both` is today's process and a manager like any other: it takes the lease (the lease row and its `Txn::check` work on SQLite too), so two `both` processes in an update's overlap place one at a time. A single-node install is unchanged but for the two rows. Where the roles split, a submit answers the job `queued` and no longer places in the call (`js-lease-server/src/job_api/submit.rs:283`); `both` places in the call only while it holds the lease. A deployment runs `scheduler` copies behind the edge, and
-  `manager` copies with no public listener of their own. One binary keeps one release, one image, one config parser and one
-  schema lock-step. The manager needs the scheduler's job tables and host rows anyway, and two binaries would split that code for
-  no gain.
+Any instance places, and any instance dispatches. Placement is serial on the commit head anyway (3.1), and the two rules are
+enough for correctness, so no lease, no instance row and no leader is needed.
 
-**Which managers may place: the manager rows and the lease.**
+**The crash case.** An instance that dies mid-placement has its transaction rolled back, and the job stays queued. One that dies
+after claiming a dispatch message, or after answering a poll whose reply is lost, leaves the message claimed until `claim_until`
+(`dispatch_lease_secs`, a config key, default 10). The next poll of that host, on any instance, then takes it again. The agent's
+start is idempotent on the job id, fenced by its allocation (Built: `js-agent/src/lifecycle/mod.rs:12-25`), so a retry never
+starts a job twice. (The agent keeps a finished job's id in its bounded retired set, `RETIRED_CAP`; a message is deleted by
+its ack or with its job's end, so a redelivery comes within one `claim_until` of the last delivery, far inside that set's span.) A stop of a job the agent no longer runs changes nothing.
 
-- `manager/<id>` is one row per manager process: its id (random at start), its release, its state (`standby`, `active` or
-  `draining`), the lease generation it last held, and `seen_at` from the database's `now()`. `standby` is a manager that does not hold the lease. The status route and
-  `js manager list` show these rows. A manager that has exited leaves its row `draining`, and its `seen_at` is written at each renewal (the holder) and each lease poll (a
-  standby) with a time to live of a day (`put_ttl`), so the row of an exited or crashed manager goes by itself and no prune runs.
-- `manager/lease` is one row: the holder's id, a generation, and `expires_at` from the database's `now()` plus
-  `manager_lease_secs` (a config key, default 10). The holder is the one active manager.
-  - **Take:** a standby takes the lease when it is free or has expired. In one transaction it writes the lease at the version read (generation raised by one) and its own row `active` at the version read, so a drain that landed first conflicts it and a `draining` manager never takes. The fence below reads the lease alone; a manager's row follows it and is for the operator, so one row decides who places.
-  - **Renew:** the holder renews every third of the lease, at the version read, keeping the generation.
-- **Fencing.** Every claim and placement transaction of a manager reads `manager/lease` and checks it in the same transaction
-  (`Txn::check`, `js-state/src/types.rs:153`, at the version read). It places only if the row names this manager, at the
-  generation it holds, with `expires_at` after `now()`. A manager whose lease was freed or taken over commits not one placement after that commit. On Postgres a decision holds the commit head from before its read of `manager/lease` to its commit (3.1, `hold_head`), so a drain, a takeover or a renewal cannot commit between the read and the commit: it commits first and the decision reads it, or the placement commits first, under the lease it still held. Where the store does not hold the head (SQLite, the default `claim_decide`) the `Cond::Version` check is what fails: the transaction conflicts and writes nothing, and a renewal that lands in between (it bumps the version) makes it run again once. The version check is the fence; `expires_at` is liveness only (a manager starts no placement on a lease it reads expired), since a stale `now` cannot be trusted at commit. The duties check it the same way: the manager's store is the job store behind a wrapper that adds `check(manager/lease, Cond::Version(v))` to every `txn`, `apply_batch` and `claim_decide` it passes (and reads the row in a decision), `v` being the version of the manager's last take or renewal. Nothing in `place_claimed`, the job pass or the scaler's rows changes its signature. `trim_feed` and `reap_expired` take no transaction, so they cannot carry a check: they delete only what is past its time and are safe twice, and are not fenced. The scaler's provider calls are outside the database (G9).
-- **Drain.** SIGTERM, or the operator's `js manager drain <id>` (a job-API route of the operator role, `POST /v1/managers/{id}/drain`),
-  writes the manager's row `draining`. If it holds the lease, the same transaction frees the lease (no holder, the generation raised
-  by one). The fence then holds at once, even before the manager has read its row. The manager stops taking work, lets its
-  in-flight transactions end (a placement already past its lease read commits first, as above; any later one fails the check), and exits 0. A process its supervisor starts again is a new manager with a new id, a standby, so a drain never hands the lease back to the drained process. A drain sends a `NOTIFY` so that a standby takes the
-  lease at once instead of at its poll.
-- **On an update the deploy drains the old manager, and a new start never does.** The new release's manager starts as a standby,
-  and the start-first update, once the new one's readiness answers `ready`, sends the old one SIGTERM. That SIGTERM frees the lease, and the new manager takes it within one
-  notification. A start that took the lease from a live holder would let a broken release take placement from a working one, and a
-  manager restarted by hand would steal it. So the hand-over is the old manager's drain, and the new one only waits for a free or
-  expired lease.
-- **This amends the rule of section 1 for the placer only.** The owner's earlier decision of no leader and no lease stands for the
-  JobScheduler. The manager's lease is a row like every other decision: taken, renewed and checked by conditional writes, judged
-  on the database's clock, and released by a transaction. No instance's memory decides who places.
+**No fencing rows, and why.** The races considered for a per-instance active/draining row or a placer lease:
 
-### 0.2 One active manager, not N
+- *A paused dispatcher.* Instance A claims message M, stalls past `claim_until`, and B takes M and delivers it; A then delivers it
+  too. The agent receives one start twice, and the idempotent start makes the second one change nothing.
+- *An old release placing during the overlap.* Its placement is claimed and booked like any other (rule 1), and the message it
+  writes is one the new release reads (version skew, below).
+- *A draining instance placing after SIGTERM.* It stops pulling at the signal. A placement already in its transaction either
+  commits, and is delivered like any other, or rolls back.
+- *A paused placer.* A placement transaction whose instance stalls is cut by the store's own timeouts
+  (`js-state/src/postgres/timeouts.rs`) and rolls back.
 
-Recommended: **one active manager, holding the lease, with one standby or more.** The choices compare as follows.
+None of these starts a job twice, books a host past its room or loses a job, so none needs a fence. If a race is found that does,
+the row is added then (B20).
 
-| | One active (the lease) | N active (`SKIP LOCKED`, no lease) |
-|---|---|---|
-| Placement throughput | serial, one transaction at a time | also serial: every claimed placement holds the commit head from its start (3.1), so N managers queue on it and add contention, not throughput |
-| Queue order and fairness | exact: one engine walks the queue | two managers walk the queue at once, so a lower-priority job can place while the other holds the one ahead of it (a held job is skipped), and each walk sees the other's bookings a transaction late |
-| Whole-host drains, the scaler, the duties | one decider: no two hosts drained for one job (G8 goes), one scaler loop (G9 shrinks), duties need no claim | each needs its own N-safe rule (G8, all of G9, the duty claims) |
-| A crash | placement and the duties pause until the lease expires (`manager_lease_secs`, 10 s by default, which is 100 times the start target for a job submitted in that window) | none |
-| An update, a drain | none: the drain frees the lease and the standby takes it within one notification | none |
-| Code | a lease row, its renewal, the fence check | already there (#879), plus the N-safe parts of G8 and G9 |
+**Version skew.** Old and new instances may pull side by side for seconds. So the queue message and the agent API stay compatible
+across one version:
 
-**Placement latency** (inferred from the round trips, not measured; G17 measures it):
+- A dispatch message changes only additively (B8): a new optional field that the release before ignores, never a renamed or
+  re-meant one.
+- A release reads and delivers every message that the release before writes.
+- The agent's dispatch route and its acknowledgement change only additively. An agent of release N works with servers N and N+1,
+  since servers are updated before agents.
+- In G19's own overlap the release before writes no messages. So a start is delivered on whichever path its agent uses: the new
+  release's placement writes the message, and the beat's reply still carries the starts derived from the rows (`per_job.rs`
+  `starts_for`) until the release before is gone. The two deliveries of one start are the same idempotent start.
+- The tests: the release before hands out a message the new placer wrote, and the agent starts it; a job placed by the release
+  before reaches a polling agent through the beat's reply.
 
-1. A submit commits the job and sends `NOTIFY`.
-2. The manager wakes on its `LISTEN` connection.
-3. It runs one placement transaction: the lease check, the claim, the booking and the start, in a few round trips on the socket.
-4. It sends `NOTIFY` for the host, and the scheduler holding the host's beat answers it with the start.
+### 0.2 The dispatch queue
 
-Inferred: the transaction is the lease read, the job and `hostbook` reads, the host's allocations and the commit, a few round trips, and each wake-up adds one. The pass reads every live `node/` row before it places (G7), which grows with the fleet and is the larger risk to 100 ms than the lease check. A burst of submits places one after another, each waiting for those ahead (the same with N active). It should meet the 100 ms start target for a host that holds a
-beat; any other host gets the start at its next beat, within its 5 s interval. N active managers have the same steady latency. One
-active costs up to the lease time only after a crash; a drain or an update costs nothing.
+The scheduling logic decides a placement and writes what the host must do as a message. A dumb dispatcher hands it out.
 
-**LISTEN/NOTIFY wakes the active manager** (G16): a submit, a free in a beat's listing, a cancel and a lease release notify the
-manager channel, and only the lease holder acts on them. A standby listens only for a lease release. A placement notifies the
-host's channel, and that wakes the scheduler holding the host's beat. Rows still decide: a lost notification costs one poll.
+- **The message.** `dispatch/<host>/<seq>` holds:
+  - its kind (`start` or `stop`), the job id, the allocation id and the host;
+  - the whole start spec (the `JobStartSpec` a beat's reply carries today), or the stop;
+  - `claimed_by` and `claim_until`.
+
+  The placement transaction writes a start. The decisions that end a job write a stop in their own transactions: a cancel
+  (`request_cancel`), an expiry, a wall limit, a loss. Stops and cancels use the same queue.
+- **Dispatch is an agent route that the agent long-polls through the edge.** `GET /v1/agent/dispatch`, on the agent listener, goes
+  to any instance. That instance claims the host's due messages with `SELECT ... FOR UPDATE SKIP LOCKED`, sets `claim_until`, and
+  returns them. With none due, it holds the request up to the hold of a held beat today (`js-lease-server/src/held_beat.rs:25`,
+  5 s), and wakes on a `NOTIFY` on the host's channel (G16).
+- **Acks by allocation id.** The agent acks each message it has acted on, by its allocation id, in its next dispatch request, on
+  any instance. The ack deletes the message, and an ack of a message already gone changes nothing. A message not acked by
+  `claim_until` is handed out again. Delivery is at least once.
+- **Heartbeats keep their own route.** Hello and the heartbeat go to any instance, applied to the rows (section 0). A beat's reply
+  no longer carries starts and stops for an agent that polls dispatch. An agent that does not poll (an older release, which says
+  so by the absence of a hello capability) gets them in its beat's reply from the same messages, as today, and acknowledges them
+  by its listing.
+- **A pull, not an inbound js-agent endpoint.** Agents dial out and have no inbound API. An inbound one would need a listener on
+  every host, reachable through NAT and the hosts' egress rules (`docs/design/agent-egress.md`). It would also need mTLS both ways,
+  that is a certificate of the coordinator's CA for js-server, which is the per-service certificate the owner ruled out
+  (section 6). The pull crosses the edge as every request does, and with the wake it starts a job as fast as a push would.
+- **Start latency against today.** Today a start rides the heartbeat reply: p50 66 ms and p90 296 ms from placement to delivery
+  (the project owner's figures from the deployment).
+  - With the long poll, a start reaches a host that holds a poll after the placement's commit, one `NOTIFY` and one reply.
+    Inferred: a few milliseconds of database work and the two network legs.
+  - The p90 today comes from a start waiting for the host's next request, and a held poll removes that wait.
+  - Not measured here: the code does not exist yet, and no build runs on this host. G19 measures it on the deployment, as p50 and
+    p90 from placement to the agent's ack, over the same starts with and without the poll, and its pull request reports both.
 
 ## 1. The rule
 
 Direction from the project owner (2026-11-15, binding): **Postgres is the single source of truth, and any number of js-server
-instances over one store just work.** The JobScheduler has no leader, no lease and no election; the placer and the periodic work have one lease row (section 0.1, the owner's amendment of 2026-11-19). Every decision (placement, admission,
+instances over one store just work.** There is no leader, no leader lease and no election. Every decision (placement, admission,
 a host's session, a taint or cordon, a periodic duty, a scaler step) is made inside a Postgres transaction whose correctness does not
-depend on which instance runs it or how many run it at once, except that placement, the periodic duties and the scaler run in the one JobManager that holds the lease. The owner's decision of 2026-11-19 (section 0.1) amends this for the
-placer: one JobManager at a time holds a lease row, and every placement checks that row in its own transaction. The rule stands for
-the JobScheduler, and the lease is itself a row that is taken, renewed and checked by conditional writes on the database's clock.
+depend on which instance runs it or how many run it at once. Pulling from the queue follows the two rules of section 0.1.
 
 1. **Postgres decides; memory only caches.** An instance's memory holds caches that can be rebuilt from the rows. A cache may
    choose what to try (which job to place first, which host to offer), but the decision is taken against the rows, in the
@@ -171,8 +185,8 @@ the JobScheduler, and the lease is itself a row that is taken, renewed and check
      `Conflict` says who lost;
    - a **claim by advancing a due time** for periodic work (`JobStore::claim_duty`, `js-jobs/src/store/duties.rs:46`): the
      instance whose advance of the duty's row commits runs it for the period.
-   Except the manager's lease (section 0.1), no step elects, leases, counts instances or relies on being the only process. An instance that dies at any point leaves
-   no lock or lease that another must clear by a timeout, except a crashed manager's lease, which expires: its transaction committed or it did not. (A host that falls silent
+   No step elects, leases, counts instances or relies on being the only process. An instance that dies at any point leaves no
+   lock or lease that another must clear by a timeout, except the dispatch claims it held, which expire (section 0.1): its transaction committed or it did not. (A host that falls silent
    is settled after a timeout, as today, but that is the host's silence judged on the store's clock, not an instance's hold.)
 3. **Time is the database's.** A time that one instance writes and another compares (a deadline, an expiry, a due time, a
    last-heard time) is read from the store's clock (`Store::now`, the database's `now()`), never from the process clock. The
@@ -235,7 +249,7 @@ and decides nothing shared). Paths are under `crates/`.
 | Feed trim | `js-lease-server/src/job_pass.rs:242`, `js-lease-server/src/job_store/feed_trim.rs:44` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
 | An unreachable database | `js-lease-server/src/job_pass.rs:190`, `:225`, `js-lease-server/src/store_health.rs` | every store call fails and nothing is decided; a hello's binding read or write or a taint's write answers `503`, a listing's commit `500` `state-write-failed` (`js-lease-server/src/agent_api.rs:324`, `:352`, `:659-662`), both retried by the agent | Built |
 | `Store::now` when the database cannot be read | `js-state/src/postgres/mod.rs:920-931` | fails with the read's error (`Store::now` returns `Result<StoreTime, StoreError>`, `js-state/src/store.rs:121`); the `js-jobs` writes that stamp rows from it (`js-jobs/src/store.rs:342`, `:486`, `ending.rs:62`, `:139`) fail with it and write nothing | Built (#938) |
-| Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. At SIGTERM the agent listener closes, held beats are answered at once and no job is placed (#935, `js-lease-server/src/drain.rs:28`, `server.rs:840`), so agents move at once; the route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; Built (agents leave at once); Designed (G13: the edge sees it) |
+| Readiness, drain and shutdown | `js-lease-server/src/ready.rs:26`, `js-lease-server/src/server.rs:309` | one instance's own phases (#876); nothing waits on another. At SIGTERM the agent listener closes, held beats are answered at once and no job is placed (#935, `js-lease-server/src/drain.rs:28`, `server.rs:840`), so agents move at once; the route is served on a loopback address only, so the edge cannot see a drain (section 12) | Per instance; on SIGTERM the instance stops pulling and finishes what it pulled (section 0.1; G19 for dispatch) |
 | The host-native update hook's "is a server running" probe | `js-state/src/writer.rs:128`, `js-state/src/postgres/serving.rs:21`, `js-lease-server/src/update_hook/step/mod.rs` | reads `pg_stat_activity` by the server's application name; it serves the one-server install of `docs/lease-server-update.md`, not an N-instance deploy (which is the orchestrator's start-first update) | Per instance |
 
 ### 3.2 Hosts: identity, admission, taint, cordon
@@ -283,11 +297,11 @@ and decides nothing shared). Paths are under `crates/`.
 | A host port is held by one job per host | `js-sched-placer/src/jobs.rs:472` | the engine's memory only; the placing transaction does not compare ports | Designed (G7) |
 | A host the scaler drains or releases takes no new job | `js-registry/src/registry/marks.rs:1-25` ("the marks are held in memory only") | a mark in one instance's registry; another instance's placement does not see it | Designed (G7, G9) |
 | One mark row per whole-host job | `js-jobs/src/store/marks.rs:81-94` | `mark/<job>` at `Cond::Absent` or `Cond::Version`, with the job checked at its version | Built |
-| Which host a whole-host job drains | `js-sched-placer/src/whole_jobs.rs:204-210`, `js-sched-placer/src/jobs.rs:741` | each instance chooses over its own hosts and deletes a mark whose host it never heard after its own start plus grace: two instances drain two hosts in turn (the rows stay consistent; the work is wasted) | Designed (G17: one manager decides; G8 deleted) |
-| Why a job waits (queue status note) | `js-sched-placer/src/jobs.rs:779`, `js-jobs/src/store/status.rs:38` | conditional, but its text depends on the instance's view, so two instances rewrite it in turn and each rewrite moves the head | Designed (G17: one manager writes it) |
+| Which host a whole-host job drains | `js-sched-placer/src/whole_jobs.rs:204-210`, `js-sched-placer/src/jobs.rs:741` | each instance chooses over its own hosts and deletes a mark whose host it never heard after its own start plus grace: two instances drain two hosts in turn (the rows stay consistent; the work is wasted) | Not a gap: churn, the rows stay consistent (G8 deleted) |
+| Why a job waits (queue status note) | `js-sched-placer/src/jobs.rs:779`, `js-jobs/src/store/status.rs:38` | conditional, but its text depends on the instance's view, so two instances rewrite it in turn and each rewrite moves the head | Not a gap: cosmetic (G8 deleted) |
 | The tables a pass decides from | `js-sched-placer/src/jobs_seen.rs:192` | a cache judged by the store's head (#880); every placement is re-decided in its transaction | Built |
 | Which hosts an instance places on | `js-lease-server/src/sched/jobs_pass.rs:154` (`registry.hosts()`; nothing at all once draining, `:147`) | the hosts whose sessions it holds; section 0 has every instance place over every live `node/` row | Designed (G7) |
-| Which manager places | the lease row `manager/lease` and `manager/<id>` (section 0.1) | one lease holder, checked in every claim and placement transaction at the version read; a drain frees it in the same transaction | Designed (G17) |
+| No two instances pull one queue element | `js-jobs/src/store/whole.rs:128-132` (the job's claim), `dispatch/<host>/<seq>` (G19) | `SELECT ... FOR UPDATE SKIP LOCKED` on the job; on a dispatch message, the same with `claim_until` (section 0.1) | Built (jobs); Designed (G19, messages) |
 | Queue order | `js-jobs/src/store/queue.rs:20` | a total order of row columns, the same on every instance | Built |
 | Job sizing | `js-sched-placer/src/sizes.rs:564` | from the shared tables; the booking is checked in the transaction | Per instance |
 
@@ -297,7 +311,7 @@ and decides nothing shared). Paths are under `crates/`.
 |---|---|---|---|
 | A client-chosen job id is recorded once | `js-jobs/src/store.rs:376-387` | `Cond::Absent`; a conflict answers from the stored job | Built |
 | A minted job id is unique | `js-jobs/src/store.rs:402-411` | random ids, `Cond::Absent`, retried on a collision | Built |
-| A cancel racing a placement on another instance | `js-jobs/src/store.rs:554-573` | `Cond::Version`; the loser writes nothing | Built |
+| A cancel racing a placement on another instance | `js-jobs/src/store.rs:554-573` | `Cond::Version`; the loser writes nothing | Built; Designed (G19: its stop message) |
 | Job reads, results, logs | `js-lease-server/src/job_api/read.rs:220`, `js-lease-server/src/job_api/logs.rs:239-249` | read from the rows; a follow polls the row, no local wake decides | Built |
 | A submit is refused `no-capable-host` | `js-lease-server/src/admit.rs:94-108`, `js-lease-server/src/job_api/submit.rs:264` | judged over this instance's registry: a host held by another instance is invisible, so a job it could run is refused for good. Since #940 a tainted host counts as capable (`js-sched/src/admission_ever.rs`, `HostView.tainted` is gone), so a taint alone refuses nothing; placement still skips it | Designed (G5) |
 | `ListHosts`, `GET /v1/hosts`, a job's `host_silent_since_ms` | `js-lease-server/src/hosts.rs:283`, `js-lease-server/src/job_api/read.rs:165` | this instance's registry: the answer depends on which instance is asked | Designed (G5) |
@@ -314,9 +328,9 @@ and decides nothing shared). Paths are under `crates/`.
 | Times stored in host rows (join-token and credential expiry, which G3 removes; the binding's cordon end) | `js-lease-server/src/join_tokens.rs:440-441`, `:529-544`, `:557`, `js-lease-server/src/agents_cordon.rs:132` | the token times are stamped and judged with the process clock (G3); the binding's cordon end is now stored on the store's clock (#938, `agent_state.rs` `Skew`); with the job service the cordon itself is now a store row `cordon/<host>` whose time to live is the store's (`js-jobs/src/store/cordons.rs:123-128`), so only the binding's copy of the end (`agents_cordon.rs:127`) and the registry's cordon use the process clock | Designed (G2; G3 for the token times) |
 | A silent host's jobs are lost (settlement) | `js-lease-server/src/job_pass.rs:130` (`gone`), `:186` (while `gone` is not empty the claim is bypassed and the pass runs regardless), `js-lease-server/src/job_alloc.rs:140` | "absent" is this instance's registry forgetting the host; a host connected to another instance is never heard here, so this instance can lose its live work | Designed (G6) |
 | `taint/<host>` rows are dropped once kept | `js-jobs/src/store/taints.rs:72` | `Cond::Any`: a taint row rewritten between the scan and the delete is lost | Designed (G4) |
-| The scaler runs a step | `js-lease-server/src/server.rs:658` (`ScalerLoop::spawn`), `:689` (`scaler.tick()`), `js-lease-server/src/scaler/mod.rs:189` | every instance with an elastic pool runs its own loop, with no claim | Designed (G17: the scaler runs in the active manager only; G9) |
+| The scaler runs a step | `js-lease-server/src/server.rs:658` (`ScalerLoop::spawn`), `:689` (`scaler.tick()`), `js-lease-server/src/scaler/mod.rs:189` | every instance with an elastic pool runs its own loop, with no claim | Designed (G9) |
 | The scaler's records and unremoved hosts | `js-lease-server/src/scaler/kept.rs:51` | read at start, written whole at `Cond::Any`: two scalers overwrite each other | Designed (G9) |
-| The scaler's caps and budgets | `js-scaler/src/budget.rs:88`, `js-scaler/src/caps.rs:97` | judged over this instance's records: N instances spend up to N times a cap | Designed (G17: one manager judges them; G9 for the fence) |
+| The scaler's caps and budgets | `js-scaler/src/budget.rs:88`, `js-scaler/src/caps.rs:97` | judged over this instance's records: N instances spend up to N times a cap | Designed (G9) |
 | The scaler's view of hosts and its drain and release | `js-lease-server/src/scaler/live.rs:98`, `:222`, `:271-302` | this registry's hosts; an acquire id drawn per process | Designed (G9) |
 | Alerts (webhook, log lines) | `js-lease-server/src/alerts.rs:38` | each instance's own; a duplicate notice, not a decision | Per instance |
 | Metrics, TLS and token-file reload | `js-lease-server/src/metrics.rs`, `js-lease-server/src/agents.rs:865-904` (`refresh`: token and client-token reload, `mirror_cordons`, `save_bindings`; the TLS reload is in `js-lease-server/src/tls.rs`, not in `agents.rs`) | each instance's own | Per instance |
@@ -342,13 +356,13 @@ cannot be read (section 3.1). G2 makes one clock:
   when it fails. That is rule 4 for time.
 - The job pass (`job_pass.rs:197`, `jobs.now()`), prepare expiry, the duty claims (`claim_duty(duty, period)` reads the clock itself, `js-jobs/src/store/duties.rs:46-52`), the whole-host start (`job_whole::serve`, only for a step that stamps a time) and the
   binding's cordon end (`agent_state.rs` `Skew`, the store's clock less the server's, read at start, at each save and before a cordon's commit) take the store's time (Built, #938). (Join-token and credential expiry,
-  `join_tokens.rs:440-557`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:741`, still the process clock) is replaced by a stored deadline on this clock, by G17 (G8 is deleted).
+  `join_tokens.rs:440-557`, go with G3.) The whole-host mark's `claim_by` (`js-sched-placer/src/jobs.rs:741`, still the process clock) is replaced by a stored deadline on this clock, by G7, which places over every live host (G8 is deleted).
 - The process clock stays for intervals that are the process's own: ticks, backoffs, the hello limiter, the held beat.
 
 One more round trip per pass or request, and none per heartbeat: its `heard_at` is `now()` inside the beat's own write (section 0, G15).
 
 **Load.** Two costs grow with the fleet, not with the instances. Every claimed decision (a placement) holds the commit head from
-its start (3.1), so the placements are serialized there, and since section 0.1 they are the one manager's; each holds it for one job's rows, and more schedulers add none. The heartbeat is a row write per host per beat interval (section 0, its cost): at the
+its start (3.1), so the placements are serialized there, each holds it for one job's rows, and more instances spread the same placements without adding any. The heartbeat is a row write per host per beat interval (section 0, its cost): at the
 default 5 s, 100 hosts are 20 writes a second. Neither is measured here; G15's pull request measures the beat's write at the
 deployment's host count, and `js-state/tests/postgres_head_queue.rs` exercises writers queued on the head.
 
@@ -396,12 +410,14 @@ Carried from komira-ai/hostkeeper's design, section 13:
 
 ## 7. Compatibility (B8)
 
-Every change of section 9 is additive but G3's; G17 adds the role flag, so its default `both` keeps every existing deploy as it is. New key prefixes: `node/` (G15; beside, and not under, the usage rows' `usage/node/`),
-`pool/` (G5), `hostmark/` (G7); new optional fields in the `node/` value (G15) and a stored deadline in the `mark/<job>` value (G17); the rows `manager/<id>` and `manager/lease` (G17);
+Every change of section 9 is additive but G3's. New key prefixes: `node/` (G15; beside, and not under, the usage rows' `usage/node/`),
+`pool/` (G5), `hostmark/` (G7); new optional fields in the `node/` value (G15) and a stored deadline in the `mark/<job>` value (G7); the messages `dispatch/<host>/<seq>` (G19);
 a usage row per instance beside a host's hour pack (G11; a release before reads the pack alone and misses only the overlap's minutes, as today); new scaler rows under `acquires/scaler/` for a launch and for a pool's brake (G9). No
 existing key is renamed, re-meant or written in a new shape. G15 adds two optional wire fields, the beat's sequence within its
 session and, in the hello, the agent process; an older agent does not send them and an older server ignores them; they are named as
-a change of the wire in that pull request. `NOTIFY` (G16) carries no stored format. G17 changes the public interface and names it in its pull request: the flag `--role` and key `server.role` (default `both`), the key `manager_lease_secs`, and the scheduler role's no longer placing; G18 adds `js manager drain|list`, `POST /v1/managers/{id}/drain` and `GET /v1/managers`. All are additive: an agent or client that never calls them is unchanged. The first update that carries G17 overlaps a release that places without checking the lease, as today (one overlap, no worse than now). Its test: the release before serves a store holding `manager/` rows, and the new release places over a store the old one placed in. The binding and scaler-record rows keep their values; what changes is
+a change of the wire in that pull request. `NOTIFY` (G16) carries no stored format. G19 adds `GET /v1/agent/dispatch`, its acks, a hello capability and `dispatch_lease_secs`, and changes what a beat's reply
+carries for an agent that polls; its pull request names that change of the wire and the public interface. It is additive: an agent
+that does not poll is served as today. The test of section 0.1's version skew is G19's. The binding and scaler-record rows keep their values; what changes is
 that they are written at the version read, which a reader does not see. An older release ignores the new prefixes. G3 is the one change
 that removes: by the owner's ruling it deletes the join-token mint and revoke, `--agent-token-file`, the host credential a welcome
 carries and the agent's token and credential flags, and refuses an agent request without a certificate. It names that change of
@@ -431,39 +447,40 @@ one store are `js-lease-server/src/sched/jobs_two_servers_tests.rs::two_servers_
 
 ## 9. The gaps, one pull request each
 
-Each lands after this document, is one subject, changes neither the replica count nor the update order (G17 adds the manager service and the drain step of section 12), and turns its rows of section 3 to Built with paths.
+Each lands after this document, is one subject, changes neither the replica count nor the update order (G19 adds the dispatch route), and turns its rows of section 3 to Built with paths.
 They land in the order of section 12's "Order of safety" (the gaps an update's overlap reaches today first), then in the table's order.
 
-| # | Under sections 0 and 0.1 | Pull request | Closes (section 3) | After |
+| # | Under section 0 | Pull request | Closes (section 3) | After |
 |---|---|---|---|---|
-| G2 | Kept: section 0's deadlines by `now()` | **One clock** (Built by #938; no `try_now`: `Store::now` itself is fallible): the store's time for every shared deadline, expiry and due time. Left to other gaps: the whole-host mark's `claim_by` (G17), join-token times (G3), presence (G5), usage minutes (G11) | `Store::now` epoch; the pass's clock; host-row times; the whole-host start's clock | none |
+| G2 | Kept: section 0's deadlines by `now()` | **One clock** (Built by #938; no `try_now`: `Store::now` itself is fallible): the store's time for every shared deadline, expiry and due time. Left to other gaps: the whole-host mark's `claim_by` (G7), join-token times (G3), presence (G5), usage minutes (G11) | `Store::now` epoch; the pass's clock; host-row times; the whole-host start's clock | none |
 | G3 | Kept: the certificate is how any instance knows the host | **Host identity is the host certificate**: delete the one-time join tokens (their mint, revoke and use-once paths, the cap of waiting tokens, the give-back of a refused hello), the pool tokens of `--agent-token-file`, and the host credentials a welcome issues and the tick renews; an agent request without a host certificate is refused; the agent's token and credential flags go. Nothing replaces them: the certificate names the host (#922), and no per-host secret is kept in a row (section 5). The scaler's mint and revoke of a launched machine's token (`js-lease-server/src/scaler/live.rs:209`, `:259`) go too, while the scaler is off; G9 launches machines with certificates. It lands once every agent presents a certificate: Linux hosts do (#922), the Macs do not yet, so until then the token hazards of section 12 stay live for the Macs. komira-ai/jobscheduler#935 (Built) reads a token's row by key at its first use (`js-lease-server/src/join_tokens_stored.rs:19`, `js-lease-server/src/agent_api/unknown.rs:34`) meanwhile; that goes with the tokens | 3.2: a host without a certificate; 3.6: the token times | none |
 | G15 | New: section 0's heartbeat | **The heartbeat is a row `UPDATE` on any instance**: the session in `node/<host>` (section 0's fields), written by the hello at the version read and by every beat; a beat guarded by its (epoch, sequence), its listing's writes conditional on the version it wrote, through #883's `Checked` store; two optional, additive wire fields, the beat's sequence and, in the hello, the agent process (so the same process takes the host over at once), the agent sending them first; for an agent that sends no sequence, a confirmed container freed only after two applied beats in a row omit it; the first-listing and listing-clean flags as `node/` columns; the reply built from the rows; no `409 unknown-host` or `403 session-mismatch` for a host the row knows; the registry refreshed from the rows. It measures the beat's write through the `Store` against a plain `node` table and takes the cheaper one that keeps the guard (section 0, its cost). komira-ai/jobscheduler#883 is closed in favour of this pull request, which takes its `Checked` store and its tests; `docs/design/jobscheduler-design.md` section 10.1 amended | 3.3: which connection commits a listing, first listing, the session, listing-clean; the lost whole-host start (was G14) | G2, G3 |
 | G4 | Shrunk: no bindings save is left to make conditional; each change of a binding is its own conditional write where it is decided | **Host bindings are rows, and after G3 only the taint**: until G3, `HostBound` is judged on the binding row read in the hello's transaction (`Cond::Absent` for a first hello, `Cond::Version` otherwise) and a refused hello is judged before its binding is written, so there is nothing to undo; after G3 the certificate names the host, so `HostBound`, the undo, the binding's credential and its copy of the cordon end (`cordon/<host>` is the cordon) go, and the row keeps the taint; the registry holds no bindings to save, so `save_bindings` goes; cordon, uncordon and clear taint take the host from the rows, so a host served by another instance is not `404` (`js-lease-server/src/agents_cordon.rs:60-63`, `agents_taints.rs:86`); `taint/<host>` dropped at the version scanned. Built by komira-ai/jobscheduler#935: the save deletes only a binding this registry held and let go (`js-lease-server/src/agent_state.rs:358`), and the hello of a host the registry does not know reads its binding row first (`js-lease-server/src/agents.rs:567`) | 3.2: host bound, undo, saved, taint seen, cordon's `404`, clear taint; 3.5: cordon and clear taint through the API; `taint/` drop | G3 |
 | G5 | Shrunk: presence is the beat's own `UPDATE` (G15), so no presence write or `presence_refresh` of its own; what is left is the readers | **Decisions read the `node/` rows**: admission, host listings, `host_silent_since_ms`, `HostLive` (judged on the row; the same agent process by G15's hello field) and `PoolFull` (under `pool/<pool>`, counting the rows not forgotten) read the `node/` rows (section 5) | 3.3: `HostLive`, `PoolFull`; 3.5: admission, listings | G15 |
-| G17 | New: section 0.1 | **The JobScheduler and JobManager roles**: `--role` with `scheduler`, `manager` or `both` (`server.role`, default `both`); the manager rows `manager/<id>` and the lease `manager/lease` (take a free or expired lease at the version read with the generation raised, renew at a third of `manager_lease_secs`, by the database's clock); every claim, placement and duty transaction checks the lease in its own transaction; SIGTERM writes the row `draining` and frees the lease in one transaction and sends `NOTIFY` (G16 builds the wake; until it the standby takes a freed lease at its poll); the scheduler role places nothing (the beat's pass `js-lease-server/src/agent_api.rs:641` and its `keep_taints` at `:644`, the submit's place-now `js-lease-server/src/job_api/submit.rs:301` (called at `:283`) and the tick's `place_jobs` at `js-lease-server/src/api.rs:202` move to the manager; the other parts of the tick are assigned in section 0.1), and the duties and the scaler run in the manager. It measures the placement latency of section 0.2. Until G16, a submit's place-now and a beat's free reach the manager only at its poll: `both` wakes its manager in process, a lone `manager` waits for the tick. Tests, against Postgres with two managers (and the SQLite store for the version-check path): a manager whose lease is freed between its read and its commit places nothing; a standby takes an expired lease on an injected clock and the old holder's next placement conflicts; a standby takes a freed lease at its next poll (on the drain's notification once G16 is Built); two managers never both commit a placement in one generation; one `both` behaves as today, and N `both` copies place from one | 3.4: which host drains, queue notes (G8 deleted); 3.6: the mark's `claim_by`; 3.6: the scaler runs per instance; section 12: placement in the overlap | G2, G15 |
-| G6 | Kept, simpler, and the manager's: silence is `heard_at`, so the local `gone` map and the claim bypass go; the active manager runs it under the lease | **Settlement by rows**: the claimed job pass loses a host's allocations by `node/<host>`'s `heard_at` and version, never by the local `gone` map; the claim bypass goes | 3.6: settlement | G15, G17 |
-| G7 | Kept, in the manager's placement transaction, over every live host | **Placement re-checks the host in its transaction, over every live host**: the pass builds the engine's hosts (`host_up`, `heard` with the load, `OpenHost`) from the live `node/` rows it reads before each pass, not from the hosts this instance serves, and the pass's skip rule (`jobs_seen.rs`, engine change counts) counts a changed row, not a local call; `place_claimed` reads the host's binding (taint; the cordon is Built, see below), `taint/<host>`, the scale-down mark and the ports of the host's live allocations in the claimed transaction and refuses the host; the scale-down mark becomes a row `hostmark/<host>`, written at `Cond::Version` by whoever marks, the registry mark its cache | 3.4: contained beside host job, taint, ports, scale-down mark, which hosts an instance places on (the cordon check is Built: `js-jobs/src/store/whole.rs:190-196`, `:290-291`) | G4, G15, G17 |
-| G16 | New: section 0's wake, aimed by section 0.2 | **LISTEN/NOTIFY wakes the active manager and held beats**: a submit, a listing's free, a cancel and a lease release `NOTIFY` the manager channel after their commit; a placement `NOTIFY`s the host's id on the host channel; the lease holder places, a standby acts only on a release, and the scheduler holding the host's beat answers it; each process `LISTEN`s on one connection of its own and wakes every waiter once when that connection is made again; the poll stays the guarantee (`js-state/src/postgres/mod.rs:25`). Tests: a submit on one scheduler is placed by the manager before its tick; a placement ends a beat held on another scheduler before its hold; with notifications off, both happen at the next poll | 3.3: held beats (a placement elsewhere waits for the next beat) | G15, G17 |
-| G18 | New: section 0.1's operator drain | **The operator drains and lists managers**: `js manager drain <id>` and `js manager list`, over `POST /v1/managers/{id}/drain` and `GET /v1/managers` of the operator role; the drain is the same transaction as SIGTERM's (the row `draining`, the lease freed if held). A change of the public interface, named as such in that pull request. Tests: a drain through the route fences a manager that has not yet read its row; the list shows each manager's state and generation | section 0.1 | G17 |
-| G9 | Shrunk: it runs in the one active manager, so it needs no claim per step and no cross-instance lock on its caps; left are its rows and the fence | **The scaler under the rule**: the scaler runs in the active manager only, so one step per pool needs no claim of its own; its records and unremoved set written at the row's version, a conflict re-reading and re-deciding the step; each launch a row at `Cond::Absent` before the provider call, its acquire id derived from that row so a repeated call is the same machine; caps and budgets judged in the transaction that writes the launch row, which checks the lease (no lock of its own: one manager decides); the lease checked again before each provider call (this narrows the window and does not close it: a manager paused after the check can still call; the launch row at `Cond::Absent`, whose write checks the lease, and the acquire id derived from it make that call the one the next manager repeats); the brake a row, its reset a conditional write; a release written to `hostmark/<host>` before the provider release; a machine it launches joins with a host certificate, since G3 removed the launch token, so the scaler stays off until a launched machine can be enrolled, as it is off on the deployment today | 3.6: scaler step, records, caps, host view; 3.5: brake reset | G2, G3, G7, G17 |
-| G11 | Kept, and more needed (the prune runs in the manager, so after G17): with any instance taking any beat, a host's minute is split over instances as a rule, not only at an update | **Usage rows and the import**: the import's loser reads the marker and starts; a host-minute flushed by two instances keeps both: each instance's minutes are kept in a row of its own beside the hour pack (a new key under the host's hour, named by the instance's start), and a reader sums the hour pack and those rows, so a flush retried after a lost reply replaces its own row and never counts twice; the usage prune run by the active manager; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G17 |
+| G6 | Kept, simpler: silence is `heard_at`, so the local `gone` map and the claim bypass go; any instance that claims the job pass runs it | **Settlement by rows**: the claimed job pass loses a host's allocations by `node/<host>`'s `heard_at` and version, never by the local `gone` map; the claim bypass goes | 3.6: settlement | G15 |
+| G7 | Kept, over every live host, on any instance | **Placement re-checks the host in its transaction, over every live host**: the pass builds the engine's hosts (`host_up`, `heard` with the load, `OpenHost`) from the live `node/` rows it reads before each pass, not from the hosts this instance serves, and the pass's skip rule (`jobs_seen.rs`, engine change counts) counts a changed row, not a local call; `place_claimed` reads the host's binding (taint; the cordon is Built, see below), `taint/<host>`, the scale-down mark and the ports of the host's live allocations in the claimed transaction and refuses the host; the scale-down mark becomes a row `hostmark/<host>`, written at `Cond::Version` by whoever marks, the registry mark its cache | 3.4: contained beside host job, taint, ports, scale-down mark, which hosts an instance places on (the cordon check is Built: `js-jobs/src/store/whole.rs:190-196`, `:290-291`) | G4, G15 |
+| G16 | New: section 0's wake | **LISTEN/NOTIFY wakes placement and the host's poll**: a submit, a listing's free and a cancel `NOTIFY` the queue channel after their commit; a dispatch message `NOTIFY`s the host's id on the host channel; each process `LISTEN`s on one connection of its own and wakes every waiter once when that connection is made again; the poll stays the guarantee (`js-state/src/postgres/mod.rs:25`). Tests: a submit on one instance is placed before the next tick; a dispatch message ends a poll held on another instance before its hold; with notifications off, both happen at the next poll | 3.3: held beats (a placement elsewhere waits for the next beat) | G15 |
+| G19 | New: section 0.2 | **The dispatch queue and its route**: the messages `dispatch/<host>/<seq>` (a start written by the placement transaction; a stop by a cancel, an expiry, a wall limit or a loss, in their own transactions); the long poll `GET /v1/agent/dispatch` on the agent listener, any instance (claim with `SKIP LOCKED` and `claim_until` of `dispatch_lease_secs`, wake on the host's channel); acks by allocation id in the next poll, idempotent; on SIGTERM an instance claims no more messages, answers the polls it holds and commits, then exits; a hello capability by which an agent says it polls, the beat's reply still carrying starts and stops for an agent that does not; `js-agent` polls dispatch and acks (it lands first, in its own pull request; the agent's start is idempotent on the job id already, `js-agent/src/lifecycle/mod.rs:12-25`). A change of the wire and of the public interface, named in its pull requests. It measures start latency, placement to ack, p50 and p90, with and without the poll. Tests: two instances never hand out one message at once; a message claimed by an instance that dies is handed out again after `claim_until` and the agent's second start changes nothing; an ack on another instance deletes it; a stop for a cancelled job reaches the host by the same queue; a held poll is answered on the host's notification; an instance given SIGTERM answers its held polls and claims nothing more; the release before hands out a message the new placer wrote; an agent without the capability gets its start in the beat's reply; a job the release before placed reaches a polling agent through the beat's reply | 3.5: cancel racing a placement (its stop) | G16 |
+| G11 | Kept, and more needed: with any instance taking any beat, a host's minute is split over instances as a rule, not only at an update | **Usage rows and the import**: the import's loser reads the marker and starts; a host-minute flushed by two instances keeps both: each instance's minutes are kept in a row of its own beside the hour pack (a new key under the host's hour, named by the instance's start), and a reader sums the hour pack and those rows, so a flush retried after a lost reply replaces its own row and never counts twice; the usage prune claimed by `periodic/usage-prune`; profile eviction at the scanned version; the stale "one writer" doc in `js-usage/src/store.rs` | 3.1: import; 3.7: minute, prune, profiles | G2 |
+| G9 | Kept: the scaler is off on the deployment, so it lands before the scaler is turned on, not before an update | **The scaler under the rule**: one step per pool and period by a duty claim (`periodic/scaler/<pool>`); its records and unremoved set written at the row's version, a conflict re-reading and re-deciding the step; each launch a row at `Cond::Absent` before the provider call, its acquire id derived from that row so a repeated call is the same machine; caps and budgets judged in the transaction that writes the launch row, under the pool's scaler row lock; the launch row at `Cond::Absent` and the acquire id derived from it make a repeated provider call the same machine; the brake a row, its reset a conditional write; a release written to `hostmark/<host>` before the provider release; a machine it launches joins with a host certificate, since G3 removed the launch token, so the scaler stays off until a launched machine can be enrolled, as it is off on the deployment today | 3.6: scaler step, records, caps, host view; 3.5: brake reset | G2, G3, G7 |
 | G12 | Kept: the cutover is not about instances | **Job-store cutover tools** (section 6): a dry-run copy of `<state file>.jobs` into the store with counts and a checksum per prefix, and an export of the store's job and usage rows to a SQLite file, with the round trip as its test. Moot for a deployment whose job store is already in Postgres with nothing to bring back | section 6 | none |
-| G13 | Kept: section 12 | **Readiness the edge can reach** (section 12): `--ready-listen` accepts a private address as the agent and job listeners do (`js-lease-server/src/config.rs:417`, `js-lease-server/src/config/listen.rs:55`, `:79`), so the edge checks `/readyz` and sends no new connection to an instance from its first `503 draining` (Built by komira-ai/jobscheduler#935: agents move at SIGTERM because the agent listener closes, held beats are answered at once, and a draining instance places nothing, `js-lease-server/src/server.rs:840`, `js-lease-server/src/drain.rs:28`; job clients still reach the old instance through the hold); the stop grace above `--drain-hold` plus `--drain-timeout` is checked once at deploy (B20), outside this repository | 3.1: readiness; section 12 | none |
 | G1 | Shrunk into G15: no connection owns a host, so #883's rule that the newest hello owns it and its `503` on a racing hello go; its mechanism, every listing write conditional on `node/<host>`, is G15's guard | ~~Finish komira-ai/jobscheduler#883~~: its `Checked` store and its two-server test (`two_servers_serve_one_store_place_each_job_once_and_keep_to_the_hosts_cores`) move into G15, and #883 is closed in favour of G15 | (now G15) | none |
-| G8 | Deleted: one active manager walks the queue and chooses the host a whole-host job drains, so two hosts are never drained for one job and the queue note is written by one engine; the mark's deadline on the database's clock is G2's | ~~Whole-host drain and queue notes without churn~~ | 3.4 (now G17, G2) | none |
+| G8 | Deleted: two instances draining two hosts for one whole-host job is churn, not a wrong answer (the rows stay consistent), and the queue note is cosmetic (B20) | ~~Whole-host drain and queue notes without churn~~ | 3.4 | none |
 | G10 | Deleted: an agent keeps no connection, and any instance serves any job client, so a connection age only spreads load (B20: no machinery without a need); a draining instance closes its connections (section 12) | ~~Job-client connection max age~~ | section 6 | none |
+| G13 | Deleted: the edge's TCP check, the agent's retry and a stop grace that covers one dispatch and the drain hold are enough; nothing is cut mid-flight (section 12) | ~~Readiness the edge can reach~~ | section 12 | none |
 | G14 | Deleted: a start is a function of the rows, so the next beat on any instance carries it again (G15), and with no hello on a change of instance the first-listing rule, a stored `node/` flag cleared in the beat's own writes, runs only after an agent restart, whose listing is the agent's whole account (`per_job.rs` `starts_for` sends a `starting` whole-host job's start on every beat until the host lists it, so a lost reply is sent again) | ~~A start whose reply was lost is sent again~~ | 3.3 (now G15) | none |
-With G2 to G7, G9, G11, G13 and G15 to G18 Built, any number of instances is safe in steady state and through an update's overlap from this repository's
-side; the edge's check and the stop grace are the deployment's.
+| G17 | Deleted: no race needs a per-instance active/draining row or a placer lease (section 0.1, the races considered) | ~~Instance rows and the placer~~ | section 0.1 | none |
+| G18 | Deleted with G17 | ~~The operator drains and lists instances~~ | section 0.1 | none |
+With G2 to G7, G9, G11, G15, G16 and G19 Built, any number of instances is safe in steady state and through an update's
+overlap from this repository's side; the stop grace is the deployment's.
 
 ## 10. Supersession (B22)
 
 - This text replaces the earlier draft of this file (komira-ai/jobscheduler#873, never merged), which designed presence rows,
   a `hostbook` gate and a placement lock order of its own before #877 to #881 built placement and the duties differently. What
   it found that still holds is in section 3 and section 9.
-- [deployment.md](deployment.md), "(b) later" and "Single active writer, not leader election": a second JobScheduler replica needs no leader,
-  no election and no fence; the JobManager has one lease holder (section 0.1), fenced by the conditional write on the lease row, which is the fence that file's 'if (b) comes' sentence names. That file gets a pointer here, and its 'Single active writer, not leader election' text is amended in G17's pull request.
+- [deployment.md](deployment.md), "(b) later" and "Single active writer, not leader election": a second replica needs no leader, no
+  election and no fence; this document is the design. That file gets a pointer here.
 - [jobscheduler-design.md](jobscheduler-design.md) section 10.1, "a heartbeat is not a write", is amended by G15 in its pull request.
 - [configuration.md](configuration.md), "What it keeps": G3 removes the tokens and host credentials from that text and G4 makes
   "read once at start" untrue for the bindings; each changes it.
@@ -483,21 +500,20 @@ side; the edge's check and the stop grace are the deployment's.
   does not have.
 - **G3 removes the tokens instead of making them N-safe.** The owner ruled that an enrolled host's certificate is its one
   identity, with no join tokens and no revocation machinery, so the token rows get no conditional writes and no cap lock.
-- **One binary with a role flag, not two binaries** (section 0.1). The default `both` keeps a single-node install as it is, and
-  the manager reads the same job tables and host rows the scheduler writes.
-- **One active manager under a lease, not N** (section 0.2). Placement is already serial on the commit head, so N active managers
-  buy no throughput. They cost an N-safe rule for the whole-host drain, the scaler and the duties. One costs a pause of at most the
-  lease time after a crash, and nothing on an update, where the deploy's SIGTERM hands the lease over.
-- **The deploy drains the old manager; a new start never does.** That way a broken release cannot take placement from a working
-  one, and a manager restarted by hand cannot steal the lease.
-- **The live hazards go first.** Section 12's list is what an update does to the deployment today; G15, G4, G5, G17, G7 and G11 close
-  it, and G3 closes the token hazards once the Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3, G4
-  and G13; each row says which part.
+- **One service, two rules for the queue** (the owner's ruling, section 0.1). All the scheduling logic stays in js-server. No two
+  instances pull the same element, and an instance given SIGTERM stops pulling and finishes what it pulled. No instance rows, no
+  placer lease and no edge flip: each race considered for them is harmless (section 0.1), and B20 adds machinery only for a race
+  that needs it.
+- **Dispatch is pulled by the agent, not pushed to it** (section 0.2). A push would need an inbound listener on every host and a
+  per-service certificate for js-server, which the owner ruled out; the pull, woken by `NOTIFY`, is as fast. It is a route of the
+  agent listener and goes to any instance.
+- **The live hazards go first.** Section 12's list is what an update does to the deployment today; G15, G4, G5, G7, G19 and G11 close
+  it, and G3 closes the token hazards once the Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3 and G4,
+  and the drain section 12 relies on; each row says which part.
 - **The standard shape (section 0) replaces sessions held by one instance.** The project owner found the earlier text too
   complicated for something fairly standard. With the heartbeat a row `UPDATE` on any instance, #883's connection ownership (G1),
-  the connection max age (G10), the lost-start rule (G14) and, with one manager, the whole-host drain rule (G8) go; presence (G5),
-  the bindings (G4) and the scaler (G9) shrink. Section 9 says which, and why. G13 changes which address a flag accepts; it is
-  not a runtime gate.
+  the connection max age (G10), the lost-start rule (G14), the whole-host drain rule (G8), readiness for the edge (G13) and the instance rows (G17, G18) go;
+  presence (G5) and the bindings (G4) shrink. Section 9 says which, and why.
 - **G12 stays Designed** although #874 shipped without it, because the owner's decision asks for it. A deployment that has no
   SQLite job store to move needs only the export.
 
@@ -537,19 +553,20 @@ Its jobs run on throughout: an agent keeps its jobs without a server for up to `
 default, `js-agent/src/cli.rs:311-316`), far more than the drain hold and drain timeout (25 s), and on the server's side silence
 ends nothing before grace plus retention ([absence.md](absence.md)).
 
-**Updating the two roles** (G17; until then one process runs both, as above). The JobScheduler service updates start-first as
-above: every copy is stateless, and an old and a new copy serve side by side. The JobManager service updates start-first too:
+**The update, by the two rules of section 0.1.** Heartbeats, the job API and dispatch go through the edge to any instance, old or
+new, all the time; nothing is routed by version, and no state lives in an instance.
 
-1. The new release's manager starts as a standby and waits for a free or expired lease.
-2. Once the new manager's readiness answers `ready`, the deploy sends the old one SIGTERM (with more than one old manager, one at a
-   time; an old standby may take the freed lease for a moment, and its own drain hands it on, each hand-over fenced). In one transaction it writes its row `draining` and frees the lease, so the fence holds
-   from that commit, and it sends `NOTIFY`.
-3. The new manager takes the lease on that notification (at its poll until G16) and places from its next transaction. The old one lets its in-flight
-   transactions end (a placement among them conflicts and writes nothing) and exits.
+1. The new release's instance starts and serves at once; it places and dispatches as soon as it runs.
+2. The deploy sends the old instance SIGTERM. It stops pulling: no more claims of queued jobs or dispatch messages. It finishes what
+   it pulled: a placement already in its transaction commits or rolls back, and the dispatch polls it holds are answered and their
+   claims committed. Then it exits. The drain of #935 (Built) closes its agent listener at the signal, so agents move to another
+   instance at once.
+3. The stop grace covers one dispatch and the drain hold, so the instance is never killed mid-flight (a deploy setting, checked once
+   at deploy: a grace above `--drain-hold` plus `--drain-timeout` plus the final tick).
 
-From the first update that carries G17, no moment has two managers placing, and none has no manager able to place for longer than one notification (one poll before G16). The update that first carries G17 overlaps a release that places without the lease: the fence binds only a release that checks it. A manager that crashes
-mid-update instead of draining leaves the lease to expire (`manager_lease_secs`), and that pause is the only one. An operator can
-drain a manager by hand the same way (`js manager drain`, G18).
+An instance killed anyway, or one that crashes, leaves what it held to the crash case of section 0.1: its transaction rolls back,
+and a claimed message is handed out again after `claim_until`, to an agent whose start is idempotent. Old and new pull side by side
+for seconds, so the messages and the agent API stay compatible across one version (section 0.1, version skew).
 
 **Hazards of the overlap that are live now:**
 
@@ -557,17 +574,17 @@ drain a manager by hand the same way (`js manager drain`, G18).
 |---|---|---|
 | A submit reaches the new instance before the hosts have said hello to it | refused `no-capable-host` (`422`) for good, though the hosts serve on the old instance | G5 |
 | Either instance's tick saves a binding that differs from the copy it last wrote (a lapsed or mirrored cordon end, a forgotten host) | the whole binding row is put or deleted at `Cond::Any` from that instance's copy, so a taint the other instance stored in it is lost, or a host it holds loses its binding | G4 (the delete of a binding never held, and the taint read at a hello: Built by komira-ai/jobscheduler#935; the put at `Cond::Any` remains) |
-| A host job placed by one instance is a taint in that instance's memory, and the host's beats move to the other | the other may place a contained job beside the host job | G17 (only the lease holder places), G4, G7 |
+| A host job placed by one instance is a taint in that instance's memory, and the host's beats move to the other | the other may place a contained job beside the host job | G4, G7 (placement checks the host's taint row in its transaction) |
 | An agent's taint clear reaches the instance that holds no taint for the host (a beat after the update's start) | before #940 it was acknowledged and changed nothing, and the stored taint stayed until a later start put it back on a clean host | closed: komira-ai/jobscheduler#940 (Built, `js-lease-server/src/agent_state.rs:686`); G4 for the rest |
-| Both instances run placement, in the beat's pass, the submit's place-now and the tick, each over the hosts it serves | each placement is claimed and booked safely (Built), but two engines walk the queue, drain hosts for whole-host jobs and write queue notes from different views | G17 (one fenced manager) |
+| Both instances run placement, in the beat's pass, the submit's place-now and the tick, each over the hosts it serves | each placement is claimed and booked safely (Built), but two engines walk the queue, drain hosts for whole-host jobs and write queue notes from different views | not a gap: each placement is claimed and booked (rule 1); the rest is churn (G8 deleted) |
 | A host has a connection on each instance for a moment (a beat in flight to the old one when the agent reconnects to the new one) | the old connection can commit a listing over the new one's | G15 |
 | A host that joins by token (the Macs) presents a host credential or one-time token the other instance issued after it started | the other reads its tokens at start, and a token it does not hold is answered `401` (the agent exits; `401` is fatal) until #935 below; one token can also admit two hosts | G3 (removes the tokens; live for the Macs until they hold certificates). komira-ai/jobscheduler#935 (Built) reads an unknown token's row by key, which ends the `401` until G3 |
 | An agent that said hello to the new instance reaches the old one again (each request opens a new connection, so any may; since komira-ai/jobscheduler#935, only until the old one's SIGTERM) | its beat is `403 session-mismatch`, and its hello there is `409 host-live` while the old record is within its grace, so the agent backs off | G15 (no session to mismatch; the same agent is applied at once) |
 | Both instances admit hosts new to a pool | the pool's cap counts per instance | G5 |
 | `ListHosts` and `GET /v1/hosts` on either instance | each lists only the hosts whose session it holds | G5 |
-| A whole-host job's start rides on a ready report's reply that is lost (a request cut by the drain, a killed process) | the next first listing ends it `Lost` without its having run | G15 (was G14) |
+| A whole-host job's start rides on a ready report's reply that is lost (a request cut by the drain, a killed process) | the next first listing ends it `Lost` without its having run | G15 (was G14), and G19: an unacked dispatch message is handed out again |
 | A host's minute of usage is recorded by both instances (it moved during the minute, and the old instance flushes at exit) | the later flush replaces the minute, so up to a minute of the host's usage rows is lost | G11 |
-| New connections reach the old instance through its drain hold, and are refused by it once it closes its listener, until the edge notices | an agent retries; a job client's request fails and is retried by the client | G13 (komira-ai/jobscheduler#935, Built, closes the agent listener at SIGTERM, so agents move at once, answers held beats at once and places nothing while draining; the edge's sight of `/readyz` remains), and a stop grace above `--drain-hold` plus `--drain-timeout` plus the final tick, checked once at deploy |
+| New connections reach the old instance through its drain hold, and are refused by it once it closes its listener, until the edge notices | an agent retries; a job client's request fails and is retried by the client | G13 (komira-ai/jobscheduler#935, Built, closes the agent listener at SIGTERM, so agents move at once, answers held beats at once and places nothing while draining; nothing more is needed, G13 deleted), and a stop grace above `--drain-hold` plus `--drain-timeout` plus the final tick, checked once at deploy |
 
 Not live in an update: settlement by the local registry (G6) needs a host unheard for grace plus retention, far longer than an
 overlap; the clock (G2) is one clock while both tasks run on the one node; the scaler (G9) is off on the deployment; the import and prune parts of G11 are economy; G10 is deleted.
@@ -576,7 +593,7 @@ overlap; the clock (G2) is one clock while both tasks run on the one node; the s
 
 1. Every write conditional and every duty claimed (section 2, Built): two instances never place one job twice, book a host past
    its room or run a duty twice.
-2. The live hazards closed: G15, G4, G5, G17, G7 and G11's minute fold, with G2 and G3 before G15; G3's removal of the tokens once the
-   Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3, G4 and G13 ahead of them.
-3. The edge sees the drain (G13) and the stop grace covers it, so no connection is refused during an update.
-4. The rest of section 9 (G6, G9, G16, G18, the rest of G11, G12), which matters for N instances in steady state or for a long overlap, not for one update.
+2. The live hazards closed: G15, G4, G5, G7, G19 and G11's minute fold, with G2 and G3 before G15; G3's removal of the tokens once the
+   Macs hold certificates. komira-ai/jobscheduler#935 (Built) landed parts of G3 and G4, and the drain, ahead of them.
+3. The stop grace covers one dispatch and the drain hold, a deploy setting checked once at deploy.
+4. The rest of section 9 (G6, G9, G16, the rest of G11, G12), which matters for N instances in steady state or for a long overlap, not for one update.
