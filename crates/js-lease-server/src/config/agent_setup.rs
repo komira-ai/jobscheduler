@@ -10,7 +10,7 @@ use js_registry::PoolConfig;
 use js_sched_placer::sizes::ColdSize;
 use js_types::ProviderId;
 
-use super::{Cli, Config, CpuSlack, LiveClients, check_pool, listen};
+use super::{Cli, Config, CpuSlack, DispatchTimes, LiveClients, check_pool, listen};
 use crate::agent_pool;
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::error::StartupError;
@@ -56,6 +56,9 @@ pub(crate) struct AgentSetup {
     /// names no platform for the pool, and the order is `static`, then the pool's launched
     /// hosts ([`crate::sched::rank::static_then`]).
     pub(crate) providers: Option<Vec<ProviderId>>,
+    /// `server.dispatch_lease_secs` and `server.dispatch_recheck_ms`, or their defaults: what
+    /// the dispatch poll is timed by.
+    pub(crate) dispatch: DispatchTimes,
 }
 
 /// A pool after the first: what registers into it and its shared join tokens.
@@ -178,6 +181,7 @@ pub(super) fn agents(cli: &Cli, clients: &LiveClients) -> Result<Box<AgentSetup>
         jobs: listen::job_store(cli),
         job_sources: JobSources::default(),
         providers: None,
+        dispatch: DispatchTimes::default(),
     }))
 }
 

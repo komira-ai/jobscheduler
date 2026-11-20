@@ -262,6 +262,10 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         cached,
     } = open(prepared, &clock)?;
     shared.agents().set_duty_period(duty_period);
+    // The name this server claims dispatch messages by: where it serves agents, and its pid.
+    let agents_at = agent_listener.as_ref().map_or(addr, |(_, agents)| *agents);
+    let claimer = format!("{agents_at}/{}", std::process::id());
+    shared.agents().dispatching.set_claimer(claimer);
     info!(
         %addr,
         hosts = listing(&shared).hosts.len(),

@@ -25,7 +25,9 @@
 //!    ([`starts_for`]). A job that books the whole host is the exception on both sides: no
 //!    container exists while it is placed (the host prepares), so it is sent no stop, and it
 //!    is sent its start only once the host reported ready and the job is starting. The reply
-//!    also names the allocation of such a job ([`JobReply::exclusive`]).
+//!    also names the allocation of such a job ([`JobReply::exclusive`]). For a host that polls
+//!    dispatch ([`BeatContext::polls_dispatch`]) a start and a stop that its dispatch queue
+//!    carries are left out, the poll hands them out ([`commands_now`]).
 //!
 //! Every change is committed before the reply that depends on it is built: a failed commit is
 //! an error, the heartbeat is answered 500 `state-write-failed` with no start or stop, and the
@@ -39,8 +41,8 @@ use js_agent_wire::{
     Outcome, refusal,
 };
 use js_jobs::{
-    AllocationRecord, AllocationStep, Booked, JobEnd, JobId, JobRecord, JobState, JobStoreError,
-    LogLengths, Output, ResourceUsage, StartFailure,
+    AllocationId, AllocationRecord, AllocationStep, Booked, DispatchKind, JobEnd, JobId, JobRecord,
+    JobState, JobStoreError, LogLengths, Output, ResourceUsage, StartFailure,
 };
 use js_types::{HostId, Resources};
 use tracing::warn;
@@ -106,6 +108,10 @@ pub(crate) struct BeatContext<'a> {
     /// The sinks of live logs a start carries, when the server has one and the host's agent
     /// reported that it uploads ([`crate::logs`]); `None` otherwise.
     pub(crate) logs: Option<&'a LogGrants>,
+    /// Whether the host's agent polls dispatch and this server serves the poll to it
+    /// ([`crate::agent_api`]): the reply then leaves out the starts and stops the host's
+    /// dispatch queue carries ([`commands_now`]), which the poll hands out.
+    pub(crate) polls_dispatch: bool,
     /// Where a start failure the host reports is counted.
     pub(crate) metrics: &'a dyn MetricsSink,
 }
@@ -161,8 +167,17 @@ pub(crate) fn serve(
 /// ([`crate::held_beat`]) builds it again, once a placement wakes it, over the listing it
 /// already committed.
 ///
+/// For a host that polls dispatch ([`BeatContext::polls_dispatch`]) a start is left out when
+/// the host's dispatch queue carries a start of its allocation, and a stop when the queue
+/// carries a stop of its job's live allocation: the poll hands those out. Everything else
+/// stays, so a job a release before placed (it queued no message), a stop the queue does not
+/// carry (a cancel acknowledged by the agent, which the job's end still waits for) and the
+/// stop of a listed job with no live allocation (never queued) still reach the agent by the
+/// reply. A host that does not poll is sent every start and stop, as it always was.
+///
 /// # Errors
-/// The [`JobStoreError`] of the read of the host's allocations.
+/// The [`JobStoreError`] of the read of the host's allocations and, for a host that polls, of
+/// its dispatch queue.
 pub(crate) fn commands_now(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -176,16 +191,43 @@ pub(crate) fn commands_now(
         .chain(retired.iter().map(String::as_str))
         .collect();
     let live = jobs.live_on(context.host)?;
+    let (queued_starts, queued_stops) = carried_by_queue(jobs, context)?;
     let exclusive = exclusive_of(&live);
+    let stopped_by_queue: BTreeSet<String> = live
+        .iter()
+        .filter(|(allocation, _)| queued_stops.contains(&allocation.allocation_id))
+        .map(|(allocation, _)| allocation.job.to_string())
+        .collect();
     let stops = stops_for(&live, listed, unknown)
         .into_iter()
+        .filter(|job_id| !stopped_by_queue.contains(job_id))
         .map(|job_id| Command::JobStop { job_id });
-    let starts = starts_for(&live, &held, context)
+    let starts = starts_for(&live, (&held, &queued_starts), context)
         .into_iter()
         .map(|spec| Command::JobStart(Box::new(spec)));
     let mut commands: Vec<Command> = stops.chain(starts).collect();
     commands.truncate(room);
     Ok((commands, exclusive))
+}
+
+/// The allocations the dispatch queue of the host of `context` carries a start of, and a stop
+/// of: both empty for a host that does not poll dispatch, which reads nothing.
+fn carried_by_queue(
+    jobs: &ServerJobs,
+    context: &BeatContext<'_>,
+) -> Result<(BTreeSet<AllocationId>, BTreeSet<AllocationId>), JobStoreError> {
+    let queue = match context.polls_dispatch {
+        true => jobs.dispatch_queue(context.host)?,
+        false => Vec::new(),
+    };
+    let of = |kind: DispatchKind| {
+        queue
+            .iter()
+            .filter(|message| message.kind == kind)
+            .map(|message| message.allocation_id)
+            .collect::<BTreeSet<_>>()
+    };
+    Ok((of(DispatchKind::Start), of(DispatchKind::Stop)))
 }
 
 /// Commits what the host lists of each job (step 1 of the module docs) and answers each
@@ -457,14 +499,15 @@ pub(crate) fn stops_for(
 }
 
 /// The starts a host is sent: one for each job of `live` with a booked allocation and no
-/// cancel intent that is not in `held` (listed or retired by the host), resent on every
-/// heartbeat until the host lists it. A job that shares the host is sent its start while it is
+/// cancel intent that is not in `held` (listed or retired by the host) and whose allocation is
+/// not in `queued` (the dispatch queue hands its start out), resent on every heartbeat until
+/// the host lists it. A job that shares the host is sent its start while it is
 /// placed; a job that books the whole host, once the host reported ready and moved it to
 /// starting. A start the wire cannot carry is logged and not sent; the start timeout ends its
 /// job.
 fn starts_for(
     live: &[(AllocationRecord, Option<JobRecord>)],
-    held: &BTreeSet<&str>,
+    (held, queued): (&BTreeSet<&str>, &BTreeSet<AllocationId>),
     context: &BeatContext<'_>,
 ) -> Vec<JobStartSpec> {
     let placed = live.iter().filter_map(|(allocation, job)| {
@@ -477,7 +520,8 @@ fn starts_for(
         let wanted = (allocation.step == AllocationStep::Booked)
             & (job.state == due)
             & !job.cancel_requested
-            & !held.contains(job.id.as_str());
+            & !held.contains(job.id.as_str())
+            & !queued.contains(&allocation.allocation_id);
         wanted.then_some((allocation, job))
     });
     placed
