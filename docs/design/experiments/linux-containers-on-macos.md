@@ -16,7 +16,7 @@ Can a Mac Studio run one of our Linux job specs as a Linux container, from a use
   - The nearest Linux figure is 26.8 ms (`docs/design/agent-egress.md`): `crun` start to the job's first byte, excluding staging, pull and unpack.
   - The start target is 100 ms at the median, from placement to a running container (`docs/design/start-latency.md`).
   - Neither figure spans exactly the same interval as the Mac one.
-- x86_64 through Rosetta could not be measured on this host: Rosetta is not installed and installing it needs administrator rights.
+- x86_64 images are out of scope: Linux on the Macs is arm64 only. The one attempt is recorded in section 6.
 
 ## 1. Host and software
 
@@ -158,7 +158,7 @@ Split, 20 samples with the rust image (`container create`, then `container start
 - The first `container run` after setup took 6.2 s. That covered the alpine pull, the 66 MB init-image pull and the unpacks.
 - Pulling and unpacking the rust image took 10.8 s, and its first run afterwards 0.70 s.
 
-**Rosetta (x86_64).** Not measured. `container run --rosetta --platform linux/amd64 …` failed with `VZErrorDomain Code=2 "Rosetta is not installed"`. Installing Rosetta needs administrator rights, which this experiment did not use. The tool itself supports it: there is a `--rosetta` flag, and the `build` defaults have `rosetta = true`.
+**x86_64 through Rosetta.** Out of scope, since Linux on the Macs is arm64 only, so nothing was measured. The one attempt, before that scope was set, is kept for the record: `container run --rosetta --platform linux/amd64 …` failed with `VZErrorDomain Code=2 "Rosetta is not installed"`. The tool has a `--rosetta` flag.
 
 ## 7. What `js-agent` on macOS would call, and what must be installed
 
@@ -173,7 +173,6 @@ Split, 20 samples with the rust image (`container create`, then `container start
 - A kernel file: the 29 MiB `vmlinux` above.
 - The init image, which the tool pulls on first use unless it is preloaded.
 - Per user running it: an app root holding images, snapshots and containers. Here that was 2.58 GB for four images.
-- Rosetta, for x86_64 images.
 
 **Hostkeeper.** Its `macos-pkg` installer requires, among other things (`docs/design/mac-hostkeeper-package.md`, the list quoted there):
 - a `PackageInfo` `identifier` equal to the manifest's package;
@@ -183,7 +182,7 @@ Split, 20 samples with the rust image (`container create`, then `container start
 
 The design also places a service's payload under `/Library/Application Support/<service>/`, though the installer does not check that.
 
-Apple's package has identifier `com.apple.container-installer`, `install-location` `/usr/local` and Apple's Developer ID leaf. As shipped it therefore fails the identifier and location checks and needs Apple's leaf in the signers file. Its Bom was not checked against the ownership rule. Because the files run from any directory, the same files can be repackaged under our own identifier and path, or shipped inside the `js-agent` payload. Either way, the release's checksum is the pin, and an update replaces the files and restarts the per-user services. Rosetta is installed with `softwareupdate`, as root.
+Apple's package has identifier `com.apple.container-installer`, `install-location` `/usr/local` and Apple's Developer ID leaf. As shipped it therefore fails the identifier and location checks and needs Apple's leaf in the signers file. Its Bom was not checked against the ownership rule. Because the files run from any directory, the same files can be repackaged under our own identifier and path, or shipped inside the `js-agent` payload. Either way, the release's checksum is the pin, and an update replaces the files and restarts the per-user services.
 
 **Pool users instead of the logged-in user.** This was not run as a pool user: creating users needs root. Measured and read:
 - The services are per-user launchd agents in `user/<uid>` and accept `Background` sessions. Every call here came from an SSH session, not the GUI session. Whether they start for a uid that has never had a console login was not tested.
@@ -209,8 +208,7 @@ These are listed in the order a job would meet them. None is resolved here.
 4. **Shared directories.** Ownership is not modelled on virtiofs: files appear owned by the reader. Writing many small files through a share is slow (26 s for 46,362 files).
 5. **Memory accounting.** A VM keeps its high-water mark of host memory after the guest frees it.
 6. **Exit codes.** Without `--init`, signals do not end a PID-1 job. "Not found" and "not runnable" are both exit 1.
-7. **Rosetta** is absent on this host. Installing it needs root.
-8. **Per-user runtime.** Everything the tool keeps is per uid, and a pool user's reset would remove it.
+7. **Per-user runtime.** Everything the tool keeps is per uid, and a pool user's reset would remove it.
 
 ## 9. Reproducing
 
