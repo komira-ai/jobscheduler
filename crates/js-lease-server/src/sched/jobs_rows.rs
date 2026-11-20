@@ -67,18 +67,26 @@ struct Seen<'a> {
     shape: &'a Shape,
     claim: Option<&'a Shape>,
     open: bool,
+    /// For a host known by its row, the shape the engine places it as: the pool's booking
+    /// with the claim's accelerator facts, as the registry tells the engine at a hello.
+    engine: Option<Shape>,
 }
 
-/// The row's view of a host: open when the host serves, its last listing was clean and its
-/// pool is one this server serves. `None` for a row with no booked shape.
+/// The row's view of a host: open when the host serves and its last listing was clean. `None`
+/// for a row with no booked shape, or of a pool this server does not serve.
 fn seen_by_row<'a>(agents: &Agents, row: &'a NodeRow) -> Option<Seen<'a>> {
     let record = &row.record;
-    let served = agents.registry.pool_cap(&record.pool).is_some();
+    let shape = record.shape.as_ref()?;
+    let claim = record.claim.as_ref();
+    let engine = agents
+        .registry
+        .placement_shape_in(&record.pool, shape, claim)?;
     let state = &record.state;
     Some(Seen {
-        shape: record.shape.as_ref()?,
-        claim: record.claim.as_ref(),
-        open: served & (state.phase == Phase::Serving) & state.last_listing_clean,
+        shape,
+        claim,
+        open: (state.phase == Phase::Serving) & state.last_listing_clean,
+        engine: Some(engine),
     })
 }
 
@@ -156,6 +164,7 @@ impl Agents {
                     shape: &view.shape,
                     claim: view.claim.as_ref(),
                     open: true,
+                    engine: None,
                 }),
             };
             let Some(seen) = seen else {
@@ -173,8 +182,8 @@ impl Agents {
             let Some(ranked) = rank(&self.providers, bindings.get(host)) else {
                 continue;
             };
-            if row.is_some() {
-                placer.host_seen(host, seen.shape);
+            if let Some(engine) = &seen.engine {
+                placer.host_seen(host, engine);
             }
             let capabilities = seen.claim.map(Shape::capabilities);
             let offer = OpenHost {

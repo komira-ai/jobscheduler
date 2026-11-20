@@ -158,10 +158,10 @@ async fn submit(server: &Harness, id: &str) {
 /// heartbeat reaches the second server, which does not know the session, and the agent says
 /// hello there once and keeps its runs; the host that had not been told its starts is told
 /// them by the second server, under the allocations the first booked. After the first has
-/// stopped (its last tick included) the second server places the two queued jobs on the
-/// third host, and every host ends its jobs. In the end every job succeeded, each was started
-/// under one allocation on one host, each agent said hello twice (once to each server), and no
-/// agent was told to stop a job. It catches a job lost or ended at the move (a first listing
+/// stopped the second server has placed the two queued jobs on the third host (whose row it
+/// reads, though the host said hello to the first), and every host ends its jobs. In the end
+/// every job succeeded, each was started under one allocation on one host, each agent said
+/// hello twice (once to each server), and no agent was told to stop a job. It catches a job lost or ended at the move (a first listing
 /// on the second server, the first server's last tick), a job placed twice or on two hosts,
 /// a start the second server does not send for a placement the first made, a job left queued
 /// or placed forever, and a draining server that goes on placing.
@@ -231,9 +231,13 @@ fn an_update_during_live_jobs_loses_doubles_and_strands_nothing() {
             "the second host was told its starts"
         );
         first.running.shutdown().await.unwrap();
+        // The second server places over every live host row, so the passes of those beats
+        // already placed the two queued jobs on the third host (its row is live from its hello
+        // to the first server), and its beats there were told the starts.
         let moved = states(&second, &all).await;
-        assert_eq!(count(&moved, "JOB_STATE_RUNNING"), 4, "{moved:?}");
-        // The second server's tick places the two queued jobs on the third host.
+        assert_eq!(count(&moved, "JOB_STATE_RUNNING"), 6, "{moved:?}");
+        assert_eq!(hosts[2].running.len(), 2, "{moved:?}");
+        // The second server's tick changes nothing of it.
         second.ticks.step().await;
         for host in &mut hosts {
             host.beat(&second).await;
