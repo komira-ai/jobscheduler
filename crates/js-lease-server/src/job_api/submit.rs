@@ -56,7 +56,10 @@
 //!    servers. A placement wakes the host's heartbeat this server holds open
 //!    ([`crate::held_beat`]), whose reply carries the start at once. The answer is the job as
 //!    the store holds it after the pass: `placed` with its host when a host had room, `queued`
-//!    otherwise, and the queued record of the commit when that read fails. A job that has a
+//!    otherwise, and the queued record of the commit when that read fails. When the commit is
+//!    the only write of the job store since the placer last read the job tables, the job is
+//!    added to those tables rather than the pass reading all four again
+//!    ([`Agents::note_inserted`]). A job that has a
 //!    queued job of its priority or above ahead of it, a retry of a job already held, and every
 //!    job of a service that does not place, are only committed: the tick's pass, or a
 //!    heartbeat's, finds the queued row. A failed read of the queue counts as a job ahead.
@@ -69,7 +72,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{Isolation, JobRecord, JobStoreError, NewJob};
+use js_jobs::{Inserted, Isolation, JobRecord, JobStoreError, NewJob};
 use js_proto::refusal::refusal_status;
 use js_proto::v1::{RefusalCode, SubmitJobRequest, SubmitJobResponse};
 use js_state::StoreError;
@@ -280,7 +283,7 @@ pub(super) async fn submit_job(
         return Err(id_conflict());
     }
     let record = match placing {
-        Some(Handle(agents)) => place_now(api, agents, inserted.record).await,
+        Some(Handle(agents)) => place_now(api, agents, inserted).await,
         None => inserted.record,
     };
     Ok(Response::new(SubmitJobResponse {
@@ -295,12 +298,18 @@ async fn nothing_ahead(api: &JobApi, priority: i32) -> bool {
     queued.is_ok_and(|queued| queued.iter().all(|job| job.priority < priority))
 }
 
-/// Runs the server's pass over the queued jobs for the job `record` just committed, keeps the
-/// taints of the hosts it gave to host jobs, and answers the job as the store holds it then
-/// (`record` when that read fails).
-async fn place_now(api: &JobApi, agents: &Arc<Agents>, record: JobRecord) -> JobRecord {
+/// Runs the server's pass over the queued jobs for the job just committed, `inserted`, keeps
+/// the taints of the hosts it gave to host jobs, and answers the job as the store holds it then
+/// (the inserted record when that read fails). The job is first added to the job tables the
+/// placer last read, when its commit is the only write since ([`Agents::note_inserted`]), so
+/// the pass does not read them again for it.
+async fn place_now(api: &JobApi, agents: &Arc<Agents>, inserted: Inserted) -> JobRecord {
     let placing = Arc::clone(agents);
-    let tainted = blocking(move || placing.place_jobs()).await;
+    let (tainted, record) = blocking(move || {
+        placing.note_inserted(&inserted);
+        (placing.place_jobs(), inserted.record)
+    })
+    .await;
     agents.keep_taints(tainted).await;
     let id = record.id.clone();
     let now = api.on_tables(move |jobs| jobs.get_job(&id)).await;
