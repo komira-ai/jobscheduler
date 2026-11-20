@@ -57,6 +57,10 @@ impl FileReader for Host {
             path.display()
         )))
     }
+
+    fn entries(&self, _dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
 }
 
 impl DirLister for Host {

@@ -255,13 +255,22 @@ pub struct JobStartSpec {
     /// agent that predates the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed_at_ms: Option<u64>,
+    /// The Xcode the job runs with, by its build id (`16C5032a`, [`crate::is_xcode_build`]):
+    /// the agent runs the job with `DEVELOPER_DIR` set to the `Contents/Developer` of the
+    /// installed Xcode of that build, and never through the host's `xcode-select`; a host
+    /// that holds no Xcode of that build refuses the start
+    /// [`refusal::XCODE_NOT_HELD`](crate::refusal::XCODE_NOT_HELD). Absent for a job that
+    /// names none. An agent that predates the field ignores it, so a server sends it only to
+    /// a host whose `xcode` capability ([`crate::limits::XCODE_CAPABILITY`]) lists the build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcode: Option<String>,
 }
 
 impl JobStartSpec {
     /// Checks the start: the ids, that an image or a layer is named and the image well
     /// formed, the command, the environment, the files, the booked resources, the wall
-    /// limit, the declared ports, and the layers, mounts and host ports
-    /// ([`crate::rootfs`]), and that a host start asks for no FUSE device. The server calls
+    /// limit, the declared ports, the layers, mounts and host ports
+    /// ([`crate::rootfs`]), that a host start asks for no FUSE device, and the Xcode build. The server calls
     /// it before it sends a start and the agent before
     /// it acts on one, together with [`JobStartSpec::require_pinned`]. It does not look at
     /// `log_sink`: a sink never refuses a start ([`JobStartSpec::log_sink_checked`]).
@@ -306,6 +315,14 @@ impl JobStartSpec {
         }
         if self.fuse && self.isolation == Isolation::Host {
             return Err(at.field("fuse").fail(Rule::Inconsistent));
+        }
+        if let Some(build) = &self.xcode {
+            check::token(
+                at.field("xcode"),
+                build,
+                limits::MAX_XCODE_BUILD_LEN,
+                check::ident_byte,
+            )?;
         }
         Ok(())
     }

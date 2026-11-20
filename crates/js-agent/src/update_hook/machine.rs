@@ -588,8 +588,10 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
 }
 
 /// The host facts that work on the host besides an update can change, as the agent reads them
-/// when it starts (the CPUs, the memory, the GPUs, and on a Mac the major version of macOS),
-/// as one line: equal facts give equal lines.
+/// when it starts (the CPUs, the memory, the GPUs, and on a Mac the major version of macOS and
+/// the builds of the installed Xcodes, `xcode=16C5032a,16F6`, as [`crate::xcode::probe`] finds
+/// them), as one line: equal facts give equal lines, and a Mac that gains an Xcode gives a
+/// different line. Off a Mac the line has no `xcode` part and nothing is listed.
 ///
 /// # Errors
 /// A fact cannot be read (see [`detect`]).
@@ -611,7 +613,7 @@ pub fn host_facts(
             )
         })
         .collect();
-    Ok(format!(
+    let mut line = format!(
         "os={} arch={} os_version={} cpu_millis={} memory_bytes={} gpus={} gpu_class={} gpu_devices={}",
         platform.os,
         platform.arch,
@@ -621,7 +623,12 @@ pub fn host_facts(
         detected.gpus.count,
         detected.gpus.class.unwrap_or_default(),
         devices.join(",")
-    ))
+    );
+    if platform.is_macos() {
+        let (xcodes, _) = crate::xcode::probe(files);
+        line = format!("{line} xcode={}", crate::xcode::joined(&xcodes));
+    }
+    Ok(line)
 }
 
 /// [`Facts`] on a machine: [`host_facts`] of `platform`, read through `runner` and `files`.

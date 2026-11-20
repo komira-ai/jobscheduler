@@ -605,6 +605,10 @@ impl FileReader for SharedFiles {
     fn facts(&self, _path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
         Err(std::io::Error::other("no facts here"))
     }
+
+    fn entries(&self, _dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
 }
 
 impl FakeMachine {

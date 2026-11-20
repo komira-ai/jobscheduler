@@ -151,6 +151,10 @@ impl FileReader for Files {
     fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
         Ok(false)
     }
+
+    fn entries(&self, _dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
 }
 
 /// The real [`System`] for the clock, the runtime and the start check, over the node; the

@@ -58,6 +58,7 @@ pub(super) fn spec(job: &str) -> JobStartSpec {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        xcode: None,
     }
 }
 

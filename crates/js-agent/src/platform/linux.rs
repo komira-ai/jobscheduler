@@ -538,12 +538,13 @@ impl Start {
 /// runtime is `crun` unless the agent runs no job (`--no-jobs`, which takes no flag of
 /// [`Flags`]) or runs the container engine (`--allow-container-engine` with `--container-bin`,
 /// which takes no flag only `crun` takes). `gpus` are the indices of the GPUs the host
-/// offers, whose nodes the GPU flags must name.
+/// offers, whose nodes the GPU flags must name. `xcodes` are the Xcodes the hello lists, which
+/// only a Mac has: nothing here runs with one.
 pub(crate) fn check(
     cli: &Cli,
     services: &Services<'_>,
     image_allow: Vec<js_oci::Allow>,
-    gpus: &[u32],
+    (gpus, _xcodes): (&[u32], &[crate::xcode::Xcode]),
     _opened: Opened,
     err: &mut dyn Write,
 ) -> Result<Start, Failure> {

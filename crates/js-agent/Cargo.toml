@@ -53,7 +53,8 @@ hex.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
-# The property lists `diskutil -plist` prints, which the update hook's host setup of a Mac reads
+# Property lists read as XML: the `version.plist` of an installed Xcode (src/xcode), and what
+# `diskutil -plist` prints, which the update hook's host setup of a Mac reads
 # (src/update_hook/step/host_setup.rs).
 plist.workspace = true
 # The messages of the mount providers' protocol, declared in src/provider/wire.rs: the agent

@@ -179,5 +179,6 @@ fn spec() -> RunSpec {
         labels: BTreeMap::new(),
         bundle: None,
         log_sink: None,
+        xcode: None,
     }
 }

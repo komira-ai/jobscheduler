@@ -69,6 +69,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             os_version: "26".to_owned(),
             accelerator: Some(accelerator),
             isolation: v1::Isolation::Unspecified.into(),
+            xcode: String::new(),
         });
         spec.network = v1::NetworkLevel::Open.into();
         spec.ports = vec![v1::PortForward {
@@ -314,6 +315,45 @@ fn a_least_os_version_is_recorded_as_its_number_and_empty_asks_for_none() {
     let none = valid(|spec| spec.constraints = Some(constraints(|_| {})));
     assert_eq!(none.spec.constraints.capabilities.get("os_version"), None);
     assert_eq!(none.wanted.os_version, None);
+}
+
+/// Asserts that an Xcode build (`16C5032a`, and one of exactly 32 bytes) is recorded under the
+/// `xcode` capability as the same text, and that an empty one records no capability. Catches a
+/// build dropped on the way to the tables, which would place an Xcode job on any Mac.
+#[test]
+fn an_xcode_build_is_recorded_as_its_text_and_empty_records_nothing() {
+    let longest = "A".repeat(32);
+    for given in ["16C5032a", "16E140", "15F31d", "1.2_3-4", longest.as_str()] {
+        let checked = valid(|spec| {
+            spec.constraints = Some(constraints(|c| c.xcode = given.to_owned()));
+        });
+        assert_eq!(
+            checked.spec.constraints.capabilities.get("xcode"),
+            Some(&given.to_owned())
+        );
+    }
+    let none = valid(|spec| spec.constraints = Some(constraints(|_| {})));
+    assert_eq!(none.spec.constraints.capabilities.get("xcode"), None);
+}
+
+/// Asserts that a build with a comma, a leading dot, 33 bytes or a space is refused naming
+/// `spec.constraints.xcode`. Catches a value that would split into two builds in the host's
+/// comma-joined set, or one the agent's start check would refuse after the job was placed.
+#[test]
+fn a_malformed_xcode_build_is_refused_naming_its_field() {
+    let long = "A".repeat(33);
+    for given in [
+        "16C5032a,16E140",
+        ".16C",
+        long.as_str(),
+        "16C 5032a",
+        "-16C",
+    ] {
+        let refused = fault(|spec| {
+            spec.constraints = Some(constraints(|c| c.xcode = given.to_owned()));
+        });
+        assert_eq!(refused, Fault::Field("spec.constraints.xcode"), "{given:?}");
+    }
 }
 
 /// Asserts the field each fault names, one fault per case, and that the first field in the
