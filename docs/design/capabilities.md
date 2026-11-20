@@ -16,13 +16,13 @@ Five kinds. A key has one kind, fixed by the schema (below).
 |---|---|---|
 | `text` | a token of the key grammar the merged wire checks (letters, digits, `.`, `_`, `-`; at most 128 bytes) | `os = macos` |
 | `version` | a version (grammar below) | `os_version = 15.1` |
-| `set_text` | a set of tokens | `base_images = {macos15-xcode16-a, macos14-xcode15-a}` |
-| `set_version` | a set of versions | `xcode = {15.4, 16.0, 16.2}` |
+| `set_text` | a set of tokens | `xcode = {16B40, 16C5032a}` |
+| `set_version` | a set of versions | `sim.ios = {17.5, 18.0, 18.2}` |
 | `count` | a non-negative integer, at most 2^32 | `vms = 2` |
 
 **Version grammar.** One to four components separated by `.`; each is `0` or a decimal number without a leading zero and with at most nine
 digits. Nothing else is a version: no `v` prefix, no `x` wildcard, no suffix. A pre-release build is not representable; an operator who
-wants to offer one advertises it under another key (`xcode_beta`), so a plain `xcode` constraint never matches it.
+wants to offer one advertises it under another key (`sim.ios_beta`), so a plain `sim.ios` constraint never matches it.
 **Order.** Pad the shorter version with zeros, then compare component by component as numbers. So `16`, `16.0` and `16.0.0` are equal,
 `16.0.1 < 16.1 < 16.10 < 17`, and the order is total on canonical values. A set of versions holds each value once under this order; a
 sender that lists `16` and `16.0` is read as listing it once.
@@ -34,7 +34,7 @@ sender that lists `16` and `16.0` is read as listing it once.
 | `arch` | `text` | the CPU architecture in one spelling, `x86_64` or `arm64` (the merged `Platform`). An older agent reports `aarch64`; the scheduler reads `aarch64` as `arm64` in a request, an offer and a hello, so either spelling of a constraint matches either report |
 | `os` | `text` | `macos`, `linux` (the merged `Platform`) |
 | `os_version` | `version` | the product version where it parses to the grammar (macOS: the product version); absent otherwise |
-| `xcode` | `set_version` | the versions of the Xcode applications installed |
+| `xcode` | `set_text` | the build ids of the Xcode applications installed (`16C5032a`): the `ProductBuildVersion` of each `/Applications/Xcode*.app/Contents/version.plist`, whatever the app's directory is called. A build, not a version, because a build names one Xcode exactly. See **Xcode**, below |
 | `sim.ios`, `sim.tvos`, `sim.watchos`, `sim.visionos` | `set_version` | the simulator runtime versions installed, one key per platform |
 | `base_images` | `set_text` | the names of the primed VM base images the host holds (5.14) |
 | `vms` | `count` | the most VMs the host runs at once: the agent's flag, lowered to what its probe allows (hosts.md, section 4) |
@@ -45,6 +45,17 @@ sender that lists `16` and `16.0` is read as listing it once.
 An agent reports a key only when it can: a probe that fails reports the key absent and a warning (as the merged GPU probe does). An
 operator may add or pin a fact the agent cannot probe with a repeatable flag `--cap key=value` (R4; the value is parsed by the key's
 kind; a set is given by repeating the flag), which overrides the probe for that key.
+
+**Xcode.** Built in `js-agent` (`crates/js-agent/src/xcode.rs`); the typed `facts` below are not built, so the set rides the legacy
+`capabilities` map as `xcode`: the builds ascending, joined with `,` (a build never holds one), as many as fit the 128-byte value
+(decisions.md, D27 (a)); the scheduler reads each as one member (`js-caps`). A job names one build (the job API's `Constraints.xcode`):
+it is placed only on a host whose set has that build, waits while none has it, and is started with that build
+(`JobStartSpec.xcode`). The agent runs it with `DEVELOPER_DIR` set to that app's `Contents/Developer`, never through `xcode-select`,
+whose global selection a job must not depend on; a start naming a build the host no longer holds is refused `xcode-not-held`. The
+agent reads its Xcodes when it starts and not again: on a Mac the builds are part of the host facts that `js-agent update-hook resume`
+compares with the ones the drain noted, so an Xcode installed or removed during a maintenance run is advertised once `resume` has
+restarted the agent, before it lifts the cordon, and never while the host is drained (hostkeeper's maintenance-updates design, 6).
+A pinned `--cap xcode=...` is not offered: the operator's `--capability` flag cannot set `xcode`.
 
 **Image profiles.** A VM job runs inside a base image, so what it needs (the Xcode, the runtime) is a property of the *image*, not of the
 host. Each primed image carries a profile in its manifest: the same typed map, over the same schema (`os`, `os_version`, `arch`, `xcode`,
@@ -127,7 +138,7 @@ alternative is a second request or the consumer's own retry, and `in` covers alt
 **Semantics.**
 
 1. **Absent is unmet.** A host with no value for the key fails every op on it, `ge 0` on a count included. There is no default and no zero.
-2. **Constraints are independent.** `xcode has_series 16` and `xcode has_ge 16.2` may be met by different members. To require one member to
+2. **Constraints are independent.** `sim.ios has_series 18` and `sim.ios has_ge 18.2` may be met by different members. To require one member to
    satisfy both, use one op (`has_range`).
 3. **Guest scope.** A host meets the `guest` constraints when at least one image in its `base_images` meets *all* of them against that
    image's profile (one image, not one per constraint). `host` constraints are evaluated on the host's own facts. The match returns the
@@ -162,7 +173,7 @@ A consumer keeps a table from its own platform properties to constraint template
 property names. For kbf the table maps an action's platform properties (the names below are illustrative; the property names are kbf's)
 and its `sandbox` choice. An unknown property follows kbf's own policy for an unknown request key (step 15); it is never dropped quietly.
 
-Worked example: an iOS test that needs Xcode 16.x and an iOS 18 simulator runtime on arm64, on macOS 15 or newer, run in a VM.
+Worked example: an iOS test that needs Xcode build 16C5032a and an iOS 18 simulator runtime on arm64, on macOS 15 or newer, run in a VM.
 
 | kbf property | Constraint |
 |---|---|
@@ -170,12 +181,12 @@ Worked example: an iOS test that needs Xcode 16.x and an iOS 18 simulator runtim
 | `Arch=arm64` | `{scope:host, key:arch, op:eq, value:"arm64"}`, and the same on the guest |
 | `sandbox=vm` | `{scope:host, key:vms, op:ge, value:1}` |
 | `min-os=15.0` | `{scope:guest, key:os_version, op:ge, value:"15.0"}` |
-| `xcode=16.x` | `{scope:guest, key:xcode, op:has_series, value:"16"}` |
+| `xcode=16C5032a` | `{scope:guest, key:xcode, op:has, value:"16C5032a"}` |
 | `sim-runtime=ios-18` | `{scope:guest, key:sim.ios, op:has_series, value:"18"}` |
 
 A host with `os=macos, arch=arm64, vms=2, base_images={mac15-x16-a, mac14-x15-a}` where `mac15-x16-a` has
-`os=macos, os_version=15.2, xcode={16.0,16.2}, sim.ios={18.0,18.2}, arch=arm64` meets every constraint (guest `os`, `arch`, `os_version`, `xcode`, `sim.ios`); the eligible image set is `{mac15-x16-a}`,
-the grant names it, and the `Start` of the VM job names it (5.14). A host holding only `mac14-x15-a` (`os=macos, os_version=14.6, xcode={15.4}`) is
+`os=macos, os_version=15.2, xcode={16B40,16C5032a}, sim.ios={18.0,18.2}, arch=arm64` meets every constraint (guest `os`, `arch`, `os_version`, `xcode`, `sim.ios`); the eligible image set is `{mac15-x16-a}`,
+the grant names it, and the `Start` of the VM job names it (5.14). A host holding only `mac14-x15-a` (`os=macos, os_version=14.6, xcode={15F31d}`) is
 skipped: no image meets all the guest constraints, though each constraint alone is met by some image of some host. The same need run
 natively (a `host` job, off by default, 5.12) drops `sandbox=vm` and puts the three Xcode and OS constraints in `host` scope.
 

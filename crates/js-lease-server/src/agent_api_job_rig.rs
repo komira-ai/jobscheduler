@@ -531,6 +531,13 @@ impl Rig {
         self.register_with(host, capabilities);
     }
 
+    /// Registers `host` past the route, as a Mac's agent that reports the `per-job` capability
+    /// and the Xcode builds `builds` (comma-joined, as a hello holds them) under `xcode`.
+    pub(crate) fn register_xcodes(&mut self, host: &str, builds: &str) {
+        let capabilities = json!({ "per-job": "true", "xcode": builds, "arch": "x86_64" });
+        self.register_with(host, capabilities);
+    }
+
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {

@@ -39,6 +39,7 @@ fn bare_start() -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         fuse: false,
+        xcode: None,
     }
 }
 

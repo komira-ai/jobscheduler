@@ -7,10 +7,11 @@
 //!    changes nothing, and lifts no cordon, not even one in force;
 //! 2. the host facts are read again and compared with the ones the drain noted. The agent reads
 //!    them only when it starts, and says hello with them, so when they differ (a new major
-//!    version of macOS, another GPU) and the host is idle, the agent's unit is stopped, waited
-//!    for (at most [`RESTART_STOP_SECS`]) and started, and the step waits for the hello of the
-//!    agent's new session (at most [`RESTART_HELLO_SECS`]): the lease server then places work
-//!    by the new facts once the cordon is lifted. Equal facts restart nothing. A host that is
+//!    version of macOS, another GPU, on a Mac an Xcode installed or removed) and the host is
+//!    idle, the agent's unit is stopped, waited for (at most [`RESTART_STOP_SECS`]) and started,
+//!    and the step waits for the hello of the agent's new session (at most
+//!    [`RESTART_HELLO_SECS`]): the lease server then places work by the new facts once the
+//!    cordon is lifted. Equal facts restart nothing. A host that is
 //!    not idle is not restarted, so no work is cut, and facts that cannot be read restart
 //!    nothing either; the success then says so in its detail. The hold file is still there
 //!    while the agent restarts, so the new agent starts no work and cordons the host after its

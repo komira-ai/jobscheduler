@@ -8,7 +8,7 @@
 //! | `cpus`, `mem_gib`, `nvme_gib`, `gpu` (once each) | countable capacity |
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring`, `mount-provider.<name>` (once each) | exact values |
 //! | `gpu.cores`, `gpu.metal_family` (a Mac reports them) | not read: a request cannot name them yet |
-//! | `xcode` (repeated: one per installed build) | a set, matched by membership |
+//! | `xcode` (repeated; each value holds one or more builds joined with `,`, empty pieces skipped) | a set of the builds, matched by membership |
 //! | `vm.image` (repeated: one per image, `<name>@sha256:<64 hex>`) | a set of the `sha256:<hex>` digests, matched by membership |
 //! | `vm.slots`, `vm.max_cpus`, `vm.max_mem_gib` (once each) | checked to be whole numbers, not matched on (report-only) |
 //! | `drivers` (repeated: one per driver the daemon runs) | the drivers; placement reads them for the lease kind, no request key names them |
@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_types::{ACCEL_KEYS, AccelError, Accelerator, Arch, UnknownArch};
 
 use crate::cpu::CpuCaps;
+use crate::host::XCODE;
 use crate::matching::{
     Consumable, IOS_DEVICE_KEY, NodeCaps, REPORT_ONLY_KEYS, is_exact_key, is_member_key,
     member_token,
@@ -129,6 +130,11 @@ impl NodeCaps {
                     return Err(ReportError::RepeatedDevice(id));
                 }
                 devices.insert(id, attributes);
+            } else if key == XCODE {
+                let builds = members.entry(key.to_owned()).or_default();
+                for build in value.split(',').filter(|build| !build.is_empty()) {
+                    builds.insert(build.to_owned());
+                }
             } else if is_member_key(key) {
                 let token = member_token(key, value)
                     .ok_or_else(|| ReportError::NoImageDigest(value.to_owned()))?;

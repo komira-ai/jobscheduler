@@ -64,3 +64,4 @@ mod support;
 mod update_hook;
 mod usage;
 mod vm;
+mod xcodes;

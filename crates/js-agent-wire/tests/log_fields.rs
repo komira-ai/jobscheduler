@@ -51,6 +51,7 @@ fn start_of(job_id: &str) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         fuse: false,
+        xcode: None,
     }
 }
 

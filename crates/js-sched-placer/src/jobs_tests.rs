@@ -976,3 +976,6 @@ fn a_whole_host_job_with_layers_mounts_or_host_ports_stays_queued() {
     assert_eq!(rig.go(&Recorder::default()), std::slice::from_ref(&w.id));
     assert_eq!(read(&rig, &w.id).host, Some(host("a")));
 }
+
+#[path = "jobs_xcode_tests.rs"]
+mod xcode;

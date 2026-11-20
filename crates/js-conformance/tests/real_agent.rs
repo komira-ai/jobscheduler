@@ -243,6 +243,7 @@ fn job_start(job: &str, cpu_millis: u64) -> Command {
         host_ports: Vec::new(),
         placed_at_ms: None,
         fuse: false,
+        xcode: None,
     }))
 }
 

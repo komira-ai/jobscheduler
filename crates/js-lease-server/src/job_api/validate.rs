@@ -15,7 +15,7 @@
 //! | `spec.command` | with an empty image, an absolute path in normal form ([`js_types::path::absolute`]) | `field: spec.command` |
 //! | `spec.env` | names and values as given; nothing to refuse | |
 //! | `spec.needs` | `whole_host` with no other need; a GPU count with a class (from `gpu_class`, else `constraints.accelerator.model`) and a class with a count | `field: spec.needs`, `spec.needs.gpus`, `spec.needs.gpuClass` |
-//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `osVersion` empty or a whole major version of one to four digits without a leading zero; `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
+//! | `spec.constraints` | `os` empty, `linux` or `macos`; `arch` any name, `aarch64` stored as `arm64`; `exec` a known mode, and not `sandbox-exec` for a job with layers or a host port at a job port of its own; `isaLevel` empty or a level; `osVersion` empty or a whole major version of one to four digits without a leading zero; `xcode` empty or a build id ([`js_agent_wire::is_xcode_build`]: 1 to 32 bytes of letters, digits, `.`, `_` and `-`, the first a letter or digit); `accelerator` keys valid and not contradicting the booked class; `isolation` a known value (unspecified is contained), and not `host` for a job with layers, mounts or host ports | `field: spec.constraints.<name>` |
 //! | `spec.wallLimitSeconds` | present and above 0, and at most the ceiling | the refusals `wall-time-not-positive` and `wall-time-above-ceiling` |
 //! | `spec.network` | a known level | `field: spec.network` |
 //! | `spec.ports` | each port 1 to 65535, no host port twice | `field: spec.ports[i].hostPort`, `spec.ports[i].containerPort` |
@@ -44,16 +44,16 @@
 //! value of the request: not the id, not the image, not a file.
 //!
 //! The capability vocabulary is the one a lease request speaks (design section 3.8): the ISA
-//! level, the least operating-system version and the structured accelerator are recorded among the job's capabilities under the
-//! keys a lease request uses (`isa_level`, `os_version` and the `accelerator.*` keys), where placement reads
-//! them, and the old `gpus` and `gpu_class` pair is the booked count and class, which the
+//! level, the least operating-system version, the Xcode build and the structured accelerator
+//! are recorded among the job's capabilities under the keys a lease request uses (`isa_level`,
+//! `os_version`, `xcode` and the `accelerator.*` keys), where placement reads them, and the old `gpus` and `gpu_class` pair is the booked count and class, which the
 //! alias table resolves; an accelerator model this release does not know passes through.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_agent_wire::{Layer, RunFile, validate_files};
-use js_caps::{FLAG_SET, LAYERED_ROOTFS, mount_provider_key};
+use js_agent_wire::{Layer, RunFile, is_xcode_build, validate_files};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, mount_provider_key};
 use js_jobs::{
     Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
 };
@@ -317,7 +317,7 @@ struct Kept {
 }
 
 /// The constraints of a job, and the capabilities the tables record beside them: the ISA
-/// level, the least operating-system version and the accelerator's keys, which [`AcceleratorNeed::requested`] checks with the
+/// level, the least operating-system version, the Xcode build and the accelerator's keys, which [`AcceleratorNeed::requested`] checks with the
 /// booked GPUs.
 fn host(constraints: &v1::Constraints) -> Result<(Kept, BTreeMap<String, String>), Fault> {
     let given = |text: &str| Some(text.to_owned()).filter(|text| !text.is_empty());
@@ -339,9 +339,19 @@ fn host(constraints: &v1::Constraints) -> Result<(Kept, BTreeMap<String, String>
     let os_version = given(&constraints.os_version)
         .map(|text| major_version(&text).ok_or(Fault::Field("spec.constraints.osVersion")))
         .transpose()?;
+    let xcode = given(&constraints.xcode)
+        .map(|build| {
+            is_xcode_build(&build)
+                .then_some(build)
+                .ok_or(Fault::Field("spec.constraints.xcode"))
+        })
+        .transpose()?;
     let mut capabilities = BTreeMap::new();
     if let Some(version) = os_version {
         capabilities.insert(OS_VERSION_KEY.to_owned(), version.to_string());
+    }
+    if let Some(build) = xcode {
+        capabilities.insert(XCODE.to_owned(), build);
     }
     if let Some(level) = given(&constraints.isa_level) {
         capabilities.insert(ISA_LEVEL_KEY.to_owned(), level);

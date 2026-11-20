@@ -101,12 +101,13 @@ pub(super) fn pin(
 
 /// Makes the pinned bundle ready for the run of `native` as `uid`, whose home is `home`:
 /// clones what the bundle says is written to into `<home>/trees` and resolves the config.
-/// `tmp` is the run's `TMPDIR`.
+/// `tmp` is the run's `TMPDIR`, and `developer_dir` the `Contents/Developer` of the Xcode the
+/// start names, which becomes `DEVELOPER_DIR` and what `${developer_dir}` expands to.
 pub(super) fn prepare(
     pinned: &Pinned,
     native: &NativeSpec,
     home: &Path,
-    (uid, tmp): (u32, &Path),
+    (uid, tmp, developer_dir): (u32, &Path, Option<&Path>),
 ) -> Result<Prepared, Prepare> {
     let under = home.join("trees");
     super::make_dir(&under, uid)?;
@@ -117,7 +118,7 @@ pub(super) fn prepare(
     let inputs = Inputs {
         store_root: pinned.root(),
         writable: &writable,
-        developer_dir: None,
+        developer_dir,
         base_env: &base_env,
         job_env: &native.env,
         job_args: &native.args,

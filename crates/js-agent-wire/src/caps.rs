@@ -91,6 +91,16 @@ impl Caps {
     }
 }
 
+/// Whether `value` is an Xcode build id, as `ProductBuildVersion` names one (`16C5032a`): 1
+/// to [`limits::MAX_XCODE_BUILD_LEN`] bytes of `[A-Za-z0-9._-]`, the first a letter or a
+/// digit. It never holds the `,` the capability [`limits::XCODE_CAPABILITY`] joins builds
+/// with.
+#[must_use]
+pub fn is_xcode_build(value: &str) -> bool {
+    let at = At::new("xcode", refusal::INVALID_JOB);
+    check::token(at, value, limits::MAX_XCODE_BUILD_LEN, check::ident_byte).is_ok()
+}
+
 /// `sha256:` and 64 lower case hex digits.
 fn is_digest(value: &str) -> bool {
     let hex = value.strip_prefix("sha256:").unwrap_or("");
