@@ -20,7 +20,7 @@ pub(crate) mod rank;
 #[cfg(test)]
 mod cold_tests;
 #[cfg(test)]
-mod cordon_tests;
+pub(crate) mod cordon_tests;
 #[cfg(test)]
 mod engine_hosts_tests;
 #[cfg(test)]

@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use js_registry::{Cordoned, NotHeld, Registry, Uncordoned};
+use js_jobs::ScaleMark;
+use js_registry::{Cordoned, HostMark, NotHeld, Registry, Uncordoned};
 use js_types::cordon::{self, Asker, Cordon, Cordoning, Uncordoning};
 use js_types::{Clock, CordonHolder, HostId};
 use tracing::{error, warn};
@@ -227,6 +228,36 @@ impl Agents {
             }
         }
         drop(gate);
+    }
+}
+
+impl Agents {
+    /// Puts the job store's scale-down marks, the rows `hostmark/<host>`, on the registry
+    /// ([`Registry::mirror_marks`]), when the server holds the job store: the registry's marks
+    /// are then the cache of the rows, so a mark put through another server, or by the scaler
+    /// here before its row write failed, is what this registry holds after the tick. A read
+    /// that fails is logged and counted, and the registry keeps the marks it holds until the
+    /// next tick.
+    pub(crate) async fn mirror_host_marks(self: &Arc<Self>) {
+        let Some(jobs) = self.jobs.clone() else {
+            return;
+        };
+        match blocking(move || jobs.host_marks()).await {
+            Ok(rows) => {
+                let named = rows.into_iter().map(|(host, (mark, _))| {
+                    let mark = match mark {
+                        ScaleMark::Draining => HostMark::Draining,
+                        ScaleMark::Releasing => HostMark::Releasing,
+                    };
+                    (host, mark)
+                });
+                self.registry.mirror_marks(&named.collect());
+            }
+            Err(error) => {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+                warn!(%error, "cannot read the job store's host marks; the registry keeps its own until the next tick");
+            }
+        }
     }
 }
 
