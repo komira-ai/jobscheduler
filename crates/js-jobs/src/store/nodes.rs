@@ -238,7 +238,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::Store`].
     pub fn forget_node(&self, host: &HostId, at: Version) -> Result<bool, JobStoreError> {
         let txn = Txn::new().delete(keys::node(host), Cond::Version(at));
-        Ok(self.write_node(txn)?.is_ok())
+        let deleted = self.write_node(txn)?.is_ok();
+        if deleted {
+            self.note_node(host, None);
+        }
+        Ok(deleted)
     }
 
     /// Writes `record` as its host's row at the absence or version of `read`: the row as
@@ -254,9 +258,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             node_cond(read),
         );
         // The transaction writes the one row, so its revision is the row's new version.
-        Ok(self.write_node(txn)?.ok().map(|commit| NodeRow {
-            record,
-            version: Version(commit.revision.0),
+        Ok(self.write_node(txn)?.ok().map(|commit| {
+            let clean = record.state.last_listing_clean;
+            self.note_node(&record.host, Some(clean));
+            NodeRow {
+                record,
+                version: Version(commit.revision.0),
+            }
         }))
     }
 }

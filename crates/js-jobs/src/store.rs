@@ -34,6 +34,7 @@ mod nodes;
 mod queue;
 mod status;
 mod taints;
+mod unclean;
 mod whole;
 mod written;
 
@@ -119,6 +120,9 @@ pub struct JobStore<S, I = RandomIds> {
     /// The store's head as [`JobStore::written`] last read it, and the head at the last commit
     /// that changed a job table, as far as the feed told: shared with the guarded views.
     heads: Arc<std::sync::Mutex<written::Heads>>,
+    /// The hosts whose node row said their last listing was not clean, as of a head of the
+    /// store ([`JobStore::unclean_nodes`]): shared with the guarded views.
+    unclean: Arc<std::sync::Mutex<unclean::Unclean>>,
     /// The node row every write of this job store is conditional on ([`JobStore::guarded`]);
     /// `None` for a job store that is not a guarded view.
     guard: Option<guard::Guard>,
@@ -259,6 +263,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             writes: Arc::new(AtomicU64::new(0)),
             heads: Arc::default(),
+            unclean: Arc::default(),
             guard: None,
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,

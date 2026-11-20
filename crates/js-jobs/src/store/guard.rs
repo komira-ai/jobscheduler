@@ -36,6 +36,7 @@ impl<S, I: Clone> JobStore<S, I> {
             instance: self.instance,
             writes: self.writes.clone(),
             heads: self.heads.clone(),
+            unclean: self.unclean.clone(),
             guard: Some(Guard {
                 host: host.clone(),
                 at,

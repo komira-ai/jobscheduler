@@ -50,6 +50,7 @@ mod retention;
 mod rows;
 mod scrub;
 mod taints;
+mod unclean;
 mod whole;
 
 pub use claimed::*;
@@ -78,6 +79,7 @@ pub use retention::*;
 pub use rows::*;
 pub use scrub::*;
 pub use taints::*;
+pub use unclean::*;
 pub use whole::*;
 
 /// Runs every check of the suite against `backend`, one after another.
@@ -113,6 +115,7 @@ where
     a_guarded_view_shares_the_write_count_of_its_store(backend);
     a_guarded_claimed_placement_honours_the_node_guard(backend);
     settle_node_writes_at_the_version_and_keeps_the_other_fields(backend);
+    the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
@@ -289,6 +292,7 @@ macro_rules! job_store_tests {
             a_guarded_view_shares_the_write_count_of_its_store,
             a_guarded_claimed_placement_honours_the_node_guard,
             settle_node_writes_at_the_version_and_keeps_the_other_fields,
+            the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
             heard_at_is_the_store_clock_and_judges_live_nodes,

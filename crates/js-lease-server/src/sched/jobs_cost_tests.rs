@@ -214,9 +214,8 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
 
 /// Asserts that the tick's pass runs after a heartbeat's was skipped, running the one round
 /// the first queued job has a host for; and that the pass reads no job table when no write
-/// came since the last pass read them: it uses the rows that pass read, and reads only the
-/// hosts' node rows, which hold whether each host's last listing was clean. (The tick's job
-/// pass, before it, reads the tables for its own ends.)
+/// came since the last pass read them: it uses the rows that pass read. (The tick's job pass,
+/// before it, reads the tables for its own ends.)
 #[tokio::test]
 async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
     let settled = Settled::new("cost_tick").await;
@@ -227,7 +226,7 @@ async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
     let pass = async { settled.rig.agents.place_jobs() };
     let (_, passed) = settled.counted(pass).await;
     assert_eq!((passed.rounds, passed.skipped), (1, 0), "{passed:?}");
-    assert_eq!(passed.reads, [Read::Scan("node/".to_owned())], "{passed:?}");
+    assert_eq!(passed.reads, [], "{passed:?}");
 }
 
 /// Asserts that a job submitted, or a queued job cancelled, brings back the next heartbeat's

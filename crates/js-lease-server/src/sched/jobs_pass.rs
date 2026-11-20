@@ -24,7 +24,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
 
 use js_agent_wire::Taint;
 use js_jobs::{Capacity, HOST_JOB_TAINT, JobId, JobStoreError};
@@ -83,12 +82,10 @@ enum Pass {
     IfChanged,
 }
 
-/// The hosts whose row says their last job listing was not clean, as one read of the rows.
+/// The hosts whose row says their last job listing was not clean: the rows the store's feed
+/// names since the last pass are read again ([`js_jobs::JobStore::unclean_nodes`]).
 fn unclean_hosts(jobs: &ServerJobs) -> Result<BTreeSet<HostId>, JobStoreError> {
-    let rows = jobs.live_nodes(Duration::MAX)?;
-    let unclean = rows.into_iter().map(|row| row.record);
-    let unclean = unclean.filter(|record| !record.state.last_listing_clean);
-    Ok(unclean.map(|record| record.host).collect())
+    jobs.unclean_nodes()
 }
 
 /// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the

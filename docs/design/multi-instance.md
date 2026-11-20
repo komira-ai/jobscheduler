@@ -73,8 +73,9 @@ where today a beat that changes nothing writes nothing. That is about the rate t
 (komira-ai/hostkeeper's design, section 19, decision 4). Through the `Store`, each beat is also a revision and a feed row, taken
 under the commit head behind every claimed placement (3.1). It moves the store's head, so the reading every pass's table cache is
 judged by (`js-jobs/src/store/written.rs`, #880) reads the feed's rows since its last reading and moves only for a row outside
-`node/` (Built, G15): a quiet beat leaves the tables cached and the pass skipped as before, at the cost of a short feed read and a
-scan of the `node/` rows for the listing-clean flags per pass. The other standard form is a plain
+`node/` (Built, G15): a quiet beat leaves the tables cached and the pass skipped as before, at the cost of a short feed read. The
+listing-clean flags a pass reads are kept the same way (`js-jobs/src/store/unclean.rs`): read whole once, then only the node rows
+the feed names since the last pass (over a store with no head, which one process writes, from that process's own writes). The other standard form is a plain
 `node` table on the store's own connections (`js-state/src/postgres/extension.rs`, no head, no feed), with
 `UPDATE ... WHERE epoch = $1 AND seq < $2 RETURNING` as the guard. It gives up the same-transaction `Checked` guard of the listing.
 G15 chooses between the two by measuring both at the deployment's host count.
@@ -319,7 +320,7 @@ and decides nothing shared). Paths are under `crates/`.
 | Whole-host job states (placed, starting, running, prepare deadline) | `js-jobs/src/store/whole.rs:370`, `:375`, `:413`, `js-lease-server/src/job_whole.rs:143` | rows written at `Cond::Version` | Built |
 | The whole-host start's taint and the clock it judges deadlines by | `js-lease-server/src/agent_api.rs:545` (`own.host.taint`), `js-lease-server/src/job_whole.rs:143` (`serve`) | the registry's taint; the clock is the store's, read only for a step that stamps a time (#938) | Built (the clock); Designed (G4, G7: the taint) |
 | A job's start command, repeated by two instances | `js-lease-server/src/per_job.rs:166`, `js-lease-server/src/job_start.rs:120` | a pure function of the rows; the placement that creates it is claimed | Built |
-| Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agent_api/rows.rs:265` (`settle`: `last_listing_clean` written by the beat that applied the listing), `js-lease-server/src/sched/jobs_pass.rs:86` (`unclean_hosts`: one read of the rows per pass; a pass that cannot read them places nothing) | the row's flag, so every instance's placement sees it | Built (G15) |
+| Listing-clean (a host whose last listing was not clean takes no job) | `js-lease-server/src/agent_api/rows.rs:265` (`settle`: `last_listing_clean` written by the beat that applied the listing), `js-lease-server/src/sched/jobs_pass.rs:86` (`unclean_hosts`), `js-jobs/src/store/unclean.rs` (`unclean_nodes`: read whole once, then the rows the feed names since; a pass that cannot read them places nothing) | the row's flag, so every instance's placement sees it | Built (G15) |
 | Held beats and their wakes | `js-lease-server/src/held_beat.rs:36` | the process's own wakes; a placement by another instance goes out on the host's next beat, at most its hold later; a draining instance ends every hold at once and begins none (#935, `js-lease-server/src/agent_api/held.rs:95-113`) | Per instance, a held dispatch poll's wake beside it (`js-lease-server/src/dispatch_state.rs:19`, rechecked every `server.dispatch_recheck_ms`); Designed (G16: woken across instances) |
 | Log upload credentials per host | `js-lease-server/src/logs/mod.rs:155-307` | stateless provider credentials; several valid at once; a flip costs a mint | Per instance |
 
