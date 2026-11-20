@@ -108,6 +108,7 @@ impl Lifecycle {
             providers: Attached::none(),
             wake: Wake::default(),
             starting: BTreeMap::new(),
+            run_dirs: super::run_dirs::RunDirs::default(),
         };
         let mut events = Vec::new();
         let now = this.clock.now_ms();

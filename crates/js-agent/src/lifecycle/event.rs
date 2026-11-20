@@ -73,6 +73,25 @@ pub struct StartTimeline {
     pub runtime: Vec<(&'static str, u64)>,
 }
 
+/// When each step of a finished run's cleanup was done, carried by [`Event::Cleaned`] and so
+/// logged with it: where the time from a run's end to its free slot went, and how much of it
+/// the lifecycle's worker spent itself. The container's removal and the removal of the run's
+/// directories run off the worker when the runtime and the lifecycle can (on their pools),
+/// and their time is then in the steps and not in `worker_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CleanupTimeline {
+    /// The lifecycle's steps, each with the milliseconds, on the lifecycle's clock, after
+    /// the first step that took the run into its cleanup, at which the step that did it
+    /// ended, in the order they were: `removed` (the container is gone), `scratch` (the
+    /// scratch directory and the directories beside it are gone) and `checks` (the post-job
+    /// checks passed and the slot is free).
+    pub steps: Vec<(&'static str, u64)>,
+    /// The milliseconds the worker spent in the run's cleanup, on the lifecycle's clock,
+    /// summed over the steps that took it on: the record of the owed checks, what of the
+    /// removals runs on the worker, the quota and the checks.
+    pub worker_ms: u64,
+}
+
 /// What [`Lifecycle`](super::Lifecycle) did, in order. The caller logs these; a test reads them as the
 /// record of the order of things.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +167,14 @@ pub enum Event {
     SlotFreed {
         /// The run.
         run_id: String,
+    },
+    /// The run's cleanup passed: when each of its steps was done. Pushed after
+    /// [`Event::SlotFreed`].
+    Cleaned {
+        /// The run.
+        run_id: String,
+        /// When each step of the cleanup was done.
+        timeline: CleanupTimeline,
     },
     /// Something to look at; see [`Finding`]. Reported once for each code of a run; a check's
     /// notes are one each at every call of the check that saw a change, and taint nothing.

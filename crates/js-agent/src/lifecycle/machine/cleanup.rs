@@ -1,13 +1,19 @@
 //! A job's end: watching a running container, and taking a finished job through the
-//! cleanup in order.
+//! cleanup in order. The container's removal and the removal of the run's directories run off
+//! the worker when the runtime ([`Runtime::removing`]) and the lifecycle
+//! ([`Lifecycle::with_cleanup_threads`]) can: the job waits in its stage until they answer,
+//! and every other job, a start among them, goes on meanwhile.
+
+use std::path::{Path, PathBuf};
 
 use super::Lifecycle;
 use super::job::{
     Cause, Job, Phase, Stage, cause_detail, cgroup_not_found_taint, check_taint, cleanup_taint,
     input_failure, outcome,
 };
-use crate::lifecycle::runtime::{RunHandle, Status, Whereabouts};
-use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
+use super::run_dirs::{DirsRemoval, RunDirs};
+use crate::lifecycle::runtime::{Removal, RunHandle, Runtime, Status, Whereabouts};
+use crate::lifecycle::{CheckFinding, Event, FilesRoot, Finding, Finished, ScratchRoot, code};
 
 /// How often a finished run's usage that stays nonzero is reported again while the agent
 /// waits for it (one hour).
@@ -144,10 +150,45 @@ impl Lifecycle {
         }
     }
 
+    /// Takes one finished job through the cleanup, in order, as far as it goes
+    /// ([`Lifecycle::clean_pass`]), and keeps when each step was done and how long the worker
+    /// spent on it; once the slot is free, [`Event::Cleaned`] carries that.
+    pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
+        if !self.jobs[index].stage.cleaning() {
+            self.clean_pass(index, events);
+            return;
+        }
+        let began = self.clock.now_ms();
+        let seen = events.len();
+        self.clean_pass(index, events);
+        let now = self.clock.now_ms();
+        let job = &mut self.jobs[index];
+        let since = *job.cleaning.since_ms.get_or_insert(began);
+        let timeline = &mut job.cleaning.timeline;
+        timeline.worker_ms = timeline.worker_ms.saturating_add(now.saturating_sub(began));
+        let after = now.saturating_sub(since);
+        for event in &events[seen..] {
+            let step = match event {
+                Event::ContainerRemoved { .. } => "removed",
+                Event::ScratchRemoved { .. } => "scratch",
+                Event::ChecksPassed { .. } => "checks",
+                _ => continue,
+            };
+            timeline.steps.push((step, after));
+        }
+        if job.stage == Stage::Freed {
+            events.push(Event::Cleaned {
+                run_id: job.run_id.clone(),
+                timeline: std::mem::take(timeline),
+            });
+        }
+    }
+
     /// Takes one finished job through the cleanup, in order, as far as it goes: the
     /// container, the scratch directory, the checks, then the slot. A step that fails
-    /// ends the pass with the slot still booked.
-    pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
+    /// ends the pass with the slot still booked, and so does a removal still under way off
+    /// the worker, whose answer a later step takes.
+    fn clean_pass(&mut self, index: usize, events: &mut Vec<Event>) {
         // A run that waits to start is cleaned once it ends (its stage holds the start).
         if matches!(self.jobs[index].stage, Stage::Preparing(_)) {
             return;
@@ -198,6 +239,7 @@ impl Lifecycle {
             quota_health,
             clock,
             providers,
+            run_dirs,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -208,9 +250,9 @@ impl Lifecycle {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
             // run: an agent that stops in between leaves the record, and the next start
-            // taints the host. Without the record nothing could be removed.
-            let cleaning = matches!(stage, Stage::Removing(_) | Stage::Scratch | Stage::Checks);
-            if cleaning && !job.owed {
+            // taints the host. Without the record nothing could be removed. It is written on
+            // the worker, before any removal is asked of a thread.
+            if stage.cleaning() && !job.owed {
                 match config.state.owe(&run_id) {
                     Ok(()) => job.owed = true,
                     Err(why) => {
@@ -220,8 +262,11 @@ impl Lifecycle {
                 }
             }
             match stage {
-                Stage::Removing(id) => match runtime.remove(&id) {
-                    Ok(()) => {
+                // Asked of the runtime at every step until it answers: off the worker when the
+                // runtime can, and then the job waits here with its slot booked.
+                Stage::Removing(id) => match runtime.removing(&id) {
+                    Removal::Pending => return,
+                    Removal::Done(Ok(())) => {
                         events.push(Event::ContainerRemoved {
                             run_id: run_id.clone(),
                         });
@@ -232,29 +277,31 @@ impl Lifecycle {
                     // holds nothing of the job, so it is a finding and not a taint, and the
                     // cleanup goes on. Only the native runtime (a macOS build's) copies outputs.
                     #[cfg(target_os = "macos")]
-                    Err(why) if why.is_outputs() => {
+                    Removal::Done(Err(why)) if why.is_outputs() => {
                         job.note(code::OUTPUTS_FAILED, why.to_string(), events);
                         events.push(Event::ContainerRemoved {
                             run_id: run_id.clone(),
                         });
                         job.stage = Stage::Scratch;
                     }
-                    Err(why) => {
+                    Removal::Done(Err(why)) => {
                         let tainted = cleanup_taint(Some(&run_id), code::CONTAINER_REMOVE_FAILED);
                         job.taint(taint, tainted, events);
                         job.note(code::CONTAINER_REMOVE_FAILED, why.to_string(), events);
                         return;
                     }
                 },
-                // What the runtime mounted for a run it never made (an assembly before the
-                // container) goes first: the run's directories hold its writable layers.
-                Stage::Scratch => match runtime
-                    .discard_fs(&run_id)
-                    .map_err(std::io::Error::other)
-                    .and_then(|()| {
-                        remove_run_dirs(config, &run_id, [lease.as_deref(), tmp.as_deref()])
-                    }) {
-                    Ok(()) => {
+                // The run's directories, off the worker when the lifecycle has threads for it
+                // (see `dirs_removal`); the job waits here until they are gone.
+                Stage::Scratch => match dirs_removal(
+                    (job.cleaning.dirs_removed, run_id.as_str()),
+                    (runtime.as_mut(), run_dirs),
+                    (&config.scratch, config.files.as_ref()),
+                    [&lease, &tmp],
+                ) {
+                    DirsRemoval::Pending => return,
+                    DirsRemoval::Done(Ok(())) => {
+                        job.cleaning.dirs_removed = true;
                         // What the run's providers made for it is given up now that nothing
                         // mounts it. A failed release is tried at every step (`provided`)
                         // and never taints the host or holds the slot.
@@ -268,8 +315,8 @@ impl Lifecycle {
                         // agent refuse later than the server admits for the seconds the
                         // lag lasts, the same as for every other booked dimension, which
                         // are held until this cleanup has passed. A failure is tried again
-                        // at the next step, together with the removal, which finds nothing
-                        // to do. None of it taints: nothing is left on disk.
+                        // at the next step; the directories, which are gone, are not removed
+                        // again. None of it taints: nothing is left on disk.
                         if let (Some(quota), Some(slot)) = (&config.quota, job.slot) {
                             let dir = config.scratch.of(&run_id);
                             // A runtime that gives no temporary directory leaves the slot's
@@ -330,7 +377,7 @@ impl Lifecycle {
                         });
                         job.stage = Stage::Checks;
                     }
-                    Err(why) => {
+                    DirsRemoval::Done(Err(why)) => {
                         let tainted = cleanup_taint(Some(&run_id), code::SCRATCH_FAILED);
                         job.taint(taint, tainted, events);
                         job.note(code::SCRATCH_FAILED, why.to_string(), events);
@@ -412,21 +459,50 @@ impl Lifecycle {
     }
 }
 
+/// How the removal of the directories of the run `run_id` stands: done once they are
+/// `removed` (a step that waits for the quota after the removal); the answer of the removal
+/// under way on `dirs` when there is one; otherwise, once the `runtime` has discarded what it
+/// mounted for a run it never made (an assembly before the container, on the worker: it is
+/// the runtime's; the run's directories hold its writable layers, so it goes first), the
+/// removal of the run's directories in the scratch root and the files root (`roots`) and of
+/// the runtime's directories `beside` them, begun on `dirs`.
+fn dirs_removal(
+    (removed, run_id): (bool, &str),
+    (runtime, dirs): (&mut dyn Runtime, &mut RunDirs),
+    (scratch, files): (&ScratchRoot, Option<&FilesRoot>),
+    beside: [&Option<PathBuf>; 2],
+) -> DirsRemoval {
+    if removed {
+        return DirsRemoval::Done(Ok(()));
+    }
+    if let Some(followed) = dirs.follow(run_id) {
+        return followed;
+    }
+    if let Err(why) = runtime.discard_fs(run_id) {
+        return DirsRemoval::Done(Err(std::io::Error::other(why)));
+    }
+    let (scratch, files, id) = (scratch.clone(), files.cloned(), run_id.to_owned());
+    let [lease, tmp] = beside;
+    let (lease, tmp) = (lease.clone(), tmp.clone());
+    let task = move || {
+        let beside = [lease.as_deref(), tmp.as_deref()];
+        remove_run_dirs((&scratch, files.as_ref()), &id, beside)
+    };
+    dirs.begin(run_id, Box::new(task))
+}
+
 /// Removes the run's scratch directory, the runtime's directories beside it (its lease and
 /// its job's temporary directory) and its files directory; all are tried, and the first
 /// failure is the one reported.
 fn remove_run_dirs(
-    config: &Config,
+    (scratch, files): (&ScratchRoot, Option<&FilesRoot>),
     run_id: &str,
-    beside: [Option<&std::path::Path>; 2],
+    beside: [Option<&Path>; 2],
 ) -> std::io::Result<()> {
     // The runtime removes its own directories with the container; one it left (a start that
     // failed after the directory was made) goes with the run's.
-    let [lease, tmp] = beside.map(|dir| dir.map_or(Ok(()), |dir| config.scratch.remove_lease(dir)));
-    let scratch = config.scratch.remove(run_id).and(lease).and(tmp);
-    let files = config
-        .files
-        .as_ref()
-        .map_or(Ok(()), |root| root.remove(run_id));
-    scratch.and(files)
+    let [lease, tmp] = beside.map(|dir| dir.map_or(Ok(()), |dir| scratch.remove_lease(dir)));
+    let removed = scratch.remove(run_id).and(lease).and(tmp);
+    let files = files.map_or(Ok(()), |root| root.remove(run_id));
+    removed.and(files)
 }

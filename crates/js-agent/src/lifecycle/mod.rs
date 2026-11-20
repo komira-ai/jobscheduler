@@ -121,7 +121,13 @@
 //!   [`Finding`] is recorded. A retry that succeeds does not free the slot by itself: the
 //!   order goes on, the checks run after the cleanup that failed, and the slot is freed
 //!   only if they ran clean and the marker is on disk (a job whose checks find something
-//!   stays blocked).
+//!   stays blocked). The container's removal ([`Runtime::removing`]) and the removal of the
+//!   run's directories ([`Lifecycle::with_cleanup_threads`]) may run off the worker: the
+//!   job waits in the order, with its slot held, until the step after they answered, and a
+//!   failure they answer is a failure of that step, as above. The record that the checks
+//!   are owed is written on the worker before either is asked, so a restart while one runs
+//!   still taints the host. When the cleanup has passed, [`Event::Cleaned`] says when each
+//!   step was done and how long the worker spent on it.
 //! - **A restart loses no running job.** [`Lifecycle::adopt`] finds the containers the
 //!   agent labelled, before the first heartbeat of the new process, and lists them first,
 //!   so the server never sees a gap that would make it run the work twice. A labelled
@@ -321,7 +327,7 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{Event, Finding, Skip, StartTimeline};
+pub use event::{CleanupTimeline, Event, Finding, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
@@ -341,7 +347,7 @@ pub use quota_flags::{
 use quota_flags::{job_tmp_gib, scratch_quota_limits};
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
-    Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared,
+    Body, Created, Exit, Found, FsPrepared, HostSource, JobFs, NativeRefusal, Prepared, Removal,
     ResolvedMount, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Whereabouts,
     check_run_env, label,
 };

@@ -208,6 +208,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         readiness: None,
         silence_stop: None,
         vm: None,
+        cleanup_threads: 0,
     }
 }
 

@@ -333,6 +333,7 @@ pub mod native;
 mod os_version;
 pub mod own_host;
 pub mod platform;
+mod pool;
 pub mod provider;
 pub mod quota;
 mod readiness;
