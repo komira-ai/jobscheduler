@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::os::fd::BorrowedFd;
+use std::os::unix::fs::MetadataExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use js_agent::CommandRunner;
 use js_agent::lifecycle::StateRoot;
-use js_agent::update_hook::step::{self, Env, TokenFacts, TokenFn};
+use js_agent::update_hook::step::{self, Env, LookFn, PathFacts, TokenFacts, TokenFn};
 use js_agent::update_hook::{
     Clock, Cordoned, DirStat, Done, Gate, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
     Params, PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units,
@@ -25,6 +26,7 @@ use js_client::HostIdentity;
 use js_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 
+use super::fake_mac::FakeMac;
 use super::fakes::{START_MS, World};
 
 pub const UNIT: &str = "js-agent-crun.service";
@@ -111,6 +113,8 @@ pub struct Rig {
     pub kill: Rc<Kill>,
     pub world: World,
     pub params: Params,
+    /// The text `params` was read from, as the params file the updater writes.
+    pub params_text: String,
     pub link: PathBuf,
     /// The unit the params name.
     pub unit: String,
@@ -213,7 +217,7 @@ impl Rig {
         };
         let link = root.join("control/link/current");
         let release_link = format!("\"release_link\" = \"{}\"\n", link.display());
-        let params = Params::parse(&format!(
+        let params_text = format!(
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
@@ -240,8 +244,8 @@ impl Rig {
             root = root.display(),
             runtime = runtime,
             token = token.display(),
-        ))
-        .unwrap();
+        );
+        let params = Params::parse(&params_text).unwrap();
         let kill = Rc::new(Kill::default());
         let world = World::new(
             &root.join("world"),
@@ -257,6 +261,7 @@ impl Rig {
             kill,
             world,
             params,
+            params_text,
             link,
             unit: unit.to_owned(),
             manager,
@@ -438,6 +443,12 @@ pub struct Spy<'a> {
     /// they are used up it prints `0`.
     pub tasks: RefCell<VecDeque<Result<String, String>>>,
     record_path: PathBuf,
+    /// The Mac the host setup's commands and looks go to, once [`Spy::on_mac`] names one; until
+    /// then a look is at the file system as it is.
+    mac: Rc<RefCell<Option<Rc<FakeMac>>>>,
+    look_fn: Box<LookFn>,
+    /// The file system table the host setup writes: `fstab` in the rig's tree.
+    pub fstab: PathBuf,
 }
 
 /// The certificate file a flags file names in the tests that give the host an identity.
@@ -478,7 +489,21 @@ impl<'a> Spy<'a> {
         let identity_cert = Rc::new(Cell::new(TokenFile::Missing));
         let identity_key = Rc::new(Cell::new(TokenFile::Missing));
         let (seen_cert, seen_key) = (Rc::clone(&identity_cert), Rc::clone(&identity_key));
+        let mac: Rc<RefCell<Option<Rc<FakeMac>>>> = Rc::new(RefCell::new(None));
+        let seen_mac = Rc::clone(&mac);
         Spy {
+            mac,
+            look_fn: Box::new(move |path| match &*seen_mac.borrow() {
+                Some(mac) => mac.look(path),
+                None => {
+                    let meta = fs::metadata(path)?;
+                    Ok(PathFacts {
+                        device: meta.dev(),
+                        uid: meta.uid(),
+                    })
+                }
+            }),
+            fstab: rig.tmp.path().join("fstab"),
             token,
             host_identity: None,
             identity_cert,
@@ -512,6 +537,11 @@ impl<'a> Spy<'a> {
             start_leaves: RefCell::new(None),
             record_path: rig.record_path(),
         }
+    }
+
+    /// The host setup's commands and looks go to `mac` from now on.
+    pub fn on_mac(&self, mac: &Rc<FakeMac>) {
+        *self.mac.borrow_mut() = Some(Rc::clone(mac));
     }
 
     /// Calls `hook(spy, ticks)` after each pause, `ticks` being the pauses so far.
@@ -604,6 +634,8 @@ impl<'a> Spy<'a> {
             token: &*self.token_fn,
             host_identity: self.host_identity.as_ref(),
             stat,
+            look: &*self.look_fn,
+            fstab: &self.fstab,
         }
     }
 
@@ -772,6 +804,10 @@ impl Clock for Spy<'_> {
 impl CommandRunner for Spy<'_> {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.push(format!("run({program} {})", args.join(" ")));
+        let mac = self.mac.borrow().clone();
+        if let Some(answer) = mac.and_then(|mac| mac.run(program, args)) {
+            return answer;
+        }
         if program == LAUNCHCTL {
             // Only the helper's bootstrap is run through the runner: the plist is the file the
             // release carries, and the job is loaded (not yet running) when it is bootstrapped.
