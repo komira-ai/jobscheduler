@@ -43,13 +43,24 @@ pub(crate) async fn hello(
     name: &str,
     token: Option<&Credential>,
 ) -> Result<Welcome, Refused> {
+    let capabilities = json!({ "per-job": "true", "arch": "x86_64" });
+    hello_with(rig, name, token, capabilities).await
+}
+
+/// [`hello`] reporting `capabilities`.
+async fn hello_with(
+    rig: &Rig,
+    name: &str,
+    token: Option<&Credential>,
+    capabilities: serde_json::Value,
+) -> Result<Welcome, Refused> {
     let who = rig.agents.tokens.identify(&"j".repeat(40)).unwrap();
     let mut said = json!({
         "host_id": name,
         "pool": "burst",
         "agent_version": "0.1.0",
         "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 },
-        "capabilities": { "per-job": "true", "arch": "x86_64" },
+        "capabilities": capabilities,
         "phase": "serving",
     });
     if token.is_some() {
@@ -198,4 +209,24 @@ async fn a_failed_refresh_is_logged_and_the_next_beat_writes_it() {
     rows::beat_row(&rig.agents, &name, Phase::Serving);
     let after = rig.jobs.read_node(&name).unwrap().unwrap();
     assert!(after.record.heard_at > before.record.heard_at);
+}
+
+/// Asserts that the beats of a host whose hello did not report `per-job` (whose jobs this
+/// server does not serve) still refresh its row, so it stays live for every server. It catches
+/// a row written at the hello and never again, which every other server reads as lost one
+/// grace later while the host beats.
+#[tokio::test]
+async fn a_host_that_runs_no_jobs_here_keeps_its_row_live() {
+    let mut rig = whole_rig("rows_unserved", rules(), None);
+    let capabilities = json!({ "arch": "x86_64" });
+    let welcome = hello_with(&rig, "host-1", None, capabilities)
+        .await
+        .unwrap();
+    rig.note_session("host-1", &welcome);
+    let name = host("host-1");
+    let before = rig.jobs.read_node(&name).unwrap().unwrap();
+    rig.advance(rig.agents.registry.refresh_every());
+    rig.beat(&FakeAgent::new("host-1")).await.unwrap();
+    let after = rig.jobs.read_node(&name).unwrap().unwrap();
+    assert!(after.record.heard_at > before.record.heard_at, "{after:?}");
 }

@@ -109,6 +109,9 @@ pub(crate) struct Agents {
     /// For each host whose hello this server took, the epoch of its `node/` row, which its
     /// beats refresh the row in ([`crate::agent_api`]). Its lock is a leaf.
     node_epochs: Mutex<BTreeMap<HostId, u64>>,
+    /// The store's rows the last pass offered hosts by, which a heartbeat's pass uses again
+    /// while nothing was committed since ([`crate::sched`]). Its lock is a leaf.
+    pub(crate) rows_read: Mutex<Option<Arc<crate::sched::jobs_rows::RowsRead>>>,
     /// The host credentials and job sinks of live logs, with `sink = "object_store"`
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
@@ -342,6 +345,7 @@ fn placed_in(
         placer: Some(placer.clone()),
         unclean: Mutex::default(),
         node_epochs: Mutex::default(),
+        rows_read: Mutex::default(),
         logs,
         job_limits,
         cpu_slack,
@@ -417,6 +421,7 @@ impl Agents {
             placer: None,
             unclean: Mutex::default(),
             node_epochs: Mutex::default(),
+            rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),

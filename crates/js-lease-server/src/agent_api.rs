@@ -579,7 +579,7 @@ async fn serve_jobs(
         tainted,
     }) = per_job
     else {
-        return Ok(None);
+        return Ok(rows::unserved_beat(agents, heartbeat).await);
     };
     let first = agents.first_listing(&host, session);
     let capabilities = claim.capabilities();

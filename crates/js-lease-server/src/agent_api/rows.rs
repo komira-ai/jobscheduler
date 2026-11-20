@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use js_agent_wire::{Phase, Welcome};
+use js_agent_wire::{Heartbeat, Phase, Welcome};
 use js_jobs::{Beat, JobStoreError, NodeHello, NodeState, SessionDigest};
 use js_registry::Refusal;
 use js_types::HostId;
@@ -116,4 +116,15 @@ pub(super) fn beat_row(agents: &Agents, host: &HostId, phase: Phase) {
             warn!(%error, %host, "the host's row was not refreshed; the next beat writes it")
         }
     }
+}
+
+/// [`beat_row`] for a beat of a host whose jobs this server does not serve (its hello did not
+/// report `per-job`), on the pool for blocking calls, so its row stays live for every server
+/// as its beats come in; `None`, which is what such a beat's job half answers.
+pub(super) async fn unserved_beat<T>(agents: &Arc<Agents>, heartbeat: &Heartbeat) -> Option<T> {
+    if let Ok(host) = HostId::new(&heartbeat.host_id) {
+        let (agents, phase) = (Arc::clone(agents), heartbeat.phase);
+        blocking(move || beat_row(&agents, &host, phase)).await;
+    }
+    None
 }

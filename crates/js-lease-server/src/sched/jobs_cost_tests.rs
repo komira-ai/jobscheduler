@@ -157,8 +157,8 @@ impl Counted {
 }
 
 /// Asserts that a heartbeat with an unchanged listing, from a host whose state the registry
-/// holds as it was, runs no pass: it reads no job table space and none of the queued jobs'
-/// rows, and runs no placement round. Before, every such heartbeat read every active job and
+/// holds as it was, runs no pass: it reads no job table space, no host rows (the last pass's
+/// are used again) and none of the queued jobs' rows, and runs no placement round. Before, every such heartbeat read every active job and
 /// ran a round for every queued job.
 #[tokio::test]
 async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round() {
@@ -166,6 +166,11 @@ async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round()
     for agent in [&settled.a, &settled.b] {
         let (_, counted) = settled.beat(agent).await;
         assert_eq!(counted.table_scans(), Vec::<&str>::new(), "{counted:?}");
+        // The hosts' rows the last pass read are used again: nothing was committed since.
+        let hosts = ["node/", "taint/", "hostmark/", "hosts/binding/"];
+        let hosts = hosts.map(|prefix| Read::Scan(prefix.to_owned()));
+        let read_hosts = counted.reads.iter().any(|read| hosts.contains(read));
+        assert!(!read_hosts, "{counted:?}");
         for id in &QUEUED[2..] {
             assert!(!counted.read_job(id), "{id} was read: {counted:?}");
         }

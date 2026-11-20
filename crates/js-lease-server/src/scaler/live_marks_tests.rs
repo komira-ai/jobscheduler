@@ -110,6 +110,82 @@ fn each_scale_down_call_writes_or_deletes_the_hosts_row() {
     assert_eq!(read.map(|(mark, _)| mark), Some(ScaleMark::Releasing));
 }
 
+/// A hello into the pool `burst`, as the node rows hold it.
+fn hello_row() -> js_jobs::NodeHello {
+    js_jobs::NodeHello {
+        session: None,
+        pool: "burst".to_owned(),
+        claim: None,
+        shape: None,
+        labels: std::collections::BTreeMap::new(),
+        phase: js_agent_wire::Phase::Serving,
+    }
+}
+
+/// Asserts that removing a released host deletes its `node/` row as well as its mark: the
+/// row is gone, and a new host is admitted into a pool whose cap the removed host's row had
+/// filled. Catches a released machine that keeps counting against its pool's cap (and stays
+/// offered to every server while its row reads live) after the registry let it go.
+#[test]
+fn a_removed_host_leaves_no_row_to_fill_its_pool() {
+    let (effects, a, _b, _store, _dirs) = two("marks-removed-row");
+    let jobs = jobs_of(&a);
+    jobs.hello_node(&h1(), &hello_row()).unwrap();
+    let next = HostId::new("h2").unwrap();
+    assert!(matches!(
+        jobs.hello_node_in_pool(&next, &hello_row(), 1),
+        Err(js_jobs::JobStoreError::PoolFull { .. })
+    ));
+    effects.call(Call::ReleaseHost, "h1");
+    assert_eq!(effects.remove("h1"), Ok(()));
+    assert_eq!(jobs.read_node(&h1()).unwrap(), None);
+    assert_eq!(row(&a), None);
+    assert!(jobs.hello_node_in_pool(&next, &hello_row(), 1).is_ok());
+}
+
+/// Asserts that a removed host's row that a beat moves between the read and the delete is
+/// read again and deleted, that one moved under both tries is left (to be forgotten once
+/// silent), and that a row that cannot be read is left; the mark row goes either way. Catches
+/// a delete that gives up a row it could still delete, and a retry without an end.
+#[test]
+fn a_removed_hosts_row_that_moves_is_read_again() {
+    let (effects, a, _b, store, _dirs) = two("marks-removed-moved");
+    let jobs = jobs_of(&a);
+    let epoch = jobs.hello_node(&h1(), &hello_row()).unwrap().record.epoch;
+    let beat = move |other: &ServerJobs| {
+        other
+            .beat_node(&h1(), epoch, None, |row| row.state.clone())
+            .unwrap();
+    };
+    let other = raw(&store);
+    let once = Arc::clone(&other);
+    store.before_next(move || beat(&once));
+    effects.call(Call::ReleaseHost, "h1");
+    // The release's own mark write takes the first hook; arm the beat for the delete.
+    let (first, again) = (Arc::clone(&other), Arc::clone(&store));
+    store.before_next(move || {
+        beat(&first);
+        let second = Arc::clone(&first);
+        again.before_next(move || beat(&second));
+    });
+    assert_eq!(effects.remove("h1"), Ok(()));
+    assert!(
+        jobs.read_node(&h1()).unwrap().is_some(),
+        "moved under both tries"
+    );
+    assert_eq!(row(&a), None);
+
+    jobs.hello_node(&HostId::new("h3").unwrap(), &hello_row())
+        .unwrap();
+    effects.call(Call::MarkEnding, "h1");
+    store.fail_read_after(0);
+    assert_eq!(effects.remove("h1"), Ok(()));
+    assert!(
+        jobs.read_node(&h1()).unwrap().is_some(),
+        "an unread row is left"
+    );
+}
+
 /// Asserts that a drain never lowers a releasing row another server wrote: the row stays
 /// releasing and the registry keeps the draining mark it took until the tick's mirror makes it
 /// releasing. Catches a draining write over a releasing row, which would reopen a host whose

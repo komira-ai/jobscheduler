@@ -553,6 +553,12 @@ impl Rig {
             .insert(host.to_owned(), (welcome.epoch, welcome.session));
     }
 
+    /// Notes the session `welcome` gave `host`, which [`Rig::beat`] then beats in.
+    pub(crate) fn note_session(&mut self, host: &str, welcome: &Welcome) {
+        let session = (welcome.epoch, welcome.session.clone());
+        self.sessions.insert(host.to_owned(), session);
+    }
+
     /// Registers `host` past the route, as [`Rig::register`] does, as an agent that reports
     /// the `per-job` and `log-upload` capabilities: a host whose hello the registry holds and
     /// whose hello the log side never saw.

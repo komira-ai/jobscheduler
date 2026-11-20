@@ -318,10 +318,11 @@ where
 }
 
 /// A row that a hello or beat moves between the scan and the delete is kept (the delete is at the
-/// version the scan read), and so is a row that another server deleted first; a binding that
-/// cannot be read is an error and its host's row is kept; a failed commit is the store's error
-/// and deletes nothing. Catches a forget that deletes a row a beat has just refreshed, one that
-/// reports a row it did not delete, and one that forgets a host whose binding it cannot read.
+/// version the scan read), and so is a row that another server deleted first; the row of a host
+/// whose binding cannot be read is kept while the next silent host's is forgotten; a failed
+/// commit is the store's error and deletes nothing. Catches a forget that deletes a row a beat
+/// has just refreshed, one that reports a row it did not delete, one that forgets a host whose
+/// binding it cannot read, and one that one unreadable row stops for every other host.
 pub fn forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding<B: Backend>(
     backend: &B,
 ) where
@@ -369,6 +370,7 @@ pub fn forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_bind
     );
 
     hello_of(&rig, "host-b");
+    hello_of(&rig, "host-c");
     rig.clock.advance(secs(100));
     rig.store.fail_next();
     assert_eq!(
@@ -381,11 +383,9 @@ pub fn forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_bind
     assert!(has_row(&rig, "host-b"), "{name}: a failed commit deleted");
 
     rig.put_raw("hosts/binding/host-b", b"not json".to_vec());
-    assert!(
-        matches!(
-            rig.jobs.forget_silent_nodes(silent_for),
-            Err(JobStoreError::Corrupt { .. })
-        ),
+    assert_eq!(
+        rig.jobs.forget_silent_nodes(silent_for),
+        Ok(vec![host("host-c")]),
         "{name}: a binding that cannot be read"
     );
     assert!(

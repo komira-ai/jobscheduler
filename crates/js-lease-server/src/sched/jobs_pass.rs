@@ -135,7 +135,12 @@ impl Agents {
         // Held from the read of the hosts to the last taint: a pass that read the hosts
         // before another pass tainted one would offer it again.
         let _placing = self.placing.lock().unwrap_or_else(PoisonError::into_inner);
-        let offered = match self.offered(jobs, placer, self.clock.now()) {
+        let now = self.clock.now();
+        let offered = match pass {
+            Pass::Always => self.offered(jobs, placer, now),
+            Pass::IfChanged => self.offered_after_beat(jobs, placer, now),
+        };
+        let offered = match offered {
             Ok(offered) => offered,
             Err(error) => {
                 warn!(%error, "the hosts could not be read; the next pass places the queued jobs");

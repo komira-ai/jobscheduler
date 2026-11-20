@@ -310,7 +310,7 @@ impl Effects for Live {
         };
         let registry = &self.agents.registry;
         registry.mark_ending(&id);
-        registry.remove(&id).map(|()| self.keep_mark(&id, None))
+        registry.remove(&id).map(|()| self.forget_removed(&id))
     }
 }
 

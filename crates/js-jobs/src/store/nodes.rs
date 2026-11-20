@@ -274,11 +274,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// no scale-down mark, as the registry forgets a host lost past its retention. Each host is
     /// decided in a transaction of its own that claims its row and reads the others; the row is
     /// deleted at the version the scan read, so a hello or beat that lands in between keeps it.
-    /// Returns the hosts whose rows were deleted, in host order.
+    /// Returns the hosts whose rows were deleted, in host order. A host whose decision reads a
+    /// row this build cannot read (its binding, or an allocation row) is logged and its row is
+    /// kept, and the other hosts are decided as usual.
     ///
     /// # Errors
-    /// [`JobStoreError::Store`], its clock included; [`JobStoreError::Corrupt`] when a binding
-    /// or allocation row the decision reads cannot be read (that host's row is kept).
+    /// [`JobStoreError::Store`], its clock included: the hosts after the failure are left to the
+    /// next call.
     pub fn forget_silent_nodes(&self, silent_for: Duration) -> Result<Vec<HostId>, JobStoreError> {
         let (now, rows) = self.nodes()?;
         let mut forgotten = Vec::new();
@@ -305,7 +307,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                     },
                 )?;
             if let Some(error) = failed {
-                return Err(error);
+                tracing::warn!(%host, %error, "a silent host's row is kept: a row it holds cannot be read");
+                continue;
             }
             if matches!(outcome, Claim::Committed(_)) {
                 forgotten.push(host);

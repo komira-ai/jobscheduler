@@ -68,4 +68,34 @@ impl Live {
         }
         warn!(%host, "the host's mark row changed under two writes; the next tick puts the registry back to the rows");
     }
+
+    /// After the registry removed `host` (its machine read back gone): deletes the host's
+    /// `node/` row, at the version read, and then its mark row, so no server counts the
+    /// machine in its pool's cap or offers it a job while the row would still read live. A
+    /// row that changed between the read and the delete is read again, once; a failure is
+    /// logged, and the row is forgotten once it is silent long enough
+    /// ([`js_jobs::JobStore::forget_silent_nodes`]).
+    pub(super) fn forget_removed(&self, host: &HostId) {
+        let Some(jobs) = &self.agents.jobs else {
+            return;
+        };
+        self.agents.note_node_epoch(host, None);
+        let forgot = (0..TRIES).try_fold(false, |done, _| match done {
+            true => Ok(true),
+            false => match jobs.read_node(host)? {
+                Some(row) => jobs.forget_node(host, row.version),
+                None => Ok(true),
+            },
+        });
+        match forgot {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(%host, "the removed host's row changed under two deletes; it is forgotten once silent")
+            }
+            Err(error) => {
+                warn!(%host, %error, "cannot delete the removed host's row; it is forgotten once silent")
+            }
+        }
+        self.keep_mark(host, None);
+    }
 }

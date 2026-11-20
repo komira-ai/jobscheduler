@@ -20,7 +20,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::{Phase, Taint};
-use js_jobs::{Capacity, HOST_JOB_TAINT, JobId, NodeRow};
+use std::sync::{Arc, PoisonError};
+
+use js_jobs::{Capacity, HOST_JOB_TAINT, HostTaint, JobId, NodeRow, Written};
 use js_registry::{Binding, HostState, HostView};
 use js_sched::ceiling::ceiling_of;
 use js_sched_placer::place::SchedPlacer;
@@ -44,6 +46,21 @@ pub(super) struct Offered {
     /// The `taint/<host>` rows of hosts this registry holds that it took on, each with the job
     /// that placed there.
     pub(super) adopted: Vec<(HostId, JobId)>,
+}
+
+/// The store's rows a pass offers hosts by, with where the store stood when they were read.
+#[derive(Debug)]
+pub(crate) struct RowsRead {
+    /// Where the job store's writes and the store's head stood before the reads.
+    written: Written,
+    /// The live `node/` rows, by host.
+    live: BTreeMap<HostId, NodeRow>,
+    /// The `taint/` rows, by host.
+    taints: BTreeMap<HostId, HostTaint>,
+    /// The hosts a `hostmark/` row marks.
+    marks: BTreeSet<HostId>,
+    /// The bindings the store holds (none in file mode).
+    stored: BTreeMap<HostId, Binding>,
 }
 
 /// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the
@@ -105,7 +122,8 @@ fn open_here(view: &HostView, now: Timestamp, live: bool) -> bool {
 impl Agents {
     /// The hosts the next pass offers, read from the job store and this server's registry at
     /// `now` (the module says how), with each offered host the placer does not know yet told to
-    /// it ([`SchedPlacer::host_seen`]).
+    /// it ([`SchedPlacer::host_seen`]). The store's rows are read afresh, and kept for
+    /// [`Agents::offered_after_beat`].
     ///
     /// # Errors
     /// A read of the store failed, said in words: the pass places nothing.
@@ -115,6 +133,40 @@ impl Agents {
         placer: &SchedPlacer,
         now: Timestamp,
     ) -> Result<Offered, String> {
+        let read = self.read_rows(jobs)?;
+        Ok(self.offered_from(&read, placer, now))
+    }
+
+    /// [`Agents::offered`] for a heartbeat's pass: the rows the last read kept are used again
+    /// when nothing was committed to the store since they were read (its head and this job
+    /// store's writes stand where they stood, [`js_jobs::JobStore::written`]), so a beat that
+    /// changes nothing reads the store's head and no table. A row that ages out of the grace
+    /// with no commit in between leaves at the next read: the tick's pass reads afresh.
+    ///
+    /// # Errors
+    /// As [`Agents::offered`].
+    pub(super) fn offered_after_beat(
+        &self,
+        jobs: &ServerJobs,
+        placer: &SchedPlacer,
+        now: Timestamp,
+    ) -> Result<Offered, String> {
+        let written = jobs.written().map_err(|error| error.to_string())?;
+        let kept = self
+            .rows_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let read = match kept.filter(|read| read.written == written) {
+            Some(read) => read,
+            None => self.read_rows(jobs)?,
+        };
+        Ok(self.offered_from(&read, placer, now))
+    }
+
+    /// The rows a pass offers by, read now, and kept for the next heartbeat's pass.
+    fn read_rows(&self, jobs: &ServerJobs) -> Result<Arc<RowsRead>, String> {
+        let written = jobs.written().map_err(|error| error.to_string())?;
         let live = jobs.live_nodes(self.registry.longest_grace());
         let live = live.map_err(|error| error.to_string())?;
         let live: BTreeMap<HostId, NodeRow> = live
@@ -127,8 +179,31 @@ impl Agents {
             .store
             .scan_stored()
             .map_err(|error| error.to_string())?;
+        let read = Arc::new(RowsRead {
+            written,
+            live,
+            taints,
+            marks: marks.into_keys().collect(),
+            stored: stored.unwrap_or_default(),
+        });
+        *self
+            .rows_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&read));
+        Ok(read)
+    }
+
+    /// [`Agents::offered`] over the rows `read`.
+    fn offered_from(&self, read: &RowsRead, placer: &SchedPlacer, now: Timestamp) -> Offered {
+        let RowsRead {
+            live,
+            taints,
+            marks,
+            stored,
+            ..
+        } = read;
         // The registry's bindings are the newest of the hosts it holds.
-        let mut bindings: BTreeMap<HostId, Binding> = stored.unwrap_or_default();
+        let mut bindings: BTreeMap<HostId, Binding> = stored.clone();
         bindings.extend(self.registry.bindings());
         let views: BTreeMap<HostId, HostView> = self
             .registry
@@ -137,7 +212,7 @@ impl Agents {
             .map(|view| (view.id.clone(), view))
             .collect();
         let mut offered = Offered::default();
-        for (host, taint) in &taints {
+        for (host, taint) in taints {
             let taint_of = |job: &JobId| Taint {
                 reason: HOST_JOB_TAINT.to_owned(),
                 run_id: Some(job.to_string()),
@@ -173,7 +248,7 @@ impl Agents {
             let tainted = bindings
                 .get(host)
                 .is_some_and(|bound| bound.taint().is_some());
-            let closed = taints.contains_key(host) | marks.contains_key(host) | tainted;
+            let closed = taints.contains_key(host) | marks.contains(host) | tainted;
             let here = view.is_none_or(|view| open_here(view, now, row.is_some()));
             if !(seen.open & !closed & here & self.listing_clean(host)) {
                 continue;
@@ -194,6 +269,6 @@ impl Agents {
             };
             offered.open.insert(host.clone(), offer);
         }
-        Ok(offered)
+        offered
     }
 }
