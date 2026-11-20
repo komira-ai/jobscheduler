@@ -43,6 +43,10 @@ impl FileReader for Shared {
     fn facts(&self, path: &Path) -> std::io::Result<js_agent::flags_file::FileFacts> {
         self.0.borrow().facts(path)
     }
+
+    fn entries(&self, dir: &Path) -> Result<Vec<String>, std::io::Error> {
+        self.0.borrow().entries(dir)
+    }
 }
 
 /// A clock the test sets.

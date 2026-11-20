@@ -649,6 +649,7 @@ async fn the_answer_shows_the_job_as_recorded() {
                     form_factor: Some("sxm".to_owned()),
                 }),
                 isolation: v1::Isolation::Unspecified.into(),
+                xcode: String::new(),
             }),
             priority: 3,
             ..conflicted()

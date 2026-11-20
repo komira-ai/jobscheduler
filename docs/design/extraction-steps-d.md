@@ -77,7 +77,7 @@ step 36 made. The size fields of step 43 wait for D26.
     map, in `js-agent-wire`; the server stores the newest snapshot per host. *Proves:* the golden corpus gains the messages; a decoder of
     the previous version skips them; a legacy-only hello still meets a scalar constraint; a conflicting legacy entry is `invalid-hello`; a
     lost ack repeats the snapshot and a repeat is ignored; each limit refuses.
-38. Facts in `js-agent`: `os_version`, `xcode`, `sim.*` probes through the bounded command runner, `--cap`, `--facts-interval`, the
+38. Facts in `js-agent`: `os_version`, `xcode` (by build id; built, see capabilities.md), `sim.*` probes through the bounded command runner, `--cap`, `--facts-interval`, the
     revision bump on change. *Proves:* on the fake runner each probe, a failing probe reports the key absent with a warning, a flag
     overrides a probe, and the revision moves only when a value changed.
 39. Needs in the lease request and matching in the server: `needs`, the refusal codes at submit, host and guest scope, the image named in

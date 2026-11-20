@@ -476,6 +476,9 @@
 //! version) and `exec` the request requires, as placement compares them, and it is neither tainted nor being released (leaving the
 //! pool): a busy, silent, cordoned or drain-marked host is capable, and so is one whose
 //! agent announced it is stopping, so a job that only has to wait is never refused for it.
+//! A job's Xcode build (`xcode`) is not asked at admission: a job that names a build no host
+//! lists is accepted and waits queued, and is placed and started only on a host whose hello lists
+//! the build among its comma-joined `xcode` builds.
 //! A provider may offer when the request is inside its capabilities and its catalog has an
 //! offer that fits the request (availability now is not asked) and the pool's
 //! `provider_limits` (an allowed instance type, at most the maximum price, an unpriced offer

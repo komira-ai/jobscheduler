@@ -323,6 +323,11 @@ pub const BUNDLE_NO_SPACE: &str = "bundle-no-space";
 pub const BUNDLE_OS_TOO_OLD: &str = "bundle-os-too-old";
 /// A start whose bundle needs an Xcode the host does not have.
 pub const BUNDLE_XCODE_MISMATCH: &str = "bundle-xcode-mismatch";
+/// A job start that names an Xcode build ([`crate::JobStartSpec::xcode`]) the host does not
+/// hold: none of its Xcodes has that build, or its runtime runs no Xcode. Nothing is created
+/// for it. A server sends the field only to a host whose `xcode` capability lists the build,
+/// so the refusal means the host's Xcodes changed under its hello.
+pub const XCODE_NOT_HELD: &str = "xcode-not-held";
 /// A start whose bundle digest is not on the host's allow list (`--bundle-trust list`).
 pub const BUNDLE_NOT_ALLOWED: &str = "bundle-not-allowed";
 /// A start whose bundle digest is on the host's deny list.

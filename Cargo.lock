@@ -1121,6 +1121,7 @@ dependencies = [
  "js-update-hook",
  "js-vm-lease",
  "libc",
+ "plist",
  "prost",
  "rcgen",
  "rustix",

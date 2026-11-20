@@ -179,6 +179,7 @@ fn every_host_question_is_the_other_runtimes() {
     let body = native("/bin/true", &[]);
     assert_eq!(with.check_native(&body), alone.check_native(&body));
     assert_eq!(with.check_env(&[]), alone.check_env(&[]));
+    assert_eq!(with.check_xcode("16C5032a"), alone.check_xcode("16C5032a"));
     assert_eq!(with.check_image(), alone.check_image());
     assert_eq!(with.runs_image_runs(), alone.runs_image_runs());
     assert_eq!(with.supports_gpus(), alone.supports_gpus());

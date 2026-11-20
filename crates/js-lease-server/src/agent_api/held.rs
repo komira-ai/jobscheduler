@@ -45,6 +45,7 @@ pub(super) struct Inputs {
     pub(super) host_jobs: bool,
     pub(super) layered_rootfs: bool,
     pub(super) mount_providers: Vec<String>,
+    pub(super) xcodes: Vec<String>,
     /// What the registry books for the host: what a start of the whole host books.
     pub(super) booked: Resources,
     pub(super) logs: Option<Arc<LogGrants>>,
@@ -63,6 +64,7 @@ impl Inputs {
             host_jobs: self.host_jobs,
             layered_rootfs: self.layered_rootfs,
             mount_providers: &self.mount_providers,
+            xcodes: &self.xcodes,
             shape: Some(&self.booked),
             logs: self.logs.as_deref(),
             metrics,

@@ -1,5 +1,6 @@
 //! The environment of a native run: the base the agent builds (the body's own `env`, or the
-//! bundle's rules applied to it, then `TMPDIR` and, for a run with files, `JS_FILES_DIR`),
+//! bundle's rules applied to it, then `TMPDIR`, `DEVELOPER_DIR` for a run that names an Xcode
+//! and, for a run with files, `JS_FILES_DIR`),
 //! with a job start's environment (`RunSpec::env`) laid over it.
 //!
 //! The whole environment goes to the helper as the `env` of its `run` request, which the
@@ -13,14 +14,21 @@ use std::path::Path;
 
 use crate::lifecycle::RuntimeError;
 
-/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`.
-pub(super) fn plain(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
+/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`, then
+/// `DEVELOPER_DIR` for a run that names an Xcode (`developer_dir`, its `Contents/Developer`).
+/// The name is the agent's own, so the job's own environment never holds it.
+pub(super) fn plain(
+    native: &NativeSpec,
+    tmp: &Path,
+    developer_dir: Option<&Path>,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = native
         .env
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
+    env.extend(developer_dir.map(|dir| ("DEVELOPER_DIR".to_owned(), dir.display().to_string())));
     env
 }
 

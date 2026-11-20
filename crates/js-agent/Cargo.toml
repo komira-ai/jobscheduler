@@ -53,6 +53,8 @@ hex.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 # The project-quota calls (`ioctl`, `quotactl`) of src/quota: rustix has no form of them.
 libc.workspace = true
+# The `version.plist` of an installed Xcode (src/xcode), read as XML.
+plist.workspace = true
 # The messages of the mount providers' protocol, declared in src/provider/wire.rs: the agent
 # does not link js-proto, the job service's crate.
 prost.workspace = true

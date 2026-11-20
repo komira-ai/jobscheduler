@@ -77,6 +77,7 @@ fn build_for(
             metrics: &NoMetrics,
             layered_rootfs: false,
             mount_providers: &[],
+            xcodes: &[],
         },
     )
 }
@@ -317,6 +318,7 @@ fn build_layered(
             metrics: &NoMetrics,
             layered_rootfs,
             mount_providers: &[],
+            xcodes: &[],
         },
     )
 }
@@ -501,6 +503,7 @@ fn build_providers(
             metrics: &NoMetrics,
             layered_rootfs: true,
             mount_providers: reported,
+            xcodes: &[],
         },
     )
 }
@@ -565,6 +568,87 @@ fn a_job_requiring_a_provider_is_not_sent_to_a_host_that_does_not_report_it() {
     assert_eq!(
         Unsendable::MountProviderNotReported(key("cache")).to_string(),
         "the job requires mount-provider.cache and the host does not report it"
+    );
+}
+
+/// The start of `job` for `allocation` to `host-a`, whose agent lists the Xcode builds
+/// `reported`.
+fn build_xcodes(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    reported: &[String],
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    let host = HostId::new("host-a").unwrap();
+    start_of(
+        job,
+        allocation,
+        &BeatContext {
+            host: &host,
+            ceiling: &allow_list(),
+            host_jobs: false,
+            shape: None,
+            logs: None,
+            metrics: &NoMetrics,
+            layered_rootfs: false,
+            mount_providers: &[],
+            xcodes: reported,
+        },
+    )
+}
+
+/// A job that names the Xcode build `build`, as a submit records it.
+fn with_xcode(job: &JobRecord, build: &str) -> JobRecord {
+    let mut job = job.clone();
+    job.spec
+        .constraints
+        .capabilities
+        .insert(js_caps::XCODE.to_owned(), build.to_owned());
+    job
+}
+
+/// A job that names an Xcode build gets a start whose `xcode` is that build when the host's
+/// agent lists it among its builds (the one of two it names, and the other), and one that names
+/// none gets a start with no `xcode`, whatever the host lists. It catches a build dropped from
+/// the start, which would run the job with the host's selected Xcode.
+#[test]
+fn a_start_carries_the_xcode_build_its_job_names() {
+    let (plain, allocation) = records();
+    let named = with_xcode(&plain, "16E140");
+    let held = ["16C5032a".to_owned(), "16E140".to_owned()];
+    let start = build_xcodes(&named, &allocation, &held).unwrap();
+    assert_eq!(start.xcode.as_deref(), Some("16E140"));
+    let start = build_xcodes(&with_xcode(&plain, "16C5032a"), &allocation, &held).unwrap();
+    assert_eq!(start.xcode.as_deref(), Some("16C5032a"));
+    assert_eq!(
+        build_xcodes(&plain, &allocation, &held).unwrap().xcode,
+        None
+    );
+    assert_eq!(build_xcodes(&plain, &allocation, &[]).unwrap().xcode, None);
+}
+
+/// A job that names an Xcode build is not sent to a host whose agent did not list it (no
+/// Xcode at all, or only other builds), with the text the log and the start timeout show; a
+/// build the wire refuses is unsendable naming the field. It catches a start an agent would
+/// refuse, or one from before the field would run with the wrong Xcode.
+#[test]
+fn a_job_naming_an_xcode_is_not_sent_to_a_host_that_does_not_list_it() {
+    let (plain, allocation) = records();
+    let named = with_xcode(&plain, "16E140");
+    let refused = Err(Unsendable::XcodeNotReported("16E140".to_owned()));
+    assert_eq!(build_xcodes(&named, &allocation, &[]), refused);
+    let others = ["16C5032a".to_owned(), "15F31d".to_owned()];
+    assert_eq!(build_xcodes(&named, &allocation, &others), refused);
+    assert_eq!(
+        Unsendable::XcodeNotReported("16E140".to_owned()).to_string(),
+        "the job requires Xcode 16E140 and the host does not report it"
+    );
+    let bad = with_xcode(&plain, "16E 140");
+    assert_eq!(
+        build_xcodes(&bad, &allocation, &["16E 140".to_owned()]),
+        Err(Unsendable::Invalid {
+            code: "invalid-job",
+            field: "xcode",
+        })
     );
 }
 

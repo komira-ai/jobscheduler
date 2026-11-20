@@ -100,7 +100,8 @@ use tracing::{info, warn};
 
 use self::host_cert::{CertifiedHost, admit_hello};
 use crate::admit::{
-    reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
+    reported_mount_providers, reported_xcodes, reports_held_beat, reports_host_jobs,
+    reports_layered_rootfs,
 };
 use crate::agent_state::Change;
 use crate::agents::{Agents, Session};
@@ -582,6 +583,7 @@ async fn serve_jobs(
         host_jobs: reports_host_jobs(capabilities),
         layered_rootfs: reports_layered_rootfs(capabilities),
         mount_providers: reported_mount_providers(capabilities),
+        xcodes: reported_xcodes(capabilities),
         booked,
         logs,
         listed: heartbeat.jobs.clone(),

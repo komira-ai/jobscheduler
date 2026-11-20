@@ -64,6 +64,9 @@ Options:
       --spec.constraints.os-version <TEXT>
           The least version of the host's operating system, as a major version such as 26 (macOS 26): a host is capable when it reports that major version or a later one. Empty: any version.
 
+      --spec.constraints.xcode <TEXT>
+          The Xcode the job runs with, by build id such as 16C5032a (its ProductBuildVersion): 1 to 32 bytes of letters, digits, dot, underscore and dash, starting with a letter or digit. A host is capable when its agent reports that build among its installed Xcodes, and the job runs with that Xcode's developer directory, never the host's selected one. Empty: none.
+
       --spec.env <KEY=VALUE>
           The environment of the job, by variable name. KEY=VALUE; repeat for more.
 

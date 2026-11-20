@@ -50,6 +50,7 @@ async fn a_start_is_resent_until_listed() {
         host_ports: Vec::new(),
         placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
         fuse: false,
+        xcode: None,
     };
     let mut last = None;
     for _ in 0..3 {
@@ -508,6 +509,70 @@ async fn a_job_naming_a_provider_is_started_only_on_a_host_that_reports_it() {
     let sent = starts(&reply);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].job_id, fitting.id.to_string());
+}
+
+/// A job spec that names the Xcode build `build`, as a submit records it.
+fn xcode_spec(build: &str) -> js_jobs::JobSpec {
+    let mut named = spec();
+    let capabilities = &mut named.constraints.capabilities;
+    capabilities.insert(js_caps::XCODE.to_owned(), build.to_owned());
+    named
+}
+
+/// A job that names an Xcode build is placed on, and started on, only a host whose hello lists
+/// that build among its comma-joined builds: of a host that lists another build and one that
+/// lists it among two, the job lands on the second and its start carries `xcode`, and the first
+/// is sent no start; with only the first registered the job stays queued and nothing is sent.
+/// A job already placed on a host that does not list the build (a placement from before the
+/// host's agent changed) is sent no start and stays placed. It catches a job run with a
+/// host's selected Xcode, and one placed where the build is not installed.
+#[tokio::test]
+async fn a_job_naming_an_xcode_is_started_only_on_a_host_that_lists_the_build() {
+    let mut placing = placing_rig("xcode_capable");
+    placing.register_xcodes("host-a", "15F31d");
+    placing.register_xcodes("host-b", "16C5032a,16E140");
+    let new = NewJob {
+        id: Some(JobId::parse("job-x").unwrap()),
+        spec: xcode_spec("16E140"),
+        priority: 0,
+        client: None,
+    };
+    let id = placing.jobs.insert_queued(new).unwrap().record.id;
+    for host in ["host-a", "host-b"] {
+        let reply = placing.beat(&FakeAgent::new(host)).await.unwrap();
+        assert!(reply.commands.is_empty() | (host == "host-b"), "{host}");
+    }
+    assert_eq!(placing.allocation(&id).host.as_str(), "host-b");
+    let sent = starts(&placing.beat(&FakeAgent::new("host-b")).await.unwrap());
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].xcode.as_deref(), Some("16E140"));
+    assert!(starts(&placing.beat(&FakeAgent::new("host-a")).await.unwrap()).is_empty());
+
+    let mut lacking = placing_rig("xcode_lacking");
+    lacking.register_xcodes("host-a", "15F31d");
+    let new = NewJob {
+        id: Some(JobId::parse("job-y").unwrap()),
+        spec: xcode_spec("16E140"),
+        priority: 0,
+        client: None,
+    };
+    let queued = lacking.jobs.insert_queued(new).unwrap().record.id;
+    for _ in 0..2 {
+        let reply = lacking.beat(&FakeAgent::new("host-a")).await.unwrap();
+        assert!(reply.commands.is_empty());
+    }
+    assert_eq!(lacking.job(&queued).state, JobState::Queued);
+
+    let mut stale = rig("xcode_placed_elsewhere", true);
+    stale.register_xcodes("host-a", "15F31d");
+    let (elsewhere, _) =
+        super::job_rig::placed(&stale.jobs, "job-w", "host-a", xcode_spec("16E140"), BOOKED);
+    let reply = stale.beat(&FakeAgent::new("host-a")).await.unwrap();
+    assert_eq!(starts(&reply), Vec::new());
+    assert_eq!(
+        stale.states(&elsewhere.id),
+        (JobState::Placed, AllocationStep::Booked)
+    );
 }
 
 /// Through the heartbeats alone, results that carry the usage their agent counted teach the
