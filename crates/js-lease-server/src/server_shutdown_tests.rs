@@ -203,3 +203,68 @@ async fn a_hold_that_runs_out_is_followed_by_a_clean_stop() {
     running.shutdown().await.unwrap();
     assert!(tokio::net::TcpStream::connect(agents).await.is_err());
 }
+
+/// POSTs `body` (JSON) to `path` of the server at `addr` with `token` as the bearer, on a
+/// connection of its own, and answers the status and the body.
+async fn post_json(
+    addr: std::net::SocketAddr,
+    path: &str,
+    token: &str,
+    body: &str,
+) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, body.to_owned())
+}
+
+/// Catches a stop that leaves an agent's held dispatch poll open on a server that stops (the
+/// agent would learn to move only at the bound), one that cuts it without an answer, and a stop
+/// that does not return once the poll is answered. Over HTTP: a host says hello with the
+/// `dispatch-poll` capability and is told to poll; its poll is held (the server counts the
+/// wait, so nothing is timed); the stop on a termination signal answers the poll at once, empty,
+/// and the shutdown that follows returns.
+#[tokio::test]
+async fn a_held_poll_is_answered_empty_at_the_signal_and_the_shutdown_returns() {
+    let (running, _jobs, _id, _dir) = started_with("hold_poll", true).await;
+    let agents = running.agent_addr().unwrap();
+    let token = "join-token-A-0123456789-abcdefghijklmnop";
+    let hello = serde_json::json!({
+        "host_id": "burst-1",
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": { "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 1, "gpu_class": "nvidia-a100" },
+        "capabilities": { "per-job": "true", "dispatch-poll": "true", "arch": "x86_64", "isa": "x86-64-v3" },
+        "phase": "serving",
+    });
+    let (status, body) = post_json(agents, "/v1/agent/hello", token, &hello.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    let welcome: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(welcome["dispatch_poll"], true);
+    let poll = serde_json::json!({
+        "host_id": "burst-1",
+        "epoch": welcome["epoch"],
+        "session": welcome["session"],
+    });
+    let sent = poll.to_string();
+    let held = post_json(agents, js_agent_wire::DISPATCH_PATH, token, &sent);
+    let signal = async {
+        let mut waits = running.shared.agents().dispatching.wakes.waits();
+        waits.wait_for(|waits| *waits >= 1).await.unwrap();
+        running.hold().await;
+    };
+    let ((status, body), ()) = tokio::join!(held, signal);
+    assert_eq!((status, body.as_str()), (200, r#"{"messages":[]}"#));
+    running.shutdown().await.unwrap();
+}

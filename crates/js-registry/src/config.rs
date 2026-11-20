@@ -147,6 +147,7 @@ impl PoolConfig {
             pool: self.name.to_string(),
             session: "probe".to_string(),
             host_credential: None,
+            dispatch_poll: false,
         };
         probe.validate()?;
         self.heartbeat_interval_ms = heartbeat_interval_ms;

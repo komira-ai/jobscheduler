@@ -35,6 +35,8 @@ mod crun_roots;
 #[cfg(target_os = "linux")]
 mod crun_tmp;
 #[cfg(target_os = "linux")]
+mod dispatch;
+#[cfg(target_os = "linux")]
 mod drain;
 #[cfg(target_os = "linux")]
 mod e2e;

@@ -1,7 +1,12 @@
 //! The conversation the transcript holds, and how it is recorded: the agent program (its
 //! hello builder, session and job worker, over a container runtime in memory) against a
 //! lease server started in the test process with the job service on, every post and its
-//! answer written down in order with the job API calls between them.
+//! answer written down in order with the job API calls between them, and the messages of the
+//! dispatch poll (the agent's second route for a job start and stop, which a server that
+//! welcomes it with `dispatch_poll` uses in place of the heartbeat reply) beside them, under
+//! `dispatched`. The poll's answers are held back from the agent until the recording lets
+//! them go, so that the order of the poll and of the heartbeats is the recording's, not a
+//! race.
 //!
 //! No frame is built from a wire type of either side: a frame is the JSON the transport
 //! carried. The code uses only the agent program's test harness and the lease server's job
@@ -13,7 +18,11 @@
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -27,7 +36,7 @@ use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 
 #[cfg(target_os = "linux")]
-use crate::jobs::fake::FakeMachine;
+use crate::jobs::fake::{FakeMachine, HANG_GUARD};
 #[cfg(target_os = "linux")]
 use crate::jobs::{private, user};
 #[cfg(target_os = "linux")]
@@ -116,19 +125,26 @@ pub enum Act {
     Beat,
     /// The submitter cancels the job.
     Cancel,
+    /// The dispatch poll's answer that the server handed out at the cancel, held until now,
+    /// reaches the agent, and its worker has acted on it.
+    Deliver,
 }
 
-/// The conversation, after the hello: the job is queued, started by the next reply,
-/// reported running, cancelled, stopped by a reply, reported killed and acknowledged; the
-/// last heartbeat holds nothing. The agent is then asked to stop.
+/// The conversation, after the hello: the job is queued, started (the start leaves in the
+/// dispatch poll, before the first beat), reported running, cancelled, the stop handed out by
+/// the poll but held from the agent for one beat (which therefore reports the job running and
+/// is answered with no command, where the previous release's reply carried the stop),
+/// delivered, the job reported killed and acknowledged; the last heartbeat holds nothing. The
+/// agent is then asked to stop.
 #[cfg(target_os = "linux")]
-pub const SCENARIO: [Act; 8] = [
+pub const SCENARIO: [Act; 9] = [
     Act::Submit,
     Act::Beat,
     Act::Beat,
     Act::Beat,
     Act::Cancel,
     Act::Beat,
+    Act::Deliver,
     Act::Beat,
     Act::Beat,
 ];
@@ -199,6 +215,37 @@ pub fn spawn(
     }
 }
 
+/// [`spawn`] for an agent that polls the dispatch route: `connector` serves its heartbeats
+/// and `dispatch` its polls.
+#[cfg(target_os = "linux")]
+pub fn spawn_polling(
+    name: &str,
+    url: String,
+    token: &Path,
+    connectors: (impl Connector + Send + 'static, Listening),
+) -> Spawned {
+    let files = Scratch::new(&format!("{name}-files"));
+    let flags = agent_flags(&files);
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let machine = Arc::new(FakeMachine::new());
+    let (connector, dispatch) = connectors;
+    let agent = Agent::spawn_polling(
+        url,
+        token.to_path_buf(),
+        &flags,
+        linux_host,
+        (connector, Arc::new(dispatch)),
+        machine.clone(),
+    );
+    let worker = agent.worker();
+    Spawned {
+        agent,
+        worker,
+        machine,
+        _files: files,
+    }
+}
+
 /// Plays [`SCENARIO`] on `running`: each beat lets one wait pass and waits for the next,
 /// then for the worker to be done with the reply; `act` does the submitter's part. Returns
 /// every wait the agent asked for (the first is the one after its hello) and what the
@@ -220,7 +267,11 @@ pub fn play(running: Spawned, mut act: impl FnMut(Act)) -> (Vec<Duration>, Ran) 
                 waits.push(agent.next_wait());
                 assert!(worker.settle());
             }
-            other => act(other),
+            other => {
+                act(other);
+                // The worker has acted on what the act made reach the agent.
+                assert!(worker.settle());
+            }
         }
     }
     (waits, agent.stop())
@@ -395,6 +446,141 @@ impl Transport for Taping {
     }
 }
 
+/// What the dispatch poll's transports tell the recording.
+#[cfg(target_os = "linux")]
+enum Poll {
+    /// A poll was sent.
+    Sent,
+    /// A poll was answered with messages, which are written down.
+    Handed,
+}
+
+/// The connector of the agent's dispatch poll: the real transport, writing down each message
+/// the server hands out (in the order handed, as the JSON the transport carried) and telling
+/// the recording when a poll was sent and when one was answered with messages.
+#[cfg(target_os = "linux")]
+pub struct Listening {
+    handed: Arc<Mutex<Vec<Value>>>,
+    events: Mutex<Sender<Poll>>,
+    gate: Arc<Mutex<Receiver<()>>>,
+    open: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+struct Listened {
+    inner: Box<dyn Transport>,
+    handed: Arc<Mutex<Vec<Value>>>,
+    events: Sender<Poll>,
+    gate: Arc<Mutex<Receiver<()>>>,
+    open: Arc<AtomicBool>,
+}
+
+/// The messages the poll is handed, and the events of the poll in the order they happen.
+#[cfg(target_os = "linux")]
+pub struct Polls {
+    pub handed: Arc<Mutex<Vec<Value>>>,
+    events: Receiver<Poll>,
+    release: Sender<()>,
+    open: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl Polls {
+    /// A poll connector and what it reports.
+    pub fn new() -> (Listening, Self) {
+        let handed = Arc::new(Mutex::new(Vec::new()));
+        let (events, receiver) = channel();
+        let (release, gate) = channel();
+        let open = Arc::new(AtomicBool::new(false));
+        let listening = Listening {
+            handed: handed.clone(),
+            events: Mutex::new(events),
+            gate: Arc::new(Mutex::new(gate)),
+            open: open.clone(),
+        };
+        (
+            listening,
+            Self {
+                handed,
+                events: receiver,
+                release,
+                open,
+            },
+        )
+    }
+
+    /// Waits until a poll was answered with messages. The answer is held back from the agent
+    /// until [`Polls::release`].
+    #[track_caller]
+    pub fn handed(&self) {
+        loop {
+            let event = self.events.recv_timeout(HANG_GUARD);
+            if matches!(event.expect("the agent polled"), Poll::Handed) {
+                break;
+            }
+        }
+    }
+
+    /// Lets the held answer reach the agent and waits until the poll after it was sent, which
+    /// the poller does only once it has given the messages to the job worker. With `rest`, no
+    /// later answer is held either.
+    #[track_caller]
+    pub fn release(&self, rest: bool) {
+        self.open.store(rest, Ordering::SeqCst);
+        self.release.send(()).expect("the held poll is waiting");
+        loop {
+            let event = self.events.recv_timeout(HANG_GUARD);
+            if matches!(event.expect("the agent polled"), Poll::Sent) {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Connector for Listening {
+    fn connect(
+        &self,
+        server: &str,
+        login: &Login,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn Transport>, ClientError> {
+        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(Box::new(Listened {
+            inner: Dialer.connect(server, login, ca_cert)?,
+            handed: self.handed.clone(),
+            events: events.clone(),
+            gate: self.gate.clone(),
+            open: self.open.clone(),
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Transport for Listened {
+    fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        let _ = self.events.send(Poll::Sent);
+        let answer = self.inner.post(path, body)?;
+        let messages = answer.body["messages"].as_array().filter(|m| !m.is_empty());
+        if let (200, Some(messages)) = (answer.status, messages) {
+            let mut handed = self.handed.lock().unwrap_or_else(PoisonError::into_inner);
+            handed.extend(messages.iter().cloned());
+            drop(handed);
+            let _ = self.events.send(Poll::Handed);
+            if !self.open.load(Ordering::SeqCst) {
+                let gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+                gate.recv_timeout(HANG_GUARD)
+                    .map_err(|_| "the test never released the poll's answer".to_owned())?;
+            }
+        }
+        Ok(answer)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
+}
+
 /// Replaces every string equal to `from` in `value` with `to`.
 #[cfg(target_os = "linux")]
 pub fn replace_text(value: &mut Value, from: &str, to: &str) {
@@ -419,15 +605,26 @@ pub fn record(name: &str) -> Value {
     let cell = Cell::start_quick(name);
     let tape = Tape::default();
     let flow = tape.0.clone();
-    let running = spawn(name, cell.url(), &cell.join_file(), tape);
+    let (listening, polls) = Polls::new();
+    let running = spawn_polling(name, cell.url(), &cell.join_file(), (tape, listening));
     let mut job = None;
     let (waits, ran) = play(running, |act| {
         let id = job.get_or_insert_with(|| cell.submit()).clone();
         let event = match act {
-            Act::Submit => json!({ "submitted": id }),
+            Act::Submit => {
+                // The start leaves in the dispatch poll, not in a heartbeat's reply.
+                polls.handed();
+                polls.release(false);
+                json!({ "submitted": id })
+            }
             Act::Cancel => {
                 cell.cancel(&id);
+                polls.handed();
                 json!({ "cancelled": id })
+            }
+            Act::Deliver => {
+                polls.release(true);
+                return;
             }
             Act::Beat => unreachable!("the play does the beats"),
         };
@@ -437,9 +634,15 @@ pub fn record(name: &str) -> Value {
     let held = Duration::ZERO;
     // After the hello and each beat: the interval, but none after a reply that says
     // `beat_now`: one the server held open for the beat (nothing to send), or one that
-    // carries only an acknowledgement. The replies with a command are the start (the job is
-    // placed by its submit) and the stop.
-    let expected = [interval, interval, held, held, interval, held, held];
+    // carries only an acknowledgement. The server leaves the start and the stop out of this
+    // agent's heartbeat replies (the dispatch poll hands them out), so no reply carries a
+    // command and only the hello's welcome is followed by the interval. In order: the
+    // hello's welcome (interval); the beat after the submit, to which the start was already
+    // delivered by the poll (held); the beat that reports the job running (held); the next
+    // (held); the beat after the cancel, which reports the job running while the poll's
+    // stop is held back (held); the beat that reports the job killed, answered with its
+    // acknowledgement (beat_now); the last beat (held).
+    let expected = [interval, held, held, held, held, held, held];
     assert_eq!(waits, expected, "{waits:?}");
     assert!(ran.err.contains("registered, epoch 1"), "{}", ran.err);
     let mut flow = std::mem::take(&mut *flow.lock().unwrap());
@@ -465,5 +668,7 @@ pub fn record(name: &str) -> Value {
     let mut flow = Value::Array(std::mem::take(&mut flow));
     replace_text(&mut flow, &session, SESSION);
     replace_text(&mut refusal, &session, SESSION);
-    json!({ "flow": flow, "refusal": refusal })
+    let mut dispatched = Value::Array(std::mem::take(&mut *polls.handed.lock().unwrap()));
+    replace_text(&mut dispatched, &session, SESSION);
+    json!({ "flow": flow, "dispatched": dispatched, "refusal": refusal })
 }

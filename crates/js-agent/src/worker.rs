@@ -107,20 +107,20 @@ use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunRes
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
 
-use crate::lifecycle::{
-    Config, Contact, Event, Lifecycle, MountProviders, Status, Wake, fits_grace,
-};
+use crate::lifecycle::{Config, Contact, Lifecycle, MountProviders, Status, Wake, fits_grace};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod bell;
 mod nudge;
 mod quiesce;
+mod replies;
 
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
+use replies::{describe, stops, without_starts};
 
 /// How many orders wait for the worker. Replies beyond it are dropped, see the module.
 pub const QUEUE: usize = 16;
@@ -409,6 +409,9 @@ enum Order {
     Reply {
         reply: Box<HeartbeatReply>,
         received_ms: u64,
+        /// Whether the reply speaks for the lease and the acknowledgements: a heartbeat's
+        /// does, a dispatch poll's answer (commands only) does not.
+        whole: bool,
     },
     /// Look at the flags and step: there is no other work.
     Nudge,
@@ -677,9 +680,27 @@ impl Worker {
     /// reply is stamped with the clock now, so a start that waits in the queue has its
     /// `valid_for_ms` counted from the moment it arrived.
     pub fn try_deliver(&self, reply: HeartbeatReply) -> Delivery {
+        self.deliver(reply, true)
+    }
+
+    /// [`Worker::try_deliver`] for the commands of a dispatch poll's answer: they are acted
+    /// on as a reply's are, and the lease the host holds is left as it is.
+    pub fn try_deliver_commands(&self, commands: Vec<Command>) -> Delivery {
+        let reply = HeartbeatReply {
+            commands,
+            ..HeartbeatReply::default()
+        };
+        self.deliver(reply, false)
+    }
+
+    fn deliver(&self, reply: HeartbeatReply, whole: bool) -> Delivery {
         let received_ms = self.clock.now_ms();
         let reply = Box::new(reply);
-        let order = Order::Reply { reply, received_ms };
+        let order = Order::Reply {
+            reply,
+            received_ms,
+            whole,
+        };
         match self.handle.orders.try_send(order) {
             Ok(()) => Delivery::Delivered,
             Err(TrySendError::Full(_)) => Delivery::Full,
@@ -887,14 +908,22 @@ fn work(
         shared.busy_until.store(due, Ordering::SeqCst);
         plain.set(due);
         match order {
-            Ok(Order::Reply { reply, received_ms }) => {
+            Ok(Order::Reply {
+                reply,
+                received_ms,
+                whole,
+            }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);
                 let (reply, skipped) = match closed {
                     true => without_starts(*reply),
                     false => (*reply, Vec::new()),
                 };
                 lines.extend(skipped);
-                lines.extend(describe(&life.apply_at(&reply, received_ms)));
+                let events = match whole {
+                    true => life.apply_at(&reply, received_ms),
+                    false => life.apply_commands_at(&reply, received_ms),
+                };
+                lines.extend(describe(&events));
             }
             Ok(Order::Settle(done)) => settle = Some(done),
             Ok(Order::Prepare) => {
@@ -940,58 +969,4 @@ fn work(
             let _ = done.send(());
         });
     }
-}
-
-/// A reply that stops every run and every job `life` holds.
-fn stops(life: &Lifecycle) -> HeartbeatReply {
-    let runs = life
-        .held()
-        .into_iter()
-        .map(|run| Command::Stop { run_id: run.run_id });
-    let jobs = life
-        .held_jobs()
-        .into_iter()
-        .map(|job| Command::JobStop { job_id: job.job_id });
-    let commands = runs.chain(jobs).collect();
-    HeartbeatReply {
-        commands,
-        ..HeartbeatReply::default()
-    }
-}
-
-/// `reply` with each `Start` and `JobStart` made an unknown command (so the places of the
-/// others, which a refusal is logged by, stay), and a line for each.
-fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
-    let mut lines = Vec::new();
-    reply.commands = reply
-        .commands
-        .into_iter()
-        .map(|command| match command {
-            Command::Start(spec) => {
-                lines.push(format!(
-                    "draining: the start of {} is not taken",
-                    spec.run_id
-                ));
-                Command::Unknown
-            }
-            Command::JobStart(spec) => {
-                lines.push(format!(
-                    "draining: the start of job {} is not taken",
-                    spec.job_id
-                ));
-                Command::Unknown
-            }
-            other => other,
-        })
-        .collect();
-    (reply, lines)
-}
-
-/// One line for each event. The text stays on the host (a finding holds what the engine
-/// said), and no event holds a token, a session secret or a job's labels.
-fn describe(events: &[Event]) -> Vec<String> {
-    events
-        .iter()
-        .map(|event| format!("job: {event:?}"))
-        .collect()
 }

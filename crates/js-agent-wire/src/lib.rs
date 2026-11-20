@@ -165,6 +165,7 @@ mod caps;
 mod check;
 mod command;
 mod credential;
+pub mod dispatch;
 mod env;
 mod error;
 mod files;
@@ -187,6 +188,10 @@ mod run;
 pub use caps::{Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
+pub use dispatch::{
+    DISPATCH_CAPABILITY, DISPATCH_PATH, DispatchAck, DispatchKind, DispatchPoll, DispatchReply,
+    Dispatched,
+};
 pub use env::check_env;
 pub use error::{Rule, ValidationError};
 pub use files::{RunFile, validate_files};

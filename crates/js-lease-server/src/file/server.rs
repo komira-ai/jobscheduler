@@ -10,8 +10,9 @@ use js_sched_placer::sizes::ColdSize;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen,
-    Limits, MAX_JOB_WALL_MUST, MetricsListen, Placement, ReadyListen, TlsFiles, Token,
+    BootMode, CpuSlack, DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, FeedRetention,
+    JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST,
+    MOST_LEASE_SECS, MOST_RECHECK_MS, MetricsListen, Placement, ReadyListen, TlsFiles, Token,
     not_loopback, not_private, parse_job_feed_retention, parse_job_retention, parse_max_job_wall,
     parse_token,
 };
@@ -68,6 +69,8 @@ const SERVER_KEYS: &[&str] = &[
     "store",
     "allow_sqlite_store",
     "store_unreachable_after",
+    "dispatch_lease_secs",
+    "dispatch_recheck_ms",
     "metrics_listen",
     "ready_listen",
 ];
@@ -114,6 +117,9 @@ pub(crate) struct Server {
     /// `store_unreachable_after`: how long the tick's store paths may fail before the store
     /// is unreachable; 60 s unless the file sets it.
     pub(crate) store_unreachable_after: Duration,
+    /// `dispatch_lease_secs` and `dispatch_recheck_ms`: what the dispatch poll is timed by;
+    /// 10 s and 500 ms unless the file sets them.
+    pub(crate) dispatch: DispatchTimes,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -280,6 +286,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let max_job_wall = read_max_job_wall(&mut s)?;
     let (store, allow_sqlite_store) = read_store(&mut s)?;
     let store_unreachable_after = s.duration_or("store_unreachable_after", UNREACHABLE_AFTER)?;
+    let dispatch = read_dispatch(&mut s)?;
     let max_lease_wall = s.duration("max_lease_wall")?;
     if let Some(wall) = max_lease_wall {
         check_ceiling(&s, wall)?;
@@ -310,6 +317,30 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         store,
         allow_sqlite_store,
         store_unreachable_after,
+        dispatch,
+    })
+}
+
+/// The dispatch poll's keys: `dispatch_lease_secs` from 1 to [`MOST_LEASE_SECS`] and
+/// `dispatch_recheck_ms` from 1 to [`MOST_RECHECK_MS`] (below the hold), each its default when
+/// the file leaves it out.
+fn read_dispatch(s: &mut Section) -> Result<DispatchTimes, StartupError> {
+    let lease = s.bounded(
+        "dispatch_lease_secs",
+        1,
+        MOST_LEASE_SECS,
+        DEFAULT_LEASE_SECS,
+    )?;
+    let recheck = s.bounded(
+        "dispatch_recheck_ms",
+        1,
+        MOST_RECHECK_MS,
+        DEFAULT_RECHECK_MS,
+    )?;
+    Ok(DispatchTimes {
+        lease: Duration::from_secs(lease),
+        recheck: Duration::from_millis(recheck),
+        ..DispatchTimes::default()
     })
 }
 
