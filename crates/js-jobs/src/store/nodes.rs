@@ -158,10 +158,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let now = self.store.now()?;
             let record = hello_record(host, hello, None, now);
             let cond = admission.map_or(Cond::Absent, |row| Cond::Version(row.version));
-            let txn = Txn::new()
-                .put(keys::node(host), encode_node(&record)?, Cond::Absent)
-                .put(pool_key.clone(), Vec::new(), cond);
-            // Every row a transaction writes takes its revision as its version.
+            // The host's row is the transaction's last write, so its version is the commit's
+            // revision, the highest one the transaction took.
+            let txn = Txn::new().put(pool_key.clone(), Vec::new(), cond).put(
+                keys::node(host),
+                encode_node(&record)?,
+                Cond::Absent,
+            );
             if let Ok(commit) = self.write(txn)? {
                 let version = Version(commit.revision.0);
                 return Ok(NodeRow { record, version });

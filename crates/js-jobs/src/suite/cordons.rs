@@ -669,7 +669,7 @@ where
     rig.jobs
         .place_with(&with, a.clone(), share(), plain.clone())
         .expect("a lifted cordon does not hold");
-    let claimed = queued(&rig, "cd-4");
+    let claimed = rig.queue_portless("cd-4");
     cordon_host(&rig, &a, secs(100), &Asker::Unnamed).expect("cordons");
     rig.clock.advance(secs(100));
     rig.jobs

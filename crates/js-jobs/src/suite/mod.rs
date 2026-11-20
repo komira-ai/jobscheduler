@@ -31,6 +31,7 @@ mod compat;
 mod cordons;
 mod duties;
 mod failures;
+mod host_rows;
 mod hosts;
 mod idempotency;
 mod indexes;
@@ -40,6 +41,7 @@ mod marks;
 mod nodes;
 mod paging;
 mod placement;
+mod pools;
 mod prepare;
 mod queue;
 mod queued_index;
@@ -47,6 +49,7 @@ mod races;
 mod retention;
 mod rows;
 mod scrub;
+mod silence;
 mod taints;
 mod whole;
 
@@ -57,6 +60,7 @@ pub use compat::*;
 pub use cordons::*;
 pub use duties::*;
 pub use failures::*;
+pub use host_rows::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use indexes::*;
@@ -66,6 +70,7 @@ pub use marks::*;
 pub use nodes::*;
 pub use paging::*;
 pub use placement::*;
+pub use pools::*;
 pub use prepare::*;
 pub use queue::*;
 pub use queued_index::*;
@@ -73,6 +78,7 @@ pub use races::*;
 pub use retention::*;
 pub use rows::*;
 pub use scrub::*;
+pub use silence::*;
 pub use taints::*;
 pub use whole::*;
 
@@ -223,6 +229,20 @@ where
     a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
     a_restarted_prepare_moves_only_the_deadline(backend);
     a_restarted_prepare_loses_to_a_change_of_either_row(backend);
+    a_claimed_placement_refuses_a_tainted_host(backend);
+    a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale(backend);
+    a_hostmark_refuses_every_placement(backend);
+    a_live_allocations_host_port_refuses_a_claimed_placement(backend);
+    stray_on_host_entries_hold_no_port_and_an_unreadable_row_refuses(backend);
+    host_marks_are_written_and_deleted_at_the_version_read(backend);
+    drop_taints_keeps_other_jobs_rows_and_reads_again_after_a_lost_version(backend);
+    a_pool_admits_new_hosts_up_to_its_cap_and_a_known_host_always(backend);
+    an_admission_that_loses_the_pool_row_counts_again(backend);
+    two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one(backend);
+    a_refresh_writes_only_a_changed_state_or_a_stale_row(backend);
+    nodes_lists_every_readable_row_heard_or_not(backend);
+    forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
+    forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -383,6 +403,20 @@ macro_rules! job_store_tests {
             a_failed_prepare_drops_its_mark_or_writes_nothing,
             a_restarted_prepare_moves_only_the_deadline,
             a_restarted_prepare_loses_to_a_change_of_either_row,
+            a_claimed_placement_refuses_a_tainted_host,
+            a_plain_placement_of_a_contained_job_on_a_tainted_host_is_stale,
+            a_hostmark_refuses_every_placement,
+            a_live_allocations_host_port_refuses_a_claimed_placement,
+            stray_on_host_entries_hold_no_port_and_an_unreadable_row_refuses,
+            host_marks_are_written_and_deleted_at_the_version_read,
+            drop_taints_keeps_other_jobs_rows_and_reads_again_after_a_lost_version,
+            a_pool_admits_new_hosts_up_to_its_cap_and_a_known_host_always,
+            an_admission_that_loses_the_pool_row_counts_again,
+            two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one,
+            a_refresh_writes_only_a_changed_state_or_a_stale_row,
+            nodes_lists_every_readable_row_heard_or_not,
+            forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,
+            forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding,
         );
     };
 }
@@ -430,6 +464,18 @@ impl<S: Store> Rig<S> {
             .expect("a fresh job is recorded");
         assert!(inserted.created, "a fresh job is created");
         inserted.record.id
+    }
+
+    /// Records a queued job `text` with the full spec but no host port, so that a claimed
+    /// placement of it is not refused for a port another job on the host holds.
+    pub(crate) fn queue_portless(&self, text: &str) -> JobId {
+        self.queue_spec(
+            text,
+            JobSpec {
+                ports: Vec::new(),
+                ..full_spec()
+            },
+        )
     }
 
     /// Records the job `text` and places it on `host-a` with [`share`].
