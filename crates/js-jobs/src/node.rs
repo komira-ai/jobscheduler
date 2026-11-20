@@ -99,6 +99,9 @@ pub struct NodeHello {
     pub labels: BTreeMap<String, String>,
     /// The phase the host announced.
     pub phase: Phase,
+    /// The agent process whose hello this is (`Hello.agent_process`); `None` for an agent that
+    /// sends none.
+    pub agent_process: Option<String>,
 }
 
 /// The epoch and sequence of the last beat a row applied.
@@ -129,6 +132,9 @@ pub struct NodeRecord {
     pub shape: Option<Shape>,
     /// The labels the host announced.
     pub labels: BTreeMap<String, String>,
+    /// The agent process whose hello wrote the row; `None` for an agent that sent none. Beats
+    /// and settles keep it.
+    pub agent_process: Option<String>,
     /// What the last hello or applied beat left.
     pub state: NodeState,
     /// The last beat applied in any epoch; `None` after a hello, until a beat is applied.

@@ -227,6 +227,8 @@ pub struct AgentSpec {
 pub struct AgentNode {
     spec: AgentSpec,
     process: Option<Process>,
+    /// How many processes the host has had: the next one's agent-process id differs.
+    generation: u64,
     io: Io,
     /// Where the node writes that it took an input, for the cell's run loop.
     applied: Applied,
@@ -250,7 +252,8 @@ impl AgentNode {
             profile: AgentProfile::default(),
         };
         Self {
-            process: Process::new(&spec),
+            process: Process::new(&spec, 0),
+            generation: 0,
             spec,
             io,
             applied: Applied::default(),
@@ -283,7 +286,8 @@ impl AgentNode {
     /// Starts a new agent process on this host with empty state, in place of any process
     /// it has. It says hello at the node's next tick.
     pub fn replace(&mut self) {
-        self.process = Process::new(&self.spec);
+        self.generation += 1;
+        self.process = Process::new(&self.spec, self.generation);
     }
 
     /// The ground truth of the agent process, or `None` while the host has none.

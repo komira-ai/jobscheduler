@@ -285,6 +285,7 @@ pub fn offer(
     let accelerator = facts::accelerator(gpu_class.as_deref(), gpus, &devices);
     Ok(Offer {
         hello: Hello {
+            agent_process: None,
             protocol: ProtocolRange::THIS,
             host_id,
             pool: cli.pool.clone(),
