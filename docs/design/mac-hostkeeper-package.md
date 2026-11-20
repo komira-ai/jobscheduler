@@ -116,8 +116,10 @@ as owner), any script, and another identifier or version.
   "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started without the flag). The hook's `params` are
   `unit` `js-agent`, `helper_unit` `js-agent.session`, `state_dir` `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
-  `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `runtime` `native`, and the cordon, drain and step
-  bounds of the Linux manifest.
+  `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
+  `/var/db/js-agent/scratch`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
+  `socket_group` and `scratch_root` are the helper plist's `--socket-group` and the agent plist's `--scratch-root`
+  (a test of xtask holds them equal); they name the host setup the hook makes (below).
 - `helper_unit` is a launchd-only parameter of the hook (`crates/js-agent`, the update hook). When it is present the
   launchd cutover, and the rollback, boot out and bootstrap the helper's plist from the release tree as well as the
   agent's, the helper before the agent, while the agent is stopped. When it is absent the hook does what it did before.
@@ -168,16 +170,38 @@ as owner), any script, and another identifier or version.
 
 ## Host setup and the group, once per Mac
 
-Done by an operator as root, never by a package, and before the group's first `set-desired`:
+Nobody has a root shell on the Macs: everything a Mac needs arrives through hostkeeper, as a package, its files or
+its hook. The flags file and the CA come from the group's config package, above, and the flags file names hostkeeper's
+host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and `host.key`), so a Mac needs no
+`/etc/js-agent/token` (and no instance file: that is for a token minted for a cloud instance). The rest is made by the
+update hook's `prepare`, which hostkeeper runs as root, before it writes its record or cordons the host, on a first
+install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs`):
 
-- `/etc/js-agent/instance` (it differs by host); the flags file and the CA come from the group's config package, above,
-  and the flags file names hostkeeper's host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and
-  `host.key`), so a Mac needs no `/etc/js-agent/token`;
-- the agent's state and scratch roots on different devices (the agent refuses a state root on the scratch root's
-  device);
-- the helper's socket group `_jsagent` (the plist names it), and the pool, which `js-mac-session` makes users in
-  (`pool-create`);
-- for `--native-network on`, the pool's pf anchor (`js-mac-provision install`).
+- the helper's socket group (`socket_group`, `_jsagent`): made with `dseditgroup -o create` when the local directory
+  does not list it, under the gid macOS picks; a group with staff's gid (20, the lease users' group the helper's
+  plist leaves at its default) is refused, as the helper refuses it;
+- the agent's state root (`state_root`) and scratch root (`scratch_root`), mode 0700, root's, with `/var/db/js-agent`
+  0755;
+- a file system of its own for the scratch root (the agent refuses a state root on the scratch root's device): while
+  the two share a device, the hook gives the scratch root the APFS volume `js-agent-scratch` in the Data volume's
+  container, with a quota of nine tenths of the container so that jobs that fill it leave room for the system and
+  the state root. The volume is made unmounted (`diskutil apfs addVolume <container> APFS js-agent-scratch -quota
+  <N>G -nomount`), named in `/etc/fstab` by its UUID (`UUID=<uuid> /var/db/js-agent/scratch apfs rw,nobrowse`) so
+  that every boot mounts it there, and then mounted on the scratch root (unmounted first if it is mounted elsewhere);
+  a volume root that ignores ownership is given it (`diskutil enableOwnership`). A volume rather than a disk image
+  or a second partition: it needs no space set aside, shares the container's free space up to its quota, and a boot
+  mounts it with no daemon of ours.
+
+Each part is looked at before it is changed and only what is not as required is made (the scratch root's owner and
+mode are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
+again ends as an uninterrupted one. A part that cannot be read or made defers the step
+(exit 75, `host_setup_missing`, the part and the cause in the detail) with no record written and no cordon placed;
+hostkeeper orders the host again later. No step undoes the setup: it belongs to the host, not to a release.
+
+Not made by the hook:
+
+- the pool's users, which `js-mac-session` makes in the uid range of its plist (600-699) when it starts;
+- for `--native-network on`, the pool's pf anchor (`js-mac-provision install`), which nothing installs yet.
 
 Once, for the repository of packages: the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
 write access to the prefix `pkg/jobscheduler/`.
@@ -204,8 +228,8 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 2. The package relayout, the new labels, the cdhash in the helper's plist, `helper_unit` in the update hook, the
    workflow and its lints, `packaging/js-agent-macos/README.md`, `docs/release.md` and the goldens.
 3. The signing environment and the upload role (operator), then the release jobs and the `macos-arm64` entry.
-4. Host setup, `host-groups put` and the group's config package (operator), then the first `set-desired` for
-   `mac-build`.
+4. `host-groups put` and the group's config package (operator), then the first `set-desired` for `mac-build`; the
+   hook makes the host setup.
 5. kbf asks for `os=macos` (kbf).
 
 ## Failure modes
@@ -221,9 +245,10 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
   defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
   later. A later order installs it once the host setup is done.
-- No state or scratch root (`/var/db/js-agent/{state,scratch}`): `prepare` of a first install goes on (an agent never
-  installed has none), and the agent does not start, so `cutover` fails `start_failed`; hostkeeper runs the hook's
-  `rollback` and, a first install having no previous version, removes the package.
+- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume, its `/etc/fstab` line
+  or its mount): `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon
+  placed, and hostkeeper runs the hook's `rollback` (a first install) and retries later. `cutover` never starts an
+  agent whose roots share a device or a helper whose socket group is missing.
 - No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for

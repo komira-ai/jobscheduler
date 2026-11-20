@@ -95,6 +95,7 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
                 state_dir: PathBuf::from("/var/lib/js-agent-update"),
                 unit: "js-agent-crun.service".to_owned(),
                 helper_unit: None,
+                socket_group: None,
                 runtime: "crun".to_owned(),
                 timeouts: Timeouts {
                     prepare: 3900,
@@ -119,6 +120,7 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
             previous_version: Some("1.3.2".to_owned()),
             state_root: PathBuf::from("/var/lib/js-agent/state"),
             token_file: PathBuf::from("/etc/js-agent/token"),
+            scratch_root: None,
         }
     );
 }
@@ -621,4 +623,77 @@ fn a_helper_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
     }
     let text = good_but("unit", "unit = \"js-agent\"\nhelper_unit = 7");
     assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "helper_unit"));
+}
+
+/// `good()` with the Mac's host setup keys `extra` (whole lines) added.
+fn with_setup(extra: &str) -> String {
+    format!("{}{extra}\n", good())
+}
+
+/// Asserts that `socket_group` and `scratch_root` are optional, absent from `good()`, and read
+/// as given when a Mac's manifest names them.
+#[test]
+fn the_host_setup_keys_are_optional_and_read_as_given() {
+    let plain = Params::parse(&good()).unwrap();
+    assert_eq!(plain.settings.socket_group, None);
+    assert_eq!(plain.scratch_root, None);
+    let params = Params::parse(&with_setup(
+        "socket_group = \"_jsagent\"\nscratch_root = \"/var/lib/js-agent/scratch\"",
+    ))
+    .unwrap();
+    assert_eq!(params.settings.socket_group.as_deref(), Some("_jsagent"));
+    assert_eq!(
+        params.scratch_root,
+        Some(PathBuf::from("/var/lib/js-agent/scratch"))
+    );
+}
+
+/// Asserts that a `socket_group` that is not a group name (empty, white space, a slash, a colon)
+/// or not text is refused, naming the key, and that one of each allowed kind of character is
+/// read.
+#[test]
+fn a_socket_group_that_is_not_a_group_name_or_not_text_is_refused() {
+    for name in ["", "js agent", "a/b", "js:agent"] {
+        let text = with_setup(&format!("socket_group = \"{name}\""));
+        assert!(
+            matches!(refused(&text), ParamsError::NotGroupName(key) if key == "socket_group"),
+            "{name:?}"
+        );
+    }
+    let text = with_setup("socket_group = 7");
+    assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "socket_group"));
+    let params = Params::parse(&with_setup("socket_group = \"_js-Agent.2\"")).unwrap();
+    assert_eq!(params.settings.socket_group.as_deref(), Some("_js-Agent.2"));
+}
+
+/// Asserts that a `scratch_root` a file system table line cannot name (not plain, with white
+/// space), a relative one, and one that is not apart from `state_root` (the same, inside it,
+/// above it) are refused with the error that says so.
+#[test]
+fn a_scratch_root_that_is_not_a_mount_path_or_not_apart_from_the_state_root_is_refused() {
+    for root in [
+        "/var/lib/js-agent/../scratch",
+        "/var/lib/js-agent//scratch",
+        "/var/lib/js agent",
+    ] {
+        let text = with_setup(&format!("scratch_root = \"{root}\""));
+        assert!(
+            matches!(refused(&text), ParamsError::NotMountPath(key) if key == "scratch_root"),
+            "{root:?}"
+        );
+    }
+    let relative = with_setup("scratch_root = \"var/lib/js-agent/scratch\"");
+    assert!(matches!(refused(&relative), ParamsError::Relative(key) if key == "scratch_root"));
+    for root in [
+        "/var/lib/js-agent/state",
+        "/var/lib/js-agent/state/scratch",
+        "/var/lib",
+    ] {
+        let error = refused(&with_setup(&format!("scratch_root = \"{root}\"")));
+        assert_eq!(
+            error.to_string(),
+            "params key \"scratch_root\" and \"state_root\" must be apart: neither may be inside the other",
+            "{root:?}"
+        );
+    }
 }
