@@ -444,7 +444,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// The allocation of the job `id` at the version read, when it is booked.
-    fn booked_allocation(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
+    pub(super) fn booked_allocation(
+        &self,
+        id: &JobId,
+    ) -> Result<(AllocationRecord, Version), JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         ensure(
             allocation.step == AllocationStep::Booked,

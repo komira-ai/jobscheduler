@@ -308,3 +308,32 @@ fn a_requeue_waits_for_a_whole_host_with_its_host() {
         })
     );
 }
+
+/// A start a held host refused sends the job back to wait as it waited before it was placed:
+/// for room when it books a share of a host, for a whole host when it books one, with a
+/// `REQUEUED` event naming the host; it is no attempt of its own. Catches a held refusal noted
+/// as a failed whole-host prepare, or as an attempt.
+#[test]
+fn a_held_refusal_waits_again_with_its_host() {
+    let detail = "host h-4 is held for maintenance and refused the start; the job is queued again";
+    for (whole_host, code) in [
+        (false, QueueCode::WaitingForCapacity),
+        (true, QueueCode::WaitingForWholeHost),
+    ] {
+        let held = Outcome::HeldRequeued {
+            host: host("h-4"),
+            whole_host,
+        };
+        assert_eq!(
+            note(&held, QueueCode::Placed),
+            Some(QueueNote {
+                code,
+                detail: detail.to_owned(),
+                event: Some(JobEventKind::Requeued),
+                host: Some(host("h-4")),
+                attempt: false,
+            }),
+            "whole host: {whole_host}"
+        );
+    }
+}

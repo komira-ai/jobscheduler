@@ -185,6 +185,12 @@ impl Behind {
         }
     }
 
+    /// Holds the host when the real agent is behind the wire ([`RealAgent::hold`]); a fake
+    /// has no state root and is not held. Returns whether the host is held.
+    fn hold(&self) -> bool {
+        self.real().is_some_and(RealAgent::hold)
+    }
+
     /// The real agent, when this is it.
     fn real(&self) -> Option<&RealAgent> {
         match self {
@@ -339,6 +345,11 @@ impl Process {
             busy_until: FarmTime::default(),
             queued: BTreeMap::new(),
         })
+    }
+
+    /// Holds the host, when the real agent is behind the wire: see [`Behind::hold`].
+    pub(super) fn hold(&self) -> bool {
+        self.agent.hold()
     }
 
     /// The time is `now`: the real lifecycle's clock reads it from here on.

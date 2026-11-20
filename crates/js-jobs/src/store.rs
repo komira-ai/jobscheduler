@@ -23,6 +23,7 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod ending;
+mod held;
 mod hosts;
 mod index;
 mod marks;
@@ -34,6 +35,7 @@ mod whole;
 mod written;
 
 pub use cordons::{CordonWrite, UncordonWrite};
+pub use held::HeldRequeue;
 
 pub use index::Backfill;
 
@@ -353,6 +355,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             client,
             failed_prepares: 0,
             prepare_bars: BTreeMap::new(),
+            held_refusals: Vec::new(),
             queue: QueueTrail::default(),
             carried: Carried::default(),
             start_failure_detail: None,
@@ -462,8 +465,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not in
     /// `expected`; [`JobStoreError::IllegalTransition`] for a move the design does not name
-    /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`]
-    /// and [`JobStore::place`] do) and for a move to an end, which only
+    /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`],
+    /// [`JobStore::requeue_held`] and [`JobStore::place`] do) and for a move to an end, which only
     /// [`JobStore::end_job`] makes; [`JobStoreError::Stale`]; as for any read and write.
     pub fn transition(
         &self,
@@ -501,7 +504,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(moved)
     }
 
-    /// The one requeue (design section 5.4): a placed whole-host job whose prepare failed goes
+    /// The requeue after a failed prepare (design section 5.4): a placed whole-host job goes
     /// back to queued, with no host, and its allocation is freed with
     /// [`EndReason::FailedPrepare`] in the same transaction (no container was made, so there
     /// is nothing for the host to confirm). Its next placement gets a new allocation id. The

@@ -756,6 +756,7 @@ mod job_alloc;
 )]
 mod job_api;
 mod job_expiry;
+mod job_held;
 mod job_loss;
 mod job_pass;
 mod job_sizes;
