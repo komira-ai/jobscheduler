@@ -148,14 +148,15 @@ impl Agents {
         for host in &offered.hello {
             let view = views.get(host);
             let row = live.get(host);
-            let seen = match (row, view) {
-                (Some(row), _) => seen_by_row(self, row),
-                (None, Some(view)) => Some(Seen {
+            // A host is offered because it has a live row or the registry holds it live, so
+            // one with no row has a view.
+            let seen = match row {
+                Some(row) => seen_by_row(self, row),
+                None => view.map(|view| Seen {
                     shape: &view.shape,
                     claim: view.claim.as_ref(),
                     open: true,
                 }),
-                (None, None) => None,
             };
             let Some(seen) = seen else {
                 continue;

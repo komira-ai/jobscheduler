@@ -236,7 +236,7 @@ async fn hello(
 /// the digest of the one-time token or host credential the request carried, when it
 /// carried one.
 #[cfg(test)]
-async fn serve_hello(
+pub(crate) async fn serve_hello(
     agents: &Arc<Agents>,
     who: Credential,
     one_time: Option<Credential>,

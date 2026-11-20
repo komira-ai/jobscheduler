@@ -185,3 +185,11 @@ mod cost_tests;
 #[cfg(test)]
 #[path = "jobs_two_servers_tests.rs"]
 mod two_servers_tests;
+
+#[cfg(test)]
+#[path = "jobs_rows_two_tests.rs"]
+mod rows_two_tests;
+
+#[cfg(test)]
+#[path = "jobs_rows_tests.rs"]
+mod rows_tests;
