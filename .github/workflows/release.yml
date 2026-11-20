@@ -270,7 +270,7 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
 
   # The unit tests of the deploy path: the workspace's tests, those `ci`'s `test` job runs with
-  # `cargo test --workspace` (not its `--ignored` live steps, and not the privileged, live and
+  # `cargo nextest run --workspace` (not its `--ignored` live steps, and not the privileged, live and
   # coverage jobs of `ci`, which do not gate the release), under cargo-nextest in four shards on
   # four runners, beside the build. It starts at the push, without waiting for `plan`, so it is
   # not after anything on the clock; `turn`, and so `publish`, needs every shard to pass. Like

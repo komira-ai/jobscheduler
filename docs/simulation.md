@@ -118,7 +118,7 @@ length; the kernel itself is described in the crate doc of `js-sim`, and
 ## Run one
 
 CI runs every test binary of the cell on each pull request, in the `test` job
-(`cargo test --workspace --locked --no-fail-fast`) and again under coverage, every store
+(`cargo nextest run --workspace --locked --no-fail-fast`) and again under coverage, every store
 scenario over SQLite. The Postgres cases are built only with the crate's `postgres`
 feature, and the `state-postgres` job runs them against its Postgres service
 (`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);

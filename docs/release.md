@@ -21,7 +21,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests` and `ci-passed`, which start beside `plan`, still run).
    Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
-   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests) under
+   runs with `cargo nextest run --workspace`; not its `--ignored` live steps and not doctests) under
    cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
    from the Cargo cache `ci`'s `test` job saves on main (read only).
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in

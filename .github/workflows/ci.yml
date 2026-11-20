@@ -6,13 +6,14 @@
 # coverage jobs (they build from nothing; see `coverage-shard`); only a push to main saves
 # it, and only when the exact key missed, so a pull request never writes the Cargo cache.
 #
-# The release tools the `deny`, `coverage-shard` and `coverage` jobs install (cargo-deny,
-# cargo-llvm-cov, cargo-nextest) are pinned by version and SHA-256, and each has a cache entry of its own,
-# keyed by both. The step before `cargo xtask fetch` restores it; fetch uses the restored
-# archive when there is one and downloads it from GitHub only when there is not, checks
-# the SHA-256 of whichever it uses, and keeps a download that passed for the step after it
-# to save. So a release-download outage stops only a job whose tool is not cached; fetch
-# then says in one line that the archive was not in the cache and the download failed.
+# The release tools the `test`, `deny`, `coverage-shard` and `coverage` jobs install
+# (cargo-nextest, cargo-deny, cargo-llvm-cov) are pinned by version and SHA-256, and each has
+# a cache entry of its own, keyed by both. The step before `cargo xtask fetch` restores it;
+# fetch uses the restored archive when there is one and downloads it from GitHub only when
+# there is not, checks the SHA-256 of whichever it uses, and keeps a download that passed for
+# the step after it to save. So a release-download outage stops only a job whose tool is not
+# cached; fetch then says in one line that the archive was not in the cache and the download
+# failed.
 # That save runs on pull requests too (an entry a pull request saves is visible to that
 # pull request alone), and only after fetch passed. crates/xtask/tests/pinned_tool_cache
 # holds every workflow to this.
@@ -133,6 +134,13 @@ jobs:
         working-directory: site
         run: npm run build
 
+  # The workspace's tests run under cargo-nextest, as release.yml's `unit-tests` runs them:
+  # every test in a process of its own, as many at once as the runner has CPUs, whatever
+  # binary each is in (`cargo test` runs one test binary after another, and js-sim-cell's
+  # scenario binaries held the whole job at its limit). nextest runs no doctests, so
+  # `cargo test --doc` runs them after it. nextest, `cargo test --doc` and the steps after
+  # them build with the same features and profile as the run, so nothing is compiled again.
+  #
   # js-state's Postgres tests run here too (a test that needs the server fails, and does
   # not skip, when KBF_TEST_POSTGRES_URL is unset), against a service container pinned by
   # digest.
@@ -174,6 +182,8 @@ jobs:
         options: --health-cmd "curl -fsS http://127.0.0.1:9000/minio/health/live" --health-interval 2s --health-timeout 5s --health-retries 30
     env:
       KBF_TEST_POSTGRES_URL: postgres://postgres:js-ci-throwaway@127.0.0.1:5432/postgres
+      NEXTEST_VERSION: 0.9.146
+      NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,10 +198,29 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      # --no-fail-fast: a red run names every failing test in every crate, not only those of
-      # the first test binary that fails, so the tests commit of a pull request shows each
-      # of its reds.
-      - run: cargo test --workspace --locked --no-fail-fast
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: nextest-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: pinned-cargo-nextest-${{ env.NEXTEST_VERSION }}-${{ env.NEXTEST_SHA256 }}
+      - name: Install cargo-nextest (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.nextest-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-nextest.tar.gz
+          key: ${{ steps.nextest-cache.outputs.cache-primary-key }}
+      # Every package Cargo.lock names, for every platform, before any test runs: tests such as
+      # xtask's spawn_sites run `cargo tree --target all --offline`, which reads them from the
+      # registry, and nextest starts its tests in no fixed order, so no earlier test can be
+      # relied on to fetch them (as in the coverage shards and release.yml's `unit-tests`).
+      - run: cargo fetch --locked
+      # --no-fail-fast: a red run names every failing test in every crate, not only the
+      # first, so the tests commit of a pull request shows each of its reds.
+      - run: cargo nextest run --workspace --locked --no-fail-fast
+      - name: Doctests
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked --doc
       # `--tests` builds what the run above built, so nothing is compiled again; the filters
       # pick the live-log tests against the store out of every test binary.
       - name: Live logs against the S3-compatible store
@@ -203,10 +232,12 @@ jobs:
       # The v1 job path over the real server binary, an agent and `js` on loopback, on a
       # SQLite and a Postgres store (js-lease-server's v1_acceptance). The workspace run
       # above runs it too; this step names it, so a break of the path between the binaries
-      # is a red step of its own. Nothing is compiled again.
+      # is a red step of its own. nextest picks the binary out of the workspace's build, so
+      # nothing is compiled again (`cargo test -p js-lease-server` resolves the features of
+      # that one package and rebuilt 38 crates).
       - name: v1 acceptance over the server binary, an agent and js
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p js-lease-server --test v1_acceptance
+        run: cargo nextest run --workspace --locked --no-fail-fast -E 'binary_id(js-lease-server::v1_acceptance)'
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
