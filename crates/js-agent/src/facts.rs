@@ -741,6 +741,7 @@ fn probe_gpus(platform: &Platform, runner: &dyn CommandRunner) -> Result<Gpus, S
 /// facts, so no rule is copied here and nothing the operator passed as a flag is judged.
 fn accepted(gpus: Gpus) -> Result<Gpus, String> {
     let probe = Hello {
+        agent_process: None,
         protocol: ProtocolRange::THIS,
         host_id: "gpu-check".to_owned(),
         pool: "gpu-check".to_owned(),

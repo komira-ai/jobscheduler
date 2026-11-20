@@ -708,6 +708,7 @@ impl<'a> Session<'a> {
             (phase, _) => phase,
         };
         let beat = Heartbeat {
+            seq: None,
             host_id: self.hello.host_id.clone(),
             epoch: live.epoch,
             session: live.secret.0.clone(),

@@ -22,6 +22,7 @@ pub fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 pub fn hello() -> Hello {
     Hello {
+        agent_process: None,
         protocol: ProtocolRange { min: 1, max: 1 },
         host_id: "mac-01".into(),
         pool: "builders".into(),
@@ -103,6 +104,7 @@ pub fn result() -> RunResult {
 
 pub fn heartbeat() -> Heartbeat {
     Heartbeat {
+        seq: None,
         host_id: "mac-01".into(),
         epoch: 3,
         session: "s3cret-0".into(),

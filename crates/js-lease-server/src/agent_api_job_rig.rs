@@ -644,6 +644,7 @@ impl Rig {
     ) -> Result<HeartbeatReply, Refused> {
         let (epoch, session) = self.sessions[&agent.host].clone();
         let sent = Heartbeat {
+            seq: None,
             host_id: agent.host.clone(),
             epoch,
             session,

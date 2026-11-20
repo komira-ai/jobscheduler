@@ -806,6 +806,7 @@ mod tests {
     #[test]
     fn every_refusal_has_its_status_and_code() {
         let unnamed = Heartbeat {
+            seq: None,
             host_id: "UPPER".into(),
             epoch: 0,
             session: String::new(),

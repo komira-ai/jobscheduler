@@ -603,6 +603,7 @@ pub fn lowest() -> &'static mut Lowest {
 /// A valid hello for `host` in the test pool.
 pub fn hello(host: &str) -> Hello {
     Hello {
+        agent_process: None,
         protocol: ProtocolRange::THIS,
         host_id: host.to_owned(),
         pool: POOL.to_owned(),

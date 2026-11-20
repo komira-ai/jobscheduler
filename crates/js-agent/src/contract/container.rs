@@ -181,6 +181,7 @@ mod tests {
 
     fn hello() -> Hello {
         Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "host-1".into(),
             pool: "builders".into(),

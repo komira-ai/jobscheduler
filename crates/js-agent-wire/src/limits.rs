@@ -9,7 +9,7 @@
 //!
 //! | field | cap |
 //! |---|---|
-//! | ids (`run_id`, `lease_id`, `job_id`, `allocation_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
+//! | ids (`run_id`, `lease_id`, `job_id`, `allocation_id`, `host_id`, `pool`, `instance_id`, `agent_process`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |

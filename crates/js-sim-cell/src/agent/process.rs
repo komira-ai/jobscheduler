@@ -452,6 +452,7 @@ impl Process {
 
     fn hello(&mut self, spec: &AgentSpec, io: &mut Io) {
         let hello = Hello {
+            agent_process: None,
             protocol: ProtocolRange::THIS,
             host_id: spec.host.as_str().to_owned(),
             pool: spec.pool.clone(),
@@ -506,6 +507,7 @@ impl Process {
             });
         }
         let beat = Heartbeat {
+            seq: None,
             host_id: spec.host.as_str().to_owned(),
             epoch: session.epoch,
             session: session.secret.clone(),
