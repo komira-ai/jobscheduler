@@ -8,7 +8,7 @@ use js_agent::lifecycle::{
     Created, FsPrepared, JobFs, Prepared, RunHandle, Runtime, Status, Wake, Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
-use js_agent_wire::{LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
+use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
 use js_vm_lease::fake::FakeDriver;
 use js_vm_lease::{ExecEnd, Step};
 
@@ -84,11 +84,18 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
         stderr_dropped: 0,
     };
     fake.report_logs("run-plain", report);
+    let counted = JobUsage {
+        peak_memory_bytes: 7,
+        cpu_usage_usec: 9,
+    };
+    fake.report_usage("run-plain", counted);
     fake.set_cgroup("run-plain", "/sys/fs/cgroup/run-plain");
     fake.exit("run-plain", 0);
     assert!(matches!(with.poll(&on_host).unwrap(), Status::Exited(_)));
     assert_eq!(with.log_tail(&on_host).unwrap().unwrap().stdout, "host out");
     assert_eq!(with.logs_report(&on_host), Some(report));
+    assert_eq!(with.usage(&on_host), Some(counted));
+    assert_eq!(with.usage(&in_vm), None);
     assert!(with.cgroup(&on_host).is_some());
     with.stop(&on_host, GRACE).unwrap();
     assert_eq!(fake.stops().len(), 1);

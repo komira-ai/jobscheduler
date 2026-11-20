@@ -32,6 +32,7 @@
 //! agent reports again.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use js_agent_wire::{
     Ack, Command, HeldJob, HeldState, JobResult, JobResultAck, JobStartSpec, NetworkCeiling,
@@ -39,7 +40,7 @@ use js_agent_wire::{
 };
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, JobEnd, JobId, JobRecord, JobState, JobStoreError,
-    LogLengths, Output, StartFailure,
+    LogLengths, Output, ResourceUsage, StartFailure,
 };
 use js_types::{HostId, Resources};
 use tracing::warn;
@@ -333,7 +334,9 @@ fn advance(
 /// with no exit status, is a failure with [`NO_EXIT_CODE`]. The stream lengths of the
 /// result's `logs` are kept with it when the report is consistent
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
-/// without it, so that a reader of the job's live logs knows where each stream ends.
+/// without it, so that a reader of the job's live logs knows where each stream ends. The
+/// result's `usage`, what the job's control group counted, is kept as the output's resource
+/// usage; a result with none records none, never a zero.
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
 /// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
@@ -349,11 +352,15 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
         stdout_dropped: report.stdout_dropped,
         stderr_dropped: report.stderr_dropped,
     });
+    let usage = result.usage.map(|used| ResourceUsage {
+        cpu_time: Duration::from_micros(used.cpu_usage_usec),
+        peak_memory_bytes: used.peak_memory_bytes,
+    });
     let output = Output {
         stdout: tail.stdout,
         stderr: tail.stderr,
         truncated: tail.truncated,
-        usage: None,
+        usage,
         logs,
     };
     let code = result.exit_code;

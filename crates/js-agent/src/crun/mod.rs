@@ -241,7 +241,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{LogReport, LogTail, NetworkCeiling, PortRange};
+use js_agent_wire::{JobUsage, LogReport, LogTail, NetworkCeiling, PortRange};
 use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::ImageSource;
@@ -258,7 +258,7 @@ use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
 use pull::Images;
-use spec::{concluded, ctr_of, log_tail_of};
+use spec::{concluded, ctr_of, log_tail_of, usage_of};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -823,6 +823,12 @@ impl Runtime for CrunRuntime {
 
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.runs.get(&id.0).and_then(|run| run.logs.report())
+    }
+
+    fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
+        // The lease's group, so that everything the job ran in it is counted; it is removed
+        // with the container, after this is read.
+        self.runs.get(&id.0).and_then(|run| usage_of(&run.cgroup))
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

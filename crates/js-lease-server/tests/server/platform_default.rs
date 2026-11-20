@@ -237,13 +237,11 @@ fn default_platform_can_ever_serve_follows_hosts_and_provider_caps() {
     assert_eq!(nothing.capabilities(), js_platform::PlatformCaps::default());
 }
 
-/// The view admission takes of host `a` of [`table`], in `state`, tainted and draining or
-/// not.
-fn view(state: HostState, tainted: bool, draining: bool) -> HostView {
+/// The view admission takes of host `a` of [`table`], in `state`, draining or not.
+fn view(state: HostState, draining: bool) -> HostView {
     HostView {
         id: HostId::new("a").unwrap(),
         state,
-        tainted,
         draining,
         total: Resources::new(4000, 8 << 30, 0, None).unwrap(),
         facts: facts(),
@@ -261,8 +259,8 @@ fn agrees(platform: &DefaultPlatform, hosts: &[HostView], providers: &[ProviderV
 }
 
 /// Asserts that the `default` platform's `can_ever_serve` is admission's function: for a
-/// host that is serving, then lost (silent past its grace), for one that is tainted, for one
-/// marked to drain (capable: the mark is undone when a request needs the host) and then
+/// host that is serving, then lost (silent past its grace), for one that is tainted (capable:
+/// its taint ends), for one marked to drain (capable: the mark is undone when a request needs the host) and then
 /// being released (draining out of the pool), and for a launching provider whose catalog
 /// cannot be read, it answers what `js_sched`'s `can_ever_serve` answers over the same
 /// views. Catches a platform that keeps a check of its own, which could disagree about a
@@ -275,15 +273,11 @@ fn default_platform_can_ever_serve_is_the_admission_function() {
     let serving = table_on(&["a"], clock.clone());
     assert!(agrees(
         &on(&serving),
-        &[view(HostState::Serving, false, false)],
+        &[view(HostState::Serving, false)],
         &[]
     ));
     clock.advance(Duration::from_secs(3600));
-    assert!(agrees(
-        &on(&serving),
-        &[view(HostState::Lost, false, false)],
-        &[]
-    ));
+    assert!(agrees(&on(&serving), &[view(HostState::Lost, false)], &[]));
     let tainted = table(&[]);
     let taint = Taint {
         reason: "post-job-check".to_owned(),
@@ -292,18 +286,14 @@ fn default_platform_can_ever_serve_is_the_admission_function() {
     };
     let binding = Binding::new(Credential::of_token("t"), None).with_taint(Some(taint));
     tainted.restore_tainted(&HostId::new("a").unwrap(), binding);
-    assert!(!agrees(
-        &on(&tainted),
-        &[view(HostState::Lost, true, false)],
-        &[]
-    ));
+    assert!(agrees(&on(&tainted), &[view(HostState::Lost, false)], &[]));
     let draining = table(&["a"]);
     let a = HostId::new("a").unwrap();
     draining.drain(&a).unwrap();
-    let marked = [view(HostState::Serving, false, false)];
+    let marked = [view(HostState::Serving, false)];
     assert!(agrees(&on(&draining), &marked, &[]));
     draining.release_host(&a).unwrap();
-    let released = [view(HostState::Serving, false, true)];
+    let released = [view(HostState::Serving, true)];
     assert!(!agrees(&on(&draining), &released, &[]));
     let cloud = platform(id.clone(), vec![gpu_cloud()], None);
     let unread = ProviderView {

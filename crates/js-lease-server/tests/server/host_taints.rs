@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, entry, hosts, post};
 use crate::job_hosts::{cpu_hello, placing_server, restarted_placing};
-use crate::jobs_support::{JobBody, commands, job_agent, job_of, submit_body};
+use crate::jobs_support::{JobBody, commands, job_agent, job_state, submit_body};
 use crate::support::{Harness, Kept, Reply, TOKEN, kept_bindings, request};
 
 /// A heartbeat of `session` carrying `extra` fields (a taint), answered 200.
@@ -123,8 +123,8 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
 }
 
 /// Asserts that a taint outlives a restart: two tainted hosts are put back awaiting with
-/// their taint, a job submitted after their agents say hello again is refused 422
-/// `no-capable-host` (no host is clean) and recorded nowhere, and the taint is still kept
+/// their taint, a job submitted after their agents say hello again is queued (a tainted
+/// host is capable: its taint ends) and started on neither, and the taint is still kept
 /// (in the state file, or in the store's host bindings). It runs with the bindings in files
 /// and in the store, and in the store it also asserts that no `.agents` file is written. It
 /// catches a restart that makes a host clean, and a store that loses a taint.
@@ -150,14 +150,15 @@ async fn a_taint_survives_a_restart_in(kept: Kept) {
         assert_eq!(shown["state"], "awaiting", "{shown}");
         assert_eq!(shown["taint"]["reason"], "residue", "{shown}");
     }
-    job_agent(&h, &cpu_hello("burst-1")).await;
-    job_agent(&h, &cpu_hello("burst-2")).await;
-    let refused = submit_body(&h, &JobBody::new("taint-restart").json()).await;
-    assert_eq!(
-        (refused.status, refused.json()),
-        (422, json!({ "error": "no-capable-host" }))
-    );
-    assert_eq!(job_of(&h, "taint-restart").await.status, 404);
+    let a2 = job_agent(&h, &cpu_hello("burst-1")).await;
+    let b2 = job_agent(&h, &cpu_hello("burst-2")).await;
+    submit_job(&h, "taint-restart").await;
+    h.ticks.step().await;
+    for session in [&a2, &b2] {
+        let reply = beat_with(&h, session, json!({})).await;
+        assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
+    }
+    assert_eq!(job_state(&h, "taint-restart").await, "JOB_STATE_QUEUED");
     let text = kept_bindings(&h);
     assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
     for id in ["burst-1", "burst-2"] {
@@ -207,7 +208,7 @@ async fn a_start_refused_as_host_tainted_taints_the_host_and_is_written() {
 
 /// Asserts the clear end to end, with the bindings in files and in the store: a tainted host
 /// that reports its taint cleared is acknowledged, `GET /v1/hosts` shows no taint, the
-/// bindings hold none, a job is refused while it is tainted and starts on it after the clear (the only host),
+/// bindings hold none, a job submitted while it is tainted is queued, not started, and starts on it after the clear (the only host) beside one submitted after,
 /// and after a restart it is not put back tainted (the clear survived). A cleared report of
 /// a taint other than the held one changes nothing. It catches a server that forgets the
 /// taint in memory only (a restart would bring it back), one that clears a taint the report
@@ -225,8 +226,10 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint": held })).await;
     assert_eq!(reply["taint_ack"], true);
-    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
-    assert_eq!(refused.status, 422, "{}", refused.body);
+    submit_job(&first, "before-clear").await;
+    first.ticks.step().await;
+    let reply = beat_with(&first, &me, json!({})).await;
+    assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
 
     let other = json!({ "reason": "residue", "run_id": "run-1-2", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint_cleared": other })).await;
@@ -243,8 +246,9 @@ async fn a_taint_reported_cleared_ends_in(kept: Kept) {
     first.ticks.step().await;
     let reply = beat_with(&first, &me, json!({})).await;
     let (starts, _) = commands(&reply);
-    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
-    assert_eq!(jobs, ["after-clear"], "{reply}");
+    let mut jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, ["after-clear", "before-clear"], "{reply}");
 
     let h = restarted_placing(first).await;
     let text = kept_bindings(&h);
@@ -286,9 +290,9 @@ async fn a_clear_is_not_acknowledged_before_it_can_be_written() {
 }
 
 /// Asserts the operator's clear end to end, with the bindings in files and in the store: a host
-/// whose agent reported a taint takes no job (422 `no-capable-host`); `ClearHostTaint` answers
-/// `cleared` with the reason, `GET /v1/hosts` shows no taint, the bindings hold none, a job
-/// submitted after it starts on the host (the only one), and a second call answers `cleared`
+/// whose agent reported a taint is sent no job (one submitted meanwhile queues); `ClearHostTaint` answers
+/// `cleared` with the reason, `GET /v1/hosts` shows no taint, the bindings hold none, the queued job and one
+/// submitted after it start on the host (the only one), and a second call answers `cleared`
 /// false; and after a restart the host is not put back tainted (the clear survived). It
 /// catches a clear that forgets the taint in memory only (a restart would bring it back), a
 /// clear that leaves placement refusing the host, and a repeat that claims a clear.
@@ -305,8 +309,10 @@ async fn a_taint_cleared_by_the_operator_ends_in(kept: Kept) {
     let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "daemonised-child" });
     let reply = beat_with(&first, &me, json!({ "taint": held })).await;
     assert_eq!(reply["taint_ack"], true);
-    let refused = submit_body(&first, &JobBody::new("before-clear").json()).await;
-    assert_eq!(refused.status, 422, "{}", refused.body);
+    submit_job(&first, "before-clear").await;
+    first.ticks.step().await;
+    let reply = beat_with(&first, &me, json!({})).await;
+    assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
 
     let cleared = clear_taint(&first, "burst-1").await;
     assert_eq!(cleared.status, 200, "{}", cleared.body);
@@ -320,8 +326,9 @@ async fn a_taint_cleared_by_the_operator_ends_in(kept: Kept) {
     first.ticks.step().await;
     let reply = beat_with(&first, &me, json!({})).await;
     let (starts, _) = commands(&reply);
-    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
-    assert_eq!(jobs, ["after-clear"], "{reply}");
+    let mut jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    jobs.sort_unstable();
+    assert_eq!(jobs, ["after-clear", "before-clear"], "{reply}");
 
     let again = clear_taint(&first, "burst-1").await;
     assert_eq!(again.status, 200, "{}", again.body);
@@ -338,4 +345,34 @@ async fn a_taint_cleared_by_the_operator_ends_in(kept: Kept) {
             .all(|host| host.get("taint").is_none()),
         "{listing}"
     );
+}
+
+/// Asserts that a pool whose only host is tainted still admits: a job submitted while the
+/// agent's heartbeat taint holds is accepted (201, not refused `no-capable-host`), stays
+/// queued and is sent to no host, and once the agent's heartbeat reports the taint cleared
+/// the same job is started on that host. Catches an admission that treats a tainted host
+/// as never capable, which refuses at once a job that only has to wait for a self-clearing
+/// taint, and a clear that does not make the host placeable.
+#[tokio::test]
+async fn a_job_submitted_while_the_only_host_is_tainted_queues_and_places_after_the_clear() {
+    let h = placing_server("host_taint_only", Kept::Files).await;
+    let me = job_agent(&h, &cpu_hello("burst-1")).await;
+    let held = json!({ "reason": "residue", "run_id": "run-1-1", "check": "tmp" });
+    let reply = beat_with(&h, &me, json!({ "taint": held })).await;
+    assert_eq!(reply["taint_ack"], true);
+
+    submit_job(&h, "waits-for-clear").await;
+    h.ticks.step().await;
+    assert_eq!(job_state(&h, "waits-for-clear").await, "JOB_STATE_QUEUED");
+    let reply = beat_with(&h, &me, json!({})).await;
+    assert_eq!(commands(&reply), (vec![], vec![]), "{reply}");
+    assert_eq!(job_state(&h, "waits-for-clear").await, "JOB_STATE_QUEUED");
+
+    let reply = beat_with(&h, &me, json!({ "taint_cleared": held })).await;
+    assert_eq!(reply["taint_cleared_ack"], true);
+    h.ticks.step().await;
+    let reply = beat_with(&h, &me, json!({})).await;
+    let (starts, _) = commands(&reply);
+    let jobs: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert_eq!(jobs, ["waits-for-clear"], "{reply}");
 }

@@ -24,6 +24,7 @@ fn job(id: &str, result: bool) -> HeldJob {
             log_tail: None,
             logs: None,
             input_failure: None,
+            usage: None,
         }),
     }
 }

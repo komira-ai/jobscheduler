@@ -522,6 +522,7 @@ fn job_result_with_input_failure_wire_form() {
         log_tail: None,
         logs: None,
         input_failure: Some(refusal::TREE_READ_FAILED.into()),
+        usage: None,
     };
     let wire = json!({
         "job_id": "job-1",
@@ -534,6 +535,7 @@ fn job_result_with_input_failure_wire_form() {
     assert_eq!(serde_json::from_value::<JobResult>(wire).unwrap(), failed);
     let clean = JobResult {
         input_failure: None,
+        usage: None,
         ..failed
     };
     let text = serde_json::to_value(&clean).unwrap();

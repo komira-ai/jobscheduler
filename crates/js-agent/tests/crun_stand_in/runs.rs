@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 
 use js_agent::lifecycle::{Body, Exit, Prepared, RunHandle, RunSpec, Runtime, Status, label};
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, JobUsage};
 use js_agent_wire::{LogTail, RunFile};
 use serde_json::{Value, json};
 
@@ -543,4 +543,36 @@ fn an_image_in_the_store_with_no_config_is_fetched_again_to_get_one() {
     std::fs::remove_file(kept).expect("lose the config");
     run(&mut runtime, "r3-exit");
     assert_eq!(fetched(), 2);
+}
+
+/// Proves the runtime answers the usage of an ended container from its lease's cgroup files,
+/// read before the container is removed: with `memory.peak` and `cpu.stat` written the way the
+/// kernel does, it gives their exact values; a lease whose group has no `memory.peak` gives
+/// none; and once the container is removed there is nothing to read. Catches a usage read from
+/// the wrong group, a zero given for an unread counter, and a read that waits until the
+/// group is gone.
+#[test]
+fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
+    let node = Node::new("run-usage");
+    let mut runtime = node.open();
+    let id = runtime
+        .create_and_start(&node.spec("r1-exit"))
+        .expect("started");
+    runtime.wait_ended(&id);
+    assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
+    let cgroup = node.cgroup_of(&id.0);
+    assert_eq!(runtime.usage(&id), None);
+    std::fs::write(cgroup.join("memory.peak"), "2147483648\n").expect("memory.peak");
+    std::fs::write(
+        cgroup.join("cpu.stat"),
+        "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\n",
+    )
+    .expect("cpu.stat");
+    let want = JobUsage {
+        peak_memory_bytes: 2_147_483_648,
+        cpu_usage_usec: 1_234_567,
+    };
+    assert_eq!(runtime.usage(&id), Some(want));
+    runtime.remove(&id).expect("removed");
+    assert_eq!(runtime.usage(&id), None);
 }

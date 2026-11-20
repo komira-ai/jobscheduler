@@ -313,7 +313,7 @@ fn placed_in(
         None => (None, None, None),
     };
     for (host, binding) in &bindings {
-        registry.restore_tainted(host, binding.clone());
+        taints::put_back(&registry, host, binding, "start");
     }
     // A cordon a binding brought back is written into the job store, which keeps the cordons
     // from then on (`agents_cordon`), so the first tick's mirror does not lift it.
@@ -583,7 +583,7 @@ impl Agents {
         let named = host.clone();
         let stored = blocking(move || this.store.stored(&named)).await?;
         if let Some(binding) = stored {
-            self.registry.restore_tainted(host, binding);
+            taints::put_back(&self.registry, host, &binding, "hello");
         }
         Ok(())
     }
@@ -667,6 +667,13 @@ impl Agents {
     /// hold until the registry has recorded the beat. Nothing when the beat would record no
     /// taint and clear none, or the registry refuses it (the beat is then refused the same).
     ///
+    /// A beat that reports cleared a taint the registry does not hold, on a host the registry
+    /// holds no taint for, ends the taint the store holds when it is that one, or the one a
+    /// refused start made (reason `host-tainted`, which the agent never reports)
+    /// ([`Agents::end_stored_taint`]): another server over the same store (the two of a
+    /// start-first update) was told the taint and stored it, and the agent, told that its
+    /// clear was taken, never reports it again.
+    ///
     /// # Errors
     ///
     /// The store failed or refused the commit: the taint is not recorded, and the caller
@@ -679,12 +686,48 @@ impl Agents {
         let Ok(check) = self.registry.check_heartbeat(heartbeat, who) else {
             return Ok(None);
         };
+        // A clear the registry does not take, on a host it holds untainted. The host is read
+        // only for such a beat, and outside `host_writes`: a taint stored in between is kept by
+        // the store's conditional write, which expects the taint it read.
+        let stray = heartbeat.taint_cleared.as_ref();
+        let stray = stray.filter(|_| !check.cleared & check.taint.is_none());
+        let untainted = |host: &HostId| {
+            let own = self.registry.own_host(host);
+            own.is_some_and(|own| own.host.taint.is_none())
+        };
+        let stray = stray.filter(|_| untainted(&check.host));
+        if let Some(cleared) = stray {
+            let gate = self.host_writes.lock().await;
+            self.end_stored_taint(&check.host, cleared).await?;
+            return Ok(Some(gate));
+        }
         if check.taint.is_none() && !check.cleared {
             return Ok(None);
         }
         let gate = self.host_writes.lock().await;
-        self.keep_taint(&check.host, check.taint).await?;
+        self.keep_taint(&check.host, check.taint.clone()).await?;
+        if let Some(cleared) = heartbeat.taint_cleared.as_ref().filter(|_| check.cleared) {
+            taints::log_cleared(&check.host, cleared, "agent");
+        }
+        if let Some(taint) = &check.taint {
+            taints::log_stored(&check.host, taint);
+        }
         Ok(Some(gate))
+    }
+
+    /// Ends the taint the store holds for `host` when it is `cleared` or a refused start's
+    /// ([`BindingStore::end_taint`], whose conditional write never erases a taint another
+    /// server stored in between). The registry holds no taint for the host, so nothing changes
+    /// in memory. The caller holds [`Agents::host_writes`].
+    async fn end_stored_taint(self: &Arc<Self>, host: &HostId, cleared: &Taint) -> io::Result<()> {
+        let this = Arc::clone(self);
+        let reason = cleared.reason.clone();
+        let (named, cleared) = (host.clone(), cleared.clone());
+        let ended = blocking(move || this.store.end_taint(&named, &cleared)).await?;
+        if ended.is_some() {
+            info!(%host, reason, "the agent's clear ended the taint another server stored");
+        }
+        Ok(())
     }
 
     /// Commits the binding of `host` with `taint` (none for a clear), when the registry holds

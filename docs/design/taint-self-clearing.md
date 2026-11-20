@@ -99,8 +99,15 @@ state the host really holds and a re-check that sees no difference does not prov
 The server held a host's first reported taint for good. It now clears it on one report only: a heartbeat whose
 `taint_cleared` equals the taint the registry holds for the host, field for field. The binding without the taint is
 committed (the store, or the `.agents` file) before the registry forgets it and before the reply says `taint_cleared_ack`, as
-for a taint report. A cleared report of any other taint (a host job's taint the server set, say) changes nothing and is
-acknowledged all the same (`taint_cleared_ack`), so the agent stops sending it. A start refused `host-tainted` in the beat that carries the
+for a taint report. A clear that reaches a server whose registry holds no taint for the host (the two servers of a
+start-first update: the agent reported its taint to one and its clear reaches the other) ends the taint the store holds
+when it is the cleared one, field for field, by the same compare-and-set, before the reply; the server's memory does not
+change. Without that the clear was acknowledged with the taint left in the store, the agent never sent it again, and every
+later start put the taint back on a clean host, which then took no job. When the taint the registry holds is the one a refused start made (reason `host-tainted`, which only mirrors the agent's own
+taint and which the clean agent never reports), a cleared report of any taint ends it: without that the agent was
+acknowledged, the server's taint stayed, and no one reported it again. A cleared report of any other taint (a host job's
+taint the server set, say) changes nothing and is acknowledged all the same (`taint_cleared_ack`), so the agent stops sending
+it. A start refused `host-tainted` in the beat that carries the
 clear taints nothing (those results were made before the clear); a taint the agent makes again is reported in `taint`
 and stands. A server that does not know the field does not acknowledge, so the agent stays tainted: roll the servers
 out before the agents.
@@ -186,7 +193,7 @@ non-residue taint stays pinned; a re-check that still finds the process keeps th
 taint and the count starts again; `cleanup-failed`, `check-owed`, `host-job` and the mount, user, group, module and
 watched-directory residues never clear; a run held keeps the re-checks off), `tests/agent/integrity/lifecycle.rs` (the
 real checks over the in-memory host, and a restored residue taint re-checked without the baseline), js-registry `tests/taint_cleared.rs` and `tests/taint_host.rs`,
-js-lease-server `tests/server/host_taints.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
+js-lease-server `tests/server/host_taints.rs`, `tests/server/live_update.rs` (a clear that reaches the other server of an update ends the stored taint), `src/agent_api_store_clear_tests.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
 operator's clear), js-agent `tests/agent/update_hook/steps_taint_clearable.rs` (the hook does not halt for a
 residue the restarted agent re-checks and does for any other taint, a pinned residue included),
 `tests/agent/lifecycle/taint_pin.rs` (a pin made in memory survives a restart), js-agent-wire `tests/golden.rs`, `previous_release.rs` and

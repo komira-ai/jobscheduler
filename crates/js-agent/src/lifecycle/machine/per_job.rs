@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, LogReport, RunResult,
-    StartKind, limits,
+    HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, JobUsage, Limits, LogReport,
+    RunResult, StartKind, limits,
 };
 
 use super::Lifecycle;
@@ -71,11 +71,12 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
 
 /// The result of a job keyed by job id, as its listing carries it, with what the capture saw
 /// of its streams (`logs`) when the runtime uploaded them, and the code of the host's input
-/// that failed (`input_failure`), when one did.
+/// that failed (`input_failure`), when one did, and what its control group used (`usage`).
 pub(super) fn job_result(
     result: &RunResult,
     logs: Option<LogReport>,
     input_failure: Option<String>,
+    usage: Option<JobUsage>,
 ) -> JobResult {
     JobResult {
         job_id: result.run_id.clone(),
@@ -86,6 +87,7 @@ pub(super) fn job_result(
         log_tail: result.log_tail.clone(),
         logs,
         input_failure,
+        usage,
     }
 }
 
@@ -180,10 +182,9 @@ impl Lifecycle {
             .map(|job| HeldJob {
                 job_id: job.run_id.clone(),
                 state: job.held_state(),
-                result: job
-                    .result
-                    .as_ref()
-                    .map(|result| job_result(result, job.logs, job.input_failure.clone())),
+                result: job.result.as_ref().map(|result| {
+                    job_result(result, job.logs, job.input_failure.clone(), job.usage)
+                }),
             })
             .collect()
     }

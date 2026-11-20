@@ -217,7 +217,7 @@ fn used_of(job: &JobRecord) -> Option<Used> {
 }
 
 /// What `booked` comes to in the usage history.
-fn booked_of(booked: Booked) -> UsageBooked {
+pub(crate) fn booked_of(booked: Booked) -> UsageBooked {
     match booked {
         Booked::Shape {
             cpu_millis,

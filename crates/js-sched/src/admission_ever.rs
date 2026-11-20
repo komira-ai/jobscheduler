@@ -64,11 +64,10 @@ pub struct HostView {
     /// The host.
     pub id: HostId,
     /// Its presence and work. Every state is capable: a busy, lost or cordoned host could
-    /// serve the request once it is free, heard again or uncordoned.
+    /// serve the request once it is free, heard again or uncordoned. A taint is not a
+    /// state here: a tainted host is capable too, as a taint ends (the agent clears it
+    /// after clean re-checks, or an operator clears it), so the view carries none.
     pub state: HostState,
-    /// Whether it is tainted. A taint ends only when a person reimages the host, so a
-    /// tainted host is never capable.
-    pub tainted: bool,
     /// Whether it is draining: leaving the pool, so never capable.
     pub draining: bool,
     /// What the pool books of it.
@@ -160,12 +159,13 @@ impl ProviderView {
 /// host in `hosts` admits it ([`Path::CapableHost`]); otherwise a provider of `providers`
 /// that may offer a machine for it ([`Path::MayOffer`]); otherwise it is refused.
 ///
-/// A host is capable when it is neither tainted nor draining, what the pool books of it holds
+/// A host is capable when it is not draining, what the pool books of it holds
 /// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`,
 /// `os_version`, `disk-gib`, `exec`, `layered-rootfs` and each `mount-provider.<name>` (as [`Shape::satisfies`] compares
 /// them), and the network ceiling its facts advertise ([`ceiling_of`]) covers `req`'s network
 /// level and host ports ([`within_ceiling`]; a host that advertises none has the level `none`
-/// and no port). Whether it is busy, lost or cordoned does not matter. A provider may offer
+/// and no port). Whether it is busy, lost, cordoned or tainted does not matter: each ends
+/// (placement alone skips a tainted host until its taint is cleared). A provider may offer
 /// only if it forwards host ports when `req` declares any; its level is not checked, and it is
 /// not asked for `layered-rootfs` or a `mount-provider.<name>` key. A pool with no provider
 /// that launches admits only through a capable host.
@@ -179,7 +179,7 @@ pub fn can_ever_serve(
         let shape = Shape::new(host.total.clone(), host.facts.clone());
         let ceiling = ceiling_of(&host.facts);
         let within = within_ceiling(&ceiling, req.network, &req.host_ports).is_ok();
-        !host.tainted & !host.draining & shape.satisfies(&req.resources, &required) & within
+        !host.draining & shape.satisfies(&req.resources, &required) & within
     });
     let offered = providers.iter().any(|provider| provider.may_offer(req));
     match (capable, offered) {

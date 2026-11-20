@@ -523,7 +523,7 @@ Text in [design/whole-node.md](design/whole-node.md) (D46 to D55). **Giving a wh
 released back; the host is quiet (no run, no VM, checks clean, not tainted) before the lease token is minted (D30). The merged `gpu-host`
 and kbf's `whole_machine` are this class, so GPU testing on the Mac Studio machines and the performance run are one mechanism. A node
 lease that books a host's shape under `Book` is a share, not this class.
-- **Admission.** Eligible hosts are the capable hosts of D41 (tainted and denied excluded). Refused (`no-capable-host`) only when no
+- **Admission.** Eligible hosts are the capable hosts of D41 (denied excluded; a tainted host counts, as its taint ends, but is not placed on meanwhile). Refused (`no-capable-host`) only when no
   registered host could ever be given whole and no elastic provider could launch one; otherwise queued (D35). A quiet host is taken at
   once, else exactly one host is reserved: least worst-case drain, then fewest leases, then lowest id. The only reservation (R1).
 - **Draining.** A reserved host takes no new work but backfill ending a minute before its tail (whole-node.md 4); its work finishes or

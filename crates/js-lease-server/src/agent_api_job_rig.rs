@@ -919,6 +919,13 @@ impl FakeAgent {
         ended.input_failure = input_failure.map(str::to_owned);
     }
 
+    /// The held job `id` ends with a clean exit whose result reports `usage`.
+    pub(crate) fn end_with_usage(&mut self, id: &str, usage: js_agent_wire::JobUsage) {
+        self.end(id, Outcome::Succeeded, Some(0));
+        let ended = self.held.get_mut(id).unwrap().result.as_mut().unwrap();
+        ended.usage = Some(usage);
+    }
+
     /// The held job `id` ends with a clean exit whose result reports `logs`.
     pub(crate) fn end_with_logs(&mut self, id: &str, logs: js_agent_wire::LogReport) {
         let held = self.held.get_mut(id).unwrap();
@@ -949,6 +956,7 @@ pub(crate) fn result(
         }),
         logs: None,
         input_failure: None,
+        usage: None,
     }
 }
 
