@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use js_agent::{Connector, Dialer, Login, Session, Step};
 use js_agent_wire::ProtocolRange;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::server::{CLIENT_TOKEN, JOIN, OtherMajors, Redirect, Server, Spy};
 use crate::support::{AMD_MAC, Host, PROFILER_CMD, Scratch, code, hello, lowest, mac_host};
@@ -183,9 +183,10 @@ fn refused_hello_is_fatal_per_code() {
 
 /// Asserts that after the server restarts (a new process over the same files) the agent's
 /// next heartbeat is refused as an unknown host, it says hello again at once and is
-/// admitted, and the host is live again. The restarted server holds no host until the agent
-/// says hello (nothing booked on it is kept). It catches an agent that heartbeats a dead
-/// session for ever. That a running job outlives the restart is asserted with a container
+/// admitted, and the host is live again. The restarted server's registry holds no host until
+/// the agent says hello (nothing booked on it is kept); its listing names the host meanwhile by
+/// the `node/` row the first process wrote, live within the grace, as it lists a host whose
+/// hello another server took. It catches an agent that heartbeats a dead session for ever. That a running job outlives the restart is asserted with a container
 /// agent in `jobs/e2e.rs`.
 #[test]
 fn server_restart_agent_reregisters() {
@@ -205,7 +206,13 @@ fn server_restart_agent_reregisters() {
     let server = server.restart();
     *address.lock().unwrap() = server.url();
     let hosts = server.get("/v1/hosts");
-    assert!(hosts["hosts"].as_array().unwrap().is_empty(), "{hosts}");
+    let listed: Vec<(&Value, &Value)> = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (&entry["id"], &entry["state"]))
+        .collect();
+    assert_eq!(listed, [(&json!("mac-1"), &json!("live"))], "{hosts}");
     agent.elapse();
     assert_eq!(agent.next_wait(), Duration::ZERO);
     agent.elapse();

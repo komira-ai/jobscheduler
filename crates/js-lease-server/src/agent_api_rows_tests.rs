@@ -230,3 +230,31 @@ async fn a_host_that_runs_no_jobs_here_keeps_its_row_live() {
     let after = rig.jobs.read_node(&name).unwrap().unwrap();
     assert!(after.record.heard_at > before.record.heard_at, "{after:?}");
 }
+
+/// Asserts that a beat whose host id is no host id, handed to the half of a beat that serves no
+/// jobs, commits nothing to the store. It catches a malformed id that panics the beat, or a row
+/// written under it.
+#[tokio::test]
+async fn a_beat_whose_host_id_is_malformed_writes_no_row() {
+    let rig = whole_rig("rows_malformed", rules(), None);
+    let commits = rig.commits();
+    let beat = js_agent_wire::Heartbeat {
+        host_id: String::new(),
+        epoch: 1,
+        session: String::new(),
+        phase: Phase::Serving,
+        held: Vec::new(),
+        results: Vec::new(),
+        taint: None,
+        taint_cleared: None,
+        exclusive_ready: None,
+        exclusive_refused: None,
+        load: None,
+        disk_gib: None,
+        jobs: Vec::new(),
+        retired_jobs: Vec::new(),
+        log_grant_state: None,
+    };
+    rows::unserved_beat(&rig.agents, &beat).await;
+    assert_eq!(rig.commits(), commits);
+}

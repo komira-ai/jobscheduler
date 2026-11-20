@@ -351,3 +351,21 @@ fn the_scan_of_stored_bindings_returns_the_readable_ones() {
     let error = w.agents.store.scan_stored().unwrap_err();
     assert!(error.to_string().contains(INJECTED), "{error}");
 }
+
+/// Asserts that a pass whose read of the store's head fails says so and offers nothing, both
+/// when it reads the rows afresh and when a heartbeat's pass asks whether the rows it kept
+/// still stand. It catches a failed head read taken as a store that has not moved, which would
+/// offer hosts by rows that may be stale.
+#[test]
+fn a_store_head_that_cannot_be_read_offers_nothing() {
+    let w = world("rows_head", true);
+    w.store.fail_next_head();
+    let error = w.offered().unwrap_err();
+    assert!(error.contains(INJECTED), "{error}");
+    w.offered().unwrap();
+    w.store.fail_next_head();
+    let now = Timestamp::from_millis(T0);
+    let error = w.agents.offered_after_beat(&w.jobs, &w.placer, now);
+    let error = error.unwrap_err();
+    assert!(error.contains(INJECTED), "{error}");
+}

@@ -289,11 +289,19 @@ async fn a_failed_row_write_is_mirrored_back_at_the_next_tick() {
     assert_eq!(held(&a), None);
 }
 
-/// Asserts that a server without a job store takes the call on its registry and writes no row,
-/// and that its tick's mirror changes nothing. Catches a call or a tick that needs the store.
+/// Asserts that a server without a job store takes the call on its registry (the host is
+/// marked releasing there, with no store to write a row to), and that its tick's mirror leaves
+/// the mark as it is. Catches a call that needs the store to mark the host, and a mirror that
+/// clears a mark for want of a row it has no store to read.
 #[tokio::test]
 async fn without_a_job_store_the_registry_alone_holds_the_mark() {
-    let (effects, _dir) = live("marks-none");
+    let (mut effects, _dir) = live("marks-none");
+    let (agents, _agents_dir, _) = server("marks-none-a", None);
+    effects.agents = agents;
+    assert!(effects.agents.jobs.is_none());
+    assert_eq!(held(&effects.agents), None);
     effects.call(Call::MarkEnding, "h1");
+    assert_eq!(held(&effects.agents), Some(HostMark::Releasing));
     effects.agents.mirror_host_marks().await;
+    assert_eq!(held(&effects.agents), Some(HostMark::Releasing));
 }

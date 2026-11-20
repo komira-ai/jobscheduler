@@ -295,28 +295,17 @@ async fn serve_hello_in(
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
     agents.applied(&change);
     between();
-    let admitted = admit_hello(agents, certified.is_some(), &hello, &who).map_err(Some);
+    let admitted = admit_hello(agents, certified.is_some(), &hello, &who)
+        .map_err(|refusal| refused_hello(&hello.host_id, &refusal));
     let admitted = match admitted {
         Ok(welcome) => rows::written_row(agents, &host, welcome).await,
         refused => refused,
     };
     let mut welcome = match admitted {
         Ok(welcome) => welcome,
-        Err(refusal) => {
+        Err(refused) => {
             give_back(agents, fresh_use, &hello.host_id, &change).await;
-            let Some(refusal) = refusal else {
-                return Err(Refused::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    STATE_WRITE_FAILED,
-                ));
-            };
-            warn!(
-                code = refusal.code(),
-                reason = refusal.reason(),
-                host = %hello.host_id,
-                "agent hello refused: {refusal}"
-            );
-            return Err(Refused::of(&refusal));
+            return Err(refused);
         }
     };
     drop(gate);
@@ -329,6 +318,13 @@ async fn serve_hello_in(
     agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
+}
+
+/// The answer to a hello of `host` that `refusal` refused, logged with its code and reason.
+fn refused_hello(host: &str, refusal: &Refusal) -> Refused {
+    let (code, reason) = (refusal.code(), refusal.reason());
+    warn!(code, reason, %host, "agent hello refused: {refusal}");
+    Refused::of(refusal)
 }
 
 /// The refusal of a hello whose host's stored binding could not be read: 503
@@ -579,7 +575,8 @@ async fn serve_jobs(
         tainted,
     }) = per_job
     else {
-        return Ok(rows::unserved_beat(agents, heartbeat).await);
+        rows::unserved_beat(agents, heartbeat).await;
+        return Ok(None);
     };
     let first = agents.first_listing(&host, session);
     let capabilities = claim.capabilities();

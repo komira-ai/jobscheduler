@@ -259,8 +259,9 @@ fn the_machine_lease_reads_a_session_end_and_the_next_session_of_a_live_host() {
 /// Asserts what a restarted server that has not heard the host since says through the port:
 /// the read, the cordon and the uncordon are each the typed `UnknownHost` (the server's 409
 /// `unknown-host`), and `prepare` over the machine refuses with exit 1, `lease_unreachable`,
-/// class environment and a detail naming the 409, writes no record and leaves the server with
-/// no such host. It catches an unknown host taken as a host with no cordon (a step that goes
+/// class environment and a detail naming the 409, writes no record and leaves the server's
+/// listing with the host only by the `node/` row the first process wrote (no session of it is
+/// made). It catches an unknown host taken as a host with no cordon (a step that goes
 /// on as if it had drained), reported as a refused credential, or blamed on the release.
 #[test]
 fn a_host_the_server_does_not_know_is_the_typed_unknown_host_and_prepare_refuses() {
@@ -287,7 +288,15 @@ fn a_host_the_server_does_not_know_is_the_typed_unknown_host_and_prepare_refuses
     assert_eq!(done.report.class, Class::Environment);
     assert_eq!(done.report.detail.as_deref(), Some(UNKNOWN));
     assert!(!tree.record().exists(), "nothing was written");
-    assert_eq!(server.get("/v1/hosts")["hosts"], serde_json::json!([]));
+    let hosts = server.get("/v1/hosts");
+    let listed: Vec<&serde_json::Value> = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["id"])
+        .collect();
+    assert_eq!(listed, [&serde_json::json!("mac-1")], "{hosts}");
+    assert_eq!(lease.host().unwrap_err(), LeaseError::UnknownHost);
 }
 
 /// Asserts that the port reads its bearer from the file `token_file` names when the state root

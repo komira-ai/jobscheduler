@@ -21,6 +21,7 @@ use js_registry::Refusal;
 use js_types::HostId;
 use tracing::warn;
 
+use super::{Refused, STATE_WRITE_FAILED, StatusCode, refused_hello};
 use crate::agents::Agents;
 use crate::util::blocking;
 
@@ -72,22 +73,25 @@ fn hello_row(agents: &Agents, host: &HostId, welcome: &Welcome) -> Result<(), Un
     }
 }
 
-/// `welcome` once the host's `node/` row is written ([`hello_row`]); otherwise the
-/// refusal (the pool is full over every server's rows), or `None` when the store failed, which
-/// is answered 503 `state-write-failed`.
+/// `welcome` once the host's `node/` row is written ([`hello_row`]); otherwise the answer to
+/// the hello: the refusal `pool-full` (the pool is full over every server's rows), or 503
+/// `state-write-failed` when the store failed, which the agent retries.
 pub(super) async fn written_row(
     agents: &Arc<Agents>,
     host: &HostId,
     welcome: Welcome,
-) -> Result<Welcome, Option<Refusal>> {
+) -> Result<Welcome, Refused> {
     let (agents, host) = (Arc::clone(agents), host.clone());
     blocking(move || match hello_row(&agents, &host, &welcome) {
         Ok(()) => Ok(welcome),
         Err(Unwritten::Store(error)) => {
             warn!(%error, %host, "agent hello refused: its row was not written");
-            Err(None)
+            Err(Refused::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                STATE_WRITE_FAILED,
+            ))
         }
-        Err(Unwritten::PoolFull) => Err(Some(Refusal::PoolFull)),
+        Err(Unwritten::PoolFull) => Err(refused_hello(host.as_str(), &Refusal::PoolFull)),
     })
     .await
 }
@@ -120,11 +124,10 @@ pub(super) fn beat_row(agents: &Agents, host: &HostId, phase: Phase) {
 
 /// [`beat_row`] for a beat of a host whose jobs this server does not serve (its hello did not
 /// report `per-job`), on the pool for blocking calls, so its row stays live for every server
-/// as its beats come in; `None`, which is what such a beat's job half answers.
-pub(super) async fn unserved_beat<T>(agents: &Arc<Agents>, heartbeat: &Heartbeat) -> Option<T> {
+/// as its beats come in. A beat whose host id is no host id writes nothing.
+pub(super) async fn unserved_beat(agents: &Arc<Agents>, heartbeat: &Heartbeat) {
     if let Ok(host) = HostId::new(&heartbeat.host_id) {
         let (agents, phase) = (Arc::clone(agents), heartbeat.phase);
         blocking(move || beat_row(&agents, &host, phase)).await;
     }
-    None
 }
