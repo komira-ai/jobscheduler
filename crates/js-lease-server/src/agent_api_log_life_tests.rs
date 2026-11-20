@@ -448,7 +448,7 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
         layered_rootfs: false,
         mount_providers: &[],
     };
-    let served = per_job::serve(&jobs, &context, &listing, &[], 16).unwrap();
+    let served = per_job::serve(&jobs, &context, &listing, &[], 16, None).unwrap();
     assert_eq!(served.job_acks.len(), 3);
     drop(jobs);
     let jobs = sqlite(&path, &clock);

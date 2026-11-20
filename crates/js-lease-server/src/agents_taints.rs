@@ -125,7 +125,7 @@ pub(super) fn log_cleared(host: &HostId, taint: &Taint, by: &'static str) {
 /// the registry without the host, so a host it holds after the call was put back here;
 /// nothing is logged when the registry took nothing (a binding with neither a taint nor a
 /// cordon still to run).
-pub(super) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
+pub(crate) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
     registry.restore_tainted(host, binding.clone());
     if registry.own_host(host).is_none() {
         return;

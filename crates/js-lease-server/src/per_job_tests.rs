@@ -56,6 +56,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
         &[],
         std::slice::from_ref(&long),
         8,
+        None,
     )
     .unwrap();
     assert_eq!(reply.retired_acks, [long]);
@@ -91,6 +92,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
         &listing,
         &[],
         8,
+        None,
     )
     .unwrap();
     assert_eq!(store.commit_stats().txns, before);
@@ -134,6 +136,7 @@ fn a_failed_end_commit_is_an_error() {
         &listing,
         &[],
         8,
+        None,
     );
     assert_eq!(
         answer.map(drop),
@@ -178,6 +181,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         &[],
         &[],
         1,
+        None,
     )
     .unwrap();
     let ids = |commands: Vec<Command>| {
@@ -204,6 +208,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         &[],
         &[],
         8,
+        None,
     )
     .unwrap();
     let both = vec!["job-b".to_owned(), "job-c".to_owned()];
@@ -245,7 +250,7 @@ fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing
         layered_rootfs: false,
         mount_providers: &[],
     };
-    let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8).unwrap();
+    let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8, None).unwrap();
 
     let reply = beat(&[]);
     assert_eq!((reply.commands.len(), reply.exclusive), (0, Some(leased)));
@@ -446,7 +451,7 @@ fn listed_end(
         mount_providers: &[],
     };
     let listing = [listed("job-a", HeldState::ExitedUnacked, Some(result))];
-    let reply = serve(jobs, &context, &listing, &[], 8).unwrap();
+    let reply = serve(jobs, &context, &listing, &[], 8, None).unwrap();
     reply.job_acks.first().map(|ack| ack.ack)
 }
 

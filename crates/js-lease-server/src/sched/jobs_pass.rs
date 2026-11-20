@@ -24,9 +24,10 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use js_agent_wire::Taint;
-use js_jobs::{Capacity, HOST_JOB_TAINT, JobId};
+use js_jobs::{Capacity, HOST_JOB_TAINT, JobId, JobStoreError};
 use js_registry::{Registry, WholeNodeConfig};
 use js_sched::ceiling::ceiling_of;
 use js_types::Clock;
@@ -39,6 +40,7 @@ use crate::admit::reports_host_jobs;
 use crate::agents::Agents;
 use crate::config::CpuSlack;
 use crate::held_beat::Wakes;
+use crate::job_store::ServerJobs;
 use crate::metrics::PassSink;
 
 /// The [`JobStarts`] of the server's pass: a start is built from the job table on the host's
@@ -78,6 +80,14 @@ impl JobStarts for Tainted<'_> {
 enum Pass {
     Always,
     IfChanged,
+}
+
+/// The hosts whose row says their last job listing was not clean, as one read of the rows.
+fn unclean_hosts(jobs: &ServerJobs) -> Result<BTreeSet<HostId>, JobStoreError> {
+    let rows = jobs.live_nodes(Duration::MAX)?;
+    let unclean = rows.into_iter().map(|row| row.record);
+    let unclean = unclean.filter(|record| !record.state.last_listing_clean);
+    Ok(unclean.map(|record| record.host).collect())
 }
 
 /// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the
@@ -158,9 +168,18 @@ impl Agents {
             .map(|view| view.id.clone())
             .collect();
         // A host whose last job listing named a job it holds no live allocation for is
-        // still running that job: its capacity is not counted until a listing is clean.
+        // still running that job: its capacity is not counted until a listing is clean. The
+        // flag is the host's row, which the beat that applied the listing wrote on whichever
+        // server took it; a pass that cannot read the rows places nothing.
+        let unclean = match unclean_hosts(jobs) {
+            Ok(unclean) => unclean,
+            Err(error) => {
+                warn!(%error, "the job pass could not read the hosts' rows; it places nothing");
+                return Vec::new();
+            }
+        };
         let open = views.into_iter();
-        let open = open.filter(|view| open_to_jobs(view, now) && self.listing_clean(&view.id));
+        let open = open.filter(|view| open_to_jobs(view, now) && !unclean.contains(&view.id));
         // The machine provider of each host, from its binding alone; a host of a provider the
         // Default platform does not list is no candidate here (it stays in the host table).
         let bindings = self.registry.bindings();

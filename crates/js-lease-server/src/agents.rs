@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
@@ -103,9 +103,6 @@ pub(crate) struct Agents {
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
-    /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
-    /// is a leaf.
-    unclean: Mutex<BTreeSet<HostId>>,
     /// The host credentials and job sinks of live logs, with `sink = "object_store"`
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
@@ -119,9 +116,6 @@ pub(crate) struct Agents {
     /// How long a claim of a periodic duty ([`js_jobs::JobStore::claim_duty`]) keeps the other
     /// servers off it, in milliseconds; zero claims every tick ([`Agents::set_duty_period`]).
     duty_period_ms: AtomicU64,
-    /// For each host, the session whose job listing was last committed: a listing of another
-    /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
-    listed_sessions: Mutex<BTreeMap<HostId, Session>>,
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
@@ -164,11 +158,6 @@ impl CordonFault {
         Self::Unsaved
     }
 }
-
-/// A host's session as the job side tells one from another: the epoch of its hello and when
-/// the hello was taken, in milliseconds (a host removed and admitted again starts its epochs
-/// over, at a later hello).
-pub(crate) type Session = (u64, Option<u64>);
 
 /// Where a file of the agent side is kept: beside the state file at `state_file`, with
 /// `suffix` added to its name.
@@ -337,12 +326,10 @@ fn placed_in(
         job_state,
         usage_in_job_store,
         placer: Some(placer.clone()),
-        unclean: Mutex::default(),
         logs,
         job_limits,
         cpu_slack,
         duty_period_ms: AtomicU64::new(0),
-        listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
         wakes: Wakes::default(),
@@ -411,12 +398,10 @@ impl Agents {
             job_state: None,
             usage_in_job_store: false,
             placer: None,
-            unclean: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),
             duty_period_ms: AtomicU64::new(0),
-            listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),
             wakes: Wakes::default(),
@@ -480,25 +465,6 @@ impl Agents {
         }
     }
 
-    /// Whether a job listing of `host` in `session` is the first since the host's hello: no
-    /// listing of that session has been committed ([`Agents::listed`]).
-    pub(crate) fn first_listing(&self, host: &HostId, session: Session) -> bool {
-        let listed = self
-            .listed_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        listed.get(host) != Some(&session)
-    }
-
-    /// Records that a job listing of `host` in `session` was committed.
-    pub(crate) fn listed(&self, host: &HostId, session: Session) {
-        let mut listed = self
-            .listed_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        listed.insert(host.clone(), session);
-    }
-
     /// This agent side placing with `placer` (`--placement js-sched`), for a test of the
     /// heartbeat's pass over the queued jobs. The registry must already hold it.
     #[cfg(test)]
@@ -509,23 +475,16 @@ impl Agents {
         }
     }
 
-    /// Records whether the last job listing of `host` was clean: it named only jobs the host
-    /// holds a live allocation for.
-    pub(crate) fn note_listing(&self, host: &HostId, clean: bool) {
-        let mut unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
-        if clean {
-            unclean.remove(host);
-        } else {
-            unclean.insert(host.clone());
-        }
-    }
-
     /// Whether the capacity of `host` may be counted by placement: its last job listing was
-    /// clean (design section 6.2, section 8 row 37). A host that lists a job it holds no live
-    /// allocation for is told to stop it and is not placed on until a listing is clean.
+    /// clean (design section 6.2, section 8 row 37), as its row holds it. True without the job
+    /// tables and for a host with no row; false for one whose row cannot be read.
+    #[cfg(test)]
     pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
-        let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
-        !unclean.contains(host)
+        let Some(jobs) = &self.jobs else {
+            return true;
+        };
+        let row = jobs.read_node(host);
+        row.is_ok_and(|row| row.is_none_or(|row| row.record.state.last_listing_clean))
     }
 
     /// Lets the hello of `host` register with the one-time token or host credential `who`
@@ -938,7 +897,7 @@ impl Agents {
 mod cordons;
 
 #[path = "agents_taints.rs"]
-mod taints;
+pub(crate) mod taints;
 
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]

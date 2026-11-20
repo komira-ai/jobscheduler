@@ -76,7 +76,7 @@
 //! lists a job as `starting` is held for [`crate::held_beat::starting_hold`] (200 ms) at most
 //! instead, so the start's `running` is not kept a whole hold.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
@@ -92,6 +92,7 @@ use axum::routing::{get, post};
 use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, Welcome, refusal,
 };
+use js_jobs::{JobStoreError, NodeRow};
 use js_registry::{Credential, Refusal};
 use js_types::{HostId, Resources, Shape};
 use serde::Serialize;
@@ -103,7 +104,7 @@ use crate::admit::{
     reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
 };
 use crate::agent_state::Change;
-use crate::agents::{Agents, Session};
+use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::host_keys::Writes;
 use crate::job_loss;
@@ -123,6 +124,7 @@ mod held;
 mod host_cert;
 mod limit;
 mod own_host;
+pub(crate) mod rows;
 mod unknown;
 
 use self::unknown::{identify_single, unknown_bearer};
@@ -287,7 +289,7 @@ async fn serve_hello_in(
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
     let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
-    let restored = agents.restore_stored(&host).await;
+    let restored = rows::refresh(agents, &host).await;
     restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
@@ -307,6 +309,10 @@ async fn serve_hello_in(
             return Err(Refused::of(&refusal));
         }
     };
+    if let Err(refused) = rows::hello_row(agents, &host, &hello, &mut welcome).await {
+        give_back(agents, fresh_use, &hello.host_id, &change).await;
+        return Err(refused);
+    }
     drop(gate);
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
@@ -416,6 +422,10 @@ async fn heartbeat(
             .await;
         served.map_err(Refused::join)?;
     }
+    // A beat of an epoch this server's registry does not hold may be of a session another
+    // server's hello began: the registry takes it from the host's row first ([`rows`]).
+    let refreshed = rows::refresh_for_beat(&agents, &heartbeat).await;
+    refreshed.map_err(|error| unread_binding(&heartbeat.host_id, &error))?;
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be durable first. With the store, a taint the beat
@@ -423,6 +433,7 @@ async fn heartbeat(
     // `state-write-failed` with nothing recorded, so the agent reports again; in file mode
     // the file is written after, and when it cannot be the reply does not acknowledge it.
     let mut reply = beat_durably(&agents, &heartbeat, &who).await?;
+    let applied = rows::beat_row(&agents, &heartbeat).await?;
     // A start refused as host-tainted taints the host too, with nothing to acknowledge
     // there: the file is made current and a failure is retried by the next tick.
     let refused = heartbeat
@@ -437,7 +448,7 @@ async fn heartbeat(
         agents.save_bindings().await;
     }
     let logs = uploading(&agents, &heartbeat.host_id);
-    let hold = add_jobs(&agents, &heartbeat, logs.clone(), &mut reply).await?;
+    let hold = add_jobs(&agents, (&heartbeat, applied), logs.clone(), &mut reply).await?;
     reply.log_grant =
         logs.and_then(|logs| logs.on_beat(&heartbeat.host_id, heartbeat.log_grant_state));
     if let Some(usage) = &agents.usage {
@@ -484,7 +495,7 @@ fn reports_upload(agents: &Agents, host: &str) -> bool {
 /// [`HELD_BEAT_CAPABILITY`]: js_agent_wire::HELD_BEAT_CAPABILITY
 async fn add_jobs(
     agents: &Arc<Agents>,
-    heartbeat: &Heartbeat,
+    (heartbeat, applied): (&Heartbeat, Option<NodeRow>),
     logs: Option<Arc<LogGrants>>,
     reply: &mut HeartbeatReply,
 ) -> Result<Option<held::Hold>, Refused> {
@@ -492,7 +503,8 @@ async fn add_jobs(
         return Ok(None);
     };
     let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
-    let Some((served, watched)) = serve_jobs(agents, jobs, heartbeat, logs, room).await? else {
+    let beat = (heartbeat, applied);
+    let Some((served, watched)) = serve_jobs(agents, jobs, beat, logs, room).await? else {
         return Ok(None);
     };
     reply.commands.extend(served.commands);
@@ -511,7 +523,6 @@ async fn add_jobs(
 /// [`serve_jobs`] reads it.
 struct PerJobHost {
     id: HostId,
-    session: Session,
     /// The shape the host announced at its hello.
     claim: Shape,
     /// What the registry books for the host: what a start of the whole host books.
@@ -535,7 +546,7 @@ struct PerJobHost {
 async fn serve_jobs(
     agents: &Arc<Agents>,
     jobs: &Arc<ServerJobs>,
-    heartbeat: &Heartbeat,
+    (heartbeat, applied): (&Heartbeat, Option<NodeRow>),
     logs: Option<Arc<LogGrants>>,
     room: usize,
 ) -> Result<Option<(JobReply, Option<Watched>)>, Refused> {
@@ -543,12 +554,10 @@ async fn serve_jobs(
         .ok()
         .and_then(|host| agents.registry.own_host(&host))
         .and_then(|own| {
-            let session = (own.host.epoch, own.session_started.map(|at| at.millis()));
             let tainted = own.host.taint.is_some();
             let booked = own.host.shape.resources().clone();
             own.host.claim.map(|claim| PerJobHost {
                 id: own.host.id,
-                session,
                 claim,
                 booked,
                 tainted,
@@ -561,7 +570,6 @@ async fn serve_jobs(
         });
     let Some(PerJobHost {
         id: host,
-        session,
         claim,
         booked,
         tainted,
@@ -569,12 +577,12 @@ async fn serve_jobs(
     else {
         return Ok(None);
     };
-    let first = agents.first_listing(&host, session);
     let capabilities = claim.capabilities();
     // Only a serving host takes a new start: a draining, preparing or tainted one is never
     // held (a draining agent counts its drain in the waits it asks for, which a held reply
-    // would stretch).
+    // would stretch). A beat the row did not apply is answered at once, from the rows.
     let holds = reports_held_beat(capabilities) && heartbeat.phase == Phase::Serving;
+    let holds = holds && applied.is_some();
     let watch = holds.then(|| agents.wakes.watch(&host));
     let inputs = Arc::new(held::Inputs {
         jobs: Arc::clone(jobs),
@@ -591,13 +599,25 @@ async fn serve_jobs(
     });
     let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
     let refused = heartbeat.exclusive_refused.clone();
+    let sequenced = heartbeat.seq.is_some();
     let placing = Arc::clone(agents);
     let kept = Arc::clone(&inputs);
     let served = blocking(move || {
         let metrics = placing.meter().sink();
         let context = inputs.context(metrics);
-        let (jobs, host) = (&inputs.jobs, &inputs.host);
         let (listed, retired) = (&inputs.listed, &inputs.retired);
+        let Some(row) = applied else {
+            // A beat the row did not apply changes nothing and is answered from the rows.
+            let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
+            return (answer.map(|answer| (answer, false)), Vec::new());
+        };
+        // Every write of the listing is conditional on the version of the row this beat
+        // wrote: once a newer beat or hello of the host moved it, the rest of this listing
+        // changes nothing ([`js_jobs::JobStore::guarded`]).
+        let guarded = inputs.jobs.guarded(&inputs.host, row.version);
+        let (jobs, host) = (&guarded, &inputs.host);
+        let first = row.record.state.first_listing_pending;
+        let missed = (!sequenced).then_some(&row.record.state.missing_in_a_row);
         // The first listing after a hello loses the jobs that ran and are not listed: their
         // container went with the agent (design section 6.7, step 6). The listing's commit
         // below then frees their allocations, since the host no longer lists them.
@@ -626,15 +646,23 @@ async fn serve_jobs(
         let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
         let whole = lost.and_then(serve);
         let served = whole.and_then(|taint_changed| {
-            let served = per_job::serve(jobs, &context, listed, retired, inputs.room);
+            let served = per_job::serve(jobs, &context, listed, retired, inputs.room, missed);
             served.map(|served| (served, taint_changed))
         });
-        // Whether the listing was clean is noted before the pass, so a host that lists a job
-        // it holds no live allocation for takes no start until it lists only its own (design
-        // section 8, row 37).
+        // Whether the listing was clean is written to the row before the pass, so a host that
+        // lists a job it holds no live allocation for takes no start until it lists only its
+        // own (design section 8, row 37), on whichever server places.
         if let Ok((served, _)) = &served {
-            placing.note_listing(host, served.clean);
+            rows::settle(&inputs.jobs, &row, served.clean, served.missing.clone());
         }
+        // A listing a newer beat or hello overtook is answered from the rows as they stand.
+        let served = match served {
+            Err(JobStoreError::NodeMoved { .. }) => {
+                let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
+                answer.map(|answer| (answer, false))
+            }
+            served => served,
+        };
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply,
         // or on this one when it is held (the placement wakes it). A beat that changed
@@ -649,7 +677,6 @@ async fn serve_jobs(
     let host = &kept.host;
     match served {
         Ok((served, taint_changed)) => {
-            agents.listed(host, session);
             if taint_changed {
                 agents.save_bindings().await;
             }
@@ -664,6 +691,27 @@ async fn serve_jobs(
             ))
         }
     }
+}
+
+/// The per-job reply to a beat that changes nothing (the row applied a newer one first): the
+/// stops and starts that follow from the rows as they stand ([`per_job::commands_now`]), with
+/// no verdict on a result and no retired id answered, which the agent then reports again.
+fn rows_answer(
+    jobs: &ServerJobs,
+    context: &per_job::BeatContext<'_>,
+    listing: (&[js_agent_wire::HeldJob], &[String]),
+    room: usize,
+) -> Result<JobReply, js_jobs::JobStoreError> {
+    let (commands, exclusive) =
+        per_job::commands_now(jobs, context, listing, &BTreeSet::new(), room)?;
+    Ok(JobReply {
+        commands,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
+        clean: true,
+        exclusive,
+        missing: BTreeMap::new(),
+    })
 }
 
 /// The registry's reply to `heartbeat`, with the taint it brings committed first

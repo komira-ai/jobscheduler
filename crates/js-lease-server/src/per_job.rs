@@ -17,7 +17,11 @@
 //!    freed in one commit.
 //! 3. **Confirmed containers are freed**: an allocation that is releasing, of a job that has
 //!    ended, whose host no longer lists the job, is freed ([`job_alloc::free_allocation`]). A
-//!    host that is only silent is never served here, so silence frees nothing.
+//!    host that is only silent is never served here, so silence frees nothing. For an agent
+//!    that sends no beat sequence the server cannot tell an old beat from a new one (a beat
+//!    the agent gave up on can still be applied after a newer one), so its container is freed
+//!    only once two applied beats in a row leave it out: the count of each such job is kept in
+//!    the host's row ([`JobReply::missing`]).
 //! 4. **The reply is built** from what the store holds now: a stop for every job of the host
 //!    with a cancel intent that has not ended, every listed job the store has no live
 //!    allocation of on this host, and every listed job that ended without the host reporting
@@ -70,6 +74,10 @@ pub(crate) struct JobReply {
     /// The allocation id of the whole-host job the host is to be prepared for or to hold,
     /// when it has one ([`exclusive_of`]): the reply's `exclusive`.
     pub(crate) exclusive: Option<String>,
+    /// For an agent that sends no beat sequence: each job whose confirmed container this
+    /// listing left out and did not free, with how many applied beats in a row have left it
+    /// out. Empty for an agent that sends one, whose containers are freed at once.
+    pub(crate) missing: BTreeMap<JobId, u32>,
 }
 
 /// What [`commit_listing`] found.
@@ -113,6 +121,10 @@ pub(crate) struct BeatContext<'a> {
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
 /// `retired`, with room for `room` commands: the listing and the retired ids committed,
 /// confirmed containers freed, then the stops and starts that follow from the store.
+/// `missed` is `None` for an agent that sends a beat sequence, whose confirmed containers are
+/// freed as soon as a listing leaves them out; for one that sends none it is the count the
+/// host's row kept of the applied beats in a row that left out each, and a container is freed
+/// once two have ([`JobReply::missing`]).
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -123,6 +135,7 @@ pub(crate) fn serve(
     listed: &[HeldJob],
     retired: &[String],
     room: usize,
+    missed: Option<&BTreeMap<JobId, u32>>,
 ) -> Result<JobReply, JobStoreError> {
     let host = context.host;
     let reported = commit_listing(jobs, context, listed)?;
@@ -136,11 +149,21 @@ pub(crate) fn serve(
         .map(|job| job.job_id.as_str())
         .chain(retired.iter().map(String::as_str))
         .collect();
+    let mut missing = BTreeMap::new();
     for (allocation, job) in jobs.live_on(host)? {
         let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
         let gone = !held.contains(allocation.job.as_str());
-        if (allocation.step == AllocationStep::Releasing) & ended & gone {
-            job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
+        if (allocation.step != AllocationStep::Releasing) | !ended | !gone {
+            continue;
+        }
+        let before = missed.map(|missed| missed.get(&allocation.job).copied().unwrap_or(0));
+        match before {
+            Some(0) => {
+                missing.insert(allocation.job, 1);
+            }
+            _ => {
+                job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
+            }
         }
     }
     let (commands, exclusive) =
@@ -151,6 +174,7 @@ pub(crate) fn serve(
         retired_acks: retired.to_vec(),
         clean: reported.unknown.is_empty(),
         exclusive,
+        missing,
     })
 }
 
