@@ -51,7 +51,8 @@ fn host_checked_by(answer: Result<&str, &str>) -> Host {
 
 /// Asserts that an agent given `--container-bin` reports `runtime=container` and
 /// `exec=container` beside `os` and `arch` (and `per-job` with `start-fence`, the job keying
-/// and its fence, and `held-beat`, which lets the server hold a quiet heartbeat's reply), that a host with two GPUs and no toolkit hook
+/// and its fence, `held-beat`, which lets the server hold a quiet heartbeat's reply, and
+/// `dispatch-poll`, by which the agent polls for its starts), that a host with two GPUs and no toolkit hook
 /// reports no `gpu-toolkit`, and that the capability the server names in its refusal is
 /// printed. It catches an agent that does not say how it runs jobs (every pool with a mode
 /// would refuse it), one that claims a toolkit it never checked, and one that does not
@@ -75,6 +76,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "per-job": "true",
             "start-fence": "true",
             "held-beat": "true",
+            "dispatch-poll": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";
@@ -107,6 +109,33 @@ fn the_hello_reports_the_per_job_capability() {
     );
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     let said = "--capability: per-job is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+}
+
+/// Asserts that the hello of an agent that runs jobs reports `dispatch-poll` as `true`, that
+/// the hello of the previous release (the wire's fixture) does not, and that an operator cannot
+/// give it with `--capability` (status 2 naming the key, nothing sent). It catches an agent
+/// that polls for its starts without saying so (a server never offers the poll to it), and one
+/// an operator could make claim the poll though it runs no poller (the server would leave its
+/// starts out of the heartbeat's reply and the host would never start a job).
+#[test]
+fn the_hello_reports_dispatch_poll_and_an_operator_cannot_give_it() {
+    let (_, hello) = container_hello("contract-dispatch-poll", &[], &linux_host());
+    assert_eq!(hello["capabilities"]["dispatch-poll"], "true");
+    let previous: Value = serde_json::from_str(include_str!(
+        "../../../../js-agent-wire/tests/fixtures/v0.1.135/hello.json"
+    ))
+    .unwrap();
+    assert!(previous["capabilities"].get("dispatch-poll").is_none());
+    let (ran, sent, _) = run_scripted(
+        &["--capability", "dispatch-poll=true"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: dispatch-poll is detected and cannot be set";
     assert!(ran.err.contains(said), "{}", ran.err);
     assert!(sent.borrow().is_empty());
 }
