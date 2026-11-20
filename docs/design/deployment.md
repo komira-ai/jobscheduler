@@ -142,6 +142,10 @@ job tables and the bindings in a database, with conditional writes (the `js-stat
   would take the host's lease from anyone holding a join token (K10). The binding file and the job store are always
   copied and restored together, with the server stopped.
 
+Superseded for a Postgres store: any number of servers serve one store with no leader, no election and no fence, every decision a row
+lock, a conditional write or a due-time claim. The design, and what of it is built, is [multi-instance.md](multi-instance.md); the
+(b) and single-writer paragraphs below describe the file store.
+
 **(b) later.** An external store is the answer when one of these is true: the service must survive the loss of a node or a zone without a
 minutes-long outage; the table is large enough that the rewrite shows (K29); or a second replica is wanted. It needs the `js-state` trait
 and a database backend (D13), a leader for the tick, the reaper and the scaler (below), and a fence so that a paused old leader's writes
