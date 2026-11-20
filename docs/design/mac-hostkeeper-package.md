@@ -92,7 +92,9 @@ as owner), any script, and another identifier or version.
   /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch
   --native-helper-socket /var/run/js-mac-session/socket`; it runs as root, with `RunAtLoad` false, `ThrottleInterval`
   30, `ExitTimeOut` 120 and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
-  conditional on `/etc/js-agent/token` (`PathState`). It names no `--server` and no `--pool`: a host's own values (the
+  conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
+  host certificate, which the flags file names (`--host-cert`, `--host-key`), and has no token; the agent then reads no
+  `--token-file`. It names no `--server` and no `--pool`: a host's own values (the
   lease server and its CA, the pool, `--native-network` and its pf flags) are in `/etc/js-agent/flags` and
   `/etc/js-agent/ca.pem`, which this package does not list. They are the group's: a config package per service and
   host group (`js-agent-config-mac-build`, listed in the group after `js-agent`) installs them, as
@@ -111,7 +113,7 @@ as owner), any script, and another identifier or version.
   its own.
 - The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session"]` (the agent first, so the
   observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
-  "update-hook"]`, and the same `minHostkeeper` and `installerBounds` as the Linux entry. The hook's `params` are
+  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, and the same `minHostkeeper` and `installerBounds` as the Linux entry. The hook's `params` are
   `unit` `js-agent`, `helper_unit` `js-agent.session`, `state_dir` `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
   `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `runtime` `native`, and the cordon, drain and step
@@ -168,8 +170,9 @@ as owner), any script, and another identifier or version.
 
 Done by an operator as root, never by a package, and before the group's first `set-desired`:
 
-- `/etc/js-agent/token` (root's, 0600: a secret, which no package carries) and `/etc/js-agent/instance` (it differs by
-  host); the flags file and the CA come from the group's config package, above;
+- `/etc/js-agent/instance` (it differs by host); the flags file and the CA come from the group's config package, above,
+  and the flags file names hostkeeper's host certificate and key (`/var/lib/hostkeeper/identity/host.crt` and
+  `host.key`), so a Mac needs no `/etc/js-agent/token`;
 - the agent's state and scratch roots on different devices (the agent refuses a state root on the scratch root's
   device);
 - the helper's socket group `_jsagent` (the plist names it), and the pool, which `js-mac-session` makes users in
@@ -215,9 +218,12 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - A `js-agent` whose cdhash is not the one in the helper's plist (a binary changed after the build): the helper refuses
   the agent, and `build` refuses the package first, because it compares the cdhash of the staged binary with the one in
   the plist.
-- No token on the Mac: the agent does not start, so the hook's `verify` (the agent runs and is registered) fails;
-  hostkeeper runs the hook's `rollback` and, a first install having no previous version, removes the package. A later
-  order installs it again once the host setup is done.
+- No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
+  defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
+  later. A later order installs it once the host setup is done.
+- No state or scratch root (`/var/db/js-agent/{state,scratch}`): `prepare` of a first install goes on (an agent never
+  installed has none), and the agent does not start, so `cutover` fails `start_failed`; hostkeeper runs the hook's
+  `rollback` and, a first install having no previous version, removes the package.
 - No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for

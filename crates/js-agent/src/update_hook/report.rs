@@ -56,11 +56,15 @@ pub enum Reason {
     JoinTokenMissing,
     /// The unit changes, and its cgroup still holds a process after the stop.
     UnitNotEmpty,
+    /// `drain`'s deadline passed with work on the host: the host was put back (exit 75).
+    DrainDeadline,
+    /// The hold file of the agent's state root could not be read, written or ended.
+    HoldFailed,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 21] = [
+    pub const ALL: [Reason; 23] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -82,6 +86,8 @@ impl Reason {
         Reason::NoPreviousRelease,
         Reason::JoinTokenMissing,
         Reason::UnitNotEmpty,
+        Reason::DrainDeadline,
+        Reason::HoldFailed,
     ];
 
     /// The token in the JSON.
@@ -109,6 +115,8 @@ impl Reason {
             Reason::NoPreviousRelease => "no_previous_release",
             Reason::JoinTokenMissing => "join_token_missing",
             Reason::UnitNotEmpty => "unit_not_empty",
+            Reason::DrainDeadline => "drain_deadline",
+            Reason::HoldFailed => "hold_failed",
         }
     }
 }

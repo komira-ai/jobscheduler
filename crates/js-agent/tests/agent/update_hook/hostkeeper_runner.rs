@@ -2,7 +2,7 @@
 //! hostkeeper's daemon runs one: its step runner (`hostkeeper_steps::StepRunner`) writes the
 //! params file and orders the steps, and its systemd launcher builds each step's `systemd-run`
 //! line and keeps what the hook printed. All of it is hostkeeper's code at the revision the
-//! workspace pins (v0.1.194). The order's inputs are the hook's bounds and params of the native
+//! workspace pins. The order's inputs are the hook's bounds and params of the native
 //! manifest that `cargo xtask release desired` writes into the targets ([`BOUNDS`] and
 //! [`DECLARED_PARAMS`]); the package's files are in the version directory below `tree/`, as the
 //! native installer keeps them, and the hook is the `/usr/bin/js-agent` of that tree (the pinned
@@ -247,6 +247,9 @@ impl Host {
             staged: Staged::seal(dir).unwrap(),
             previous: None,
             hook_binary: PathBuf::from(HOOK),
+            // The manifest's hook command is the program alone: every step is run bare.
+            hook_args: Vec::new(),
+            previous_hook: None,
             bounds: BOUNDS,
             declared_params: Params::parse_declared(DECLARED_PARAMS).unwrap(),
             min_updater_protocol: None,
@@ -334,7 +337,7 @@ verify_deadline_secs = 9000
 verify_timeout_secs = 615
 "#;
 
-/// A first install: hostkeeper 0.1.194 orders js-agent on a host where nothing has made
+/// A first install: hostkeeper's pinned runner orders js-agent on a host where nothing has made
 /// the hook's state directory. The params file it writes is read by the hook as it is, `prepare`
 /// makes the state directory (root's alone, mode 0700) and the update runs to the end:
 /// `prepare`, `cutover`, `verify` and `cleanup`, each in the bare form hostkeeper runs a step
@@ -406,14 +409,44 @@ fn a_first_install_through_hostkeepers_runner_makes_the_state_directory_and_succ
     );
 }
 
-/// A state directory whose parent is not there either cannot be made: the hook makes only the
-/// last directory of the path. `prepare` fails `state_invalid` and so does the `rollback` after
-/// it, and the host halts; each step says why on standard error, which hostkeeper keeps as the
-/// hook's log, in the same words as the detail of its last line. Catches a refusal that reaches
-/// the journal as a bare reason token, and a hook that makes the directories above its own.
+/// A state directory whose parent is not there either is made with its parent: a Mac's
+/// `/Library/Application Support/js-agent/update`, where the package has not put
+/// `js-agent` yet when `prepare` runs. The first install succeeds; the parent is mode 0755 and
+/// the state directory 0700. Catches a hook that makes only the last directory of the path and
+/// halts the first install `state_invalid` on the missing parent.
+#[test]
+fn a_first_install_whose_state_directory_has_no_parent_makes_both_and_succeeds() {
+    let host = Host::with_state_dir("hk-runner-no-parent", "gone/js-agent-update");
+    let dir = host.unpack();
+    let order = host.order(&dir);
+
+    let finished = host.run(&order);
+
+    assert_eq!(
+        (finished.verdict, finished.reason),
+        (
+            Verdict::Succeeded {
+                promotion_pending: false
+            },
+            None
+        ),
+        "{:#?}",
+        host.ran()
+    );
+    let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&host.root().join("gone")), 0o755);
+    assert_eq!(mode(&host.state_dir), 0o700);
+}
+
+/// A state directory that cannot be made (a file is where its parent would be) halts:
+/// `prepare` fails `state_invalid` and so does the `rollback` after it; each step says why on
+/// standard error, which hostkeeper keeps as the hook's log, in the same words as the detail of
+/// its last line. Catches a refusal that reaches the journal as a bare reason token, and a hook
+/// that makes over what is in its path.
 #[test]
 fn a_state_directory_that_cannot_be_made_halts_and_each_step_says_why_on_standard_error() {
-    let host = Host::with_state_dir("hk-runner-no-parent", "gone/js-agent-update");
+    let host = Host::with_state_dir("hk-runner-file-parent", "gone/js-agent-update");
+    fs::write(host.root().join("gone"), "not a directory\n").unwrap();
     let dir = host.unpack();
     let order = host.order(&dir);
 
@@ -425,7 +458,7 @@ fn a_state_directory_that_cannot_be_made_halts_and_each_step_says_why_on_standar
         "{:#?}",
         host.ran()
     );
-    let detail = "<root>/gone: No such file or directory (os error 2)";
+    let detail = "above the state directory, <root>/gone: is not a directory";
     let said: Vec<(Option<i32>, String, serde_json::Value)> = host
         .ran()
         .iter()
@@ -460,8 +493,9 @@ fn a_state_directory_that_cannot_be_made_halts_and_each_step_says_why_on_standar
             ),
         ]
     );
-    assert!(
-        !host.root().join("gone").exists(),
-        "nothing above the state directory is made"
+    assert_eq!(
+        fs::read_to_string(host.root().join("gone")).unwrap(),
+        "not a directory\n",
+        "what is in the path is left as it was"
     );
 }

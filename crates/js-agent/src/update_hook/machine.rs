@@ -26,6 +26,12 @@
 //! it is past its commit still says `reversible: false` (the record is read without the lock).
 //! The state root is looked up once per step: the lease's credential and the step's taint and
 //! owed checks come from the same [`StateRoot`].
+//!
+//! `drain` and `resume` ([`run_maintain`]) hold the state root to the same rule, and find the
+//! hold file there: one that is not private ends either `state_invalid`. One that is not there
+//! ends `drain` `state_invalid` (no agent runs to be drained) and `resume` with success and
+//! nothing changed (no agent ever ran, so none was held). Their host facts are read on the
+//! machine as the agent reads them when it starts ([`host_facts`]).
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -41,7 +47,7 @@ use js_update_hook::peek;
 
 use crate::cli::{Cli, parse_agent_flags, resolve_host_id};
 use crate::facts::{
-    CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
+    CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 use crate::flags_file::{self, FileFacts};
 use crate::lifecycle::StateRoot;
@@ -50,12 +56,12 @@ use crate::own_host::{
 };
 use crate::{CredentialFile, Login};
 
-use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
-use super::step::{self, Env, TokenFacts, TokenFn};
+use super::ports::{Facts, NoGate, Ports, StateView, SystemClock, SystemLink};
+use super::step::{self, Env, MaintainEnv, TokenFacts, TokenFn};
 use super::{
-    ConnectParams, DirStat, Done, FLAGS_FILE_KEY, Invocation, Manager, Outcome, Params,
-    PlatformUnits, PortError, Reason, Report, STATE_ROOT_KEY, Step, StopRunner, TOKEN_FILE_KEY,
-    fd_stat,
+    ConnectParams, DirStat, Done, DrainParams, FLAGS_FILE_KEY, Invocation, MaintainInvocation,
+    MaintenanceStep, Manager, Outcome, Params, PlatformUnits, PortError, Reason, Report,
+    STATE_ROOT_KEY, Step, StopRunner, TOKEN_FILE_KEY, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -476,16 +482,16 @@ impl StateView for Root {
 pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     stop: &'a StopRunner,
-    token_file: &'a Path,
+    flags_file: &'a Path,
 ) -> PlatformUnits<'a> {
-    launch_units(commands, stop, token_file)
+    launch_units(commands, stop, flags_file)
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn platform_units<'a>(
     commands: &'a SystemCommands,
     _stop: &'a StopRunner,
-    _token_file: &'a Path,
+    _flags_file: &'a Path,
 ) -> PlatformUnits<'a> {
     super::SystemUnits::new(commands)
 }
@@ -499,18 +505,19 @@ const MANAGER: Manager = if cfg!(target_os = "macos") {
 
 /// The units of a Mac: `launchctl` through `commands`, `bootout` through `stop` (it waits for the
 /// agent to exit, which its plist allows [`AGENT_EXIT_TIMEOUT_SECS`], so `stop` must wait
-/// longer: see [`StopRunner`]), and a kickstart held back while the agent's token file (the
-/// `token_file` param, which the plist's `KeepAlive` also waits on) is absent. Built for the
+/// longer: see [`StopRunner`]), and a kickstart held back while the host's flags file (the
+/// `flags_file` param, which the plist's `KeepAlive` also waits on) is absent. The gate is the
+/// flags file, not the join token: a Mac that joins by its host certificate has no token. Built for the
 /// tests on every platform, so that a test off a Mac checks the wiring the Mac's hook runs with.
 #[cfg(any(target_os = "macos", test))]
 fn launch_units<'a>(
     commands: &'a dyn CommandRunner,
     stop: &'a dyn CommandRunner,
-    token_file: &'a Path,
+    flags_file: &'a Path,
 ) -> super::LaunchUnits<'a> {
     super::LaunchUnits::new(commands)
         .with_stop_runner(stop)
-        .with_gate(token_file)
+        .with_gate(flags_file)
 }
 
 /// Runs the step the invocation names on this machine.
@@ -522,7 +529,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     };
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
-    let units = platform_units(&commands, &stop, &params.token_file);
+    let units = platform_units(&commands, &stop, &params.flags_file);
     // A flags file that cannot be read names no host certificate: a first install then goes by
     // the join token as before, and a step that asks the lease server ends with the reason.
     let flags = read_flags(&params.flags_file, machine);
@@ -563,6 +570,129 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     }
 }
 
+/// The host facts that work on the host besides an update can change, as the agent reads them
+/// when it starts (the CPUs, the memory, the GPUs, and on a Mac the major version of macOS),
+/// as one line: equal facts give equal lines.
+///
+/// # Errors
+/// A fact cannot be read (see [`detect`]).
+pub fn host_facts(
+    platform: &Platform,
+    runner: &dyn CommandRunner,
+    files: &dyn FileReader,
+) -> Result<String, String> {
+    let detected = detect(platform, runner, files)?;
+    let (os_version, _) = crate::os_version::report(platform, runner);
+    let devices: Vec<String> = detected
+        .gpus
+        .devices
+        .iter()
+        .map(|gpu| {
+            format!(
+                "{}:{}:{}:{}",
+                gpu.index, gpu.uuid, gpu.model, gpu.memory_bytes
+            )
+        })
+        .collect();
+    Ok(format!(
+        "os={} arch={} os_version={} cpu_millis={} memory_bytes={} gpus={} gpu_class={} gpu_devices={}",
+        platform.os,
+        platform.arch,
+        os_version.unwrap_or_default(),
+        detected.cpu_millis,
+        detected.memory_bytes,
+        detected.gpus.count,
+        detected.gpus.class.unwrap_or_default(),
+        devices.join(",")
+    ))
+}
+
+/// [`Facts`] on a machine: [`host_facts`] of `platform`, read through `runner` and `files`.
+pub struct SystemFacts<'a> {
+    /// The platform the facts are read on.
+    pub platform: Platform,
+    /// Starts the programs the facts are read with.
+    pub runner: &'a dyn CommandRunner,
+    /// Reads the files the facts are read from.
+    pub files: &'a dyn FileReader,
+}
+
+impl Facts for SystemFacts<'_> {
+    fn read(&self) -> Result<String, String> {
+        host_facts(&self.platform, self.runner, self.files)
+    }
+}
+
+/// A maintenance step refused for its state root: `state_invalid`, with nothing changed.
+fn invalid_root(detail: String) -> Done {
+    Done {
+        outcome: Outcome::Failure,
+        report: Report::failure(Reason::StateInvalid, detail),
+    }
+}
+
+/// Runs the maintenance step the invocation names on this machine: the lease server the host's
+/// flags file names, the hold file of the agent's state root, the platform's unit manager and
+/// the machine's host facts.
+#[must_use]
+pub fn run_maintain(
+    invocation: &MaintainInvocation,
+    params: &DrainParams,
+    machine: &Machine<'_>,
+) -> Done {
+    let state = match find_root(Some(&params.state_root)) {
+        Ok(state) => state,
+        Err(why) => return invalid_root(why.to_string()),
+    };
+    let Some(root) = state.open() else {
+        return match invocation.step {
+            MaintenanceStep::Drain => invalid_root(format!(
+                "{STATE_ROOT_KEY}: {} is not there, and a drain needs the state root of the agent that runs",
+                params.state_root.display()
+            )),
+            // No agent ever ran here, so none was held: nothing to put back.
+            MaintenanceStep::Resume => Done {
+                outcome: Outcome::Success,
+                report: Report::default(),
+            },
+        };
+    };
+    let commands = SystemCommands::default();
+    let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
+    let units = platform_units(&commands, &stop, &params.token_file);
+    let lease = match connect_with(
+        &params.flags_file,
+        &params.state_root,
+        &params.token_file,
+        machine,
+    ) {
+        Ok(connect) => MachineLease::with_root(
+            &connect,
+            Ok(&state),
+            machine.own_host_id,
+            RequestLimit::DEFAULT,
+        ),
+        Err(why) => MachineLease::failed(why),
+    };
+    let facts = SystemFacts {
+        platform: Platform::current(),
+        runner: &commands,
+        files: &SystemFiles,
+    };
+    let env = MaintainEnv {
+        lease: &lease,
+        holds: root,
+        units: &units,
+        facts: &facts,
+        clock: &SystemClock,
+        gate: &NoGate,
+    };
+    match invocation.step {
+        MaintenanceStep::Drain => step::drain(&env, params),
+        MaintenanceStep::Resume => step::resume(&env, params),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -600,17 +730,17 @@ mod tests {
     /// Asserts the wiring of a Mac's units: a read, an `is_active` and the start of a running
     /// service each print the service through the commands; a stop prints it through the
     /// commands and boots it out through the stop runner, which runs nothing else; and the
-    /// kickstart waits on the agent's token file. It catches units built without the stop
+    /// kickstart waits on the host's flags file. It catches units built without the stop
     /// runner or the gate, or with the two runners swapped or one runner for both.
     #[test]
-    fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_token()
+    fn the_units_of_a_mac_read_through_the_commands_stop_through_the_stop_runner_and_wait_on_the_flags()
      {
         let label = "com.example.agent";
-        let token = Path::new("/etc/example/token");
+        let flags = Path::new("/etc/example/flags");
         let print = format!("{LAUNCHCTL} print system/{label}");
         let commands = Noting::default();
         let stop = Noting::default();
-        let units = launch_units(&commands, &stop, token);
+        let units = launch_units(&commands, &stop, flags);
         assert_eq!(units.show(label).unwrap().active, "active");
         assert!(units.is_active(label).unwrap());
         units.start(label).unwrap();
@@ -621,7 +751,7 @@ mod tests {
             [format!("{LAUNCHCTL} bootout system/{label}")]
         );
         assert_eq!(*commands.seen.borrow(), vec![print; 4]);
-        assert_eq!(units.gate(), Some(token));
+        assert_eq!(units.gate(), Some(flags));
         // The fake's other entry, which the units never use, answers as `run` does.
         let other = Noting::default();
         assert_eq!(

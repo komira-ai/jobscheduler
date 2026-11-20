@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use js_update_hook::{
-    CUTOVER_MARGIN_SECS, Class, CommandRunner, MAX_REASON_LEN, Outcome, POLL_SECS,
+    CUTOVER_MARGIN_SECS, Class, CommandRunner, MAX_REASON_LEN, MaintenanceStep, Outcome, POLL_SECS,
     PREPARE_MARGIN_SECS, ROLLBACK_MARGIN_SECS, ReasonToken, Report, START_WAIT_SECS, Step, Streams,
     UnknownStep, VERIFY_MARGIN_SECS, is_plain, is_reason_token,
 };
@@ -258,6 +258,40 @@ fn every_step_word_parses_back_to_its_step() {
     for step in Step::ALL {
         assert_eq!(step.name().parse::<Step>(), Ok(step));
     }
+}
+
+/// The two maintenance steps are `drain` and `resume`, in that order: each displays its word
+/// and parses back from it, and neither word is a step of an update. It catches a maintenance
+/// word misspelt, or one that an update hook would take for one of its five steps.
+#[test]
+fn the_maintenance_steps_are_drain_and_resume_and_no_update_step_takes_their_words() {
+    assert_eq!(
+        MaintenanceStep::ALL,
+        [MaintenanceStep::Drain, MaintenanceStep::Resume]
+    );
+    for (step, word) in MaintenanceStep::ALL.into_iter().zip(["drain", "resume"]) {
+        assert_eq!(step.name(), word);
+        assert_eq!(step.to_string(), word);
+        assert_eq!(word.parse::<MaintenanceStep>(), Ok(step));
+        assert_eq!(word.parse::<Step>(), Err(UnknownStep(word.to_owned())));
+    }
+}
+
+/// A word that is not a maintenance step is refused with its text quoted, an update step's
+/// word among them. It catches a parse that takes `prepare` or a near word for a drain.
+#[test]
+fn an_unknown_maintenance_word_is_refused_with_its_text_quoted() {
+    for word in ["prepare", "drained", "Resume", ""] {
+        let err = word.parse::<MaintenanceStep>().unwrap_err();
+        assert_eq!(err, UnknownStep(word.to_owned()));
+    }
+    assert_eq!(
+        "undrain"
+            .parse::<MaintenanceStep>()
+            .unwrap_err()
+            .to_string(),
+        r#"unknown step "undrain""#
+    );
 }
 
 /// A word that is not a step is refused and the message quotes it.
