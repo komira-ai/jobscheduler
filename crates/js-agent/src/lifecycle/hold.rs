@@ -5,8 +5,9 @@
 //! # The file
 //!
 //! One file, [`HOLD_FILE`], in the state root (`--state-root`), beside the taint marker. Its
-//! presence is the hold: the agent reads nothing in it, and the text [`write`] puts there is
-//! for a person. While it is there the agent
+//! presence is the hold: the agent reads nothing in it. [`HOLD_TEXT`] is there for a person,
+//! and the update hook's `drain` puts a note of its own after it, which `resume` reads back.
+//! While it is there the agent
 //!
 //! - starts no run and no job: every `Start` and every job start is answered
 //!   `failed_to_start` with the code `host-held` (`js_agent_wire::refusal::HOST_HELD`),
@@ -17,8 +18,12 @@
 //!   process has made the host known to the server, and renews the cordon before it lapses
 //!   (see the `hold_cordon` module of the crate).
 //!
-//! The agent never writes or removes the file: the step that drains the host writes it with
-//! [`write`], and only the step that puts the host back removes it.
+//! The agent never writes or removes the file: the step that drains the host writes it
+//! ([`write_text`], with a note of its own after [`HOLD_TEXT`]), and only the step that puts
+//! the host back removes it. That step first renames it to [`HOLD_RESUME_FILE`]
+//! ([`release`]), which the agent does not read, so the agent stops renewing the cordon before
+//! the step lifts it, and removes that file once the cordon is lifted ([`released`]): a step
+//! killed between the two finds the renamed file and lifts the cordon again.
 //!
 //! # Its form
 //!
@@ -47,6 +52,10 @@ pub const HOLD_FILE: &str = "hold";
 
 /// The temporary file the hold file is written through, renamed over [`HOLD_FILE`].
 pub const HOLD_TEMP_FILE: &str = "hold.tmp";
+
+/// The name the step that puts the host back renames the hold file to before it lifts the
+/// cordon, and removes once it has ([`release`], [`released`]).
+pub const HOLD_RESUME_FILE: &str = "hold.resume";
 
 /// The text [`write`] puts in the hold file, for a person who finds it.
 pub const HOLD_TEXT: &str =
@@ -133,6 +142,17 @@ pub fn read_own(root: &StateRoot) -> Hold {
 /// Any step failed. The hold file is then what it was before, or the new one: never a part
 /// of it.
 pub fn write(root: &StateRoot) -> io::Result<()> {
+    write_text(root, HOLD_TEXT)
+}
+
+/// [`write`] with `text` in the file in place of [`HOLD_TEXT`]: the step that drains the host
+/// puts its own note after that text.
+///
+/// # Errors
+///
+/// Any step failed. The hold file is then what it was before, or the new one: never a part
+/// of it.
+pub fn write_text(root: &StateRoot, text: &str) -> io::Result<()> {
     let temp = root.path().join(HOLD_TEMP_FILE);
     OpenOptions::new()
         .write(true)
@@ -142,9 +162,62 @@ pub fn write(root: &StateRoot) -> io::Result<()> {
         .open(&temp)
         .and_then(|mut file| {
             file.set_permissions(Permissions::from_mode(0o600))
-                .and_then(|()| file.write_all(HOLD_TEXT.as_bytes()))
+                .and_then(|()| file.write_all(text.as_bytes()))
                 .and_then(|()| file.sync_all())
         })
         .and_then(|()| fs::rename(&temp, root.path().join(HOLD_FILE)))
-        .and_then(|()| File::open(root.path()).and_then(|dir| dir.sync_all()))
+        .and_then(|()| sync(root))
+}
+
+/// The text of the file `name` of `root` (the hold file, or the one [`release`] renamed it
+/// to), looked at without following a link; `None` when there is none.
+///
+/// # Errors
+///
+/// Something is there that is not a regular file, or it cannot be looked at or read.
+pub fn read_text(root: &StateRoot, name: &str) -> io::Result<Option<String>> {
+    let path = root.path().join(name);
+    let meta = match fs::symlink_metadata(&path) {
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(None),
+        meta => meta?,
+    };
+    if !meta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is not a regular file (a link is not accepted)"),
+        ));
+    }
+    fs::read_to_string(&path).map(Some)
+}
+
+/// Renames the hold file of `root` to [`HOLD_RESUME_FILE`] and syncs the directory: the agent
+/// no longer reads the host as held, and the step that puts it back lifts the cordon next.
+///
+/// # Errors
+///
+/// There is no hold file, or the rename or the sync failed.
+pub fn release(root: &StateRoot) -> io::Result<()> {
+    fs::rename(
+        root.path().join(HOLD_FILE),
+        root.path().join(HOLD_RESUME_FILE),
+    )
+    .and_then(|()| sync(root))
+}
+
+/// Removes [`HOLD_RESUME_FILE`] of `root`, if it is there, and syncs the directory: the hold
+/// is over.
+///
+/// # Errors
+///
+/// The file is there and cannot be removed, or the sync failed.
+pub fn released(root: &StateRoot) -> io::Result<()> {
+    match fs::remove_file(root.path().join(HOLD_RESUME_FILE)) {
+        Err(why) if why.kind() != io::ErrorKind::NotFound => Err(why),
+        _ => sync(root),
+    }
+}
+
+/// Syncs the directory of `root`, so a rename or a removal in it survives a power cut.
+fn sync(root: &StateRoot) -> io::Result<()> {
+    File::open(root.path()).and_then(|dir| dir.sync_all())
 }

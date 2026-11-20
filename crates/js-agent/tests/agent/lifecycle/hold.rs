@@ -3,11 +3,15 @@
 //! itself (`hold::read` and `hold::write` over a real state root).
 
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 
-use js_agent::lifecycle::hold::{self, HOLD_FILE, HOLD_TEMP_FILE, HOLD_TEXT, Hold};
+use js_agent::lifecycle::hold::{
+    self, HOLD_FILE, HOLD_RESUME_FILE, HOLD_TEMP_FILE, HOLD_TEXT, Hold,
+};
 use js_agent::lifecycle::{Event, StateRoot};
+use js_agent::update_hook::{HoldState, Holds, PortError};
 use js_agent_wire::{Outcome, refusal};
 
 use super::per_job::{job_start, listing, start};
@@ -317,4 +321,203 @@ fn a_write_that_fails_leaves_no_hold() {
     fs::remove_dir(&path).unwrap();
     fs::write(&path, "not a directory").unwrap();
     assert!(hold::write(&root).is_err());
+}
+
+/// The text of a hold file with a note, for the tests of the text forms.
+const NOTED: &str = "a note of two lines\ncordoned_before=true\n";
+
+/// Asserts that `write_text` writes exactly the text it is given (not `HOLD_TEXT`), with mode
+/// 0600, leaves no temporary file, and replaces a longer text of an earlier hold whole. It
+/// catches a note that is appended to the old text or cut short, and a hold file others can
+/// read.
+#[test]
+fn write_text_writes_the_text_exactly_with_mode_0600() {
+    let dir = Scratch::new("hold-text-write");
+    let (root, path) = root_in(&dir, "state");
+    let file = path.join(HOLD_FILE);
+    hold::write_text(&root, NOTED).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), NOTED);
+    assert_eq!(mode_of(&file), 0o600);
+    assert_eq!(hold::read_own(&root), Hold::Held);
+    hold::write_text(&root, "short\n").unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "short\n");
+    assert_eq!(mode_of(&file), 0o600);
+    let listed: Vec<String> = fs::read_dir(&path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(listed, [HOLD_FILE]);
+}
+
+/// Asserts that `read_text` answers `None` for a file that is not there, and the file's whole
+/// text for a regular one, by either name (the hold file, or the one `release` renamed it to).
+/// It catches an absent file read as an error, and a text that is cut or changed.
+#[test]
+fn read_text_finds_none_where_nothing_is_and_the_text_where_a_file_is() {
+    let dir = Scratch::new("hold-text-read");
+    let (root, path) = root_in(&dir, "state");
+    assert_eq!(hold::read_text(&root, HOLD_FILE).unwrap(), None);
+    assert_eq!(hold::read_text(&root, HOLD_RESUME_FILE).unwrap(), None);
+    hold::write_text(&root, NOTED).unwrap();
+    assert_eq!(
+        hold::read_text(&root, HOLD_FILE).unwrap().as_deref(),
+        Some(NOTED)
+    );
+    assert_eq!(hold::read_text(&root, HOLD_RESUME_FILE).unwrap(), None);
+    fs::write(path.join(HOLD_RESUME_FILE), "renamed\n").unwrap();
+    assert_eq!(
+        hold::read_text(&root, HOLD_RESUME_FILE).unwrap().as_deref(),
+        Some("renamed\n")
+    );
+}
+
+/// Asserts that `read_text` refuses a directory and a link under the name it is asked for
+/// with `InvalidData` and the exact text naming that name, a link even when it points at a
+/// good file; that bytes that are not text are `InvalidData` too; and that a state root that
+/// cannot be looked into (its directory replaced by a file) is an error that is not
+/// "not found". It catches a link followed, a directory read as absent, and a failed look
+/// taken for no hold.
+#[test]
+fn read_text_refuses_what_is_not_a_regular_file_and_what_cannot_be_looked_at() {
+    let dir = Scratch::new("hold-text-refused");
+    let (root, path) = root_in(&dir, "dir");
+    fs::create_dir(path.join(HOLD_FILE)).unwrap();
+    let err = hold::read_text(&root, HOLD_FILE).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert_eq!(
+        err.to_string(),
+        "hold is not a regular file (a link is not accepted)"
+    );
+
+    let (root, path) = root_in(&dir, "linked");
+    let target = dir.write("target", HOLD_TEXT, 0o600);
+    symlink(target, path.join(HOLD_RESUME_FILE)).unwrap();
+    let err = hold::read_text(&root, HOLD_RESUME_FILE).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert_eq!(
+        err.to_string(),
+        "hold.resume is not a regular file (a link is not accepted)"
+    );
+
+    let (root, path) = root_in(&dir, "bytes");
+    fs::write(path.join(HOLD_FILE), [0xff, 0xfe, 0x00]).unwrap();
+    let err = hold::read_text(&root, HOLD_FILE).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+    let (root, path) = root_in(&dir, "gone");
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, "not a directory").unwrap();
+    let err = hold::read_text(&root, HOLD_FILE).unwrap_err();
+    assert_ne!(err.kind(), ErrorKind::NotFound);
+}
+
+/// Asserts that `release` renames the hold file to `hold.resume` with its text: the hold file
+/// is gone, the agent's own reading of the hold is `Absent` (it stops holding the host), and
+/// the renamed file is the text of the hold; and that with no hold file it fails `NotFound`
+/// and makes no `hold.resume`. It catches a release that copies, one that leaves the agent
+/// holding the host, and one that succeeds with nothing to release.
+#[test]
+fn release_renames_the_hold_file_and_fails_without_one() {
+    let dir = Scratch::new("hold-text-release");
+    let (root, path) = root_in(&dir, "state");
+    hold::write_text(&root, NOTED).unwrap();
+    assert_eq!(hold::read_own(&root), Hold::Held);
+    hold::release(&root).unwrap();
+    assert_eq!(hold::read_own(&root), Hold::Absent);
+    assert!(!path.join(HOLD_FILE).exists());
+    assert_eq!(
+        fs::read_to_string(path.join(HOLD_RESUME_FILE)).unwrap(),
+        NOTED
+    );
+    assert_eq!(mode_of(&path.join(HOLD_RESUME_FILE)), 0o600);
+
+    let (root, path) = root_in(&dir, "empty");
+    let err = hold::release(&root).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::NotFound);
+    assert!(!path.join(HOLD_RESUME_FILE).exists());
+}
+
+/// Asserts that `released` removes `hold.resume` and leaves the hold file alone, is no error
+/// when there is none, and fails when it cannot remove it (a non-empty directory is there).
+/// It catches a release that removes the hold file, and one that reports success over a file
+/// it left.
+#[test]
+fn released_removes_the_renamed_file_and_fails_when_it_cannot() {
+    let dir = Scratch::new("hold-text-released");
+    let (root, path) = root_in(&dir, "state");
+    hold::write_text(&root, NOTED).unwrap();
+    fs::write(path.join(HOLD_RESUME_FILE), "renamed\n").unwrap();
+    hold::released(&root).unwrap();
+    assert!(!path.join(HOLD_RESUME_FILE).exists());
+    assert_eq!(fs::read_to_string(path.join(HOLD_FILE)).unwrap(), NOTED);
+    hold::released(&root).unwrap();
+
+    let (root, path) = root_in(&dir, "blocked");
+    let blocker = path.join(HOLD_RESUME_FILE);
+    fs::create_dir(&blocker).unwrap();
+    fs::write(blocker.join("inner"), "x").unwrap();
+    let err = hold::released(&root).unwrap_err();
+    assert_ne!(err.kind(), ErrorKind::NotFound);
+    assert!(blocker.join("inner").exists());
+}
+
+/// Asserts what the state root says of the hold to the steps: `Free` with neither file,
+/// `Held(text)` with the hold file (whatever `hold.resume` holds beside it), and
+/// `Releasing(text)` with only the renamed file; and that `hold` writes the text, `release`
+/// renames it and `released` removes the renamed file, through the trait. It catches a state
+/// that reads the renamed file before the hold file, and a trait that does not reach the file.
+#[test]
+fn the_state_root_tells_the_steps_free_held_and_releasing() {
+    let dir = Scratch::new("hold-port-states");
+    let (root, path) = root_in(&dir, "state");
+    assert_eq!(root.state().unwrap(), HoldState::Free);
+    root.hold(NOTED).unwrap();
+    assert_eq!(root.state().unwrap(), HoldState::Held(NOTED.to_owned()));
+    assert_eq!(fs::read_to_string(path.join(HOLD_FILE)).unwrap(), NOTED);
+    fs::write(path.join(HOLD_RESUME_FILE), "older\n").unwrap();
+    assert_eq!(root.state().unwrap(), HoldState::Held(NOTED.to_owned()));
+    fs::remove_file(path.join(HOLD_RESUME_FILE)).unwrap();
+    root.release().unwrap();
+    assert!(!path.join(HOLD_FILE).exists());
+    assert_eq!(
+        root.state().unwrap(),
+        HoldState::Releasing(NOTED.to_owned())
+    );
+    root.released().unwrap();
+    assert_eq!(root.state().unwrap(), HoldState::Free);
+    assert!(fs::read_dir(&path).unwrap().next().is_none());
+}
+
+/// Asserts that every call of the state root's `Holds` that fails is a `PortError::Io`: a
+/// directory under either name (with the exact text), a release with no hold file, a removal
+/// of a renamed file that cannot be removed, and a write into a state root whose directory
+/// became a file. It catches an error of the file system told as a command's or lost.
+#[test]
+fn the_errors_of_the_state_roots_holds_are_io_errors() {
+    let dir = Scratch::new("hold-port-errors");
+    let (root, path) = root_in(&dir, "state");
+    fs::create_dir(path.join(HOLD_FILE)).unwrap();
+    assert_eq!(
+        root.state(),
+        Err(PortError::Io(
+            "hold is not a regular file (a link is not accepted)".to_owned()
+        ))
+    );
+    fs::remove_dir(path.join(HOLD_FILE)).unwrap();
+    fs::create_dir(path.join(HOLD_RESUME_FILE)).unwrap();
+    assert_eq!(
+        root.state(),
+        Err(PortError::Io(
+            "hold.resume is not a regular file (a link is not accepted)".to_owned()
+        ))
+    );
+    fs::write(path.join(HOLD_RESUME_FILE).join("inner"), "x").unwrap();
+    assert!(matches!(root.released(), Err(PortError::Io(_))));
+    assert!(matches!(root.release(), Err(PortError::Io(_))));
+
+    let (root, path) = root_in(&dir, "gone");
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, "not a directory").unwrap();
+    assert!(matches!(root.hold(NOTED), Err(PortError::Io(_))));
+    assert!(matches!(root.state(), Err(PortError::Io(_))));
 }

@@ -26,6 +26,12 @@
 //! it is past its commit still says `reversible: false` (the record is read without the lock).
 //! The state root is looked up once per step: the lease's credential and the step's taint and
 //! owed checks come from the same [`StateRoot`].
+//!
+//! `drain` and `resume` ([`run_maintain`]) hold the state root to the same rule, and find the
+//! hold file there: one that is not private ends either `state_invalid`. One that is not there
+//! ends `drain` `state_invalid` (no agent runs to be drained) and `resume` with success and
+//! nothing changed (no agent ever ran, so none was held). Their host facts are read on the
+//! machine as the agent reads them when it starts ([`host_facts`]).
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -41,7 +47,7 @@ use js_update_hook::peek;
 
 use crate::cli::{Cli, parse_agent_flags, resolve_host_id};
 use crate::facts::{
-    CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, host_id, machine_id,
+    CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 use crate::flags_file::{self, FileFacts};
 use crate::lifecycle::StateRoot;
@@ -50,12 +56,12 @@ use crate::own_host::{
 };
 use crate::{CredentialFile, Login};
 
-use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
-use super::step::{self, Env, TokenFacts, TokenFn};
+use super::ports::{Facts, NoGate, Ports, StateView, SystemClock, SystemLink};
+use super::step::{self, Env, MaintainEnv, TokenFacts, TokenFn};
 use super::{
-    ConnectParams, DirStat, Done, FLAGS_FILE_KEY, Invocation, Manager, Outcome, Params,
-    PlatformUnits, PortError, Reason, Report, STATE_ROOT_KEY, Step, StopRunner, TOKEN_FILE_KEY,
-    fd_stat,
+    ConnectParams, DirStat, Done, DrainParams, FLAGS_FILE_KEY, Invocation, MaintainInvocation,
+    MaintenanceStep, Manager, Outcome, Params, PlatformUnits, PortError, Reason, Report,
+    STATE_ROOT_KEY, Step, StopRunner, TOKEN_FILE_KEY, fd_stat,
 };
 
 /// How a directory of the state directory's path is looked at (see [`fd_stat`]).
@@ -561,6 +567,129 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         Step::Verify => step::verify(&env, params),
         Step::Rollback => step::rollback(&env, params),
         Step::Cleanup => step::cleanup(&env, params),
+    }
+}
+
+/// The host facts that work on the host besides an update can change, as the agent reads them
+/// when it starts (the CPUs, the memory, the GPUs, and on a Mac the major version of macOS),
+/// as one line: equal facts give equal lines.
+///
+/// # Errors
+/// A fact cannot be read (see [`detect`]).
+pub fn host_facts(
+    platform: &Platform,
+    runner: &dyn CommandRunner,
+    files: &dyn FileReader,
+) -> Result<String, String> {
+    let detected = detect(platform, runner, files)?;
+    let (os_version, _) = crate::os_version::report(platform, runner);
+    let devices: Vec<String> = detected
+        .gpus
+        .devices
+        .iter()
+        .map(|gpu| {
+            format!(
+                "{}:{}:{}:{}",
+                gpu.index, gpu.uuid, gpu.model, gpu.memory_bytes
+            )
+        })
+        .collect();
+    Ok(format!(
+        "os={} arch={} os_version={} cpu_millis={} memory_bytes={} gpus={} gpu_class={} gpu_devices={}",
+        platform.os,
+        platform.arch,
+        os_version.unwrap_or_default(),
+        detected.cpu_millis,
+        detected.memory_bytes,
+        detected.gpus.count,
+        detected.gpus.class.unwrap_or_default(),
+        devices.join(",")
+    ))
+}
+
+/// [`Facts`] on a machine: [`host_facts`] of `platform`, read through `runner` and `files`.
+pub struct SystemFacts<'a> {
+    /// The platform the facts are read on.
+    pub platform: Platform,
+    /// Starts the programs the facts are read with.
+    pub runner: &'a dyn CommandRunner,
+    /// Reads the files the facts are read from.
+    pub files: &'a dyn FileReader,
+}
+
+impl Facts for SystemFacts<'_> {
+    fn read(&self) -> Result<String, String> {
+        host_facts(&self.platform, self.runner, self.files)
+    }
+}
+
+/// A maintenance step refused for its state root: `state_invalid`, with nothing changed.
+fn invalid_root(detail: String) -> Done {
+    Done {
+        outcome: Outcome::Failure,
+        report: Report::failure(Reason::StateInvalid, detail),
+    }
+}
+
+/// Runs the maintenance step the invocation names on this machine: the lease server the host's
+/// flags file names, the hold file of the agent's state root, the platform's unit manager and
+/// the machine's host facts.
+#[must_use]
+pub fn run_maintain(
+    invocation: &MaintainInvocation,
+    params: &DrainParams,
+    machine: &Machine<'_>,
+) -> Done {
+    let state = match find_root(Some(&params.state_root)) {
+        Ok(state) => state,
+        Err(why) => return invalid_root(why.to_string()),
+    };
+    let Some(root) = state.open() else {
+        return match invocation.step {
+            MaintenanceStep::Drain => invalid_root(format!(
+                "{STATE_ROOT_KEY}: {} is not there, and a drain needs the state root of the agent that runs",
+                params.state_root.display()
+            )),
+            // No agent ever ran here, so none was held: nothing to put back.
+            MaintenanceStep::Resume => Done {
+                outcome: Outcome::Success,
+                report: Report::default(),
+            },
+        };
+    };
+    let commands = SystemCommands::default();
+    let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
+    let units = platform_units(&commands, &stop, &params.token_file);
+    let lease = match connect_with(
+        &params.flags_file,
+        &params.state_root,
+        &params.token_file,
+        machine,
+    ) {
+        Ok(connect) => MachineLease::with_root(
+            &connect,
+            Ok(&state),
+            machine.own_host_id,
+            RequestLimit::DEFAULT,
+        ),
+        Err(why) => MachineLease::failed(why),
+    };
+    let facts = SystemFacts {
+        platform: Platform::current(),
+        runner: &commands,
+        files: &SystemFiles,
+    };
+    let env = MaintainEnv {
+        lease: &lease,
+        holds: root,
+        units: &units,
+        facts: &facts,
+        clock: &SystemClock,
+        gate: &NoGate,
+    };
+    match invocation.step {
+        MaintenanceStep::Drain => step::drain(&env, params),
+        MaintenanceStep::Resume => step::resume(&env, params),
     }
 }
 

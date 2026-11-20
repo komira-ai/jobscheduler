@@ -236,8 +236,15 @@ fn the_program_answers_the_config_verb_before_it_installs_the_signal_handlers() 
         panic!("the update hook's step must not run")
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code =
-        js_agent::update_hook::run(&words(&[]), &mut out, &mut err, &UpdateHost { step: &step });
+    let code = js_agent::update_hook::run(
+        &words(&[]),
+        &mut out,
+        &mut err,
+        &UpdateHost {
+            step: &step,
+            maintain: &no_maintain,
+        },
+    );
     assert_eq!(format!("{code:?}"), status(1));
     assert_eq!(
         last_line(&String::from_utf8(out).unwrap())["detail"],
@@ -284,7 +291,10 @@ fn the_program_runs_a_config_step_on_the_machine() {
         &words(&["prepare", "/staged", "--params", &file]),
         &mut out,
         &mut err,
-        &UpdateHost { step: &step },
+        &UpdateHost {
+            step: &step,
+            maintain: &no_maintain,
+        },
     );
     let line = last_line(&String::from_utf8(out).unwrap());
     if rustix::process::geteuid().is_root() {
@@ -330,4 +340,12 @@ fn the_binary_prints_one_valid_last_line_and_the_status_of_the_step() {
         last_line(&String::from_utf8(refused.stdout).unwrap())["reason"],
         "bad_params"
     );
+}
+
+/// The maintenance body of an update host whose test runs no maintenance step.
+fn no_maintain(
+    _: &js_agent::update_hook::MaintainInvocation,
+    _: &js_agent::update_hook::DrainParams,
+) -> js_agent::update_hook::Done {
+    unreachable!("a config step ran the update hook's maintenance steps")
 }

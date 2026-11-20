@@ -182,7 +182,7 @@ pub(super) fn refused(result: Result<String, Error>) -> Vec<String> {
 pub(super) fn golden() -> String {
     let entry = |digest: &str| {
         format!(
-            "{{\"entries\":[{{\"digest\":\"{digest}\",\"installer\":\"apt\",\"manifest\":{{\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/usr/bin/js-agent\",\"update-hook\"],\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"crun\"}},\"state_dir\":{{\"text\":\"/var/lib/js-agent-update\"}},\"state_root\":{{\"text\":\"/var/lib/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent-crun.service\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent-crun.service\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}]}}"
+            "{{\"entries\":[{{\"digest\":\"{digest}\",\"installer\":\"apt\",\"manifest\":{{\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/usr/bin/js-agent\",\"update-hook\"],\"drain\":\"drain\",\"resume\":\"resume\",\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"crun\"}},\"state_dir\":{{\"text\":\"/var/lib/js-agent-update\"}},\"state_root\":{{\"text\":\"/var/lib/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent-crun.service\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent-crun.service\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}]}}"
         )
     };
     format!(
@@ -805,6 +805,8 @@ fn the_manifest_follows_the_native_entry_contract() {
         manifest["hook"]["command"],
         serde_json::json!(["/usr/bin/js-agent", "update-hook"])
     );
+    assert_eq!(manifest["hook"]["drain"], "drain");
+    assert_eq!(manifest["hook"]["resume"], "resume");
     assert!(manifest["hook"]["timeoutSecs"].get("uninstall").is_none());
     assert!(manifest.get("healthUrl").is_none());
     assert_eq!(
@@ -841,4 +843,19 @@ fn the_targets_hold_only_the_platforms_given() {
         ["linux-arm64"]
     );
     assert_eq!(one["linux-arm64"]["entries"][0]["digest"], ARM64);
+}
+
+/// Asserts that the words the manifest carries as `hook.drain` and `hook.resume` are the names
+/// the hook's own maintenance steps answer to, on both the Linux and the Mac entry. It catches a
+/// manifest that names a word the hook refuses.
+#[test]
+fn the_manifest_names_the_maintenance_steps_by_the_hooks_own_words() {
+    use js_agent::update_hook::MaintenanceStep;
+    let _serial = serial();
+    assert_eq!(manifest::HOOK_DRAIN, MaintenanceStep::Drain.name());
+    assert_eq!(manifest::HOOK_RESUME, MaintenanceStep::Resume.name());
+    for manifest in [manifest::manifest(), manifest::mac_manifest()] {
+        assert_eq!(manifest["hook"]["drain"], MaintenanceStep::Drain.name());
+        assert_eq!(manifest["hook"]["resume"], MaintenanceStep::Resume.name());
+    }
 }
