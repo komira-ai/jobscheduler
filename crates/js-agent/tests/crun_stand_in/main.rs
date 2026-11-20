@@ -33,6 +33,7 @@ mod logs;
 mod node;
 mod open;
 mod pins;
+mod removes;
 mod resume;
 mod runs;
 mod s3_compat;
