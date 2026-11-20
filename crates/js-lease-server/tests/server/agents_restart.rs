@@ -54,11 +54,11 @@ async fn taint(h: &Harness, host: &Session) {
 
 /// Asserts what a restart does to a tainted registered host that runs a job. The job stays
 /// running and is not ended by ticks while the host is not heard; the host reads `awaiting`;
-/// the old session is dead (409 `unknown-host`, and a secret from
-/// before the restart does not open the new session); the agent's hello is admitted, and the
-/// job then lives on the live host and its end, reported by the agent, is accepted. It
+/// the host's row holds the session, so the old session's beat is served and the host is live
+/// again without a hello. The job then lives on the live host and its end,
+/// reported by the agent, is accepted. It
 /// catches a restart that drops the host, one that lets a new job take the awaiting host,
-/// and an old session that survives the process. It runs with the bindings in files and in
+/// and a row that is not read back, so that the old session's beat is refused. It runs with the bindings in files and in
 /// the state store, and catches in the store a restart that loses the host or its session
 /// handling because the binding was not read back.
 #[tokio::test]
@@ -88,14 +88,12 @@ async fn restart_keeps_a_registered_host_as_unknown_until_rehello_in(kept: Kept)
     h.ticks.step().await;
     assert_eq!(job_state(&h, "job-1").await, "JOB_STATE_RUNNING");
 
+    // The host's row is in the job tables, which a restart over the same state keeps: the
+    // restarted server adopts the old session from it at the agent's next beat, so the session
+    // lives across the restart and no hello is needed.
     let heard = beat(&h, &old).await;
-    assert_eq!(heard.status, 409, "{}", heard.body);
-    assert_eq!(heard.json(), json!({ "error": "unknown-host" }));
-    let back = job_host(&h, "burst-1").await;
-    assert_eq!(back.epoch, 1);
-    assert_ne!(back.secret, old.secret);
-    let replayed = beat(&h, &old).await;
-    assert_eq!(replayed.json(), json!({ "error": "session-mismatch" }));
+    assert_eq!(heard.status, 200, "{}", heard.body);
+    let back = old.clone();
     let listed_again = beat_with(&h, &back, &[running("job-1")]).await;
     assert_eq!(commands(&listed_again), (vec![], vec![]), "{listed_again}");
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
@@ -112,10 +110,12 @@ async fn restart_keeps_a_registered_host_as_unknown_until_rehello_in(kept: Kept)
 
 /// Asserts that a tainted registered host keeps its binding across a restart: after it, a
 /// hello for the host from another join token is refused 403 `host-bound` and the host
-/// awaits its own agent, whose hello (the token the host was admitted with) is then
-/// admitted. It catches a restart that forgets the binding, so that the first hello from
-/// any holder of a join token takes the host. It runs with the bindings in files and in the
-/// state store, and catches in the store a binding that is not read back at the start.
+/// is read back from the host's row, which the restarted server holds live (another process's
+/// hello is refused `host-live`), and the host's own hello (the token the host was admitted
+/// with, from the same agent process) is then admitted. It catches a restart that forgets the
+/// binding, so that the first hello from any holder of a join token takes the host. It runs
+/// with the bindings in files and in the state store, and catches in the store a binding that
+/// is not read back at the start.
 #[tokio::test]
 async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host() {
     for kept in Kept::BOTH {
@@ -125,7 +125,8 @@ async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host() {
 
 async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept: Kept) {
     let first = start_job_hosts_in("agents_restart_binding", kept).await;
-    let host = job_host(&first, "burst-1").await;
+    let hello = job_hello("burst-1");
+    let host = job_agent(&first, &hello).await;
     taint(&first, &host).await;
 
     let h = restarted_job_hosts(first).await;
@@ -135,9 +136,17 @@ async fn restart_keeps_the_binding_so_another_token_cannot_take_the_host_in(kept
     let intruder = post(&h, "/v1/agent/hello", Some(JOIN_B), &job_hello("burst-1")).await;
     assert_eq!(intruder.status, 403, "{}", intruder.body);
     assert_eq!(intruder.json(), json!({ "error": "host-bound" }));
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "awaiting");
+    // The hello that was refused still read the host's row, and the restarted server holds the
+    // live session it names.
+    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 
-    let owner = post(&h, "/v1/agent/hello", Some(JOIN), &job_hello("burst-1")).await;
+    // A hello of another process over a live row is refused; the same process replaces it.
+    let mut other = job_hello("burst-1");
+    other["agent_process"] = json!("another-process");
+    let other = post(&h, "/v1/agent/hello", Some(JOIN), &other).await;
+    assert_eq!(other.status, 409, "{}", other.body);
+    assert_eq!(other.json(), json!({ "error": "host-live" }));
+    let owner = post(&h, "/v1/agent/hello", Some(JOIN), &hello).await;
     assert_eq!(owner.status, 200, "{}", owner.body);
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 }

@@ -8,6 +8,17 @@
 //! `invalid-*` code, never with the decoder's message, which repeats the text it choked
 //! on.
 //!
+//! # Any server serves any beat
+//!
+//! When the server holds the job tables, a host's session is its store row `node/<host>`
+//! ([`rows`]): the hello writes it, a heartbeat of an epoch this server's registry does not
+//! hold takes the session from it, and every heartbeat is applied to it, guarded by its
+//! (epoch, sequence), before its listing is committed with every write conditional on the
+//! version the beat wrote. So a heartbeat that reaches another server than the hello's is
+//! served there, with no second hello; a beat older than one the row applied, or whose listing
+//! a newer beat overtook, changes nothing more and is answered from the rows, and is not held.
+//! Without the job tables the session is the registry's alone, as before.
+//!
 //! # Jobs keyed by job id
 //!
 //! When the server holds the job tables ([`Agents::jobs`]) and the host reported the hello
@@ -34,7 +45,8 @@
 //!
 //! Before the listing, the heartbeat's `phase`, `exclusive_ready` and `exclusive_refused`
 //! move the placed whole-host job of the host ([`crate::job_whole`]): a ready report starts
-//! it, a refusal fails its prepare, the first listing after a hello restarts it, and a cancel
+//! it, a refusal fails its prepare, the first listing after a hello (the row's flag) restarts
+//! it, and a cancel
 //! ends it once the agent has left `preparing`.
 //!
 //! The listing's changes (a job starting, running or ended, an allocation freed once the

@@ -95,7 +95,9 @@ async fn a_listed_unknown_job_is_told_to_stop() {
     told.sort();
     assert_eq!(stops(&reply), told);
     assert!(starts(&reply).is_empty());
-    assert_eq!(rig.commits(), before);
+    // Catches a beat that writes more or fewer than its two row commits (the beat's, then the
+    // listing's settle) when its listing changes no job.
+    assert_eq!(rig.commits(), before + 2);
     assert!(!rig.agents.listing_clean(&host));
     let ghost = JobId::parse("ghost").unwrap();
     assert_eq!(rig.jobs.get_job(&ghost).unwrap(), None);
@@ -114,7 +116,7 @@ async fn a_listed_unknown_job_is_told_to_stop() {
     assert!(agent.listing().is_empty());
     rig.beat(&agent).await.unwrap();
     assert!(rig.agents.listing_clean(&host));
-    assert_eq!(rig.commits(), before);
+    assert_eq!(rig.commits(), before + 6);
 }
 
 /// A running job is cancelled, ends cancelled and its allocation is freed; when the host
@@ -162,7 +164,9 @@ async fn a_cancelled_job_is_never_revived_by_a_late_listing() {
         (JobState::Cancelled, AllocationStep::Freed)
     );
     assert_eq!(rig.allocation(&id), freed);
-    assert_eq!(rig.commits(), before);
+    // Catches a beat that writes more or fewer than its two row commits (the beat's, then the
+    // listing's settle) when the listing changes no job.
+    assert_eq!(rig.commits(), before + 2);
 }
 
 /// A placed job is cancelled before the host listed it; the host answers the stop with the
@@ -185,7 +189,16 @@ async fn retired_id_answer_cancels_and_frees_in_one_commit() {
     agent.take(&reply);
     assert!(!agent.holds("job-a"));
 
+    // The beat's own row write fails first: 503, and nothing of the job changes.
     rig.store.fail_next();
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+    assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
+    // Let the beat's row write through; the listing's commit fails: 500.
+    rig.store.fail_after(1);
     let refused = rig.beat(&agent).await.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),
@@ -195,7 +208,7 @@ async fn retired_id_answer_cancels_and_frees_in_one_commit() {
 
     let before = rig.commits();
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 1);
+    assert_eq!(rig.commits(), before + 3);
     assert_eq!(
         rig.states(&id),
         (JobState::Cancelled, AllocationStep::Freed)
@@ -205,7 +218,7 @@ async fn retired_id_answer_cancels_and_frees_in_one_commit() {
     assert!(reply.commands.is_empty());
     agent.take(&reply);
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 1);
+    assert_eq!(rig.commits(), before + 5);
     assert!(reply.retired_acks.is_empty());
 }
 
@@ -278,7 +291,8 @@ async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
         (JobState::Placed, AllocationStep::Booked)
     );
     assert_eq!(placing.allocation(&id).host.as_str(), "host-a");
-    assert_eq!(placing.commits(), commits + 1);
+    // The placement's commit plus the beat's two row writes (beat_node, settle_node).
+    assert_eq!(placing.commits(), commits + 3);
     assert_eq!(starts(&first), Vec::new());
     let second = placing.beat(&agent).await.unwrap();
     let started: Vec<String> = starts(&second).into_iter().map(|s| s.job_id).collect();

@@ -139,7 +139,8 @@ pub(crate) struct Rig {
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
     who: Credential,
-    sessions: BTreeMap<String, (u64, String)>,
+    /// The epoch and session each host was given.
+    pub(crate) sessions: BTreeMap<String, (u64, String)>,
     /// The sequence of the rig's last heartbeat: each one the rig sends carries the next, unless
     /// the rig plays an agent that sends none ([`Rig::unsequenced`]).
     seq: Option<std::sync::atomic::AtomicU64>,

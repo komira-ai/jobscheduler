@@ -100,8 +100,8 @@ fn a_job_pass_counts_its_start_failures_its_duration_and_its_failure() {
 }
 
 /// Asserts what a pass over the queued jobs counts: a placement, with the time its job waited
-/// from its submit (40 s on the manual clock, and 2 ms of the store's own clock for the
-/// commit of the submit) in the queue wait histogram; and a placement whose commit fails as a
+/// from its submit (40 s on the manual clock, and 6 ms of the store's own clock for the
+/// commit of the submit and the beat's row writes before the placement) in the queue wait histogram; and a placement whose commit fails as a
 /// failed write, not as a placement. It catches a wait measured from the wrong instant and a
 /// failed placement counted as made.
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn a_placement_counts_its_wait_and_one_that_does_not_commit_a_failed_write
     agent.take(&rig.beat(&agent).await.unwrap());
     let (below, placed, sum_micros) = recorder.queue_wait.read();
     assert_eq!((below[2], below[3]), (("30", 0), ("60", 1)));
-    assert_eq!((placed, sum_micros), (1, 40_002_000));
+    assert_eq!((placed, sum_micros), (1, 40_006_000));
     assert_eq!(recorder.placed.load(Ordering::Relaxed), 1);
     queue(&rig, "not-committed");
     rig.store.fail_next();
@@ -182,7 +182,8 @@ async fn a_heartbeat_counts_a_refused_start_a_lost_job_and_a_listing_that_does_n
     assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 2, 0));
     rig.place("unwritten", "host-b");
     fresh.take(&rig.beat(&fresh).await.unwrap());
-    rig.store.fail_next();
+    // The beat's own row write goes through; the listing's commit is the one that fails.
+    rig.store.fail_after(1);
     assert!(rig.beat(&fresh).await.is_err());
     assert_eq!(counted(&recorder), ([0, 0, 0, 1, 0], 2, 1));
 }

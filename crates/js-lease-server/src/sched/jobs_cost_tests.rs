@@ -1,7 +1,9 @@
 //! What the pass over the queued jobs costs a heartbeat ([`Agents::place_jobs_after_beat`]):
-//! the job table reads it makes and the placement rounds it runs, counted per heartbeat. A
-//! heartbeat that changes nothing the pass depends on reads no job table and runs no round;
-//! one that frees a host reads the queued rows and no other job's, and runs a round only for
+//! the job table reads it makes and the placement rounds it runs, counted per heartbeat. Every
+//! heartbeat writes its host's row, which moves the store's head, so the pass runs after every
+//! beat (the skip of a pass whose tables did not change holds only between beats, for the
+//! tick's pass and a second pass with no beat between); a heartbeat that changes no job reads
+//! the tables once and runs one round; one that frees a host reads the queued rows and no other job's, and runs a round only for
 //! a job that has a host left to try; and each thing a pass depends on brings the next pass
 //! back: a job submitted or cancelled, a host that says hello or goes lost, a write of the
 //! last pass that failed, and what pass 2 told. The tick's pass always runs.
@@ -156,20 +158,31 @@ impl Counted {
     }
 }
 
-/// Asserts that a heartbeat with an unchanged listing, from a host whose state the registry
-/// holds as it was, runs no pass: it reads no job table space and none of the queued jobs'
-/// rows, and runs no placement round. Before, every such heartbeat read every active job and
-/// ran a round for every queued job.
+/// Asserts what a heartbeat with an unchanged listing, from a host whose state the registry
+/// holds as it was, costs: the beat's own row write moved the store's head, so its pass reads
+/// the job tables once (the allocations by host, the queue and the marks) and runs one round,
+/// for the first queued job, and does not read the row of the job running on the other host;
+/// a second pass with no beat between reads no job table, only the node rows for the hosts
+/// whose listing is not clean. It catches a pass that reads tables a beat did not move, or
+/// reads the other host's job, or rereads the job tables when nothing was written since the
+/// last pass.
 #[tokio::test]
-async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round() {
+async fn a_heartbeat_that_changes_no_job_reads_the_tables_once_and_runs_one_round() {
     let settled = Settled::new("cost_quiet").await;
-    for agent in [&settled.a, &settled.b] {
+    for (agent, other) in [(&settled.a, "b-second"), (&settled.b, "a-first")] {
         let (_, counted) = settled.beat(agent).await;
-        assert_eq!(counted.table_scans(), Vec::<&str>::new(), "{counted:?}");
-        for id in &QUEUED[2..] {
-            assert!(!counted.read_job(id), "{id} was read: {counted:?}");
-        }
-        assert_eq!((counted.rounds, counted.skipped), (0, 1), "{counted:?}");
+        assert_eq!(
+            counted.table_scans(),
+            ["idx/alloc/host/", "idx/job/queued/", "mark/"],
+            "{counted:?}"
+        );
+        assert!(!counted.read_job(other), "{other} was read: {counted:?}");
+        assert_eq!((counted.rounds, counted.skipped), (1, 0), "{counted:?}");
+        let pass = async { settled.rig.agents.place_jobs() };
+        let (_, again) = settled.counted(pass).await;
+        assert_eq!(again.table_scans(), Vec::<&str>::new(), "{again:?}");
+        assert_eq!(again.reads, [Read::Scan("node/".to_owned())], "{again:?}");
+        assert_eq!(again.skipped, 0, "{again:?}");
     }
 }
 
@@ -212,21 +225,23 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
     assert_eq!(settled.state("d-fourth"), JobState::Queued);
 }
 
-/// Asserts that the tick's pass runs after a heartbeat's was skipped, running the one round
-/// the first queued job has a host for; and that the pass reads no job table when no write
-/// came since the last pass read them: it uses the rows that pass read. (The tick's job pass,
-/// before it, reads the tables for its own ends.)
+/// Asserts that the tick's pass runs after the beats' (each ran its own after its row write)
+/// and that the pass reads no job table when no write came since the last pass read them: it
+/// uses the rows that pass read, and reads the node rows alone. (The tick's job pass, before
+/// it, reads the tables for its own ends.)
 #[tokio::test]
 async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
     let settled = Settled::new("cost_tick").await;
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
-    assert_eq!(quiet.skipped, 2, "{quiet:?}");
+    // Each beat's row write moved the head, so each beat's pass ran.
+    assert_eq!((quiet.rounds, quiet.skipped), (2, 0), "{quiet:?}");
     let (_, ticked) = settled.counted(async { settled.rig.tick() }).await;
     assert_eq!((ticked.rounds, ticked.skipped), (1, 0), "{ticked:?}");
     let pass = async { settled.rig.agents.place_jobs() };
     let (_, passed) = settled.counted(pass).await;
     assert_eq!((passed.rounds, passed.skipped), (1, 0), "{passed:?}");
-    assert_eq!(passed.reads, [], "{passed:?}");
+    // Only the node rows, which the pass reads for the hosts whose listing is not clean.
+    assert_eq!(passed.reads, [Read::Scan("node/".to_owned())], "{passed:?}");
 }
 
 /// Asserts that a job submitted, or a queued job cancelled, brings back the next heartbeat's
@@ -251,7 +266,8 @@ async fn a_submit_or_a_cancel_brings_the_next_heartbeats_pass_back() {
     );
     assert!(!cancelled.read_job("urgent"), "{cancelled:?}");
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
-    assert_eq!((quiet.rounds, quiet.skipped), (0, 2), "{quiet:?}");
+    // Each beat's own row write moved the head, so each beat's pass ran its one round.
+    assert_eq!((quiet.rounds, quiet.skipped), (2, 0), "{quiet:?}");
 }
 
 /// Asserts that a host that says hello, and a host the registry holds lost, each bring back
@@ -284,16 +300,19 @@ async fn a_failed_placement_or_what_pass_2_told_brings_the_next_heartbeats_pass_
     settled.a.end(&ending, Outcome::Succeeded, Some(0));
     let reply = settled.rig.beat(&settled.a).await.unwrap();
     settled.a.take(&reply);
-    // The beat's own write (the free) commits; the placement after it fails.
-    settled.rig.store.fail_after(1);
+    // The beat's own writes commit (its row, the free, and the listing's settle); the placement
+    // after them fails.
+    settled.rig.store.fail_after(3);
     settled.rig.beat(&settled.a).await.unwrap();
     assert_eq!(settled.state("c-third"), JobState::Queued);
     let (_, again) = settled.beat(&settled.b).await;
     assert_eq!(again.skipped, 0, "{again:?}");
     assert_eq!(settled.state("c-third"), JobState::Placed);
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
+    // Each beat's row write moved the head, so each beat's pass ran (one round each).
     assert_eq!(
-        quiet.skipped, 1,
+        (quiet.rounds, quiet.skipped),
+        (2, 0),
         "the first beat confirms the placement: {quiet:?}"
     );
     let fourth = JobId::parse("d-fourth").unwrap();

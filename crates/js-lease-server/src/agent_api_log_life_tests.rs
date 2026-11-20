@@ -242,8 +242,8 @@ async fn a_heartbeat_never_calls_the_minter() {
 }
 
 /// A server rebuilt on the same store holds no credential: each capable agent's next contact
-/// mints again, a hello (after the old session is refused) and a first beat of a host whose
-/// hello the server holds, and the credential reaches both, the one that reports an old
+/// mints again, a beat of a session the server adopts from the host's row and a first beat of a
+/// host whose hello the server holds, and the credential reaches both, the one that reports an old
 /// expiry and the one that reports `stale` with none. No stored row and no file of the
 /// server holds an access key id, a secret or a session token. Catches a credential that
 /// survives in the store, and a host left without one.
@@ -263,11 +263,17 @@ async fn a_restart_mints_again_for_each_capable_host() {
 
     let later = START_MS + 60_000;
     let (mut again, fresh) = logging_over("logs_restart_after", LONG_GRACE, Some(&rig), later);
-    again.join("host-a", true).await;
+    // host-a's agent keeps the session it was given: the new server adopts it from the host's
+    // row at the first beat (a hello over that live row would be refused `host-live`).
+    again
+        .sessions
+        .insert("host-a".into(), rig.sessions["host-a"].clone());
     // host-b's hello is held by the new registry without the route: its first beat mints.
     again.register_uploading("host-b");
     b.grant = None;
     b.stale = true;
+    // Each first beat only queues a mint and goes on.
+    assert_eq!(again.beat(&a).await.unwrap().log_grant, None);
     let reply_b = again.beat(&b).await.unwrap();
     assert_eq!(reply_b.log_grant, None);
     fresh.settle().await;

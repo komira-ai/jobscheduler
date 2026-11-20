@@ -274,3 +274,7 @@ pub(super) fn settle(jobs: &ServerJobs, row: &NodeRow, clean: bool, missing: BTr
         warn!(%error, %host, "a heartbeat's listing flags could not be written to its host's row");
     }
 }
+
+#[cfg(test)]
+#[path = "../agent_api_rows_tests.rs"]
+mod tests;
