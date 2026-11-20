@@ -970,6 +970,10 @@ pub(crate) mod peer_rig;
 mod job_tests;
 
 #[cfg(test)]
+#[path = "agent_api_rows_tests.rs"]
+pub(crate) mod rows_tests;
+
+#[cfg(test)]
 #[path = "agent_api_job_cases.rs"]
 mod job_cases;
 
