@@ -12,11 +12,11 @@ use std::sync::mpsc::channel;
 use js_agent_wire::{JobMount, Layer, MountMode, refusal};
 use js_testkit::dir::TestDir;
 
-use super::pool::Poll;
-use super::pool::THREADS;
 use super::tests::{GUARD, Mounts, Paths, host_layer, mount, owners, scratch, until};
 use super::{CHECK_MS, Fs, FsError, FsSettings, LOOKUP_MS};
 use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal};
+use crate::pool::Poll;
+use crate::pool::THREADS;
 
 /// The file systems of a test: the mounts in `dir`, the roots `data` (read-write) and `ro`.
 fn open(dir: &TestDir, paths: Paths) -> (Fs, Arc<Mounts>) {
