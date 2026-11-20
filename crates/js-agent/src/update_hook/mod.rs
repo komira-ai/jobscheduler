@@ -4,11 +4,22 @@
 //! ```text
 //! js-agent update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
 //! js-agent <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
+//! js-agent update-hook <drain|resume> --params <file>
+//! js-agent <drain|resume> --params <file>
 //! ```
 //!
 //! hostkeeper runs the update steps in the second form and the steps it adds in the first, so
-//! the hook takes both ([`is_hook_word`] routes the program to it). `uninstall` is refused:
-//! the package declares no uninstall bound.
+//! the hook takes both, for every step ([`is_hook_word`] routes the program to it). `uninstall`
+//! is refused: the package declares no uninstall bound.
+//!
+//! `drain` and `resume` are the steps of a maintenance run (hostkeeper's maintenance-updates
+//! design, 5.2): the package manifest names them (`hook.drain`, `hook.resume`), and hostkeeper
+//! runs `drain` before work on the host that is not an update (an OS update, a reboot) and
+//! `resume` after it. `drain` writes the hold file of the agent's state root, cordons the host
+//! and returns once it is idle; `resume` restarts the agent if the host facts changed, ends the
+//! hold and lifts the cordon (see [`step::drain`] and [`step::resume`]). Their params file is
+//! the manifest's table with the updater's maintenance keys ([`DrainParams`]), and they keep no
+//! record.
 //!
 //! The updater reads two things: the exit status and the last line of standard output, a JSON
 //! object ([`Report`]). Exit 0 is success, 1 failure, 75 deferred (nothing irreversible
@@ -21,7 +32,7 @@
 //! the agent's flags are parsed and before any signal handler is installed: a hook is a
 //! short-lived root process of the updater, not an agent.
 //!
-//! The five steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
+//! The steps have their bodies in [`step`], over the ports. [`Host::system`] runs them over
 //! the machine's: the unit manager, the release link (read, never written: hostkeeper points it
 //! at the staged release before `cutover` and back at the previous one before `rollback`), the
 //! lease server's own-host routes and the agent's state root (see [`machine`](Machine)). What the
@@ -43,6 +54,7 @@
 
 mod args;
 pub mod config;
+mod drain_params;
 mod launch_units;
 mod machine;
 pub mod params;
@@ -61,9 +73,14 @@ use std::process::ExitCode;
 
 pub use js_update_hook::Outcome;
 
-pub use args::{ArgsError, Invocation, Step, VERB, is_hook_word};
+pub use args::{
+    ArgsError, Invocation, MaintainInvocation, MaintenanceStep, Request, Step, VERB, is_hook_word,
+};
+pub use drain_params::{DRAIN_DEADLINE_KEY, DrainParams};
 pub use launch_units::{BOOTOUT_MARGIN, LAUNCHCTL, LaunchUnits, SETTLE_READS, StopRunner};
-pub use machine::{Machine, MachineLease, StatFn, own_host_id, run_step};
+pub use machine::{
+    Machine, MachineLease, StatFn, SystemFacts, host_facts, own_host_id, run_maintain, run_step,
+};
 pub use params::{
     ARTIFACT_DIGEST_KEY, CLEANUP_TIMEOUT_KEY, CORDON_LEASE_KEY, CORDON_MAX_KEY,
     CUTOVER_TIMEOUT_KEY, ConnectParams, DEFER_RETRY_KEY, DRAIN_WAIT_KEY, FLAGS_FILE_KEY,
@@ -74,9 +91,9 @@ pub use params::{
     VERIFY_TIMEOUT_KEY,
 };
 pub use ports::{
-    Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
-    NoGate, PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink, SystemUnits,
-    Uncordoned, UnitState, Units, read_link,
+    Clock, CordonView, Cordoned, Facts, Gate, HoldState, Holds, HostReading, Lease, LeaseError,
+    Link, MAX_CORDON_SECS, NoGate, PortError, Ports, SYSTEMCTL, StateView, SystemClock, SystemLink,
+    SystemUnits, Uncordoned, UnitState, Units, read_link,
 };
 pub use record::{
     Cordon, DirProblem, DirStat, Held, LOCK_FILE, RECORD_FILE, RECORD_MAX, Record, Rollback,
@@ -117,11 +134,18 @@ pub struct Done {
 pub struct Host<'a> {
     /// Runs the step `invocation` names, with the params already read.
     pub step: &'a dyn Fn(&Invocation, &Params) -> Done,
+    /// Runs the maintenance step `invocation` names, with its params already read.
+    pub maintain: &'a dyn Fn(&MaintainInvocation, &DrainParams) -> Done,
 }
 
 /// This machine's step: the real ports.
 fn machine_step(invocation: &Invocation, params: &Params) -> Done {
     run_step(invocation, params, &Machine::system())
+}
+
+/// This machine's maintenance step: the real ports.
+fn machine_maintain(invocation: &MaintainInvocation, params: &DrainParams) -> Done {
+    run_maintain(invocation, params, &Machine::system())
 }
 
 impl Host<'static> {
@@ -130,6 +154,7 @@ impl Host<'static> {
     pub fn system() -> Self {
         Self {
             step: &machine_step,
+            maintain: &machine_maintain,
         }
     }
 }
@@ -161,10 +186,19 @@ impl Refusal {
     }
 }
 
-/// Reads the command line and the params file and runs the step they name: the step, and how it
-/// ended.
-fn step_of(args: &[OsString], host: &Host<'_>) -> Result<(Step, Done), Refusal> {
-    let invocation = Invocation::parse(args.iter().skip(1).cloned()).map_err(Refusal::Args)?;
+/// Reads the command line and the params file and runs the step they name: the step's word,
+/// and how it ended.
+fn step_of(args: &[OsString], host: &Host<'_>) -> Result<(&'static str, Done), Refusal> {
+    let invocation = match Request::parse(args.iter().skip(1).cloned()).map_err(Refusal::Args)? {
+        Request::Update(invocation) => invocation,
+        Request::Maintain(invocation) => {
+            let params = DrainParams::read(&invocation.params).map_err(Refusal::Params)?;
+            return Ok((
+                invocation.step.name(),
+                (host.maintain)(&invocation, &params),
+            ));
+        }
+    };
     let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
     if let Some(given) = invocation
@@ -177,13 +211,13 @@ fn step_of(args: &[OsString], host: &Host<'_>) -> Result<(Step, Done), Refusal> 
             staged: params.staged_release,
         });
     }
-    Ok((invocation.step, (host.step)(&invocation, &params)))
+    Ok((invocation.step.name(), (host.step)(&invocation, &params)))
 }
 
 /// Writes to `err` how `step` ended and why: the reason and the detail of its last line, in the
 /// same words. A success says nothing unless its last line has a detail (a record set aside, a
 /// unit that changes), and then says the detail.
-fn tell(err: &mut dyn Write, step: Step, done: &Done) {
+fn tell(err: &mut dyn Write, step: &str, done: &Done) {
     let ending = match done.outcome {
         Outcome::Success => {
             if let Some(detail) = &done.report.detail {

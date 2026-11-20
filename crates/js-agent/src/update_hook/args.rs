@@ -3,7 +3,12 @@
 //! ```text
 //! js-agent update-hook <step> [<artifact>] --params <file>
 //! js-agent <step> [<artifact>] --params <file>
+//! js-agent update-hook <drain|resume> --params <file>
+//! js-agent <drain|resume> --params <file>
 //! ```
+//!
+//! A step of an update is an [`Invocation`]; `drain` and `resume`, the steps of a maintenance
+//! run, are a [`MaintainInvocation`], and take no artifact. [`Request`] reads either.
 //!
 //! hostkeeper runs the update steps (`prepare`, `cutover`, `verify`, `rollback`, `cleanup`) as
 //! `<executable> <step> ...` and gives the leading arguments of the manifest's `command` only
@@ -16,21 +21,23 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-pub use js_update_hook::Step;
 use js_update_hook::UnknownStep;
+pub use js_update_hook::{MaintenanceStep, Step};
 
 /// The first argument that selects the hook, with the step after it.
 pub const VERB: &str = "update-hook";
 
 /// The step words the updater passes without the verb. `uninstall` is the updater's step for
 /// a service that has a hook to remove it with: this hook has none, and refuses it.
-const BARE_WORDS: [&str; 6] = [
+const BARE_WORDS: [&str; 8] = [
     "prepare",
     "cutover",
     "verify",
     "rollback",
     "cleanup",
     "uninstall",
+    "drain",
+    "resume",
 ];
 
 /// Whether `word`, the first argument after the program name, selects the hook: the verb, a
@@ -46,7 +53,7 @@ pub enum ArgsError {
     /// Nothing follows the verb.
     #[error("no step given")]
     MissingStep,
-    /// The first word is not one of the five steps.
+    /// The first word is not a step of an update or of a maintenance run.
     #[error("unknown step {0:?}")]
     UnknownStep(String),
     /// `prepare` without the staged release directory.
@@ -78,6 +85,75 @@ pub struct Invocation {
     pub params: PathBuf,
 }
 
+/// A maintenance step the updater asked for, with its params file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaintainInvocation {
+    /// `drain` or `resume`.
+    pub step: MaintenanceStep,
+    /// The file of the `[params]` table.
+    pub params: PathBuf,
+}
+
+/// What a command line asks the hook for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// A step of an update.
+    Update(Invocation),
+    /// A step of a maintenance run.
+    Maintain(MaintainInvocation),
+}
+
+impl Request {
+    /// Parses the arguments after the program name: the verb if it is there, then the step,
+    /// which is a maintenance step's word or else read as [`Invocation::parse`] reads it.
+    ///
+    /// # Errors
+    /// [`ArgsError`]: what [`Invocation::parse`] refuses, or for `drain` and `resume` an
+    /// argument besides `--params <file>`, or none.
+    pub fn parse<I>(args: I) -> Result<Request, ArgsError>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
+        let mut words: Vec<OsString> = args.into_iter().collect();
+        let at = usize::from(words.first().is_some_and(|word| word == VERB));
+        let maintenance = words
+            .get(at)
+            .and_then(|word| word.to_str())
+            .and_then(|word| word.parse::<MaintenanceStep>().ok());
+        match maintenance {
+            Some(step) => {
+                let params = params_flag(words.split_off(at + 1), |arg| {
+                    Err(ArgsError::Unexpected(arg))
+                })?;
+                let params = params.ok_or(ArgsError::MissingParams)?;
+                Ok(Request::Maintain(MaintainInvocation { step, params }))
+            }
+            None => Invocation::parse_words(words).map(Request::Update),
+        }
+    }
+}
+
+/// Reads `--params <file>` out of `args`: each other argument is given to `other`, which keeps
+/// it or refuses it.
+fn params_flag(
+    args: Vec<OsString>,
+    mut other: impl FnMut(OsString) -> Result<(), ArgsError>,
+) -> Result<Option<PathBuf>, ArgsError> {
+    let mut args = args.into_iter();
+    let mut params = None;
+    while let Some(arg) = args.next() {
+        if arg == "--params" {
+            let file = args.next().ok_or(ArgsError::MissingParamsFile)?;
+            if params.replace(PathBuf::from(file)).is_some() {
+                return Err(ArgsError::DuplicateParams);
+            }
+        } else {
+            other(arg)?;
+        }
+    }
+    Ok(params)
+}
+
 impl Invocation {
     /// Parses the arguments after the program name: the verb if it is there, then the step.
     ///
@@ -102,19 +178,15 @@ impl Invocation {
             .to_string_lossy()
             .parse()
             .map_err(|UnknownStep(word)| ArgsError::UnknownStep(word))?;
-        let (mut artifact, mut params) = (None, None);
-        while let Some(arg) = args.next() {
-            if arg == "--params" {
-                let file = args.next().ok_or(ArgsError::MissingParamsFile)?;
-                if params.replace(PathBuf::from(file)).is_some() {
-                    return Err(ArgsError::DuplicateParams);
-                }
-            } else if step == Step::Prepare && artifact.is_none() {
+        let mut artifact = None;
+        let params = params_flag(args.collect(), |arg| {
+            if step == Step::Prepare && artifact.is_none() {
                 artifact = Some(PathBuf::from(arg));
+                Ok(())
             } else {
-                return Err(ArgsError::Unexpected(arg));
+                Err(ArgsError::Unexpected(arg))
             }
-        }
+        })?;
         if step == Step::Prepare && artifact.is_none() {
             return Err(ArgsError::MissingArtifact);
         }

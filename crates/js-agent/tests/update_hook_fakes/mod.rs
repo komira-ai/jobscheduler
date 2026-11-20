@@ -7,9 +7,10 @@
 //!   host's cordon, there only while the server holds one) and `state/` (the agent's state
 //!   root).
 //! - `control/`, what the harness must not compare: the clock (`clock`, milliseconds) and the
-//!   count of pauses (`ticks`), the skew of the lease server's clock (`server-skew-ms`) and the
-//!   release links (`link/<name>`), which are the updater's: the hook reads them and never
-//!   writes one, and the updater moves them whatever the hook's lock says.
+//!   count of pauses (`ticks`), the skew of the lease server's clock (`server-skew-ms`), the
+//!   host facts `resume` reads (`facts`, [`FACTS`] when it is not there) and the release links
+//!   (`link/<name>`), which are the updater's: the hook reads them and never writes one, and
+//!   the updater moves them whatever the hook's lock says.
 //!
 //! Every change to `world/` passes the [`Gate`] first; a read, and a call that changes nothing,
 //! does not. Nothing here sleeps: [`Clock::pause`] moves the fake clock on and counts.
@@ -22,8 +23,8 @@ use std::time::Duration;
 
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::{
-    Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
-    Params, PortError, Uncordoned, UnitState, Units, read_link,
+    Clock, CordonView, Cordoned, Facts, Gate, HostReading, Lease, LeaseError, Link,
+    MAX_CORDON_SECS, Params, PortError, Uncordoned, UnitState, Units, read_link,
 };
 use js_agent_wire::Taint;
 use js_update_hook::swap_link;
@@ -38,6 +39,9 @@ pub const START_MS: u64 = 1_000_000;
 /// The runtime a fake hello reports unless a test says otherwise: the execution mode of a
 /// container agent, which is what a real agent's hello names (`ExecMode::name`).
 pub const RUNTIME: &str = "container";
+
+/// The host facts of a world whose `control/facts` is not there.
+pub const FACTS: &str = "os=linux arch=x86_64 cpu_millis=4000";
 
 /// What the server saved of a host with its binding, and a restart keeps.
 #[derive(Default, Serialize, Deserialize)]
@@ -667,6 +671,26 @@ impl Lease for World {
 
     fn host(&self) -> Result<HostReading, LeaseError> {
         self.live()
+    }
+}
+
+impl World {
+    /// The host facts read from now on are `facts` (work on the host changed them).
+    ///
+    /// # Panics
+    /// The file cannot be written.
+    pub fn set_facts(&self, facts: &str) {
+        fs::write(self.control.join("facts"), facts).unwrap();
+    }
+}
+
+impl Facts for World {
+    fn read(&self) -> Result<String, String> {
+        match fs::read_to_string(self.control.join("facts")) {
+            Ok(facts) => Ok(facts),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(FACTS.to_owned()),
+            Err(why) => Err(why.to_string()),
+        }
     }
 }
 
