@@ -277,7 +277,7 @@ fn shared_over(rig: &Rig) -> Shared {
 }
 
 /// Asserts that the first hello with a join token commits the token's use and the host's
-/// binding in one transaction, before the registry is asked: when that commit fails (once,
+/// binding in one transaction, before the registry takes the hello: when that commit fails (once,
 /// by the store's fault hook) the hello is refused 503 `join-token-unsaved`, the store holds
 /// the token unused and no binding, and memory agrees (the token serves no host, the
 /// registry holds nothing); once the fault is gone the same hello is admitted with exactly
@@ -523,13 +523,12 @@ async fn heartbeat_and_host_book_reads_make_no_store_call() {
 }
 
 /// Asserts that hellos racing for one fresh token are taken one at a time and exactly one
-/// is admitted: each runs its seam between the use and the registry with the host writes'
+/// is admitted: each runs its seam between the use and the registry taking it with the host writes'
 /// gate held, the others are refused 403 `join-token-used`, the stored row names the
 /// winner and the store holds the winner's binding alone. The hellos are polled together on
 /// one task, so each that waits for the gate is parked at a known point, and nothing waits
 /// on timing. It catches a hello path that lets a second hello in between the use and the
-/// registry's answer (where its compensation could undo what the other did), and two hosts
-/// registered with one token.
+/// registry taking the hello, and two hosts registered with one token.
 #[tokio::test]
 async fn concurrent_hellos_with_one_token_admit_exactly_one() {
     let rig = rig("concurrent");
@@ -608,7 +607,7 @@ async fn a_pool_token_hello_commits_its_binding_alone_and_none_when_refused() {
 
 /// Asserts that a token that registered its host, presented again after a restart over a
 /// store that no longer holds the host's binding (the tick dropped it once the registry
-/// forgot the host), has the binding committed alone before the registry is asked: a
+/// forgot the host), has the binding committed alone before the registry takes the hello: a
 /// failed commit refuses the hello 503 `join-token-unsaved` with nothing held, and the
 /// hello repeated is admitted with one commit that holds the binding. It catches a binding
 /// taken by the registry with no commit.

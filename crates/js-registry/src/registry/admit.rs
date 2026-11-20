@@ -1,23 +1,64 @@
-//! Admitting a hello: the judge that makes every check, shared by [`Registry::hello`] (which
-//! then records the session) and [`Registry::check_hello`] (which records nothing), so the
-//! two cannot answer differently for one state.
+//! Admitting a hello in two steps: [`Registry::judge_hello`] makes every check and draws the
+//! session secret and changes nothing; [`Registry::take_hello`] records the admission and
+//! cannot refuse. [`Registry::hello`] is the two together.
 
 use super::*;
 
-/// What the judge found of an admissible hello: what the record it makes keeps of the host's
-/// last one.
+/// What the judge found of an admissible hello that does not change before the hello is
+/// recorded.
 struct Judged {
     host: HostId,
     protocol: u32,
     pool: usize,
     claim: Option<Shape>,
-    kept_binding: Option<Binding>,
-    kept_taint: Option<Taint>,
-    kept_cordon: Option<Timestamp>,
-    kept_cordon_holder: Option<CordonHolder>,
-    kept_leaving: Option<marks::Leaving>,
     rebinding: bool,
+}
+
+/// What the registry keeps of a host's last hello, which the record of the next one carries
+/// over. Read from the registry when the record is made, so a taint, a cordon or a mark set
+/// since the judgement is kept.
+struct Kept {
+    binding: Option<Binding>,
+    taint: Option<Taint>,
+    cordon: Option<Timestamp>,
+    cordon_holder: Option<CordonHolder>,
+    leaving: Option<marks::Leaving>,
     prior_epoch: Option<u64>,
+}
+
+impl Kept {
+    /// What `state` keeps of `host`.
+    fn of(state: &State, host: &HostId) -> Self {
+        let known = state.records.get(host);
+        let leaving = match state.ending.contains(host) {
+            true => Some(marks::Leaving::Releasing),
+            false => known.and_then(|record| record.leaving),
+        };
+        Self {
+            binding: known.and_then(|record| record.binding.clone()),
+            taint: known.and_then(|record| record.taint.clone()),
+            cordon: known.and_then(|record| record.cordon),
+            cordon_holder: known.and_then(|record| record.cordon_holder.clone()),
+            leaving,
+            prior_epoch: known.map(|record| record.epoch),
+        }
+    }
+}
+
+/// A hello the registry judged admissible, with the session secret drawn for it
+/// ([`Registry::judge_hello`]), to be recorded by [`Registry::take_hello`], which cannot
+/// refuse it. It holds no lock and changes nothing until it is taken; a caller that drops it
+/// leaves the registry as it was (the secret drawn is simply never used).
+#[derive(Debug)]
+pub struct Admission {
+    hello: Hello,
+    credential: Credential,
+    host: HostId,
+    protocol: u32,
+    pool: usize,
+    claim: Option<Shape>,
+    rebinding: bool,
+    secret: String,
 }
 
 impl Registry {
@@ -44,15 +85,8 @@ impl Registry {
         if known.is_some_and(|record| record.pool.is_some_and(|held| held != pool)) {
             return Err(Refusal::HostListed);
         }
-        let kept_binding = known.and_then(|record| record.binding.clone());
-        let kept_taint = known.and_then(|record| record.taint.clone());
-        let kept_cordon = known.and_then(|record| record.cordon);
-        let kept_cordon_holder = known.and_then(|record| record.cordon_holder.clone());
-        let kept_leaving = known.and_then(|record| record.leaving);
-        let kept_leaving = match state.ending.contains(&host) {
-            true => Some(marks::Leaving::Releasing),
-            false => kept_leaving,
-        };
+        let kept = Kept::of(state, &host);
+        let kept_binding = kept.binding;
         let instance = hello.instance.as_ref();
         let rebinding = rebind
             && kept_binding
@@ -75,7 +109,6 @@ impl Registry {
         if live {
             return Err(Refusal::HostLive);
         }
-        let prior_epoch = known.map(|record| record.epoch);
         let floor = config.shape();
         if let Some(exec) = config.exec() {
             let contract = HostContract::new(exec, floor.resources().gpus() > 0);
@@ -114,7 +147,7 @@ impl Registry {
             .filter(|record| record.pool.unwrap_or(0) == pool)
             .count();
         let room = in_pool < config.max_machines();
-        if ![prior_epoch.is_some(), room].into_iter().any(|ok| ok) {
+        if ![kept.prior_epoch.is_some(), room].into_iter().any(|ok| ok) {
             return Err(Refusal::PoolFull);
         }
         Ok(Judged {
@@ -122,77 +155,90 @@ impl Registry {
             protocol,
             pool,
             claim,
-            kept_binding,
-            kept_taint,
-            kept_cordon,
-            kept_cordon_holder,
-            kept_leaving,
             rebinding,
-            prior_epoch,
         })
     }
 
-    /// Whether [`Registry::hello`] would admit `hello` from `credential`, or, with
-    /// `certified` set, [`Registry::hello_as_certified_host`] would: every check it makes,
-    /// in its order, with its refusals, changing nothing and issuing no secret. A caller
-    /// that records the hello elsewhere first uses it to refuse before it writes anything.
+    /// Judges `hello` from `credential` as [`Registry::hello`] would, or, with `certified`
+    /// set, as [`Registry::hello_as_certified_host`] would: every check it makes, in its
+    /// order, with its refusals, and then the draw of the session secret (the refusal
+    /// `session-unavailable` is given here, when the source of secrets gives none). Changes
+    /// nothing. The admission it returns is recorded by [`Registry::take_hello`], which
+    /// cannot refuse it, so a caller that records the hello elsewhere first judges, writes,
+    /// and takes, and has nothing to undo when the hello is refused.
     ///
-    /// The one refusal it cannot give is `session-unavailable`, which comes of the source of
-    /// secrets when one is asked for. The answer is as of the call; a call in between can
-    /// change what the hello then does.
-    pub fn check_hello(
+    /// # Errors
+    ///
+    /// The [`Refusal`] the hello meets, as of the call.
+    pub fn judge_hello(
         &self,
         hello: &Hello,
         credential: &Credential,
         certified: bool,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Admission, Refusal> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
-        self.judge(hello, credential, certified, (&state, now))
-            .map(|_| ())
-    }
-
-    /// [`Registry::hello`], binding the host to `credential` over another credential's
-    /// binding when `rebind` is set and the host is not live.
-    pub(super) fn admit(
-        &self,
-        hello: &Hello,
-        credential: &Credential,
-        rebind: bool,
-    ) -> Result<Welcome, Refusal> {
-        let now = self.shared.clock.now();
-        let mut state = self.lock_at(now);
-        let judged = self.judge(hello, credential, rebind, (&state, now))?;
-        let Judged {
-            host,
-            protocol,
-            pool,
-            claim,
-            kept_binding,
-            kept_taint,
-            kept_cordon,
-            kept_cordon_holder,
-            kept_leaving,
-            rebinding,
-            prior_epoch,
-        } = judged;
-        let config = self.pool_at(pool);
-        let epoch = prior_epoch.unwrap_or(0).saturating_add(1);
+        let judged = self.judge(hello, credential, certified, (&state, now))?;
         let secret = self
             .shared
             .sessions
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
+        let Judged {
+            host,
+            protocol,
+            pool,
+            claim,
+            rebinding,
+        } = judged;
+        Ok(Admission {
+            hello: hello.clone(),
+            credential: credential.clone(),
+            host,
+            protocol,
+            pool,
+            claim,
+            rebinding,
+            secret,
+        })
+    }
+
+    /// Records the hello `admission` judged ([`Registry::judge_hello`]) and answers it. It
+    /// cannot refuse: it does not judge again, so a hello admitted is recorded even when the
+    /// registry changed since the judgement (the pool filled, or the host went live). What
+    /// the registry keeps of the host's last hello (its binding, taint, cordon and marks)
+    /// is read when the record is made, so what was set in between is kept.
+    ///
+    /// The pool's cap of machines is judged per instance until the rows judge it (G5 of the
+    /// multi-instance design), so a pool that filled between the two calls may hold one more
+    /// host than its cap: no more than two hellos arriving at two instances at once can do
+    /// now.
+    pub fn take_hello(&self, admission: Admission) -> Welcome {
+        let Admission {
+            hello,
+            credential,
+            host,
+            protocol,
+            pool,
+            claim,
+            rebinding,
+            secret,
+        } = admission;
+        let now = self.shared.clock.now();
+        let mut state = self.lock_at(now);
+        let kept = Kept::of(&state, &host);
+        let config = self.pool_at(pool);
+        let epoch = kept.prior_epoch.unwrap_or(0).saturating_add(1);
         config.list_claimed(&mut state.book, host.clone(), claim.as_ref());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),
             Record {
                 pool: Some(pool),
-                binding: Some(match kept_binding {
-                    Some(kept) if !rebinding => kept,
-                    _ => Binding::new(credential.clone(), hello.instance.clone()),
+                binding: Some(match kept.binding {
+                    Some(bound) if !rebinding => bound,
+                    _ => Binding::new(credential, hello.instance.clone()),
                 }),
                 epoch,
                 session: Some(SessionDigest::of(&secret)),
@@ -203,12 +249,12 @@ impl Registry {
                 labels: hello.labels.clone(),
                 held,
                 beats: 0,
-                taint: kept_taint,
-                cordon: kept_cordon,
-                cordon_holder: kept_cordon_holder,
+                taint: kept.taint,
+                cordon: kept.cordon,
+                cordon_holder: kept.cordon_holder,
                 hello_at: Some(now),
                 runtime: hello.capabilities.get(RUNTIME).cloned(),
-                leaving: kept_leaving,
+                leaving: kept.leaving,
                 claim,
                 load: load::Kept::default(),
                 agent_process: hello.agent_process.clone(),
@@ -217,7 +263,7 @@ impl Registry {
         // The placer sees the host as the book lists it.
         let listed = state.book.shape_of(&host).cloned();
         listed.iter().for_each(|shape| self.tell_up(&host, shape));
-        Ok(Welcome {
+        Welcome {
             protocol,
             epoch,
             heartbeat_interval_ms: config.heartbeat_interval_ms(),
@@ -225,6 +271,6 @@ impl Registry {
             pool: config.name().to_string(),
             session: secret,
             host_credential: None,
-        })
+        }
     }
 }

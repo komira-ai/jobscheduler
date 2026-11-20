@@ -96,8 +96,8 @@ pub use load::{BadLease, node_load};
 pub use placer::Placer;
 pub use refusal::{Refusal, ShapeFault};
 pub use registry::{
-    Adopted, Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, NodeSession, NotHeld,
-    OwnHost, Registry, Uncordoned,
+    Admission, Adopted, Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, NodeSession,
+    NotHeld, OwnHost, Registry, Uncordoned,
 };
 pub use session::{OsSessions, SequentialSessions, SessionSource, session_digest};
 pub use whole::requests::{Exclusion, prepare_exclusion};

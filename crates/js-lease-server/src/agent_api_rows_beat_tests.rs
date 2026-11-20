@@ -284,3 +284,38 @@ async fn the_pass_places_on_a_host_whose_row_says_clean_whichever_server_wrote_i
         "the first server reads the flag the second wrote"
     );
 }
+
+/// Asserts that a beat the row has already passed, whose answer from the rows cannot be read,
+/// is 500 `state-write-failed`, logged with the store's error, and writes nothing: the agent
+/// reports again. It catches a passed beat answered as served with an empty reply when the
+/// rows it is answered from could not be read (the agent would drop a start it is owed until
+/// its next beat, and nothing would say why).
+#[tokio::test]
+async fn a_passed_beat_whose_rows_cannot_be_read_is_refused_and_logged() {
+    let world = World::new();
+    let server = world.server("rows_passed_unread", Kind::JOBS);
+    let session = server.join("host-a").await;
+    server.beat(&session, Some(5), Vec::new()).await.unwrap();
+    let lines = crate::api::rig::Lines::default();
+    let capture = crate::agent_api::log_tests::capture(&lines);
+    let commits = world.commits();
+    // The beat reads its host's row (and is found passed), then the rows it is answered from.
+    world.store.fail_read_after(1);
+    let refused = server
+        .beat(&session, Some(5), Vec::new())
+        .await
+        .unwrap_err();
+    drop(capture);
+    assert_eq!(said(&refused), (500, "state-write-failed"));
+    assert_eq!(world.commits(), commits, "a passed beat wrote");
+    let text = lines.take();
+    let said: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("a heartbeat's job listing could not be committed"))
+        .collect();
+    assert_eq!(said.len(), 1, "{text}");
+    assert!(
+        said[0].contains("WARN") && said[0].contains("host-a"),
+        "{text}"
+    );
+}

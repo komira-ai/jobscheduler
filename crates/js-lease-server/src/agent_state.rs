@@ -341,7 +341,7 @@ impl Skew {
 ///
 /// Every write of a row is conditional on `versions`, the version of the row as this server
 /// last read or wrote it. A host with no version is written at [`Cond::Absent`]: it was read
-/// absent, or its version is not known (a binding put back by a compensation); a row that is
+/// absent, or its version is not known (a restore wrote it in a commit of several rows); a row that is
 /// there then refuses the write, and the refusal reads it again, so a version not known costs
 /// a read and overwrites nothing.
 ///
@@ -548,10 +548,9 @@ fn fetch(store: &dyn Store, host: &HostId) -> io::Result<Option<Row>> {
 }
 
 /// One host's binding as a commit is to leave it, worked out before the commit, with the
-/// writes that commit it and the writes that put the binding before it back.
+/// writes that commit it.
 pub(crate) struct Change {
     host: HostId,
-    before: Option<Binding>,
     after: Binding,
     /// What the commit writes: nothing in file mode (the save after it writes the file), and
     /// nothing when the store holds `after` already. The write is conditional on the version
@@ -632,7 +631,7 @@ impl BindingStore {
 
     /// The binding the store holds for `host` now, read by its key, which is also held from
     /// here on as what the store holds, with the version of the row (so a change made after it
-    /// is conditional on that version, and puts back, on undo, what the store held). `None`
+    /// is conditional on that version). `None`
     /// when the store holds none, and in file mode: the file is the one server's, and its
     /// bindings are those read at start.
     ///
@@ -750,21 +749,8 @@ impl BindingStore {
         };
         Change {
             host: host.clone(),
-            before,
             after,
             writes,
-        }
-    }
-
-    /// The writes that put back the binding from before `change`, once its writes are
-    /// committed and held ([`BindingStore::applied`]): a put of the binding the store held
-    /// before, or a delete when it held none, at the version the change's commit wrote, so a
-    /// row another server wrote since is not undone. Empty when the change wrote nothing.
-    pub(crate) fn undo(&self, change: &Change) -> Writes {
-        let written = self.lock();
-        match change.writes.is_empty() {
-            true => Writes::new(),
-            false => vec![written.write(&change.host, change.before.as_ref())],
         }
     }
 
@@ -901,16 +887,6 @@ impl BindingStore {
             written
                 .versions
                 .extend(version.map(|version| (host.clone(), version)));
-        }
-    }
-
-    /// Holds the binding before `change` once its undo is committed. Nothing in file mode.
-    /// The version of the row it left is not known (the undo's revision is not carried back),
-    /// so the next write of the host is made at [`Cond::Absent`] and, if the row is there,
-    /// refused and read again ([`Held`]).
-    pub(crate) fn undone(&self, change: &Change) {
-        if let Keeper::Store(..) = self.keeper {
-            self.lock().hold(&change.host, change.before.as_ref());
         }
     }
 }

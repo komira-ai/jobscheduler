@@ -109,18 +109,16 @@ use js_types::{HostId, Resources, Shape};
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use self::host_cert::{CertifiedHost, admit_hello};
+use self::host_cert::CertifiedHost;
 use crate::admit::{
     reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
 };
-use crate::agent_state::Change;
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::job_whole;
-use crate::join_tokens::Admission;
 use crate::logs::{self, LogGrants};
 use crate::per_job::{self, JobReply};
 use crate::util::blocking;
@@ -241,13 +239,12 @@ async fn hello(
     Ok((headers, welcome).into_response())
 }
 
-/// The hello route. `between` runs after a one-time token was admitted and the binding
-/// committed, and before the registry is asked, under the gate of the host writes
+/// The hello route. `between` runs after the hello was judged, its token's use and binding
+/// committed, and before the registry takes it, under the gate of the host writes
 /// ([`Agents::host_writes`]): no other hello can get in there through the route. Production
-/// passes a function that does nothing; a test passes what it checks there, so nothing
-/// waits on timing. `who` is the credential the registry knows the host by; `one_time` is
-/// the digest of the one-time token or host credential the request carried, when it
-/// carried one.
+/// passes a function that does nothing; a test passes what it checks there, so nothing waits
+/// on timing. `who` is the credential the registry knows the host by; `one_time` is the digest
+/// of the one-time token or host credential the request carried, when it carried one.
 #[cfg(test)]
 async fn serve_hello(
     agents: &Arc<Agents>,
@@ -279,6 +276,8 @@ async fn serve_hello_in(
 ) -> Result<Json<Welcome>, Refused> {
     let (who, one_time, pool, certified) = given;
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
+    // The host id is the first thing checked, as every later step names the host by it.
+    let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
@@ -293,37 +292,32 @@ async fn serve_hello_in(
         warn!(host = %hello.host_id, pool = %hello.pool, "agent hello refused: its token is another pool's");
         return Err(Refused::of(&Refusal::UnknownPool));
     }
-    // Hellos are taken one at a time, from the use of the token to the registry's answer
-    // and the release of a refused one, so no other hello of the host comes in between.
+    // Hellos are taken one at a time, from the judgement to the registry taking the hello, so
+    // no other hello of the host comes in between.
     let gate = agents.host_writes.lock().await;
-    // The binding the registry will hold once it admits the hello. With the store, when the
-    // store does not hold it yet, it is committed before the registry admits the hello: with the
+    // The binding the registry will hold once it takes the hello. With the store, when the
+    // store does not hold it yet, it is committed before the registry takes the hello: with the
     // use of the token in one transaction, or alone for a pool token, and conditional on the row
     // the refresh below read (absent, or at its version), so a binding another server wrote in
     // between refuses the hello and the agent says hello again. A known host's binding is held
     // already, and nothing is written for it.
-    let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     let restored = rows::refresh(agents, &host).await;
     restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
-    // The hello is judged on what the registry holds now, which the rows just refreshed, before
-    // anything is written: a refused hello uses no token and writes no binding, so there is
-    // nothing to undo.
+    // The hello is judged on what the registry holds now, which the rows just refreshed, and
+    // the session secret is drawn, before anything is written: a refused hello uses no token
+    // and writes no binding, and the registry cannot refuse the admission it gives
+    // ([`js_registry::Registry::take_hello`]), so a write that has been made is never undone.
     let judged = agents
         .registry
-        .check_hello(&hello, &who, certified.is_some());
-    judged.map_err(|refusal| refused_hello(&hello, &refusal))?;
+        .judge_hello(&hello, &who, certified.is_some());
+    let admission = judged.map_err(|refusal| refused_hello(&hello, &refusal))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
-    let (fresh_use, issued, revision) =
-        take_hello(agents, one_time.as_ref(), &hello, writes).await?;
+    let (issued, revision) = write_hello(agents, one_time.as_ref(), &hello, writes).await?;
     agents.applied(&change, revision);
     between();
-    let admitting = (certified.is_some(), &hello, &who);
-    let mut welcome = admit_written(agents, admitting, (fresh_use.clone(), &change)).await?;
-    if let Err(refused) = rows::hello_row(agents, &host, &hello, &mut welcome).await {
-        give_back(agents, fresh_use, &hello.host_id, &change).await;
-        return Err(refused);
-    }
+    let mut welcome = agents.registry.take_hello(admission);
+    rows::hello_row(agents, &host, &hello, &mut welcome).await?;
     drop(gate);
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
@@ -354,38 +348,36 @@ fn unread_binding(host: &str, error: &io::Error) -> Refused {
     Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
 }
 
-/// What a hello's token takes once the registry would admit the hello, with `writes` (the
-/// host's binding, with the store, conditional on the version of the row the hello was judged
-/// on) in the same commit: the use that was fresh, to give back if the registry refuses after
-/// all, the host credential issued, and the revision of the commit (the binding's version).
-/// One refusal for every failure, a binding another server wrote since it was read among them
-/// (the agent says hello again, and the next hello reads the row afresh), so that
-/// [`serve_hello`] has no arm that only a failed commit takes: every test binary runs the same
-/// code of it.
+/// What a hello's token takes once the registry has judged the hello admissible, with `writes`
+/// (the host's binding, with the store, conditional on the version of the row the hello was
+/// judged on) in the same commit: the host credential issued, and the revision of the commit
+/// (the binding's version). One refusal for every failure, a binding another server wrote since
+/// it was read among them (the agent says hello again, and the next hello reads the row afresh),
+/// so that [`serve_hello_in`] has no arm that only a failed commit takes: every test binary runs
+/// the same code of it. Nothing is changed in the registry before it succeeds, and nothing
+/// written here is taken back after.
 ///
 /// A one-time token registers the host that names its instance, and only that host
 /// thereafter. The registry has judged the hello already ([`serve_hello_in`] asks it before
-/// anything is taken), so a refused hello uses nothing. The token is consumed before the registry
-/// admits the hello, so that two hellos cannot both pass; a hello the registry then still refuses
-/// (a race in this process, which the host writes' gate keeps to the seam of the route) gives the
-/// use back, and the token stays unused for its instance. A hello that says it keeps a host credential, and registers its host with an
-/// unused token, retires the token in the same step and is answered with the credential:
-/// the token alone opens nothing from then on. When the registry refuses that hello the
-/// credential goes back with the use, since the answer that carries it is not sent. The
+/// anything is taken), so a refused hello uses nothing. The token is consumed before the
+/// registry takes the hello, so that two hellos cannot both pass: of two that race for one
+/// token the second is refused as used, with nothing written for it. A hello that says it keeps
+/// a host credential, and registers its host with an unused token, retires the token in the same
+/// step and is answered with the credential: the token alone opens nothing from then on. The
 /// pool's token commits `writes` alone.
-async fn take_hello(
+async fn write_hello(
     agents: &Arc<Agents>,
     one_time: Option<&Credential>,
     hello: &Hello,
     writes: Writes,
-) -> Result<(Option<Credential>, Option<HostCredential>, Option<Revision>), Refused> {
+) -> Result<(Option<HostCredential>, Option<Revision>), Refused> {
     let Some(presented) = one_time else {
         let committed = agents.commit_hosts(writes).await;
         let revision = committed.map_err(|error| {
             warn!(%error, host = %hello.host_id, "agent hello refused: the binding could not be committed");
             Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
         })?;
-        return Ok((None, None, revision));
+        return Ok((None, revision));
     };
     let instance = hello.instance.clone();
     let host = hello.host_id.clone();
@@ -397,52 +389,7 @@ async fn take_hello(
         warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
         Refused::join(refusal)
     })?;
-    let fresh = (admitted.admission == Admission::Fresh).then(|| presented.clone());
-    Ok((fresh, admitted.issued, revision))
-}
-
-/// The registry's admission of a hello whose token's use and binding are committed. The registry
-/// can still refuse what it judged admissible a moment ago, when something outside the host
-/// writes' gate (the scaler, a test's seam) changed it in between, and then the compensation
-/// ([`give_back`], with the use `fresh_use` and the binding `change`) runs and the refusal is the
-/// answer. Apart from [`serve_hello_in`] so that the route's own lines are the ones every
-/// test binary runs, and only a race reaches the compensation's.
-async fn admit_written(
-    agents: &Arc<Agents>,
-    (certified, hello, who): (bool, &Hello, &Credential),
-    (fresh_use, change): (Option<Credential>, &Change),
-) -> Result<Welcome, Refused> {
-    match admit_hello(agents, certified, hello, who) {
-        Ok(welcome) => Ok(welcome),
-        Err(refusal) => {
-            give_back(agents, fresh_use, &hello.host_id, change).await;
-            Err(refused_hello(hello, &refusal))
-        }
-    }
-}
-
-/// The compensation of a hello the registry refused after [`take_hello`], which only a race
-/// inside this process reaches: [`serve_hello_in`] judged the hello before it wrote anything
-/// ([`js_registry::Registry::check_hello`]), so a hello the registry refuses then was admissible
-/// when it was judged and something changed the registry since. The fresh use of the token,
-/// when there was one, and the host's binding `change` go back in one transaction, the binding
-/// at the version the change's commit wrote. When it fails both stay, as the store holds them.
-/// Apart from [`serve_hello`], so that the route has no arm that only one kind of token takes:
-/// every test binary runs the same code of it.
-async fn give_back(
-    agents: &Arc<Agents>,
-    fresh_use: Option<Credential>,
-    host: &str,
-    change: &Change,
-) {
-    let undo = agents.store.undo(change);
-    let given_back = match fresh_use {
-        Some(presented) => agents.release_join(presented, host.to_owned(), undo).await,
-        None => agents.commit_hosts(undo).await.is_ok(),
-    };
-    if given_back {
-        agents.undone(change);
-    }
+    Ok((admitted.issued, revision))
 }
 
 async fn heartbeat(
@@ -655,55 +602,59 @@ async fn serve_jobs(
         let metrics = placing.meter().sink();
         let context = inputs.context(metrics);
         let (listed, retired) = (&inputs.listed, &inputs.retired);
-        let Some(row) = applied else {
-            // A beat the row did not apply changes nothing and is answered from the rows.
-            let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
-            return (answer.map(|answer| (answer, false)), Vec::new());
+        // A beat the row did not apply changes nothing; its listing is answered as one a newer
+        // beat or hello overtook.
+        let apply = |row: &NodeRow| {
+            // Every write of the listing is conditional on the version of the row this beat
+            // wrote: once a newer beat or hello of the host moved it, the rest of this listing
+            // changes nothing ([`js_jobs::JobStore::guarded`]).
+            let guarded = inputs.jobs.guarded(&inputs.host, row.version);
+            let (jobs, host) = (&guarded, &inputs.host);
+            let first = row.record.state.first_listing_pending;
+            let missed = (!sequenced).then_some(&row.record.state.missing_in_a_row);
+            // The first listing after a hello loses the jobs that ran and are not listed: their
+            // container went with the agent (design section 6.7, step 6). The listing's commit
+            // below then frees their allocations, since the host no longer lists them.
+            let held: BTreeSet<&str> = listed
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .chain(retired.iter().map(String::as_str))
+                .collect();
+            let lost = match first {
+                true => job_loss::lose_unlisted(jobs, host, &held, metrics).map(drop),
+                false => Ok(()),
+            };
+            // A whole-host job the host prepares for is moved before the listing is committed
+            // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
+            // restarts it, and a cancel ends it once the agent has left `preparing`.
+            let beat = job_whole::Beat {
+                host,
+                phase,
+                ready: ready.as_deref(),
+                refused: refused.as_ref(),
+                first,
+                tainted,
+            };
+            let rules = placing.whole_rules();
+            let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
+            let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
+            let whole = lost.and_then(serve);
+            let served = whole.and_then(|taint_changed| {
+                let served = per_job::serve(jobs, &context, listed, retired, inputs.room, missed);
+                served.map(|served| (served, taint_changed))
+            });
+            // Whether the listing was clean is written to the row before the pass, so a host that
+            // lists a job it holds no live allocation for takes no start until it lists only its
+            // own (design section 8, row 37), on whichever server places.
+            if let Ok((served, _)) = &served {
+                rows::settle(&inputs.jobs, row, served.clean, served.missing.clone());
+            }
+            served
         };
-        // Every write of the listing is conditional on the version of the row this beat
-        // wrote: once a newer beat or hello of the host moved it, the rest of this listing
-        // changes nothing ([`js_jobs::JobStore::guarded`]).
-        let guarded = inputs.jobs.guarded(&inputs.host, row.version);
-        let (jobs, host) = (&guarded, &inputs.host);
-        let first = row.record.state.first_listing_pending;
-        let missed = (!sequenced).then_some(&row.record.state.missing_in_a_row);
-        // The first listing after a hello loses the jobs that ran and are not listed: their
-        // container went with the agent (design section 6.7, step 6). The listing's commit
-        // below then frees their allocations, since the host no longer lists them.
-        let held: BTreeSet<&str> = listed
-            .iter()
-            .map(|job| job.job_id.as_str())
-            .chain(retired.iter().map(String::as_str))
-            .collect();
-        let lost = match first {
-            true => job_loss::lose_unlisted(jobs, host, &held, metrics).map(drop),
-            false => Ok(()),
-        };
-        // A whole-host job the host prepares for is moved before the listing is committed
-        // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
-        // restarts it, and a cancel ends it once the agent has left `preparing`.
-        let beat = job_whole::Beat {
-            host,
-            phase,
-            ready: ready.as_deref(),
-            refused: refused.as_ref(),
-            first,
-            tainted,
-        };
-        let rules = placing.whole_rules();
-        let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
-        let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
-        let whole = lost.and_then(serve);
-        let served = whole.and_then(|taint_changed| {
-            let served = per_job::serve(jobs, &context, listed, retired, inputs.room, missed);
-            served.map(|served| (served, taint_changed))
-        });
-        // Whether the listing was clean is written to the row before the pass, so a host that
-        // lists a job it holds no live allocation for takes no start until it lists only its
-        // own (design section 8, row 37), on whichever server places.
-        if let Ok((served, _)) = &served {
-            rows::settle(&inputs.jobs, &row, served.clean, served.missing.clone());
-        }
+        let host = || inputs.host.clone();
+        let served = applied
+            .as_ref()
+            .map_or_else(|| Err(JobStoreError::NodeMoved { host: host() }), apply);
         // A listing a newer beat or hello overtook is answered from the rows as they stand.
         let served = match served {
             Err(JobStoreError::NodeMoved { .. }) => {

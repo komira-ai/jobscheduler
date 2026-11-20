@@ -1,11 +1,11 @@
 //! The hello route with a one-time token, when what a second hello does lands in the seam
-//! of the first, between the token's use and the registry's answer.
+//! of the first, between the token's use and the registry taking the hello.
 //!
 //! Through the route that cannot happen any more: the route takes its hellos one at a time
 //! ([`Agents::host_writes`], see `agent_api_store_tests.rs` for the test of that). These
-//! tests run the second hello's steps in the seam itself, past the route's gate, so the
-//! guards of the join tokens (a use given back only when no hello was admitted again since)
-//! and of the registry are still each held to what they promise on their own.
+//! tests run the second hello's steps in the seam itself, past the route's gate, so what the
+//! join tokens and the registry promise on their own is still held: a hello that was judged
+//! is admitted whatever happened in between, and the token is the host's that used it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,7 +20,7 @@ use serde_json::json;
 
 use super::*;
 use crate::clock::SharedClock;
-use crate::join_tokens::JoinRefusal;
+use crate::join_tokens::{Admission, JoinRefusal};
 
 fn instance() -> InstanceIdentity {
     InstanceIdentity {
@@ -88,16 +88,18 @@ fn agents(name: &str) -> (Arc<Agents>, TestDir) {
     (Arc::new(Agents::over(registry, &shared, &dir)), dir)
 }
 
-/// Of two hellos of one host with one fresh token, the first is admitted fresh, then the
-/// second (admitted again) is accepted by the registry before the first is asked, and the
-/// registry then refuses the first (the host is live). The first hello's release must
-/// leave the token used by that host: the host heartbeats with it and another host id is
-/// refused as used. It catches a release that frees a token whose host the registry
-/// accepted, which would let a second host register with the token. The second hello runs
-/// inside the seam of the first, so the order is fixed and nothing waits on timing.
+/// Of two hellos of one host with one fresh token, the first is judged and uses the token, then
+/// the second (admitted again) is accepted by the registry in the seam, before the registry
+/// takes the first. The first is admitted all the same (the registry does not judge it again, so
+/// it takes the session over, the epoch following the second's) and answered, and the token stays
+/// used by that host: the host heartbeats with it and another host id is refused as used. It
+/// catches a take that refuses the hello a race made inadmissible after its token was used, which
+/// would leave a token consumed for a hello that was not answered, and a token that is freed or
+/// shared. The second hello runs inside the seam of the first, so the order is fixed and nothing
+/// waits on timing.
 #[tokio::test]
-async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered() {
-    let (agents, _dir) = agents("fresh_refused_again_accepted");
+async fn a_judged_hello_is_admitted_though_another_of_the_host_registered_in_between() {
+    let (agents, _dir) = agents("fresh_judged_again_accepted");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
@@ -120,17 +122,17 @@ async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered()
         &second,
     )
     .await;
-    let refused = first.expect_err("the registry refuses the first hello");
-    assert_eq!((refused.status.as_u16(), refused.error), (409, "host-live"));
+    let Json(welcome) = first.expect("the first hello was judged admissible, so it is admitted");
+    assert_eq!(welcome.epoch, 2);
     assert_eq!(agents.joins.serves(&who, "host-a"), Ok(()));
     let other = agents.joins.admit(&who, "host-b", Some(&instance()));
     assert_eq!(other, Err(JoinRefusal::Used));
 }
 
-/// A revoke that lands between the admit and the registry call: the registry still accepts
+/// A revoke that lands between the use and the registry taking the hello: the registry still takes
 /// the hello (the host is registered), but the token is gone, so it is unknown afterwards
 /// (the route answers its heartbeats 401) and serves no host. It catches a hello that
-/// puts a revoked token back, for example by releasing the use as a rewrite of the entry.
+/// puts a revoked token back, for example by writing the use again as a rewrite of the entry.
 #[tokio::test]
 async fn a_revoke_between_admit_and_registry_leaves_the_token_gone() {
     let (agents, _dir) = agents("revoke_between");
@@ -199,30 +201,28 @@ async fn of_two_first_hellos_one_credential_is_made_and_the_token_retired() {
     assert_eq!(rows(&dir), 1);
 }
 
-/// The registry refuses the hello that issued a credential (the host id is bound to another
-/// credential, which a hello in the seam arranges): the answer is the refusal, the token is
-/// unused again, no credential row remains, and a hello of another host with the token is
-/// then given a credential. It catches a refused hello that leaves the token retired for a
-/// credential nobody received, which would strand the instance until its boot time ran out.
+/// The registry refuses the hello that asks for a credential (the host id is bound to another
+/// credential): the answer is the refusal, given before the token is used, so the token is
+/// unused, no credential row exists, and a hello of another host with the token is then given a
+/// credential. It catches a refused hello that leaves the token retired for a credential nobody
+/// received, which would strand the instance until its boot time ran out.
 #[tokio::test]
-async fn a_refused_hello_gives_the_credential_back_with_the_token() {
+async fn a_refused_hello_that_asked_for_a_credential_leaves_the_token_unused() {
     let (agents, dir) = agents("credential_refused");
     let minted = agents
         .joins
         .mint(instance(), Duration::from_secs(600))
         .unwrap();
     let who = Credential::of_token(&minted.token);
-    let rival = || {
-        let hello: Hello = serde_json::from_slice(&body("host-a")).unwrap();
-        let elsewhere = Credential::of_token("another-token");
-        agents.registry.hello(&hello, &elsewhere).unwrap();
-    };
+    let hello: Hello = serde_json::from_slice(&body("host-a")).unwrap();
+    let elsewhere = Credential::of_token("another-token");
+    agents.registry.hello(&hello, &elsewhere).unwrap();
     let first = serve_hello(
         &agents,
         who.clone(),
         Some(who.clone()),
         Ok(asking("host-a")),
-        &rival,
+        &|| (),
     )
     .await;
     let refused = first.expect_err("the registry refuses the first hello");

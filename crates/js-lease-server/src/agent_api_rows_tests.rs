@@ -410,10 +410,10 @@ async fn a_hello_takes_the_epoch_the_store_numbers() {
 
 /// Asserts that a hello whose row cannot be written is refused 503 `state-write-failed`, that
 /// the registry gives its session up (the retried hello is admitted, not refused `host-live`),
-/// that the one-time token's use is given back (the same token admits the retry), and that no
+/// that the one-time token stays the host's (the same token admits the retry), and that no
 /// row is left by the failure. Catches a refused hello that leaves the registry holding a
 /// session no row backs, which makes the agent's retry `host-live` for as long as it beats
-/// nothing, and a token that is spent by a hello that was never served.
+/// nothing, and a retry the token refuses after the failed hello used it.
 #[tokio::test]
 async fn a_hello_whose_row_cannot_be_written_leaves_nothing_held() {
     let world = World::new();

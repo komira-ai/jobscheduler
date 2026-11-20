@@ -75,7 +75,7 @@ pub(crate) struct Agents {
     pub(crate) clock: SharedClock,
     pub(crate) store: BindingStore,
     /// The gate every change of the bindings and of the join tokens' uses goes through, held
-    /// from the change's commit until the registry has taken it (or its undo is committed): a
+    /// from the change's commit until the registry has taken it: a
     /// hello, the taint of a heartbeat, a cordon or its lift, and the save of each tick. So
     /// the server takes its hellos one at a time, and no save reads the registry between a
     /// commit and the change it commits. Held across the store's calls; no other lock is
@@ -511,20 +511,6 @@ impl Agents {
         .await
     }
 
-    /// Gives back the use that [`Agents::admit_join`] made for `host`, and the credential it
-    /// issued, after the registry refused its hello though the hello had been judged admissible
-    /// (a race in this process), with `binding` (the undo of the host's binding, with the store,
-    /// at the version the hello wrote) in the same transaction. True when that was written.
-    pub(crate) async fn release_join(
-        self: &Arc<Self>,
-        who: Credential,
-        host: String,
-        binding: Writes,
-    ) -> bool {
-        let this = Arc::clone(self);
-        blocking(move || this.joins.release_writing(&who, &host, binding)).await
-    }
-
     /// Reads the binding row of `host` before its hello is judged (or its binding is written),
     /// holds it with its version as what the store holds ([`BindingStore::stored`]), and puts
     /// what it holds into the registry ([`taints::take_in`]): the taint or cordon of a host the
@@ -608,11 +594,6 @@ impl Agents {
     /// Holds the binding of `change` as committed at `revision`.
     pub(crate) fn applied(&self, change: &Change, revision: Option<Revision>) {
         self.store.applied(change, revision);
-    }
-
-    /// Holds the binding from before `change`, once its undo is committed.
-    pub(crate) fn undone(&self, change: &Change) {
-        self.store.undone(change);
     }
 
     /// Commits the binding of `host` as `make` changes it, when the registry holds one, and

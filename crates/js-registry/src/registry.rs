@@ -26,6 +26,7 @@ mod view;
 
 use record::Record;
 
+pub use admit::Admission;
 pub use adopt::{Adopted, NodeSession};
 pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
@@ -406,7 +407,8 @@ impl Registry {
     /// adopted: each is answered with a cancel in the host's next heartbeat reply (a
     /// welcome carries no commands).
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
-        self.admit(hello, credential, false)
+        let admission = self.judge_hello(hello, credential, false)?;
+        Ok(self.take_hello(admission))
     }
 
     /// [`Registry::hello`] for a hello authenticated by a host certificate
@@ -421,7 +423,8 @@ impl Registry {
         hello: &Hello,
         credential: &Credential,
     ) -> Result<Welcome, Refusal> {
-        self.admit(hello, credential, true)
+        let admission = self.judge_hello(hello, credential, true)?;
+        Ok(self.take_hello(admission))
     }
 
     /// Records that a host is alive in its session, with the phase it announces. A host
