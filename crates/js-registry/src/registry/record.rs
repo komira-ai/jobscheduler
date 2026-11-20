@@ -51,6 +51,9 @@ pub(super) struct Record {
     pub(super) claim: Option<Shape>,
     /// The load of the host's latest accepted reading, see [`HostView::load`].
     pub(super) load: load::Kept,
+    /// The agent process id of the host's last hello ([`Hello::agent_process`]): a hello
+    /// from the same process is not refused while the host is live.
+    pub(super) agent_process: Option<String>,
 }
 
 impl Record {
@@ -82,6 +85,7 @@ impl Record {
             leaving: None,
             claim: None,
             load: load::Kept::default(),
+            agent_process: None,
         }
     }
 

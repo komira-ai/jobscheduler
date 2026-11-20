@@ -9,6 +9,7 @@ use js_types::Shape;
 pub fn hello(host: &str, shape: &Shape) -> Hello {
     let resources = shape.resources();
     Hello {
+        agent_process: None,
         protocol: ProtocolRange { min: 1, max: 1 },
         host_id: host.into(),
         pool: "pool".into(),

@@ -21,12 +21,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Hello, InstanceIdentity, Taint};
 use js_elastic::HostName;
-use js_registry::{Binding, Credential, HostState, OsSessions, Registry};
+use js_registry::{Binding, Credential, OsSessions, Registry};
+use js_state::Revision;
 use js_types::{HostId, ProviderId};
 use tracing::{error, info, warn};
 
@@ -75,7 +76,7 @@ pub(crate) struct Agents {
     pub(crate) clock: SharedClock,
     pub(crate) store: BindingStore,
     /// The gate every change of the bindings and of the join tokens' uses goes through, held
-    /// from the change's commit until the registry has taken it (or its undo is committed): a
+    /// from the change's commit until the registry has taken it: a
     /// hello, the taint of a heartbeat, a cordon or its lift, and the save of each tick. So
     /// the server takes its hellos one at a time, and no save reads the registry between a
     /// commit and the change it commits. Held across the store's calls; no other lock is
@@ -104,9 +105,6 @@ pub(crate) struct Agents {
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
-    /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
-    /// is a leaf.
-    unclean: Mutex<BTreeSet<HostId>>,
     /// The host credentials and job sinks of live logs, with `sink = "object_store"`
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
@@ -120,9 +118,6 @@ pub(crate) struct Agents {
     /// How long a claim of a periodic duty ([`js_jobs::JobStore::claim_duty`]) keeps the other
     /// servers off it, in milliseconds; zero claims every tick ([`Agents::set_duty_period`]).
     duty_period_ms: AtomicU64,
-    /// For each host, the session whose job listing was last committed: a listing of another
-    /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
-    listed_sessions: Mutex<BTreeMap<HostId, Session>>,
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
@@ -168,11 +163,6 @@ impl CordonFault {
         Self::Unsaved
     }
 }
-
-/// A host's session as the job side tells one from another: the epoch of its hello and when
-/// the hello was taken, in milliseconds (a host removed and admitted again starts its epochs
-/// over, at a later hello).
-pub(crate) type Session = (u64, Option<u64>);
 
 /// Where a file of the agent side is kept: beside the state file at `state_file`, with
 /// `suffix` added to its name.
@@ -342,12 +332,10 @@ fn placed_in(
         job_state,
         usage_in_job_store,
         placer: Some(placer.clone()),
-        unclean: Mutex::default(),
         logs,
         job_limits,
         cpu_slack,
         duty_period_ms: AtomicU64::new(0),
-        listed_sessions: Mutex::default(),
         meter: OnceLock::new(),
         placing: Mutex::default(),
         wakes: Wakes::default(),
@@ -417,12 +405,10 @@ impl Agents {
             job_state: None,
             usage_in_job_store: false,
             placer: None,
-            unclean: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),
             duty_period_ms: AtomicU64::new(0),
-            listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             placing: Mutex::default(),
             wakes: Wakes::default(),
@@ -487,25 +473,6 @@ impl Agents {
         }
     }
 
-    /// Whether a job listing of `host` in `session` is the first since the host's hello: no
-    /// listing of that session has been committed ([`Agents::listed`]).
-    pub(crate) fn first_listing(&self, host: &HostId, session: Session) -> bool {
-        let listed = self
-            .listed_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        listed.get(host) != Some(&session)
-    }
-
-    /// Records that a job listing of `host` in `session` was committed.
-    pub(crate) fn listed(&self, host: &HostId, session: Session) {
-        let mut listed = self
-            .listed_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        listed.insert(host.clone(), session);
-    }
-
     /// This agent side placing with `placer` (`--placement js-sched`), for a test of the
     /// heartbeat's pass over the queued jobs. The registry must already hold it.
     #[cfg(test)]
@@ -516,23 +483,16 @@ impl Agents {
         }
     }
 
-    /// Records whether the last job listing of `host` was clean: it named only jobs the host
-    /// holds a live allocation for.
-    pub(crate) fn note_listing(&self, host: &HostId, clean: bool) {
-        let mut unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
-        if clean {
-            unclean.remove(host);
-        } else {
-            unclean.insert(host.clone());
-        }
-    }
-
     /// Whether the capacity of `host` may be counted by placement: its last job listing was
-    /// clean (design section 6.2, section 8 row 37). A host that lists a job it holds no live
-    /// allocation for is told to stop it and is not placed on until a listing is clean.
+    /// clean (design section 6.2, section 8 row 37), as its row holds it. True without the job
+    /// tables and for a host with no row; false for one whose row cannot be read.
+    #[cfg(test)]
     pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
-        let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
-        !unclean.contains(host)
+        let Some(jobs) = &self.jobs else {
+            return true;
+        };
+        let row = jobs.read_node(host);
+        row.is_ok_and(|row| row.is_none_or(|row| row.record.state.last_listing_clean))
     }
 
     /// Lets the hello of `host` register with the one-time token or host credential `who`
@@ -540,14 +500,15 @@ impl Agents {
     /// commits `binding` (the host's binding, with the store) with the use in one
     /// transaction. With `issue`, that first use also retires the token for a new host
     /// credential (see [`JoinTokens::admit_writing`]). The check and the write run on the
-    /// pool for blocking calls.
+    /// pool for blocking calls. The revision of the commit comes with the answer: the version of
+    /// the binding it wrote ([`JoinTokens::admit_writing`]).
     pub(crate) async fn admit_join(
         self: &Arc<Self>,
         who: Credential,
         (host, instance): (String, Option<InstanceIdentity>),
         issue: bool,
         binding: Writes,
-    ) -> Result<Admitted, JoinRefusal> {
+    ) -> Result<(Admitted, Option<Revision>), JoinRefusal> {
         let this = Arc::clone(self);
         blocking(move || {
             let instance = instance.as_ref();
@@ -557,40 +518,31 @@ impl Agents {
         .await
     }
 
-    /// Gives back the use that [`Agents::admit_join`] made for `host`, and the credential it
-    /// issued, after the registry refused its hello, with `binding` (the undo of the host's
-    /// binding, with the store) in the same transaction. True when that was written.
-    pub(crate) async fn release_join(
-        self: &Arc<Self>,
-        who: Credential,
-        host: String,
-        binding: Writes,
-    ) -> bool {
-        let this = Arc::clone(self);
-        blocking(move || this.joins.release_writing(&who, &host, binding)).await
-    }
-
-    /// Puts back, before the hello of `host` is judged, the taint or cordon the store holds
-    /// for it when the registry does not know the host: the start of this server put back
-    /// what the store held then ([`Registry::restore_tainted`]), and this does the same for
-    /// what the store holds now, so a host that comes from another server over the same
-    /// store keeps the taint that server stored after this one started, and takes no job
-    /// here that its agent would refuse. Nothing for a host the registry knows, whose record
-    /// holds its taint, and nothing in file mode.
+    /// Reads the binding row of `host` before its hello is judged (or its binding is written),
+    /// holds it with its version as what the store holds ([`BindingStore::stored`]), and puts
+    /// what it holds into the registry ([`taints::take_in`]): the taint or cordon of a host the
+    /// registry does not know (the start of this server put back what the store held then, and
+    /// this does the same for what the store holds now, so a host that comes from another
+    /// server over the same store keeps the taint that server stored after this one started,
+    /// and takes no job here that its agent would refuse), and the taint another server
+    /// stored for a host the registry knows and holds none for, which a write made on what the
+    /// registry holds would otherwise overwrite. `when` names the caller in the log line of
+    /// what is put back. Nothing in file mode.
     ///
     /// # Errors
     ///
     /// The store could not be read: the hello is refused with an error the agent retries,
     /// and nothing is judged on less than the store holds.
-    pub(crate) async fn restore_stored(self: &Arc<Self>, host: &HostId) -> io::Result<()> {
-        if self.registry.own_host(host).is_some() {
-            return Ok(());
-        }
+    pub(crate) async fn restore_stored(
+        self: &Arc<Self>,
+        host: &HostId,
+        when: &'static str,
+    ) -> io::Result<()> {
         let this = Arc::clone(self);
         let named = host.clone();
         let stored = blocking(move || this.store.stored(&named)).await?;
         if let Some(binding) = stored {
-            taints::put_back(&self.registry, host, &binding, "hello");
+            taints::take_in(&self.registry, host, &binding, when);
         }
         Ok(())
     }
@@ -598,8 +550,11 @@ impl Agents {
     /// The change of the binding of `host` that the registry makes when it admits `hello`
     /// with `credential`; `certified` says the hello presented a host certificate. It is the
     /// binding the registry holds for the host, which it keeps, or a new one to `credential`
-    /// and the hello's instance. Its writes are empty in file mode, and when the store holds that binding already, as for a host the registry knows
-    /// (unless the stored binding still holds a cordon that lapsed since the last tick).
+    /// and the hello's instance. Its writes are empty in file mode, and when the store holds
+    /// that binding already, as for a host the registry knows (unless the stored binding still
+    /// holds a cordon that lapsed since the last tick); otherwise the write is conditional on
+    /// the version of the row [`Agents::restore_stored`] read: the hello is judged on that row,
+    /// and a row another server wrote since refuses the write.
     pub(crate) fn hello_change(
         &self,
         host: &HostId,
@@ -608,14 +563,11 @@ impl Agents {
     ) -> Change {
         let held = self.registry.bindings().remove(host);
         let fresh = || Binding::new(credential.clone(), hello.instance.clone());
-        // A hello with a host certificate moves a host that is not live from the
-        // credential it was bound to onto the certificate's, keeping its taint and cordon
-        // (the registry decides the same, [`Registry::hello_as_certified_host`]; for a live host it
-        // refuses, and nothing is written here).
-        let idle = || {
-            let state = self.registry.own_host(host).map(|own| own.host.state);
-            state != Some(HostState::Live)
-        };
+        // A hello with a host certificate moves a host from the credential it was bound to
+        // onto the certificate's, keeping its taint and cordon (the registry decides the same,
+        // [`Registry::hello_as_certified_host`], and has judged this hello before the change
+        // is made: a live host that is not the same process is refused there, so a hello that
+        // gets here moves the binding the registry moves).
         let moved = |bound: &Binding| {
             let taint = bound.taint().cloned();
             fresh()
@@ -623,7 +575,7 @@ impl Agents {
                 .with_cordon(bound.cordon_until_ms())
         };
         let bound = match held {
-            Some(bound) if certified && bound.credential() != credential && idle() => moved(&bound),
+            Some(bound) if certified && bound.credential() != credential => moved(&bound),
             Some(bound) => bound,
             None => fresh(),
         };
@@ -631,39 +583,44 @@ impl Agents {
     }
 
     /// Commits `writes` (bindings, with the store) in one transaction, on the pool for
-    /// blocking calls; no store call when there are none, as in file mode.
+    /// blocking calls; no store call when there are none, as in file mode. The revision of the
+    /// commit is the version of the binding it wrote, when it wrote one.
     ///
     /// # Errors
     ///
-    /// The store failed or refused the transaction: nothing was written.
-    pub(crate) async fn commit_hosts(self: &Arc<Self>, writes: Writes) -> io::Result<()> {
+    /// The store failed or refused the transaction (a binding another server wrote since it
+    /// was read): nothing was written.
+    pub(crate) async fn commit_hosts(
+        self: &Arc<Self>,
+        writes: Writes,
+    ) -> io::Result<Option<Revision>> {
         let this = Arc::clone(self);
         blocking(move || this.store.commit(writes)).await
     }
 
-    /// Holds the binding of `change` as committed.
-    pub(crate) fn applied(&self, change: &Change) {
-        self.store.applied(change);
-    }
-
-    /// Holds the binding from before `change`, once its undo is committed.
-    pub(crate) fn undone(&self, change: &Change) {
-        self.store.undone(change);
+    /// Holds the binding of `change` as committed at `revision`.
+    pub(crate) fn applied(&self, change: &Change, revision: Option<Revision>) {
+        self.store.applied(change, revision);
     }
 
     /// Commits the binding of `host` as `make` changes it, when the registry holds one, and
-    /// holds it as committed. The caller holds [`Agents::host_writes`] and has the registry
-    /// take the change next. Nothing is written in file mode.
+    /// holds it as committed. The row is read first ([`Agents::restore_stored`]), so the write
+    /// is made at the version of the row as it stands and over a taint another server stored
+    /// the registry has taken; a row written in between refuses the write. The caller holds
+    /// [`Agents::host_writes`] and has the registry take the change next. Nothing is written in
+    /// file mode.
     async fn keep(
         self: &Arc<Self>,
         host: &HostId,
         make: impl FnOnce(Binding) -> Binding,
     ) -> io::Result<()> {
+        self.restore_stored(host, "write").await?;
         let held = self.registry.bindings().remove(host);
         let change = held.map(|bound| self.store.change(host, make(bound)));
         let writes = change.as_ref().map(|change| change.writes.clone());
-        self.commit_hosts(writes.unwrap_or_default()).await?;
-        change.iter().for_each(|change| self.store.applied(change));
+        let revision = self.commit_hosts(writes.unwrap_or_default()).await?;
+        let applied = |change: &Change| self.store.applied(change, revision);
+        change.iter().for_each(applied);
         Ok(())
     }
 
@@ -746,13 +703,14 @@ impl Agents {
         let expected = held.as_ref().and_then(|bound| bound.taint().cloned());
         let change = held.map(|bound| self.store.change(host, bound.with_taint(taint)));
         let this = Arc::clone(self);
-        let change = blocking(move || {
+        let (change, revision) = blocking(move || {
             let commit = |change| this.store.commit_taint(change, expected.as_ref());
-            change.as_ref().map_or(Ok(()), commit)?;
-            Ok::<_, io::Error>(change)
+            let revision = change.as_ref().map_or(Ok(None), commit)?;
+            Ok::<_, io::Error>((change, revision))
         })
         .await?;
-        change.iter().for_each(|change| self.store.applied(change));
+        let applied = |change: &Change| self.store.applied(change, revision);
+        change.iter().for_each(applied);
         Ok(())
     }
 
@@ -928,16 +886,47 @@ impl Agents {
     /// changed by itself (a host it forgot, a cordon that lapsed) or took without a commit.
     /// True when the file or the store holds what the registry has bound (a taint report is
     /// acknowledged only then).
+    /// Whether a server may still serve `host` by its session row (`node/<host>`): the row was
+    /// heard, by the store's clock, within the grace and lost retention of its pool
+    /// ([`js_registry::Registry::kept_for`]), the window after which a registry forgets a
+    /// silent host. Then its binding is not deleted because this server's registry let go of it
+    /// (it heard the host last when it took its session from the row; another server has
+    /// heard it since). A row that cannot be read, or of a pool this server does not have,
+    /// counts as served: a binding is never deleted on less than the store holds. False
+    /// without the job tables and for a host with no row.
+    fn served(&self, host: &HostId) -> bool {
+        let Some(jobs) = &self.jobs else {
+            return false;
+        };
+        let heard = |row: js_jobs::NodeRow| {
+            let kept = self.registry.kept_for(&row.record.pool);
+            let now = jobs.now().ok();
+            let silent = now.map(|now| now.since(row.record.heard_at));
+            kept.zip(silent).is_none_or(|(kept, silent)| silent <= kept)
+        };
+        jobs.read_node(host)
+            .map_or(true, |row| row.is_some_and(heard))
+    }
+
     pub(crate) async fn save_bindings(self: &Arc<Self>) -> bool {
         let gate = self.host_writes.lock().await;
         let this = Arc::clone(self);
-        let saved = blocking(move || this.store.save(|| this.registry.bindings())).await;
+        let saved = blocking(move || {
+            let served = |host: &HostId| this.served(host);
+            this.store.save(|| this.registry.bindings(), &served)
+        })
+        .await;
+        // A row another server wrote since this one read it was left as it is: the taint it
+        // holds is the registry's from here on, and the binding is written over it by the next
+        // save, or not at all when the two agree.
+        let lost = saved.iter().flatten();
+        lost.for_each(|(host, binding)| taints::take_in(&self.registry, host, binding, "save"));
         drop(gate);
         if let Err(err) = &saved {
             self.errors.fetch_add(1, Ordering::SeqCst);
             error!(error = %err, "cannot write the host bindings");
         }
-        saved.is_ok()
+        saved.is_ok_and(|lost| lost.is_empty())
     }
 }
 
@@ -945,7 +934,7 @@ impl Agents {
 mod cordons;
 
 #[path = "agents_taints.rs"]
-mod taints;
+pub(crate) mod taints;
 
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]

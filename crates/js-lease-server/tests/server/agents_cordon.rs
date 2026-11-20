@@ -12,8 +12,8 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hosts, job_hello, listed, post, restarted_job_hosts, session,
-    start_job_hosts_in,
+    JOIN, Session, entry, hello_body, hosts, job_hello, listed, post, restarted,
+    restarted_job_hosts, session, start_agents_in, start_job_hosts_in,
 };
 use crate::jobs_support::{JobBody, commands, exited, job_state, one_start, running, submit_body};
 use crate::joins::{beat_with, code, minted};
@@ -604,13 +604,14 @@ async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kep
 }
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
-/// registry does not hold (its server restarted, it holds no lease, is not tainted and
-/// is not cordoned) is 409 `unknown-host` on all three routes until its agent says hello
-/// again. It runs with the bindings in the agent state file and in the state store. It
-/// catches an uncordon that leaves the row, and a route that makes up a host; in the store
-/// it also catches an uncordon that leaves the cordon in the host's binding key.
+/// restarted server's registry does not hold but the job store's rows do (its node row) is
+/// served by the host's own read and by the cordon and uncordon routes, which take it from the
+/// rows. It runs with the bindings in the agent state file and in the state store. It catches
+/// an uncordon that leaves the row, a read or a cordon route that answers a host another server
+/// holds as unknown, and in the store an uncordon that leaves the cordon in the host's binding
+/// key.
 #[tokio::test]
-async fn a_lifted_cordon_stays_lifted_and_an_unknown_host_is_not_found() {
+async fn a_lifted_cordon_stays_lifted_and_a_host_in_the_rows_is_served() {
     for kept in Kept::BOTH {
         a_lifted_cordon_stays_lifted_in(kept).await;
     }
@@ -627,13 +628,43 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
         assert!(!agents_file(&first).exists());
     }
     let h = restarted_job_hosts(first).await;
-    for reply in [
-        own(&h, "GET", "burst-1", None, &me.credential, None).await,
-        cordon(&h, "burst-1", &me, 60).await,
-        uncordon(&h, "burst-1", &me).await,
-    ] {
-        assert_eq!(reply.status, 409, "{}", reply.body);
-        assert_eq!(code(&reply), "unknown-host");
+    let read = own(&h, "GET", "burst-1", None, &me.credential, None).await;
+    assert_eq!(read.status, 200, "{}", read.body);
+    // The host's row says it is there: the cordon is placed afresh (the lifted one did not come
+    // back) and lifted again.
+    let placed = cordon(&h, "burst-1", &me, 60).await;
+    assert_eq!(placed.status, 200, "{}", placed.body);
+    assert_eq!(placed.json()["already_cordoned"], false);
+    assert_eq!(uncordon(&h, "burst-1", &me).await.status, 200);
+}
+
+/// Asserts that on a server without the job tables, which reads no row for a host its restarted
+/// registry does not hold (it holds no lease, is not tainted and is not cordoned), the host's
+/// cordon and uncordon are 409 `unknown-host` until its agent says hello again. It runs with the
+/// bindings in the agent state file and in the state store. It catches a cordon route that makes
+/// up a host, or one that reads rows a server without the job tables does not have.
+#[tokio::test]
+async fn a_host_a_restarted_server_without_job_tables_does_not_hold_is_unknown() {
+    for kept in Kept::BOTH {
+        let first = start_agents_in("cordon_plain_restart", kept).await;
+        let token = minted(&first, "i-1").await;
+        let mut body = hello_body("burst-1");
+        body["instance"] = json!({ "provider": "lambdalabs", "instance_id": "i-1" });
+        body["accepts_host_credential"] = json!(true);
+        let welcome = post(&first, "/v1/agent/hello", Some(&token), &body).await;
+        let credential = welcome.json()["host_credential"].clone();
+        let me = Host {
+            credential: credential.as_str().unwrap().to_owned(),
+            session: session(&welcome, "burst-1"),
+        };
+        let h = restarted(first).await;
+        for reply in [
+            cordon(&h, "burst-1", &me, 60).await,
+            uncordon(&h, "burst-1", &me).await,
+        ] {
+            assert_eq!(reply.status, 409, "{}", reply.body);
+            assert_eq!(code(&reply), "unknown-host");
+        }
     }
 }
 

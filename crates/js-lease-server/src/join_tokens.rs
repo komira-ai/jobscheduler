@@ -50,25 +50,22 @@
 //!
 //! If the answer carrying the credential is lost, the host holds nothing that
 //! authenticates: it cannot register again, and whoever launched it releases it when its
-//! boot time is up. If the registry refuses the hello that issued the credential, the
-//! answer is not sent, so [`JoinTokens::release_writing`] takes the credential back and
-//! puts the token back as it was.
+//! boot time is up. That holds for an answer that is not sent for another reason too (the
+//! hello's row could not be written after the use was committed): a use is never given back.
 //!
 //! The instance a hello names is the hello's own claim: the binding guards against
 //! mix-ups (a token delivered to the wrong machine, a host id reused by another
 //! instance), not against a holder of the token, who can name the instance too. The
 //! client token can mint for any instance id.
 //!
-//! A hello that the registry then refuses gives the use back
-//! ([`JoinTokens::release_writing`]): the token stays unused for the instance. The server
-//! takes its hellos one at a time, from the use to the registry's answer and the release
-//! ([`crate::agents::Agents::host_writes`]), so no other hello of the host is served in
-//! between. The release still leaves the use standing when a hello of the same host was
-//! admitted with the token since the use (the host may then be registered with it, and the
-//! token stays its); that mark is kept in memory only, and a restart in between leaves the
-//! use standing too, which errs on the side of one token, one host. When the release's
-//! write fails the token stays tied to the host, which says hello again with it; if that
-//! host cannot register, mint another.
+//! The server judges a hello before it takes the use of a token
+//! ([`js_registry::Registry::judge_hello`]), so a hello the registry refuses uses nothing, and
+//! the registry takes a judged hello without refusing it ([`js_registry::Registry::take_hello`]),
+//! so a use that was committed has no undo: the token stays tied to the host, which says hello
+//! again with it. The server takes its hellos one at a time, from the judgement to the
+//! registry taking the hello ([`crate::agents::Agents::host_writes`]), so no other hello of the
+//! host is served in between. Of two hellos that race for one token the second is refused as
+//! used, with nothing written for it.
 //!
 //! The scheduler's terminate path revokes the token of the instance it terminates
 //! (`DELETE /v1/agent/join-tokens`, see [`crate::join_api`]): [`JoinTokens::revoke`] drops
@@ -111,10 +108,10 @@
 //! `version` and the fields of a file row (all but `hash`, which is the key), read at start,
 //! and a row this set does not hold read by its key at its first use
 //! ([`JoinTokens::identify_stored`]). Fields of a value that this build does not know are kept and written back. A
-//! change is committed as the file is written, before it is held: a mint, a use, a release
+//! change is committed as the file is written, before it is held: a mint, a use
 //! and a revoke each commit the rows they change in one transaction, and the use of a token
 //! by a hello commits the host's binding in the same transaction
-//! ([`JoinTokens::admit_writing`]), as does the release that gives it back. A renewal
+//! ([`JoinTokens::admit_writing`]). A renewal
 //! makes no store call on a hello or a heartbeat: a credential time that comes due for a
 //! write is committed by the next tick ([`JoinTokens::flush`]), and is moved in memory
 //! only then.
@@ -127,7 +124,7 @@ use std::time::Duration;
 
 use js_agent_wire::{HostCredential, InstanceIdentity};
 use js_registry::{Credential, SessionSource};
-use js_state::Store;
+use js_state::{Cond, Revision, Store};
 use js_types::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -170,9 +167,8 @@ struct Entry {
     instance: InstanceIdentity,
     expires_at_ms: u64,
     used: Option<Used>,
-    /// On the entry of a host credential: the digest of the one-time token it replaced.
-    /// `expires_at_ms` is then that token's expiry, which gives the token back to a
-    /// [`JoinTokens::release_writing`].
+    /// On the entry of a host credential: the digest of the one-time token it replaced
+    /// ([`JoinTokens::registered_as`]). `expires_at_ms` is then that token's expiry.
     replaces: Option<String>,
     /// The fields of the stored value that this build does not know (none from the file,
     /// whose reader drops them), written back with the row.
@@ -184,10 +180,6 @@ struct Entry {
 struct Used {
     host: String,
     credential_expires_at_ms: u64,
-    /// Whether a hello of `host` was served with the token after the hello that used it.
-    /// Kept in memory only (a loaded token has it unset): it stops [`JoinTokens::release_writing`]
-    /// from freeing a token whose host the registry accepted by that later hello.
-    again_served: bool,
 }
 
 /// What a granted [`JoinTokens::admit`] did to the token.
@@ -356,7 +348,7 @@ impl JoinTokens {
         random: Box<dyn SessionSource>,
     ) -> Result<Self, String> {
         let mut entries = Entries::new();
-        for (hash, bytes) in host_keys::scan(&*store, JOINS)? {
+        for (hash, bytes, _) in host_keys::scan(&*store, JOINS)? {
             let (hash, entry) = stored_entry(hash, &bytes)?;
             entries.insert(hash, entry);
         }
@@ -397,10 +389,12 @@ impl JoinTokens {
     }
 
     /// Makes the file hold `next`, or commits to the store the rows `next` changes from
-    /// `held` with `extra` in one transaction.
-    fn write(&self, held: &Entries, next: &Entries, extra: Writes) -> io::Result<()> {
+    /// `held` with `extra` in one transaction, whose revision is answered (none in file mode).
+    /// The rows `next` changes are written first and `extra` after them, so the revision is
+    /// the version of the last write of `extra` (the host's binding, a put).
+    fn write(&self, held: &Entries, next: &Entries, extra: Writes) -> io::Result<Option<Revision>> {
         match &self.keeper {
-            Keeper::File(path) => replace(path, render(next)?.as_bytes()),
+            Keeper::File(path) => replace(path, render(next)?.as_bytes()).map(|()| None),
             Keeper::Store(store) => {
                 let mut writes = changes(held, next);
                 writes.extend(extra);
@@ -409,10 +403,11 @@ impl JoinTokens {
         }
     }
 
-    /// Commits `extra` alone to the store; nothing in file mode, which has no such writes.
-    fn write_extra(&self, extra: Writes) -> io::Result<()> {
+    /// Commits `extra` alone to the store, and answers the revision; nothing in file mode,
+    /// which has no such writes.
+    fn write_extra(&self, extra: Writes) -> io::Result<Option<Revision>> {
         match &self.keeper {
-            Keeper::File(_) => Ok(()),
+            Keeper::File(_) => Ok(None),
             Keeper::Store(store) => host_keys::commit(&**store, extra),
         }
     }
@@ -490,7 +485,8 @@ impl JoinTokens {
         instance: Option<&InstanceIdentity>,
         issue: bool,
     ) -> Result<Admitted, JoinRefusal> {
-        self.admit_writing(credential, host, instance, issue, Writes::new())
+        let admitted = self.admit_writing(credential, host, instance, issue, Writes::new());
+        admitted.map(|(admitted, _)| admitted)
     }
 
     /// Lets the hello of `host`, naming `instance`, register with the token or host
@@ -500,8 +496,8 @@ impl JoinTokens {
     /// its credential has not passed (the agent says hello again; the time moves), or
     /// when it is unused, not expired, and `instance` is the one it is bound to. The
     /// check, the use and the write happen under one lock, so of two hellos that race for
-    /// an unused token one wins. A caller whose hello is then refused elsewhere gives a
-    /// [`Admission::Fresh`] use back with [`JoinTokens::release_writing`].
+    /// an unused token one wins. A use is never given back: the caller judges the hello first, so
+    /// a refused hello makes none.
     ///
     /// With `issue`, the use of an unused token also retires it: in the same write the
     /// token's row is replaced by one for a new host credential, which is returned. The
@@ -512,7 +508,8 @@ impl JoinTokens {
     /// `extra` is what the store commits with the use, in the same transaction: the host's
     /// binding (always empty in file mode). For a token that already registered its host it
     /// is committed alone, when there is any; a failed commit refuses the hello, as a failed
-    /// write of the use does.
+    /// write of the use does. The revision of the commit comes with the answer: the version of
+    /// the binding row it wrote (`extra` is written last), none when nothing was committed.
     pub(crate) fn admit_writing(
         &self,
         credential: &Credential,
@@ -520,7 +517,7 @@ impl JoinTokens {
         instance: Option<&InstanceIdentity>,
         issue: bool,
         extra: Writes,
-    ) -> Result<Admitted, JoinRefusal> {
+    ) -> Result<(Admitted, Option<Revision>), JoinRefusal> {
         let now = self.clock.now().millis();
         let key = credential.to_hex();
         let mut entries = self.lock();
@@ -532,14 +529,13 @@ impl JoinTokens {
             if used.host != host {
                 return Err(JoinRefusal::Used);
             }
-            let held = entries.get_mut(&key).and_then(|entry| entry.used.as_mut());
-            held.into_iter().for_each(|used| used.again_served = true);
             self.renew(&mut entries, &key, now);
-            self.write_extra(extra).map_err(unsaved)?;
-            return Ok(Admitted {
+            let revision = self.write_extra(extra).map_err(unsaved)?;
+            let admitted = Admitted {
                 admission: Admission::Again,
                 issued: None,
-            });
+            };
+            return Ok((admitted, revision));
         }
         if entry.expires_at_ms <= now {
             return Err(JoinRefusal::Expired);
@@ -555,7 +551,6 @@ impl JoinTokens {
             used: Some(Used {
                 host: host.to_owned(),
                 credential_expires_at_ms: credential_expiry(now),
-                again_served: false,
             }),
             ..entry.clone()
         };
@@ -571,12 +566,13 @@ impl JoinTokens {
                 )
             }
         };
-        self.write(&entries, &next, extra).map_err(unsaved)?;
+        let revision = self.write(&entries, &next, extra).map_err(unsaved)?;
         *entries = next;
-        Ok(Admitted {
+        let admitted = Admitted {
             admission: Admission::Fresh,
             issued,
-        })
+        };
+        Ok((admitted, revision))
     }
 
     /// A new host credential when `issue`, drawn from the operating system's random bytes;
@@ -602,48 +598,6 @@ impl JoinTokens {
         replaced
             .and_then(|hex| Credential::from_hex(&hex))
             .unwrap_or_else(|| presented.clone())
-    }
-
-    /// [`JoinTokens::release_writing`] with nothing else to commit.
-    #[cfg(test)]
-    pub(crate) fn release(&self, credential: &Credential, host: &str) {
-        self.release_writing(credential, host, Writes::new());
-    }
-
-    /// Gives back the use that [`JoinTokens::admit_writing`] just made for `host` with the
-    /// token whose credential is `credential`: the registry refused the hello, and the token
-    /// stays good for the instance it was minted for. A host credential the use issued is
-    /// dropped and the token comes back unused: the answer that would have carried the
-    /// credential was never sent.
-    ///
-    /// `extra` is committed in the same transaction: with the store, the write that puts
-    /// the host's binding back as it was before the use. True when the use was given back
-    /// and that was written. False, with nothing written, when a hello of `host` was admitted
-    /// [`Admission::Again`] since the use: that hello may have been the one the registry
-    /// accepted, so the token stays the host's, and its binding with it. False too when the
-    /// write failed: memory then stays as the use left it, as the file or the store does
-    /// (the token tied to `host`; with the store, the binding kept too), and the operator
-    /// mints again if that host cannot register.
-    pub(crate) fn release_writing(
-        &self,
-        credential: &Credential,
-        host: &str,
-        extra: Writes,
-    ) -> bool {
-        let mut entries = self.lock();
-        let Some(next) = given_back(&entries, &credential.to_hex(), host) else {
-            return false;
-        };
-        match self.write(&entries, &next, extra) {
-            Ok(()) => {
-                *entries = next;
-                true
-            }
-            Err(err) => {
-                error!(error = %err, "cannot write the join tokens");
-                false
-            }
-        }
     }
 
     /// Drops every token bound to `instance`, used or not, and writes the file; kept only
@@ -700,7 +654,7 @@ impl JoinTokens {
         let mut next = entries.clone();
         next.insert(key.to_owned(), renewed);
         match self.write(entries, &next, Writes::new()) {
-            Ok(()) => *entries = next,
+            Ok(_) => *entries = next,
             Err(err) => error!(error = %err, "cannot write the join tokens"),
         }
     }
@@ -725,7 +679,7 @@ impl JoinTokens {
         let mut next = entries.clone();
         next.extend(renewed);
         match self.write(&entries, &next, Writes::new()) {
-            Ok(()) => {
+            Ok(_) => {
                 *entries = next;
                 due.clear();
                 true
@@ -749,11 +703,11 @@ fn unsaved(err: io::Error) -> JoinRefusal {
 /// stored, and changes nothing).
 fn changes(held: &Entries, next: &Entries) -> Writes {
     let gone = held.keys().filter(|hash| !next.contains_key(*hash));
-    let gone = gone.map(|hash| (format!("{JOINS}{hash}"), None));
+    let gone = gone.map(|hash| (format!("{JOINS}{hash}"), None, Cond::Any));
     let changed = next.iter().filter_map(|(hash, entry)| {
         let value = stored_value(entry);
         let same = held.get(hash).map(stored_value) == Some(value.clone());
-        (!same).then(|| (format!("{JOINS}{hash}"), Some(value)))
+        (!same).then(|| (format!("{JOINS}{hash}"), Some(value), Cond::Any))
     });
     gone.chain(changed).collect()
 }
@@ -786,48 +740,10 @@ impl Entry {
             used: Some(Used {
                 host: used.host.clone(),
                 credential_expires_at_ms: renewed,
-                again_served: used.again_served,
             }),
             ..self.clone()
         })
     }
-}
-
-/// `entries` with the use of the token at `key` by `host` undone, or `None` when there is
-/// no such use to undo: either the token itself is tied to `host` and no later hello of
-/// the host was served with it, or a host credential of `host` replaced the token (the
-/// token is then put back unused, the credential dropped).
-fn given_back(entries: &Entries, key: &str, host: &str) -> Option<Entries> {
-    let mut next = entries.clone();
-    let tied = entries.get(key).filter(|entry| {
-        let held = entry.used.as_ref();
-        held.is_some_and(|used| used.host == host && !used.again_served)
-    });
-    if let Some(entry) = tied {
-        next.insert(
-            key.to_owned(),
-            Entry {
-                used: None,
-                ..entry.clone()
-            },
-        );
-        return Some(next);
-    }
-    let issued = entries.iter().find(|(_, entry)| {
-        let held = entry.used.as_ref();
-        entry.replaces.as_deref() == Some(key) && held.is_some_and(|used| used.host == host)
-    });
-    let (credential, entry) = issued?;
-    next.remove(credential);
-    next.insert(
-        key.to_owned(),
-        Entry {
-            used: None,
-            replaces: None,
-            ..entry.clone()
-        },
-    );
-    Some(next)
 }
 
 /// The gain over the file that makes a renewal of the token at `key` worth a write:
@@ -910,7 +826,6 @@ fn entry_of(row: Row) -> Result<(String, Entry), String> {
         (Some(host), Some(credential_expires_at_ms)) => Some(Used {
             host,
             credential_expires_at_ms,
-            again_served: false,
         }),
         _ => {
             let both = "a token has only one of used_by and credential_expires_at_ms";
