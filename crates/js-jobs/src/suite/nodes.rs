@@ -37,6 +37,7 @@ fn hello() -> NodeHello {
         shape: Some(Shape::new(booked, BTreeMap::new())),
         labels: BTreeMap::from([("rack".to_owned(), "r1".to_owned())]),
         phase: Phase::Serving,
+        agent_process: Some("proc-a".to_owned()),
     }
 }
 
