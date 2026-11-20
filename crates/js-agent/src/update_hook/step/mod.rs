@@ -17,6 +17,7 @@ mod cutover;
 mod drain;
 mod held;
 mod helper;
+mod host_setup;
 mod pf;
 mod prepare;
 mod resume;
@@ -41,6 +42,9 @@ pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub(crate) use cutover::{Life, life};
 pub use drain::drain;
+pub use host_setup::{
+    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB, QUOTA_TENTHS, SCRATCH_VOLUME,
+};
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
 pub use rollback::rollback;
@@ -61,6 +65,18 @@ pub struct TokenFacts {
 /// How the token file and the host certificate and key files are looked at (see
 /// [`TokenFacts`]).
 pub type TokenFn = dyn Fn(&Path) -> io::Result<TokenFacts>;
+
+/// What the host setup of a Mac finds when it looks at a root it made (a link followed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathFacts {
+    /// The device number of the file system that holds it (`st_dev`).
+    pub device: u64,
+    /// Its owner.
+    pub uid: u32,
+}
+
+/// How the host setup looks at the state root and the scratch root (see [`PathFacts`]).
+pub type LookFn = dyn Fn(&Path) -> io::Result<PathFacts>;
 
 /// Everything a step touches.
 pub struct Env<'a> {
@@ -84,6 +100,11 @@ pub struct Env<'a> {
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
+    /// How the host setup of a Mac looks at the state root and the scratch root.
+    pub look: &'a LookFn,
+    /// The file system table the host setup names the scratch volume in, so that every boot
+    /// mounts it on the scratch root: [`FSTAB`] on a Mac.
+    pub fstab: &'a Path,
 }
 
 /// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file

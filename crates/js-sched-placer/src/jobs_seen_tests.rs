@@ -440,3 +440,6 @@ fn a_placement_from_a_picture_another_server_changed_does_not_book_the_host() {
         1
     );
 }
+
+#[path = "jobs_seen_submit_tests.rs"]
+mod submit;
