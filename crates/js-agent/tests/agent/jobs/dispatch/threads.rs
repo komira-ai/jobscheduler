@@ -561,3 +561,46 @@ fn a_welcome_without_dispatch_poll_leaves_the_starts_in_the_heartbeat_reply() {
     assert_eq!(world.created().len(), 1, "{:?}", world.log());
     assert!(sent.borrow().iter().all(|(path, _)| path != DISPATCH_PATH));
 }
+
+/// Asserts that a poll's transport that will not take the host's credential is not used: the
+/// open fails with the transport's own reason (which names no secret), while the same
+/// connector opens for a route with no credential. Catches a poller that polls with the join
+/// token in place of the credential the session adopted, and one that drops the refusal.
+#[test]
+fn a_transport_that_refuses_the_credential_is_a_failed_open() {
+    struct Unadoptable;
+    impl Transport for Unadoptable {
+        fn post(&mut self, _path: &str, _body: &Value) -> Result<Answer, String> {
+            Err("not used".to_owned())
+        }
+
+        fn adopt_credential(&mut self, _secret: &str) -> Result<(), String> {
+            Err("the credential is not a bearer".to_owned())
+        }
+    }
+    struct Giving;
+    impl Connector for Giving {
+        fn connect(
+            &self,
+            _server: &str,
+            _login: &Login,
+            _ca_cert: Option<&std::path::Path>,
+        ) -> Result<Box<dyn Transport>, ClientError> {
+            Ok(Box::new(Unadoptable))
+        }
+    }
+    let login = Login::Token(PathBuf::from("/nonexistent/token"));
+    let dial = Dial {
+        connector: &Giving,
+        server: "http://127.0.0.1:1",
+        login: &login,
+        ca_cert: None,
+    };
+    let credential = js_agent_wire::HostCredential::parse("cred-secret-2").unwrap();
+    let refused = dial.open(Some(&credential)).err();
+    assert_eq!(refused.as_deref(), Some("the credential is not a bearer"));
+    assert!(
+        dial.open(None).is_ok(),
+        "no credential: the transport is used as made"
+    );
+}
