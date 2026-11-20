@@ -113,6 +113,8 @@ pub struct Rig {
     pub kill: Rc<Kill>,
     pub world: World,
     pub params: Params,
+    /// The text `params` was read from, as the params file the updater writes.
+    pub params_text: String,
     pub link: PathBuf,
     /// The unit the params name.
     pub unit: String,
@@ -215,7 +217,7 @@ impl Rig {
         };
         let link = root.join("control/link/current");
         let release_link = format!("\"release_link\" = \"{}\"\n", link.display());
-        let params = Params::parse(&format!(
+        let params_text = format!(
             concat!(
                 "cordon_lease_secs = {lease}\ncordon_max_secs = {max}\n{release_link}",
                 "drain_wait_secs = {wait}\ndefer_retry_secs = {retry}\n",
@@ -242,8 +244,8 @@ impl Rig {
             root = root.display(),
             runtime = runtime,
             token = token.display(),
-        ))
-        .unwrap();
+        );
+        let params = Params::parse(&params_text).unwrap();
         let kill = Rc::new(Kill::default());
         let world = World::new(
             &root.join("world"),
@@ -259,6 +261,7 @@ impl Rig {
             kill,
             world,
             params,
+            params_text,
             link,
             unit: unit.to_owned(),
             manager,

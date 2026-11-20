@@ -50,6 +50,7 @@ mod steps_drain;
 mod steps_helper;
 mod steps_host_files;
 mod steps_host_setup;
+mod steps_host_setup_verb;
 mod steps_host_setup_volume;
 mod steps_prepare;
 mod steps_prepare_cordon;

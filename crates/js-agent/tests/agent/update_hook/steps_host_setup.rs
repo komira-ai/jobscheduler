@@ -26,7 +26,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// The line the setup writes to the file system table for the scratch volume.
-fn fstab_line(rig: &Rig) -> String {
+pub(super) fn fstab_line(rig: &Rig) -> String {
     format!(
         "UUID={UUID} {} apfs rw,nobrowse\n",
         scratch_of(rig).display()
@@ -34,7 +34,7 @@ fn fstab_line(rig: &Rig) -> String {
 }
 
 /// What a first install on an empty Mac changes, in order.
-fn first_changes(rig: &Rig) -> Vec<String> {
+pub(super) fn first_changes(rig: &Rig) -> Vec<String> {
     let scratch = scratch_of(rig).display().to_string();
     vec![
         format!("{DSEDITGROUP} -o create {GROUP}"),

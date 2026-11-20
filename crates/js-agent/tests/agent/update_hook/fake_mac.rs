@@ -12,6 +12,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use js_agent::update_hook::Params;
 use js_agent::update_hook::step::{
     DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, PathFacts, SCRATCH_VOLUME,
 };
@@ -23,7 +24,8 @@ pub const GROUP: &str = "_jsagent";
 
 /// A Mac whose params name the helper's socket group and a scratch root: a first install
 /// (`previous` false) or an update from 1.3.0, with the state root and the scratch root
-/// `db/js-agent/{state,scratch}` of the rig's tree, neither there yet.
+/// `db/js-agent/{state,scratch}` of the rig's tree, neither there yet. The params are read
+/// from the text a params file holds, with `socket_group` and `scratch_root` as its keys.
 pub fn mac_rig(name: &str, previous: bool) -> Rig {
     let mut rig = if previous {
         Rig::mac_with_helper(name)
@@ -31,9 +33,23 @@ pub fn mac_rig(name: &str, previous: bool) -> Rig {
         Rig::mac_first_install_with_helper(name)
     };
     let db = rig.tmp.path().join("db/js-agent");
-    rig.params.state_root = db.join("state");
-    rig.params.scratch_root = Some(db.join("scratch"));
-    rig.params.settings.socket_group = Some(GROUP.to_owned());
+    let state_root = format!(
+        "state_root = \"{}/world/state\"\n",
+        rig.tmp.path().display()
+    );
+    assert!(rig.params_text.contains(&state_root), "{}", rig.params_text);
+    rig.params_text = rig.params_text.replace(
+        &state_root,
+        &format!(
+            "state_root = \"{db}/state\"\nscratch_root = \"{db}/scratch\"\n\
+             socket_group = \"{GROUP}\"\n",
+            db = db.display()
+        ),
+    );
+    rig.params = Params::parse(&rig.params_text).unwrap();
+    assert_eq!(rig.params.state_root, db.join("state"));
+    assert_eq!(rig.params.scratch_root, Some(db.join("scratch")));
+    assert_eq!(rig.params.settings.socket_group.as_deref(), Some(GROUP));
     rig
 }
 
