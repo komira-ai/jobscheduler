@@ -1,7 +1,8 @@
 //! What a pass over the queued jobs saw ([`Seen`]), so that a pass after a heartbeat runs only
 //! when something it depends on changed since the last pass ([`SchedPlacer::place_jobs_if_changed`]),
 //! and the job tables a pass read ([`Tables`]), so that a pass reads them again only when they
-//! changed ([`SchedPlacer::tables`]).
+//! changed ([`SchedPlacer::tables`]), and not for a job a submit of this server just recorded,
+//! which is added to them instead ([`SchedPlacer::note_inserted`]).
 //!
 //! A pass ([`super::jobs`]) decides from:
 //!
@@ -38,7 +39,8 @@ use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationRecord, IdSource, JobId, JobRecord, JobStore, JobStoreError, MarkRecord, Written,
+    AllocationRecord, IdSource, Inserted, JobId, JobRecord, JobStore, JobStoreError, MarkRecord,
+    Written, queue_order,
 };
 use js_registry::WholeNodeConfig;
 use js_types::{HostId, Timestamp};
@@ -63,7 +65,7 @@ pub(crate) struct Seen {
 }
 
 /// The job tables as one pass read them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Tables {
     /// Every live allocation ([`JobStore::live_allocations`]).
     pub(crate) live: Vec<AllocationRecord>,
@@ -78,7 +80,28 @@ pub(crate) struct Tables {
 }
 
 /// The job tables a pass read, with where the job store's writes stood before the read.
-pub(crate) type Read = (Written, Arc<Tables>);
+#[derive(Debug)]
+pub(crate) struct Kept {
+    /// Where the job store's writes stood before the read, or after the last job a submit
+    /// recorded and added to them.
+    at: Written,
+    tables: Arc<Tables>,
+    /// Whether a job a submit recorded was added since a pass last took them.
+    added: bool,
+}
+
+/// Where a pass took the job tables from ([`SchedPlacer::tables`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TablesFrom {
+    /// The job store: the live allocations, the queued jobs, the marks and the cordons were
+    /// read, as a write of the job store came since the last read.
+    Store,
+    /// Those the last read kept, with no write of the job store since.
+    Kept,
+    /// Those the last read kept, with the jobs submits of this server recorded since added to
+    /// them, and no other write: read again, they would have been the same.
+    Submitted,
+}
 
 /// The [`PassMetrics`] of a pass, passed on, with whether a write of the pass failed.
 struct Watched<'a> {
@@ -94,6 +117,10 @@ impl PassMetrics for Watched<'_> {
     fn store_write_failed(&self) {
         self.failed.set(true);
         self.metrics.store_write_failed();
+    }
+
+    fn job_tables(&self, from: TablesFrom) {
+        self.metrics.job_tables(from);
     }
 }
 
@@ -179,8 +206,9 @@ impl SchedPlacer {
     }
 
     /// The job tables of `jobs`: those the last pass read when no write of the job store came
-    /// since, and otherwise read now, with the cordons the store holds. A failed read keeps
-    /// nothing.
+    /// since but the jobs this server's submits recorded and added to them
+    /// ([`SchedPlacer::note_inserted`]), and otherwise read now, with the cordons the store
+    /// holds. Where they came from is told to `metrics`. A failed read keeps nothing.
     ///
     /// # Errors
     /// As [`JobStore::live_allocations`], [`JobStore::queued`], [`JobStore::marks`] and
@@ -188,13 +216,21 @@ impl SchedPlacer {
     pub(crate) fn tables<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
+        metrics: &dyn PassMetrics,
     ) -> Result<Arc<Tables>, JobStoreError> {
         let written = jobs.written()?;
         let mut kept = lock(&self.tables);
-        if let Some((at, tables)) = kept.as_ref()
-            && *at == written
+        if let Some(read) = kept.as_mut()
+            && read.at == written
         {
-            return Ok(Arc::clone(tables));
+            let added = std::mem::replace(&mut read.added, false);
+            let from = if added {
+                TablesFrom::Submitted
+            } else {
+                TablesFrom::Kept
+            };
+            metrics.job_tables(from);
+            return Ok(Arc::clone(&read.tables));
         }
         *kept = None;
         let tables = Arc::new(Tables {
@@ -203,8 +239,40 @@ impl SchedPlacer {
             marks: jobs.marks()?,
             cordons: cordons_from(jobs.cordons()?, self.clock.now()),
         });
-        *kept = Some((written, Arc::clone(&tables)));
+        metrics.job_tables(TablesFrom::Store);
+        *kept = Some(Kept {
+            at: written,
+            tables: Arc::clone(&tables),
+            added: false,
+        });
         Ok(tables)
+    }
+
+    /// Adds the job a submit of this server just recorded, `inserted`, to the job tables the
+    /// last pass read, when the commit that recorded it is the only write of the job store
+    /// since they were read ([`js_jobs::Step::after`]): the next pass then takes them
+    /// without reading the four tables again ([`TablesFrom::Submitted`]). Otherwise, and for
+    /// a job the call did not record, nothing changes, and the next pass reads them as any
+    /// write makes it. Whether the job was added.
+    ///
+    /// A job is added once, in queue order ([`queue_order`]): the tables may have been read
+    /// after the commit landed and hold it already.
+    pub fn note_inserted(&self, inserted: &Inserted) -> bool {
+        let mut kept = lock(&self.tables);
+        let Some(read) = kept.as_mut() else {
+            return false;
+        };
+        let Some(after) = inserted.step.and_then(|step| step.after(read.at)) else {
+            return false;
+        };
+        let job = &inserted.record;
+        let queued = &mut Arc::make_mut(&mut read.tables).queued;
+        queued.retain(|other| other.id != job.id);
+        let at = queued.partition_point(|other| queue_order(other, job).is_lt());
+        queued.insert(at, job.clone());
+        read.at = after;
+        read.added = true;
+        true
     }
 }
 
