@@ -59,8 +59,9 @@
 //! that was lost before one heartbeat of it was accepted: that run goes on, so a server
 //! that welcomes and at once refuses is asked less and less often.
 //!
-//! The session secret is held in memory, goes into the body of every heartbeat and into
-//! nothing else: it is in no log line, no [`Note`] and no `Debug` output.
+//! The session secret is held in memory, goes into the body of every heartbeat and, through the
+//! dispatch [`Cell`], of every dispatch poll, and into nothing else: it is in no log line, no
+//! [`Note`] and no `Debug` output.
 //!
 //! # The host credential
 //!
@@ -124,6 +125,9 @@
 //!   (reported as `failed_to_start`) while a reply names a lease, since nothing prepares
 //!   the host for it.
 //!
+//! A session given the dispatch [`Cell`] ([`Session::with_dispatch`]) tells it every welcome, for
+//! the poller of [`crate::dispatch`] to poll by, and closes it at a drain.
+//!
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
 //!
@@ -170,6 +174,7 @@ use serde_json::Value;
 use crate::backoff::{Backoff, Jitter};
 use crate::credential::CredentialStore;
 use crate::disk::DiskGauge;
+use crate::dispatch::Cell;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::logs::HostGrant;
@@ -409,6 +414,8 @@ pub struct Session<'a> {
     news: bool,
     /// The `seq` of the last heartbeat sent in this session: 0 after a welcome.
     seq: u64,
+    /// Where each welcome is told to the dispatch poller, when the agent has one.
+    dispatch: Option<&'a Cell>,
 }
 
 impl<'a> Session<'a> {
@@ -439,6 +446,7 @@ impl<'a> Session<'a> {
             log_grant: None,
             news: false,
             seq: 0,
+            dispatch: None,
         }
     }
 
@@ -467,6 +475,16 @@ impl<'a> Session<'a> {
     pub fn with_jobs(self, worker: &'a Worker, drain: Drain) -> Self {
         Self {
             jobs: Some(Jobs { worker, drain }),
+            ..self
+        }
+    }
+
+    /// The same session telling `cell` the route of each welcome and closing it at a drain
+    /// (see [`crate::dispatch`]).
+    #[must_use]
+    pub fn with_dispatch(self, cell: &'a Cell) -> Self {
+        Self {
+            dispatch: Some(cell),
             ..self
         }
     }
@@ -578,6 +596,7 @@ impl<'a> Session<'a> {
         self.phase = Phase::Draining;
         self.hello.phase = Phase::Draining;
         self.jobs.iter().for_each(|jobs| jobs.worker.close());
+        self.dispatch.iter().for_each(|cell| cell.close());
     }
 
     /// How the drain treats the jobs, when the session has a worker.
@@ -754,6 +773,9 @@ impl<'a> Session<'a> {
             jobs.worker.heard();
         }
         let credential = self.keep_credential(welcome.host_credential.as_ref());
+        if let Some(cell) = self.dispatch {
+            cell.publish(&self.hello.host_id, welcome, credential);
+        }
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
         self.live = Some(Live {
             epoch: welcome.epoch,

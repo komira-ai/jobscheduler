@@ -157,6 +157,61 @@ pub fn take_early_start(then: &Value, now: &mut Value) -> Option<Value> {
     }
 }
 
+/// The command a heartbeat reply would have carried for a message the dispatch poll handed
+/// out: a start is its `start` body (the job start a heartbeat's reply carries) with the
+/// command's `type`, a stop is a `job_stop` of the same job. `None` for any other message
+/// (an unknown kind, a start without a body).
+pub fn as_command(message: &Value) -> Option<Value> {
+    match (message["kind"].as_str()?, message.get("start")) {
+        ("start", Some(Value::Object(start))) => {
+            let mut command = start.clone();
+            command.insert("type".to_owned(), Value::from("job_start"));
+            Some(Value::Object(command))
+        }
+        ("stop", None) => Some(serde_json::json!({
+            "type": "job_stop",
+            "job_id": message["job_id"],
+        })),
+        _ => None,
+    }
+}
+
+/// For an agent welcomed with `dispatch_poll`, the server hands a job start or stop out by
+/// the dispatch poll and leaves it out of the heartbeat reply, where the previous release
+/// sent it. When the previous reply `then` held a command and the reply `now` holds none,
+/// takes the next of `handed` (the messages of the poll, in the order handed) and puts it in
+/// `now` as the command it stands for ([`as_command`]), so that [`uncovered`] compares it
+/// with the previous release's command field by field, and returns the message. A reply that
+/// holds a command, a previous reply without one, a poll with nothing left to hand out, and
+/// a message that stands for no command, are left as they are: the comparison reports the
+/// missing or different command, or [`unhanded`] the message.
+pub fn hand_out(
+    then: &Value,
+    now: &mut Value,
+    handed: &mut std::collections::VecDeque<Value>,
+) -> Option<Value> {
+    let wanted = then["commands"].as_array().is_some_and(|c| !c.is_empty());
+    let commands = now.get_mut("commands")?.as_array_mut()?;
+    if !wanted || !commands.is_empty() {
+        return None;
+    }
+    let command = as_command(handed.front()?)?;
+    commands.push(command);
+    handed.pop_front()
+}
+
+/// The messages of `handed` that no reply took ([`hand_out`]) and that are no repeat of one
+/// that was taken (`taken`), as problems. The poll may hand out a message again (the server
+/// hands a stop out again for a job it ended on the host's report of the kill); a repeat is
+/// the same message on a route the previous release never had, and says nothing more.
+pub fn unhanded(handed: &std::collections::VecDeque<Value>, taken: &[Value]) -> Vec<String> {
+    let new = handed.iter().filter(|message| !taken.contains(message));
+    new.map(|message| {
+        format!("the poll handed out {message}, which no reply of the previous release carried")
+    })
+    .collect()
+}
+
 /// Asserts what [`uncovered`] reports of a frame that lost a field, renamed one, changed a
 /// value, or holds another number of items, and that a frame with a field added, or with
 /// another `agent_version` string, is covered while a missing or non-string version is
@@ -299,4 +354,75 @@ fn only_a_lone_start_the_previous_reply_lacked_is_taken_early() {
     assert_eq!(start_after(&flow, 0), Some((3, start.clone())));
     assert_eq!(start_after(&flow, 3), None);
     assert_eq!(start_after(&flow[..3], 0), None);
+}
+
+/// Asserts that a start or stop the poll handed out stands in for the command the previous
+/// release's reply carried only when it is that command: a start with its body (compared field
+/// by field afterwards), a stop of the same job; that a reply which still holds a command, a
+/// previous reply without one, an empty poll and a message that stands for no command are left
+/// alone; and that a message left over is reported unless it repeats one a reply took. It
+/// catches a comparison that would pass a reply whose command went missing, or one that would
+/// accept any message the poll hands out.
+#[test]
+fn a_start_or_stop_of_the_poll_stands_in_for_the_command_of_a_reply_only_as_that_command() {
+    use std::collections::VecDeque;
+    let start = serde_json::json!({ "type": "job_start", "job_id": "j1", "image": "i" });
+    let stop = serde_json::json!({ "type": "job_stop", "job_id": "j1" });
+    let dispatched_start = serde_json::json!({
+        "kind": "start", "job_id": "j1", "allocation_id": "a1",
+        "start": { "job_id": "j1", "image": "i" },
+    });
+    let dispatched_stop =
+        serde_json::json!({ "kind": "stop", "job_id": "j1", "allocation_id": "a1" });
+    assert_eq!(as_command(&dispatched_start), Some(start.clone()));
+    assert_eq!(as_command(&dispatched_stop), Some(stop.clone()));
+    for odd in [
+        serde_json::json!({ "kind": "start", "job_id": "j1" }),
+        serde_json::json!({ "kind": "stop", "job_id": "j1", "start": {} }),
+        serde_json::json!({ "kind": "unknown", "job_id": "j1" }),
+        serde_json::json!({}),
+    ] {
+        assert_eq!(as_command(&odd), None, "{odd}");
+    }
+
+    let wants = |command: &Value| serde_json::json!({ "commands": [command] });
+    let none = serde_json::json!({ "commands": [] });
+    let mut handed: VecDeque<Value> = [dispatched_start.clone(), dispatched_stop.clone()].into();
+    let mut now = none.clone();
+    assert_eq!(
+        hand_out(&wants(&start), &mut now, &mut handed),
+        Some(dispatched_start.clone())
+    );
+    assert_eq!(now, wants(&start));
+    let mut now = none.clone();
+    assert_eq!(
+        hand_out(&wants(&stop), &mut now, &mut handed),
+        Some(dispatched_stop.clone())
+    );
+    assert_eq!(now, wants(&stop));
+    assert!(handed.is_empty());
+
+    let mut left: VecDeque<Value> = [dispatched_stop.clone()].into();
+    let mut held = wants(&start);
+    assert_eq!(hand_out(&wants(&stop), &mut held, &mut left), None);
+    assert_eq!(held, wants(&start));
+    let mut empty = none.clone();
+    assert_eq!(hand_out(&none, &mut empty, &mut left), None);
+    assert_eq!(empty, none);
+    let mut bare = serde_json::json!({});
+    assert_eq!(hand_out(&wants(&stop), &mut bare, &mut left), None);
+    assert_eq!(
+        hand_out(&wants(&stop), &mut none.clone(), &mut VecDeque::new()),
+        None
+    );
+    let mut odd: VecDeque<Value> = [serde_json::json!({ "kind": "unknown" })].into();
+    assert_eq!(hand_out(&wants(&stop), &mut none.clone(), &mut odd), None);
+    assert_eq!(left.len(), 1);
+
+    assert_eq!(
+        unhanded(&left, std::slice::from_ref(&dispatched_stop)),
+        Vec::<String>::new()
+    );
+    assert_eq!(unhanded(&left, &[dispatched_start]).len(), 1);
+    assert_eq!(unhanded(&VecDeque::new(), &[]), Vec::<String>::new());
 }

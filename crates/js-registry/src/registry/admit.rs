@@ -271,6 +271,7 @@ impl Registry {
             pool: config.name().to_string(),
             session: secret,
             host_credential: None,
+            dispatch_poll: false,
         }
     }
 }

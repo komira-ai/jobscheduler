@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::{
-    Answer, CommandRunner, Connector, FileReader, Handle, Jitter, Login, Machine, Platform,
+    Answer, CommandRunner, Connector, Dialer, FileReader, Handle, Jitter, Login, Machine, Platform,
     Services, Sleeper, Transport, Wake, run_with,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
@@ -765,12 +765,54 @@ fn run_exactly(
     jobs: Jobs<'_>,
     store: Arc<FakeHost>,
 ) -> Ran {
+    // These tests' servers never say `dispatch_poll`, so the poller never makes a transport.
+    let dispatch = &Dialer;
+    run_polling(
+        args,
+        host,
+        (connector, dispatch),
+        (sleeper, jitter),
+        jobs,
+        store,
+    )
+}
+
+/// [`run_on`] with the connector of the dispatch poll's transports given: the one the
+/// heartbeat loop uses is `connector`, and the poller makes its own through `dispatch`.
+pub fn run_on_polling(
+    args: &[&str],
+    host: &Host,
+    connectors: (&dyn Connector, &(dyn Connector + Sync)),
+    sleeper: &mut dyn Sleeper,
+    jobs: Jobs<'_>,
+) -> Ran {
+    let named: Vec<&str> = no_job_runtime(args).iter().chain(args).copied().collect();
+    run_polling(
+        &named,
+        host,
+        connectors,
+        (sleeper, &mut Lowest),
+        jobs,
+        FakeHost::new(),
+    )
+}
+
+fn run_polling(
+    args: &[&str],
+    host: &Host,
+    connectors: (&dyn Connector, &(dyn Connector + Sync)),
+    waiting: (&mut dyn Sleeper, &mut dyn Jitter),
+    jobs: Jobs<'_>,
+    store: Arc<FakeHost>,
+) -> Ran {
+    let ((connector, dispatch), (sleeper, jitter)) = (connectors, waiting);
     let (mut out, mut err) = (Capped::new(), Capped::new());
     let mut services = Services {
         platform: host.platform.clone(),
         commands: &host.commands,
         files: &host.files,
         connector,
+        dispatch,
         jitter,
         sleeper,
         machine: jobs.0,

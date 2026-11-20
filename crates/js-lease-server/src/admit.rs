@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use js_agent_wire::{HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
+use js_agent_wire::{DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, is_mount_provider_key};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
@@ -126,6 +126,13 @@ pub(crate) fn reports_held_beat(capabilities: &BTreeMap<String, String>) -> bool
     capabilities.get(HELD_BEAT_CAPABILITY).map(String::as_str) == Some(FLAG_SET)
 }
 
+/// Whether `capabilities`, those a host's hello reported, say its agent polls for its starts
+/// and stops ([`DISPATCH_CAPABILITY`] is exactly [`FLAG_SET`]), so a server that serves the
+/// poll leaves out of its heartbeat replies what the dispatch queue carries.
+pub(crate) fn reports_dispatch_poll(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities.get(DISPATCH_CAPABILITY).map(String::as_str) == Some(FLAG_SET)
+}
+
 /// Whether `capabilities`, those a host's hello reported, say its agent gives a job layers,
 /// mounts and host ports ([`LAYERED_ROOTFS`] is exactly [`FLAG_SET`]).
 pub(crate) fn reports_layered_rootfs(capabilities: &BTreeMap<String, String>) -> bool {
@@ -230,6 +237,27 @@ mod tests {
         for other in [None, Some("false"), Some("True"), Some("true ")] {
             assert!(!said(other), "{other:?}");
         }
+    }
+
+    /// Catches an agent that never said it polls being left without its starts in the
+    /// heartbeat's reply. A hello reports the dispatch poll only with the capability
+    /// `dispatch-poll` set to exactly `true`: absent, `false`, another case or a padded value
+    /// do not, and the `held-beat` capability does not stand for it.
+    #[test]
+    fn the_dispatch_poll_is_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (DISPATCH_CAPABILITY.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_dispatch_poll(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("TRUE"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
+        let held = BTreeMap::from([(HELD_BEAT_CAPABILITY.to_owned(), "true".to_owned())]);
+        assert!(!reports_dispatch_poll(&held));
     }
 
     /// Asserts that a hello reports layered rootfs only with the capability `layered-rootfs`

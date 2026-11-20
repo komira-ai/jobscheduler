@@ -324,6 +324,7 @@ impl Agent {
                 commands: &commands,
                 files: &files,
                 connector: &Dialer,
+                dispatch: &Dialer,
                 jitter: &mut Lowest,
                 sleeper: &mut sleeper,
                 machine,

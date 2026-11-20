@@ -16,7 +16,9 @@
 //! it at once.
 //!
 //! The wakes are this process's: a placement made by another server is not seen here, and
-//! its start goes out on the host's next heartbeat, at most one hold later.
+//! its start goes out on the host's next heartbeat, at most one hold later. (A host that polls
+//! dispatch has a held poll as well, watched by the wakes of [`crate::dispatch_state`]; the
+//! pass wakes both, and the poll rechecks the queue on a timer for what it does not wake.)
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

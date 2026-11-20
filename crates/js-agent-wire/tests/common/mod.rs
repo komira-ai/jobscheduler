@@ -173,6 +173,7 @@ pub fn welcome() -> Welcome {
         pool: "builders".into(),
         session: "s3cret-0".into(),
         host_credential: None,
+        dispatch_poll: false,
     }
 }
 

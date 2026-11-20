@@ -590,7 +590,7 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
 /// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload`, since the
 /// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
-/// `start-fence`, `held-beat`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
+/// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
 /// mode the agent cannot serve. Returns the warnings the operator should read: none.
 fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<String> {
@@ -644,11 +644,11 @@ mod tests {
     }
 
     /// Asserts that a native agent's hello says it uploads live logs, takes the job-keyed
-    /// start (`per-job`, `start-fence`, `held-beat`) and gives mounts (`layered-rootfs`), and still
+    /// start (`per-job`, `start-fence`, `held-beat`), polls the dispatch route (`dispatch-poll`) and gives mounts (`layered-rootfs`), and still
     /// validates. Catches a server never told that a native agent uploads or takes job starts
     /// and mounts.
     #[test]
-    fn a_native_agent_reports_log_upload_and_the_job_keys() {
+    fn a_native_agent_reports_log_upload_the_job_keys_and_the_dispatch_poll() {
         let mut native = hello();
         assert!(report_native(&mut native, true, Ceiling::Off).is_empty());
         let flag = |key: &str| native.capabilities.get(key).cloned();
@@ -663,6 +663,10 @@ mod tests {
         );
         assert_eq!(
             flag(js_agent_wire::HELD_BEAT_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(
+            flag(js_agent_wire::DISPATCH_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
         assert_eq!(flag(js_caps::LAYERED_ROOTFS).as_deref(), Some(FLAG_SET));

@@ -1,8 +1,11 @@
 //! The drain of a stopping server's agent side ([`crate::server::Running::hold`]): from the
-//! termination signal on, the server places no job and holds no heartbeat's reply, so the
-//! agents it serves leave for another server over the same store as soon as their next
-//! heartbeat needs a connection, and no job is placed on a host by a server that will not
-//! hear it again.
+//! termination signal on, the server places no job, holds no heartbeat's reply, holds no
+//! dispatch poll and claims no dispatch message, so the agents it serves leave for another
+//! server over the same store as soon as their next heartbeat or poll needs a connection, and
+//! no job is placed on a host by a server that will not hear it again. A dispatch poll that
+//! has claimed when the drain begins is answered with what it claimed, whose claim is
+//! committed; a held one is answered empty at once; the acknowledgements of a poll are
+//! applied as ever ([`crate::agent_api`]).
 //!
 //! What the server already committed stays: a job it placed before the drain is in the job
 //! tables, and whichever server the host says hello to next sends its start. The job pass

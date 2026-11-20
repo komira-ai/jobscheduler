@@ -184,7 +184,11 @@ either side (a release that changed none leaves the transcript as it is):
    (`welcome_interval_as`) and no other. Its unknown-major hello asks for majors 2 to 3, and
    it fails unless the server refuses it; once a server speaks major 2, the majors in
    `record()` (`crates/js-agent/tests/agent/skew/record.rs`) are moved above the newest one
-   it speaks in the same pull request.
+   it speaks in the same pull request. A release that has the dispatch poll records the
+   messages the poll handed out under `dispatched`, beside `flow` and `refusal`, and its
+   start and stop are then absent from the heartbeat replies of `flow`; a tag from before
+   the poll is recorded with `Agent::spawn_on` in place of `spawn_polling` (adapted there)
+   and has no `dispatched`.
 2. On a branch of main, copy that file to `crates/js-agent/tests/agent/skew/v<new>.json`,
    delete the old transcript, and change the file name in `previous()`
    (`crates/js-agent/tests/agent/skew/mod.rs`) and the release this section and the module's

@@ -87,6 +87,18 @@
 //! it; the reply is then built again from the store and carries the start. A heartbeat that
 //! lists a job as `starting` is held for [`crate::held_beat::starting_hold`] (200 ms) at most
 //! instead, so the start's `running` is not kept a whole hold.
+//!
+//! # The dispatch poll
+//!
+//! A host that reported [`js_agent_wire::DISPATCH_CAPABILITY`] to a server that holds the job
+//! tables is told so in the welcome (`dispatch_poll`) and takes its starts and stops from
+//! `POST /v1/agent/dispatch` ([`dispatch`]), a long poll that claims the host's dispatch
+//! queue from whichever server answers. Its heartbeat's reply then leaves out each start and
+//! stop the queue carries ([`crate::per_job::commands_now`]); everything else still rides on
+//! the reply, a start of a job a release before placed (it queued no message) among it. A
+//! host that did not report the capability is sent every start and stop in the reply, as
+//! before, and a poll of its is refused 409 `dispatch-not-served`. A placement wakes the
+//! host's held heartbeat and its held poll, each by a wake of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -105,14 +117,12 @@ use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, Wel
 use js_jobs::{JobStoreError, NodeRow};
 use js_registry::{Credential, Refusal};
 use js_state::Revision;
-use js_types::{HostId, Resources, Shape};
+use js_types::HostId;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
 use self::host_cert::CertifiedHost;
-use crate::admit::{
-    reported_mount_providers, reports_held_beat, reports_host_jobs, reports_layered_rootfs,
-};
+use crate::admit::{reports_dispatch_poll, reports_held_beat};
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::host_keys::Writes;
@@ -128,6 +138,7 @@ use crate::util::blocking;
 /// store, the binding it changes could not be committed.
 const STATE_WRITE_FAILED: &str = "state-write-failed";
 
+mod dispatch;
 mod held;
 mod host_cert;
 mod limit;
@@ -136,6 +147,7 @@ mod refused;
 pub(crate) mod rows;
 mod unknown;
 
+use self::held::{HostFacts, Inputs};
 pub(crate) use self::refused::Refused;
 use self::unknown::{identify_single, unknown_bearer};
 
@@ -157,6 +169,7 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
     Router::new()
         .route("/v1/agent/hello", hello)
         .route("/v1/agent/heartbeat", post(heartbeat))
+        .route(js_agent_wire::DISPATCH_PATH, post(dispatch::poll))
         .route(
             "/v1/hosts/{target}",
             get(own_host::show).post(own_host::act),
@@ -319,6 +332,10 @@ async fn serve_hello_in(
     let mut welcome = agents.registry.take_hello(admission);
     rows::hello_row(agents, &host, &hello, &mut welcome).await?;
     drop(gate);
+    // The poll is served to a host that says it polls by a server that holds the job tables
+    // (the queue it hands out is theirs): the heartbeat's reply then leaves the queue's
+    // starts and stops to the poll ([`dispatch`]).
+    welcome.dispatch_poll = agents.jobs.is_some() && reports_dispatch_poll(&hello.capabilities);
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
     agents.save_bindings().await;
@@ -515,18 +532,6 @@ async fn add_jobs(
     }))
 }
 
-/// What the registry holds of a host that reported the `per-job` capability, as
-/// [`serve_jobs`] reads it.
-struct PerJobHost {
-    id: HostId,
-    /// The shape the host announced at its hello.
-    claim: Shape,
-    /// What the registry books for the host: what a start of the whole host books.
-    booked: Resources,
-    /// Whether the registry holds the host tainted.
-    tainted: bool,
-}
-
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
 /// room for `room` commands, its starts carrying the sinks of `logs`, and, for a host that
 /// reported [`HELD_BEAT_CAPABILITY`], the watch of its heartbeat (taken before the store is
@@ -546,53 +551,25 @@ async fn serve_jobs(
     logs: Option<Arc<LogGrants>>,
     room: usize,
 ) -> Result<Option<(JobReply, Option<Watched>)>, Refused> {
-    let per_job = HostId::new(&heartbeat.host_id)
-        .ok()
-        .and_then(|host| agents.registry.own_host(&host))
-        .and_then(|own| {
-            let tainted = own.host.taint.is_some();
-            let booked = own.host.shape.resources().clone();
-            own.host.claim.map(|claim| PerJobHost {
-                id: own.host.id,
-                claim,
-                booked,
-                tainted,
-            })
-        })
-        .filter(|host| {
-            let capabilities = host.claim.capabilities();
-            let reported = capabilities.get(js_agent_wire::PER_JOB_CAPABILITY);
-            reported.map(String::as_str) == Some("true")
-        });
-    let Some(PerJobHost {
-        id: host,
-        claim,
-        booked,
-        tainted,
-    }) = per_job
-    else {
+    let per_job = HostFacts::of(agents, &heartbeat.host_id).filter(|host| {
+        let reported = host
+            .claim
+            .capabilities()
+            .get(js_agent_wire::PER_JOB_CAPABILITY);
+        reported.map(String::as_str) == Some("true")
+    });
+    let Some(facts) = per_job else {
         return Ok(None);
     };
-    let capabilities = claim.capabilities();
     // Only a serving host takes a new start: a draining, preparing or tainted one is never
     // held (a draining agent counts its drain in the waits it asks for, which a held reply
     // would stretch). A beat the row did not apply is answered at once, from the rows.
-    let holds = reports_held_beat(capabilities) && heartbeat.phase == Phase::Serving;
+    let holds = reports_held_beat(facts.claim.capabilities()) && heartbeat.phase == Phase::Serving;
     let holds = holds && applied.is_some();
-    let watch = holds.then(|| agents.wakes.watch(&host));
-    let inputs = Arc::new(held::Inputs {
-        jobs: Arc::clone(jobs),
-        ceiling: js_agent_wire::NetworkCeiling::from_capabilities(capabilities).unwrap_or_default(),
-        host_jobs: reports_host_jobs(capabilities),
-        layered_rootfs: reports_layered_rootfs(capabilities),
-        mount_providers: reported_mount_providers(capabilities),
-        booked,
-        logs,
-        listed: heartbeat.jobs.clone(),
-        retired: heartbeat.retired_jobs.clone(),
-        room,
-        host,
-    });
+    let watch = holds.then(|| agents.wakes.watch(&facts.id));
+    let beat = (heartbeat.jobs.clone(), heartbeat.retired_jobs.clone(), room);
+    let inputs = Arc::new(Inputs::new(jobs, &facts, logs, beat));
+    let tainted = facts.tainted;
     let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
     let refused = heartbeat.exclusive_refused.clone();
     let sequenced = heartbeat.seq.is_some();

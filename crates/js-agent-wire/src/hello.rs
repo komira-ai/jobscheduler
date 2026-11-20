@@ -616,6 +616,13 @@ pub struct Welcome {
     /// the token it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_credential: Option<HostCredential>,
+    /// Whether this server hands the host's starts and stops out by the dispatch poll
+    /// ([`crate::dispatch`]) and leaves them out of its heartbeats' replies: said only to an
+    /// agent whose hello reported [`crate::DISPATCH_CAPABILITY`], by a server that serves the
+    /// poll. The agent polls for the session this welcome begins only when it is `true`.
+    /// Absent (a server from before the poll) means `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dispatch_poll: bool,
 }
 
 /// Every field but `session` and `host_credential`, which print as `".."` (the second only
@@ -634,6 +641,7 @@ impl fmt::Debug for Welcome {
                 "host_credential",
                 &self.host_credential.as_ref().map(|_| ".."),
             )
+            .field("dispatch_poll", &self.dispatch_poll)
             .finish()
     }
 }
