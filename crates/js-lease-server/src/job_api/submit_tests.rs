@@ -26,6 +26,9 @@ use crate::job_api::writes_rig::{
 #[path = "submit_provider_tests.rs"]
 mod provider;
 
+#[path = "submit_xcode_tests.rs"]
+mod xcode;
+
 /// The answer of a refusal by `code`, as the gateway says it, beside its gRPC code.
 fn refusal(code: RefusalCode) -> (StatusCode, Value) {
     said(&refusal_status(code, ""))

@@ -595,6 +595,7 @@ fn build_xcodes(
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: reported,
+            polls_dispatch: false,
         },
     )
 }
