@@ -242,6 +242,8 @@ where
     an_admission_that_loses_the_pool_row_counts_again(backend);
     two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one(backend);
     a_refresh_writes_only_a_changed_state_or_a_stale_row(backend);
+    a_refresh_of_the_hearing_alone_leaves_the_reading_standing(backend);
+    live_nodes_reusing_takes_only_rows_at_the_stored_version(backend);
     nodes_lists_every_readable_row_heard_or_not(backend);
     forget_silent_nodes_deletes_only_the_rows_that_hold_nothing(backend);
     forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding(backend);
@@ -426,6 +428,8 @@ macro_rules! job_store_tests {
             an_admission_that_loses_the_pool_row_counts_again,
             two_servers_admitting_hosts_one_slot_from_the_cap_admit_exactly_one,
             a_refresh_writes_only_a_changed_state_or_a_stale_row,
+            a_refresh_of_the_hearing_alone_leaves_the_reading_standing,
+            live_nodes_reusing_takes_only_rows_at_the_stored_version,
             nodes_lists_every_readable_row_heard_or_not,
             forget_silent_nodes_deletes_only_the_rows_that_hold_nothing,
             forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_binding,

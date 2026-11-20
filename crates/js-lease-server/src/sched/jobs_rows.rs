@@ -55,6 +55,9 @@ pub(crate) struct RowsRead {
     written: Written,
     /// The live `node/` rows, by host.
     live: BTreeMap<HostId, NodeRow>,
+    /// The shape the engine places each live row's host as ([`engine_shape`]), for the rows
+    /// that have one.
+    engines: BTreeMap<HostId, Shape>,
     /// The `taint/` rows, by host.
     taints: BTreeMap<HostId, HostTaint>,
     /// The hosts a `hostmark/` row marks.
@@ -84,24 +87,31 @@ struct Seen<'a> {
     shape: &'a Shape,
     claim: Option<&'a Shape>,
     open: bool,
-    /// For a host known by its row, the shape the engine places it as: the pool's booking
-    /// with the claim's accelerator facts, as the registry tells the engine at a hello.
-    engine: Option<Shape>,
+    /// For a host known by its row, the shape the engine places it as ([`engine_shape`]).
+    engine: Option<&'a Shape>,
 }
 
-/// The row's view of a host: open when the host serves and its last listing was clean. `None`
-/// for a row with no booked shape, or of a pool this server does not serve.
-fn seen_by_row<'a>(agents: &Agents, row: &'a NodeRow) -> Option<Seen<'a>> {
+/// The shape the engine places the host of `row` as: the pool's booking with the claim's
+/// accelerator facts, as the registry tells the engine at a hello. `None` for a row with no
+/// booked shape, or of a pool this server does not serve.
+fn engine_shape(agents: &Agents, row: &NodeRow) -> Option<Shape> {
     let record = &row.record;
     let shape = record.shape.as_ref()?;
     let claim = record.claim.as_ref();
-    let engine = agents
+    agents
         .registry
-        .placement_shape_in(&record.pool, shape, claim)?;
+        .placement_shape_in(&record.pool, shape, claim)
+}
+
+/// The row's view of a host, placed by the engine as `engine` ([`engine_shape`]): open when the
+/// host serves and its last listing was clean. `None` for a row the engine places no host of.
+fn seen_by_row<'a>(row: &'a NodeRow, engine: Option<&'a Shape>) -> Option<Seen<'a>> {
+    let record = &row.record;
+    let (shape, engine) = record.shape.as_ref().zip(engine)?;
     let state = &record.state;
     Some(Seen {
         shape,
-        claim,
+        claim: record.claim.as_ref(),
         open: (state.phase == Phase::Serving) & state.last_listing_clean,
         engine: Some(engine),
     })
@@ -167,11 +177,23 @@ impl Agents {
     /// The rows a pass offers by, read now, and kept for the next heartbeat's pass.
     fn read_rows(&self, jobs: &ServerJobs) -> Result<Arc<RowsRead>, String> {
         let written = jobs.written().map_err(|error| error.to_string())?;
-        let live = jobs.live_nodes(self.registry.longest_grace());
+        // The rows the last read decoded are taken again at the versions they had then.
+        let kept = self
+            .rows_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let known = kept.as_ref().map(|read| &read.live);
+        let grace = self.registry.longest_grace();
+        let live = jobs.live_nodes_reusing(grace, known.unwrap_or(&BTreeMap::new()));
         let live = live.map_err(|error| error.to_string())?;
         let live: BTreeMap<HostId, NodeRow> = live
             .into_iter()
             .map(|row| (row.record.host.clone(), row))
+            .collect();
+        let engines = live
+            .iter()
+            .filter_map(|(host, row)| Some((host.clone(), engine_shape(self, row)?)))
             .collect();
         let taints = jobs.host_taints().map_err(|error| error.to_string())?;
         let marks = jobs.host_marks().map_err(|error| error.to_string())?;
@@ -182,6 +204,7 @@ impl Agents {
         let read = Arc::new(RowsRead {
             written,
             live,
+            engines,
             taints,
             marks: marks.into_keys().collect(),
             stored: stored.unwrap_or_default(),
@@ -197,14 +220,15 @@ impl Agents {
     fn offered_from(&self, read: &RowsRead, placer: &SchedPlacer, now: Timestamp) -> Offered {
         let RowsRead {
             live,
+            engines,
             taints,
             marks,
             stored,
             ..
         } = read;
         // The registry's bindings are the newest of the hosts it holds.
-        let mut bindings: BTreeMap<HostId, Binding> = stored.clone();
-        bindings.extend(self.registry.bindings());
+        let held: BTreeMap<HostId, Binding> = self.registry.bindings();
+        let binding_of = |host: &HostId| held.get(host).or_else(|| stored.get(host));
         let views: BTreeMap<HostId, HostView> = self
             .registry
             .hosts()
@@ -234,7 +258,7 @@ impl Agents {
             // A host is offered because it has a live row or the registry holds it live, so
             // one with no row has a view.
             let seen = match row {
-                Some(row) => seen_by_row(self, row),
+                Some(row) => seen_by_row(row, engines.get(host)),
                 None => view.map(|view| Seen {
                     shape: &view.shape,
                     claim: view.claim.as_ref(),
@@ -245,19 +269,19 @@ impl Agents {
             let Some(seen) = seen else {
                 continue;
             };
-            let tainted = bindings
-                .get(host)
-                .is_some_and(|bound| bound.taint().is_some());
+            let tainted = binding_of(host).is_some_and(|bound| bound.taint().is_some());
             let closed = taints.contains_key(host) | marks.contains(host) | tainted;
             let here = view.is_none_or(|view| open_here(view, now, row.is_some()));
             if !(seen.open & !closed & here & self.listing_clean(host)) {
                 continue;
             }
             // A host of a provider the Default platform does not list is no candidate here.
-            let Some(ranked) = rank(&self.providers, bindings.get(host)) else {
+            let Some(ranked) = rank(&self.providers, binding_of(host)) else {
                 continue;
             };
-            if let Some(engine) = &seen.engine {
+            // The engine was told of a host this registry holds live at its hello here.
+            let held_live = view.is_some_and(|view| view.state == HostState::Live);
+            if let Some(engine) = seen.engine.filter(|_| !held_live) {
                 placer.host_seen(host, engine);
             }
             let capabilities = seen.claim.map(Shape::capabilities);

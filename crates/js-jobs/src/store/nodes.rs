@@ -227,7 +227,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// the row: the row's session is `epoch` and its state is not `state`, or the row was last
     /// heard `every` or longer ago by the store's clock. A beat that changes neither writes
     /// nothing and is `None`, so a host whose state stands still moves its row once per
-    /// `every`, not once per beat.
+    /// `every`, not once per beat. A write that only moves when the host was heard is left out
+    /// of [`JobStore::written`] when nothing else was committed or written around it, so it
+    /// does not make the callers that cached the tables read them again.
     ///
     /// # Errors
     /// As [`JobStore::beat_node`].
@@ -245,8 +247,19 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 return Ok(None);
             }
         }
-        self.beat_node(host, epoch, None, |_| state.clone())
-            .map(Some)
+        // Only the hearing moves when the row the write read holds `state` already.
+        let unchanged = std::cell::Cell::new(false);
+        self.hearing(|| {
+            let beat = self.beat_node(host, epoch, None, |read| {
+                unchanged.set(read.state == *state);
+                state.clone()
+            })?;
+            let wrote = match &beat {
+                Beat::Applied(row) => Some(row.version).filter(|_| unchanged.get()),
+                _ => None,
+            };
+            Ok((Some(beat), wrote))
+        })
     }
 
     /// Every host's row this build can read, heard lately or not, in host order, with the
@@ -325,10 +338,29 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::Store`], its clock included.
     pub fn live_nodes(&self, grace: Duration) -> Result<Vec<NodeRow>, JobStoreError> {
+        self.live_nodes_reusing(grace, &BTreeMap::new())
+    }
+
+    /// [`JobStore::live_nodes`], taking each row the store still holds at the version it has in
+    /// `known` (rows read before, by host) from there, so that only a row written since is
+    /// decoded. Whether a row is live is judged afresh either way.
+    ///
+    /// # Errors
+    /// As [`JobStore::live_nodes`].
+    pub fn live_nodes_reusing(
+        &self,
+        grace: Duration,
+        known: &BTreeMap<HostId, NodeRow>,
+    ) -> Result<Vec<NodeRow>, JobStoreError> {
         let now = self.store.now()?;
         let mut live = Vec::new();
         for (key, row) in self.store.scan_prefix(keys::NODE)? {
-            match node_at(&key, &row) {
+            let host = key
+                .strip_prefix(keys::NODE)
+                .and_then(|host| HostId::new(host).ok());
+            let kept = host.and_then(|host| known.get(&host));
+            let kept = kept.filter(|kept| kept.version == row.version).cloned();
+            match kept.map_or_else(|| node_at(&key, &row), Ok) {
                 Ok(row) if heard_within(row.record.heard_at, grace, now) => live.push(row),
                 Ok(_) => {}
                 Err(error) => {

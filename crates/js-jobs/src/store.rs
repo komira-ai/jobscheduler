@@ -106,8 +106,8 @@ pub struct JobStore<S, I = RandomIds> {
     /// The number of this job store among those this process made ([`Written`]).
     instance: u64,
     /// How many writes this job store has sent to the store since it was made, whatever each
-    /// answered ([`JobStore::written`]).
-    writes: AtomicU64,
+    /// answered, and the hearing it last refreshed alone ([`JobStore::written`]).
+    writes: written::Writes,
     /// How long an ended job is kept: applied when a job ends.
     retention: Retention,
     /// How long a freed allocation's row is kept after its free: applied by the tick.
@@ -243,7 +243,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             ids,
             schema,
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
-            writes: AtomicU64::new(0),
+            writes: written::Writes::default(),
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
         };

@@ -58,8 +58,9 @@
 //! server places over the live rows, whichever server took the host's hello. A hello of a host
 //! new to its pool is counted against the pool's cap over every server's rows
 //! ([`JobStore::hello_node_in_pool`]), a beat writes the row when it changes it or it is old
-//! ([`JobStore::refresh_node`]), and a row silent long enough that holds nothing is deleted
-//! ([`JobStore::forget_silent_nodes`]).
+//! ([`JobStore::refresh_node`]; a refresh of only when the host was heard is left out of
+//! [`JobStore::written`], so it makes no cache of the tables read them again), and a row silent
+//! long enough that holds nothing is deleted ([`JobStore::forget_silent_nodes`]).
 //!
 //! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
 //! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the

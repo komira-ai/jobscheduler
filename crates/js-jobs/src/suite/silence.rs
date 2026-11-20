@@ -401,3 +401,153 @@ pub fn forget_silent_nodes_keeps_a_row_that_moved_and_refuses_an_unreadable_bind
         "{name}: a clock that cannot be read"
     );
 }
+
+/// Asserts what a refresh that only moves when a host was heard does to
+/// [`crate::JobStore::written`]: committed alone, directly on the head, the reading stands as it
+/// was before it, read once or twice; the job store's next write (a refresh that changes the
+/// state, or one whose commit fails) moves it; and on a store that tells its head, another
+/// server's commit moves it, both after such a refresh and when it lands just before the
+/// refresh commits. Catches a refresh
+/// that makes every cache of the tables read them again (each beat's pass would then read every
+/// table once per host's hearing), and a reading that hides a commit that changed a row.
+pub fn a_refresh_of_the_hearing_alone_leaves_the_reading_standing<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "a_refresh_of_the_hearing_alone_leaves_the_reading_standing";
+    let rig = rig(backend);
+    let tells_head = rig.store.head().expect("the head reads").is_some();
+    let every = secs(10);
+    let a = host("host-a");
+    hello_of(&rig, "host-a");
+    let read = rig.jobs.read_node(&a).expect("reads").expect("a row");
+    let standing = read.record.state.clone();
+    rig.clock.advance(every);
+    let before = rig.jobs.written().expect("reads");
+    let heard = applied_row(
+        rig.jobs
+            .refresh_node(&a, 1, &standing, every)
+            .expect("reads")
+            .expect("a row heard `every` ago is refreshed"),
+    );
+    assert!(
+        heard.record.heard_at > read.record.heard_at,
+        "{name}: heard"
+    );
+    assert_eq!(rig.jobs.written(), Ok(before), "{name}: the hearing alone");
+    assert_eq!(rig.jobs.written(), Ok(before), "{name}: read again");
+
+    let changed = NodeState {
+        first_listing_pending: !standing.first_listing_pending,
+        ..standing.clone()
+    };
+    rig.jobs
+        .refresh_node(&a, 1, &changed, every)
+        .expect("reads")
+        .expect("a changed state is written");
+    let moved = rig.jobs.written().expect("reads");
+    assert_ne!(moved, before, "{name}: a changed state");
+
+    rig.clock.advance(every);
+    rig.jobs
+        .refresh_node(&a, 1, &changed, every)
+        .expect("reads")
+        .expect("refreshed");
+    assert_eq!(
+        rig.jobs.written(),
+        Ok(moved),
+        "{name}: the next hearing alone"
+    );
+
+    // Another server's commit is seen where the store tells its head, and only there (a store
+    // that does not is one only this job store writes).
+    rig.other()
+        .hello_node(&host("host-b"), &hello_in("pool-a"))
+        .expect("another server's hello");
+    let other = rig.jobs.written().expect("reads");
+    assert_eq!(
+        other != moved,
+        tells_head,
+        "{name}: another server's commit after a hearing"
+    );
+
+    rig.clock.advance(every);
+    let second = rig.other();
+    rig.store.before_next(move || {
+        second
+            .hello_node(&host("host-c"), &hello_in("pool-a"))
+            .expect("another server's hello");
+    });
+    rig.jobs
+        .refresh_node(&a, 1, &changed, every)
+        .expect("reads")
+        .expect("refreshed");
+    let after = rig.jobs.written().expect("reads");
+    assert_eq!(
+        after != other,
+        tells_head,
+        "{name}: another server's commit just before a hearing"
+    );
+
+    // A refresh whose commit fails is an error, and its write is counted as any other.
+    rig.clock.advance(every);
+    rig.store.fail_after(0);
+    assert!(
+        rig.jobs.refresh_node(&a, 1, &changed, every).is_err(),
+        "{name}: a failed commit"
+    );
+    assert_ne!(rig.jobs.written(), Ok(after), "{name}: the failed write");
+}
+
+/// Asserts that [`crate::JobStore::live_nodes_reusing`] takes a row from the rows it is given
+/// only at the version the store still holds, and decodes the others: a given row at the
+/// stored version comes back as given, one at another version comes back as stored, and a host
+/// it was not given comes back as stored; whether a row is live is judged afresh, so a given
+/// row whose host went silent past the grace is left out. Catches a reuse that hands back a
+/// row written over since, and one that keeps a silent host live.
+pub fn live_nodes_reusing_takes_only_rows_at_the_stored_version<B: Backend>(backend: &B)
+where
+    B::Store: 'static,
+{
+    let name = "live_nodes_reusing_takes_only_rows_at_the_stored_version";
+    let rig = rig(backend);
+    let grace = secs(30);
+    hello_of(&rig, "host-a");
+    hello_of(&rig, "host-b");
+    hello_of(&rig, "host-c");
+    let stored = |name: &str| {
+        rig.jobs
+            .read_node(&host(name))
+            .expect("reads")
+            .expect("a row")
+    };
+    let (a, b, c) = (stored("host-a"), stored("host-b"), stored("host-c"));
+    // Rows given with labels the store does not hold, so that a row taken from them shows.
+    let given = |row: &crate::NodeRow, version: js_state::Version| {
+        let mut row = row.clone();
+        row.record
+            .labels
+            .insert("given".to_owned(), "yes".to_owned());
+        row.version = version;
+        (row.record.host.clone(), row)
+    };
+    let known = [
+        given(&a, a.version),
+        given(&b, js_state::Version(b.version.0 + 1000)),
+    ]
+    .into_iter()
+    .collect();
+    let live = rig.jobs.live_nodes_reusing(grace, &known).expect("reads");
+    assert_eq!(
+        live,
+        vec![known[&host("host-a")].clone(), b.clone(), c.clone()],
+        "{name}: the given row at its version, the others as stored"
+    );
+
+    rig.clock.advance(grace + secs(1));
+    assert_eq!(
+        rig.jobs.live_nodes_reusing(grace, &known),
+        Ok(Vec::new()),
+        "{name}: silent past the grace, given or not"
+    );
+}
