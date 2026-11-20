@@ -197,9 +197,10 @@ impl Registry {
     /// marked. For a caller that has decided the machine is being given back and must not
     /// take work, however the registry came to hold it: a scaler that restarts with a
     /// release in flight calls this for every such machine before the server admits a
-    /// hello, because the marks are held in memory and a host whose release was under way
-    /// would otherwise say hello again unmarked and be given work before its machine is
-    /// gone. Work the host already has is not cut; the mark only stops new work.
+    /// hello, because the marks are the cache of the `hostmark/<host>` rows when the server
+    /// has a job store (set from them at a tick, after that hello) and memory only without
+    /// one, so a host whose release was under way would otherwise say hello again unmarked
+    /// and be given work before its machine is gone. Work the host already has is not cut; the mark only stops new work.
     /// Marking a releasing host again changes nothing. [`Registry::remove`] ends it.
     pub fn mark_ending(&self, host: &HostId) {
         let mut guard = self.lock();

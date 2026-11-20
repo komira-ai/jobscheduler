@@ -5,8 +5,8 @@
 //! the context it needs, one builder call per group. A group task whose calls the server
 //! serves adds its `with_<group>` line here when the server handles that group's context
 //! needs exist. Today the read group's is (it reads host silence from the registry), the
-//! submit group's (the ceiling on a job's wall limit, admission over the registry's hosts
-//! and the pool's launching providers, and the agent side whose pass places a job with nothing
+//! submit group's (the ceiling on a job's wall limit, admission over the registry's hosts, the job store's
+//! `node/` rows and the pool's launching providers, and the agent side whose pass places a job with nothing
 //! ahead of it in the call), the fleet group's (the server's hosts and their
 //! cordons, the status of its pools, the usage sink's ended bookings, none with
 //! `--usage-off`, and the job store's records of jobs' allocations), and the logs group's (the log store of the `[logs]` table, built before

@@ -7,7 +7,8 @@
 //! the taint's record between the two writes, so a crash between them loses nothing. The drop
 //! deletes a row at the version it read and only while it names the job the caller kept, so a
 //! taint put since is not lost. Nothing else deletes or rewrites a taint row, and the retention
-//! tick does not read the table. Every placement's transaction refuses a host whose row is there
+//! tick does not read the table. Every placement's commit checks the row absent for a contained job, and
+//! [`JobStore::place_claimed`] also reads it (and the host's binding) and refuses the host
 //! (`host_rows`), whichever server placed the host job.
 //!
 //! The table is additive: a store written before it has no `taint/` rows and reads and writes

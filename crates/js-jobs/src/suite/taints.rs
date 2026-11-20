@@ -363,8 +363,8 @@ where
 }
 
 /// [`crate::JobStore::drop_taints`] deletes the rows of the hosts it is given, each with the job
-/// that tainted it, in one commit, passes over a host with no row and leaves every other row; no hosts make no commit, and a
-/// failed commit deletes nothing.
+/// that tainted it, in one commit, passes over a host with no row and leaves every other row;
+/// no hosts make no commit, and a failed commit deletes nothing.
 pub fn drop_taints_deletes_the_named_rows_in_one_commit<B: Backend>(backend: &B)
 where
     B::Store: 'static,

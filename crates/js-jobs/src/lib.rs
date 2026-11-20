@@ -29,14 +29,16 @@
 //! reason [`HOST_JOB_TAINT`]): [`JobStore::place`] and [`JobStore::place_with`] write it in the
 //! transaction that places the job, and the caller deletes it once it holds the taint where it
 //! keeps every host's taint ([`JobStore::drop_taints`], at the version read and only while it
-//! names that job); nothing else in this crate deletes one. Every placement's transaction
-//! refuses a host whose taint row is there, or whose binding (`hosts/binding/<host>`, the
-//! server's) holds a taint ([`JobStoreError::HostTainted`]).
+//! names that job); nothing else in this crate deletes one. Every placement's commit checks
+//! that no taint row is there for a contained job (and puts it absent for a host job);
+//! [`JobStore::place_claimed`] also reads the host's binding (`hosts/binding/<host>`, the
+//! server's) and refuses a host whose taint row is there or whose binding holds a taint
+//! ([`JobStoreError::HostTainted`]).
 //!
 //! A **scale-down mark** (`hostmark/<host>`, [`ScaleMark`]) takes a host that is leaving the pool
 //! out of placement: written at the version read by whoever marks it ([`JobStore::mark_host`],
 //! [`JobStore::unmark_host`], [`JobStore::host_marks`]), and checked absent by every placement's
-//! transaction ([`JobStoreError::HostMarked`]). A placement made through
+//! commit; [`JobStore::place_claimed`] also refuses it ([`JobStoreError::HostMarked`]). A placement made through
 //! [`JobStore::place_claimed`] is also refused when a live allocation on the host holds a host
 //! port the job declares ([`JobStoreError::PortTaken`]).
 //!

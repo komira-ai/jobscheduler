@@ -106,6 +106,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ///   reserves the capacity: the booking and the check are one transaction);
     /// - the host must not be cordoned: a live `cordon/<host>` row is [`JobStoreError::HostCordoned`]
     ///   and nothing is written (the commit checks the row absent too);
+    /// - the host must not be tainted: a live `taint/<host>` row, or a text `taint_reason` in
+    ///   the host's binding row (`hosts/binding/<host>`), is [`JobStoreError::HostTainted`];
+    /// - the host must not be marked to scale down: a `hostmark/<host>` row is
+    ///   [`JobStoreError::HostMarked`];
+    /// - none of the job's host ports may be held by a live allocation on the host, else
+    ///   [`JobStoreError::PortTaken`];
     /// - the host's reservation row (`hostbook/<host>`) is written at the version the
     ///   transaction read, so a reader that works from a picture of the host sees it moved.
     ///
@@ -114,7 +120,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
     /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`];
-    /// [`JobStoreError::HostCordoned`].
+    /// [`JobStoreError::HostCordoned`]; [`JobStoreError::HostTainted`];
+    /// [`JobStoreError::HostMarked`]; [`JobStoreError::PortTaken`].
     pub fn place_claimed(
         &self,
         id: &JobId,

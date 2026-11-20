@@ -30,8 +30,8 @@
 //!    repeated submit without an id makes a second job.
 //! 3. **Admission** (design section 5.6, step 2), only for a job that would be created:
 //!    [`Admission::can_ever_serve`] asks whether a host, or a catalog of a provider that
-//!    launches, could ever serve the job; the server's source reads the registry's hosts and
-//!    the catalogs as the server's catalog cache holds them, calling no provider, and a
+//!    launches, could ever serve the job; the server's source reads the registry's hosts, the
+//!    `node/` rows of the job store (hosts that said hello to another server) and the catalogs as the server's catalog cache holds them, calling no provider, and a
 //!    catalog the cache has not read may offer. A job with host isolation is offered only the
 //!    hosts that reported they run host jobs, and no catalog. A job nothing could serve is the
 //!    refusal `no-capable-host` (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row,
