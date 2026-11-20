@@ -57,6 +57,18 @@ pub struct HostTaint {
     pub job: JobId,
 }
 
+/// The scale-down mark of a host (`hostmark/<host>`): the host is leaving the pool, so no job
+/// is placed on it. Whoever marks a host writes the row at the version it read
+/// ([`JobStore::mark_host`](crate::JobStore::mark_host)), and every placement's transaction
+/// checks it absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleMark {
+    /// The host is drained: it keeps what it runs and takes nothing new.
+    Draining,
+    /// The host is being released to its provider.
+    Releasing,
+}
+
 /// What a job may reach on the network (design section 5.8).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NetworkPolicy {

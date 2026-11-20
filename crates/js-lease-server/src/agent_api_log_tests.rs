@@ -140,7 +140,9 @@ async fn a_placed_job_starts_with_a_sink_naming_its_own_prefix_and_no_credential
 #[tokio::test]
 async fn no_sink_for_a_host_that_did_not_report_the_capability_or_with_sink_none() {
     let mut before = rig("logs_none_before", true);
-    before.register("host-a", true);
+    // Through the route, as the other two: each hello writes the host's row on the store's
+    // clock, so the three replies are made at the same store times.
+    before.join("host-a", false).await;
     before.place("job-a", "host-a");
     let today = before.beat(&FakeAgent::new("host-a")).await.unwrap();
     assert!(starts(&today)[0].log_sink.is_none());

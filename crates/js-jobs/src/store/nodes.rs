@@ -17,10 +17,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_state::{Cond, Store, StoreTime, Txn, Version, Versioned};
+use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version, Versioned};
 use js_types::HostId;
 
-use super::JobStore;
+use super::host_rows::binding_tainted;
+use super::{JobStore, booked_in};
 use crate::codec::DecodeError;
 use crate::codec::node_fields::{decode_node, encode_node};
 use crate::error::JobStoreError;
@@ -112,32 +113,67 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         loop {
             let read = self.read_node(host)?;
             let now = self.store.now()?;
-            let before = read.as_ref().map(|row| &row.record);
-            let record = NodeRecord {
-                host: host.clone(),
-                epoch: before.map_or(1, |before| before.epoch.saturating_add(1)),
-                session: hello.session,
-                pool: hello.pool.clone(),
-                claim: hello.claim.clone(),
-                shape: hello.shape.clone(),
-                labels: hello.labels.clone(),
-                state: NodeState {
-                    phase: hello.phase,
-                    load: None,
-                    first_listing_pending: true,
-                    last_listing_clean: before.is_none_or(|before| before.state.last_listing_clean),
-                    missing_in_a_row: BTreeMap::new(),
-                },
-                last_beat: None,
-                heard_at: now,
-                carried: before
-                    .map(|before| before.carried.clone())
-                    .unwrap_or_default(),
-            };
+            let record = hello_record(host, hello, read.as_ref(), now);
             if let Some(row) = self.put_node(record, read.as_ref())? {
                 return Ok(row);
             }
         }
+    }
+
+    /// [`JobStore::hello_node`] for a host of a pool that holds at most `cap` hosts. A host that
+    /// has a row is not new to the pool and is written as there. For a host that has none, the
+    /// pool's admission row `pool/<pool>` is read first, then the pool's rows are counted (every
+    /// row this build can read that names the pool, heard lately or not: a row is gone only
+    /// once [`JobStore::forget_node`] or [`JobStore::forget_silent_nodes`] deleted it); when
+    /// they are `cap` or more the hello is refused, and otherwise the host's row is put at its
+    /// absence and the admission row at the version read, in one transaction. Two hellos of new
+    /// hosts of one pool thus write one row at one version: the second's commit conflicts, and
+    /// it counts again with the first's row there, so a pool one host from its cap admits one.
+    ///
+    /// # Errors
+    /// [`JobStoreError::PoolFull`] when the pool holds `cap` hosts or more; as
+    /// [`JobStore::hello_node`]. Nothing is written.
+    pub fn hello_node_in_pool(
+        &self,
+        host: &HostId,
+        hello: &NodeHello,
+        cap: usize,
+    ) -> Result<NodeRow, JobStoreError> {
+        let pool_key = keys::pool(&hello.pool);
+        loop {
+            let read = self.read_node(host)?;
+            if read.is_some() {
+                return self.hello_node(host, hello);
+            }
+            // The admission row before the count: a hello that commits after this read moves
+            // the row, and one that committed before it is counted.
+            let admission = self.store.get(&pool_key)?;
+            let held = self.rows_of_pool(&hello.pool)?;
+            if held >= cap {
+                return Err(JobStoreError::PoolFull {
+                    host: host.clone(),
+                    pool: hello.pool.clone(),
+                });
+            }
+            let now = self.store.now()?;
+            let record = hello_record(host, hello, None, now);
+            let cond = admission.map_or(Cond::Absent, |row| Cond::Version(row.version));
+            let txn = Txn::new()
+                .put(keys::node(host), encode_node(&record)?, Cond::Absent)
+                .put(pool_key.clone(), Vec::new(), cond);
+            // Every row a transaction writes takes its revision as its version.
+            if let Ok(commit) = self.write(txn)? {
+                let version = Version(commit.revision.0);
+                return Ok(NodeRow { record, version });
+            }
+        }
+    }
+
+    /// How many rows this build can read name the pool `pool`.
+    fn rows_of_pool(&self, pool: &str) -> Result<usize, JobStoreError> {
+        let rows = self.store.scan_prefix(keys::NODE)?;
+        let rows = rows.iter().filter_map(|(key, row)| node_at(key, row).ok());
+        Ok(rows.filter(|row| row.record.pool == pool).count())
     }
 
     /// Applies a beat of `host` in the session of `epoch`, with the sequence `seq` its agent
@@ -182,6 +218,97 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 return Ok(Beat::Applied(row));
             }
         }
+    }
+
+    /// [`JobStore::beat_node`] of a beat that writes `state`, with no sequence, when it changes
+    /// the row: the row's session is `epoch` and its state is not `state`, or the row was last
+    /// heard `every` or longer ago by the store's clock. A beat that changes neither writes
+    /// nothing and is `None`, so a host whose state stands still moves its row once per
+    /// `every`, not once per beat.
+    ///
+    /// # Errors
+    /// As [`JobStore::beat_node`].
+    pub fn refresh_node(
+        &self,
+        host: &HostId,
+        epoch: u64,
+        state: &NodeState,
+        every: Duration,
+    ) -> Result<Option<Beat>, JobStoreError> {
+        if let Some(row) = self.read_node(host)? {
+            let now = self.store.now()?;
+            let fresh = row.record.heard_at.saturating_add(every) > now;
+            if (row.record.epoch == epoch) & (row.record.state == *state) & fresh {
+                return Ok(None);
+            }
+        }
+        self.beat_node(host, epoch, None, |_| state.clone())
+            .map(Some)
+    }
+
+    /// Every host's row this build can read, heard lately or not, in host order, with the
+    /// store's time when they were read. A row this build cannot read is left out and logged.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`], its clock included.
+    pub fn nodes(&self) -> Result<(StoreTime, Vec<NodeRow>), JobStoreError> {
+        let now = self.store.now()?;
+        let mut rows = Vec::new();
+        for (key, row) in self.store.scan_prefix(keys::NODE)? {
+            match node_at(&key, &row) {
+                Ok(row) => rows.push(row),
+                Err(error) => {
+                    tracing::warn!(%key, %error, "a node row this build cannot read is skipped");
+                }
+            }
+        }
+        Ok((now, rows))
+    }
+
+    /// Deletes the row of each host silent for longer than `silent_for` by the store's clock
+    /// (its `heard_at` more than `silent_for` before the store's time now) that holds nothing:
+    /// no live allocation, no `taint/<host>` row, no binding that holds a taint, no cordon and
+    /// no scale-down mark, as the registry forgets a host lost past its retention. Each host is
+    /// decided in a transaction of its own that claims its row and reads the others; the row is
+    /// deleted at the version the scan read, so a hello or beat that lands in between keeps it.
+    /// Returns the hosts whose rows were deleted, in host order.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`], its clock included; [`JobStoreError::Corrupt`] when a binding
+    /// or allocation row the decision reads cannot be read (that host's row is kept).
+    pub fn forget_silent_nodes(&self, silent_for: Duration) -> Result<Vec<HostId>, JobStoreError> {
+        let (now, rows) = self.nodes()?;
+        let mut forgotten = Vec::new();
+        for row in rows {
+            if heard_within(row.record.heard_at, silent_for, now) {
+                continue;
+            }
+            let host = row.record.host.clone();
+            let claim = [keys::node(&host)];
+            let mut failed = None;
+            let outcome = self
+                .store
+                .claim_decide(
+                    &claim,
+                    &mut |read| match holds_nothing(read, &host, row.version) {
+                        Ok(true) => {
+                            Some(Txn::new().delete(keys::node(&host), Cond::Version(row.version)))
+                        }
+                        Ok(false) => None,
+                        Err(error) => {
+                            failed = Some(error);
+                            None
+                        }
+                    },
+                )?;
+            if let Some(error) = failed {
+                return Err(error);
+            }
+            if matches!(outcome, Claim::Committed(_)) {
+                forgotten.push(host);
+            }
+        }
+        Ok(forgotten)
     }
 
     /// Every host's row heard within `grace` by the store's clock (its `heard_at` at most
@@ -235,6 +362,65 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             version: Version(commit.revision.0),
         }))
     }
+}
+
+/// The row of `host` that a hello writes over `before` (the row read, if any) at the store's
+/// time `now`: the next epoch, what `hello` announces, no load, the first listing pending, no
+/// beat applied, no container missed; the listing-clean flag and the fields a later build wrote
+/// are kept.
+fn hello_record(
+    host: &HostId,
+    hello: &NodeHello,
+    before: Option<&NodeRow>,
+    now: StoreTime,
+) -> NodeRecord {
+    let before = before.map(|row| &row.record);
+    NodeRecord {
+        host: host.clone(),
+        epoch: before.map_or(1, |before| before.epoch.saturating_add(1)),
+        session: hello.session,
+        pool: hello.pool.clone(),
+        claim: hello.claim.clone(),
+        shape: hello.shape.clone(),
+        labels: hello.labels.clone(),
+        state: NodeState {
+            phase: hello.phase,
+            load: None,
+            first_listing_pending: true,
+            last_listing_clean: before.is_none_or(|before| before.state.last_listing_clean),
+            missing_in_a_row: BTreeMap::new(),
+        },
+        last_beat: None,
+        heard_at: now,
+        carried: before
+            .map(|before| before.carried.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// Whether the rows `read` shows let the row of `host`, read at `version`, be forgotten: it is
+/// still at that version, and the host holds no live allocation, no taint (its own row or its
+/// binding's), no cordon and no scale-down mark.
+fn holds_nothing(
+    read: &mut dyn TxnRead,
+    host: &HostId,
+    version: Version,
+) -> Result<bool, JobStoreError> {
+    let same = read
+        .get(&keys::node(host))?
+        .is_some_and(|row| row.version == version);
+    let binding_key = keys::binding(host);
+    let tainted = match read.get(&binding_key)? {
+        Some(row) => binding_tainted(&binding_key, &row.value)?,
+        None => false,
+    };
+    let rows_absent = [keys::taint(host), keys::cordon(host), keys::hostmark(host)];
+    let mut absent = true;
+    for key in rows_absent {
+        absent &= read.get(&key)?.is_none();
+    }
+    let booked = booked_in(read, host)?;
+    Ok(same & !tainted & absent & (booked.allocations == 0))
 }
 
 /// Whether a row heard at `heard_at` is heard within `grace` of `now`.

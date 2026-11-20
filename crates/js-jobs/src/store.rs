@@ -25,6 +25,7 @@ use crate::result::{JobEnd, Output, Retention};
 mod cordons;
 mod duties;
 mod ending;
+mod host_rows;
 mod hosts;
 mod index;
 mod marks;

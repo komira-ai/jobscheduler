@@ -1,43 +1,40 @@
 //! The server's pass over the queued jobs ([`Agents::place_jobs`], which the tick runs, and
 //! [`Agents::place_jobs_after_beat`], which a heartbeat runs and which is skipped when nothing
-//! the pass depends on changed since the last one): it reads the hosts the
-//! registry would let take a job now and whose last job listing was clean, each with the
-//! network ceiling its hello advertises, whether it reported that it runs host jobs and the
-//! machine provider of the Default platform its binding names, with its position in the
-//! platform's order ([`super::rank`]; a host of a provider the platform does not list is not
-//! offered), the
-//! hosts that said hello to this server, and the pool's whole-node settings, and hands them to
-//! the placer's pass
+//! the pass depends on changed since the last one): it reads the hosts it offers from the job
+//! store before each pass ([`super::jobs_rows`]: every host whose `node/` row is live, whichever
+//! server took its hello, each with the network ceiling its hello advertises, whether it
+//! reported that it runs host jobs and the machine provider its binding names, with its position
+//! in the Default platform's order, [`super::rank`]; a host of a provider the platform does not
+//! list is not offered), the hosts heard from, and the pool's whole-node settings, and hands
+//! them to the placer's pass
 //! ([`SchedPlacer::place_jobs_with`](super::place::SchedPlacer::place_jobs_with), whose
 //! module, [`js_sched_placer::engine::jobs`], says what a pass does, and
 //! [`js_sched_placer::engine::whole_jobs`] what it does for the jobs that book the whole
-//! host).
+//! host). Every placement is decided again in its own transaction, on the host's rows
+//! ([`js_jobs::JobStore::place_claimed`]): its taint, its scale-down mark, its cordon and the
+//! ports its live allocations hold.
 //!
 //! A job with host isolation taints the host it is placed on. The placement commit writes
 //! the taint row of the job store; right after it, still inside the placer's pass, the taint
 //! is put on the registry's record of the host ([`js_registry::Registry::taint_host`]: reason
 //! [`HOST_JOB_TAINT`], run id the job id), which closes the host to every other job; the pass
-//! returns the hosts it tainted so that the caller writes their bindings
+//! returns the hosts it tainted, each with its job, so that the caller writes their bindings
 //! ([`Agents::keep_taints`]). One pass of the server runs at a time ([`Agents::placing`]),
 //! from its read of the open hosts to its last taint, so a pass never offers a host that an
-//! earlier pass has tainted. A server that drains ([`crate::drain`]) runs no pass.
+//! earlier pass has tainted. A server that drains ([`crate::drain`]) runs no pass: a placement
+//! already inside its transaction commits or rolls back.
 
-use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
-use js_jobs::{Capacity, HOST_JOB_TAINT, JobId};
+use js_jobs::{HOST_JOB_TAINT, JobId};
 use js_registry::{Registry, WholeNodeConfig};
-use js_sched::ceiling::ceiling_of;
 use js_types::Clock;
-use js_types::{HostId, Shape};
+use js_types::HostId;
 use tracing::warn;
 
-use super::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics, open_to_jobs};
-use super::rank::rank;
-use crate::admit::reports_host_jobs;
+use super::engine::jobs::{JobHosts, JobStarts, PassMetrics};
 use crate::agents::Agents;
-use crate::config::CpuSlack;
 use crate::held_beat::Wakes;
 use crate::metrics::PassSink;
 
@@ -51,8 +48,8 @@ struct Tainted<'a> {
     registry: &'a Registry,
     /// The held heartbeats a placement wakes.
     wakes: &'a Wakes,
-    /// The hosts this pass tainted, in the order of their commits.
-    hosts: Mutex<Vec<HostId>>,
+    /// The hosts this pass tainted, each with its job, in the order of their commits.
+    hosts: Mutex<Vec<(HostId, JobId)>>,
 }
 
 impl JobStarts for Tainted<'_> {
@@ -68,7 +65,7 @@ impl JobStarts for Tainted<'_> {
         };
         let fresh = self.registry.taint_host(host, taint);
         let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
-        hosts.extend(fresh.then(|| host.clone()));
+        hosts.extend(fresh.then(|| (host.clone(), job.clone())));
     }
 }
 
@@ -78,21 +75,6 @@ impl JobStarts for Tainted<'_> {
 enum Pass {
     Always,
     IfChanged,
-}
-
-/// What a host of `shape` can book: the shape the pool books for it, with the CPU slack the
-/// placement engine allows on its cores, which is the most the engine places on it. The
-/// capacity is the bound a placement is held to in its own transaction against the
-/// allocations the store holds, so it must not be tighter than what the engine allows.
-fn capacity_of(shape: &Shape, slack: CpuSlack) -> Capacity {
-    let resources = shape.resources();
-    let cpu = u128::from(resources.cpu_millis()) * (1000 + u128::from(slack.permille())) / 1000;
-    Capacity {
-        cpu_millis: u64::try_from(cpu).unwrap_or(u64::MAX),
-        memory_bytes: resources.memory_bytes(),
-        disk_bytes: resources.disk_bytes(),
-        accelerators: resources.gpus(),
-    }
 }
 
 impl Agents {
@@ -123,7 +105,7 @@ impl Agents {
     ///
     /// The tick runs this pass whatever changed; a heartbeat runs
     /// [`Agents::place_jobs_after_beat`].
-    pub(crate) fn place_jobs(&self) -> Vec<HostId> {
+    pub(crate) fn place_jobs(&self) -> Vec<(HostId, JobId)> {
         self.pass_over_queue(Pass::Always)
     }
 
@@ -133,14 +115,14 @@ impl Agents {
     /// the job tables, the engine's picture of the hosts, the hosts offered with what each
     /// offers, the hosts that said hello and what pass 2 told. The hosts are read from the
     /// registry first either way.
-    pub(crate) fn place_jobs_after_beat(&self) -> Vec<HostId> {
+    pub(crate) fn place_jobs_after_beat(&self) -> Vec<(HostId, JobId)> {
         self.pass_over_queue(Pass::IfChanged)
     }
 
     /// [`Agents::place_jobs`], or [`Agents::place_jobs_after_beat`] as `pass` says. Nothing
     /// once the server drains ([`crate::drain`]): its hosts are leaving for another server,
     /// which places the queued jobs as they say hello there.
-    fn pass_over_queue(&self, pass: Pass) -> Vec<HostId> {
+    fn pass_over_queue(&self, pass: Pass) -> Vec<(HostId, JobId)> {
         let (Some(jobs), Some(placer)) = (&self.jobs, &self.placer) else {
             return Vec::new();
         };
@@ -150,43 +132,22 @@ impl Agents {
         // Held from the read of the hosts to the last taint: a pass that read the hosts
         // before another pass tainted one would offer it again.
         let _placing = self.placing.lock().unwrap_or_else(PoisonError::into_inner);
-        let now = self.clock.now();
-        let views = self.registry.hosts();
-        let hello: BTreeSet<_> = views
-            .iter()
-            .filter(|view| view.claim.is_some())
-            .map(|view| view.id.clone())
-            .collect();
-        // A host whose last job listing named a job it holds no live allocation for is
-        // still running that job: its capacity is not counted until a listing is clean.
-        let open = views.into_iter();
-        let open = open.filter(|view| open_to_jobs(view, now) && self.listing_clean(&view.id));
-        // The machine provider of each host, from its binding alone; a host of a provider the
-        // Default platform does not list is no candidate here (it stays in the host table).
-        let bindings = self.registry.bindings();
-        let open = open.filter_map(|view| {
-            let ranked = rank(&self.providers, bindings.get(&view.id))?;
-            // The ceiling and the host-jobs capability are read again on every pass, from the
-            // hello the host last said; a host whose hello is not held (after a restart)
-            // advertises no network and no host jobs.
-            let capabilities = view.claim.as_ref().map(|claim| claim.capabilities());
-            let offer = OpenHost {
-                ceiling: capabilities.map(ceiling_of).unwrap_or_default(),
-                host_jobs: capabilities.is_some_and(reports_host_jobs),
-                rank: Some(ranked),
-                capacity: Some(capacity_of(&view.shape, self.cpu_slack)),
-            };
-            Some((view.id, offer))
-        });
+        let offered = match self.offered(jobs, placer, self.clock.now()) {
+            Ok(offered) => offered,
+            Err(error) => {
+                warn!(%error, "the hosts could not be read; the next pass places the queued jobs");
+                return Vec::new();
+            }
+        };
         let hosts = JobHosts {
-            open: &open.collect(),
-            hello: &hello,
+            open: &offered.open,
+            hello: &offered.hello,
             whole: self.registry.whole_node(),
         };
         let starts = Tainted {
             registry: &self.registry,
             wakes: &self.wakes,
-            hosts: Mutex::default(),
+            hosts: Mutex::new(offered.adopted),
         };
         let sink = PassSink(self.meter().sink());
         let sinks = (&starts as &dyn JobStarts, &sink as &dyn PassMetrics);

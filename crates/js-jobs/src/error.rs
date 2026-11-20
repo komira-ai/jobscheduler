@@ -65,6 +65,43 @@ pub enum JobStoreError {
         /// The host.
         host: HostId,
     },
+    /// The host is tainted: its `taint/<host>` row is there (a host job was placed on it), or its
+    /// binding holds a taint, so no job is placed on it.
+    #[error("host {host} is tainted, so job {id} is not placed on it")]
+    HostTainted {
+        /// The job.
+        id: JobId,
+        /// The host.
+        host: HostId,
+    },
+    /// The host is marked to scale down: its `hostmark/<host>` row is there, so no job is placed
+    /// on it.
+    #[error("host {host} is marked to scale down, so job {id} is not placed on it")]
+    HostMarked {
+        /// The job.
+        id: JobId,
+        /// The host.
+        host: HostId,
+    },
+    /// A live allocation on the host holds a host port the job declares.
+    #[error("host port {port} of host {host} is held, so job {id} is not placed on it")]
+    PortTaken {
+        /// The job.
+        id: JobId,
+        /// The host.
+        host: HostId,
+        /// The first of the job's host ports that a live allocation on the host holds.
+        port: u16,
+    },
+    /// The pool already holds as many hosts as it may, so the hello of a host new to it is
+    /// refused ([`crate::JobStore::hello_node_in_pool`]).
+    #[error("pool {pool} is full, so host {host} is not admitted")]
+    PoolFull {
+        /// The host.
+        host: HostId,
+        /// The pool.
+        pool: String,
+    },
     /// The host's cordon row changed between the read and the commit of a cordon, a lift or a
     /// restore; the caller reads it again and retries.
     #[error("the cordon of host {host} changed while the operation ran")]
@@ -218,6 +255,35 @@ mod tests {
                     host: host.clone(),
                 },
                 "host h is cordoned, so job a is not placed on it",
+            ),
+            (
+                JobStoreError::HostTainted {
+                    id: id.clone(),
+                    host: host.clone(),
+                },
+                "host h is tainted, so job a is not placed on it",
+            ),
+            (
+                JobStoreError::HostMarked {
+                    id: id.clone(),
+                    host: host.clone(),
+                },
+                "host h is marked to scale down, so job a is not placed on it",
+            ),
+            (
+                JobStoreError::PortTaken {
+                    id: id.clone(),
+                    host: host.clone(),
+                    port: 8080,
+                },
+                "host port 8080 of host h is held, so job a is not placed on it",
+            ),
+            (
+                JobStoreError::PoolFull {
+                    host: host.clone(),
+                    pool: "burst".to_owned(),
+                },
+                "pool burst is full, so host h is not admitted",
             ),
             (
                 JobStoreError::CordonConflict { host: host.clone() },

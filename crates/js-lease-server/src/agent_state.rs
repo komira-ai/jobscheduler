@@ -787,6 +787,9 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
+#[path = "agent_state_scan.rs"]
+mod scan;
+
 #[cfg(test)]
 #[path = "agent_state_clock_tests.rs"]
 mod clock_tests;

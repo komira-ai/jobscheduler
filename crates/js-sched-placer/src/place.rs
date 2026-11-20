@@ -129,6 +129,22 @@ impl SchedPlacer {
         self.changes.load(Ordering::SeqCst)
     }
 
+    /// `host`, booked as `shape`, is one a pass may offer jobs although its hello may have been
+    /// taken by another server (its `node/` row is live): the engine is told of it as at a
+    /// hello ([`Placer::host_up`]) when it does not know the host booked as `shape`, and the
+    /// change is counted then only ([`SchedPlacer::engine_changes`]). Unlike a hello, it leaves
+    /// a removal the job pass has not settled ([`SchedPlacer::gone`]) as it is.
+    pub fn host_seen(&self, host: &HostId, shape: &Shape) {
+        let now = self.now();
+        self.changing(|engine| {
+            let known = engine.knows(host, shape);
+            if !known {
+                engine.host_up(host, shape, now);
+            }
+            ((), !known)
+        });
+    }
+
     /// How many passes over the queued jobs were skipped
     /// ([`SchedPlacer::place_jobs_if_changed`]).
     #[cfg(any(test, feature = "test-support"))]

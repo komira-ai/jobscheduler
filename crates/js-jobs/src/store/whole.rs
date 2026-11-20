@@ -18,7 +18,7 @@ use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version};
 use js_types::{HostId, QueueNote};
 
 use super::index::{put_allocation, put_job};
-use super::{Beside, JobStore, allocation_at, booked_in, ensure, job_at, with_rows};
+use super::{Beside, JobStore, allocation_at, booked_in, ensure, host_rows, job_at, with_rows};
 use crate::codec::Carried;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
@@ -194,6 +194,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 host: host.clone(),
             },
         )?;
+        let ports = job.spec.ports.iter().map(|port| port.host).collect();
+        let (binding_key, binding_cond) = host_rows::refuse_host(read, (id, host), &ports)?;
         let (txn, placed, allocation) = self.build_placement(
             id,
             (job, row.version),
@@ -207,6 +209,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             None => txn.check(mark_key, Cond::Absent),
         };
         let txn = txn.put(book_key, allocation.allocation_id.to_string(), cond);
+        let txn = txn.check(binding_key, binding_cond);
         Ok((txn, placed, allocation))
     }
 
@@ -287,8 +290,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let earlier = earlier.as_ref().map(|(record, _)| record);
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
         let txn = super::taints::with_taint(txn, &placed, &allocation.host)?;
-        // A host with a cordon in force is placed on by no one: the commit conflicts.
+        // A host with a cordon in force, or marked to scale down, is placed on by no one: the
+        // commit conflicts.
         let txn = txn.check(keys::cordon(&allocation.host), Cond::Absent);
+        let txn = txn.check(keys::hostmark(&allocation.host), Cond::Absent);
         Ok((txn, placed, allocation))
     }
 

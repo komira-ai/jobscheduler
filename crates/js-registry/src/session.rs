@@ -75,6 +75,11 @@ impl SessionDigest {
         Self(sha2::Sha256::digest(secret.as_bytes()).into())
     }
 
+    /// The digest's bytes.
+    pub(crate) fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     /// Whether `presented` is the secret this is the digest of. The two digests are
     /// compared in constant time, so the time taken does not tell how many leading bytes
     /// of a guess were right.

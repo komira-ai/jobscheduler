@@ -14,6 +14,7 @@
 pub(crate) use js_sched_placer::{engine, map, place};
 
 mod jobs_pass;
+mod jobs_rows;
 pub(crate) mod rank;
 
 #[cfg(test)]

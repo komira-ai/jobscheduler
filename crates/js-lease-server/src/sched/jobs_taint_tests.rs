@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use js_agent_wire::{Ack, HOST_JOBS_CAPABILITY, Hello, Isolation, Outcome, Taint};
 use js_jobs::interfere::Interfere;
-use js_jobs::{AllocationStep, HOST_JOB_TAINT, JobState};
+use js_jobs::{AllocationStep, HOST_JOB_TAINT, JobId, JobState};
 use js_registry::Credential;
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
+use js_types::HostId;
 use serde_json::json;
 
 use super::tests::{clock, host, on_the_machine, queue_spec, sized};
@@ -24,6 +25,11 @@ use crate::clock::SharedClock;
 use crate::hosts::HostList;
 use crate::sched::engine_rig::{GIB, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
+
+/// A host the pass tainted, with the job whose placement tainted it.
+fn tainted_by(name: &str, job: &str) -> (HostId, JobId) {
+    (host(name), JobId::parse(job).expect("a job id"))
+}
 
 /// The taint a host job `job` leaves.
 fn host_job_taint(job: &str) -> Taint {
@@ -82,7 +88,7 @@ async fn the_taint_is_recorded_in_the_commit_that_places_a_host_job() {
 
     let commits = rig.store.commit_stats().txns;
     let tainted = rig.agents.place_jobs();
-    assert_eq!(tainted, [host("host-a")]);
+    assert_eq!(tainted, [tainted_by("host-a", "job-h")]);
     assert_eq!(rig.store.commit_stats().txns, commits + 1);
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.store.get("taint/host-a").unwrap().is_some());
@@ -154,7 +160,7 @@ async fn a_host_job_is_sent_only_to_a_host_that_reports_host_jobs() {
     rig.register("host-a", true);
     rig.register_host_jobs("host-b", "true");
     let id = queue_spec(&rig.jobs, "job-h", on_the_machine(1), 0);
-    assert_eq!(rig.agents.place_jobs(), [host("host-b")]);
+    assert_eq!(rig.agents.place_jobs(), [tainted_by("host-b", "job-h")]);
     assert_eq!(rig.allocation(&id).host, host("host-b"));
     assert_eq!(registry_taint(&rig.agents, "host-a"), None);
     assert_eq!(
@@ -226,7 +232,7 @@ async fn a_failed_binding_write_is_written_by_the_next_save() {
     rig.register_host_jobs("host-a", "true");
     queue_spec(&rig.jobs, "job-h", on_the_machine(1), 0);
     let tainted = rig.agents.place_jobs();
-    assert_eq!(tainted, [host("host-a")]);
+    assert_eq!(tainted, [tainted_by("host-a", "job-h")]);
 
     let before = kept.commit_stats().txns;
     rig.agents.keep_taints(Vec::new()).await;
@@ -250,14 +256,20 @@ async fn a_failed_binding_write_is_written_by_the_next_save() {
 
     lines.take();
     rig.store.fail_next();
-    rig.agents.keep_taints(vec![host("host-a")]).await;
+    rig.agents
+        .keep_taints(vec![tainted_by("host-a", "job-h")])
+        .await;
     let text = lines.take();
     let said = "a host job's taint row is not deleted; the next start deletes it";
     assert!(text.contains(said), "{text}");
     assert!(rig.store.get("taint/host-a").unwrap().is_some());
-    rig.agents.keep_taints(vec![host("host-z")]).await;
+    rig.agents
+        .keep_taints(vec![tainted_by("host-z", "job-h")])
+        .await;
     assert!(rig.store.get("taint/host-a").unwrap().is_some());
-    rig.agents.keep_taints(vec![host("host-a")]).await;
+    rig.agents
+        .keep_taints(vec![tainted_by("host-a", "job-h")])
+        .await;
     assert!(rig.store.get("taint/host-a").unwrap().is_none());
     assert_eq!(bound_taint(&kept, "host-a"), Some(host_job_taint("job-h")));
 }
@@ -303,7 +315,7 @@ async fn restarted_after_placing_a_host_job(name: &str, binding_written: bool) {
     assert!(first.save_bindings().await);
     queue_spec(first.jobs.as_ref().unwrap(), "job-h", on_the_machine(2), 0);
     let tainted = first.place_jobs();
-    assert_eq!(tainted, [host("h1")]);
+    assert_eq!(tainted, [tainted_by("h1", "job-h")]);
     if binding_written {
         first.keep_taints(tainted).await;
     }

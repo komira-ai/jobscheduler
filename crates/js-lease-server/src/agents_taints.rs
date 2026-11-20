@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_agent_wire::Taint;
-use js_jobs::HOST_JOB_TAINT;
+use js_jobs::{HOST_JOB_TAINT, JobId};
 use js_registry::{Binding, Registry};
 use js_types::HostId;
 use tracing::{error, info, warn};
@@ -27,13 +27,15 @@ use crate::util::blocking;
 
 impl Agents {
     /// Writes the bindings of `hosts`, the hosts a pass over the queued jobs tainted
-    /// ([`Agents::place_jobs`]), with the taint the registry now holds for them: committed in
+    /// ([`Agents::place_jobs`]), each with the job whose placement tainted it, with the taint
+    /// the registry now holds for them: committed in
     /// one transaction with the store, saved to the file without it, under
     /// [`Agents::host_writes`] ([`Agents::save_bindings`]); then deletes the job store's taint
-    /// rows of those of them that have a binding. Nothing for no hosts. A write that fails is
+    /// rows of those of them that have a binding, each while it still names its job. Nothing for
+    /// no hosts. A write that fails is
     /// logged and leaves the rows: the tick's save writes the bindings again, and the next start
     /// puts each row left on its binding and deletes it.
-    pub(crate) async fn keep_taints(self: &Arc<Self>, hosts: Vec<HostId>) {
+    pub(crate) async fn keep_taints(self: &Arc<Self>, hosts: Vec<(HostId, JobId)>) {
         if hosts.is_empty() {
             return;
         }
@@ -45,9 +47,9 @@ impl Agents {
             return;
         }
         let bound = self.registry.bindings();
-        let kept: Vec<HostId> = hosts
+        let kept: Vec<(HostId, JobId)> = hosts
             .into_iter()
-            .filter(|host| bound.contains_key(host))
+            .filter(|(host, _)| bound.contains_key(host))
             .collect();
         let this = Arc::clone(self);
         let dropped = blocking(move || {
@@ -181,7 +183,7 @@ pub(super) fn restore_job_taints(
             info!(%host, job = %row.job, "a host job's taint is put back on the host's binding");
             *bound = bound.clone().with_taint(Some(taint));
         }
-        kept.push(host);
+        kept.push((host, row.job));
     }
     store.restore(&merged).map_err(|error| {
         StartupError::new(flag, format!("cannot write the host bindings: {error}"))

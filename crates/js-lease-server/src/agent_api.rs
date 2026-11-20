@@ -123,6 +123,7 @@ mod held;
 mod host_cert;
 mod limit;
 mod own_host;
+mod rows;
 mod unknown;
 
 use self::unknown::{identify_single, unknown_bearer};
@@ -294,10 +295,21 @@ async fn serve_hello_in(
     let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
     agents.applied(&change);
     between();
-    let mut welcome = match admit_hello(agents, certified.is_some(), &hello, &who) {
+    let admitted = admit_hello(agents, certified.is_some(), &hello, &who).map_err(Some);
+    let admitted = match admitted {
+        Ok(welcome) => rows::written_row(agents, &host, welcome).await,
+        refused => refused,
+    };
+    let mut welcome = match admitted {
         Ok(welcome) => welcome,
         Err(refusal) => {
             give_back(agents, fresh_use, &hello.host_id, &change).await;
+            let Some(refusal) = refusal else {
+                return Err(Refused::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    STATE_WRITE_FAILED,
+                ));
+            };
             warn!(
                 code = refusal.code(),
                 reason = refusal.reason(),
@@ -635,6 +647,8 @@ async fn serve_jobs(
         if let Ok((served, _)) = &served {
             placing.note_listing(host, served.clean);
         }
+        // The host's row, which every server places by, before the pass reads the rows.
+        rows::beat_row(&placing, host, phase);
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply,
         // or on this one when it is held (the placement wakes it). A beat that changed

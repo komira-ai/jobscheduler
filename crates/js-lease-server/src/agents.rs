@@ -106,6 +106,9 @@ pub(crate) struct Agents {
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
     unclean: Mutex<BTreeSet<HostId>>,
+    /// For each host whose hello this server took, the epoch of its `node/` row, which its
+    /// beats refresh the row in ([`crate::agent_api`]). Its lock is a leaf.
+    node_epochs: Mutex<BTreeMap<HostId, u64>>,
     /// The host credentials and job sinks of live logs, with `sink = "object_store"`
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
@@ -338,6 +341,7 @@ fn placed_in(
         usage_in_job_store,
         placer: Some(placer.clone()),
         unclean: Mutex::default(),
+        node_epochs: Mutex::default(),
         logs,
         job_limits,
         cpu_slack,
@@ -412,6 +416,7 @@ impl Agents {
             usage_in_job_store: false,
             placer: None,
             unclean: Mutex::default(),
+            node_epochs: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),
@@ -526,6 +531,28 @@ impl Agents {
     pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
         let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
         !unclean.contains(host)
+    }
+
+    /// Notes the epoch of the `node/` row the hello of `host` wrote, or, with `None`, that the
+    /// row is another session's now.
+    pub(crate) fn note_node_epoch(&self, host: &HostId, epoch: Option<u64>) {
+        let mut epochs = self
+            .node_epochs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match epoch {
+            Some(epoch) => epochs.insert(host.clone(), epoch),
+            None => epochs.remove(host),
+        };
+    }
+
+    /// The epoch of the `node/` row the last hello of `host` on this server wrote.
+    pub(crate) fn node_epoch(&self, host: &HostId) -> Option<u64> {
+        let epochs = self
+            .node_epochs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        epochs.get(host).copied()
     }
 
     /// Lets the hello of `host` register with the one-time token or host credential `who`

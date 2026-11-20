@@ -145,6 +145,11 @@ impl Engine {
             .collect()
     }
 
+    /// Whether the engine knows `host` booked as `shape`.
+    pub fn knows(&self, host: &HostId, shape: &Shape) -> bool {
+        self.hosts.get(host) == Some(shape)
+    }
+
     /// `host` is no longer listed by the registry: it is forgotten, worker and all, unless
     /// the engine still holds a job's allocation there (which only its host's confirmation or
     /// the provider's absence frees).
