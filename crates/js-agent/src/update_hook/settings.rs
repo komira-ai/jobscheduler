@@ -43,6 +43,10 @@ pub struct Settings {
     /// has one. `cutover` and `rollback` boot it out after the agent is stopped and bootstrap
     /// it from the release being started, before the agent is. Only a launchd host has one.
     pub helper_unit: Option<String>,
+    /// The group the root helper gives its socket (`js-mac-session --socket-group`, `_jsagent`
+    /// on a Mac), when the params name it: `prepare` makes it when the host has none. Only a
+    /// launchd host is set up so.
+    pub socket_group: Option<String>,
     /// The runtime the unit's agent must have (`crun`, `docker` or `native`): the staged agent
     /// must list it, and the agent that says hello after the cutover runs jobs the way it
     /// does.
