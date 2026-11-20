@@ -7,7 +7,9 @@
 //!
 //! A reply is held only when it carries nothing at all: no command, no acknowledgement, no
 //! taint acknowledgement and no log credential, so a hold never delays what the beat asked
-//! for. A reply that is not held says `beat_now` too when it carries no command, so the
+//! for. The taint the host holds ([`HeartbeatReply::host_taint`]) is information for the
+//! agent's health route, not something it acts on, so a reply that names it and nothing else
+//! is held, and a tainted host's replies are held as a clean host's are. A reply that is not held says `beat_now` too when it carries no command, so the
 //! heartbeat after an acknowledgement is held at once rather than an interval later. Everything the beat reported was committed and counted before the hold: the listing,
 //! the taint, the usage. When a wake comes, the stops and starts are built again from the
 //! store over the listing the beat brought ([`per_job::commands_now`]); a reply that now has
@@ -172,7 +174,9 @@ pub(super) struct Hold {
     pub(super) registry_exclusive: Option<String>,
 }
 
-/// Holds `reply` while it carries nothing (beside the whole-host allocation it names): until a
+/// Holds `reply` while it carries nothing (beside the whole-host allocation it names and the
+/// taint the host holds, `host_taint`, which the registry names in every reply to a tainted
+/// host and which asks the agent for nothing): until a
 /// wake builds a reply with something in it, which replaces its commands and allocation, or
 /// until the bound ([`limit`]). A reply says `beat_now` when it carries no command:
 /// one held to the bound, one woken with a new whole-host allocation alone, and one not held
@@ -180,6 +184,7 @@ pub(super) struct Hold {
 pub(super) async fn hold(agents: &Arc<Agents>, hold: Hold, reply: &mut HeartbeatReply) {
     let quiet = HeartbeatReply {
         exclusive: reply.exclusive.clone(),
+        host_taint: reply.host_taint.clone(),
         ..HeartbeatReply::default()
     };
     if *reply != quiet {

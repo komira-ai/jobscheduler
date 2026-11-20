@@ -942,9 +942,10 @@ pub(crate) fn runtime(
 /// is read from (or why there is none).
 pub(crate) type Checks = (Box<dyn CheckHook>, Result<String, &'static str>);
 
-/// The post-job checks of `backend`'s jobs, which watch `watch` and wait `settle` for the host
-/// to settle, and the cgroup directory the usage of the leases is read from (or why there is
-/// none).
+/// The post-job checks of `backend`'s jobs, which watch `watch`, wait `settle` for the host to
+/// settle and do not call the modules the job runtime loads a job's
+/// ([`integrity::runtime_modules`], by whether the backend wires jobs); and the cgroup
+/// directory the usage of the leases is read from (or why there is none).
 ///
 /// # Errors
 ///
@@ -956,7 +957,14 @@ pub(crate) fn checks(
     settle: Duration,
 ) -> Result<Checks, String> {
     let settings = backend.settings();
-    let integrity = Integrity::start(machine.view(), settings.uid(), watch)?.with_settle(settle);
+    // The kernel loads the modules of the job runtime on a first job, which the baseline may
+    // predate: a crun agent that wires jobs (its egress is started, which only the ceilings
+    // `allow-list` and `open` do) loads `veth` and `nft_nat` besides `overlay`. The egress
+    // starts when the claims are taken, before the checks are made.
+    let wired = settings.crun().is_some_and(|plan| plan.egress.is_some());
+    let integrity = Integrity::start(machine.view(), settings.uid(), watch)?
+        .with_settle(settle)
+        .with_runtime_modules(integrity::runtime_modules(wired));
     // The engines give each slot a user of its own; every crun job runs as the one id of the
     // job user's range, so there are no slots to tell apart.
     let integrity = match settings.crun() {

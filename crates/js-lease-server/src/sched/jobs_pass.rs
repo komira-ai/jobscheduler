@@ -13,6 +13,10 @@
 //! [`js_sched_placer::engine::whole_jobs`] what it does for the jobs that book the whole
 //! host).
 //!
+//! A live host that holds a taint is offered to no job; the pass logs it once for its taint
+//! ([`super::taint_skips::TaintSkips`]), so that a job that stays queued has its cause in the
+//! journal.
+//!
 //! A job with host isolation taints the host it is placed on. The placement commit writes
 //! the taint row of the job store; right after it, still inside the placer's pass, the taint
 //! is put on the registry's record of the host ([`js_registry::Registry::taint_host`]: reason
@@ -27,7 +31,7 @@ use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
 use js_jobs::{Capacity, HOST_JOB_TAINT, JobId};
-use js_registry::{Registry, WholeNodeConfig};
+use js_registry::{HostState, Registry, WholeNodeConfig};
 use js_sched::ceiling::ceiling_of;
 use js_types::Clock;
 use js_types::{HostId, Shape};
@@ -153,6 +157,9 @@ impl Agents {
         let _placing = self.placing.lock().unwrap_or_else(PoisonError::into_inner);
         let now = self.clock.now();
         let views = self.registry.hosts();
+        let skipped = views.iter().filter(|view| view.state == HostState::Live);
+        self.taint_skips
+            .note(skipped.filter_map(|view| view.taint.as_ref().map(|taint| (&view.id, taint))));
         let hello: BTreeSet<_> = views
             .iter()
             .filter(|view| view.claim.is_some())

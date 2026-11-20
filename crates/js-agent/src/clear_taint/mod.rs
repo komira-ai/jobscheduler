@@ -43,10 +43,13 @@
 //! 7. The unit is started and waited for (at most [`START_WAIT_SECS`]): the agent starts with no
 //!    taint, and from a new baseline of the host.
 //!
-//! The taint the lease server keeps is the server's: the restarted agent says hello without
-//! one, and the operator ends the server's with its own clear (`ClearHostTaint`), which is why
-//! the agent's files go first. That call is the operator's, with the operator's credential; the
-//! verb, which runs with the host's, does not make it.
+//! The taint the lease server keeps for an agent-made taint ends with the agent's own word: the
+//! restarted agent holds no marker, so its first heartbeat says `tainted: false`, and a server
+//! that knows the field forgets the taint the agent made (which is why the agent's files go
+//! first). A taint the server made itself (`host-job`, `host-unsafe`) and any taint on a server
+//! or an agent from before the field end only with the operator's own clear (`ClearHostTaint`).
+//! That call is the operator's, with the operator's credential; the verb, which runs with the
+//! host's, does not make it.
 //!
 //! The verb speaks the host updater's hook contract, so hostkeeper can run it as it runs an
 //! update step: the exit status (0 success, 1 failure, 75 deferred: nothing was changed, try

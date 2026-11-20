@@ -236,6 +236,7 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
         results: h.life.results(),
         taint: None,
         taint_cleared: None,
+        tainted: None,
         exclusive_ready: None,
         exclusive_refused: None,
         load: Some(full_load()),

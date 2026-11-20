@@ -118,6 +118,7 @@ pub fn heartbeat() -> Heartbeat {
             check: Some("new_mount".into()),
         }),
         taint_cleared: None,
+        tainted: None,
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,

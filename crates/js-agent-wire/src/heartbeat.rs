@@ -237,6 +237,15 @@ pub struct Heartbeat {
     /// tainted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint_cleared: Option<Taint>,
+    /// Whether the agent holds a taint as it sends this beat: its marker's, one it could not
+    /// write yet, or one it is reporting cleared, until the server acknowledges the clear
+    /// ([`Heartbeat::taint_cleared`]). `Some(false)` is the agent's word that its host holds
+    /// none, which the server takes as the end of a taint the agent made; a taint the server
+    /// makes itself stays. Absent from an agent from before the field and from a session that
+    /// runs no jobs; the server then judges the beat as it did before. A server from before
+    /// the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tainted: Option<bool>,
     /// The lease id of the exclusive lease the host has finished preparing for; the
     /// scheduler mints the lease token only on seeing it. Not sent together with
     /// [`Heartbeat::exclusive_refused`].
@@ -335,6 +344,14 @@ pub struct HeartbeatReply {
     /// it cannot end the taint before the server has heard of the clear. Absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub taint_cleared_ack: bool,
+    /// The taint the server holds for the host once it has taken this heartbeat. Absent when
+    /// it holds none, and from a server from before the field: the agent cannot tell those
+    /// two apart. Informational: the agent shows it and never acts on it otherwise. It is
+    /// held to the bounds of a heartbeat's taint ([`Heartbeat::taint`]) and the verdict is
+    /// [`ReplyCheck::host_taint`]; an agent uses the field only when that is `Ok`. An agent
+    /// from before the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_taint: Option<Taint>,
     /// The lease id of an exclusive lease granted to this host: the agent is to prepare
     /// for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,6 +478,7 @@ impl fmt::Debug for Heartbeat {
             .field("results", &self.results)
             .field("taint", &self.taint)
             .field("taint_cleared", &self.taint_cleared)
+            .field("tainted", &self.tainted)
             .field("exclusive_ready", &self.exclusive_ready)
             .field("exclusive_refused", &self.exclusive_refused)
             .field("load", &self.load)
@@ -577,6 +595,13 @@ pub struct ReplyCheck<'a> {
     /// byte other than printable ASCII, or the expiry is zero. When this is an error the
     /// agent ignores `log_grant` and still acts on `commands` and the acknowledgements.
     pub log_grant: Result<(), ValidationError>,
+    /// Whether `host_taint` is acceptable: `Ok` when there is none, and otherwise held to the
+    /// bounds of a heartbeat's taint (a reason of 1 to [`limits::MAX_TAINT_TEXT_LEN`] bytes
+    /// with no control character, a good run id, a check name within the same cap). The
+    /// error is under [`refusal::INVALID_REPLY`] and names the field of the taint that
+    /// failed, such as `taint.reason`. When this is an error the agent ignores `host_taint`
+    /// and still acts on `commands` and the acknowledgements.
+    pub host_taint: Result<(), ValidationError>,
 }
 
 impl HeartbeatReply {
@@ -614,6 +639,9 @@ impl HeartbeatReply {
             retired_acks: per_job::check_ids(at.field("retired_acks"), &self.retired_acks),
             log_grant: self.log_grant.as_ref().map_or(Ok(()), |grant| {
                 grant.check(At::new("log_grant", refusal::INVALID_LOG_CREDENTIAL))
+            }),
+            host_taint: self.host_taint.as_ref().map_or(Ok(()), |taint| {
+                taint.check(At::new("host_taint", refusal::INVALID_REPLY))
             }),
         }
     }

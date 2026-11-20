@@ -129,6 +129,7 @@
 //! | `--settle-ms <milliseconds>` | (Linux build only) how long the agent lets the host settle before it counts what it sees against a job: a process or mount the baseline did not have is a job's leftover (`daemonised-child`, `process-as-job-user`, `new-mount`) only when it is still there this long after the check first saw it, and a running run whose control group the runtime cannot name taints the host as unchecked (`cgroup-not-found`, which clears itself) only when it is still so this long after the first step that saw it and its container's first process then runs in another group; a host's own short-lived processes and mounts at the moment a job ends, a container not made yet, and a container read as running after it exited and its group was removed, are neither. By default 1000, from 1 to 60000; not with `--no-jobs` |
 //! | `--taint-recheck-ms <milliseconds>` | (Linux build only) how long the agent waits between the re-checks of a taint it may clear itself: a taint that a check judged (`residue` of a process, `daemonised-child` or `process-as-job-user`, or `unchecked` for an input the check could not read or a run whose container group was not found, `cgroup-not-found`) is re-checked while no run is held, and ends after two clean re-checks this far apart and the server's acknowledgement of the clear; the marker is then kept as `taint.json.cleared-<unix seconds>` and the clear is logged (`taint-cleared`). A process still there keeps the host tainted. A residue of a process read from the marker when the agent starts is re-checked too, with two rules that need no baseline (a process of the job users' range, or one whose parent is `init` in a control group a job can be in, is a finding even if the restart baseline holds it); any other taint read from the marker stays. `cleanup-failed`, `check-owed`, `host-job` and a change of mounts, users, groups, modules or a watched directory are never cleared by the agent. By default 60000, from 1 to 3600000; not with `--no-jobs` |
 //! | `--silence-stop <seconds>` | how long the agent runs its jobs while it hears nothing from the server (contact is a welcome or a heartbeat reply it accepted, one its worker had no room for included, counted on the agent's monotonic clock from the last of them, or from the agent's start before the first): then it stops every job it holds as a stop from the server would (SIGTERM, the stop grace, the kill; a native run through the helper's `stop`, or killed at once by a helper from before it), retires each job's fence (job id and allocation id, in the state root before the stop is reported, so a start of it never runs again here, after a restart too) and reports each `killed` with the detail `silence-stop`; once for each silence. By default 300 (twenty times the server's default grace of 15 s, and more than the 140 s a server restart costs a well agent beside the restart's own time: one heartbeat interval, the 120 s cap on `Retry-After` and the old session's grace), from 1 to 7200; no value turns the stop off. It must be above the stop grace plus the server's default grace (status 2 at start otherwise: a `--stop-grace` of 285 or more needs a longer `--silence-stop`), and a welcome whose grace plus the stop grace is not below it ends the agent (status 1, naming the flag). It runs only while the agent runs: a native run is bounded while no agent does only by the deadline the helper holds for it (`--native-helper-socket`). Not with `--no-jobs` |
+//! | `--health-listen <addr>` | a loopback socket address (`127.0.0.1:7311`; port 0 takes a free port, which is printed at start) on which the agent answers `GET /healthz` for the host's supervisor (see [`health`]): `200` and `placeable` when the session holds a welcome and neither the agent nor the lease server (the `host_taint` of its last reply) holds a taint on the host, `503` and `not placeable: <reason>` otherwise, `404` for any other request; every change of that verdict is one line in the log. hostkeeper reads it as a package's `healthUrl`, so a tainted host is reported unhealthy and holds a rollout's bake. An address that is not a loopback one, or that cannot be bound, ends the agent with exit status 2 naming the flag; without the flag nothing is bound |
 //! | `--bundle-store <path>` | the store of unpacked toolchain bundles (a Mac only): absolute, on the volume of `--scratch-root`, which must be APFS, mounted with ownership honoured and not noexec, with the kernel's securelevel at most 0, or the agent does not start; needs `--scratch-root` and `--bundle-budget-gib`. The hello then carries `bundle-root` (this path) and `bundle` (the held manifest digests, comma-separated, at most 16 of them), and the disk offered is reduced by the part of the budget the store has not used (see [`bundle`]). The hello carries `bundle` and `bundle-root` only when the agent can run a bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without the helper it carries neither. A job that pins a bundle runs `@bundle/<entrypoint>` from the store's trees, its writable trees cloned for the run, under the profile of any native job. A start named by its image with a `run` is a bundle start too: the image reference is the bundle's name, pinned by a manifest digest or by the digest of an index that lists a darwin/arm64 manifest, held to the same deny list, allow list and needs as a `bundle` pin, but to the `--image-allow` entries for its registry (`image-not-allowed` on none) and to darwin/arm64 for its `os` and `arch` (`platform-mismatch`); an image start without a `run`, or on an agent with no store, is refused `image-unsupported-here`. And, until a server says it takes a longer value, `bundle` holds one digest (two are 143 bytes, over the 128 an older server accepts and then refuses the hello). Roll out in this order: servers first (they accept the long value and the new codes), then agents, then `--bundle-store`, then placement by `bundle`; no job that names a bundle may be placed on a host that did not report `bundle` |
 //! | `--bundle-budget-gib <n>` | the most GiB the store's trees and trash may take; required with a store, above 0 |
 //! | `--bundle-low-water-gib <n>` | fetches are refused while the volume has less than this free; default 0 |
@@ -315,6 +316,7 @@ pub mod flags_file;
 pub mod fuse_env;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
+pub mod health;
 pub mod hold_cordon;
 mod host;
 pub mod host_ports;
@@ -356,6 +358,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
@@ -369,6 +372,7 @@ pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
+use health::{Health, Route};
 use hold_cordon::{Keeper, Seams as KeeperSeams};
 pub use host::{Offer, StoreView, offer};
 pub use identity::{IdentityFlags, IdentitySourceKind};
@@ -640,6 +644,10 @@ fn execute(
         return Err(Failure::Usage(refusal.to_owned()));
     }
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
+    // The health route is bound before anything else, so a wrong address stops the agent
+    // before it registers.
+    let route = cli.health_listen.map(Route::bind);
+    let route = route.transpose().map_err(Failure::Usage)?;
     // Read once, before anything else: a credentials file that breaks a rule stops the
     // agent before it registers, and the files are never read again.
     let credentials = RegistryCredentials::from_cli(&cli, services.secret_owner)
@@ -854,6 +862,7 @@ fn execute(
         .map(|(worker, ..)| WorkerHost::new(worker.handle()));
     let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
     let cell = dispatch::Cell::new(kept);
+    let health = Health::default();
     let host_id = offer.hello.host_id.clone();
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain, outbox)) = &jobs {
@@ -878,6 +887,16 @@ fn execute(
     if let Some(grant) = log_grant {
         session = session.with_log_grant(grant);
     }
+    // The route answers from what the session tells `health`; an agent with no route keeps none.
+    if let Some(route) = &route {
+        session = session.with_health(&health);
+        let _ = writeln!(
+            err,
+            "js-agent: health route: http://{}{}",
+            route.addr(),
+            health::PATH
+        );
+    }
     // The cordon of a held host is asked on the lease server the agent registers with, with
     // the credential it registered with, after each exchange (see `hold_cordon`).
     let connect =
@@ -900,13 +919,20 @@ fn execute(
         login: &login,
         ca_cert,
     };
+    let stop = AtomicBool::new(false);
     let exit = std::thread::scope(|scope| {
         if let Some((worker, ..)) = &jobs {
             let (cell, dial) = (&cell, &dial);
             scope.spawn(move || dispatch::serve(cell, dial, worker, Box::new(SystemJitter)));
         }
+        if let Some(route) = &route {
+            let (health, stop) = (&health, &stop);
+            scope.spawn(move || route.serve(health, stop));
+        }
         let exit = drive_holding(&mut session, &mut *services.sleeper, err, keeper.as_mut());
         cell.close();
+        stop.store(true, Ordering::SeqCst);
+        route.iter().for_each(Route::wake);
         exit
     });
     match exit {

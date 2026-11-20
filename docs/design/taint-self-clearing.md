@@ -96,8 +96,9 @@ state the host really holds and a re-check that sees no difference does not prov
 
 ## The server
 
-The server held a host's first reported taint for good. It now clears it on one report only: a heartbeat whose
-`taint_cleared` equals the taint the registry holds for the host, field for field. The binding without the taint is
+The server held a host's first reported taint for good. It now clears it on the agent's word, in two ways: a heartbeat
+whose `taint_cleared` equals the taint the registry holds for the host, field for field, and a heartbeat that says the
+agent holds no taint (`tainted: false`) while the taint held is one the agent made (see "The agent's word"). The binding without the taint is
 committed (the store, or the `.agents` file) before the registry forgets it and before the reply says `taint_cleared_ack`, as
 for a taint report. A clear that reaches a server whose registry holds no taint for the host (the two servers of a
 start-first update: the agent reported its taint to one and its clear reaches the other) ends the taint the store holds
@@ -121,10 +122,39 @@ taint with a clear, or revive a cleared taint with a report. Left stuck on purpo
 visible as `state-write-failed`: a server whose memory differs from the store keeps refusing
 until it restarts and reads the store.
 
+### The agent's word
+
+The agent's marker is the truth of every taint the agent makes: a residue, an unchecked input, `cleanup-failed`,
+`marker-unreadable`, `check-owed`, and the `host-tainted` mirror of a refused start. The server keeps its own truth only
+for the two taints it makes itself, `host-job` (a host job's placement) and `host-unsafe` (a refused whole-host
+prepare). Every heartbeat therefore carries `tainted`, whether the agent holds a taint as it sends the beat (its
+marker's, one it could not write yet, or one it reports cleared until the clear is acknowledged); the field is absent
+from an agent that predates it and from a session that runs no jobs, and the server then judges the beat as before.
+
+- `tainted: false` ends the taint the registry holds when it is the agent's, by the same committed clear as a reported
+  one, and logs "a host's taint is cleared" with `by="agent-holds-none"` and the reason held. It ends nothing when the
+  taint is a host job's or a refused prepare's, and nothing when the field is absent. So an agent that restarts with no
+  marker (an operator moved it aside, or the host was reimaged)
+  ends the server's agent-made taint at its first beat, with no call of the operator. The reply carries no
+  `taint_cleared_ack`, since the agent reported no clear.
+- `tainted: true` with no `taint_cleared`, on a host the registry holds no taint for (the operator cleared the server's
+  taint while the marker stayed), gives the host the taint `host-tainted` with no run and no check: the registry holds
+  what the marker holds, and the agent's next clean beat ends it. A beat that reports a clear never gives the mirror (its
+  `tainted` is true until the clear is acknowledged).
+- Every reply names the taint the host holds once the beat is taken, `host_taint` (absent when it holds none, and from a
+  server that predates the field). It is informational: the agent shows it on its health route and acts on it in no other
+  way. A reply that names only it is held as a quiet reply is, so a tainted host's heartbeats are held as any host's.
+- The pass over the queued jobs logs each live host it skips for a taint once, as a warning, "a live host is skipped by
+  placement for the taint the server holds", with the host, reason, check and run id, and again when the taint changes or
+  the host left the set and came back tainted.
+
+A server that predates `tainted` ignores it: its stored taint then ends only by a reported clear or the operator's call,
+as before, and an agent that predates it sends none.
+
 ### The operator's clear
 
-A taint the agent will not report cleared stays stored for good: an agent whose marker an
-operator moved aside by hand, a reimaged host, an agent too old to report a clear. The job
+A taint the agent's word does not end stays stored until the operator clears it: a host job's, a refused whole-host
+prepare's, and one held for an agent too old to send `tainted`. The job
 service's `ClearHostTaint` (operator only, `POST /v1/hosts/{host_id}:cleartaint`,
 `js host host-taint --host-id ID`) clears the stored taint. It is the heartbeat's clear made without
 the agent's report, through the same code: under the same lock the binding without the
@@ -133,8 +163,8 @@ taint is committed by the same compare-and-set (a store that holds another taint
 in file mode the file is saved. The answer says whether a taint was cleared (`cleared`) and
 its reason (`cleared_reason`); a host with no taint answers `cleared` false and nothing is
 written; an unknown host is `NOT_FOUND`. The call does not reach the agent: an agent whose
-marker still holds the taint refuses the next start `host-tainted`, and the server takes that
-refusal as the host's taint again, so the operator moves the agent's `taint.json` and its
+marker still holds the taint says at its next beat that it is tainted (and refuses the next start `host-tainted`), and
+the server takes that as the host's taint again, so the operator moves the agent's `taint.json` and its
 `taint.pinned` file and `owed-*` records aside first (`js-agent clear-taint`, see
 docs/runbooks/clear-a-taint.md), or lets the agent clear it itself. A host job's taint row still
 in the job store is put back on the binding at the next start, so that clear follows the start.
@@ -181,8 +211,9 @@ process that outlives the container and the wait is the escape the check exists 
 
 ## Compatibility
 
-Additive: one new optional flag with a default; one new optional heartbeat field (`taint_cleared`, absent when none, ignored
-by a server that does not know it); one new job-service call, `ClearHostTaint`, with its own request and answer messages; the taint file keeps its format; the cleared copy uses the name operators already
+Additive: one new optional flag with a default; two new optional heartbeat fields (`taint_cleared`, absent when none, and
+`tainted`, absent from an agent that predates it, both ignored by a server that does not know them) and one new optional reply
+field (`host_taint`, absent when the server holds none, ignored by an agent that does not know it); one new job-service call, `ClearHostTaint`, with its own request and answer messages; the taint file keeps its format; the cleared copy uses the name operators already
 use; the pin file `taint.pinned` is a new file in the state root that an agent without it never reads. An older agent reading the directory sees no `taint.json` and starts clean, as after an operator's clear.
 
 ## Tests
@@ -192,8 +223,8 @@ acknowledgement, and the file is kept as `taint.json.cleared-<time>`; a restored
 non-residue taint stays pinned; a re-check that still finds the process keeps the
 taint and the count starts again; `cleanup-failed`, `check-owed`, `host-job` and the mount, user, group, module and
 watched-directory residues never clear; a run held keeps the re-checks off), `tests/agent/integrity/lifecycle.rs` (the
-real checks over the in-memory host, and a restored residue taint re-checked without the baseline), js-registry `tests/taint_cleared.rs` and `tests/taint_host.rs`,
-js-lease-server `tests/server/host_taints.rs`, `tests/server/live_update.rs` (a clear that reaches the other server of an update ends the stored taint), `src/agent_api_store_clear_tests.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
+real checks over the in-memory host, and a restored residue taint re-checked without the baseline), js-registry `tests/taint_cleared.rs`, `tests/taint_agent_word.rs` (the agent's word: a beat with `tainted: false` ends an agent-made taint and not a host job's or a refused prepare's, a beat without it ends nothing, `tainted: true` records the mirror, the reply names the taint held) and `tests/taint_host.rs`,
+js-lease-server `tests/server/host_taints.rs` (a restarted agent ends the taint the server kept, and the queued job is placed), `src/agent_api_stale_taint_tests.rs`, `src/sched/taint_skips_tests.rs` and `src/sched/jobs_taint_tests.rs` (the log lines, and a host job's taint outliving a clean agent), `tests/server/live_update.rs` (a clear that reaches the other server of an update ends the stored taint), `src/agent_api_store_clear_tests.rs` and `src/job_api/fleet_tests.rs` (the server's side, and the
 operator's clear), js-agent `tests/agent/update_hook/steps_taint_clearable.rs` (the hook does not halt for a
 residue the restarted agent re-checks and does for any other taint, a pinned residue included),
 `tests/agent/lifecycle/taint_pin.rs` (a pin made in memory survives a restart), js-agent-wire `tests/golden.rs`, `previous_release.rs` and

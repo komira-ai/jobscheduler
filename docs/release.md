@@ -476,6 +476,7 @@ SHA-256 as the pin, and the manifest:
 | `hook.timeoutSecs` | prepare 3900, cutover 4320, verify 615, rollback 8220, cleanup 120; no uninstall: hostkeeper refuses an uninstall order of the agent |
 | `hook.verifyDeadlineSecs`, `hook.cleanupRetries` | 9000, 3 |
 | `run` | `js-agent-crun.service` |
+| `healthUrl` | `http://127.0.0.1:7311/healthz`: the route of the agent's `--health-listen` in the package's unit (a test holds the two equal). hostkeeper probes it once per round and reports the service unhealthy unless it answers `2xx`; the agent answers `503` while it or the lease server holds a taint on the host, so a tainted host is shown as unhealthy and holds a rollout's bake |
 | `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
@@ -611,6 +612,7 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
 | `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
 | `run` | the launchd labels `js-agent` and `js-agent.session` (the agent and its root helper) |
+| `healthUrl` | none: the Mac agent is started without `--health-listen` |
 | `params.unit`, `params.helper_unit` | `js-agent`, `js-agent.session` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |

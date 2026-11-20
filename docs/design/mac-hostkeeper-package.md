@@ -113,7 +113,7 @@ as owner), any script, and another identifier or version.
   its own.
 - The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session"]` (the agent first, so the
   observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
-  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, and the same `minHostkeeper` and `installerBounds` as the Linux entry. The hook's `params` are
+  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started without the flag). The hook's `params` are
   `unit` `js-agent`, `helper_unit` `js-agent.session`, `state_dir` `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
   `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `runtime` `native`, and the cordon, drain and step

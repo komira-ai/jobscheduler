@@ -210,6 +210,7 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         results: Vec::new(),
         taint: None,
         taint_cleared: None,
+        tainted: None,
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,

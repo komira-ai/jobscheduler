@@ -659,6 +659,7 @@ impl Rig {
             results: Vec::new(),
             taint,
             taint_cleared: None,
+            tainted: agent.tainted,
             exclusive_ready: agent.ready.clone(),
             exclusive_refused: agent.refused.clone(),
             load: None,
@@ -749,6 +750,8 @@ pub(crate) struct FakeAgent {
     pub(crate) stale: bool,
     /// The phase its heartbeats report.
     pub(crate) phase: Phase,
+    /// Whether its heartbeats say it holds a taint; `None` says nothing.
+    pub(crate) tainted: Option<bool>,
     /// The allocation the last reply named for it to prepare for or keep.
     pub(crate) exclusive: Option<String>,
     /// The allocation it reports ready.
@@ -770,6 +773,7 @@ impl FakeAgent {
             grant: None,
             stale: false,
             phase: Phase::Serving,
+            tainted: None,
             exclusive: None,
             ready: None,
             refused: None,

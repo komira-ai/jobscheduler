@@ -6,6 +6,7 @@ mod checks;
 mod crun;
 mod lifecycle;
 mod mapped;
+mod modules;
 mod noise;
 mod overlap;
 mod proc;

@@ -24,7 +24,9 @@
 //! process of the job users' range, and a process whose parent is `init` in a group a job
 //! can be in, are findings even if the baseline holds them (the agent's own process, read from
 //! `/proc/self/stat` when the agent starts, is never one). A helper of the agent that is a
-//! child of `init` in the agent's group keeps a restored taint until it ends.
+//! child of `init` in the agent's group keeps a restored taint until it ends. A module the
+//! job runtime loads on its first use is not a finding when the baseline lacks it, and the
+//! next check that finds nothing takes it (see [`runtime_modules`]).
 //!
 //! # What is checked
 //!
@@ -34,7 +36,7 @@
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs, and in a control group a job can be in (the agent's own group or below it, a group that names a container, or no unified path; see [What the host does while jobs run](#what-the-host-does-while-jobs-run)): what a child that outlived its parent looks like | residue |
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source) and is still there after the settle wait, other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
-//! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
+//! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline and is not one the agent's own job runtime loads ([`runtime_modules`]: `overlay`, and `veth` and `nft_nat` when the agent wires jobs), or one that was and is gone (an unload is a finding too, a runtime module's included: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
 //! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
 //! | `processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable` | an input could not be read or understood | unchecked |
 //! | `watch-over-bound` | a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested | unchecked |
@@ -221,6 +223,7 @@
 //! Mac when it starts, so a Mac agent runs no job and no check. This is stated, not
 //! hidden: `js-agent` does not pretend that a Mac host was checked.
 
+mod modules;
 mod proc;
 mod view;
 
@@ -231,6 +234,7 @@ use std::time::Duration;
 use crate::cli_runtime::{IdRange, JobUsers};
 use crate::lifecycle::{CheckFinding, CheckHook, Finished};
 
+pub use modules::{NFT_NAT, OVERLAY, VETH, runtime_modules};
 pub use proc::{DirLister, Entry, Listing, PROCESS_CAP, ProcHost, SystemDirs, WATCH_ENTRY_CAP};
 pub use view::{FakeHost, HostView, Mount, Process, Watched, input};
 
@@ -636,6 +640,9 @@ pub struct Integrity {
     /// How long a process or mount the checks would call a job's leftover must go on before
     /// it is one (`--settle-ms`); zero looks once.
     settle: Duration,
+    /// The modules the job runtime loads, which a new one of is not a finding (see
+    /// [`Integrity::with_runtime_modules`]).
+    runtime_modules: BTreeSet<String>,
 }
 
 impl Integrity {
@@ -674,6 +681,7 @@ impl Integrity {
             own,
             agent_pid,
             settle: Duration::ZERO,
+            runtime_modules: BTreeSet::new(),
         };
         this.baseline = this.observe().map_err(|problems| {
             format!(
@@ -886,18 +894,7 @@ impl Integrity {
                 code::GROUP_CHANGED,
                 changed(&self.baseline.groups, &now.groups),
             ),
-            group(
-                code::MODULE_CHANGED,
-                now.modules
-                    .difference(&self.baseline.modules)
-                    .map(|name| format!("loaded {name}"))
-                    .chain(
-                        self.baseline
-                            .modules
-                            .difference(&now.modules)
-                            .map(|name| format!("unloaded {name}")),
-                    ),
-            ),
+            group(code::MODULE_CHANGED, self.changed_modules(&now.modules)),
             group(
                 code::WATCH_DIR_CHANGED,
                 moved.map(|(dir, _)| format!("{} differs from the baseline", dir.display())),

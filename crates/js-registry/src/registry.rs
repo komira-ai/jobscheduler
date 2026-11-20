@@ -86,8 +86,9 @@ pub struct HostView {
     /// host is not yet clear of it.
     pub releasing: bool,
     /// The taint the host reported, once it has: it can no longer be trusted clean, so it
-    /// takes no new job. It is kept across a restart and is not cleared by anything in this
-    /// crate.
+    /// takes no new job. It is kept across a restart. It ends by the host's own word
+    /// ([`Registry::heartbeat`]: it reports the taint cleared, or says it holds none while
+    /// the taint is one the agent made) or by [`Registry::clear_taint`].
     pub taint: Option<Taint>,
     /// How the host is set aside, if it is: to be scaled away ([`HostMark::Draining`],
     /// [`HostMark::Releasing`]). The registry sets no other mark.
@@ -599,10 +600,18 @@ impl Registry {
     /// carries a cleared taint (`taint_cleared`). The caller must make the taint (or its clearing) durable
     /// ([`Registry::bindings`]) before it lets the acknowledgement go, since the agent stops
     /// reporting once it has it. A tainted host takes no new job and is never forgotten for
-    /// being silent. The one thing that ends a taint here is the host's own report that it
-    /// cleared the taint held for it: `taint_cleared` equal to the held taint, field for
-    /// field, or any `taint_cleared` when the held taint is the one a refused start made
-    /// (reason `host-tainted`). A report of a different taint changes nothing otherwise.
+    /// being silent. A taint ends here by the host's own word, in two ways. The host reports
+    /// that it cleared the taint held for it: `taint_cleared` equal to the held taint, field
+    /// for field, or any `taint_cleared` when the held taint is the one a refused start made
+    /// (reason `host-tainted`); a report of a different taint changes nothing otherwise. Or
+    /// the host says it holds none (`tainted` is false) while the taint held is one the agent
+    /// made (any but a host job's, `host-job`, and a refused whole-host prepare's,
+    /// `host-unsafe`, which the server makes and only [`Registry::clear_taint`] ends); a beat
+    /// without `tainted` (an agent that predates it) ends nothing this way. A beat that says
+    /// the host is tainted (`tainted` is true), reports no clear and finds the host holding
+    /// no taint gives it the `host-tainted` mirror, so the registry holds the taint the
+    /// agent's marker holds. The reply names the taint the host holds after the beat
+    /// (`host_taint`), none when it holds none.
     ///
     /// This records the beat: it changes the registry. [`Registry::check_heartbeat`] runs
     /// the same checks and finds the taint the beat would record, changing nothing, so a
@@ -628,7 +637,7 @@ impl Registry {
             .map(|run| run.run_id.clone())
             .collect();
         record.taint = taint;
-        Ok(beat::answer(heartbeat))
+        Ok(beat::answer(heartbeat, record.taint.clone()))
     }
 
     /// Reserves `ids` to another source of hosts: a hello for one is refused as

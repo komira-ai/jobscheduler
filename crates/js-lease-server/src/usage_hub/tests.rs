@@ -157,6 +157,7 @@ fn beat(host: &str, results: Vec<RunResult>) -> Heartbeat {
         results,
         taint: None,
         taint_cleared: None,
+        tainted: None,
         exclusive_ready: None,
         exclusive_refused: None,
         load: None,

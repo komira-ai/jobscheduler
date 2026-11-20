@@ -117,7 +117,7 @@ and none is removed without a decision:
   (including a daemonised child, when it is in a group a job can be in: see taint-self-clearing.md, A process outside the groups a job can be in), and any process running as the job's user after the job ends;
 - *host changes*: a file created or changed outside the allowed roots (the agent's scratch, cache and output roots), compared by a bounded
   listing and digest of a configured watch list of directories; the set of mounts (`/proc/self/mountinfo`) against the baseline; the user
-  and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline;
+  and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline, where a module the agent's own job runtime loads on first use (`overlay`, and `veth` and `nft_nat` when the agent wires jobs' networks) is not a job's when it is new, and an unload of any module is a finding;
 - *cleanup failure*: the container or its scratch directory could not be removed, a cgroup could not be emptied, or the slot could not be
   freed; for a VM job, the VM could not be stopped or its clone deleted;
 - *VM store* (an agent with a VM backend): a directory in the VM store that is neither a base image nor the clone of a run the
@@ -129,8 +129,11 @@ Any finding taints the host, whatever the job declared. A check that cannot run 
 not clear it, and it sends the taint in its `Heartbeat` (reason code, the lease id of the job, the check that found it) until the
 scheduler acknowledges it. The scheduler records the taint durably against the host id (an additive field of the binding file, R3) and
 announces the phase `tainted` (5.3). A tainted host takes no new lease or job. Its running leases finish or are drained: the consumer is
-told, drains and releases (9.1). **The scheduler never clears a taint on the agent's word:** a later hello or heartbeat without the
-taint changes nothing; only the provider path below, or an operator, ends it.
+told, drains and releases (9.1). **The agent's marker is the truth of the taints the agent makes:** a heartbeat that says
+the agent holds no taint (`tainted` false, the first beat of an agent whose marker was moved aside) ends such a taint, and one that
+says it holds one while the scheduler holds none records it again (`host-tainted`). The taints the scheduler makes itself, a host
+job's (`host-job`) and a refused whole-host prepare's (`host-unsafe`), end only by the provider path below, or by an operator. A
+heartbeat without the field (an older agent) changes nothing.
 
 **Replacement, by provider kind.**
 

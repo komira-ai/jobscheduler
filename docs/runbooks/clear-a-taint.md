@@ -60,14 +60,30 @@ the line's `reason` and `detail` say why, and so does standard error:
 | `record_failed` | the files were kept aside but the record was not written | keep the journal line |
 | `start_failed` | the clear stands but the unit did not start | `systemctl status js-agent-crun` |
 
-## 3. Clear the server's taint
+## 3. Check the server's taint
 
-The lease server keeps its own record of the taint. Once the agent has restarted, clear it with
-the operator's credential:
+The lease server keeps its own record of the taint, but the agent's marker is the truth of every
+taint the agent made (a residue, an unchecked input, a failed cleanup, an unreadable marker,
+owed checks, the mirror of a refused start). Every heartbeat says whether the agent holds a
+taint (`tainted`), so the agent that step 2 restarted, which holds no marker, ends the server's
+record at its first heartbeat: the host is listed without a taint (`js host list`) within one
+heartbeat interval, and the server's journal has one line, "a host's taint is cleared", with
+`by="agent-holds-none"` and the taint's reason. Nothing more is needed.
+
+The agent's word does not end two taints the server makes itself: a host job's (`host-job`) and
+a refused whole-host prepare's (`host-unsafe`). Clear one of those, or the record held for an
+agent too old to send `tainted`, with the operator's credential:
 
 ```text
 js host host-taint --host-id ID
 ```
 
-Do it after step 2: while the agent's marker is there, the agent refuses the next start, and the
-server takes that refusal as the host's taint again.
+Do it after step 2 (and, for a host job's taint, after the machine is reimaged): while the
+agent's marker is there, the agent says it is tainted at every heartbeat, and the server takes
+that as the host's taint again (reason `host-tainted`).
+
+While a taint stands, the server logs once, as a warning, that the placement pass skips the host
+for it ("a live host is skipped by placement for the taint the server holds"), with the host, the
+reason, the check and the run, so a job that stays queued has its cause in the journal. On a host
+whose agent runs with `--health-listen` (the packaged unit does), the agent's health route
+(`/healthz`) reports it not placeable for the same cause.

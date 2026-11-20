@@ -40,6 +40,9 @@ mod overlap;
 #[path = "agent_api_taint_log_tests.rs"]
 mod taint_log;
 
+#[path = "agent_api_stale_taint_tests.rs"]
+mod stale_taint;
+
 /// When a rig's clock starts, in milliseconds.
 const START_MS: u64 = 5_000_000;
 

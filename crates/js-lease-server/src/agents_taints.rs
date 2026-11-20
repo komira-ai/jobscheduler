@@ -1,6 +1,9 @@
 //! The taint of a host job on the host's binding: written after the pass that placed the job
 //! ([`Agents::keep_taints`]) and put back at start from the job store's taint rows
-//! ([`restore_job_taints`]); and the operator's clear of a host's taint ([`Agents::clear_taint`]).
+//! ([`restore_job_taints`]); the operator's clear of a host's taint ([`Agents::clear_taint`]);
+//! and the log lines of a host's taint: stored from a heartbeat, cleared by the agent's report
+//! of the clear (`by="agent"`), by its saying it holds none (`by="agent-holds-none"`, which
+//! names the taint the registry held before the beat) or by the operator, and put back.
 //!
 //! The placement commit writes `taint/<host>` in the job store, and the host's binding lives
 //! in another store (the `--store` state store, or the `.agents` file), so the two cannot be
@@ -61,6 +64,16 @@ impl Agents {
         }
     }
 
+    /// Logs that a heartbeat of `host` ended the taint the registry holds for it by saying the
+    /// agent holds none (`tainted` false), with the reason of the taint held, before the
+    /// registry records the beat. The caller has committed the clear; nothing is logged for a
+    /// host the registry does not hold.
+    pub(super) fn log_agent_holds_none(&self, host: &HostId) {
+        let held = self.registry.own_host(host).and_then(|own| own.host.taint);
+        held.iter()
+            .for_each(|taint| log_cleared(host, taint, "agent-holds-none"));
+    }
+
     /// Clears the taint the registry holds for `host`, as the operator's `ClearHostTaint`
     /// asks, and returns the taint it cleared; `None`, with nothing written, for a host that
     /// has none (in file mode the file is still saved, which writes nothing when it is current,
@@ -114,7 +127,8 @@ pub(super) fn log_stored(host: &HostId, taint: &Taint) {
     );
 }
 
-/// Logs that the taint `taint` of `host` is cleared, `by` the `agent` or the `operator`.
+/// Logs that the taint `taint` of `host` is cleared, `by` the `agent` (its report of the
+/// clear), the `agent-holds-none` (its saying it holds no taint) or the `operator`.
 pub(super) fn log_cleared(host: &HostId, taint: &Taint, by: &'static str) {
     info!(%host, reason = taint.reason.as_str(), by, "a host's taint is cleared");
 }
