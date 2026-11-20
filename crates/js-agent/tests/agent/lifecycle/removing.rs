@@ -193,10 +193,7 @@ fn pooled(name: &str) -> (Harness, Receiver<()>) {
     let wake = Wake::new(move || {
         let _ = ring.send(());
     });
-    h.life = life
-        .with_cleanup_threads(1)
-        .expect("a thread")
-        .with_wake(wake);
+    h.life = life.with_cleanup_threads(1).with_wake(wake);
     (h, rung)
 }
 

@@ -174,14 +174,16 @@ impl Lifecycle {
     /// The same lifecycle, removing each finished run's directories (its scratch directory
     /// and those beside it) on a pool of `threads` threads (`js-scratch`) instead of on the
     /// thread that steps it: the job waits in its cleanup until the pool answers, and the
-    /// pool rings the lifecycle's wake ([`Lifecycle::with_wake`]) when it has. Without it
-    /// the removal runs on the stepping thread.
-    ///
-    /// # Errors
-    /// A thread could not be made.
-    pub fn with_cleanup_threads(self, threads: usize) -> std::io::Result<Self> {
-        let run_dirs = run_dirs::RunDirs::pooled(threads, self.wake.clone())?;
-        Ok(Self { run_dirs, ..self })
+    /// pool rings the lifecycle's wake ([`Lifecycle::with_wake`]) when it has. Without it,
+    /// and when its threads cannot be made (the runtime's pools, made when the agent starts,
+    /// fail the start first), the removal runs on the stepping thread.
+    #[must_use]
+    pub fn with_cleanup_threads(self, threads: usize) -> Self {
+        let pooled = run_dirs::RunDirs::pooled(threads, self.wake.clone());
+        Self {
+            run_dirs: pooled.unwrap_or_default(),
+            ..self
+        }
     }
 
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be

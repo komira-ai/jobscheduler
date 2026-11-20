@@ -858,9 +858,7 @@ fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
     // After the wake, which the pool rings when a removal answered.
     let mut life = match cleanup_threads {
         0 => life,
-        threads => life
-            .with_cleanup_threads(threads)
-            .map_err(|why| why.to_string())?,
+        threads => life.with_cleanup_threads(threads),
     };
     lines.extend(describe(&events));
     // The mount providers, once the earlier process's runs are adopted: what it left of

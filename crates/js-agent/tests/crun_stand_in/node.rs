@@ -564,3 +564,9 @@ impl std::ops::DerefMut for Ringing {
         &mut self.life
     }
 }
+
+impl std::ops::DerefMut for Ringing {
+    fn deref_mut(&mut self) -> &mut Lifecycle {
+        &mut self.life
+    }
+}
