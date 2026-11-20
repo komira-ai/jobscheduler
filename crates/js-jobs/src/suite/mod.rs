@@ -31,6 +31,7 @@ mod compat;
 mod cordons;
 mod duties;
 mod failures;
+mod guarded;
 mod hosts;
 mod idempotency;
 mod indexes;
@@ -57,6 +58,7 @@ pub use compat::*;
 pub use cordons::*;
 pub use duties::*;
 pub use failures::*;
+pub use guarded::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use indexes::*;
@@ -103,6 +105,11 @@ where
     live_on_lists_the_live_allocations_of_one_host(backend);
     two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
+    a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
+    a_conflict_on_another_row_is_not_the_node_moving(backend);
+    a_guarded_view_shares_the_write_count_of_its_store(backend);
+    a_guarded_claimed_placement_honours_the_node_guard(backend);
+    settle_node_writes_at_the_version_and_keeps_the_other_fields(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
@@ -263,6 +270,11 @@ macro_rules! job_store_tests {
             live_on_lists_the_live_allocations_of_one_host,
             two_servers_beating_one_host_at_once_apply_each_beat_once,
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
+            a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
+            a_conflict_on_another_row_is_not_the_node_moving,
+            a_guarded_view_shares_the_write_count_of_its_store,
+            a_guarded_claimed_placement_honours_the_node_guard,
+            settle_node_writes_at_the_version_and_keeps_the_other_fields,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
             heard_at_is_the_store_clock_and_judges_live_nodes,

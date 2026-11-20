@@ -121,6 +121,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 claim: hello.claim.clone(),
                 shape: hello.shape.clone(),
                 labels: hello.labels.clone(),
+                agent_process: hello.agent_process.clone(),
                 state: NodeState {
                     phase: hello.phase,
                     load: None,
@@ -182,6 +183,29 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 return Ok(Beat::Applied(row));
             }
         }
+    }
+
+    /// Writes the row `row` again with its state replaced by `state`, at the version `row` was
+    /// read or written at: the way a beat, after the writes of its listing (made through
+    /// [`JobStore::guarded`] at that version), records in its own write that the first listing
+    /// is applied, whether the listing was clean, and the missing counts. The epoch, session,
+    /// the hello's fields (the agent process included), the last beat, `heard_at` and the
+    /// fields a later build wrote are kept. Returns the row as written, with its new version,
+    /// or `None` when the row is not at that version any more (another beat or hello was
+    /// applied, or the row was forgotten) and nothing was written.
+    ///
+    /// # Errors
+    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`]. Nothing is written.
+    pub fn settle_node(
+        &self,
+        row: &NodeRow,
+        state: NodeState,
+    ) -> Result<Option<NodeRow>, JobStoreError> {
+        let record = NodeRecord {
+            state,
+            ..row.record.clone()
+        };
+        self.put_node(record, Some(row))
     }
 
     /// Every host's row heard within `grace` by the store's clock (its `heard_at` at most
