@@ -88,20 +88,23 @@ impl Agents {
 
     /// One pass over the queued jobs
     /// ([`SchedPlacer::place_jobs_with`](super::place::SchedPlacer::place_jobs_with)) on the
-    /// hosts the registry would let take a job now and whose last job listing was clean
-    /// ([`Agents::listing_clean`]), when this server holds the job tables and its registry
-    /// has the placer; otherwise nothing (an agent side a test built without a placer
-    /// places no job). The hosts that said hello to this server (those the registry
-    /// holds a claim of) and the pool's whole-node settings go with them: a queued job that
-    /// books the whole host is marked, placed and prepared only under those settings. A failed
-    /// read of the tables is logged; the next pass reads them again.
+    /// hosts [`Agents::offered`] reads before the pass: every host whose `node/` row is live
+    /// and every host this server's registry holds live, when nothing closes it and its last
+    /// job listing was clean; when this server holds the job tables and its registry has the
+    /// placer; otherwise nothing (an agent side a test built without a placer places no job).
+    /// The hosts heard from (whose rows are live, or that said hello here) and the pool's
+    /// whole-node settings go with them: a queued job that books the whole host is marked,
+    /// placed and prepared only under those settings. A failed read of the hosts or the tables
+    /// is logged; the next pass reads them again.
     ///
     /// A host is offered to a job with host isolation only when its hello reported
     /// `host-jobs`. Each host such a job was placed on is tainted in the registry
     /// (`host-job`, the job's id as the run id) as soon as the placement is committed, and
-    /// returned: the caller writes the bindings of the hosts returned
-    /// ([`Agents::keep_taints`]). A host the registry no longer holds, or that was tainted
-    /// before, is not returned.
+    /// returned with the job: the caller writes the bindings of the hosts returned
+    /// ([`Agents::keep_taints`]). A host the registry does not hold, or that was tainted
+    /// before, is not returned: its `taint/<host>` row stays, closing it to every server, until
+    /// the pass of the server that holds it takes the taint on. The taint rows such a pass took
+    /// on are returned too.
     ///
     /// The tick runs this pass whatever changed; a heartbeat runs
     /// [`Agents::place_jobs_after_beat`].
@@ -113,8 +116,8 @@ impl Agents {
     /// changed since the last pass that ran
     /// ([`SchedPlacer::place_jobs_if_changed`](super::place::SchedPlacer::place_jobs_if_changed)):
     /// the job tables, the engine's picture of the hosts, the hosts offered with what each
-    /// offers, the hosts that said hello and what pass 2 told. The hosts are read from the
-    /// registry first either way.
+    /// offers, the hosts heard from and what pass 2 told. The hosts are read from the rows and
+    /// the registry first either way, so a changed row brings the pass back.
     pub(crate) fn place_jobs_after_beat(&self) -> Vec<(HostId, JobId)> {
         self.pass_over_queue(Pass::IfChanged)
     }
