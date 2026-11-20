@@ -11,7 +11,8 @@ mod threads;
 use std::time::Duration;
 
 use js_agent::dispatch::{Cell, Next, Poller, Route};
-use js_agent::{CredentialState, Delivery, QUEUE};
+use js_agent::lifecycle::Quiet;
+use js_agent::{CredentialState, Delivery, QUEUE, Quiesce, WorkerHost};
 use js_agent_wire::limits::MAX_COMMANDS;
 use js_agent_wire::{
     BookedResources, DISPATCH_PATH, DispatchReply, Dispatched, JobStartSpec, Welcome,
@@ -165,6 +166,38 @@ fn a_start_in_a_poll_reaches_the_worker_and_the_next_poll_acknowledges_it() {
     assert!(bodies[2].get("acks").is_none(), "{}", bodies[2]);
 }
 
+/// Asserts that a start handed out by a poll leaves the whole-node lease the host holds as
+/// it is: the worker was granted a lease by a heartbeat's reply and found the host quiet for
+/// it; after the poll delivers a start the job is held and the worker still answers ready for
+/// that lease from what it published. Catches an answer delivered as a heartbeat reply that
+/// names no lease, which ends the hold (the published answer for the lease is dropped, and the
+/// host would prepare again and refuse the lease's own starts).
+#[test]
+fn a_poll_that_delivers_a_start_keeps_the_whole_node_lease_ready() {
+    let dir = Scratch::new("jobs-dispatch-lease");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+    let grant = js_agent_wire::HeartbeatReply {
+        exclusive: Some("lease-1".to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(worker.try_deliver(grant), Delivery::Delivered);
+    assert!(handle.settle());
+    assert_eq!(host.prepare("lease-1"), Quiet::Busy, "asked");
+    assert!(handle.settle());
+    assert_eq!(host.prepare("lease-1"), Quiet::Ready);
+
+    let (mut script, _) = Script::new(vec![handed(vec![Dispatched::start(spec("j1"))])]);
+    let mut poller = Poller::new(&worker, Box::new(Lowest));
+    assert_eq!(poller.poll(&mut script, &route(1)), Next::Again);
+    assert!(handle.settle());
+
+    assert_eq!(worker.snapshot().jobs[0].job_id, "j1");
+    assert_eq!(host.prepare("lease-1"), Quiet::Ready, "the hold was kept");
+}
+
 /// Asserts that a stop in a poll's answer reaches the worker, which stops the running job,
 /// and that the next poll acknowledges it as a stop of the allocation (the kind is part of the
 /// acknowledgement, so it never deletes the start of the same allocation). Catches a stop
@@ -271,15 +304,16 @@ fn a_poll_whose_answer_is_lost_sends_the_same_acknowledgements_again() {
     assert_eq!(acked(&bodies[4]), Vec::<String>::new());
 }
 
-/// Asserts how each status ends a poll. 404 (a server without the route behind the edge), 408,
-/// 429 with a `Retry-After` and 5xx wait a backoff that doubles while the failures last and
-/// starts again after an answered poll; the wait is at least the `Retry-After`. 400, 401, 403
-/// and 409 stop the polls until the next welcome (`Halt`), and the acknowledgements are kept
-/// for the first poll after it. Catches a 404 that stops the polls (the server's update would
-/// leave the host without dispatch for ever, though its heartbeats go on), a 409 that is
-/// retried in a loop, and a rate limit that is not obeyed.
+/// Asserts how each status ends a poll. Every status but 200 (404, 408, 429 with a
+/// `Retry-After`, 5xx, and the refusals 400, 401, 403 and 409 of an instance that does not
+/// hold the session or will not serve it) waits a backoff that doubles while the failures
+/// last and starts again after an answered poll; the wait is at least the `Retry-After`; and
+/// the acknowledgements are kept for the poll after each. Catches a refusal that stops the
+/// polls for the rest of the session (one instance's 409 would leave the host without the
+/// starts that the servers leave out of heartbeat replies), and a rate limit that is not
+/// obeyed.
 #[test]
-fn a_missing_route_backs_off_and_a_refused_session_halts_the_polls() {
+fn every_refusal_backs_off_and_the_poll_goes_on() {
     let dir = Scratch::new("jobs-dispatch-statuses");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
@@ -302,8 +336,8 @@ fn a_missing_route_backs_off_and_a_refused_session_halts_the_polls() {
     assert_eq!(decided(), Next::After(ms(500)));
     assert_eq!(decided(), Next::After(ms(1000)));
     assert_eq!(decided(), Next::After(ms(2000)));
-    for _ in 0..4 {
-        assert_eq!(decided(), Next::Halt);
+    for wait in [4000, 8000, 16000, 30000] {
+        assert_eq!(decided(), Next::After(ms(wait)));
     }
     assert_eq!(decided(), Next::Again);
     assert_eq!(
@@ -474,47 +508,46 @@ fn a_route_prints_without_its_secrets() {
 
 /// Asserts what the cell holds after welcomes: no route before one; the route of a welcome
 /// that says `dispatch_poll`, with its generation; nothing for a later welcome that does not
-/// (the poller stops); a later generation only after a later welcome; and nothing once
-/// closed. Catches a poller that keeps polling a session the server no longer serves, one that
-/// polls a welcome without the flag, and one that takes a route it has already halted on.
+/// (the poller stops); a later welcome's route replacing the earlier; and nothing once
+/// closed. Catches a poller that keeps polling a session the server no longer serves, and one
+/// that polls a welcome without the flag.
 #[test]
 fn the_cell_holds_the_route_of_the_latest_welcome_that_says_dispatch_poll() {
     let cell = Cell::new(None);
-    assert!(cell.try_route(0).is_none());
+    assert!(cell.try_route().is_none());
     cell.publish(
         "h1",
         &welcomed(1, "one", false, None),
         CredentialState::None,
     );
-    assert!(cell.try_route(0).is_none(), "no flag, no route");
+    assert!(cell.try_route().is_none(), "no flag, no route");
     cell.publish("h1", &welcomed(2, "two", true, None), CredentialState::None);
-    let (generation, route) = cell.try_route(0).unwrap();
+    let (generation, route) = cell.try_route().unwrap();
     assert_eq!(
         (generation, route.epoch, route.session.as_str()),
         (2, 2, "two")
     );
     assert_eq!(route.host_id, "h1");
-    assert!(cell.try_route(2).is_none(), "halted on this generation");
     cell.publish(
         "h1",
         &welcomed(3, "three", true, None),
         CredentialState::None,
     );
-    assert_eq!(cell.try_route(2).unwrap().1.epoch, 3);
+    assert_eq!(cell.try_route().unwrap().1.epoch, 3);
     cell.publish(
         "h1",
         &welcomed(4, "four", false, None),
         CredentialState::None,
     );
-    assert!(cell.try_route(0).is_none(), "the flag was withdrawn");
+    assert!(cell.try_route().is_none(), "the flag was withdrawn");
     cell.publish(
         "h1",
         &welcomed(5, "five", true, None),
         CredentialState::None,
     );
     cell.close();
-    assert!(cell.try_route(0).is_none());
-    assert!(cell.wait_route(0).is_none());
+    assert!(cell.try_route().is_none());
+    assert!(cell.wait_route().is_none());
 }
 
 /// Asserts which credential the route carries: the one found in the state root at start; the
@@ -527,7 +560,7 @@ fn the_route_carries_the_credential_the_session_adopted() {
     let found = js_agent_wire::HostCredential::parse("found-credential").unwrap();
     let cell = Cell::new(Some(found));
     let held = |cell: &Cell| {
-        let route = cell.try_route(0).unwrap().1;
+        let route = cell.try_route().unwrap().1;
         route.credential.map(|c| c.expose().to_owned())
     };
     let publish = |epoch: u64, credential: Option<&str>, kept: CredentialState| {

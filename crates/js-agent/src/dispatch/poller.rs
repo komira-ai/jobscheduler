@@ -3,9 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_agent_wire::{
-    Command, DISPATCH_PATH, DispatchAck, DispatchPoll, DispatchReply, Dispatched, HeartbeatReply,
-};
+use js_agent_wire::{Command, DISPATCH_PATH, DispatchAck, DispatchPoll, DispatchReply, Dispatched};
 use serde_json::Value;
 
 use super::Route;
@@ -20,9 +18,6 @@ pub enum Next {
     Again,
     /// Wait this long, then poll again: the poll failed.
     After(Duration),
-    /// Poll no more until the next welcome: the server does not hold this session or will
-    /// not serve the poll to it.
-    Halt,
 }
 
 /// The state that outlives a poll: the acknowledgements not yet answered, and the run of
@@ -61,8 +56,6 @@ impl<'a> Poller<'a> {
             Err(_) => self.failed(None),
             Ok(answer) => match answer.status {
                 200 => self.answered(answer.body),
-                404 | 408 | 429 => self.failed(answer.retry_after),
-                400..=499 => Next::Halt,
                 _ => self.failed(answer.retry_after),
             },
         }
@@ -85,10 +78,7 @@ impl<'a> Poller<'a> {
         let (commands, acks): (Vec<_>, Vec<_>) =
             reply.messages.into_iter().filter_map(actionable).unzip();
         let taken = !commands.is_empty()
-            && self.worker.try_deliver(HeartbeatReply {
-                commands,
-                ..HeartbeatReply::default()
-            }) == Delivery::Delivered;
+            && self.worker.try_deliver_commands(commands) == Delivery::Delivered;
         if taken {
             self.acks.extend(acks);
         }

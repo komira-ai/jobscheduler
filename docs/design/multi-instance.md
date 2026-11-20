@@ -186,8 +186,10 @@ The scheduling logic decides a placement and writes what the host must do as a m
   connection for each poll (so each can reach any instance), with the welcome's host, epoch and session. A 200 is handed to the
   worker in one delivery and its messages are acked in the next poll when the worker took them (an invalid message is neither acted on
   nor acked, one the worker had no room for is not acked and comes again after `claim_until`); the acks stay until a poll that carried
-  them is answered 200. A transport error, 408, 429, 5xx and 404 (a server without the route during an update) back off like a
-  failed heartbeat and poll again; any other 4xx (409, 401, 403) stops the polls until the next welcome. A welcome without the flag
+  them is answered 200. A transport error and every status but 200 (404 from a server without the route during an update, 408, 429, 5xx, and
+  the refusals 400, 401, 403, 409 of an instance that does not hold or will not serve the session) back off like a failed heartbeat
+  and poll again with the same route, since the next poll may reach another instance and a halt would leave the starts that servers
+  leave out of beat replies undelivered while heartbeats succeed. A welcome without the flag
   leaves the agent on the beat's reply.
 - **A pull, not an inbound js-agent endpoint.** Agents dial out and have no inbound API. An inbound one would need a listener on
   every host, reachable through NAT and the hosts' egress rules (`docs/design/agent-egress.md`). It would also need mTLS both ways,

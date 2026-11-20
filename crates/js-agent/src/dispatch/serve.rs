@@ -1,4 +1,4 @@
-//! The poller's thread: wait for a route, poll, pause or park as the answer says.
+//! The poller's thread: wait for a route, poll, pause as the answer says.
 
 use std::path::Path;
 
@@ -43,12 +43,11 @@ impl Dial<'_> {
 }
 
 /// Polls for the sessions `cell` is given until it is closed: each poll on a transport of
-/// its own ([`Dial::open`]), the answers handed to `worker`, a wait after a failure as
-/// `jitter` says, and no poll after a refusal until the next welcome.
+/// its own ([`Dial::open`]), the answers handed to `worker`, and a wait after a failure
+/// (any answer but a usable 200, any transport error) as `jitter` says.
 pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitter>) {
     let mut poller = Poller::new(worker, jitter);
-    let mut parked = 0;
-    while let Some((generation, route)) = cell.wait_route(parked) {
+    while let Some((generation, route)) = cell.wait_route() {
         let next = match dial.open(route.credential.as_ref()) {
             Ok(mut transport) => poller.poll(&mut *transport, &route),
             Err(_) => poller.failed(None),
@@ -56,7 +55,6 @@ pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitt
         match next {
             Next::Again => {}
             Next::After(wait) => cell.pause(wait, generation),
-            Next::Halt => parked = generation,
         }
     }
 }

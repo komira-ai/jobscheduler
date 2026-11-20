@@ -103,22 +103,22 @@ impl Cell {
         self.changed.notify_all();
     }
 
-    /// The route of a generation later than `parked` (0 for any), with its generation, when
-    /// there is one and the cell is open; never waits. A welcome without the flag withdraws
+    /// The route of the latest welcome, with its generation, when there is one and the cell
+    /// is open; never waits. A welcome without the flag withdraws
     /// the route.
-    pub fn try_route(&self, parked: u64) -> Option<(u64, Route)> {
-        Self::due(&self.lock(), parked)
+    pub fn try_route(&self) -> Option<(u64, Route)> {
+        Self::due(&self.lock())
     }
 
     /// [`Cell::try_route`], waiting for it: `None` once the cell is closed.
-    pub fn wait_route(&self, parked: u64) -> Option<(u64, Route)> {
-        let wait = |state: &mut State| !state.closed && Self::due(state, parked).is_none();
+    pub fn wait_route(&self) -> Option<(u64, Route)> {
+        let wait = |state: &mut State| !state.closed && Self::due(state).is_none();
         let state = self.changed.wait_while(self.lock(), wait);
-        Self::due(&state.unwrap_or_else(PoisonError::into_inner), parked)
+        Self::due(&state.unwrap_or_else(PoisonError::into_inner))
     }
 
-    fn due(state: &State, parked: u64) -> Option<(u64, Route)> {
-        let route = state.route.clone().filter(|_| state.generation > parked);
+    fn due(state: &State) -> Option<(u64, Route)> {
+        let route = state.route.clone();
         route
             .filter(|_| !state.closed)
             .map(|route| (state.generation, route))

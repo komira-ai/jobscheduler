@@ -29,23 +29,24 @@
 //!   one that fails is an error, below. The acknowledgements sent are dropped (a poll that
 //!   was answered carried them). Each message that passes [`Dispatched::validate`] becomes a
 //!   [`Command::JobStart`] or [`Command::JobStop`], and the valid ones are handed to the
-//!   worker in one [`Worker::try_deliver`](crate::Worker::try_deliver), like the commands of
-//!   a heartbeat's reply. When the worker took them, each message's acknowledgement
+//!   worker in one [`Worker::try_deliver_commands`](crate::Worker::try_deliver_commands):
+//!   they are acted on as the commands of a heartbeat's reply are, and the answer says
+//!   nothing of the whole-node lease or the acknowledgements, so what the host holds of
+//!   them stays as the last heartbeat's reply left it. When the worker took them, each message's acknowledgement
 //!   ([`Dispatched::ack`]) goes into the next poll; when it was full or gone nothing is
 //!   acknowledged, and the server hands the messages out again once its hold on them ends.
 //!   A message that fails its check is neither acted on nor acknowledged, and costs the
 //!   messages beside it nothing. The agent polls again at once.
-//! - **A transport error, 408, 429, 5xx, 404 or an answer that is not usable.** The agent
-//!   waits as the session does after a failure ([`Backoff`](crate::Backoff): doubling,
-//!   capped, jittered, at least the `Retry-After` the server gave) and polls again, with
-//!   the same acknowledgements, so a poll whose answer was lost is sent again whole, to
-//!   whichever instance answers. A 404 is a server without the route behind the edge during
-//!   an update: the heartbeat path from that server still carries the starts.
-//! - **Any other 4xx** (409 `stale-epoch`, `unknown-host`, `host-lost`; 401; 403
-//!   `session-mismatch`, `dispatch-not-served`): the server does not hold this session or
-//!   will not serve the poll to it. The agent stops polling until the next welcome, which
-//!   the heartbeat loop brings by saying hello again; the acknowledgements it holds are sent
-//!   in the first poll of that session.
+//! - **Anything else: a transport error, any status but 200 (404, 408, 429, 5xx, and the
+//!   refusals 400, 401, 403, 409), or an answer that is not usable.** The agent waits as the
+//!   session does after a failure ([`Backoff`](crate::Backoff): doubling, capped, jittered,
+//!   at least the `Retry-After` the server gave) and polls again with the route it holds
+//!   and the same acknowledgements, so a poll whose answer was lost is sent again whole, to
+//!   whichever instance answers. A refusal is one instance's (a 404 is a server without the
+//!   route during an update; a 409 `dispatch-not-served` or `unknown-host` is one whose
+//!   registry lacks the host's claim) and the next poll may reach another, while the
+//!   heartbeats go on succeeding; a wait ends early at a new welcome, which replaces the
+//!   route.
 //!
 //! The poller never reads the heartbeat's state and the heartbeat never waits for the
 //! poller. A drain ([`Session::begin_drain`]) and the end of the loop close the cell: the

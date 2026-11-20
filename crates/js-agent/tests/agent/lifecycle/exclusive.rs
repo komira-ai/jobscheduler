@@ -3,7 +3,7 @@
 //! lifecycle: a fake runtime, a clock that moves when a test moves it, and the scripted
 //! post-job checks, which note in the log each time they run.
 
-use js_agent::lifecycle::{CheckFinding, Event, Quiet, Restored, code};
+use js_agent::lifecycle::{CheckFinding, Clock, Event, Quiet, Restored, code};
 use js_agent_wire::{Command, JobSpec, Outcome, refusal};
 use serde_json::json;
 
@@ -135,6 +135,42 @@ fn a_start_for_the_lease_itself_runs_only_after_the_host_was_found_quiet() {
         names(&other),
         [format!("refused c {}", refusal::NO_CAPACITY)]
     );
+}
+
+/// Asserts that commands delivered alone (what a dispatch poll's answer carries) leave a
+/// whole-node hold that is ready as it is: the start of the lease runs, the stop of it stops
+/// it, the hold stays ready and the checks do not run again. Catches a commands-only
+/// delivery that reads as a reply naming no lease and so drops the hold, which refuses the
+/// lease's own starts and makes the host prepare again.
+#[test]
+fn commands_alone_leave_a_ready_lease_hold_as_it_is() {
+    let mut h = Harness::new("ex-commands-only");
+    h.life.apply(&granting(LEASE, vec![]));
+    assert_eq!(prepare(&mut h).0, Quiet::Ready);
+    let now = h.clock.now_ms();
+    let started = h
+        .life
+        .apply_commands_at(&reply(vec![start(of(LEASE, "a"))]), now);
+    assert_eq!(names(&started), ["started a"]);
+    assert_eq!(h.life.exclusive(), Some(LEASE));
+    let stopped = h.life.apply_commands_at(
+        &reply(vec![Command::Stop {
+            run_id: "a".to_owned(),
+        }]),
+        now,
+    );
+    assert!(
+        names(&stopped)
+            .iter()
+            .all(|name| !name.starts_with("refused"))
+    );
+    assert_eq!(h.life.exclusive(), Some(LEASE));
+    assert_eq!(
+        prepare(&mut h).0,
+        Quiet::Busy,
+        "a is held until acknowledged"
+    );
+    assert_eq!(checks_of(&h, LEASE), 1);
 }
 
 /// Asserts that a reply that names a lease changes nothing for a start in the same reply

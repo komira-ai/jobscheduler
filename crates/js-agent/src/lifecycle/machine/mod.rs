@@ -180,6 +180,20 @@ impl Lifecycle {
     /// a reply that waited for a worker busy with a slow runtime call is not given the time
     /// it spent waiting.
     pub fn apply_at(&mut self, reply: &HeartbeatReply, received: u64) -> Vec<Event> {
+        self.apply_reply(reply, received, true)
+    }
+
+    /// [`Lifecycle::apply_at`] for a reply that carries commands and nothing else (what a
+    /// dispatch poll answers with): the whole-node lease held, the acknowledgements and the
+    /// taint's are left as they are, as a reply that says nothing of them must not end a
+    /// hold the last heartbeat's reply granted.
+    pub fn apply_commands_at(&mut self, reply: &HeartbeatReply, received: u64) -> Vec<Event> {
+        self.apply_reply(reply, received, false)
+    }
+
+    /// The body of [`Lifecycle::apply_at`]; `whole` is whether the reply speaks for the
+    /// lease it grants (a heartbeat's does, a dispatch poll's does not).
+    fn apply_reply(&mut self, reply: &HeartbeatReply, received: u64, whole: bool) -> Vec<Event> {
         let checked = reply.validate();
         let mut events: Vec<Event> = checked
             .refused
@@ -191,7 +205,7 @@ impl Lifecycle {
             .collect();
         // The lease is followed before the commands, so a `Start` in the reply that grants
         // an exclusive lease is judged against it.
-        if checked.exclusive.is_ok() {
+        if whole && checked.exclusive.is_ok() {
             self.follow(reply.exclusive.as_deref());
         }
         for command in &checked.commands {

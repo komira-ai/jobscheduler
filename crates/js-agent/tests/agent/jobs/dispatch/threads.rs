@@ -203,13 +203,14 @@ fn the_poller_follows_each_welcome_and_stops_when_the_flag_is_withdrawn() {
     assert_eq!(connector.0.connects.load(Ordering::SeqCst), 2);
 }
 
-/// Asserts that a 409 ends the polls of that session and the next welcome starts them again
-/// with the new session, carrying the acknowledgements kept. Catches a poller that polls a
-/// session the server refused in a loop, and one that does not poll again after the hello
-/// that follows the refusal.
+/// Asserts that a 409 from one instance does not end the polls of the session: the poller
+/// backs off and polls again with the same route (epoch and session) and the acknowledgements
+/// it holds, and a later 200 is taken as usual. Catches a poller that stops for the rest of
+/// the session on a refusal while the heartbeats succeed, which leaves the host without the
+/// starts the servers leave out of heartbeat replies.
 #[test]
-fn a_refused_session_is_not_polled_again_but_the_next_welcome_is() {
-    let dir = Scratch::new("jobs-dispatch-halt");
+fn a_refused_poll_is_polled_again_with_the_same_session() {
+    let dir = Scratch::new("jobs-dispatch-refused");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
     let cell = Cell::new(None);
@@ -221,11 +222,11 @@ fn a_refused_session_is_not_polled_again_but_the_next_welcome_is() {
         driver.answer(handed(vec![Dispatched::start(spec("j1"))]));
         let (carrying, _) = driver.next();
         assert_eq!(acked(&carrying), ["start:alloc-j1"]);
-        driver.answer(refused(409, "stale-epoch"));
-        cell.publish("h1", &welcomed(2, "two", true, None), CredentialState::None);
+        driver.answer(refused(409, "dispatch-not-served"));
         let (after, _) = driver.next();
-        assert_eq!(after["epoch"], 2);
-        assert_eq!(acked(&after), ["start:alloc-j1"], "kept across the halt");
+        assert_eq!(after["epoch"], 1);
+        assert_eq!(after["session"], "one");
+        assert_eq!(acked(&after), ["start:alloc-j1"], "kept across the refusal");
         driver.finish();
     });
 }
@@ -353,7 +354,7 @@ fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
     let mut session = session_over(&mut script, &worker, &cell).with_credential_store(&store);
 
     session.tick();
-    let (generation, route) = cell.try_route(0).unwrap();
+    let (generation, route) = cell.try_route().unwrap();
     assert_eq!(
         (generation, route.epoch, route.host_id.as_str()),
         (1, 1, "h1")
@@ -362,12 +363,12 @@ fn a_session_tells_its_cell_each_welcome_and_closes_it_at_a_drain() {
     assert_eq!(route.credential.unwrap().expose(), "issued-credential");
     session.tick();
     session.tick();
-    assert!(cell.try_route(0).is_none(), "a welcome without the flag");
+    assert!(cell.try_route().is_none(), "a welcome without the flag");
     session.tick();
     session.tick();
-    assert_eq!(cell.try_route(0).unwrap().1.epoch, 3);
+    assert_eq!(cell.try_route().unwrap().1.epoch, 3);
     session.begin_drain();
-    assert!(cell.wait_route(0).is_none(), "the drain closed the cell");
+    assert!(cell.wait_route().is_none(), "the drain closed the cell");
 }
 
 /// Asserts that a session with no cell says nothing to a poller and works as it did, and that
@@ -392,7 +393,7 @@ fn a_session_without_a_cell_or_with_a_refused_credential_publishes_nothing_wrong
     let mut script = script.refusing_credentials();
     let mut session = session_over(&mut script, &worker, &cell).with_credential_store(&store);
     session.tick();
-    assert!(cell.try_route(0).unwrap().1.credential.is_none());
+    assert!(cell.try_route().unwrap().1.credential.is_none());
 }
 
 /// A sleeper that waits for the test's go at its first wait and ends the agent there and at

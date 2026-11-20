@@ -3,11 +3,18 @@
 //! waits are opened one at a time by the test, so each test reads as the order of events
 //! it asserts: nothing here waits for a time to pass.
 //!
+//! The agent polls the dispatch route (its hello reports `dispatch-poll` and the real server
+//! welcomes it with `dispatch_poll`), so the server leaves each start and stop out of a
+//! heartbeat's reply and hands it out in an answer of the poll. The poller runs on a thread of
+//! its own; its transports tell the rig when a poll is sent and when an answer handed out a
+//! message ([`Rig::delivered`]), which is how a test waits for a start or a stop to reach the
+//! worker: by event, as the heartbeats are.
+//!
 //! The rigs use a pool with the shortest heartbeat interval (250 ms, [`POOL_RUNS_QUICK_TOML`]):
 //! the server holds the reply of a heartbeat that has nothing to send for up to that long, to
 //! an agent that reports `held-beat`, and says `beat_now`, after which the agent beats at once
-//! ([`HELD`]); so does a reply with acknowledgements and no command; a reply with a command is
-//! followed by the interval ([`INTERVAL`]). With
+//! ([`HELD`]); so does a reply with acknowledgements and no command; a reply with a command
+//! (a start or a stop of a run, a clear) is followed by the interval ([`INTERVAL`]). With
 //! the default 5 s each quiet beat would hold the test for 5 s of real time.
 //!
 //! The jobs here are submitted through the v1 job API (`POST /v1/jobs` on `--job-listen`) and
@@ -15,14 +22,17 @@
 //! asserted with the server's own binary and the crun runtime, in js-lease-server's
 //! `v1_acceptance` target.
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use js_agent::Handle;
-use js_client::Reply;
+use js_agent::{Answer, Connector, Handle, Login, Transport};
+use js_client::{ClientError, Reply};
 use serde_json::{Value, json};
 
+use super::dispatch::GUARD;
 use super::fake::FakeMachine;
 use super::{private, user};
 use crate::server::{Agent, Counting, POOL_RUNS_QUICK_TOML, Recorder, Redirect, Server};
@@ -36,11 +46,67 @@ const INTERVAL: Duration = Duration::from_millis(250);
 /// command. A reply with a command (a start, a stop) is followed by [`INTERVAL`].
 const HELD: Duration = Duration::ZERO;
 
+/// The most beats a test waits for a job to be placed.
+const BEATS: usize = 5;
+
 /// The state of a job that is running, as the job service names it.
 const RUNNING: &str = "JOB_STATE_RUNNING";
 
+/// What the poller's transports tell the rig, in the order they happen.
+enum Poll {
+    /// A poll was sent.
+    Sent,
+    /// A poll was answered 200 with at least one message.
+    Handed,
+}
+
+/// The connector of the poller's transports: the redirecting one, watched.
+struct Announcing {
+    inner: Redirect,
+    events: Mutex<Sender<Poll>>,
+}
+
+struct Announced {
+    inner: Box<dyn Transport>,
+    events: Sender<Poll>,
+}
+
+impl Connector for Announcing {
+    fn connect(
+        &self,
+        server: &str,
+        login: &Login,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn Transport>, ClientError> {
+        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(Box::new(Announced {
+            inner: self.inner.connect(server, login, ca_cert)?,
+            events: events.clone(),
+        }))
+    }
+}
+
+impl Transport for Announced {
+    fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        let _ = self.events.send(Poll::Sent);
+        let answer = self.inner.post(path, body)?;
+        let handed = answer.body["messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty());
+        if answer.status == 200 && handed {
+            let _ = self.events.send(Poll::Handed);
+        }
+        Ok(answer)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
+}
+
 /// A server with one agent that runs containers.
 struct Rig {
+    polls: Receiver<Poll>,
     server: Server,
     agent: Agent,
     worker: Handle,
@@ -87,17 +153,23 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
     ];
     flags.extend_from_slice(extra);
     let machine = Arc::new(FakeMachine::new());
-    let agent = Agent::spawn_on(
+    let (events, polls) = channel();
+    let dispatch = Announcing {
+        inner: Redirect(address.clone()),
+        events: Mutex::new(events),
+    };
+    let agent = Agent::spawn_polling(
         server.url(),
         server.join_file(),
         &flags,
         linux_host,
-        connector(address.clone()),
+        (connector(address.clone()), Arc::new(dispatch)),
         machine.clone(),
     );
     let worker = agent.worker();
     assert_eq!(agent.next_wait(), INTERVAL, "the hello");
     Rig {
+        polls,
         server,
         agent,
         worker,
@@ -108,6 +180,22 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
 }
 
 impl Rig {
+    /// Waits until the poller was handed a message (a start or a stop) and has given it to
+    /// the worker (the poll after the answer is sent only then), and the worker is done with
+    /// it. The agent is not asked to beat: nothing here depends on a heartbeat.
+    #[track_caller]
+    fn delivered(&self) {
+        let next = |wanted: fn(&Poll) -> bool| loop {
+            let event = self.polls.recv_timeout(GUARD);
+            if wanted(&event.expect("the poller polled")) {
+                break;
+            }
+        };
+        next(|event| matches!(event, Poll::Handed));
+        next(|event| matches!(event, Poll::Sent));
+        assert!(self.worker.settle());
+    }
+
     /// One heartbeat of the agent, and the worker done with the reply to it. `wait` is what the
     /// agent asks for after the reply: [`HELD`] when the server held the reply open for the
     /// beat, [`INTERVAL`] when the reply carried something.
@@ -138,12 +226,39 @@ impl Rig {
         (state, reason)
     }
 
-    /// Beats until the server lists `job` as running: the beat that brings its start (a
-    /// command, so the interval follows), the one that lists it created and the one after,
-    /// both held.
+    /// One heartbeat of the agent, with no claim about the wait after it: the server places
+    /// the jobs that wait on a heartbeat, and a placement's start leaves in the dispatch route.
+    #[track_caller]
+    fn tick(&self) {
+        self.agent.elapse();
+        self.agent.next_wait();
+        assert!(self.worker.settle());
+    }
+
+    /// Beats until the server has placed `job`, at most [`BEATS`] times: a guard against a
+    /// hang, not an expectation.
+    #[track_caller]
+    fn placed(&self, job: &str) {
+        for _ in 0..BEATS {
+            if self.server.job_state(job) != "JOB_STATE_QUEUED" {
+                return;
+            }
+            self.tick();
+        }
+        assert_ne!(
+            self.server.job_state(job),
+            "JOB_STATE_QUEUED",
+            "{BEATS} beats"
+        );
+    }
+
+    /// Until the server lists `job` as running: it is placed (on a beat if it waited), its
+    /// start arrives by the dispatch route, then the beat that lists it created and the one
+    /// after, both held.
     #[track_caller]
     fn until_running(&self, job: &str) {
-        self.beat(INTERVAL);
+        self.placed(job);
+        self.delivered();
         self.beat(HELD);
         self.beat(HELD);
         assert_eq!(self.view(job).0, RUNNING);
@@ -164,9 +279,9 @@ impl Rig {
 }
 
 /// Asserts a job from the submitter's side to the agent's and back: the job is submitted
-/// (201) and, with the host idle, reads placed at once (the submit call places it); the next
-/// heartbeat's reply carries its start (so it is not held: the agent waits the interval) and
-/// the agent creates the container; the heartbeat after lists it, is held (the agent beats
+/// (201) and, with the host idle, reads placed at once (the submit call places it); the start
+/// reaches the agent in an answer of the dispatch poll (not in a heartbeat's reply) and the
+/// agent creates the container; the heartbeat after lists it, is held (the agent beats
 /// again at once) and the job reads running; with the whole budget booked a second job stays
 /// queued; when the container exits the next heartbeat carries the result, which the server
 /// records (succeeded, reason exit) and acknowledges, and the agent drops it; the second job
@@ -180,7 +295,7 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
     let job = rig.queued(4000);
     assert_eq!(rig.view(&job).0, "JOB_STATE_PLACED");
 
-    rig.beat(INTERVAL);
+    rig.delivered();
     assert_eq!(rig.machine.world.created(), [job.as_str()]);
     rig.beat(HELD);
     assert_eq!(rig.view(&job).0, RUNNING);
@@ -210,7 +325,7 @@ fn a_job_goes_through_the_agent_and_its_result_comes_back() {
 }
 
 /// Asserts a cancel from the submitter: the cancel is taken and reads the job still running
-/// with the cancel requested, the next reply carries the stop, the agent stops the container,
+/// with the cancel requested, the dispatch poll hands out the stop, the agent stops the container,
 /// and the job ends cancelled. It catches a stop the agent ignores and a killed result the
 /// server does not take.
 #[test]
@@ -222,7 +337,7 @@ fn a_cancel_is_delivered_and_the_job_is_stopped() {
     let asked = rig.server.cancel(&job);
     assert_eq!(asked.status, 200, "{}", asked.body);
     assert_eq!(asked.body["job"]["cancelRequested"], true, "{}", asked.body);
-    rig.beat(INTERVAL);
+    rig.delivered();
     rig.beat(HELD);
     assert_eq!(rig.view(&job).0, "JOB_STATE_CANCELLED");
     let log = rig.machine.world.log();
@@ -289,6 +404,7 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     rig.until_running(&job);
 
     let Rig {
+        polls: _,
         server,
         agent,
         worker,
@@ -338,6 +454,7 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
     rig.until_running(&job);
 
     let Rig {
+        polls: _,
         server,
         agent,
         worker,
