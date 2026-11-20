@@ -8,9 +8,10 @@
 //! the job tables ([`Agents::jobs`]); that server said `dispatch_poll` in the welcome
 //! ([`super::serve_hello_in`]) and leaves the starts and stops the queue carries out of the
 //! heartbeat's reply ([`crate::per_job::commands_now`]). Any other poll is a 409
-//! [`NOT_SERVED`], and the agent stops polling. The route is behind the same authentication
-//! as the heartbeat (a host certificate, a one-time token or host credential, or a pool's
-//! token), the body is held to [`js_agent_wire::DispatchPoll::validate`] (400
+//! [`NOT_SERVED`]: the agent backs off and polls again, as after any refusal, and the next
+//! welcome that does not say `dispatch_poll` ends its polls. The route is behind the same
+//! authentication as the heartbeat (a host certificate, a one-time token or host credential,
+//! or a pool's token), the body is held to [`js_agent_wire::DispatchPoll::validate`] (400
 //! `invalid-dispatch`), and a one-time token or host credential is held to its host.
 //!
 //! The session is checked as a heartbeat's is, by [`js_registry::Registry::check_heartbeat`],
@@ -90,7 +91,8 @@ use crate::util::blocking;
 
 /// The code of the 409 a poll is answered when this server does not serve the poll to the
 /// host: it holds no job tables, or the host's hello did not report the capability. The agent
-/// stops polling and takes its starts and stops in the heartbeat's reply.
+/// backs off and polls again; its next welcome, which does not say `dispatch_poll`, ends its
+/// polls, and the heartbeat's reply carries its starts and stops.
 pub(super) const NOT_SERVED: &str = "dispatch-not-served";
 
 /// The poll route: see the module documentation.

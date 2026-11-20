@@ -126,11 +126,15 @@ impl Cell {
 
     /// Waits at most `limit`, and not at all past the close or a welcome later than
     /// `generation`: the backoff of the poller, which a new session or the end cuts short.
-    pub fn pause(&self, limit: Duration, generation: u64) {
-        let _ = self
+    /// Returns whether it was cut short (`false`: the whole `limit` passed).
+    pub fn pause(&self, limit: Duration, generation: u64) -> bool {
+        let (state, waited) = self
             .changed
             .wait_timeout_while(self.lock(), limit, |state| {
                 !state.closed && state.generation == generation
-            });
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(state);
+        !waited.timed_out()
     }
 }

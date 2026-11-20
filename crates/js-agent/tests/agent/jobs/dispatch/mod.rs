@@ -581,15 +581,26 @@ fn the_route_carries_the_credential_the_session_adopted() {
     assert_eq!(held(&bare), None);
 }
 
-/// Asserts that a pause is over at once for a pause begun for a generation the cell has left
-/// and for a cell that is closed. Catches a backoff that outlasts a new session or the end of
-/// the agent.
+/// Asserts that a pause is cut short, without waiting, for a generation the cell has left and
+/// for a cell that is closed, and that a pause of the current generation of an open cell is
+/// not (it runs its whole limit, here zero). Catches a backoff that outlasts a new session or
+/// the end of the agent, and one that is cut short with nothing to cut it.
 #[test]
 fn a_pause_ends_at_the_close_and_at_a_later_welcome() {
     let cell = Cell::new(None);
     cell.publish("h1", &welcomed(1, "s", true, None), CredentialState::None);
     cell.publish("h1", &welcomed(2, "s", true, None), CredentialState::None);
-    cell.pause(Duration::from_secs(3600), 1);
+    assert!(
+        cell.pause(Duration::from_secs(3600), 1),
+        "a later welcome cuts the pause"
+    );
+    assert!(
+        !cell.pause(Duration::ZERO, 2),
+        "the current session's pause runs its limit"
+    );
     cell.close();
-    cell.pause(Duration::from_secs(3600), 2);
+    assert!(
+        cell.pause(Duration::from_secs(3600), 2),
+        "the close cuts the pause"
+    );
 }

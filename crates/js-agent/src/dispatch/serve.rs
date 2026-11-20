@@ -54,7 +54,9 @@ pub fn serve(cell: &Cell, dial: &Dial<'_>, worker: &Worker, jitter: Box<dyn Jitt
         };
         match next {
             Next::Again => {}
-            Next::After(wait) => cell.pause(wait, generation),
+            Next::After(wait) => {
+                cell.pause(wait, generation);
+            }
         }
     }
 }
