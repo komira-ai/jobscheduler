@@ -35,6 +35,7 @@
 use std::time::Duration;
 
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
+use js_caps::XCODE;
 use js_jobs::{
     Isolation, JobEvent, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy,
     ResourceUsage, ResultReason, StartFailure,
@@ -251,6 +252,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             os_version: capability(spec, OS_VERSION_KEY).unwrap_or_default(),
             accelerator: accelerator(spec),
             isolation: isolation(spec.constraints.isolation).into(),
+            xcode: capability(spec, XCODE).unwrap_or_default(),
         }),
         wall_limit_seconds: Some(spec.wall_limit_secs),
         network: network(spec.network).into(),

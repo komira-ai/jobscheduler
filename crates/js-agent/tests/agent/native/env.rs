@@ -47,8 +47,9 @@ fn a_job_env_reaches_the_helper_over_the_agents_and_stays_off_the_command_line()
 }
 
 /// Asserts that a job start's environment the wire would refuse fails the start before the
-/// helper is asked for a user: a reserved name (`TMPDIR`, which the agent sets, and
-/// `JS_FILES_DIR`, the agent's prefix) and a name given twice. It catches a job that
+/// helper is asked for a user: a reserved name (`TMPDIR`, which the agent sets,
+/// `JS_FILES_DIR`, the agent's prefix, and `DEVELOPER_DIR`, which only a start's Xcode sets)
+/// and a name given twice. It catches a job that
 /// replaces the run's temporary directory or the path of its files, and an environment with
 /// two values for one name, of which the helper would set either.
 #[test]
@@ -58,6 +59,10 @@ fn a_job_env_the_wire_refuses_makes_no_user() {
         (vec![pair("TMPDIR", "/elsewhere")], "env uses the reserved"),
         (
             vec![pair("JS_FILES_DIR", "/elsewhere")],
+            "env uses the reserved",
+        ),
+        (
+            vec![pair("DEVELOPER_DIR", "/elsewhere")],
             "env uses the reserved",
         ),
         (

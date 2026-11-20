@@ -492,3 +492,28 @@ fn an_adopted_run_has_its_bundle_pinned_again() {
     let mut bare = open(super::TERM + 2).with_bundles(empty);
     assert_eq!(bare.list_labelled().unwrap().len(), 1);
 }
+
+/// Asserts that a start that pins a bundle and names a held Xcode runs with one
+/// `DEVELOPER_DIR`, the `Contents/Developer` of that Xcode's app, and that a start that names
+/// none has none. It catches a bundle run that ignores the Xcode its start names.
+#[test]
+fn a_bundle_run_naming_a_held_xcode_gets_its_developer_dir() {
+    let mut s = Stored::new("xcode");
+    let held = js_agent::xcode::Xcode {
+        build: "16F6".to_owned(),
+        app: PathBuf::from("/Applications/Xcode.app"),
+    };
+    s.rig.rt = s.rig.rt.with_xcodes(vec![held]);
+    let mut spec = s.spec("r1", "@bundle/tool", &[]);
+    spec.xcode = Some("16F6".to_owned());
+    s.rig.rt.create_and_start(&spec).unwrap();
+    let dirs = |lease: &str| -> Vec<String> {
+        let run = s.rig.fake.run_of(lease);
+        let found = run.env.iter().filter(|(name, _)| name == "DEVELOPER_DIR");
+        found.map(|(_, value)| value.clone()).collect()
+    };
+    assert_eq!(dirs("7.0"), ["/Applications/Xcode.app/Contents/Developer"]);
+    let plain = s.spec("r2", "@bundle/tool", &[]);
+    s.rig.rt.create_and_start(&plain).unwrap();
+    assert!(dirs("7.1").is_empty());
+}

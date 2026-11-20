@@ -13,7 +13,7 @@
 //! | `layered-rootfs` | exact: a job with layers, mounts or host ports asks for `true` |
 //! | `fuse-jobs`, `fuse-uring` | exact: a job that needs the FUSE device asks for `true` (`fuse-uring` for FUSE over io_uring) |
 //! | `mount-provider.<name>` | exact: a job with a layer or a mount from the provider `<name>` asks for `true` |
-//! | `xcode` | membership: the node reports a set (one entry per installed Xcode build) and the request names one |
+//! | `xcode` | membership: the node reports a set (its builds, one entry each or one entry joining them with `,`) and the request names one |
 //! | `vm.image` | membership on the digest: the request names `<name>@sha256:<64 hex>`, the node reports one entry in that form per image it holds, and only the `sha256:<hex>` parts are compared |
 //! | `ios.device` (`1`) with `ios.device.<attribute>` | one device: the node reports one `ios.device` entry per ready device, and **one** of them must satisfy every attribute (exact) |
 //!
@@ -115,7 +115,7 @@ const EXACT_KEYS: [&str; 9] = [
 ];
 
 /// Keys a node reports as a set and a request names one member of.
-const MEMBER_KEYS: [&str; 2] = ["xcode", VM_IMAGE_KEY];
+const MEMBER_KEYS: [&str; 2] = [crate::host::XCODE, VM_IMAGE_KEY];
 
 /// The VM image key: membership on the `sha256:<hex>` part of the value.
 const VM_IMAGE_KEY: &str = "vm.image";

@@ -348,6 +348,7 @@ pub mod update_hook;
 pub mod usage;
 pub mod vm;
 mod worker;
+pub mod xcode;
 
 use std::ffi::OsString;
 use std::fmt::Display;
@@ -694,7 +695,14 @@ fn execute(
         .collect();
     // The runtime of this build and its flags (see `platform`): a wrong flag, or a host that
     // cannot run the runtime, ends the agent before it registers.
-    let start = platform::check(&cli, services, image_allow, &gpus, opened, err)?;
+    let start = platform::check(
+        &cli,
+        services,
+        image_allow,
+        (&gpus, &offer.xcodes),
+        opened,
+        err,
+    )?;
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
     let mut start = start;

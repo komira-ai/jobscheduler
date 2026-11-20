@@ -121,8 +121,11 @@ jobs_in() {
 }
 
 placeable >"$out_dir/hosts-before.txt"
+# `wc -l` on macOS pads its count with spaces; `$((...))` makes each count a bare number.
 hosts_before=$(wc -l <"$out_dir/hosts-before.txt")
+hosts_before=$((hosts_before))
 running_before=$(jobs_in running | wc -l)
+running_before=$((running_before))
 printf 'hosts taking jobs: %s (in %s)\n' "$hosts_before" "$out_dir/hosts-before.txt"
 printf 'jobs running: %s\n' "$running_before"
 printf 'update: docker service update --force --detach=false %s\n' "$service"

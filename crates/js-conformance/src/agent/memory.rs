@@ -190,6 +190,7 @@ mod tests {
             labels: labels.collect(),
             bundle: None,
             log_sink: None,
+            xcode: None,
         }
     }
 

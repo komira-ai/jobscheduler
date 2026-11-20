@@ -122,6 +122,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         ports: Vec::new(),
         host_ports: Vec::new(),
         log_sink: None,
+        xcode: None,
     }
 }
 

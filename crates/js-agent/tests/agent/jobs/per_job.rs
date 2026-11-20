@@ -50,6 +50,7 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 mounts: Vec::new(),
                 host_ports: Vec::new(),
                 placed_at_ms: None,
+                xcode: None,
             }))
         })
         .collect();

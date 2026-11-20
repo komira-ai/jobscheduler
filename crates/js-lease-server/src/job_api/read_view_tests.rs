@@ -39,6 +39,7 @@ fn full() -> JobSpec {
             capabilities: BTreeMap::from([
                 ("kvm".to_owned(), "yes".to_owned()),
                 ("os_version".to_owned(), "26".to_owned()),
+                ("xcode".to_owned(), "16C5032a".to_owned()),
             ]),
             isolation: Isolation::Host,
         },
@@ -102,6 +103,7 @@ fn full_shown() -> v1::JobSpec {
             os_version: "26".to_owned(),
             accelerator: None,
             isolation: v1::Isolation::Host.into(),
+            xcode: "16C5032a".to_owned(),
         }),
         wall_limit_seconds: Some(600),
         network: v1::NetworkLevel::AllowList.into(),

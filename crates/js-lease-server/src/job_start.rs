@@ -15,7 +15,7 @@
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, BookedResources, Isolation, JobStartSpec, NetworkLevel, RunFile, RunSpec,
 };
-use js_caps::is_mount_provider_key;
+use js_caps::{XCODE, is_mount_provider_key};
 use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, NetworkPolicy};
 use js_types::{Arch, ExecMode, Os, PortMap, Resources};
 
@@ -61,6 +61,12 @@ pub(crate) enum Unsendable {
     /// sources would not read the source, so it is never sent such a job. It names the key.
     #[error("the job requires {0} and the host does not report it")]
     MountProviderNotReported(String),
+    /// The job names an Xcode build (`xcode`, [`js_caps::XCODE`]) and the host's hello did not
+    /// list it among its builds; an agent that does not hold the build would refuse the start
+    /// (`xcode-not-held`), and one from before the field would run it with the wrong Xcode, so
+    /// it is never sent such a job. It names the build.
+    #[error("the job requires Xcode {0} and the host does not report it")]
+    XcodeNotReported(String),
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -103,7 +109,9 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// `host-jobs` ([`BeatContext::host_jobs`]), and one with layers, mounts or host ports only to
 /// a host whose agent reported `layered-rootfs` ([`BeatContext::layered_rootfs`]); a job that
 /// requires a `mount-provider.<name>` capability is sent only to a host whose agent reported
-/// each such key ([`BeatContext::mount_providers`]).
+/// each such key ([`BeatContext::mount_providers`]); a job that names an Xcode build (the
+/// capability `xcode`) is sent only to a host whose agent listed that build
+/// ([`BeatContext::xcodes`]), and its start carries it as `xcode`.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -139,6 +147,11 @@ pub(crate) fn start_of(
         .find(|key| !context.mount_providers.contains(key));
     if let Some(key) = unreported {
         return Err(Unsendable::MountProviderNotReported(key.clone()));
+    }
+    let xcode = spec.constraints.capabilities.get(XCODE).cloned();
+    let listed = |build: &String| context.xcodes.contains(build);
+    if !xcode.as_ref().is_none_or(listed) {
+        return Err(Unsendable::XcodeNotReported(xcode.unwrap_or_default()));
     }
     let booked = match allocation.booked {
         Booked::WholeHost => whole_host(context.shape)?,
@@ -241,6 +254,7 @@ pub(crate) fn start_of(
         host_ports: spec.host_ports.clone(),
         placed_at_ms: job.placed_at.map(millis),
         fuse: false,
+        xcode,
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);
