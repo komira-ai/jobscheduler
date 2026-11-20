@@ -26,7 +26,7 @@ use super::kernel::{
     search_with, unreadable,
 };
 use super::list;
-use super::pool::{Poll, Pool};
+use crate::pool::{Poll, Pool};
 
 /// A directory of the test's own.
 pub(super) fn scratch(name: &str) -> TestDir {
@@ -296,7 +296,7 @@ pub(super) fn owners() -> Owners {
 /// unanswered at once, after which the thread takes the next task.
 #[test]
 fn the_pool_answers_once_waits_to_the_deadline_and_survives_a_panic() {
-    let pool = Pool::new(1).expect("a pool");
+    let pool = Pool::named(1, "js-paths").expect("a pool");
     let (go, gate) = channel::<()>();
     let held = pool.run(100, task(Some(gate), false));
     assert_eq!(held.poll(99), Poll::Waiting);
@@ -332,7 +332,7 @@ pub(super) const GUARD: std::time::Duration = std::time::Duration::from_secs(120
 fn a_task_that_answered_rings_the_pools_wake() {
     let (rung, rings) = channel::<()>();
     let rung = std::sync::Mutex::new(rung);
-    let mut pool = Pool::new(1).expect("a pool");
+    let mut pool = Pool::named(1, "js-paths").expect("a pool");
     pool.set_wake(crate::lifecycle::Wake::new(move || {
         let _ = rung.lock().map(|rung| rung.send(()));
     }));

@@ -10,8 +10,8 @@
 //!
 //! The worker keeps what reads or changes the runtime's own books: the checks of the start
 //! (its host isolation, its network, its GPUs), the taking of its assembled file system, its
-//! name (refused while a container or a create of it exists) and its sidecar's contents
-//! ([`Head`]). The thread is given a [`Maker`]: copies of the settings and shares of the
+//! name (refused while a container, a create or a removal of it exists) and its sidecar's
+//! contents ([`Head`]). The thread is given a [`Maker`]: copies of the settings and shares of the
 //! image store, the ledger, the egress and the forwarder, nothing of the worker's. It answers
 //! the made [`Run`], which the worker puts in its books when it next asks
 //! ([`CrunRuntime::poll_create`](crate::lifecycle::Runtime::poll_create)), or the failure. A
@@ -42,7 +42,6 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use super::fault::Fault;
 use super::fs::Assembled;
-use super::fs::pool::{Pending, Poll, Pool};
 use super::ledger::{Entry, Ledger, Supervisor};
 use super::make::Marks;
 use super::pull::Images;
@@ -53,6 +52,7 @@ use crate::lifecycle::{
     Body, Created, FilesRoot, Forgetter, RunHandle, RunSpec, RuntimeError, check_run_env, label,
 };
 use crate::logs::{LiveLogs, RunLogs};
+use crate::pool::{Pending, Poll, Pool};
 
 /// The threads of the create pool: as many starts are made at once, the rest wait their
 /// turn in the order they were begun.
@@ -260,7 +260,8 @@ impl CrunRuntime {
         };
         let name = container_name(&self.host_id, &spec.run_id)
             .map_err(|_| Fault::Name(spec.run_id.clone()))?;
-        if self.runs.contains_key(&name) || self.creates.holds(&name) {
+        if self.runs.contains_key(&name) || self.creates.holds(&name) || self.removals.holds(&name)
+        {
             return Err(Fault::InUse(spec.run_id.clone()));
         }
         // What the run's assembly made of its layers and mounts: the run's removal unmounts

@@ -21,8 +21,11 @@
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
 //!   exited is found whether or not the server said anything; and at once when work its
 //!   lifecycle handed off the worker (an image's pull, a lookup or an assembly of a job's
-//!   file system, a provider's call) is done, so a start that waits on it is not held to
-//!   the interval (the lifecycle's [`Wake`], module `nudge`).
+//!   file system, a provider's call, a container's create, a finished job's container
+//!   removal or the removal of its directories) is done, so a start or a cleanup that waits
+//!   on it is not held to the interval (the lifecycle's [`Wake`], module `nudge`). With
+//!   threads for the cleanup ([`Plan::cleanup_threads`]), a reply in the queue does not wait
+//!   for those removals.
 //! - **The session says when it heard the server.** [`Worker::heard`] stamps a [`Contact`]
 //!   on the lifecycle's clock without waiting, at every welcome and every accepted reply,
 //!   whether or not the queue had room for it; the lifecycle reads it at every step and
@@ -192,6 +195,10 @@ pub struct Plan {
     pub silence_stop: Option<Duration>,
     /// The VM backend (`--vm-driver`, `--vm-store`); none when it is off.
     pub vm: Option<VmSettings>,
+    /// The threads that remove each finished run's directories off the worker
+    /// ([`Lifecycle::with_cleanup_threads`]); 0 removes them on the worker, for a test that
+    /// looks at a run's cleanup as soon as the worker settled.
+    pub cleanup_threads: usize,
 }
 
 /// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
@@ -824,6 +831,7 @@ fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
         machine,
         usage,
         vm,
+        cleanup_threads,
         ..
     } = plan;
     let stop_grace = config.stop_grace;
@@ -843,10 +851,15 @@ fn build(plan: Plan, clock: SharedClock, wake: Wake) -> Result<Built, String> {
     let (checks, actions) = crate::platform::checks(&backend, &*machine, watch, settle)?;
     let (life, events) = Lifecycle::adopt(config, runtime, checks, Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
-    let mut life = life
+    let life = life
         .with_blind_wait(settle)
         .with_taint_recheck(taint_recheck)
         .with_wake(wake);
+    // After the wake, which the pool rings when a removal answered.
+    let mut life = match cleanup_threads {
+        0 => life,
+        threads => life.with_cleanup_threads(threads),
+    };
     lines.extend(describe(&events));
     // The mount providers, once the earlier process's runs are adopted: what it left of
     // theirs is released.
