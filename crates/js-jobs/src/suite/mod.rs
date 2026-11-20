@@ -29,6 +29,7 @@ mod clock;
 mod collect;
 mod compat;
 mod cordons;
+mod dispatch;
 mod duties;
 mod failures;
 mod guarded;
@@ -56,6 +57,7 @@ pub use clock::*;
 pub use collect::*;
 pub use compat::*;
 pub use cordons::*;
+pub use dispatch::*;
 pub use duties::*;
 pub use failures::*;
 pub use guarded::*;
@@ -231,6 +233,16 @@ where
     a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
     a_restarted_prepare_moves_only_the_deadline(backend);
     a_restarted_prepare_loses_to_a_change_of_either_row(backend);
+    two_servers_claiming_one_host_at_once_hand_out_each_message_once(backend);
+    a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock(backend);
+    an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing(backend);
+    every_placement_that_books_a_host_queues_its_start_and_a_refused_one_none(backend);
+    a_whole_host_job_queues_its_start_when_it_moves_to_starting(backend);
+    an_end_leaves_a_stop_only_where_the_start_may_have_reached_the_host(backend);
+    an_end_that_loses_to_a_claim_of_its_start_is_stale(backend);
+    the_sweep_deletes_a_jobs_messages_with_its_row(backend);
+    a_dispatch_row_of_another_build_is_read_or_left(backend);
+    a_failed_claim_or_ack_changes_nothing_and_says_so(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -397,6 +409,16 @@ macro_rules! job_store_tests {
             a_failed_prepare_drops_its_mark_or_writes_nothing,
             a_restarted_prepare_moves_only_the_deadline,
             a_restarted_prepare_loses_to_a_change_of_either_row,
+            two_servers_claiming_one_host_at_once_hand_out_each_message_once,
+            a_message_whose_claim_lapses_is_handed_out_again_by_the_store_clock,
+            an_ack_deletes_only_what_was_handed_out_and_a_repeat_changes_nothing,
+            every_placement_that_books_a_host_queues_its_start_and_a_refused_one_none,
+            a_whole_host_job_queues_its_start_when_it_moves_to_starting,
+            an_end_leaves_a_stop_only_where_the_start_may_have_reached_the_host,
+            an_end_that_loses_to_a_claim_of_its_start_is_stale,
+            the_sweep_deletes_a_jobs_messages_with_its_row,
+            a_dispatch_row_of_another_build_is_read_or_left,
+            a_failed_claim_or_ack_changes_nothing_and_says_so,
         );
     };
 }
@@ -673,6 +695,16 @@ pub(crate) fn cancelled() -> JobEnd {
         exit_code: None,
         output: Output::default(),
     }
+}
+
+/// A start body for the job `job` and the allocation `allocation`, as the agent protocol reads
+/// one: the fields it requires, and every other at its default.
+pub(crate) fn start_body(job: &str, allocation: &str) -> js_agent_wire::JobStartSpec {
+    let text = format!(
+        r#"{{"job_id":"{job}","allocation_id":"{allocation}","image":"{}","booked":{{"cpu_millis":2000,"memory_bytes":1073741824}},"wall_ms":600000}}"#,
+        digest('a')
+    );
+    serde_json::from_str(&text).expect("a start body")
 }
 
 /// The share of a host [`Rig::placed`] books.

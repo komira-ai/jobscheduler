@@ -21,6 +21,7 @@ mod files;
 #[cfg(target_os = "linux")]
 mod flags;
 mod held;
+mod hold;
 mod host_ports;
 mod layout;
 mod lease_dir;

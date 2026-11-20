@@ -252,6 +252,14 @@ pub const INPUT_UNREADABLE: &str = "input-unreadable";
 /// As a result's `input_failure` ([`crate::JobResult::input_failure`]): a host port of the
 /// job that the agent could not offer again after it restarted, so it stopped the job.
 pub const HOST_PORT_LOST: &str = "host-port-lost";
+/// As the detail of a `failed_to_start` result: a start the agent refused because its host
+/// is held (its hold file is there: the host is being drained for an update, or its update
+/// halted). Nothing was created. It is the host's state and not the run's, and, unlike
+/// [`HOST_TAINTED`], not a taint: the host is put back when the step that drains it is
+/// undone. The run may be sent to another host. A held agent also cordons its host, so
+/// placement sends it nothing once the cordon is in force; the code answers what was placed
+/// before (between the host's hello and its cordon).
+pub const HOST_HELD: &str = "host-held";
 
 /// A whole-node lease request that failed after the host could not be prepared within the
 /// allowed number of replacements; its detail names the last reason code and detail the
