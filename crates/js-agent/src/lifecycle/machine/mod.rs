@@ -505,7 +505,7 @@ impl Lifecycle {
         // host do not apply to it; the VM ones do (`vm`).
         let body = match given.vm {
             true => self.admit_vm(spec).map(|()| None)?,
-            false => self.admit_body(spec, &given.env)?,
+            false => self.admit_body(spec, given)?,
         };
         if let Some(why) = self.quota_health.why() {
             return Err(no(
@@ -618,18 +618,21 @@ impl Lifecycle {
     }
 
     /// The checks of a start's body on the host, for every start but a VM one: the runtime
-    /// must carry its environment and run its image or native body. The native body, if any.
-    fn admit_body(
-        &self,
-        spec: &JobSpec,
-        env: &[(String, String)],
-    ) -> Result<Option<NativeSpec>, Refusal> {
+    /// must carry its environment, hold the Xcode it names and run its image or native body.
+    /// The native body, if any.
+    fn admit_body(&self, spec: &JobSpec, given: &Given) -> Result<Option<NativeSpec>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         // The runtime must carry the job's environment; asked before the image and the body,
         // so a runtime that carries none answers for the environment (`env-unsupported`).
         self.runtime
-            .check_env(env)
+            .check_env(&given.env)
             .map_err(|refused| (refused.code, refused.why))?;
+        // The Xcode the start names must be one the runtime holds, before anything is created.
+        if let Some(build) = &given.xcode {
+            self.runtime
+                .check_xcode(build)
+                .map_err(|refused| (refused.code, refused.why))?;
+        }
         // The native body of the start: the legacy `native` one, or the `run` of a start
         // named by its image on a runtime that runs those (the Mac one, by the bundle the
         // image resolves to).

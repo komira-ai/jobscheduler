@@ -120,6 +120,7 @@ impl Lifecycle {
                 },
                 placed_at_ms: spec.placed_at_ms,
                 fuse: spec.fuse,
+                xcode: spec.xcode.clone(),
             };
             self.admit_and_start((&run, Keyed::Job), &given, received, events);
             // The start always leaves its job last, running or refused.

@@ -10,7 +10,7 @@ use js_jobs::JobState;
 use js_registry::HostMark;
 use js_types::HostId;
 
-use super::{FAILURE_CODES, Histogram, Recorder};
+use super::{FAILURE_CODES, Histogram, Recorder, TABLES_FROM};
 use crate::hosts::mark_text;
 
 /// The job states, in the order they are written. A job that failed to start is counted under
@@ -183,6 +183,13 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         help,
         &recorder.job_pass,
     );
+    let name = "js_job_tables_total";
+    let help = "Passes over the queued jobs, by where each took the job tables from: read from the store, kept from the last read with no write since, or kept with the jobs this server's submits recorded since added to them.";
+    family(&mut out, name, "counter", help);
+    for (from, count) in TABLES_FROM.iter().zip(&recorder.job_tables) {
+        let count = count.load(Ordering::Relaxed);
+        let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
+    }
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
     out

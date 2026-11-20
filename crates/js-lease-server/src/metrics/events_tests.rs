@@ -129,6 +129,38 @@ async fn a_placement_counts_its_wait_and_one_that_does_not_commit_a_failed_write
     assert_eq!(counted(&recorder), ([0; 5], 0, 1));
 }
 
+/// Asserts that each pass over the queued jobs tells the meter where it took the job tables
+/// from: read from the store at first; kept with a submit's job added when the submit's commit
+/// is the only write since; read again after the placement that pass wrote; and kept with no
+/// write since. It catches a sink that drops the count or counts it under another label.
+#[test]
+fn a_pass_counts_where_it_took_the_job_tables_from() {
+    let mut rig = clocked_rig("metrics_tables", true, JobLimits::default());
+    rig.register("host-a", true);
+    let recorder = metered(&rig);
+    let from = |recorder: &Recorder| {
+        let counts = recorder.job_tables.each_ref();
+        counts.map(|count| count.load(Ordering::Relaxed))
+    };
+    rig.agents.place_jobs();
+    assert_eq!(from(&recorder), [1, 0, 0]);
+    let id = JobId::parse("submitted").unwrap();
+    let new = NewJob {
+        id: Some(id.clone()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    let inserted = rig.jobs.insert_queued(new).unwrap();
+    assert!(rig.agents.note_inserted(&inserted));
+    rig.agents.place_jobs();
+    assert_eq!(rig.job(&id).state, JobState::Placed);
+    assert_eq!(from(&recorder), [1, 0, 1]);
+    rig.agents.place_jobs();
+    rig.agents.place_jobs();
+    assert_eq!(from(&recorder), [2, 1, 1]);
+}
+
 /// Takes `host` out of the registry as the scaler does when its provider reads it gone.
 fn remove(rig: &Rig, host: &str) {
     let host = HostId::new(host).unwrap();

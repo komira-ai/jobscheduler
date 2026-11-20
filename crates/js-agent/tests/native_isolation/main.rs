@@ -321,6 +321,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         ports: Vec::new(),
         host_ports: Vec::new(),
         log_sink: None,
+        xcode: None,
     }
 }
 

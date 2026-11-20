@@ -179,6 +179,12 @@ pub struct RunSpec {
     /// ([`Sink::of_start`]), `None` for a run start and a start without one. A runtime that
     /// uploads no live logs ignores it.
     pub log_sink: Option<Sink>,
+    /// The Xcode the job runs with, by build id ([`JobStartSpec::xcode`](js_agent_wire::JobStartSpec::xcode)):
+    /// the agent checked it with [`Runtime::check_xcode`] before it created anything, and the
+    /// native runtime runs the job with `DEVELOPER_DIR` set to that Xcode's
+    /// `Contents/Developer`. `None` for a run start and a start that names none; a runtime
+    /// that runs no Xcode ignores it.
+    pub xcode: Option<String>,
 }
 
 /// How a container ended.
@@ -583,6 +589,22 @@ pub trait Runtime {
     /// The code the start is refused with, and why.
     fn check_env(&self, _env: &[(String, String)]) -> Result<(), NativeRefusal> {
         Ok(())
+    }
+
+    /// Whether this runtime holds the Xcode of build `build` (a job start's
+    /// [`JobStartSpec::xcode`](js_agent_wire::JobStartSpec::xcode)), asked at admission for
+    /// every start that names one, after [`Runtime::check_env`] and before anything is
+    /// created. The default holds none, which is every runtime but the Mac's native one: a
+    /// start that names a build is refused [`refusal::XCODE_NOT_HELD`].
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_xcode(&self, _build: &str) -> Result<(), NativeRefusal> {
+        Err(NativeRefusal {
+            code: refusal::XCODE_NOT_HELD,
+            why: "this agent runs no Xcode".to_owned(),
+        })
     }
 
     /// Whether this runtime runs a start named by its image (an `image`, with or without a

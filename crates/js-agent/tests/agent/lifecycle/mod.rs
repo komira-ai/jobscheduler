@@ -55,6 +55,7 @@ mod taint_idle;
 mod taint_pin;
 mod timeline;
 mod tmp_dir;
+mod xcode;
 
 use std::collections::BTreeSet;
 use std::fs;

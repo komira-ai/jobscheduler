@@ -98,6 +98,11 @@ message Constraints {
   // 26): a host is capable when it reports that major version or a later one. Empty: any
   // version.
   string os_version = 7;
+  // The Xcode the job runs with, by build id such as 16C5032a (its ProductBuildVersion): 1 to
+  // 32 bytes of letters, digits, dot, underscore and dash, starting with a letter or digit. A
+  // host is capable when its agent reports that build among its installed Xcodes, and the job
+  // runs with that Xcode's developer directory, never the host's selected one. Empty: none.
+  string xcode = 8;
 }
 
 // One host port forwarded to a port of the job (design section 5.8). New traffic toward a

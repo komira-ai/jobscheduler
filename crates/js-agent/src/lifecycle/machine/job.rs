@@ -69,6 +69,11 @@ pub(super) struct Given {
     /// ([`JobStartSpec::fuse`](js_agent_wire::JobStartSpec::fuse)), which the admission gives
     /// only where the agent reported `fuse-jobs` ([`RunSpec::fuse`]).
     pub(super) fuse: bool,
+    /// The Xcode build the start names
+    /// ([`JobStartSpec::xcode`](js_agent_wire::JobStartSpec::xcode)), which the admission
+    /// holds to the runtime's [`Runtime::check_xcode`](crate::lifecycle::Runtime::check_xcode)
+    /// ([`RunSpec::xcode`]).
+    pub(super) xcode: Option<String>,
 }
 
 /// What a start that waits is waiting for besides its images.
@@ -835,5 +840,6 @@ pub(super) fn run_spec(
             .clone()
             .or_else(|| spec.run.as_ref().map(|_| spec.image.clone())),
         log_sink: given.log_sink.clone(),
+        xcode: given.xcode.clone(),
     }
 }

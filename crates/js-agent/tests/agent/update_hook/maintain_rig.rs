@@ -164,6 +164,9 @@ pub fn note_text(cordoned_before: bool, facts: Option<&str>) -> String {
 
 type PauseHook<'a> = Box<dyn FnMut(&Probe<'a>, usize) + 'a>;
 
+/// What a test reads the host facts with instead of the world's.
+type FactsReader<'a> = Box<dyn Fn() -> Result<String, String> + 'a>;
+
 /// The calls that change something, in the log's words.
 const CHANGES: [&str; 8] = [
     "lease.cordon",
@@ -184,6 +187,7 @@ pub struct Probe<'a> {
     root: StateRoot,
     calls: RefCell<Vec<&'static str>>,
     on_pause: RefCell<Option<PauseHook<'a>>>,
+    facts_reader: RefCell<Option<FactsReader<'a>>>,
     lease_faults: RefCell<BTreeMap<(&'static str, usize), LeaseError>>,
     text_faults: RefCell<BTreeMap<(&'static str, usize), String>>,
     /// The unit manager takes the stop and the unit stays as it was.
@@ -197,6 +201,7 @@ impl<'a> Probe<'a> {
             root: rig.world.state_root(),
             calls: RefCell::new(Vec::new()),
             on_pause: RefCell::new(None),
+            facts_reader: RefCell::new(None),
             lease_faults: RefCell::new(BTreeMap::new()),
             text_faults: RefCell::new(BTreeMap::new()),
             stop_ignored: Cell::new(false),
@@ -227,6 +232,12 @@ impl<'a> Probe<'a> {
     /// `act` runs after each pause, with the number of pauses taken so far.
     pub fn at_pause(&self, act: impl FnMut(&Probe<'a>, usize) + 'a) {
         *self.on_pause.borrow_mut() = Some(Box::new(act));
+    }
+
+    /// The facts are read with `reader` (the host's own, over files the test changes) and not
+    /// from the world.
+    pub fn read_facts_with(&self, reader: impl Fn() -> Result<String, String> + 'a) {
+        *self.facts_reader.borrow_mut() = Some(Box::new(reader));
     }
 
     /// The `nth` call named `call` (`lease.host`, `lease.cordon`, `lease.uncordon`) fails with
@@ -402,7 +413,10 @@ impl Facts for Probe<'_> {
     fn read(&self) -> Result<String, String> {
         match self.text_fault("facts.read") {
             Some(text) => Err(text),
-            None => Facts::read(self.world),
+            None => match self.facts_reader.borrow().as_ref() {
+                Some(reader) => reader(),
+                None => Facts::read(self.world),
+            },
         }
     }
 }

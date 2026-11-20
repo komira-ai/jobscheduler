@@ -52,6 +52,7 @@ mod steps_prepare_cordon;
 mod steps_prepare_first_dirs;
 mod steps_prepare_supersede;
 mod steps_resume;
+mod steps_resume_xcode;
 mod steps_rollback;
 mod steps_rollback_first;
 mod steps_rollback_guards;

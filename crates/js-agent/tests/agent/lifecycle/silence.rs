@@ -68,6 +68,7 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
         mounts: Vec::new(),
         host_ports: Vec::new(),
         placed_at_ms: None,
+        xcode: None,
     }))
 }
 
