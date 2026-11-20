@@ -8,14 +8,17 @@
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
 //!    must point at the staged release (`link_failed` otherwise, nothing done);
 //! 2. unless the stop is begun already: a taint the restarted agent will not re-check (see
-//!    `refuse_host` in `prepare`), or an `owed-*`
-//!    record, halts (76), and the host
-//!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
-//!    between the placing and the confirming), so a cordon of ours that is gone is put back
-//!    within the cap, and a cap that is spent or a lease that came in defers (75, class
-//!    environment) with nothing stopped (a failed lift of the cordon on the way is no reason to
+//!    `refuse_taint` in `prepare`) halts (76), as does an `owed-*` record on a first install,
+//!    and the host must be cordoned, hold no lease and owe no check. `prepare` can end with no
+//!    cordon held (it was killed between the placing and the confirming), so a cordon of ours
+//!    that is gone is put back within the cap, and a cap that is spent, a lease that came in or
+//!    an `owed-*` record (a job of the running agent whose checks have not run yet: stopping the
+//!    agent now would leave the record and taint the host) defers (75, class environment,
+//!    `drain_bound`) with nothing stopped; the records are read after the host and the taint
+//!    again after the records, so a check that failed meanwhile halts (76). A failed lift of
+//!    the cordon on the way is no reason to
 //!    fail: the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or
-//!    rollback to lift). A cordon that is not ours (an operator's) is neither renewed nor
+//!    rollback to lift. A cordon that is not ours (an operator's) is neither renewed nor
 //!    lifted. A cordon in force under a mark that was never confirmed may be ours or not, and
 //!    nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit is read, so that a read that fails leaves nothing begun; then the record gets
@@ -57,7 +60,7 @@ use crate::update_hook::{
 };
 
 use super::helper;
-use super::prepare::{ask_secs, place, refuse_host, renew};
+use super::prepare::{ask_secs, busy_detail, idle, owed, place, refuse_host, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
 
 /// Runs `cutover`.
@@ -114,7 +117,13 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     // that finds the stop begun reads nothing and keeps what the record holds.
     let mut session = None;
     if !entered_begun {
-        refuse_host(env)?;
+        // The agent that would settle an owed check runs until the stop: `hold` waits for it.
+        // A first install has no such agent.
+        if record.update.previous.is_none() {
+            refuse_host(env)?;
+        } else {
+            refuse_taint(env)?;
+        }
         session = hold(env, held, record, params)?;
     }
     // A first install has no unit to stop.
@@ -220,10 +229,14 @@ fn hold(
         replace(env, held, record, params, now)?;
         env.ports.lease.host().map_err(lease_failure)?
     };
-    if host.leases == 0 && !host.releasing {
+    // The records after the host, and the taint after the records: a check that failed before
+    // its record went has its taint on disk already.
+    let owed = owed(env)?;
+    refuse_taint(env)?;
+    if idle(&host, &owed) {
         return Ok(host.session_started_ms);
     }
-    Err(busy(env, held, record, params, &host).unwrap_or_else(|done| done))
+    Err(busy(env, held, record, params, &host, &owed).unwrap_or_else(|done| done))
 }
 
 /// Puts a cordon back where there is none: the one that was lost, or the one `prepare` never
@@ -248,8 +261,8 @@ fn replace(
     place(env, held, record, params, false)
 }
 
-/// The host holds a lease under the cordon (or in its absence): lift the cordon if it is ours
-/// and defer. Nothing was stopped.
+/// The host holds a lease under the cordon (or in its absence), or a job's checks are owed:
+/// lift the cordon if it is ours and defer. Nothing was stopped.
 ///
 /// A cordon that cannot be lifted is left as recorded (placed, with its expiry), as `prepare`'s
 /// deferral leaves it: the next prepare, cleanup or rollback tries to lift it, and it lapses
@@ -260,6 +273,7 @@ fn busy(
     record: &mut Record,
     params: &Params,
     host: &HostReading,
+    owed: &[String],
 ) -> Result<Done, Done> {
     let mut left = None;
     if ours(record, env.ports.clock.now_ms()) {
@@ -272,9 +286,12 @@ fn busy(
             Err(error) => left = Some(error),
         }
     }
-    let mut detail = format!(
-        "the host is not idle: {} lease(s), releasing: {}",
-        host.leases, host.releasing
+    let mut detail = busy_detail(
+        format!(
+            "the host is not idle: {} lease(s), releasing: {}",
+            host.leases, host.releasing
+        ),
+        owed,
     );
     if let Some(error) = left {
         detail.push_str(&format!(

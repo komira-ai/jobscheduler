@@ -186,10 +186,11 @@ fn a_taint_the_agent_cannot_clear_still_halts_rollback() {
     }
 }
 
-/// Catches an owed check that stops halting once a clearable taint is also on record.
+/// Catches an owed check that stops halting once a clearable taint is also on record, where an
+/// owed check halts: a first install, which has no running agent to settle it.
 #[test]
 fn an_owed_check_halts_even_under_a_clearable_taint() {
-    let rig = Rig::new("hook-clearable-and-owed");
+    let rig = Rig::first_install("hook-clearable-and-owed");
     rig.taint_with("residue", Some("daemonised-child"));
     rig.state_root().owe("run-7").unwrap();
     let done = Spy::new(&rig).prepare(&rig);

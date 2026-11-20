@@ -12,10 +12,13 @@
 //!    directory is made, mode 0700, when it is not there, and so is every directory above it
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
-//! 2. a taint the restarted agent will not re-check, or an `owed-*` record, halts (76); a taint
-//!    it will re-check (a residue of a process the pin file does not name, see
+//! 2. a taint the restarted agent will not re-check halts (76); a taint it will re-check (a
+//!    residue of a process the pin file does not name, see
 //!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
-//!    step goes on as for a clean host;
+//!    step goes on as for a clean host. An `owed-*` record halts a first install (no agent runs
+//!    that could settle it, so the agent the install starts would taint itself for it); on an
+//!    update it does not: it is the record of a job of the running agent whose post-job checks
+//!    have not run yet, and the wait of item 7 waits for it (see `refuse_taint`);
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
 //!    release, see [`agent_in`]) `--version` names the target version (1), and the staged release
 //!    carries the unit the hook manages (`bad_artifact` otherwise);
@@ -37,7 +40,12 @@
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;
 //! 7. the wait: poll the host, renewing the cordon we placed after each pause and never
-//!    asking for more than the cap allows.
+//!    asking for more than the cap allows, until it holds no lease, has no run to finish and
+//!    the state root holds no `owed-*` record. The records are read after the host, and a
+//!    taint is looked for after the records at every poll: the agent writes the taint of a
+//!    check that failed before it removes the record, so a check that fails during the wait
+//!    halts the step (76), the cordon left in place. A drain bound that passes with a record
+//!    still there defers (75, `drain_bound`) as for a lease, and the detail names the runs.
 //!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
@@ -76,8 +84,16 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
         None => false,
     };
     // Before anything else is looked at or written: no version can repair a taint the agent
-    // cannot clear itself.
-    refuse_host(env)?;
+    // cannot clear itself. The owed checks of a running agent are waited for (see `wait`); a
+    // first install has no agent to settle them.
+    if params.previous_version.is_none() {
+        refuse_host(env)?;
+    } else {
+        refuse_taint(env)?;
+        // Listed now as well, so that a state root that cannot be listed fails the step with
+        // nothing changed.
+        owed(env)?;
+    }
     let (fresh, aside, mut record) = match loaded {
         Some(record) if !stale => (false, None, record),
         aside => {
@@ -262,32 +278,53 @@ fn bad_artifact(why: impl ToString) -> Done {
     failure(Reason::BadArtifact, why.to_string())
 }
 
-/// A taint the restarted agent will not re-check, or an owed check, halts: no version can repair
-/// it. A taint it will re-check does not: a residue of a process (`process-as-job-user`,
-/// `daemonised-child`) that the state root's pin file does not name. The marker stays, the
-/// restarted agent restores it, and its own re-checks clear it, so a halt would only keep the
-/// release that carries that clearing from reaching the host. Every unchecked taint
-/// (`*-unreadable`, `watch-over-bound`, `cgroup-not-found`) still halts, because a restart
-/// restores it pinned, as does a residue the pin file names.
-pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
+/// A taint the restarted agent will not re-check halts: no version can repair it. A taint it
+/// will re-check does not: a residue of a process (`process-as-job-user`, `daemonised-child`)
+/// that the state root's pin file does not name. The marker stays, the restarted agent restores
+/// it, and its own re-checks clear it, so a halt would only keep the release that carries that
+/// clearing from reaching the host. Every unchecked taint (`*-unreadable`, `watch-over-bound`,
+/// `cgroup-not-found`) still halts, because a restart restores it pinned, as does a residue the
+/// pin file names.
+///
+/// The `owed-*` records are not looked at: while the agent that wrote them runs, a record is a
+/// job whose post-job checks have not run yet, which the agent settles in seconds, and on a
+/// busy host there almost always is one. The steps that would stop that agent wait for them
+/// (`owed`); a check that fails writes its taint before its record goes, and this refuses it.
+/// A record left by an agent that stopped inside the window becomes a `check-owed` taint at
+/// the agent's next start, which this refuses too.
+pub(super) fn refuse_taint(env: &Env<'_>) -> Result<(), Done> {
     let state = env.ports.state;
-    if let Some(taint) = state
+    match state
         .taint()
         .filter(|taint| !state.restored_rechecks(taint))
     {
-        return Err(Done {
+        Some(taint) => Err(Done {
             outcome: Outcome::Halt,
             report: Report::failure(
                 Reason::Tainted,
                 format!("the agent is tainted: {}", taint.reason),
             ),
-        });
+        }),
+        None => Ok(()),
     }
-    let owed = env
-        .ports
+}
+
+/// The runs whose post-job checks are owed; a state root that cannot be listed fails the step
+/// (`state_invalid`).
+pub(super) fn owed(env: &Env<'_>) -> Result<Vec<String>, Done> {
+    env.ports
         .state
         .owed()
-        .map_err(|why| failure(Reason::StateInvalid, why.to_string()))?;
+        .map_err(|why| failure(Reason::StateInvalid, why.to_string()))
+}
+
+/// [`refuse_taint`], and an `owed-*` record halts too: for the steps that run where no agent
+/// that could settle the record runs (a first install's `prepare`) or once this update has
+/// stopped the agent (`verify`, and `cutover` and `rollback` after the stop). The stopped agent
+/// can no longer settle it, and the agent started next taints itself for it.
+pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
+    refuse_taint(env)?;
+    let owed = owed(env)?;
     if owed.is_empty() {
         return Ok(());
     }
@@ -298,6 +335,21 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
             format!("checks are owed for {}", owed.join(", ")),
         ),
     })
+}
+
+/// Whether the agent is idle enough to be stopped: no lease, no run to finish, and no job whose
+/// post-job checks are owed.
+pub(super) fn idle(host: &HostReading, owed: &[String]) -> bool {
+    host.leases == 0 && !host.releasing && owed.is_empty()
+}
+
+/// What keeps the host from being idle, after `lead`: the leases, and the runs whose checks are
+/// owed when there are any.
+pub(super) fn busy_detail(lead: String, owed: &[String]) -> String {
+    match owed.is_empty() {
+        true => lead,
+        false => format!("{lead}; checks are owed for {}", owed.join(", ")),
+    }
 }
 
 /// The staged agent runs and is the version the order names; if it lists its runtimes, the
@@ -454,17 +506,20 @@ pub(super) fn renew(
     Ok(())
 }
 
-/// Waits for the host to hold no lease, up to the drain bound.
+/// Waits for the host to hold no lease and owe no check, up to the drain bound. The host is
+/// read first, then the records, then the taint (see item 7 of the module header).
 fn wait(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<Done, Done> {
     let started = env.ports.clock.now_ms();
     loop {
         let host = env.ports.lease.host().map_err(lease_failure)?;
-        if host.leases == 0 && !host.releasing {
+        let owed = owed(env)?;
+        refuse_taint(env)?;
+        if idle(&host, &owed) {
             return Ok(success());
         }
         let waited = env.ports.clock.now_ms().saturating_sub(started);
         if waited >= params.drain_wait_secs.saturating_mul(1000) {
-            return defer(env, held, record, params, &host);
+            return defer(env, held, record, params, &host, &owed);
         }
         env.ports.clock.pause(Duration::from_secs(POLL_SECS));
         if record.cordon.placed {
@@ -473,14 +528,15 @@ fn wait(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Res
     }
 }
 
-/// The bound passed with a lease still running: lift the cordon if it is ours, record that
-/// there is none, and defer. Nothing was stopped.
+/// The bound passed with a lease still running or a check still owed: lift the cordon if it is
+/// ours, record that there is none, and defer. Nothing was stopped.
 fn defer(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
     params: &Params,
     host: &HostReading,
+    owed: &[String],
 ) -> Result<Done, Done> {
     // A cordon that cannot be lifted is left as recorded (placed, with its expiry): the next
     // prepare, cleanup or rollback handles it, and it lapses on its own within one lease. The
@@ -496,9 +552,12 @@ fn defer(
             Err(error) => left = Some(error),
         }
     }
-    let mut detail = format!(
-        "the host still held {} lease(s) after {} s",
-        host.leases, params.drain_wait_secs
+    let mut detail = busy_detail(
+        format!(
+            "the host still held {} lease(s) after {} s",
+            host.leases, params.drain_wait_secs
+        ),
+        owed,
     );
     if let Some(error) = left {
         detail.push_str(&format!(
