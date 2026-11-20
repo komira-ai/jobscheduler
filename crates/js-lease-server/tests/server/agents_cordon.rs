@@ -605,11 +605,11 @@ async fn a_cordoned_host_that_never_returns_is_forgotten_with_its_binding_in(kep
 
 /// Asserts that a lifted cordon is not brought back by a restart, and that a host the
 /// restarted server's registry does not hold but the job store's rows do (its node row) is
-/// served by the cordon and uncordon routes, which take it from the rows, while the host's own
-/// read is 409 `unknown-host` until its agent says hello again. It runs with the bindings in
-/// the agent state file and in the state store. It catches an uncordon that leaves the row, a
-/// cordon route that answers a host another server holds as unknown, and in the store an
-/// uncordon that leaves the cordon in the host's binding key.
+/// served by the host's own read and by the cordon and uncordon routes, which take it from the
+/// rows. It runs with the bindings in the agent state file and in the state store. It catches
+/// an uncordon that leaves the row, a read or a cordon route that answers a host another server
+/// holds as unknown, and in the store an uncordon that leaves the cordon in the host's binding
+/// key.
 #[tokio::test]
 async fn a_lifted_cordon_stays_lifted_and_a_host_in_the_rows_is_served() {
     for kept in Kept::BOTH {
@@ -628,9 +628,8 @@ async fn a_lifted_cordon_stays_lifted_in(kept: Kept) {
         assert!(!agents_file(&first).exists());
     }
     let h = restarted_job_hosts(first).await;
-    let unknown = own(&h, "GET", "burst-1", None, &me.credential, None).await;
-    assert_eq!(unknown.status, 409, "{}", unknown.body);
-    assert_eq!(code(&unknown), "unknown-host");
+    let read = own(&h, "GET", "burst-1", None, &me.credential, None).await;
+    assert_eq!(read.status, 200, "{}", read.body);
     // The host's row says it is there: the cordon is placed afresh (the lifted one did not come
     // back) and lifted again.
     let placed = cordon(&h, "burst-1", &me, 60).await;

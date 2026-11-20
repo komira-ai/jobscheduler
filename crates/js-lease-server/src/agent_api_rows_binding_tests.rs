@@ -251,3 +251,36 @@ async fn cordon_uncordon_and_clear_taint_take_the_host_from_the_rows() {
     let unread = c.agents.cordon(&host, lease, Asker::Unnamed).await;
     assert_eq!(unread.err(), Some(CordonFault::Unsaved));
 }
+
+/// Asserts that a host's read of itself (`GET /v1/hosts/{id}`) on a server that does not hold
+/// the host is served from the rows: `host-a` said hello to server A, and server B answers its
+/// certified read with the host's state; a host no row knows is 409 `unknown-host`, and a read of
+/// the rows that fails is 503 `cordon-unsaved`. It catches a read that answers a host another
+/// server (or this one before a restart) took the hello of as unknown, while its cordon is
+/// served: the agent's update hook would wait on a host the server holds.
+#[tokio::test]
+async fn a_hosts_read_of_itself_takes_the_host_from_the_rows() {
+    use crate::agent_api::host_cert::CertifiedHost;
+    use crate::agent_api::own_host;
+    let world = World::new();
+    let a = world.server("binding_read_a", Kind::KEPT);
+    let b = world.server("binding_read_b", Kind::KEPT);
+    let session = a.join("host-a").await;
+    assert_eq!(b.holds("host-a"), None);
+    let read = |agents: &Arc<Agents>, host: &str| {
+        let certified = Some(Extension(CertifiedHost(id(host))));
+        let target = axum::extract::Path(host.to_owned());
+        own_host::show(State(Arc::clone(agents)), (None, certified), target)
+    };
+
+    let shown = read(&b.agents, "host-a").await;
+    assert_eq!(shown.map(|answer| answer.status().as_u16()).ok(), Some(200));
+    assert_eq!(b.holds("host-a"), Some(session.epoch));
+    let ghost = read(&b.agents, "ghost").await.map(drop).unwrap_err();
+    assert_eq!(said(&ghost), (409, "unknown-host"));
+
+    let c = world.server("binding_read_c", Kind::KEPT);
+    world.store.fail_read_after(0);
+    let unread = read(&c.agents, "host-a").await.map(drop).unwrap_err();
+    assert_eq!(said(&unread), (503, "cordon-unsaved"));
+}
