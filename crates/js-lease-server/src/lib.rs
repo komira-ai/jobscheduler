@@ -103,6 +103,11 @@
 //! # store: the path of an owner-only file holding the store's connection (never the
 //! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # store_unreachable_after ("60s"): the flag's name, default and rules
+//! # dispatch_lease_secs (10, a whole number of seconds from 1 to 3600), dispatch_recheck_ms
+//! # (500, a whole number of milliseconds from 1 to 4999): config file only, there is no flag;
+//! # how long a server's claim of a dispatch message holds it for the agent to acknowledge
+//! # before another poll hands it out again, and how often a held dispatch poll reads its
+//! # host's queue again
 //! # tick, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, drain_hold, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
@@ -499,6 +504,7 @@
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted` (with `"reason"`: `below-floor`, the host's shape, labels or capabilities do not meet the pool's; `quota-default-unfit`, the pool names `scratch-quota` and the host's scratch default is absent, zero or above the pool's `disk_bytes`; or `quota-without-pool-disk`, the host enforces a scratch quota and the pool books no disk and does not name `scratch-quota`; a server logs the refusal with the host id, the code and the reason), `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable`, or `state-write-failed` when, with a store setting, the host's binding could not be committed |
 //! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack, taint_cleared_ack?, beat_now?}` (see "Taint"; to an agent that reported `held-beat`, a reply with nothing to send is held open until a job is placed on the host, for the heartbeat interval at most 5 s, and says `beat_now`: `docs/design/held-beat.md`); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413; 503 `state-write-failed` when, with a store setting, the taint it brings could not be committed (nothing is recorded, and the agent reports it again) |
+//! | `POST /v1/agent/dispatch` | the dispatch poll of an agent whose hello reported `dispatch-poll` (the welcome said `dispatch_poll`): 200 `{messages}`, the host's due starts and stops from the dispatch queue (claimed for `server.dispatch_lease_secs`, held up to 5 s when none is due, answered empty at once when the server drains), after deleting the messages the request acknowledges; 400 `invalid-dispatch`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host`, `dispatch-not-served` (the host did not report the capability, or this server holds no job tables: the agent backs off and polls again until a welcome without `dispatch_poll` ends its polls); 413; 500 `state-write-failed`. Nothing is recorded of the host: a poll is not a beat |
 //! | `POST /v1/hosts/{id}:cordon` | with a host credential, for that host only: 200 the host as `GET /v1/hosts/{id}` reads it, plus `already_cordoned`; plus `held_by_other` (the cordon in force is another holder's and was left as it was); body optional, `{"lease_secs": n, "holder": "<id>", "take_over": true}` (default 300, cut to 3600; a request of another holder than the cordon's leaves it; `take_over`, with a holder only, makes it the caller's); 400 `invalid-cordon` (also a holder that is not an id, or `take_over` with no holder); 403 `host-credential-required`, or the code of a credential that is not the host's (`join-token-not-admitted`, `join-token-expired`); 409 `unknown-host`; 413; 503 `cordon-unsaved` |
 //! | `POST /v1/hosts/{id}:uncordon` | as the cordon, body optional, `{"holder": "<id>"}`: 200 the host, plus `lifted` and `held_by_other`; 200 also when it was not cordoned; with a holder, only that holder's cordon is lifted, and another's is left (`held_by_other: true`) |
 //! | `GET /v1/hosts/{id}` | as the cordon: 200 `{id, state, epoch, session_started_ms?, leases, lease?, releasing, mark?, cordon? {expires_at_ms, expires_in_ms}, taint?, agent_version?, runtime?}`; `mark` is `reserved`, `held`, `draining` or `releasing` as in the `mark` of `GET /v1/hosts`, and absent for a host that is not set aside (a host is idle when `lease` is absent, `leases` is 0, `releasing` is false and `mark` is absent) |
@@ -691,8 +697,9 @@
 //! 503 once the loop has stopped, or while the store paths have failed for
 //! `--store-unreachable-after`. On SIGTERM or ctrl-c the server (with `--ready-listen`, its
 //! readiness route answering 503 `draining` from now on) closes the listener of the agent
-//! routes (each connection once it has answered; a held heartbeat is answered at once), places
-//! no more jobs, and keeps serving the job service and ticking for `--drain-hold` (`15s`), so a
+//! routes (each connection once it has answered; a held heartbeat or dispatch poll is
+//! answered at once, a dispatch poll that has claimed is answered with its claim), places
+//! no more jobs, claims no more dispatch messages, and keeps serving the job service and ticking for `--drain-hold` (`15s`), so a
 //! proxy that polls the route takes it out of rotation first and the agents move to another
 //! server over the same store, then stops accepting, gives the
 //! requests in flight `--drain-timeout` to finish (a connection still open then is cut),
@@ -721,6 +728,7 @@ mod client_verifier;
 mod clock;
 mod config;
 mod cordon;
+mod dispatch_state;
 mod drain;
 mod error;
 mod file;

@@ -13,7 +13,7 @@ named beside it.
 ## 1. What the wire is today
 
 **Routes and authentication.** The lease server's agent router (`crates/js-lease-server/src/agent_api.rs`, `router`) serves
-`POST /v1/agent/hello`, `POST /v1/agent/heartbeat`, and `GET` and `POST /v1/hosts/{target}` (the routes a host calls about
+`POST /v1/agent/hello`, `POST /v1/agent/heartbeat`, `POST /v1/agent/dispatch` (the dispatch poll, below), and `GET` and `POST /v1/hosts/{target}` (the routes a host calls about
 itself: cordon, uncordon, show). Every request carries a bearer in `Authorization`. `authenticate` accepts one of the pool's join
 tokens, a one-time join token or a host credential, and answers anything else with a bare 401. The hello is held to a per-credential
 rate limit before its body is read (`limit_hello`: 429 `rate-limited` with `Retry-After`; `DEFAULT_HELLO_BURST` 60,
@@ -34,7 +34,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`, `identity` (the cloud's
   signed identity of the machine, `{"document", "signature"}` as its metadata service served them, `js_elastic::SignedIdentity`;
   sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet).
-- `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`. Over HTTP the welcome is
+- `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
   cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `exclusive_ready`,
@@ -69,6 +69,8 @@ a `cancel` for each run the heartbeat lists in `held`, at most `MAX_COMMANDS`, a
 `results`, so that the agent kills what it holds and drops what it reports. The rest of the reply is empty apart from the taint
 acknowledgement, and the job half is added as above. The registry still records `held` from a hello and a heartbeat. The capabilities
 `one-job` (`ONE_JOB_CAPABILITY`) and `run-files` gate start fields an older agent would silently ignore.
+
+**The dispatch poll.** An agent that runs jobs announces the hello capability `dispatch-poll` (`DISPATCH_CAPABILITY`, `crates/js-agent-wire/src/dispatch.rs`) and polls `POST /v1/agent/dispatch` (`DispatchPoll`: host, epoch, session, and the acknowledgements of what it took; answered with `DispatchReply`) only when its welcome says `dispatch_poll`. A server that serves the poll to a host leaves the starts and stops its dispatch queue carries out of that host's heartbeat reply; a host whose welcome lacks the flag gets them in the heartbeat reply as before. Every additive: an older server never sets the flag, an older agent never reports the capability. The poll's rules, the agent's backoff and the queue are in `multi-instance.md`, section 0.2.
 
 The fence of a job start is the pair it already carries, `job_id` with `allocation_id`; no field is added for it, and no existing
 body encodes differently (`crates/js-agent-wire/tests/start_fence.rs`). An agent that enforces it reports the hello capability
