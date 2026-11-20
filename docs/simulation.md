@@ -200,8 +200,8 @@ The flags, all the binary's own (it has no harness, so libtest never reads them)
 
 This is the one way to run a scenario over seeds other than the first few; there is no
 environment variable. A run with none of these flags runs no seed and passes, saying so
-on stderr: that is how `cargo test --workspace` runs the binary on every pull request, so
-the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
+on stderr: that is how the `test` job's `cargo nextest run --workspace` runs the binary on
+every pull request, so the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
 shard past the last, fewer seeds than shards, a range past the last seed, a scenario the
 family does not have) are refused with exit status 2.
 

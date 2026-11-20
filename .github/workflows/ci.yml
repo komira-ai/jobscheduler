@@ -136,8 +136,8 @@ jobs:
 
   # The workspace's tests run under cargo-nextest, as release.yml's `unit-tests` runs them:
   # every test in a process of its own, as many at once as the runner has CPUs, whatever
-  # binary each is in (`cargo test` runs one test binary after another, and js-sim-cell's
-  # scenario binaries held the whole job at its limit). nextest runs no doctests, so
+  # binary each is in (`cargo test` runs one test binary after another; under it the job's
+  # passing runs on main took 44 to 45 of its 45 minutes). nextest runs no doctests, so
   # `cargo test --doc` runs them after it. nextest, `cargo test --doc` and the steps after
   # them build with the same features and profile as the run, so nothing is compiled again.
   #
