@@ -360,12 +360,19 @@ mod tests {
         read_facts(file(text))
     }
 
-    /// The flag and the fault of a refused flag.
-    fn refused(text: &str) -> (&'static str, FlagFault) {
-        match read_text(text) {
-            Err(FlagsError::Flag { flag, fault, .. }) => (flag, fault),
-            other => panic!("{text:?}: {other:?}"),
+    /// What a refused flags file of `text` says.
+    fn refused(text: &str) -> String {
+        read_text(text).unwrap_err().to_string()
+    }
+
+    /// What a refusal of `flag` for `fault` says, by [`FlagsError::Flag`].
+    fn said(flag: &'static str, fault: FlagFault) -> String {
+        FlagsError::Flag {
+            path: PathBuf::from("/etc/js-agent/flags"),
+            flag,
+            fault,
         }
+        .to_string()
     }
 
     const MAC: &str = "# the Mac build host group\n\
@@ -381,12 +388,9 @@ mod tests {
 
     #[test]
     fn the_mac_flags_give_the_pool_its_endpoints_and_the_agents_defaults() {
-        let AgentPf::On(policy) = read_text(MAC).unwrap() else {
-            panic!("not on");
-        };
         assert_eq!(
-            policy,
-            Policy {
+            read_text(MAC).unwrap(),
+            AgentPf::On(Policy {
                 pfctl: PathBuf::from("/sbin/pfctl"),
                 anchor: AnchorName::new("com.apple/com.komira.js.pool").unwrap(),
                 state_dir: PathBuf::from("/var/db/com.komira.js-pf"),
@@ -395,7 +399,7 @@ mod tests {
                     "198.51.100.7:8443".parse().unwrap(),
                     "192.0.2.10:443".parse().unwrap(),
                 ],
-            }
+            })
         );
     }
 
@@ -404,14 +408,16 @@ mod tests {
         let text = "--native-network=on\n--native-pf-uid-start=700\n--native-pf-uid-count=1\n\
             --native-pf-anchor=com.apple/other\n--native-pf-state-dir=/var/db/other\n\
             --native-pfctl=/opt/pfctl\n";
-        let AgentPf::On(policy) = read_text(text).unwrap() else {
-            panic!("not on");
-        };
-        assert_eq!(policy.anchor.as_str(), "com.apple/other");
-        assert_eq!(policy.state_dir, PathBuf::from("/var/db/other"));
-        assert_eq!(policy.pfctl, PathBuf::from("/opt/pfctl"));
-        assert_eq!(policy.uids, UidRange::new(700, 1).unwrap());
-        assert!(policy.endpoints.is_empty());
+        assert_eq!(
+            read_text(text).unwrap(),
+            AgentPf::On(Policy {
+                pfctl: PathBuf::from("/opt/pfctl"),
+                anchor: AnchorName::new("com.apple/other").unwrap(),
+                state_dir: PathBuf::from("/var/db/other"),
+                uids: UidRange::new(700, 1).unwrap(),
+                endpoints: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -437,11 +443,11 @@ mod tests {
     fn a_pf_flag_beside_a_ceiling_other_than_on_is_refused_by_its_name() {
         assert_eq!(
             refused("--native-network=open\n--native-pf-uid-start=600\n"),
-            (UID_START, FlagFault::NeedsOn)
+            said(UID_START, FlagFault::NeedsOn)
         );
         assert_eq!(
             refused("--native-pf-endpoint=192.0.2.10:443\n"),
-            (ENDPOINT, FlagFault::NeedsOn)
+            said(ENDPOINT, FlagFault::NeedsOn)
         );
     }
 
@@ -449,20 +455,23 @@ mod tests {
     fn a_ceiling_the_agent_does_not_have_is_refused() {
         assert_eq!(
             refused("--native-network=yes\n"),
-            (NETWORK, FlagFault::Network("yes".to_owned()))
+            said(NETWORK, FlagFault::Network("yes".to_owned()))
         );
     }
 
     #[test]
     fn a_flag_read_here_without_its_value_or_given_twice_is_refused() {
-        assert_eq!(refused("--native-network\n"), (NETWORK, FlagFault::NoValue));
+        assert_eq!(
+            refused("--native-network\n"),
+            said(NETWORK, FlagFault::NoValue)
+        );
         assert_eq!(
             refused("--native-network=on\n--native-network=on\n"),
-            (NETWORK, FlagFault::Repeated)
+            said(NETWORK, FlagFault::Repeated)
         );
         assert_eq!(
             refused("--native-network=on\n--native-pf-uid-start=600\n--native-pf-uid-start=600\n"),
-            (UID_START, FlagFault::Repeated)
+            said(UID_START, FlagFault::Repeated)
         );
     }
 
@@ -470,40 +479,48 @@ mod tests {
     fn on_needs_the_pools_uids_as_whole_numbers_the_provisioner_accepts() {
         assert_eq!(
             refused("--native-network=on\n--native-pf-uid-count=100\n"),
-            (UID_START, FlagFault::Missing)
+            said(UID_START, FlagFault::Missing)
         );
         assert_eq!(
             refused("--native-network=on\n--native-pf-uid-start=600\n"),
-            (UID_COUNT, FlagFault::Missing)
+            said(UID_COUNT, FlagFault::Missing)
         );
         assert_eq!(
             refused("--native-network=on\n--native-pf-uid-start=6x\n--native-pf-uid-count=1\n"),
-            (UID_START, FlagFault::NotANumber("6x".to_owned()))
+            said(UID_START, FlagFault::NotANumber("6x".to_owned()))
         );
-        let (flag, fault) =
-            refused("--native-network=on\n--native-pf-uid-start=400\n--native-pf-uid-count=1\n");
-        assert_eq!(flag, UID_START);
-        assert!(matches!(fault, FlagFault::Policy(_)), "{fault:?}");
-        assert!(fault.to_string().contains("below 500"), "{fault}");
+        let below = UidRange::new(400, 1).unwrap_err();
+        assert!(below.to_string().contains("below 500"), "{below}");
+        assert_eq!(
+            refused("--native-network=on\n--native-pf-uid-start=400\n--native-pf-uid-count=1\n"),
+            said(UID_START, FlagFault::Policy(below))
+        );
     }
 
     const ON: &str = "--native-network=on\n--native-pf-uid-start=600\n--native-pf-uid-count=1\n";
 
     #[test]
     fn an_anchor_an_endpoint_or_a_path_the_agent_refuses_is_refused() {
-        let (flag, fault) = refused(&format!("{ON}--native-pf-anchor=a/*\n"));
-        assert_eq!(flag, ANCHOR);
-        assert!(matches!(fault, FlagFault::Policy(_)), "{fault:?}");
-        let (flag, fault) = refused(&format!("{ON}--native-pf-endpoint=169.254.169.254:80\n"));
-        assert_eq!(flag, ENDPOINT);
-        assert!(fault.to_string().contains("link-local"), "{fault}");
+        assert_eq!(
+            refused(&format!("{ON}--native-pf-anchor=a/*\n")),
+            said(
+                ANCHOR,
+                FlagFault::Policy(AnchorName::new("a/*").unwrap_err())
+            )
+        );
+        let metadata = "169.254.169.254:80".parse::<Endpoint>().unwrap_err();
+        assert!(metadata.to_string().contains("link-local"), "{metadata}");
+        assert_eq!(
+            refused(&format!("{ON}--native-pf-endpoint=169.254.169.254:80\n")),
+            said(ENDPOINT, FlagFault::Policy(metadata))
+        );
         assert_eq!(
             refused(&format!("{ON}--native-pfctl=pfctl\n")),
-            (PFCTL, FlagFault::Relative("pfctl".to_owned()))
+            said(PFCTL, FlagFault::Relative("pfctl".to_owned()))
         );
         assert_eq!(
             refused(&format!("{ON}--native-pf-state-dir=state\n")),
-            (STATE_DIR, FlagFault::Relative("state".to_owned()))
+            said(STATE_DIR, FlagFault::Relative("state".to_owned()))
         );
     }
 

@@ -213,12 +213,12 @@ fn install_from(
             return Ok(());
         }
         AgentPf::Off { network } => {
-            writeln!(
-                out,
+            let said = format!(
                 "{}: {}={network}: the agent checks no anchor, nothing to install",
                 file.display(),
                 agent_flags::NETWORK
-            )?;
+            );
+            writeln!(out, "{said}")?;
             return Ok(());
         }
         AgentPf::On(policy) => policy,
