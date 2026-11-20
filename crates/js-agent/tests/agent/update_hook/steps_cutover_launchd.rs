@@ -20,7 +20,7 @@ fn mac(name: &str) -> (Rig, Launchctl) {
     (rig, tool)
 }
 
-/// Runs a step with the unit port over `tool`, the token file at `gate`.
+/// Runs a step with the unit port over `tool`, the gate file (the host's flags file) at `gate`.
 fn run_over(rig: &Rig, tool: &Launchctl, gate: &Path, run: impl FnOnce(&Env<'_>) -> Done) -> Done {
     let spy = Spy::new(rig);
     let units = LaunchUnits::new(tool).with_clock(&spy).with_gate(gate);
@@ -39,17 +39,17 @@ fn verify(rig: &Rig, tool: &Launchctl, gate: &Path) -> Done {
     run_over(rig, tool, gate, |env| step::verify(env, &rig.params))
 }
 
-/// A token file that exists.
-fn with_token(tmp: &TestDir) -> std::path::PathBuf {
-    let gate = tmp.path().join("token");
-    std::fs::write(&gate, "token").unwrap();
+/// A gate file (the host's flags file) that exists.
+fn with_gate_file(tmp: &TestDir) -> std::path::PathBuf {
+    let gate = tmp.path().join("flags");
+    std::fs::write(&gate, "--pool=farm\n").unwrap();
     gate
 }
 
 #[test]
 fn a_mac_cutover_stops_boots_out_and_starts_the_agent_again() {
     let (rig, tool) = mac("hook-launchd-clean");
-    let gate = with_token(&rig.tmp);
+    let gate = with_gate_file(&rig.tmp);
     let done = cutover(&rig, &tool, &gate);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(tool.launches.borrow().get(MAC_UNIT), Some(&1));
@@ -60,7 +60,7 @@ fn a_mac_cutover_stops_boots_out_and_starts_the_agent_again() {
 fn a_mac_agent_that_starts_and_dies_is_a_failure_of_the_release() {
     for exit in [Exit::Code(1), Exit::Code(78), Exit::Signal] {
         let (rig, tool) = mac(&format!("hook-launchd-dies-{exit:?}"));
-        let gate = with_token(&rig.tmp);
+        let gate = with_gate_file(&rig.tmp);
         tool.next_start.set(Then::Dies(exit));
         let done = cutover(&rig, &tool, &gate);
         assert_eq!(done.outcome, Outcome::Failure, "{exit:?}");
@@ -73,7 +73,7 @@ fn a_mac_agent_that_starts_and_dies_is_a_failure_of_the_release() {
 #[test]
 fn a_mac_agent_that_launchd_is_slow_to_start_is_waited_for() {
     let (rig, tool) = mac("hook-launchd-slow");
-    let gate = with_token(&rig.tmp);
+    let gate = with_gate_file(&rig.tmp);
     tool.settle.set(4);
     let done = cutover(&rig, &tool, &gate);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
@@ -82,7 +82,7 @@ fn a_mac_agent_that_launchd_is_slow_to_start_is_waited_for() {
 #[test]
 fn a_plist_launchd_cannot_load_is_a_failure_of_the_host_and_not_of_the_release() {
     let (rig, tool) = mac("hook-launchd-bad-plist");
-    let gate = with_token(&rig.tmp);
+    let gate = with_gate_file(&rig.tmp);
     // Bootout unloads the service; the plist is gone from the directory: bootstrap fails.
     tool.plists.borrow_mut().remove(MAC_UNIT);
     let done = cutover(&rig, &tool, &gate);
@@ -93,9 +93,9 @@ fn a_plist_launchd_cannot_load_is_a_failure_of_the_host_and_not_of_the_release()
 
 #[test]
 fn an_agent_that_launchd_leaves_idle_after_the_start_is_a_failure_of_the_host() {
-    // The token file is there; launchd bootstraps the plist and does not run the agent.
+    // The gate file is there; launchd bootstraps the plist and does not run the agent.
     let (rig, tool) = mac("hook-launchd-left-idle");
-    let gate = with_token(&rig.tmp);
+    let gate = with_gate_file(&rig.tmp);
     tool.next_start.set(Then::Idle);
     let done = cutover(&rig, &tool, &gate);
     assert_eq!(done.outcome, Outcome::Failure);
@@ -106,7 +106,7 @@ fn an_agent_that_launchd_leaves_idle_after_the_start_is_a_failure_of_the_host() 
 #[test]
 fn a_mac_agent_that_dies_after_cutover_fails_verify_as_a_start_failure() {
     let (rig, tool) = mac("hook-launchd-verify-dies");
-    let gate = with_token(&rig.tmp);
+    let gate = with_gate_file(&rig.tmp);
     assert_eq!(cutover(&rig, &tool, &gate).outcome, Outcome::Success);
     tool.loaded.borrow_mut().insert(
         MAC_UNIT.to_owned(),

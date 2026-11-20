@@ -28,7 +28,7 @@
 	<dict>
 		<key>PathState</key>
 		<dict>
-			<key>/etc/js-agent/token</key>
+			<key>/etc/js-agent/flags</key>
 			<true/>
 		</dict>
 	</dict>

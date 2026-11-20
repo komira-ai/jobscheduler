@@ -40,6 +40,7 @@ mod steps_helper;
 mod steps_host_files;
 mod steps_prepare;
 mod steps_prepare_cordon;
+mod steps_prepare_first_dirs;
 mod steps_prepare_supersede;
 mod steps_rollback;
 mod steps_rollback_first;

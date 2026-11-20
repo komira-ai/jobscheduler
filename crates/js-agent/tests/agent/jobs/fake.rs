@@ -67,8 +67,8 @@ struct State {
     containers: BTreeMap<String, Container>,
     #[cfg(target_os = "linux")]
     next: u32,
-    /// Calls to fail: the name of the call and how many more times it fails.
-    #[cfg(target_os = "linux")]
+    /// Calls to fail: the name of the call and how many more times it fails. On every
+    /// platform: a check's process listing ([`State::fails_listing`]) reads it on both.
     failing: BTreeMap<&'static str, u32>,
     /// `create_and_start` waits while this is set.
     #[cfg(target_os = "linux")]

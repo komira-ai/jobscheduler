@@ -616,24 +616,24 @@ fn the_stop_runner_runs_programs() {
 }
 
 fn gate_in(tmp: &TestDir) -> std::path::PathBuf {
-    tmp.path().join("token")
+    tmp.path().join("flags")
 }
 
 #[test]
-fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_token_file_is_absent() {
+fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_gate_file_is_absent() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "launchd-gate");
     let gate = gate_in(&tmp);
     let tool = world();
     tool.load_idle(LABEL, "not running");
     let units = LaunchUnits::new(&tool).with_gate(&gate);
     let Err(PortError::Command(why)) = units.start(LABEL) else {
-        panic!("a kickstart without the token must be refused");
+        panic!("a kickstart without the gate file must be refused");
     };
     assert!(why.contains(gate.to_str().unwrap()), "{why}");
     assert!(why.contains("kickstart"), "{why}");
     assert_eq!(tool.calls(), [print_line(LABEL)]);
     // With the file there, launchd would run the agent by its own rules: the kick goes.
-    std::fs::write(&gate, "token").unwrap();
+    std::fs::write(&gate, "--pool=farm\n").unwrap();
     units.start(LABEL).unwrap();
     assert!(
         tool.calls()
@@ -642,7 +642,7 @@ fn a_kickstart_of_a_loaded_idle_agent_is_refused_while_the_token_file_is_absent(
 }
 
 #[test]
-fn a_bootstrap_is_left_to_launchds_own_gate_on_the_token_file() {
+fn a_bootstrap_is_left_to_launchds_own_path_state_gate() {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "launchd-gate-bootstrap");
     let tool = world();
     let gate = gate_in(&tmp);
