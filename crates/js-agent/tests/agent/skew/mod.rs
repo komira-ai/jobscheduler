@@ -53,19 +53,27 @@ pub fn previous() -> Value {
 
 /// Asserts that this release's agent and server, met as [`record`] meets them, say
 /// everything their previous release said, with the fresh values paired as the replay
-/// pairs them, in two respects that are not a field added: the recording's pool asks a
+/// pairs them, in three respects that are not a field added: the recording's pool asks a
 /// heartbeat interval of [`record::QUICK_INTERVAL_MS`] where the previous release's asked
-/// 5000 (the one value of the transcript set to it), and the job start comes in the reply
-/// to the heartbeat after the submit, one before the previous release's (the server
-/// places the job in the submit call), and is then compared field by field at the step
-/// the previous release has it, where this release sends none ([`compare::take_early_start`]);
-/// any other command, or a start the previous release never sent, is a difference. It also
-/// writes this release's transcript to `skew/transcript.json` under the
+/// 5000 (the one value of the transcript set to it); a job start the server places in the
+/// submit call comes in the reply to the heartbeat after the submit, one before the previous
+/// release's, and is then compared field by field at the step the previous release has it
+/// ([`compare::take_early_start`]); and, for an agent the welcome tells to poll
+/// (`dispatch_poll`, which with the hello's `dispatch-poll` capability is an added field),
+/// the start and the stop the previous release carried in a heartbeat reply are handed out
+/// by the dispatch poll instead, and each is compared, as the command it stands for, with the
+/// command the previous reply held ([`compare::hand_out`]): a reply of the previous release
+/// that held a command is covered by that command in the reply or in the poll's next message,
+/// never by neither. Any other command, a start the previous release never sent, or a
+/// message the poll hands out that no reply of the previous release carried, is a difference.
+/// It also writes this release's transcript to `skew/transcript.json` under the
 /// directory cargo gives integration tests for scratch files (`CARGO_TARGET_TMPDIR`, under
 /// the build's own target directory; nothing else writes there), which is where the next
 /// release's transcript is taken from: a path that outlives the test, unlike a [`Scratch`]
 /// directory. It catches a transcript that no longer matches the conversation [`record`] has
-/// (the other tests would then compare against a conversation that is not the one they run).
+/// (the other tests would then compare against a conversation that is not the one they run),
+/// a start or a stop that reaches the agent by neither route, or by the poll with another
+/// body than the previous release's command.
 ///
 /// [`Scratch`]: crate::support::Scratch
 #[test]
@@ -89,6 +97,13 @@ fn this_version_still_says_what_the_previous_release_said() {
     assert_eq!(then.len(), now.len(), "{transcript}");
     welcome_interval_as(&mut then, record::QUICK_INTERVAL_MS);
     let mut ahead = std::collections::BTreeMap::new();
+    let mut taken = Vec::new();
+    let mut handed: std::collections::VecDeque<Value> = transcript["dispatched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
     for (index, (old, new)) in then.iter().zip(&now).enumerate() {
         let old = minted.apply(old);
         let mut new = new.clone();
@@ -113,8 +128,15 @@ fn this_version_still_says_what_the_previous_release_said() {
                 *commands = serde_json::json!([start]);
             }
         }
+        let body = new
+            .get_mut("server")
+            .and_then(|server| server.get_mut("body"));
+        if let Some(body) = body {
+            taken.extend(compare::hand_out(&old["server"]["body"], body, &mut handed));
+        }
         let found = compare::uncovered(&old, &new, Some(&mut minted));
         problems.extend(found.into_iter().map(|what| format!("{index} {what}")));
     }
+    problems.extend(compare::unhanded(&handed, &taken));
     assert_eq!(problems, Vec::<String>::new());
 }
