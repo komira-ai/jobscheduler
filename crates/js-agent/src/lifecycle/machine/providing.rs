@@ -5,11 +5,15 @@
 //! as a host path, the step `provided` is marked, and the lookups of those paths are
 //! followed with the rest.
 //!
-//! - **At admission**, once the start has its slot, the record of its sources is written
-//!   ([`provider_record`], so a restart can release what may exist), the sources are
-//!   remembered for the release at the run's end, and each provider is asked to `Prepare`
-//!   its source: before the start's images are asked for, so the provider fetches while the
-//!   image is pulled and the container made.
+//! - **At admission**, once the start has its slot, the sources are remembered for the
+//!   release at the run's end, each provider is asked to `Prepare` its source, and then the
+//!   record of the sources is written ([`provider_record`], so a restart can release what
+//!   may exist). The asks go before the start's images are asked for, so the provider
+//!   fetches while the image is pulled and the container made, and before the record, so
+//!   the record's syncs overlap the provider's first work. A crash between a `Prepare` and
+//!   the record is covered by the sweep each provider is asked when the agent starts
+//!   (`provided`). A start whose record cannot be written fails, and its cleanup releases
+//!   what was asked.
 //! - **At every step** each source that has no directory yet is asked again: `Prepare`
 //!   until the provider has taken it, then `Mount` until it answers the directory. A
 //!   provider that is unavailable is asked again; one that refuses the ref fails the start
@@ -331,14 +335,24 @@ pub(super) fn follow(
 
 impl Lifecycle {
     /// Begins the providers' part of a start admitted at `now_ms` whose file system `fs`
-    /// holds sources a provider makes: writes the record of them, remembers them for the
-    /// release, and asks each provider for what its source lacks. `None` for a start with no
-    /// such source.
+    /// holds sources a provider makes: remembers them for the release, asks each provider
+    /// for what its source lacks, and then writes the record of them. `None` for a start
+    /// with no such source.
+    ///
+    /// The asks go first: a provider begins making its tree in the background when it has
+    /// `Prepare`, so the record's syncs (the file, its rename, the directory) are spent while
+    /// it works and not before it begins. The record is still written in this call, before
+    /// the start is held and before the worker steps again. A crash between a `Prepare` and
+    /// the record leaves a source no record names, and the sweep each provider is asked when
+    /// the agent starts ([`Lifecycle::attach_providers`]) releases it: it keeps only the runs
+    /// the agent adopted, and a start that had no container is not one.
     ///
     /// # Errors
     ///
-    /// The record could not be written (nothing was asked of any provider), or a provider
-    /// refused a source at once.
+    /// A provider refused a source at once (the record is not written then; the sources are
+    /// remembered, so the failed start's cleanup releases them), or the record could not be
+    /// written (the providers were asked already, and the same cleanup releases what they
+    /// were asked for).
     pub(super) fn provide(
         &mut self,
         run_id: &str,
@@ -356,6 +370,13 @@ impl Lifecycle {
                 index: source.index,
             })
             .collect();
+        self.providers.keep(run_id, sources.clone());
+        let deadline_ms = now_ms.saturating_add(self.providers.wait_ms());
+        let mut providing = Providing {
+            deadline_ms,
+            sources: provided.iter().map(Wanted::of).collect(),
+        };
+        providing.poll(run_id, &mut self.providers, &self.config.mounts, now_ms)?;
         provider_record::write(&self.config.state, run_id, &sources).map_err(|why| {
             (
                 refusal::INPUT_UNAVAILABLE,
@@ -364,13 +385,6 @@ impl Lifecycle {
                 false,
             )
         })?;
-        self.providers.keep(run_id, sources);
-        let deadline_ms = now_ms.saturating_add(self.providers.wait_ms());
-        let mut providing = Providing {
-            deadline_ms,
-            sources: provided.iter().map(Wanted::of).collect(),
-        };
-        providing.poll(run_id, &mut self.providers, &self.config.mounts, now_ms)?;
         Ok(Some(providing))
     }
 }

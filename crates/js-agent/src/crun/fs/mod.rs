@@ -1,20 +1,22 @@
 //! A job's file system on the `crun` runtime (`docs/design/job-rootfs.md`, sections 4.2 to
 //! 4.7 and 8): [`Fs`], which holds the roots a job's host paths lie beneath (opened when
 //! the agent starts), the directory of the runs' mounts (`<mounts>`, made a private mount
-//! of its own when the agent starts) and the `js-paths` pool, and prepares each run's file
-//! system off the lifecycle's worker:
+//! of its own when the agent starts) and two pools of threads (`js-lookups` for the lookups
+//! of host paths, `js-paths` for the assemblies and the checks, so a start's lookups never
+//! wait behind another's assembly or check), and prepares each run's file system off the
+//! lifecycle's worker:
 //!
 //! 1. each host path is opened beneath its root, and a mount's `sub_path` beneath it, on the
-//!    pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's clock;
-//!    a start with none is ready at the first call, and a later call that adds host paths
+//!    lookups' pool ([`Fs::resolve`]), each lookup bounded by [`LOOKUP_MS`] on the lifecycle's
+//!    clock; a start with none is ready at the first call, and a later call that adds host paths
 //!    keeps the lookups already begun and asks only the new ones;
 //! 2. once they are open and the images are in the store, the assembly ([`assemble`]) runs
-//!    on the pool ([`Fs::assemble`]): clones, overlays, targets, each mount listed in
-//!    `<mounts>/<lease>/mounts` ([`list`]) before it is made;
+//!    on the other pool ([`Fs::ask_assembly`]): clones, overlays, targets, each mount listed
+//!    in `<mounts>/<lease>/mounts` ([`list`]) before it is made;
 //! 3. the container takes what was made ([`Fs::take`]); a run never made has it removed
 //!    ([`Fs::discard`]); every end of a run unmounts it from the list ([`Fs::release`]);
 //! 4. after a job that did not succeed, each of its sources is asked whether it still
-//!    answers ([`Fs::check`]), within [`CHECK_MS`].
+//!    answers ([`Fs::check`], on the other pool), within [`CHECK_MS`].
 //!
 //! The system calls are [`MountCalls`] (js-contain's) and [`PathCalls`], so what is built
 //! from them is tested with fakes as an ordinary user.
@@ -100,7 +102,7 @@ pub enum FsError {
         /// Why.
         why: ResolveError,
     },
-    /// The pool's threads could not be made.
+    /// The threads of a pool could not be made.
     #[error("the threads of the host paths: {0}")]
     Threads(#[from] io::Error),
 }
@@ -118,7 +120,7 @@ struct Lookup {
 /// How a [`Lookup`] stands.
 #[derive(Debug)]
 enum Opened {
-    /// Asked of the pool: the answer to come.
+    /// Asked of the lookups' pool: the answer to come.
     Asked(Pending<Result<OwnedFd, NativeRefusal>>),
     /// Open.
     Open(OwnedFd),
@@ -136,7 +138,7 @@ impl Lookup {
 enum Assembly {
     /// Not asked yet: the host paths are being looked up, or are open.
     Unasked,
-    /// Asked of the pool.
+    /// Asked of the assemblies' pool.
     Asked(Pending<Result<Assembled, Unassembled>>),
     /// Made, for the container to take.
     Made(Assembled),
@@ -164,6 +166,10 @@ pub(crate) struct Fs {
     calls: Arc<dyn MountCalls + Send + Sync>,
     paths: Arc<dyn PathCalls>,
     image_allow: Vec<js_oci::Allow>,
+    /// The threads of the lookups of host paths, which no assembly or check holds.
+    lookups: Pool,
+    /// The threads of the assemblies and the checks: an assembly holds one for as long as the
+    /// mounts of its layers answer, which a hung file system makes for ever.
     pool: Pool,
     /// By run id.
     preps: BTreeMap<String, Prep>,
@@ -210,7 +216,7 @@ impl Fs {
     /// Makes the directory of the runs' mounts and its parent (mode `0711`, the parent too when
     /// another part of the agent made it closed: nothing below it is searchable otherwise) and a private mount of its own
     /// (bound onto itself only when it is not one already: an agent that restarts finds its
-    /// own, with its adopted runs' mounts below it), opens every root, and starts the pool.
+    /// own, with its adopted runs' mounts below it), opens every root, and starts the two pools.
     ///
     /// # Errors
     /// See [`FsError`].
@@ -237,6 +243,7 @@ impl Fs {
             calls: settings.calls,
             paths: settings.paths,
             image_allow: settings.image_allow,
+            lookups: Pool::named(pool::THREADS, "js-lookups")?,
             pool: Pool::new(pool::THREADS)?,
             preps: BTreeMap::new(),
         })
@@ -244,6 +251,7 @@ impl Fs {
 
     /// Rings `wake` whenever a lookup, an assembly or a check asked from now on has answered.
     pub(crate) fn set_wake(&mut self, wake: crate::lifecycle::Wake) {
+        self.lookups.set_wake(wake.clone());
         self.pool.set_wake(wake);
     }
 
@@ -266,9 +274,9 @@ impl Fs {
     }
 
     /// Begins, or follows, the lookups of the host paths of the run `run_id` (lease `name`):
-    /// each is asked of the pool at the first call, bounded by [`LOOKUP_MS`] from `now_ms`,
-    /// and the first call polls them as a later one does, so a start with no host path is
-    /// [`FsPrepared::Ready`] at once. [`FsPrepared::Ready`] once every one is open; refused
+    /// each is asked of the lookups' pool at the first call, bounded by [`LOOKUP_MS`] from
+    /// `now_ms`, and the first call polls them as a later one does, so a start with no host path
+    /// is [`FsPrepared::Ready`] at once. [`FsPrepared::Ready`] once every one is open; refused
     /// `input-not-allowed` for a path beneath no root or one that leads out of it by a link,
     /// `input-unavailable` for one that is missing, is not a directory, cannot be searched or
     /// did not answer in time.
@@ -321,7 +329,7 @@ impl Fs {
         lookups
     }
 
-    /// Asks the pool to open `path` beneath its root, and `sub_path` beneath it.
+    /// Asks the lookups' pool to open `path` beneath its root, and `sub_path` beneath it.
     fn look_up(&self, source: HostSource<'_>, now_ms: u64) -> Lookup {
         let (path, sub_path) = (source.path, source.sub_path);
         // Every root is held from the start: the one a path lies beneath is open.
@@ -333,7 +341,7 @@ impl Fs {
         let sub_path_text = sub_path.map(str::to_owned);
         let (given, sub_path) = (path.to_owned(), sub_path.map(PathBuf::from));
         let deadline = now_ms.saturating_add(LOOKUP_MS);
-        let pending = self.pool.run(deadline, move || {
+        let pending = self.lookups.run(deadline, move || {
             let Some((root, name, rest)) = root else {
                 let why = format!("{given} lies beneath no root of this agent");
                 return Err(not_allowed(why));
@@ -372,9 +380,9 @@ impl Fs {
         ))
     }
 
-    /// Asks the pool for the assembly of the run `run_id` (its host paths open), over the
-    /// image's tree `image` and the trees of its image layers (`trees`, base first, one for
-    /// each image layer), in the lease directory `lease`, with `owners`.
+    /// Asks the assemblies' pool for the assembly of the run `run_id` (its host paths open),
+    /// over the image's tree `image` and the trees of its image layers (`trees`, base first,
+    /// one for each image layer), in the lease directory `lease`, with `owners`.
     pub(crate) fn ask_assembly(
         &mut self,
         run_id: &str,
@@ -487,9 +495,9 @@ impl Fs {
             .count()
     }
 
-    /// Asks the pool whether each of the `sources` clones of the lease `name` still answers
-    /// ([`PathCalls::answers`]), bounded by [`CHECK_MS`] from `now_ms`: the answer is the
-    /// first that is [unreadable](kernel::unreadable), `None` when all answer.
+    /// Asks the assemblies' pool whether each of the `sources` clones of the lease `name`
+    /// still answers ([`PathCalls::answers`]), bounded by [`CHECK_MS`] from `now_ms`:
+    /// the answer is the first that is [unreadable](kernel::unreadable), `None` when all answer.
     pub(crate) fn check(&self, name: &str, sources: usize, now_ms: u64) -> Pending<Option<String>> {
         let src = self.dir_of(name).join("src");
         let paths = Arc::clone(&self.paths);

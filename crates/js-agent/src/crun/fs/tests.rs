@@ -2,8 +2,9 @@
 //! that read a host path and the list of a run's mounts here, the assembly in
 //! `assemble_tests` and [`super::Fs`] in `fs_tests`, over
 //! directories of the test's own, with a fake of the mounts' calls ([`Mounts`], which
-//! records each call and binds a clone's directories by copying them) and of the reads of
-//! host paths ([`Paths`], which can hold a lookup or a check until the test lets it go).
+//! records each call and binds a clone's directories by copying them, and can hold a clone,
+//! so an assembly, until the test lets it go) and of the reads of host paths ([`Paths`], which
+//! can hold a lookup or a check until the test lets it go).
 //! Every bound is passed on the caller's clock (`now`), never waited for.
 
 use std::fs;
@@ -69,6 +70,8 @@ pub(super) struct Mounts {
     pub(super) mounted: bool,
     /// Whether every call panics, as a thread lost to a fault does.
     pub(super) panics: bool,
+    /// Each clone says it began, then waits for a word, when set: an assembly held.
+    pub(super) gate: Option<Gate>,
 }
 
 impl Mounts {
@@ -77,6 +80,18 @@ impl Mounts {
             root: root.to_owned(),
             ..Self::default()
         }
+    }
+
+    /// Mounts whose clones each wait for a word on the second channel, having said so on the
+    /// first.
+    pub(super) fn holding_clones(root: &Path) -> (Self, Receiver<()>, Sender<()>) {
+        let (began, beginning) = channel();
+        let (go, going) = channel();
+        let mounts = Self {
+            gate: Some((Mutex::new(began), Mutex::new(going))),
+            ..Self::under(root)
+        };
+        (mounts, beginning, go)
     }
 
     fn ask(&self, call: &'static str, path: &Path, rest: &str) -> io::Result<()> {
@@ -97,6 +112,7 @@ impl Mounts {
 
 impl MountCalls for Mounts {
     fn clone_tree(&self, source: BorrowedFd<'_>) -> io::Result<OwnedFd> {
+        wait_at(self.gate.as_ref());
         self.ask("clone", &path_of(source), "")?;
         source.try_clone_to_owned()
     }
@@ -146,6 +162,8 @@ pub(super) type Gives = Vec<(std::ffi::OsString, (u32, u32))>;
 pub(super) struct Paths {
     /// Each lookup and check says it began, then waits for a word, when set.
     pub(super) gate: Option<Gate>,
+    /// Each check alone says it began, then waits for a word, when set: a lookup is not held.
+    pub(super) check_gate: Option<Gate>,
     /// A search of a mount's source: refused with this error, or allowed.
     pub(super) search: Option<i32>,
     /// The ids of each search, in the order made.
@@ -171,18 +189,31 @@ impl Paths {
         (paths, beginning, go)
     }
 
-    fn wait(&self) {
-        if let Some((began, go)) = &self.gate {
-            let _ = began.lock().expect("began").send(());
-            let _ = go.lock().expect("go").recv();
-        }
+    /// Reads where only the checks wait for a word on the second channel, having said so on
+    /// the first.
+    pub(super) fn holding_checks() -> (Self, Receiver<()>, Sender<()>) {
+        let (began, beginning) = channel();
+        let (go, going) = channel();
+        let paths = Self {
+            check_gate: Some((Mutex::new(began), Mutex::new(going))),
+            ..Self::default()
+        };
+        (paths, beginning, go)
+    }
+}
+
+/// Says the call began and waits for a word, when there is a `gate`.
+fn wait_at(gate: Option<&Gate>) {
+    if let Some((began, go)) = gate {
+        let _ = began.lock().expect("began").send(());
+        let _ = go.lock().expect("go").recv();
     }
 }
 
 impl PathCalls for Paths {
     fn open_beneath(&self, dir: BorrowedFd<'_>, rest: &Path) -> Result<OwnedFd, ResolveError> {
         self.opens.fetch_add(1, Ordering::SeqCst);
-        self.wait();
+        wait_at(self.gate.as_ref());
         Kernel.open_beneath(dir, rest)
     }
 
@@ -195,7 +226,8 @@ impl PathCalls for Paths {
     }
 
     fn answers(&self, dir: &Path) -> io::Result<()> {
-        self.wait();
+        wait_at(self.gate.as_ref());
+        wait_at(self.check_gate.as_ref());
         match self.answer {
             Some(errno) => Err(io::Error::from_raw_os_error(errno)),
             None => Kernel.answers(dir),
@@ -291,7 +323,7 @@ fn the_pool_answers_once_waits_to_the_deadline_and_survives_a_panic() {
 
 /// How long a test waits for a ring that must come: a guard against a hang, far above
 /// any real wait.
-const GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+pub(super) const GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Catches a pool whose answer is had only at the lifecycle's next step: a pool given a wake
 /// rings it once for each task that answered, after the answer is there to be had, and a

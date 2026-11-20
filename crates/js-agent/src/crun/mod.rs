@@ -173,9 +173,10 @@
 //! A runtime opened with [`CrunSettings::fs`] (where the kernel has `openat2`, `open_tree`,
 //! `move_mount` and `mount_setattr`) gives a job start its layers and mounts of host paths
 //! (`docs/design/job-rootfs.md`, the module `fs`): while the start waits, each host path is
-//! opened beneath its `--mount-root` on the `js-paths` pool ([`Runtime::resolve_fs`]); then
+//! opened beneath its `--mount-root` on the `js-lookups` pool ([`Runtime::resolve_fs`]); then
 //! the images are pinned for the lease (an image layer as `<lease>.l<k>`) and the assembly
-//! clones the paths and mounts the layered root and the copy-on-write mounts at
+//! clones the paths (on the `js-paths` pool, which the checks after a job use too, so no
+//! lookup waits behind them) and mounts the layered root and the copy-on-write mounts at
 //! `/run/js-agent/mounts/<lease>`, listing each mount before it is made
 //! ([`Runtime::assemble_fs`]). The container is made over the assembled root, writable, with
 //! the clones bound where the start named them. Every end of the run (its removal, a failed

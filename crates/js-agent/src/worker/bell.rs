@@ -1,19 +1,19 @@
 //! The session's bell: the worker rings it when what it publishes holds news for the server,
 //! so the next heartbeat leaves at once instead of after the interval.
 //!
-//! News is what the server has not heard and acts on: a run or a job that runs now, ended,
-//! or holds a new result; a result not yet reported; a job id newly retired; a taint to
-//! report or its clear. A start the worker has only just taken, listed as `starting`, is not
-//! news: the server sends no start again while it waits for the reply it sent the start in,
-//! and a heartbeat sent then would only be held at the server, where the start's `running`
-//! could not ride on it until the hold ends. A run or a job that is gone from the listing is
-//! not news either: it went because the server acknowledged it.
+//! News is what the server has not heard and acts on: a run or a job newly listed, whatever
+//! its state, that runs now, ended, or holds a new result; a result not yet reported; a job id
+//! newly retired; a taint to report or its clear. A start the worker has only just taken,
+//! listed as `starting`, is news: the heartbeat that leaves for it is the one the server holds
+//! for the host's next placement, so a placement is delivered by it and not by the heartbeat
+//! after the interval. The server holds a beat that lists a start for a short bound only, so
+//! the start's `running` is not kept behind that hold. A start already listed as `starting`
+//! and unchanged is not news, and a run or a job that is gone from the listing is not either:
+//! it went because the server acknowledged it.
 //!
 //! The bell is the sleeper's ([`Sleeper::bell`](crate::Sleeper::bell)); a worker given none
 //! rings nothing. Nothing is lost when the session is not waiting: the bell stays rung until
 //! the session's next wait that it may end.
-
-use js_agent_wire::HeldState;
 
 use super::{Shared, Snapshot, Worker};
 use crate::lifecycle::Wake;
@@ -46,18 +46,9 @@ impl Shared {
 /// Whether `now` holds something the server has not heard against `before` (see the module
 /// `bell`).
 pub(super) fn holds_news(before: &Snapshot, now: &Snapshot) -> bool {
-    // A changed entry is news unless it is a start just taken: `starting`, and not listed
-    // before.
+    // An entry that is new or changed is news, whatever its state.
     let runs = now.held.iter().filter(|run| !before.held.contains(run));
-    let runs = runs.filter(|run| {
-        let known = || before.held.iter().any(|was| was.run_id == run.run_id);
-        run.state != HeldState::Starting || known()
-    });
     let jobs = now.jobs.iter().filter(|job| !before.jobs.contains(job));
-    let jobs = jobs.filter(|job| {
-        let known = || before.jobs.iter().any(|was| was.job_id == job.job_id);
-        job.state != HeldState::Starting || known()
-    });
     let results = now
         .results
         .iter()

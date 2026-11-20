@@ -10,6 +10,11 @@
 //! once and none is lost. The agent sends its next heartbeat as soon as a held reply reaches
 //! it, so one heartbeat of the host is nearly always waiting here.
 //!
+//! A heartbeat that lists a job as `starting` is held for [`starting_hold`] at most instead:
+//! the agent sends that heartbeat as soon as its worker has taken the start, and the start's
+//! `running` rides on the next one, so the hold is kept short, while a placement still wakes
+//! it at once.
+//!
 //! The wakes are this process's: a placement made by another server is not seen here, and
 //! its start goes out on the host's next heartbeat, at most one hold later.
 
@@ -31,6 +36,57 @@ pub(crate) fn hold_bound(interval: Duration) -> Duration {
     interval.min(MAX_HOLD)
 }
 
+/// The longest a reply is held while the beat lists a job as `starting`: the start's `running`
+/// can reach the server only on the heartbeat after this one, so this is the most it waits for
+/// the hold to end. It is long enough that a host with a start under way, which beats again at
+/// once after each held reply, is not asked in a tight loop (five beats a second at most), and
+/// short next to the agent's whole wait for the start. A placement ends the hold at once.
+pub(crate) const STARTING_HOLD: Duration = Duration::from_millis(200);
+
+/// How long a reply with nothing to send is held when the beat lists a job as `starting`:
+/// [`STARTING_HOLD`], and never longer than [`hold_bound`] of the same `interval`.
+pub(crate) fn starting_hold(interval: Duration) -> Duration {
+    hold_bound(interval).min(STARTING_HOLD)
+}
+
+/// For how long, on the server's clock, after a hold first saw a job listed `starting` that job
+/// takes the short hold ([`Starts::young`]): longer than nearly every start takes, so its
+/// `running` is reported soon, and short enough that a start that waits for minutes (a provider,
+/// an image) does not keep its host beating five times a second: after it the normal bound
+/// applies, and `running` is reported at most one normal hold later.
+pub(crate) const STARTING_WINDOW_MS: u64 = 2_000;
+
+/// The jobs each host's held beats list as `starting`, each with the time (milliseconds, on the
+/// server's clock) a hold first saw it so. Only the jobs the last held beat of a host listed are
+/// kept, and a host whose last held beat listed none is not kept.
+#[derive(Default)]
+pub(crate) struct Starts {
+    /// By host, by job id. Its lock is a leaf.
+    seen: Mutex<BTreeMap<HostId, BTreeMap<String, u64>>>,
+}
+
+impl Starts {
+    /// Records that a held beat of `host` lists the jobs `starting` as `starting` at `now_ms`,
+    /// and says whether one of them was first seen so less than [`STARTING_WINDOW_MS`] ago (a
+    /// job not seen before is first seen now). A job the beat does not list is forgotten, so one
+    /// listed `starting` again later counts from then.
+    pub(crate) fn young(&self, host: &HostId, starting: &[&str], now_ms: u64) -> bool {
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = seen.remove(host).unwrap_or_default();
+        let now: BTreeMap<String, u64> = starting
+            .iter()
+            .map(|id| (id.to_string(), before.get(*id).copied().unwrap_or(now_ms)))
+            .collect();
+        let young = now
+            .values()
+            .any(|first| now_ms.saturating_sub(*first) < STARTING_WINDOW_MS);
+        if !now.is_empty() {
+            seen.insert(host.clone(), now);
+        }
+        young
+    }
+}
+
 /// The heartbeats being watched, one per host, and how often a held reply began to wait.
 #[derive(Clone)]
 pub(crate) struct Wakes {
@@ -38,6 +94,8 @@ pub(crate) struct Wakes {
     watched: Arc<Mutex<BTreeMap<HostId, Arc<Notify>>>>,
     /// How many times a held reply began to wait for a wake: the progress a test waits for.
     waits: Arc<watch::Sender<u64>>,
+    /// The bound the last hold that began was given: what a test reads to see which it took.
+    bound: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Default for Wakes {
@@ -45,6 +103,7 @@ impl Default for Wakes {
         Wakes {
             watched: Arc::default(),
             waits: Arc::new(watch::Sender::new(0)),
+            bound: Arc::default(),
         }
     }
 }
@@ -79,6 +138,17 @@ impl Wakes {
     /// after each wake that brought nothing to send.
     pub(crate) fn waiting(&self) {
         self.waits.send_modify(|waits| *waits += 1);
+    }
+
+    /// Notes that a hold begins with `bound`, before its first wait.
+    pub(crate) fn holding_for(&self, bound: Duration) {
+        *self.bound.lock().unwrap_or_else(PoisonError::into_inner) = Some(bound);
+    }
+
+    /// The bound the last hold that began was given, `None` before any.
+    #[cfg(test)]
+    pub(crate) fn last_bound(&self) -> Option<Duration> {
+        *self.bound.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// How many times a held reply began to wait, as a receiver a test waits on.

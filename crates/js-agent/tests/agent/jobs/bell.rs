@@ -41,14 +41,15 @@ fn counting() -> (Bell, Arc<AtomicUsize>) {
     (bell, rings)
 }
 
-/// Proves the worker rings its bell when a run it started runs and when that run ends, not
-/// when it lists the start as starting (the image is still being pulled), and not when the
-/// server's acknowledgement removes the result; and that a second bell given to the worker
-/// is never rung. Catches a worker that rings for every publish, one that rings only at the
-/// end of a run, a bell that is replaced by a later one, and a ring for a result the server
-/// itself acknowledged.
+/// Proves the worker rings its bell once when it lists a start as starting (the image is
+/// still being pulled), when that run runs and when it ends, and not when the server's
+/// acknowledgement removes the result; and that a second bell given to the worker is never
+/// rung. Catches a worker that rings for every publish, one that rings only at the end of a
+/// run, one that does not ring for a start taken (so no heartbeat is held at the server for a
+/// placement meanwhile), a bell that is replaced by a later one, and a ring for a result the
+/// server itself acknowledged.
 #[test]
-fn the_worker_rings_for_a_run_that_runs_and_ends_not_for_a_start_taken_or_an_ack() {
+fn the_worker_rings_for_a_start_taken_a_run_that_runs_and_ends_not_for_an_ack() {
     let dir = Scratch::new("jobs-bell-worker");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
@@ -63,17 +64,19 @@ fn the_worker_rings_for_a_run_that_runs_and_ends_not_for_a_start_taken_or_an_ack
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().held[0].state, HeldState::Starting);
-    assert_eq!(rings.load(Ordering::SeqCst), 0, "a start taken is no news");
+    assert_eq!(rings.load(Ordering::SeqCst), 1, "a start taken is news");
+    assert!(worker.handle().settle());
+    assert_eq!(rings.load(Ordering::SeqCst), 1, "the same start rings once");
 
     machine.world.end_pull(&image, true);
     assert!(worker.handle().wait_until(&running, HANG_GUARD));
     assert!(worker.handle().settle());
-    assert_eq!(rings.load(Ordering::SeqCst), 1, "the run runs");
+    assert_eq!(rings.load(Ordering::SeqCst), 2, "the run runs");
 
     machine.world.exit("r1", 0);
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().results.len(), 1);
-    assert_eq!(rings.load(Ordering::SeqCst), 2, "the run ended");
+    assert_eq!(rings.load(Ordering::SeqCst), 3, "the run ended");
 
     let ack = acks("r1", "ACCEPTED");
     assert_eq!(worker.try_deliver(ack), Delivery::Delivered);
@@ -81,7 +84,7 @@ fn the_worker_rings_for_a_run_that_runs_and_ends_not_for_a_start_taken_or_an_ack
     assert!(worker.snapshot().results.is_empty());
     assert_eq!(
         rings.load(Ordering::SeqCst),
-        2,
+        3,
         "an acknowledgement is none"
     );
     assert_eq!(

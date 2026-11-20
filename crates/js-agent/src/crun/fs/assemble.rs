@@ -1,6 +1,7 @@
 //! The assembly of a job's file system once its host paths are open and its images are in
 //! the store (`docs/design/job-rootfs.md`, 4.2 step 3, 4.3 and 4.4), made by a thread of the
-//! `js-paths` pool, since its mounts look up the providers' file systems:
+//! `js-paths` pool (not the pool of the lookups, which no assembly may hold), since its mounts
+//! look up the providers' file systems:
 //!
 //! 1. each opened host path (the layers' first, then the mounts') cloned private, `nosuid`
 //!    and `nodev` (read-only for a layer and a read-only mount, `noexec` when the mount asks)
