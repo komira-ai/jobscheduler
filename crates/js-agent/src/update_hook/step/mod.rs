@@ -17,6 +17,7 @@ mod cutover;
 mod drain;
 mod held;
 mod helper;
+mod pf;
 mod prepare;
 mod resume;
 mod rollback;
@@ -66,7 +67,9 @@ pub struct Env<'a> {
     /// The unit manager, the release link, the lease server, the agent's state root, time and
     /// the kill points.
     pub ports: Ports<'a>,
-    /// Runs the staged agent's `--version`, and `systemctl` where the unit manager is systemd.
+    /// Runs the staged agent's `--version`, the staged `js-mac-provision` that loads the pool's
+    /// pf anchor on a Mac, `launchctl bootstrap`, and `systemctl` where the unit manager is
+    /// systemd.
     pub runner: &'a dyn CommandRunner,
     /// Which unit manager runs the agent, and so which unit file a release carries.
     pub manager: Manager,
@@ -159,6 +162,7 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
 /// [`open_state`] without the rules: the record as it was loaded, for `prepare` to judge.
 fn open_unchecked(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
     helper::refuse_without_launchd(env, params)?;
+    pf::refuse_without_launchd(env, params)?;
     let held = Held::open_or_make(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;
     Ok((held, record))

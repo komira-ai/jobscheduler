@@ -19,6 +19,9 @@ clap.workspace = true
 # The one way the agent's code starts a program (`disclaim::Program`): `pfctl`
 # is started with its privacy (TCC) responsibility disclaimed on macOS.
 js-mac-session = { path = "../js-mac-session" }
+# `geteuid`: `install --flags-file` trusts a flags file of root or of the user running it, as the
+# agent does.
+rustix.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

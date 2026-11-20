@@ -47,6 +47,7 @@ mod steps_cutover_launchd;
 mod steps_drain;
 mod steps_helper;
 mod steps_host_files;
+mod steps_pf;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_prepare_first_dirs;

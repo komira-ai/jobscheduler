@@ -101,7 +101,7 @@ fn with_mac(dir: &TestDir, sums: &Serve<'_>, pkg: &Serve<'_>) -> DesiredArgs {
 /// proto3 canonical JSON hostkeeper reads: the whole text, written out.
 fn mac_golden() -> String {
     format!(
-        "{{\"bytes\":\"21\",\"digest\":\"{}\",\"installer\":\"macos-pkg\",\"manifest\":{{\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/Library/Application Support/js-agent/bin/js-agent\",\"update-hook\"],\"drain\":\"drain\",\"resume\":\"resume\",\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"com.komira.js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"helper_unit\":{{\"text\":\"js-agent.session\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"native\"}},\"state_dir\":{{\"text\":\"/Library/Application Support/js-agent/update\"}},\"state_root\":{{\"text\":\"/var/db/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent\",\"js-agent.session\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}",
+        "{{\"bytes\":\"21\",\"digest\":\"{}\",\"installer\":\"macos-pkg\",\"manifest\":{{\"hook\":{{\"cleanupRetries\":3,\"command\":[\"/Library/Application Support/js-agent/bin/js-agent\",\"update-hook\"],\"drain\":\"drain\",\"resume\":\"resume\",\"timeoutSecs\":{{\"cleanup\":\"120\",\"cutover\":\"4320\",\"prepare\":\"3900\",\"rollback\":\"8220\",\"verify\":\"615\"}},\"verifyDeadlineSecs\":\"9000\"}},\"installerBounds\":{{\"activateSecs\":\"300\",\"removeSecs\":\"300\",\"stageSecs\":\"600\"}},\"minHostkeeper\":\"0.1.225\",\"package\":\"com.komira.js-agent\",\"params\":{{\"cleanup_timeout_secs\":{{\"integer\":\"120\"}},\"cordon_lease_secs\":{{\"integer\":\"300\"}},\"cordon_max_secs\":{{\"integer\":\"17355\"}},\"cutover_timeout_secs\":{{\"integer\":\"4320\"}},\"defer_retry_secs\":{{\"integer\":\"300\"}},\"drain_wait_secs\":{{\"integer\":\"3600\"}},\"flags_file\":{{\"text\":\"/etc/js-agent/flags\"}},\"helper_unit\":{{\"text\":\"js-agent.session\"}},\"pf_unit\":{{\"text\":\"js-agent.pf-pool\"}},\"prepare_timeout_secs\":{{\"integer\":\"3900\"}},\"release_link\":{{\"text\":\"/var/lib/hostkeeper/packages/js-agent/current\"}},\"rollback_timeout_secs\":{{\"integer\":\"8220\"}},\"runtime\":{{\"text\":\"native\"}},\"state_dir\":{{\"text\":\"/Library/Application Support/js-agent/update\"}},\"state_root\":{{\"text\":\"/var/db/js-agent/state\"}},\"token_file\":{{\"text\":\"/etc/js-agent/token\"}},\"unit\":{{\"text\":\"js-agent\"}},\"verify_deadline_secs\":{{\"integer\":\"9000\"}},\"verify_timeout_secs\":{{\"integer\":\"615\"}}}},\"run\":[\"js-agent\",\"js-agent.session\",\"js-agent.pf-pool\"]}},\"packageVersion\":\"1.2.3\",\"repository\":\"komira-stable\"}}",
         pkg_digest()
     )
 }
@@ -350,7 +350,8 @@ fn the_package_is_named_by_its_version() {
     assert_eq!(file_name(version), PKG_NAME);
 }
 
-/// Asserts the Mac manifest against the Linux one: the same keys and bounds plus `helper_unit`,
+/// Asserts the Mac manifest against the Linux one: the same keys and bounds plus `helper_unit`
+/// and `pf_unit`,
 /// the package identifier, the launchd labels and the hook program the package installs, and
 /// that the Linux manifest is the one it was.
 #[test]
@@ -365,6 +366,7 @@ fn the_mac_manifest_is_the_linux_one_with_the_mac_units_paths_and_runtime() {
     };
     let mut linux_keys = keys(&PARAMS);
     linux_keys.push("helper_unit".to_owned());
+    linux_keys.push("pf_unit".to_owned());
     linux_keys.sort();
     assert_eq!(keys(&MAC_PARAMS), linux_keys);
     assert_eq!(mac["installerBounds"], linux["installerBounds"]);

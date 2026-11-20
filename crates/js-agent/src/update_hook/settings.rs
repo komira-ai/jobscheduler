@@ -43,6 +43,11 @@ pub struct Settings {
     /// has one. `cutover` and `rollback` boot it out after the agent is stopped and bootstrap
     /// it from the release being started, before the agent is. Only a launchd host has one.
     pub helper_unit: Option<String>,
+    /// The launchd job that keeps the pool's pf anchor loaded (`js-agent.pf-pool` on a Mac), when
+    /// the package has one. `cutover` boots it out, loads the anchor of the host's flags file with
+    /// the staged release's `js-mac-provision`, and bootstraps it from the staged release, before
+    /// the agent starts. Only a launchd host has one.
+    pub pf_unit: Option<String>,
     /// The runtime the unit's agent must have (`crun`, `docker` or `native`): the staged agent
     /// must list it, and the agent that says hello after the cutover runs jobs the way it
     /// does.

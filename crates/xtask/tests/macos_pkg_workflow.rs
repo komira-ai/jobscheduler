@@ -564,6 +564,11 @@ fn package_problems(text: &str) -> Vec<String> {
         "the helper's plist does not name the agent by its cdhash",
     );
     want(
+        build.contains("target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist")
+            && build.contains("--pf-pool-plist inputs/pf-pool.plist"),
+        "the pf daemon's plist is not the fixed one",
+    );
+    want(
         build.contains("cdhash=\"$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')\""),
         "the cdhash is not read from the js-agent binary that is built",
     );
@@ -636,6 +641,16 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "--daemon-requirement \"cdhash H\\\"$cdhash\\\"\"",
             "--daemon-requirement SET-THE-DAEMON-REQUIREMENT",
             "the helper's plist does not name the agent by its cdhash",
+        ),
+        (
+            "pf-pool-plist > inputs/pf-pool.plist",
+            "launchd-plist --program /x --uid-start 600 --uid-count 100 > inputs/pf-pool.plist",
+            "the pf daemon's plist is not the fixed one",
+        ),
+        (
+            "--pf-pool-plist inputs/pf-pool.plist",
+            "--pf-pool-plist inputs/other.plist",
+            "the pf daemon's plist is not the fixed one",
         ),
         (
             "codesign --display --verbose=4 target/release/js-agent 2>&1",

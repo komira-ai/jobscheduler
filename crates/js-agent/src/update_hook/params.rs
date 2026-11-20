@@ -12,6 +12,10 @@
 //! - `helper_unit` (optional, launchd only): the label of the agent's root helper job, which the
 //!   package's release tree carries as `tree/Library/LaunchDaemons/<helper_unit>.plist`; the hook
 //!   boots it out and bootstraps it again with each agent start (a file name: no `/`);
+//! - `pf_unit` (optional, launchd only): the label of the job that keeps the pool's pf anchor
+//!   loaded, carried as `tree/Library/LaunchDaemons/<pf_unit>.plist`; `cutover` boots it out,
+//!   loads the anchor of the host's flags file with the staged release's `js-mac-provision` and
+//!   bootstraps it again before the agent starts (a file name: no `/`);
 //! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
 //! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
 //!   the hook finds the lease server, the certificate to trust and the host id;
@@ -92,6 +96,9 @@ pub const UNIT_KEY: &str = "unit";
 
 /// The key of the launchd job of the agent's root helper (optional).
 pub const HELPER_UNIT_KEY: &str = "helper_unit";
+
+/// The key of the launchd job that keeps the pool's pf anchor loaded (optional).
+pub const PF_UNIT_KEY: &str = "pf_unit";
 
 /// The key of the directory of the hook record.
 pub const STATE_DIR_KEY: &str = "state_dir";
@@ -192,7 +199,7 @@ pub enum ParamsError {
     /// `unit` is empty.
     #[error("params key {0:?} must not be empty")]
     Empty(String),
-    /// `helper_unit` is not a plain file name: it becomes part of the path of the helper's plist
+    /// `helper_unit` or `pf_unit` is not a plain file name: it becomes part of the path of a plist
     /// in the release tree.
     #[error("params key {0:?} must be a plain file name: not empty, not . or .., no /")]
     NotFileName(String),
@@ -375,13 +382,8 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
         return Err(ParamsError::NotPlain(STATE_DIR_KEY.to_owned()));
     }
     let unit = unit_of(table)?;
-    let helper_unit = string_of(table, HELPER_UNIT_KEY)?;
-    if helper_unit
-        .as_deref()
-        .is_some_and(|name| matches!(name, "" | "." | "..") || name.contains('/'))
-    {
-        return Err(ParamsError::NotFileName(HELPER_UNIT_KEY.to_owned()));
-    }
+    let helper_unit = file_name_of(table, HELPER_UNIT_KEY)?;
+    let pf_unit = file_name_of(table, PF_UNIT_KEY)?;
     let runtime = string_of(table, RUNTIME_KEY)?.ok_or(ParamsError::Missing(RUNTIME_KEY))?;
     if !RUNTIMES.contains(&runtime.as_str()) {
         return Err(ParamsError::UnknownRuntime(runtime));
@@ -407,10 +409,24 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
         state_dir,
         unit,
         helper_unit,
+        pf_unit,
         runtime,
         timeouts,
         verify_deadline_secs,
     })
+}
+
+/// An optional key that is a plain file name (not empty, not `.` or `..`, no `/`): a launchd
+/// label, which becomes part of the path of its plist in the release tree.
+fn file_name_of(table: &toml::Table, key: &'static str) -> Result<Option<String>, ParamsError> {
+    let name = string_of(table, key)?;
+    if name
+        .as_deref()
+        .is_some_and(|name| matches!(name, "" | "." | "..") || name.contains('/'))
+    {
+        return Err(ParamsError::NotFileName(key.to_owned()));
+    }
+    Ok(name)
 }
 
 /// A required key that is a whole number of seconds.

@@ -610,8 +610,8 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `package` | `com.komira.js-agent` |
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
 | `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
-| `run` | the launchd labels `js-agent` and `js-agent.session` (the agent and its root helper) |
-| `params.unit`, `params.helper_unit` | `js-agent`, `js-agent.session` |
+| `run` | the launchd labels `js-agent`, `js-agent.session` and `js-agent.pf-pool` (the agent, its root helper and the job that keeps the pool's pf anchor loaded) |
+| `params.unit`, `params.helper_unit`, `params.pf_unit` | `js-agent`, `js-agent.session`, `js-agent.pf-pool` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |
 | `params.runtime` | `native` |
