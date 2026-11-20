@@ -321,8 +321,8 @@ fn a_stop_that_fails_fails_the_resume_and_the_hold_stays() {
 }
 
 /// Asserts that a unit that does not go down within `RESTART_STOP_SECS` fails the resume with
-/// `stop_failed` and the exact detail, after that many seconds of polls, with no start made and
-/// the hold and the cordon left. It catches a restart that waits for ever or starts a unit that
+/// `stop_failed` and the exact detail, after that many seconds of polls, with no start made, the
+/// hold left and no cordon lifted. It catches a restart that waits for ever or starts a unit that
 /// never stopped.
 #[test]
 fn a_unit_that_never_goes_down_fails_the_resume_after_the_stop_bound() {
@@ -339,7 +339,9 @@ fn a_unit_that_never_goes_down_fails_the_resume_after_the_stop_bound() {
     assert_eq!(rig.world.ticks() as u64, RESTART_STOP_SECS / POLL_SECS);
     assert_eq!(probe.count("units.start"), 0);
     assert!(rig.hold_text().is_some());
-    assert!(rig.expiry().is_some());
+    // The fake clock has passed the drain's lease, so its cordon has lapsed on its own (on a
+    // host the held agent renews it); what the step must not do is lift it.
+    assert_eq!(probe.count("lease.uncordon"), 0);
 }
 
 /// Asserts that a unit state that cannot be read while the resume waits for the stop fails it
@@ -382,8 +384,8 @@ fn a_start_that_fails_fails_the_resume_and_the_hold_stays() {
 }
 
 /// Asserts that an agent that says no hello within `RESTART_HELLO_SECS` fails the resume with
-/// `no_hello` and the exact detail, after that many seconds of polls, with the hold and the
-/// cordon left. It catches a resume that lifts the cordon before the new agent is known to the
+/// `no_hello` and the exact detail, after that many seconds of polls, with the hold left and no
+/// cordon lifted. It catches a resume that lifts the cordon before the new agent is known to the
 /// server.
 #[test]
 fn an_agent_that_says_no_hello_fails_the_resume_with_no_hello() {
@@ -398,7 +400,8 @@ fn an_agent_that_says_no_hello_fails_the_resume_with_no_hello() {
     );
     assert_eq!(rig.world.ticks() as u64, RESTART_HELLO_SECS / POLL_SECS);
     assert!(rig.hold_text().is_some());
-    assert!(rig.expiry().is_some());
+    // The fake clock has passed the drain's lease, so its cordon has lapsed on its own (on a
+    // host the held agent renews it); what the step must not do is lift it.
     assert_eq!(probe.count("lease.uncordon"), 0);
 }
 
