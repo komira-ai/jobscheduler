@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_agent_wire::{DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
-use js_caps::{FLAG_SET, LAYERED_ROOTFS, is_mount_provider_key};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, is_mount_provider_key};
 use js_elastic::CapacityProvider;
 use js_jobs::Isolation;
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
@@ -146,6 +146,19 @@ pub(crate) fn reported_mount_providers(capabilities: &BTreeMap<String, String>) 
         .iter()
         .filter(|(key, value)| is_mount_provider_key(key) & (value.as_str() == FLAG_SET))
         .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// The builds of the Xcodes `capabilities`, those a host's hello reported, list under
+/// [`XCODE`]: the value split on `,`, empty pieces skipped, in the order given.
+pub(crate) fn reported_xcodes(capabilities: &BTreeMap<String, String>) -> Vec<String> {
+    capabilities
+        .get(XCODE)
+        .map(|builds| builds.split(','))
+        .into_iter()
+        .flatten()
+        .filter(|build| !build.is_empty())
+        .map(str::to_owned)
         .collect()
 }
 
@@ -305,5 +318,22 @@ mod tests {
             ["mount-provider.cache", "mount-provider.tierstore"]
         );
         assert!(reported_mount_providers(&BTreeMap::new()).is_empty());
+    }
+
+    /// Asserts that a hello's `xcode` capability is read as its builds split on `,` in the order
+    /// given, with empty pieces skipped, one build staying one, and that a hello without it (or
+    /// with an empty value) reports none. Catches a joined value read as one build, which no job
+    /// names.
+    #[test]
+    fn xcodes_are_reported_as_the_builds_of_the_joined_value() {
+        let with = |value: &str| BTreeMap::from([("xcode".to_owned(), value.to_owned())]);
+        assert_eq!(
+            reported_xcodes(&with("16C5032a,16E140")),
+            ["16C5032a", "16E140"]
+        );
+        assert_eq!(reported_xcodes(&with(",16E140,,")), ["16E140"]);
+        assert_eq!(reported_xcodes(&with("16E140")), ["16E140"]);
+        assert!(reported_xcodes(&with("")).is_empty());
+        assert!(reported_xcodes(&BTreeMap::new()).is_empty());
     }
 }

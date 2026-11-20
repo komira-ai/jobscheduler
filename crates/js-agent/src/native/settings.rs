@@ -13,6 +13,7 @@ use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
 use crate::logs::{DEFAULT_FILE_CAP, LogPlan};
+use crate::xcode::Xcode;
 
 /// Where the helper makes lease users' homes unless `--native-homes` says otherwise.
 pub const DEFAULT_HOMES: &str = "/Users";
@@ -60,6 +61,8 @@ pub struct NativeSettings {
     config: NativeConfig,
     sandbox_exec: PathBuf,
     bundles: Option<Arc<Placer>>,
+    /// The Xcodes the host holds, which a job start may name by build.
+    xcodes: Vec<Xcode>,
     /// Live logs: the file cap of a run with a sink and the host's credential.
     logs: LogPlan,
 }
@@ -181,6 +184,7 @@ impl NativeSettings {
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
+            xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
         }))
     }
@@ -244,6 +248,18 @@ impl NativeSettings {
     #[must_use]
     pub fn logs(&self) -> &LogPlan {
         &self.logs
+    }
+
+    /// The same settings with `xcodes` as the Xcodes the runtime runs a job with, by build.
+    #[must_use]
+    pub fn with_xcodes(self, xcodes: Vec<Xcode>) -> Self {
+        Self { xcodes, ..self }
+    }
+
+    /// The Xcodes of the runtime.
+    #[must_use]
+    pub fn xcodes(&self) -> &[Xcode] {
+        &self.xcodes
     }
 
     /// The bundle store of the runtime, if there is one.

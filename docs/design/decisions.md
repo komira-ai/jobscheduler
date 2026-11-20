@@ -86,7 +86,7 @@ marked settled. The ids run D1 to D66 with no gaps. D26 is open. Superseded deci
   packing matters more (6.5). The trade-off is the boot cost per run, which neither option changes. The wire carries the VM's size under
   both, and the lifecycle, the channel and the integrity rules do not change; only the size fields (step 43) wait. No recommendation
   until the answer arrives; detail in [vm-backend.md](vm-backend.md).
-- **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
+- **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16B40,16C5032a`); (b) an additive typed
   `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
   scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
 - **D28. Runtime traits for VMs.** (a) Widen `Runtime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an

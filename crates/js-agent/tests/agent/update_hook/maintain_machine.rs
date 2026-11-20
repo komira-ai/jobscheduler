@@ -28,6 +28,7 @@ use crate::server::T0;
 use crate::support::{
     AMD_MAC, Host, NVIDIA_CMD, OS_VERSION_CMD, PROFILER_CMD, linux_host, mac_host,
 };
+use crate::xcodes::with_installed;
 
 /// The agent's unit in the params of these tests. No test starts or stops it.
 const UNIT: &str = "js-agent-crun.service";
@@ -364,7 +365,7 @@ fn the_facts_of_a_mac_carry_its_os_version() {
         line,
         format!(
             "os=macos arch=aarch64 os_version=26 cpu_millis=10000 memory_bytes=17179869184 gpus=1 \
-             gpu_class={} gpu_devices=",
+             gpu_class={} gpu_devices= xcode=",
             js_agent::APPLE_GPU_CLASS
         )
     );
@@ -377,8 +378,43 @@ fn the_facts_of_a_mac_carry_its_os_version() {
     assert_eq!(
         line,
         "os=macos arch=aarch64 os_version=26 cpu_millis=10000 memory_bytes=17179869184 gpus=0 \
-         gpu_class= gpu_devices="
+         gpu_class= gpu_devices= xcode="
     );
+}
+
+/// Asserts that the line of a Mac ends with the builds of its installed Xcodes, ascending and
+/// joined with a comma (`xcode=16C5032a,16F6`), that it differs once an Xcode is added to the
+/// files, and that a Linux host's line has no `xcode` part even with Xcode apps in
+/// `/Applications`. It catches an Xcode installed during a maintenance run that reads as no
+/// change, so the agent would keep a hello without it.
+#[test]
+fn the_facts_of_a_mac_name_its_xcodes_and_change_when_one_is_installed() {
+    let mut mac = mac_host();
+    mac.files = with_installed(
+        mac.files,
+        &[("Xcode-16.4.app", "16F6"), ("Xcode-16.2.app", "16C5032a")],
+    );
+    let line = host_facts(&mac.platform, &mac.commands, &mac.files).unwrap();
+    assert!(
+        line.ends_with(" gpu_devices= xcode=16C5032a,16F6"),
+        "{line}"
+    );
+    mac.files = with_installed(
+        mac.files,
+        &[
+            ("Xcode-16.4.app", "16F6"),
+            ("Xcode-16.2.app", "16C5032a"),
+            ("Xcode-26.app", "17A100"),
+        ],
+    );
+    let later = host_facts(&mac.platform, &mac.commands, &mac.files).unwrap();
+    assert!(later.ends_with(" xcode=16C5032a,16F6,17A100"), "{later}");
+    assert_ne!(line, later);
+
+    let mut linux = linux_host();
+    linux.files = with_installed(linux.files, &[("Xcode-16.2.app", "16C5032a")]);
+    let line = host_facts(&linux.platform, &linux.commands, &linux.files).unwrap();
+    assert!(!line.contains("xcode"), "{line}");
 }
 
 /// Asserts that a host whose facts cannot be detected (no `/proc/meminfo`) is an error with

@@ -112,6 +112,10 @@ impl Runtime for WithVms {
         self.other.check_env(env)
     }
 
+    fn check_xcode(&self, build: &str) -> Result<(), NativeRefusal> {
+        self.other.check_xcode(build)
+    }
+
     fn check_image(&self) -> Result<(), NativeRefusal> {
         self.other.check_image()
     }

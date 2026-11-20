@@ -33,6 +33,7 @@ mod runtime;
 mod settings;
 mod silence;
 mod worker;
+mod xcode;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,6 +119,13 @@ impl Rig {
         Self { fake, rt, dir }
     }
 
+    /// The same rig, its runtime holding `xcodes`: a start may name the build of one.
+    pub fn holding(self, xcodes: Vec<js_agent::xcode::Xcode>) -> Self {
+        let Self { fake, rt, dir } = self;
+        let rt = rt.with_xcodes(xcodes);
+        Self { fake, rt, dir }
+    }
+
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.
     pub fn spec(&self, run_id: &str, native: NativeSpec) -> RunSpec {
         let scratch = self.dir.path("scratch").join(run_id);
@@ -142,6 +150,7 @@ impl Rig {
             ports: Vec::new(),
             host_ports: Vec::new(),
             log_sink: None,
+            xcode: None,
         }
     }
 
