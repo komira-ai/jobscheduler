@@ -169,6 +169,18 @@ fn a_write_that_loses_twice_is_given_up() {
     assert_eq!(row(&a), Some(ScaleMark::Draining));
 }
 
+/// Asserts that a mark whose row cannot be read is left to the next tick's mirror: the
+/// registry holds the draining mark and no row is written. Catches a failed read taken for
+/// an absent row, which would write the mark over a row this server could not read.
+#[test]
+fn a_mark_whose_row_cannot_be_read_writes_nothing() {
+    let (effects, a, _b, store, _dirs) = two("marks-unread");
+    store.fail_read_after(0);
+    effects.call(Call::Drain, "h1");
+    assert_eq!(row(&a), None);
+    assert_eq!(held(&a), Some(HostMark::Draining));
+}
+
 /// Rewrites the row of `h1` as draining, a new version of it.
 fn rewrite(jobs: &ServerJobs) {
     let (_, at) = jobs.read_host_mark(&h1()).unwrap().unwrap();
