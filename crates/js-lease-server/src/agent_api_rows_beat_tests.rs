@@ -272,7 +272,16 @@ async fn the_pass_places_on_a_host_whose_row_says_clean_whichever_server_wrote_i
         "a pass that cannot read the rows places nothing"
     );
 
-    // The rows are read; the queue after them is not: the job stays queued for the next pass.
+    // A job table changes (a second job is queued behind the first), so the next pass reads the
+    // tables again; the rows are read, the queue after them is not: the jobs stay queued for the
+    // next pass.
+    let behind = NewJob {
+        id: Some(job("job-r")),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    world.jobs.insert_queued(behind).unwrap();
     world.store.fail_read_after(1);
     first.agents.place_jobs();
     assert_eq!(state(), JobState::Queued);

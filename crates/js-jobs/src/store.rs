@@ -97,9 +97,10 @@ pub struct JobPage {
 /// it needs, decides, and commits with the versions it read as preconditions, so a row that
 /// changed in between makes the operation [`JobStoreError::Stale`].
 ///
-/// Every write it makes is counted, and the store's head is read ([`JobStore::written`]), so a
-/// caller that read the tables can tell that they have not changed since, by this server or by
-/// another over the same store, without reading them again.
+/// Every write of its job tables is counted, and the store's head and feed are read
+/// ([`JobStore::written`]), so a caller that read the tables can tell that they have not changed
+/// since, by this server or by another over the same store, without reading them again; a
+/// heartbeat's write of its host's node row is not a change of the tables.
 ///
 /// A job store made by [`JobStore::guarded`] is a view of one that shares its store, its ids
 /// and its write count, and adds to every transaction it writes a check that a host's node row
@@ -111,9 +112,13 @@ pub struct JobStore<S, I = RandomIds> {
     schema: u32,
     /// The number of this job store among those this process made ([`Written`]).
     instance: u64,
-    /// How many writes this job store has sent to the store since it was made, whatever each
-    /// answered ([`JobStore::written`]).
+    /// How many writes of the job tables this job store has sent to the store since it was
+    /// made, whatever each answered ([`JobStore::written`]); a write of a host's node row is not
+    /// one.
     writes: Arc<AtomicU64>,
+    /// The store's head as [`JobStore::written`] last read it, and the head at the last commit
+    /// that changed a job table, as far as the feed told: shared with the guarded views.
+    heads: Arc<std::sync::Mutex<written::Heads>>,
     /// The node row every write of this job store is conditional on ([`JobStore::guarded`]);
     /// `None` for a job store that is not a guarded view.
     guard: Option<guard::Guard>,
@@ -253,6 +258,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             schema,
             instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             writes: Arc::new(AtomicU64::new(0)),
+            heads: Arc::default(),
             guard: None,
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
@@ -794,6 +800,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// A guarded view ([`JobStore::guarded`]) adds the check of its node row to `txn`, and a
     /// conflict on that row is [`JobStoreError::NodeMoved`]. A job store that is not guarded
     /// sends `txn` as it is.
+    /// Commits `txn`, which writes only a host's node row, without counting it as a write of
+    /// the job tables ([`JobStore::written`]): every heartbeat writes its host's row, and a
+    /// reader of the tables is not to read them again for that.
+    fn write_node(&self, txn: Txn) -> Result<Result<Commit, Conflict>, JobStoreError> {
+        let answer = self.store.txn(self.guard_txn(txn));
+        match answer? {
+            Err(conflict) => self.refuse_moved(conflict).map(Err),
+            committed => Ok(committed),
+        }
+    }
+
     fn write(&self, txn: Txn) -> Result<Result<Commit, Conflict>, JobStoreError> {
         let answer = self.store.txn(self.guard_txn(txn));
         self.writes.fetch_add(1, Ordering::SeqCst);

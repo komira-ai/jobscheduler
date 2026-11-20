@@ -71,8 +71,10 @@ What the shape removes:
 **Its cost.** A heartbeat becomes one short write per host per beat interval (5 s by default, `js-agent-wire/src/lib.rs:225`),
 where today a beat that changes nothing writes nothing. That is about the rate the project owner accepted for the coordinator
 (komira-ai/hostkeeper's design, section 19, decision 4). Through the `Store`, each beat is also a revision and a feed row, taken
-under the commit head behind every claimed placement (3.1). It moves the head that every pass's table cache is judged by
-(`js-jobs/src/store/written.rs`, #880), so a pass is skipped as unchanged only between beats. The other standard form is a plain
+under the commit head behind every claimed placement (3.1). It moves the store's head, so the reading every pass's table cache is
+judged by (`js-jobs/src/store/written.rs`, #880) reads the feed's rows since its last reading and moves only for a row outside
+`node/` (Built, G15): a quiet beat leaves the tables cached and the pass skipped as before, at the cost of a short feed read and a
+scan of the `node/` rows for the listing-clean flags per pass. The other standard form is a plain
 `node` table on the store's own connections (`js-state/src/postgres/extension.rs`, no head, no feed), with
 `UPDATE ... WHERE epoch = $1 AND seq < $2 RETURNING` as the guard. It gives up the same-transaction `Checked` guard of the listing.
 G15 chooses between the two by measuring both at the deployment's host count.
