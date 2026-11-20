@@ -508,6 +508,28 @@ fn the_machine_looks_at_directories_files_and_users_as_the_system_does() {
     );
 }
 
+/// Asserts that the machine's look at a root of the host setup is the system's: the device and
+/// owner of the directory, a link followed, and an error for a path that is not there; and that
+/// the file system table it names is the Mac's.
+#[test]
+fn the_machine_looks_at_a_root_as_the_system_does_and_names_the_macs_fstab() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-machine-look");
+    let dir = tmp.path().join("root");
+    fs::create_dir(&dir).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let meta = fs::metadata(&dir).unwrap();
+    let look = Machine::system().look;
+    for path in [&dir, &link] {
+        let facts = look(path).unwrap();
+        assert_eq!((facts.device, facts.uid), (meta.dev(), meta.uid()));
+    }
+    let missing = look(&tmp.path().join("missing")).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(Machine::system().fstab, Path::new("/etc/fstab"));
+}
+
 #[test]
 fn the_machines_own_host_id_is_the_agents_from_the_machine_id_it_reads() {
     let host = linux_host();

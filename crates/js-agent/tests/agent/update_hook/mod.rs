@@ -11,6 +11,8 @@ mod conformance;
 mod conformance_runs;
 mod drain_params;
 mod fake_bin;
+#[allow(dead_code)] // The rig of the host setup tests: each test file uses part of it.
+mod fake_mac;
 #[allow(dead_code)]
 #[path = "../../update_hook_fakes/mod.rs"]
 mod fakes;
@@ -47,6 +49,8 @@ mod steps_cutover_launchd;
 mod steps_drain;
 mod steps_helper;
 mod steps_host_files;
+mod steps_host_setup;
+mod steps_host_setup_volume;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_prepare_first_dirs;
