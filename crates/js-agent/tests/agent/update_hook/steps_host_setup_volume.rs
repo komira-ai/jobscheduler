@@ -394,3 +394,20 @@ fn a_state_root_that_cannot_be_made_defers() {
         &format!("{}: {why}", rig.params.state_root.display()),
     );
 }
+
+/// Asserts that a root whose own directory cannot be made though its parent can (a name longer
+/// than a file system allows) defers naming it and the cause, not taken for one that is there.
+#[test]
+fn a_root_whose_directory_cannot_be_made_under_its_parent_defers() {
+    let mut rig = mac_rig("hook-setup-root-too-long", false);
+    let parent = rig.tmp.path().join("db/js-agent");
+    let scratch = parent.join("s".repeat(300));
+    rig.params.scratch_root = Some(scratch.clone());
+    fs::create_dir_all(&parent).unwrap();
+    let why = fs::create_dir(&scratch).unwrap_err();
+    assert_ne!(why.kind(), std::io::ErrorKind::AlreadyExists);
+    let mac = FakeMac::new();
+    let done = spy_on(&rig, &mac).prepare(&rig);
+    assert_missing(&done, &format!("{}: {why}", scratch.display()));
+    assert!(mac.volume.borrow().is_none());
+}
