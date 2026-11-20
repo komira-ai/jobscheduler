@@ -75,11 +75,11 @@ pub fn run_on(
 }
 
 /// Runs `step` on this machine: the unit manager of the platform (`systemctl`, or `launchctl`
-/// with the kickstart held back while the token file is absent) and the real clock.
+/// with the kickstart held back while the flags file is absent) and the real clock.
 #[must_use]
 pub fn run_step(step: Step, params: &Params, machine: &Machine<'_>) -> Done {
     let commands = SystemCommands::default();
     let stop = StopRunner::new(Duration::from_secs(u64::from(AGENT_EXIT_TIMEOUT_SECS)));
-    let units = platform_units(&commands, &stop, &params.token_file);
+    let units = platform_units(&commands, &stop, &params.flags_file);
     run_on(step, params, machine, &units, &SystemClock)
 }

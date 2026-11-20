@@ -268,7 +268,7 @@ fn on_launchd_cutover_boots_the_service_out_and_bootstraps_it_again() {
     let clock = Ticks::default();
     let units = LaunchUnits::new(&tool)
         .with_clock(&clock)
-        .with_gate(Path::new(&tree.params.token_file));
+        .with_gate(Path::new(&tree.params.flags_file));
     let done = tree.run(Step::Cutover, Err("unused"), &units);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let calls = tool.calls();

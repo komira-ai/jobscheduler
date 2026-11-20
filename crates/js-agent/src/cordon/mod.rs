@@ -20,7 +20,8 @@
 //! An operator's measurement needs a node that no lease lands on for an hour or two. The
 //! lease server lets a host cordon itself (`POST /v1/hosts/{id}:cordon`), with the host's own
 //! credential: a cordon is a lease the caller renews, cut to an hour a request, and one that
-//! is not renewed lapses. The daemon calls no such route, so this verb does: it cordons, renews
+//! is not renewed lapses. The daemon calls that route only to keep a held host cordoned (see
+//! [`crate::hold_cordon`]), so for an operator's window this verb does: it cordons, renews
 //! every third of `--lease-secs` until `--for` has passed or SIGTERM, SIGINT or SIGHUP (the end
 //! of an ssh session) comes, and lifts the cordon.
 //!
