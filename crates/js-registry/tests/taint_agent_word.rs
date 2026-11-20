@@ -240,3 +240,143 @@ fn the_reply_names_the_taint_held_after_the_beat() {
     cleared.taint_cleared = Some(held);
     assert_eq!(beat_agreeing(&fx, &cleared).host_taint, None);
 }
+
+/// A beat of host `a` numbered `seq` (none for an agent that predates the number) that says
+/// whether the agent is tainted.
+fn numbered(fx: &Fixture, epoch: u64, seq: Option<u64>, tainted: Option<bool>) -> Heartbeat {
+    Heartbeat {
+        seq,
+        ..saying(fx, epoch, tainted)
+    }
+}
+
+/// Asserts that a beat that reaches the registry after a newer one, and says the agent holds
+/// none (`tainted` false), ends no taint: the check names no clearing, the reply still names
+/// the taint, and the view and the binding hold it; a newer beat that says the same then ends
+/// it. It catches a delayed clean beat that undoes a taint the agent reported after sending
+/// it.
+#[test]
+fn a_late_beat_that_says_the_agent_holds_none_leaves_the_taint_held() {
+    let held = taint("residue");
+    let (fx, epoch) = holding(&held);
+    let newest = numbered(&fx, epoch, Some(5), Some(true));
+    assert_eq!(beat_agreeing(&fx, &newest).host_taint, Some(held.clone()));
+
+    let late = numbered(&fx, epoch, Some(4), Some(false));
+    let check = fx.registry.check_heartbeat(&late, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, false));
+    assert_eq!(beat_agreeing(&fx, &late).host_taint, Some(held.clone()));
+    assert_eq!(view(&fx).taint, Some(held));
+
+    let next = numbered(&fx, epoch, Some(6), Some(false));
+    let check = fx.registry.check_heartbeat(&next, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, true));
+    assert_eq!(beat_agreeing(&fx, &next).host_taint, None);
+    assert_eq!(view(&fx).taint, None);
+}
+
+/// Asserts that a beat that reaches the registry after a newer one, and says the agent is
+/// tainted (`tainted` true), records no mirror on a host that holds no taint: the check names
+/// none and the view and the binding hold none; a newer beat that says the same records it.
+/// It catches a delayed tainted beat that gives a host the agent has cleared since a taint
+/// again.
+#[test]
+fn a_late_beat_that_says_the_agent_is_tainted_records_no_mirror() {
+    let (fx, epoch) = joined();
+    let newest = numbered(&fx, epoch, Some(5), Some(false));
+    assert_eq!(beat_agreeing(&fx, &newest).host_taint, None);
+
+    let late = numbered(&fx, epoch, Some(4), Some(true));
+    let check = fx.registry.check_heartbeat(&late, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, false));
+    assert_eq!(beat_agreeing(&fx, &late).host_taint, None);
+    assert_eq!(view(&fx).taint, None);
+    assert_eq!(fx.registry.bindings()[&host("a")].taint(), None);
+
+    let next = numbered(&fx, epoch, Some(6), Some(true));
+    let check = fx.registry.check_heartbeat(&next, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (Some(mirror()), false));
+    assert_eq!(beat_agreeing(&fx, &next).host_taint, Some(mirror()));
+}
+
+/// Asserts that a beat numbered as the newest one taken is overtaken, as a lower one is: a
+/// repeat of seq 3 that says the agent holds none ends no taint, and one that says it is
+/// tainted records no mirror. It catches a comparison that lets an equal number through.
+#[test]
+fn a_beat_with_the_newest_number_taken_is_late() {
+    let held = taint("residue");
+    let (fx, epoch) = holding(&held);
+    let first = numbered(&fx, epoch, Some(3), Some(true));
+    assert_eq!(beat_agreeing(&fx, &first).host_taint, Some(held.clone()));
+    let again = numbered(&fx, epoch, Some(3), Some(false));
+    let check = fx.registry.check_heartbeat(&again, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, false));
+    assert_eq!(beat_agreeing(&fx, &again).host_taint, Some(held));
+
+    let (fx, epoch) = joined();
+    let first = numbered(&fx, epoch, Some(3), Some(false));
+    assert_eq!(beat_agreeing(&fx, &first).host_taint, None);
+    let again = numbered(&fx, epoch, Some(3), Some(true));
+    let check = fx.registry.check_heartbeat(&again, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, false));
+    assert_eq!(beat_agreeing(&fx, &again).host_taint, None);
+}
+
+/// Asserts that a beat late by its number still acts on what it reports of a taint: a taint it
+/// reports is kept on a host that holds none, and a taint it reports cleared ends the one held.
+/// It catches a late beat whose whole message is dropped rather than only its word of
+/// `tainted`.
+#[test]
+fn a_late_beat_still_reports_and_clears_taints() {
+    let held = taint("residue");
+    let (fx, epoch) = joined();
+    let newest = numbered(&fx, epoch, Some(5), None);
+    assert_eq!(beat_agreeing(&fx, &newest).host_taint, None);
+    let mut report = numbered(&fx, epoch, Some(2), Some(true));
+    report.taint = Some(held.clone());
+    assert_eq!(beat_agreeing(&fx, &report).host_taint, Some(held.clone()));
+    let mut cleared = numbered(&fx, epoch, Some(1), Some(true));
+    cleared.taint_cleared = Some(held);
+    assert_eq!(beat_agreeing(&fx, &cleared).host_taint, None);
+    assert_eq!(view(&fx).taint, None);
+}
+
+/// Asserts that a beat without a number (an agent that predates it) is never late and moves
+/// the newest number taken by nothing: it records the mirror and ends a taint as before, after
+/// a numbered beat, and a numbered beat older than the newest taken before it is still late.
+/// It catches a missing number read as zero, or one that resets the count.
+#[test]
+fn a_beat_with_no_number_is_never_late_and_does_not_move_the_count() {
+    let (fx, epoch) = joined();
+    let numbered_first = numbered(&fx, epoch, Some(9), None);
+    assert_eq!(beat_agreeing(&fx, &numbered_first).host_taint, None);
+    let unnumbered = numbered(&fx, epoch, None, Some(true));
+    assert_eq!(beat_agreeing(&fx, &unnumbered).host_taint, Some(mirror()));
+
+    let late = numbered(&fx, epoch, Some(8), Some(false));
+    assert_eq!(beat_agreeing(&fx, &late).host_taint, Some(mirror()));
+    let clean = numbered(&fx, epoch, None, Some(false));
+    assert_eq!(beat_agreeing(&fx, &clean).host_taint, None);
+    assert_eq!(view(&fx).taint, None);
+}
+
+/// Asserts that the numbering starts over at a hello: after a session in which beat 5 was
+/// taken, the host says hello again and its beat 1 ends the taint it holds. It catches a count
+/// carried over from the old session, which holds the new session's first beats late.
+#[test]
+fn a_new_hello_starts_the_numbering_over() {
+    let held = taint("residue");
+    let (fx, epoch) = holding(&held);
+    let old = numbered(&fx, epoch, Some(5), Some(true));
+    assert_eq!(beat_agreeing(&fx, &old).host_taint, Some(held.clone()));
+
+    fx.pass_grace();
+    let epoch = fx.join("a", "t");
+    assert_eq!(epoch, 2);
+    assert_eq!(view(&fx).taint, Some(held));
+    let first = numbered(&fx, epoch, Some(1), Some(false));
+    let check = fx.registry.check_heartbeat(&first, &cred("t")).unwrap();
+    assert_eq!((check.taint, check.cleared), (None, true));
+    assert_eq!(beat_agreeing(&fx, &first).host_taint, None);
+    assert_eq!(view(&fx).taint, None);
+}

@@ -149,6 +149,7 @@ fn usage(fake: &Arc<Fake>) -> (Usage, ManualClock) {
 
 fn beat(host: &str, results: Vec<RunResult>) -> Heartbeat {
     Heartbeat {
+        seq: None,
         host_id: host.to_string(),
         epoch: 3,
         session: String::new(),

@@ -14,6 +14,17 @@
 //! reply that says `beat_now` (the server held it open, `held-beat`) it sends the next one at
 //! once instead, so one heartbeat is always waiting at the server for a start to ride on.
 //!
+//! Every heartbeat carries `seq`, the session's count of the heartbeats it sent: it is raised
+//! for every one, a retry of an unanswered or failed one included, and starts at 1 after each
+//! welcome (a new hello resets it). The server applies a beat only when its `seq` is newer
+//! than the newest it applied. The session reads no clock for it; it is a counter.
+//!
+//! Every hello carries `agent_process` when the session was given one
+//! ([`Session::with_agent_process`]): an id the agent draws once per process
+//! ([`agent_process`](crate::agent_process)) and sends in every hello of that process, the
+//! first and each one after a lost session. A server that knows the field takes the hello of
+//! the process that holds the host live over at once, instead of refusing it `host-live`.
+//!
 //! # What an answer does
 //!
 //! - 200: the work went through. A welcome or a heartbeat reply that does not decode or
@@ -30,8 +41,9 @@
 //!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
 //!   `body-too-large`). The operator fixes the cause and restarts the agent.
 //! - 409 to a heartbeat (`stale-epoch`, `unknown-host`, `host-lost`), and 403
-//!   `session-mismatch` to one: the server no longer holds this session, as after its
-//!   restart. The agent says hello again at once, but only when its last heartbeat was
+//!   `session-mismatch` to one: the server no longer holds this session. A server of this
+//!   release serves any beat on any instance from its store, so these come only from an older
+//!   server or a lost session (as after its restart). The agent says hello again at once, but only when its last heartbeat was
 //!   accepted: a heartbeat refused straight after a hello backs off like any failure, so
 //!   a server that welcomes and then refuses is not asked in a loop.
 //! - 403 `pool-full` to a hello, 409 to a hello (`host-live`: the old session of this
@@ -183,8 +195,10 @@ use crate::worker::{Delivery, Snapshot, Worker};
 
 mod fatal;
 mod note;
+mod reason;
 pub use fatal::Fatal;
-pub use note::{CredentialState, Note, Reason};
+pub use note::Note;
+pub use reason::{CredentialState, Reason};
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -323,6 +337,8 @@ pub struct Session<'a> {
     log_grant: Option<Arc<HostGrant>>,
     /// The last tick's wait may end when the worker has news ([`Session::beats_on_news`]).
     news: bool,
+    /// The `seq` of the last heartbeat sent in this session: 0 after a welcome.
+    seq: u64,
     /// Where each welcome is told to the dispatch poller, when the agent has one.
     dispatch: Option<&'a Cell>,
     /// What the host's health route answers from, when the agent has one.
@@ -356,9 +372,19 @@ impl<'a> Session<'a> {
             saying: None,
             log_grant: None,
             news: false,
+            seq: 0,
             dispatch: None,
             health: None,
         }
+    }
+
+    /// The same session saying hello as agent process `id` in every hello it sends (see the
+    /// module documentation), or naming no process when `id` is `None`. The id must pass
+    /// [`Hello::validate`]; one that does not makes every hello unusable.
+    #[must_use]
+    pub fn with_agent_process(mut self, id: Option<String>) -> Self {
+        self.hello.agent_process = id;
+        self
     }
 
     /// The same session filling `cell` with the live-log credential of the replies and
@@ -582,6 +608,7 @@ impl<'a> Session<'a> {
 
     /// Sends a heartbeat carrying the outbox's load, and tells the outbox how it went.
     fn send_beat(&mut self, live: &Live, lease: Fields, jobs: Snapshot) -> Result<Answer, Reason> {
+        self.seq = self.seq.saturating_add(1);
         let load = self.usage.as_ref().and_then(|outbox| outbox.take());
         self.saying = self
             .disk
@@ -612,6 +639,7 @@ impl<'a> Session<'a> {
             (phase, _) => phase,
         };
         let beat = Heartbeat {
+            seq: Some(self.seq),
             host_id: self.hello.host_id.clone(),
             epoch: live.epoch,
             session: live.secret.0.clone(),
@@ -699,6 +727,7 @@ impl<'a> Session<'a> {
             interval,
         });
         self.proven = false;
+        self.seq = 0;
         self.told = self
             .hello
             .capabilities

@@ -130,6 +130,7 @@ impl Rig {
     pub(super) fn heartbeat(&self, host: &str, load: Option<Wire>) -> Heartbeat {
         let (_, epoch, session) = self.sessions.iter().find(|(h, ..)| h == host).unwrap();
         Heartbeat {
+            seq: None,
             host_id: host.to_owned(),
             epoch: *epoch,
             session: session.clone(),

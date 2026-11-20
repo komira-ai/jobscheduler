@@ -227,6 +227,7 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
     }
     h.life.step();
     let beat = Heartbeat {
+        seq: None,
         // A host id has a fixed shape (`h-` and 16 hex digits), so the longest is any valid one.
         host_id: crate::cli_runtime::HOST.to_owned(),
         epoch: u64::MAX,

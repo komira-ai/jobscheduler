@@ -8,6 +8,17 @@
 //! `invalid-*` code, never with the decoder's message, which repeats the text it choked
 //! on.
 //!
+//! # Any server serves any beat
+//!
+//! When the server holds the job tables, a host's session is its store row `node/<host>`
+//! ([`rows`]): the hello writes it, a heartbeat of an epoch this server's registry does not
+//! hold takes the session from it, and every heartbeat is applied to it, guarded by its
+//! (epoch, sequence), before its listing is committed with every write conditional on the
+//! version the beat wrote. So a heartbeat that reaches another server than the hello's is
+//! served there, with no second hello; a beat older than one the row applied, or whose listing
+//! a newer beat overtook, changes nothing more and is answered from the rows, and is not held.
+//! Without the job tables the session is the registry's alone, as before.
+//!
 //! # Jobs keyed by job id
 //!
 //! When the server holds the job tables ([`Agents::jobs`]) and the host reported the hello
@@ -34,7 +45,8 @@
 //!
 //! Before the listing, the heartbeat's `phase`, `exclusive_ready` and `exclusive_refused`
 //! move the placed whole-host job of the host ([`crate::job_whole`]): a ready report starts
-//! it, a refusal fails its prepare, the first listing after a hello restarts it, and a cancel
+//! it, a refusal fails its prepare, the first listing after a hello (the row's flag) restarts
+//! it, and a cancel
 //! ends it once the agent has left `preparing`.
 //!
 //! The listing's changes (a job starting, running or ended, an allocation freed once the
@@ -88,7 +100,7 @@
 //! before, and a poll of its is refused 409 `dispatch-not-served`. A placement wakes the
 //! host's held heartbeat and its held poll, each by a wake of its own.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
@@ -101,25 +113,22 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, Welcome, refusal,
-};
+use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, Welcome, refusal};
+use js_jobs::{JobStoreError, NodeRow};
 use js_registry::{Credential, Refusal};
+use js_state::Revision;
 use js_types::HostId;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use self::host_cert::{CertifiedHost, admit_hello};
+use self::host_cert::CertifiedHost;
 use crate::admit::{reports_dispatch_poll, reports_held_beat};
-use crate::agent_state::Change;
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
 use crate::host_keys::Writes;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::job_whole;
-use crate::join_tokens::{Admission, JoinRefusal};
 use crate::logs::{self, LogGrants};
 use crate::per_job::{self, JobReply};
 use crate::util::blocking;
@@ -134,9 +143,12 @@ mod held;
 mod host_cert;
 mod limit;
 mod own_host;
+mod refused;
+pub(crate) mod rows;
 mod unknown;
 
 use self::held::{HostFacts, Inputs};
+pub(crate) use self::refused::Refused;
 use self::unknown::{identify_single, unknown_bearer};
 
 /// The watch of a heartbeat whose reply may be held, and what building it again needs.
@@ -240,13 +252,12 @@ async fn hello(
     Ok((headers, welcome).into_response())
 }
 
-/// The hello route. `between` runs after a one-time token was admitted and the binding
-/// committed, and before the registry is asked, under the gate of the host writes
+/// The hello route. `between` runs after the hello was judged, its token's use and binding
+/// committed, and before the registry takes it, under the gate of the host writes
 /// ([`Agents::host_writes`]): no other hello can get in there through the route. Production
-/// passes a function that does nothing; a test passes what it checks there, so nothing
-/// waits on timing. `who` is the credential the registry knows the host by; `one_time` is
-/// the digest of the one-time token or host credential the request carried, when it
-/// carried one.
+/// passes a function that does nothing; a test passes what it checks there, so nothing waits
+/// on timing. `who` is the credential the registry knows the host by; `one_time` is the digest
+/// of the one-time token or host credential the request carried, when it carried one.
 #[cfg(test)]
 async fn serve_hello(
     agents: &Arc<Agents>,
@@ -278,6 +289,8 @@ async fn serve_hello_in(
 ) -> Result<Json<Welcome>, Refused> {
     let (who, one_time, pool, certified) = given;
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
+    // The host id is the first thing checked, as every later step names the host by it.
+    let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
@@ -292,34 +305,32 @@ async fn serve_hello_in(
         warn!(host = %hello.host_id, pool = %hello.pool, "agent hello refused: its token is another pool's");
         return Err(Refused::of(&Refusal::UnknownPool));
     }
-    // Hellos are taken one at a time, from the use of the token to the registry's answer
-    // and the release of a refused one, so no other hello of the host comes in between.
+    // Hellos are taken one at a time, from the judgement to the registry taking the hello, so
+    // no other hello of the host comes in between.
     let gate = agents.host_writes.lock().await;
-    // The binding the registry will hold once it admits the hello. With the store, when the
-    // store does not hold it yet, it is committed before the registry is asked: with the use
-    // of the token in one transaction, or alone for a pool token. A known host's binding is
-    // held already, and nothing is written for it.
-    let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
-    let restored = agents.restore_stored(&host).await;
+    // The binding the registry will hold once it takes the hello. With the store, when the
+    // store does not hold it yet, it is committed before the registry takes the hello: with the
+    // use of the token in one transaction, or alone for a pool token, and conditional on the row
+    // the refresh below read (absent, or at its version), so a binding another server wrote in
+    // between refuses the hello and the agent says hello again. A known host's binding is held
+    // already, and nothing is written for it.
+    let restored = rows::refresh(agents, &host).await;
     restored.map_err(|error| unread_binding(&hello.host_id, &error))?;
+    // The hello is judged on what the registry holds now, which the rows just refreshed, and
+    // the session secret is drawn, before anything is written: a refused hello uses no token
+    // and writes no binding, and the registry cannot refuse the admission it gives
+    // ([`js_registry::Registry::take_hello`]), so a write that has been made is never undone.
+    let judged = agents
+        .registry
+        .judge_hello(&hello, &who, certified.is_some());
+    let admission = judged.map_err(|refusal| refused_hello(&hello, &refusal))?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
-    let (fresh_use, issued) = take_hello(agents, one_time.as_ref(), &hello, writes).await?;
-    agents.applied(&change);
+    let (issued, revision) = write_hello(agents, one_time.as_ref(), &hello, writes).await?;
+    agents.applied(&change, revision);
     between();
-    let mut welcome = match admit_hello(agents, certified.is_some(), &hello, &who) {
-        Ok(welcome) => welcome,
-        Err(refusal) => {
-            give_back(agents, fresh_use, &hello.host_id, &change).await;
-            warn!(
-                code = refusal.code(),
-                reason = refusal.reason(),
-                host = %hello.host_id,
-                "agent hello refused: {refusal}"
-            );
-            return Err(Refused::of(&refusal));
-        }
-    };
+    let mut welcome = agents.registry.take_hello(admission);
+    rows::hello_row(agents, &host, &hello, &mut welcome).await?;
     drop(gate);
     // The poll is served to a host that says it polls by a server that holds the job tables
     // (the queue it hands out is theirs): the heartbeat's reply then leaves the queue's
@@ -336,6 +347,17 @@ async fn serve_hello_in(
     Ok(Json(welcome))
 }
 
+/// The answer to a hello the registry refused, logged as the route logs it.
+fn refused_hello(hello: &Hello, refusal: &Refusal) -> Refused {
+    warn!(
+        code = refusal.code(),
+        reason = refusal.reason(),
+        host = %hello.host_id,
+        "agent hello refused: {refusal}"
+    );
+    Refused::of(refusal)
+}
+
 /// The refusal of a hello whose host's stored binding could not be read: 503
 /// `state-write-failed`, which the agent retries.
 fn unread_binding(host: &str, error: &io::Error) -> Refused {
@@ -343,34 +365,36 @@ fn unread_binding(host: &str, error: &io::Error) -> Refused {
     Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
 }
 
-/// What a hello's token takes before the registry is asked, with `writes` (the host's
-/// binding, with the store) in the same commit: the use that was fresh, to give back if the
-/// registry refuses, and the host credential issued. One refusal for every failure, so
-/// that [`serve_hello`] has no arm that only a failed commit takes: every test binary runs
-/// the same code of it.
+/// What a hello's token takes once the registry has judged the hello admissible, with `writes`
+/// (the host's binding, with the store, conditional on the version of the row the hello was
+/// judged on) in the same commit: the host credential issued, and the revision of the commit
+/// (the binding's version). One refusal for every failure, a binding another server wrote since
+/// it was read among them (the agent says hello again, and the next hello reads the row afresh),
+/// so that [`serve_hello_in`] has no arm that only a failed commit takes: every test binary runs
+/// the same code of it. Nothing is changed in the registry before it succeeds, and nothing
+/// written here is taken back after.
 ///
 /// A one-time token registers the host that names its instance, and only that host
-/// thereafter. The token is consumed before the registry is asked, so that two hellos
-/// cannot both pass; a hello the registry then refuses (the pool is full, the host id is
-/// bound to another credential) gives the use back, and the token stays unused for its
-/// instance. A hello that says it keeps a host credential, and registers its host with an
-/// unused token, retires the token in the same step and is answered with the credential:
-/// the token alone opens nothing from then on. When the registry refuses that hello the
-/// credential goes back with the use, since the answer that carries it is not sent. The
+/// thereafter. The registry has judged the hello already ([`serve_hello_in`] asks it before
+/// anything is taken), so a refused hello uses nothing. The token is consumed before the
+/// registry takes the hello, so that two hellos cannot both pass: of two that race for one
+/// token the second is refused as used, with nothing written for it. A hello that says it keeps
+/// a host credential, and registers its host with an unused token, retires the token in the same
+/// step and is answered with the credential: the token alone opens nothing from then on. The
 /// pool's token commits `writes` alone.
-async fn take_hello(
+async fn write_hello(
     agents: &Arc<Agents>,
     one_time: Option<&Credential>,
     hello: &Hello,
     writes: Writes,
-) -> Result<(Option<Credential>, Option<HostCredential>), Refused> {
+) -> Result<(Option<HostCredential>, Option<Revision>), Refused> {
     let Some(presented) = one_time else {
         let committed = agents.commit_hosts(writes).await;
-        committed.map_err(|error| {
+        let revision = committed.map_err(|error| {
             warn!(%error, host = %hello.host_id, "agent hello refused: the binding could not be committed");
             Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_WRITE_FAILED)
         })?;
-        return Ok((None, None));
+        return Ok((None, revision));
     };
     let instance = hello.instance.clone();
     let host = hello.host_id.clone();
@@ -378,33 +402,11 @@ async fn take_hello(
     let admitted = agents
         .admit_join(presented.clone(), (host, instance), asked, writes)
         .await;
-    let admitted = admitted.map_err(|refusal| {
+    let (admitted, revision) = admitted.map_err(|refusal| {
         warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
         Refused::join(refusal)
     })?;
-    let fresh = (admitted.admission == Admission::Fresh).then(|| presented.clone());
-    Ok((fresh, admitted.issued))
-}
-
-/// The compensation of a hello the registry refused after [`take_hello`]: the fresh use of
-/// the token, when there was one, and the host's binding `change` go back in one
-/// transaction. When it fails both stay, as the store holds them. Apart from
-/// [`serve_hello`], so that the route has no arm that only one kind of token takes: every
-/// test binary runs the same code of it.
-async fn give_back(
-    agents: &Arc<Agents>,
-    fresh_use: Option<Credential>,
-    host: &str,
-    change: &Change,
-) {
-    let undo = change.undo.clone();
-    let given_back = match fresh_use {
-        Some(presented) => agents.release_join(presented, host.to_owned(), undo).await,
-        None => agents.commit_hosts(undo).await.is_ok(),
-    };
-    if given_back {
-        agents.undone(change);
-    }
+    Ok((admitted.issued, revision))
 }
 
 async fn heartbeat(
@@ -433,6 +435,10 @@ async fn heartbeat(
             .await;
         served.map_err(Refused::join)?;
     }
+    // A beat of an epoch this server's registry does not hold may be of a session another
+    // server's hello began: the registry takes it from the host's row first ([`rows`]).
+    let refreshed = rows::refresh_for_beat(&agents, &heartbeat).await;
+    refreshed.map_err(|error| unread_binding(&heartbeat.host_id, &error))?;
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be durable first. With the store, a taint the beat
@@ -440,6 +446,7 @@ async fn heartbeat(
     // `state-write-failed` with nothing recorded, so the agent reports again; in file mode
     // the file is written after, and when it cannot be the reply does not acknowledge it.
     let mut reply = beat_durably(&agents, &heartbeat, &who).await?;
+    let applied = rows::beat_row(&agents, &heartbeat).await?;
     // A start refused as host-tainted taints the host too, with nothing to acknowledge
     // there: the file is made current and a failure is retried by the next tick.
     let refused = heartbeat
@@ -454,7 +461,7 @@ async fn heartbeat(
         agents.save_bindings().await;
     }
     let logs = uploading(&agents, &heartbeat.host_id);
-    let hold = add_jobs(&agents, &heartbeat, logs.clone(), &mut reply).await?;
+    let hold = add_jobs(&agents, (&heartbeat, applied), logs.clone(), &mut reply).await?;
     reply.log_grant =
         logs.and_then(|logs| logs.on_beat(&heartbeat.host_id, heartbeat.log_grant_state));
     if let Some(usage) = &agents.usage {
@@ -501,7 +508,7 @@ fn reports_upload(agents: &Agents, host: &str) -> bool {
 /// [`HELD_BEAT_CAPABILITY`]: js_agent_wire::HELD_BEAT_CAPABILITY
 async fn add_jobs(
     agents: &Arc<Agents>,
-    heartbeat: &Heartbeat,
+    (heartbeat, applied): (&Heartbeat, Option<NodeRow>),
     logs: Option<Arc<LogGrants>>,
     reply: &mut HeartbeatReply,
 ) -> Result<Option<held::Hold>, Refused> {
@@ -509,7 +516,8 @@ async fn add_jobs(
         return Ok(None);
     };
     let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
-    let Some((served, watched)) = serve_jobs(agents, jobs, heartbeat, logs, room).await? else {
+    let beat = (heartbeat, applied);
+    let Some((served, watched)) = serve_jobs(agents, jobs, beat, logs, room).await? else {
         return Ok(None);
     };
     reply.commands.extend(served.commands);
@@ -539,7 +547,7 @@ async fn add_jobs(
 async fn serve_jobs(
     agents: &Arc<Agents>,
     jobs: &Arc<ServerJobs>,
-    heartbeat: &Heartbeat,
+    (heartbeat, applied): (&Heartbeat, Option<NodeRow>),
     logs: Option<Arc<LogGrants>>,
     room: usize,
 ) -> Result<Option<(JobReply, Option<Watched>)>, Refused> {
@@ -553,61 +561,85 @@ async fn serve_jobs(
     let Some(facts) = per_job else {
         return Ok(None);
     };
-    let first = agents.first_listing(&facts.id, facts.session);
     // Only a serving host takes a new start: a draining, preparing or tainted one is never
     // held (a draining agent counts its drain in the waits it asks for, which a held reply
-    // would stretch).
+    // would stretch). A beat the row did not apply is answered at once, from the rows.
     let holds = reports_held_beat(facts.claim.capabilities()) && heartbeat.phase == Phase::Serving;
+    let holds = holds && applied.is_some();
     let watch = holds.then(|| agents.wakes.watch(&facts.id));
     let beat = (heartbeat.jobs.clone(), heartbeat.retired_jobs.clone(), room);
     let inputs = Arc::new(Inputs::new(jobs, &facts, logs, beat));
-    let (session, tainted) = (facts.session, facts.tainted);
+    let tainted = facts.tainted;
     let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
     let refused = heartbeat.exclusive_refused.clone();
+    let sequenced = heartbeat.seq.is_some();
     let placing = Arc::clone(agents);
     let kept = Arc::clone(&inputs);
     let served = blocking(move || {
         let metrics = placing.meter().sink();
         let context = inputs.context(metrics);
-        let (jobs, host) = (&inputs.jobs, &inputs.host);
         let (listed, retired) = (&inputs.listed, &inputs.retired);
-        // The first listing after a hello loses the jobs that ran and are not listed: their
-        // container went with the agent (design section 6.7, step 6). The listing's commit
-        // below then frees their allocations, since the host no longer lists them.
-        let held: BTreeSet<&str> = listed
-            .iter()
-            .map(|job| job.job_id.as_str())
-            .chain(retired.iter().map(String::as_str))
-            .collect();
-        let lost = match first {
-            true => job_loss::lose_unlisted(jobs, host, &held, metrics).map(drop),
-            false => Ok(()),
+        // A beat the row did not apply changes nothing; its listing is answered as one a newer
+        // beat or hello overtook.
+        let apply = |row: &NodeRow| {
+            // Every write of the listing is conditional on the version of the row this beat
+            // wrote: once a newer beat or hello of the host moved it, the rest of this listing
+            // changes nothing ([`js_jobs::JobStore::guarded`]).
+            let guarded = inputs.jobs.guarded(&inputs.host, row.version);
+            let (jobs, host) = (&guarded, &inputs.host);
+            let first = row.record.state.first_listing_pending;
+            let missed = (!sequenced).then_some(&row.record.state.missing_in_a_row);
+            // The first listing after a hello loses the jobs that ran and are not listed: their
+            // container went with the agent (design section 6.7, step 6). The listing's commit
+            // below then frees their allocations, since the host no longer lists them.
+            let held: BTreeSet<&str> = listed
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .chain(retired.iter().map(String::as_str))
+                .collect();
+            let lost = match first {
+                true => job_loss::lose_unlisted(jobs, host, &held, metrics).map(drop),
+                false => Ok(()),
+            };
+            // A whole-host job the host prepares for is moved before the listing is committed
+            // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
+            // restarts it, and a cancel ends it once the agent has left `preparing`.
+            let beat = job_whole::Beat {
+                host,
+                phase,
+                ready: ready.as_deref(),
+                refused: refused.as_ref(),
+                first,
+                tainted,
+            };
+            let rules = placing.whole_rules();
+            let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
+            let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
+            let whole = lost.and_then(serve);
+            let served = whole.and_then(|taint_changed| {
+                let served = per_job::serve(jobs, &context, listed, retired, inputs.room, missed);
+                served.map(|served| (served, taint_changed))
+            });
+            // Whether the listing was clean is written to the row before the pass, so a host that
+            // lists a job it holds no live allocation for takes no start until it lists only its
+            // own (design section 8, row 37), on whichever server places.
+            if let Ok((served, _)) = &served {
+                rows::settle(&inputs.jobs, row, served.clean, served.missing.clone());
+            }
+            served
         };
-        // A whole-host job the host prepares for is moved before the listing is committed
-        // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
-        // restarts it, and a cancel ends it once the agent has left `preparing`.
-        let beat = job_whole::Beat {
-            host,
-            phase,
-            ready: ready.as_deref(),
-            refused: refused.as_ref(),
-            first,
-            tainted,
+        let host = || inputs.host.clone();
+        let served = applied
+            .as_ref()
+            .map_or_else(|| Err(JobStoreError::NodeMoved { host: host() }), apply);
+        // A listing a newer beat or hello overtook is answered from the rows as they stand.
+        let served = match served {
+            Err(JobStoreError::NodeMoved { .. }) => {
+                let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
+                answer.map(|answer| (answer, false))
+            }
+            served => served,
         };
-        let rules = placing.whole_rules();
-        let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
-        let serve = |()| job_whole::serve(jobs, &beat, &rules, (metrics, &taint));
-        let whole = lost.and_then(serve);
-        let served = whole.and_then(|taint_changed| {
-            let served = per_job::serve(jobs, &context, listed, retired, inputs.room);
-            served.map(|served| (served, taint_changed))
-        });
-        // Whether the listing was clean is noted before the pass, so a host that lists a job
-        // it holds no live allocation for takes no start until it lists only its own (design
-        // section 8, row 37).
-        if let Ok((served, _)) = &served {
-            placing.note_listing(host, served.clean);
-        }
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply,
         // or on this one when it is held (the placement wakes it). A beat that changed
@@ -622,7 +654,6 @@ async fn serve_jobs(
     let host = &kept.host;
     match served {
         Ok((served, taint_changed)) => {
-            agents.listed(host, session);
             if taint_changed {
                 agents.save_bindings().await;
             }
@@ -637,6 +668,27 @@ async fn serve_jobs(
             ))
         }
     }
+}
+
+/// The per-job reply to a beat that changes nothing (the row applied a newer one first): the
+/// stops and starts that follow from the rows as they stand ([`per_job::commands_now`]), with
+/// no verdict on a result and no retired id answered, which the agent then reports again.
+fn rows_answer(
+    jobs: &ServerJobs,
+    context: &per_job::BeatContext<'_>,
+    listing: (&[js_agent_wire::HeldJob], &[String]),
+    room: usize,
+) -> Result<JobReply, js_jobs::JobStoreError> {
+    let (commands, exclusive) =
+        per_job::commands_now(jobs, context, listing, &BTreeSet::new(), room)?;
+    Ok(JobReply {
+        commands,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
+        clean: true,
+        exclusive,
+        missing: BTreeMap::new(),
+    })
 }
 
 /// The registry's reply to `heartbeat`, with the taint it brings committed first
@@ -676,237 +728,6 @@ fn read(body: Result<Bytes, BytesRejection>, malformed: &'static str) -> Result<
 /// nothing of the decoder's complaint.
 fn decode<T: DeserializeOwned>(bytes: &[u8], malformed: &'static str) -> Result<T, Refused> {
     serde_json::from_slice(bytes).map_err(|_| Refused::new(StatusCode::BAD_REQUEST, malformed))
-}
-
-/// An error answer: a status and `{"error": "<code>"}`, with the majors the server
-/// speaks when the code is `unsupported-protocol`.
-#[derive(Debug, Serialize)]
-pub(crate) struct Refused {
-    #[serde(skip)]
-    status: StatusCode,
-    error: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    supported: Option<ProtocolRange>,
-    /// The capability at fault, for the two refusals of the host contract.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    field: Option<&'static str>,
-    /// Which condition failed, for `shape-not-accepted`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
-}
-
-impl Refused {
-    fn new(status: StatusCode, error: &'static str) -> Self {
-        Self {
-            status,
-            error,
-            supported: None,
-            field: None,
-            reason: None,
-        }
-    }
-
-    /// The answer to a refused one-time token: 503 when the use could not be written down or
-    /// the credential could not be made, 403 otherwise. The code names the fault and
-    /// nothing of the token.
-    fn join(refusal: JoinRefusal) -> Self {
-        let status = match refusal {
-            JoinRefusal::Unsaved | JoinRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::FORBIDDEN,
-        };
-        Self::new(status, refusal.code())
-    }
-
-    /// The answer to a registry refusal: 400 for a message that breaks the wire's rules,
-    /// 409 for a session the agent should say hello again for (or wait out), 403 for
-    /// what the credential or the pool does not allow, 503 when no session secret could
-    /// be made.
-    fn of(refusal: &Refusal) -> Self {
-        let status = match refusal {
-            Refusal::Invalid(_) | Refusal::BadHostId(_) | Refusal::BadHeartbeatHostId(_) => {
-                StatusCode::BAD_REQUEST
-            }
-            Refusal::HostLive | Refusal::StaleEpoch | Refusal::UnknownHost => StatusCode::CONFLICT,
-            Refusal::UnknownPool
-            | Refusal::HostBound
-            | Refusal::HostListed
-            | Refusal::ShapeNotAccepted(_)
-            | Refusal::HostContract { .. }
-            | Refusal::ExecutionMismatch { .. }
-            | Refusal::PoolFull
-            | Refusal::SessionMismatch => StatusCode::FORBIDDEN,
-            Refusal::SessionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-        };
-        let code = refusal.code();
-        let unsupported = code == js_agent_wire::refusal::UNSUPPORTED_PROTOCOL;
-        Self {
-            supported: unsupported.then_some(ProtocolRange::THIS),
-            field: refusal.field(),
-            reason: refusal.reason(),
-            ..Self::new(status, code)
-        }
-    }
-}
-
-impl From<Refusal> for Refused {
-    fn from(refusal: Refusal) -> Self {
-        Self::of(&refusal)
-    }
-}
-
-impl IntoResponse for Refused {
-    fn into_response(self) -> Response {
-        (self.status, Json(&self)).into_response()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use js_agent_wire::Phase;
-    use js_registry::ShapeFault;
-    use js_types::HostId;
-    use serde_json::json;
-
-    use super::*;
-
-    /// Every refusal of the registry has the status and the wire code the API documents:
-    /// 400 for a message that breaks the wire's rules, 409 for the refusals that tell an
-    /// agent to say hello again or wait, 403 for what the credential or the pool does not
-    /// allow, 503 when no session secret could be made; and only `unsupported-protocol`
-    /// carries the majors served. It catches a new refusal that falls into the wrong class
-    /// of status, and the 503, which no transport test can provoke because the registry
-    /// draws its secrets from the operating system.
-    #[test]
-    fn every_refusal_has_its_status_and_code() {
-        let unnamed = Heartbeat {
-            host_id: "UPPER".into(),
-            epoch: 0,
-            session: String::new(),
-            phase: Phase::Serving,
-            held: Vec::new(),
-            results: Vec::new(),
-            taint: None,
-            taint_cleared: None,
-            tainted: None,
-            exclusive_ready: None,
-            exclusive_refused: None,
-            load: None,
-            disk_gib: None,
-            jobs: Vec::new(),
-            retired_jobs: Vec::new(),
-            log_grant_state: None,
-        };
-        let hello: Hello = serde_json::from_value(json!({
-            "protocol": { "min": 2, "max": 3 },
-            "host_id": "h",
-            "pool": "p",
-            "agent_version": "1",
-            "shape": { "cpu_millis": 0, "memory_bytes": 0, "gpus": 0 },
-            "phase": "serving",
-        }))
-        .unwrap();
-        let bad_id = HostId::new("").unwrap_err();
-        let cases = [
-            (
-                Refusal::Invalid(unnamed.validate().unwrap_err()),
-                400,
-                "invalid-heartbeat",
-            ),
-            (
-                Refusal::Invalid(hello.validate().unwrap_err()),
-                400,
-                "unsupported-protocol",
-            ),
-            (Refusal::BadHostId(bad_id.clone()), 400, "invalid-hello"),
-            (
-                Refusal::BadHeartbeatHostId(bad_id),
-                400,
-                "invalid-heartbeat",
-            ),
-            (Refusal::HostLive, 409, "host-live"),
-            (Refusal::StaleEpoch, 409, "stale-epoch"),
-            (Refusal::UnknownHost, 409, "unknown-host"),
-            (Refusal::UnknownPool, 403, "unknown-pool"),
-            (Refusal::HostBound, 403, "host-bound"),
-            (Refusal::HostListed, 403, "host-listed"),
-            (
-                Refusal::ShapeNotAccepted(ShapeFault::BelowFloor),
-                403,
-                "shape-not-accepted",
-            ),
-            (
-                Refusal::ShapeNotAccepted(ShapeFault::QuotaDefaultUnfit),
-                403,
-                "shape-not-accepted",
-            ),
-            (
-                Refusal::ShapeNotAccepted(ShapeFault::QuotaWithoutPoolDisk),
-                403,
-                "shape-not-accepted",
-            ),
-            (
-                Refusal::HostContract { field: "runtime" },
-                403,
-                "host-contract",
-            ),
-            (
-                Refusal::ExecutionMismatch { field: "exec" },
-                403,
-                "execution-mismatch",
-            ),
-            (Refusal::PoolFull, 403, "pool-full"),
-            (Refusal::SessionMismatch, 403, "session-mismatch"),
-            (Refusal::SessionUnavailable, 503, "session-unavailable"),
-        ];
-        for (refusal, status, code) in cases {
-            let answer = Refused::of(&refusal);
-            assert_eq!(answer.status.as_u16(), status, "{code}");
-            assert_eq!(answer.error, code);
-            let says_majors = code == "unsupported-protocol";
-            assert_eq!(answer.supported.is_some(), says_majors, "{code}");
-            assert_eq!(answer.field, refusal.field(), "{code}");
-            assert_eq!(answer.reason, refusal.reason(), "{code}");
-        }
-        let reasons = [
-            (ShapeFault::BelowFloor, "below-floor"),
-            (ShapeFault::QuotaDefaultUnfit, "quota-default-unfit"),
-            (ShapeFault::QuotaWithoutPoolDisk, "quota-without-pool-disk"),
-        ];
-        for (fault, reason) in reasons {
-            let answer = Refused::of(&Refusal::ShapeNotAccepted(fault));
-            assert_eq!(
-                serde_json::to_value(&answer).unwrap(),
-                json!({ "error": "shape-not-accepted", "reason": reason })
-            );
-        }
-        let plain = serde_json::to_value(Refused::of(&Refusal::HostLive)).unwrap();
-        assert_eq!(plain, json!({ "error": "host-live" }));
-    }
-
-    /// Every refusal of a one-time token has its status and code: 503 for the use that
-    /// could not be written down (the agent may try again), 403 for the rest.
-    #[test]
-    fn every_join_refusal_has_its_status_and_code() {
-        let cases = [
-            (JoinRefusal::Expired, 403, "join-token-expired"),
-            (JoinRefusal::Used, 403, "join-token-used"),
-            (JoinRefusal::WrongInstance, 403, "join-token-instance"),
-            (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
-            (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
-            (JoinRefusal::Unavailable, 503, "join-token-unavailable"),
-            (
-                JoinRefusal::CredentialRequired,
-                403,
-                "join-token-credential-required",
-            ),
-        ];
-        for (refusal, status, code) in cases {
-            let answer = Refused::join(refusal);
-            assert_eq!(answer.status.as_u16(), status, "{code}");
-            assert_eq!(answer.error, code);
-            assert!(answer.supported.is_none());
-        }
-    }
 }
 
 #[cfg(test)]

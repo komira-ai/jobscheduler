@@ -34,7 +34,7 @@ use crate::admit::{
     reported_mount_providers, reported_xcodes, reports_dispatch_poll, reports_host_jobs,
     reports_layered_rootfs,
 };
-use crate::agents::{Agents, Session};
+use crate::agents::Agents;
 use crate::held_beat::Watch;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
@@ -46,7 +46,6 @@ use crate::util::blocking;
 /// built from it: read by the heartbeat's per-job half and by the dispatch poll.
 pub(super) struct HostFacts {
     pub(super) id: HostId,
-    pub(super) session: Session,
     /// The shape the host announced at its hello, with the capabilities it reported.
     pub(super) claim: Shape,
     /// What the registry books for the host: what a start of the whole host books.
@@ -64,12 +63,10 @@ impl HostFacts {
             .ok()
             .and_then(|host| agents.registry.own_host(&host))
             .and_then(|own| {
-                let session = (own.host.epoch, own.session_started.map(|at| at.millis()));
                 let tainted = own.host.taint.is_some();
                 let booked = own.host.shape.resources().clone();
                 own.host.claim.map(|claim| HostFacts {
                     id: own.host.id,
-                    session,
                     claim,
                     booked,
                     tainted,

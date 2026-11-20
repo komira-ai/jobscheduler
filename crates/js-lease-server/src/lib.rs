@@ -595,7 +595,12 @@
 //! converse holds as well: a beat with `tainted: true` that reports no clear, on a host the
 //! server holds no taint for (the operator cleared the server's taint, the marker stayed), gives
 //! the host the `host-tainted` taint naming no run, which the agent's next beat with
-//! `tainted: false` ends. Every reply names the taint the host holds once the beat is taken
+//! `tainted: false` ends. With a store setting, a taint commit another server's change makes fail
+//! (the store holds another taint than this server's registry does: the agent reported to the
+//! other server, or its clear reached the other) is answered 503 `state-write-failed` as any failed commit is, and the
+//! registry takes the stored taint before that answer (a host job's or a refused prepare's taint,
+//! which the server makes itself, is kept), so the agent's next beat is judged on what the store
+//! holds. Every reply names the taint the host holds once the beat is taken
 //! (`host_taint`; absent when it holds none), which the agent shows on its health route and acts
 //! on in no other way, and a reply that names only it is held as any other quiet reply is. The
 //! pass over the queued jobs logs each live host it skips for a taint once, as a warning, "a live
@@ -658,8 +663,11 @@
 //! agent says hello again. An awaiting host whose agent has not returned is forgotten,
 //! binding included, once the grace period and `lost_retention` have passed since the
 //! restart that put it back; the next tick writes the file of bindings (or the store)
-//! without it. An agent whose heartbeat reaches a restarted server is answered 409
-//! `unknown-host` and says hello.
+//! without it. With the job tables, which a restart keeps (in the store, or in `.jobs` beside
+//! the state file), a host's session is its row `node/<host>`: an agent whose heartbeat
+//! reaches a restarted server is served, its session taken from the row, and says no hello.
+//! Without them, or for a host the rows do not hold, the heartbeat is answered 409
+//! `unknown-host` and the agent says hello.
 //!
 //! What lets a host keep its id against any join-token holder after a restart is the
 //! binding of the host id to the credential and instance it was admitted with. The server

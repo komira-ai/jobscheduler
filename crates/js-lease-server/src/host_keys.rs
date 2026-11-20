@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
-use js_state::{Commit, Cond, Conflict, Store, StoreError, Txn};
+use js_state::{Cond, Conflict, Revision, Store, StoreError, Txn, Version};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
@@ -27,42 +27,73 @@ const VERSION: u32 = 1;
 /// The fields of a stored value that this build does not know, kept to be written back.
 pub(crate) type Extra = BTreeMap<String, Value>;
 
-/// Writes to commit together: each key with the value to put, or `None` to delete it.
-pub(crate) type Writes = Vec<(String, Option<Vec<u8>>)>;
+/// One write of a commit: the key, the value to put or `None` to delete it, and the
+/// condition the key must meet. A binding's write is conditional on the version of the row
+/// this server read or wrote last ([`crate::agent_state::BindingStore`]), as other servers
+/// over the store write the same rows; the join tokens' rows, which one server's lock orders,
+/// are written at [`Cond::Any`].
+pub(crate) type KeyWrite = (String, Option<Vec<u8>>, Cond);
+
+/// Writes to commit together.
+pub(crate) type Writes = Vec<KeyWrite>;
+
+/// The write a commit refused because its key did not meet its condition: another server
+/// wrote the key since this one read it. It is the error [`commit`] returns for that, which
+/// [`refused_key`] recognises.
+#[derive(Debug, thiserror::Error)]
+#[error("the store refused the write of {0}")]
+struct Refused(String);
+
+/// The key a failed commit was refused for, when the store refused it for the key's condition
+/// (and not because it failed).
+pub(crate) fn refused_key(error: &io::Error) -> Option<&str> {
+    let inner = error.get_ref()?.downcast_ref::<Refused>();
+    inner.map(|refused| refused.0.as_str())
+}
 
 /// Commits `writes` in one transaction, and calls the store not at all when there are none.
+/// The revision it answers is the version of the row written only when the transaction wrote
+/// one row, or the row written last is the one wanted (a put, as the job rows' commits use it).
 ///
 /// # Errors
 ///
-/// The store failed, or refused the write: nothing was written.
-pub(crate) fn commit(store: &dyn Store, writes: Writes) -> io::Result<()> {
+/// The store failed, or refused the write: nothing was written. A refusal for a key's
+/// condition is told by [`refused_key`].
+pub(crate) fn commit(store: &dyn Store, writes: Writes) -> io::Result<Option<Revision>> {
     if writes.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    committed(store.txn(transaction(writes)))
+    committed(store.txn(transaction(writes))).map(Some)
 }
 
-/// The transaction of `writes`. The server is the store's one writer, under its lock, so
-/// no write has a precondition, but a taint's: that is read and written conditionally
-/// ([`crate::agent_state::BindingStore::commit_taint`]), so a second server cannot lose it.
+/// Commits `write` alone, and answers its revision, which is the version of the row it wrote
+/// (the one write of the transaction).
+///
+/// # Errors
+///
+/// As [`commit`].
+pub(crate) fn commit_one(store: &dyn Store, write: KeyWrite) -> io::Result<Revision> {
+    committed(store.txn(transaction(vec![write])))
+}
+
+/// The transaction of `writes`, each at its own condition.
 fn transaction(writes: Writes) -> Txn {
     writes
         .into_iter()
-        .fold(Txn::new(), |txn, (key, value)| match value {
-            Some(value) => txn.put(key, value, Cond::Any),
-            None => txn.delete(key, Cond::Any),
+        .fold(Txn::new(), |txn, (key, value, cond)| match value {
+            Some(value) => txn.put(key, value, cond),
+            None => txn.delete(key, cond),
         })
 }
 
-/// A commit's answer as the result of a file write: an error when the store failed or
-/// refused it.
-pub(crate) fn committed(answer: Result<Result<Commit, Conflict>, StoreError>) -> io::Result<()> {
+/// A commit's answer as the result of a file write: its revision, or an error when the store
+/// failed or refused it.
+pub(crate) fn committed(
+    answer: Result<Result<js_state::Commit, Conflict>, StoreError>,
+) -> io::Result<Revision> {
     match answer {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(conflict)) => Err(io::Error::other(format!(
-            "the store refused the write of {}",
-            conflict.key
-        ))),
+        Ok(Ok(commit)) => Ok(commit.revision),
+        Ok(Err(conflict)) => Err(io::Error::other(Refused(conflict.key))),
         Err(err) => Err(io::Error::other(err)),
     }
 }
@@ -83,16 +114,19 @@ pub(crate) fn field(fields: &mut Map<String, Value>, name: &str, value: Option<i
     }
 }
 
-/// Every key under `prefix`, as what follows the prefix, with its value.
+/// Every key under `prefix`, as what follows the prefix, with its value and its version.
 ///
 /// # Errors
 ///
 /// The store failed, as its message says.
-pub(crate) fn scan(store: &dyn Store, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub(crate) fn scan(
+    store: &dyn Store,
+    prefix: &str,
+) -> Result<Vec<(String, Vec<u8>, Version)>, String> {
     let rows = store.scan_prefix(prefix).map_err(|err| err.to_string())?;
     let rows = rows.into_iter().map(|(key, row)| {
         let name = key.get(prefix.len()..).unwrap_or_default().to_owned();
-        (name, row.value)
+        (name, row.value, row.version)
     });
     Ok(rows.collect())
 }
@@ -132,24 +166,30 @@ mod tests {
     #[test]
     fn writes_commit_in_one_transaction_and_none_make_no_call() {
         let store = store();
-        commit(&store, vec![("a".to_owned(), Some(b"1".to_vec()))]).unwrap();
+        commit(
+            &store,
+            vec![("a".to_owned(), Some(b"1".to_vec()), Cond::Any)],
+        )
+        .unwrap();
         let writes = vec![
-            ("a".to_owned(), None),
-            ("b".to_owned(), Some(b"2".to_vec())),
+            ("a".to_owned(), None, Cond::Any),
+            ("b".to_owned(), Some(b"2".to_vec()), Cond::Any),
         ];
         commit(&store, writes).unwrap();
         assert_eq!(store.commit_stats().txns, 2);
-        commit(&store, Writes::new()).unwrap();
+        assert_eq!(commit(&store, Writes::new()).unwrap(), None);
         assert_eq!(store.commit_stats().txns, 2);
         assert!(store.get("a").unwrap().is_none());
         assert_eq!(store.get("b").unwrap().unwrap().value, b"2");
         store.fail_next();
-        let failed = commit(&store, vec![("c".to_owned(), None)]).unwrap_err();
+        let failed = commit(&store, vec![("c".to_owned(), None, Cond::Any)]).unwrap_err();
         assert!(failed.to_string().contains(INJECTED), "{failed}");
     }
 
-    /// A refused write (which the server's writes, with no precondition, never meet) is an
-    /// error naming the key, as a failed store is. It catches a refusal read as a success.
+    /// A refused write is an error naming the key, which [`refused_key`] tells from a failed
+    /// store, and a commit answers its revision. It catches a refusal read as a success, and a
+    /// store's failure taken for a lost version (which a save answers by reading the row again
+    /// instead of failing).
     #[test]
     fn a_refused_write_is_an_error_naming_its_key() {
         let conflict = Conflict {
@@ -161,11 +201,13 @@ mod tests {
             refused.to_string(),
             "the store refused the write of hosts/join/k"
         );
-        let commit = Commit {
+        assert_eq!(refused_key(&refused), Some("hosts/join/k"));
+        assert_eq!(refused_key(&io::Error::other("the store failed")), None);
+        let commit = js_state::Commit {
             revision: Revision(1),
             counters: Vec::new(),
         };
-        assert!(committed(Ok(Ok(commit))).is_ok());
+        assert_eq!(committed(Ok(Ok(commit))).unwrap(), Revision(1));
     }
 
     /// A value holds its fields, the version, and the fields kept from what was read; a
@@ -205,12 +247,13 @@ mod tests {
     fn a_scan_names_keys_after_the_prefix() {
         let store = store();
         let writes = vec![
-            ("hosts/join/d1".to_owned(), Some(b"x".to_vec())),
-            ("hosts/other".to_owned(), Some(b"y".to_vec())),
+            ("hosts/join/d1".to_owned(), Some(b"x".to_vec()), Cond::Any),
+            ("hosts/other".to_owned(), Some(b"y".to_vec()), Cond::Any),
         ];
         commit(&store, writes).unwrap();
         let rows = scan(&store, JOINS).unwrap();
-        assert_eq!(rows, vec![("d1".to_owned(), b"x".to_vec())]);
+        let version = store.get("hosts/join/d1").unwrap().unwrap().version;
+        assert_eq!(rows, vec![("d1".to_owned(), b"x".to_vec(), version)]);
         store.fail_read_after(0);
         let failed = scan(&store, JOINS).unwrap_err();
         assert!(failed.contains(INJECTED), "{failed}");

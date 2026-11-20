@@ -51,10 +51,18 @@
 //! server makes itself (a hello that binds a host, a taint, a cordon or its lift) is
 //! committed before the registry holds it ([`BindingStore::change`]), and a failed commit
 //! leaves memory as it was. The save of each tick then makes the store hold what the
-//! registry has bound ([`BindingStore::save`]), in one transaction: it drops the binding
-//! of a host the registry held and forgot (never of one it did not hold, which another
-//! server may serve), and a cordon that lapsed. Fields of a value that this
-//! build does not know are kept and written back.
+//! registry has bound ([`BindingStore::save`]): it drops the binding of a host the registry
+//! held and forgot (never of one it did not hold, which another server may serve), and a
+//! cordon that lapsed. Fields of a value that this build does not know are kept and written
+//! back.
+//!
+//! Other servers write the same rows, so every write of a binding is conditional on the
+//! version of the row this server last read or wrote ([`Held`]): `Cond::Version` for a row it
+//! saw, `Cond::Absent` for one it saw absent. A write that loses its version (another server
+//! wrote the row in between) changes nothing: a hello is refused as a failed write and the
+//! agent says hello again, a save reads the row again, keeps what it holds, and leaves the
+//! row as the other server wrote it, so a taint another server stored is never overwritten
+//! with a binding made before it.
 //!
 //! A stored `cordon_until_ms` is a time of the store's clock (milliseconds since the Unix
 //! epoch, as the file's), since another server over the store reads it: the store's clock less
@@ -75,7 +83,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
-use js_state::{Cond, Store, Txn};
+use js_state::{Cond, Revision, Store, Txn, Version};
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -83,7 +91,7 @@ use serde_json::{Map, Value};
 use crate::clock::SharedClock;
 use crate::config::read_private;
 use crate::error::StartupError;
-use crate::host_keys::{self, BINDINGS, Extra, Writes};
+use crate::host_keys::{self, BINDINGS, Extra, KeyWrite, Writes};
 
 /// The flag the refusals name: the file lives beside the state file.
 const FLAG: &str = "--state-file";
@@ -322,14 +330,20 @@ impl Skew {
 }
 
 /// The bindings the file or the store holds, the fields of each stored value that this
-/// build does not know (none in the file, whose reader drops them), and the hosts this
-/// server's registry has held a binding of.
+/// build does not know (none in the file, whose reader drops them), the version of each
+/// row, and the hosts this server's registry has held a binding of.
 ///
 /// Over a store other servers share, a binding this server read but whose host its registry
 /// never held (a host that says hello to another server) is not this server's to delete: a
 /// save deletes only the binding of a host its registry held and then let go of. A server
 /// that starts beside another therefore leaves every binding the other one serves as it
 /// is.
+///
+/// Every write of a row is conditional on `versions`, the version of the row as this server
+/// last read or wrote it. A host with no version is written at [`Cond::Absent`]: it was read
+/// absent, or its version is not known (a restore wrote it in a commit of several rows); a row that is
+/// there then refuses the write, and the refusal reads it again, so a version not known costs
+/// a read and overwrites nothing.
 ///
 /// The bindings held are on this server's clock; `skew` is the store's clock less this
 /// server's as last read, by which a write puts a binding's cordon end on the store's clock
@@ -338,31 +352,60 @@ impl Skew {
 struct Held {
     bindings: BTreeMap<HostId, Binding>,
     extra: BTreeMap<HostId, Extra>,
+    versions: BTreeMap<HostId, Version>,
     held: BTreeSet<HostId>,
     skew: Skew,
 }
 
+/// A row of the store as it was read: the binding on the store's clock, the fields this build
+/// does not know, and the version.
+struct Row {
+    binding: Binding,
+    extra: Extra,
+    version: Version,
+}
+
+/// One host's write of a save, with the binding it leaves (none for a delete).
+struct Pending {
+    host: HostId,
+    after: Option<Binding>,
+    write: KeyWrite,
+}
+
 impl Held {
+    /// The condition a write of `host`'s row is made at: the version this server holds for it,
+    /// or that the row is absent.
+    fn cond(&self, host: &HostId) -> Cond {
+        self.versions
+            .get(host)
+            .map_or(Cond::Absent, |version| Cond::Version(*version))
+    }
+
     /// The write that makes the store hold `binding` for `host`, or no binding, its cordon end
-    /// put on the store's clock.
-    fn write(&self, host: &HostId, binding: Option<&Binding>) -> (String, Option<Vec<u8>>) {
+    /// put on the store's clock, at the version held for the row.
+    fn write(&self, host: &HostId, binding: Option<&Binding>) -> KeyWrite {
         let extra = self.extra.get(host).cloned().unwrap_or_default();
         let on_store = binding.map(|binding| self.skew.to_store(binding));
         let value = on_store.map(|binding| stored_value(host, &binding, &extra));
-        (key(host), value)
+        (key(host), value, self.cond(host))
     }
 
     /// The writes that make the store hold `bindings`, the registry's, instead of these: a put
     /// for each binding that differs, and a delete for each host the registry held before and
     /// holds no more.
-    fn writes_to(&self, bindings: &BTreeMap<HostId, Binding>) -> Writes {
+    fn writes_to(&self, bindings: &BTreeMap<HostId, Binding>) -> Vec<Pending> {
         let gone = self.gone(bindings);
-        let gone = gone.map(|host| self.write(host, None));
+        let gone = gone.map(|host| (host, None));
         let changed = bindings
             .iter()
             .filter(|(host, binding)| self.bindings.get(*host) != Some(*binding));
-        let changed = changed.map(|(host, binding)| self.write(host, Some(binding)));
-        gone.chain(changed).collect()
+        let changed = changed.map(|(host, binding)| (host, Some(binding)));
+        let pending = |(host, after): (&HostId, Option<&Binding>)| Pending {
+            host: host.clone(),
+            after: after.cloned(),
+            write: self.write(host, after),
+        };
+        gone.chain(changed).map(pending).collect()
     }
 
     /// The hosts the registry held a binding of and holds none of in `bindings`.
@@ -375,21 +418,75 @@ impl Held {
             .filter(|host| !bindings.contains_key(*host))
     }
 
-    /// Holds what a save of `bindings`, the registry's, left in the store: the hosts the
-    /// registry let go of have no binding, those it holds have theirs, and every other
-    /// binding read stays as it was read.
-    fn settle(&mut self, bindings: BTreeMap<HostId, Binding>) {
-        let gone: Vec<HostId> = self.gone(&bindings).cloned().collect();
-        for host in &gone {
-            self.hold(host, None);
+    /// Commits the writes that make the store hold `bindings`, the registry's, one transaction
+    /// for each host, and holds what each left. A write that loses the version of its row
+    /// (another server wrote it since this one read it) is not made: the row is read again and
+    /// held as it is, and answered with the binding it holds, so the caller can take a taint
+    /// of it into the registry. A delete that loses leaves the row to the server that wrote it
+    /// and the host is no longer one this server held. The other hosts are written all the
+    /// same. One transaction for each host, since the revision of a commit that wrote one row
+    /// is that row's version, which the next write is conditional on; a commit of several
+    /// rows would leave the version of each to be read.
+    ///
+    /// # Errors
+    ///
+    /// The store failed: the hosts written before it stay written and held, and the rest are
+    /// left to the next save.
+    fn save_each(
+        &mut self,
+        store: &dyn Store,
+        bindings: BTreeMap<HostId, Binding>,
+        served: &dyn Fn(&HostId) -> bool,
+    ) -> io::Result<Vec<(HostId, Binding)>> {
+        let pending = self.writes_to(&bindings);
+        self.held.extend(bindings.into_keys());
+        let mut lost = Vec::new();
+        for Pending { host, after, write } in pending {
+            // A host this registry let go of that a server still serves (its session row is
+            // there) keeps its binding: the row is left to that server, and is not this one's.
+            if after.is_none() && served(&host) {
+                self.hold(&host, None);
+                continue;
+            }
+            match host_keys::commit_one(store, write) {
+                Ok(revision) => self.wrote(&host, after.as_ref(), revision),
+                Err(error) if host_keys::refused_key(&error).is_some() => {
+                    if after.is_none() {
+                        self.held.remove(&host);
+                    }
+                    let row = fetch(store, &host)?;
+                    let seen = self.saw(&host, row);
+                    lost.extend(seen.map(|binding| (host, binding)));
+                }
+                Err(error) => return Err(error),
+            }
         }
-        for (host, binding) in bindings {
-            self.hold(&host, Some(&binding));
+        Ok(lost)
+    }
+
+    /// Holds `binding` as what the store holds for `host` and the registry holds as well,
+    /// written by a commit of that one row at `revision`, or no binding and nothing kept for
+    /// it.
+    fn wrote(&mut self, host: &HostId, binding: Option<&Binding>, revision: Revision) {
+        self.hold(host, binding);
+        if binding.is_some() {
+            self.versions.insert(host.clone(), Version(revision.0));
         }
     }
 
+    /// Holds `binding` as what the store holds for `host`, written with other rows by one
+    /// commit, so that the version of its row is not known, without taking the host for one
+    /// the registry held.
+    fn remember(&mut self, host: &HostId, binding: &Binding) {
+        self.bindings.insert(host.clone(), binding.clone());
+        self.versions.remove(host);
+    }
+
     /// Holds `binding` for `host` as the registry's, or no binding and nothing kept for it.
+    /// The version of the row is no longer known to be what it was: the caller that knows it
+    /// holds it after.
     fn hold(&mut self, host: &HostId, binding: Option<&Binding>) {
+        self.versions.remove(host);
         match binding {
             Some(binding) => {
                 self.bindings.insert(host.clone(), binding.clone());
@@ -402,19 +499,64 @@ impl Held {
             }
         }
     }
+
+    /// Holds `row`, which a read of the host's key found (none when the key is absent), as
+    /// what the store holds for `host`, with its fields and version, and answers the binding
+    /// on this server's clock. What the registry held of `host` is not changed.
+    fn saw(&mut self, host: &HostId, row: Option<Row>) -> Option<Binding> {
+        let Some(Row {
+            binding,
+            extra,
+            version,
+        }) = row
+        else {
+            // Another server dropped it since it was read: what was read is not what the
+            // store holds, so a change puts the binding again (at `Cond::Absent`) rather than
+            // taking it for stored.
+            self.bindings.remove(host);
+            self.extra.remove(host);
+            self.versions.remove(host);
+            return None;
+        };
+        let binding = self.skew.to_server(binding);
+        self.bindings.insert(host.clone(), binding.clone());
+        self.extra.insert(host.clone(), extra);
+        self.versions.insert(host.clone(), version);
+        Some(binding)
+    }
+}
+
+/// The row of `host`'s key as the store holds it now; none when the key is absent.
+///
+/// # Errors
+///
+/// The store could not be read, or its value is not a binding.
+fn fetch(store: &dyn Store, host: &HostId) -> io::Result<Option<Row>> {
+    let name = key(host);
+    let Some(row) = store.get(&name).map_err(io::Error::other)? else {
+        return Ok(None);
+    };
+    let stored: Stored = host_keys::decode(&name, &row.value).map_err(io::Error::other)?;
+    let (_, binding, extra) = stored
+        .into_binding(host.to_string())
+        .map_err(|reason| io::Error::other(format!("{name}: {reason}")))?;
+    Ok(Some(Row {
+        binding,
+        extra,
+        version: row.version,
+    }))
 }
 
 /// One host's binding as a commit is to leave it, worked out before the commit, with the
-/// writes that commit it and the writes that put the binding before it back.
+/// writes that commit it.
 pub(crate) struct Change {
     host: HostId,
-    before: Option<Binding>,
     after: Binding,
     /// What the commit writes: nothing in file mode (the save after it writes the file), and
-    /// nothing when the store holds `after` already.
+    /// nothing when the store holds `after` already. The write is conditional on the version
+    /// of the row this server read last (`Cond::Absent` when it read none), so a row another
+    /// server wrote since is not overwritten.
     pub(crate) writes: Writes,
-    /// What a compensating commit writes to put `before` back.
-    pub(crate) undo: Writes,
 }
 
 /// Writes the bindings when they differ from what the file or the store holds.
@@ -453,12 +595,13 @@ impl BindingStore {
             skew,
             ..Held::default()
         };
-        for (id, bytes) in host_keys::scan(&*store, BINDINGS)? {
+        for (id, bytes, version) in host_keys::scan(&*store, BINDINGS)? {
             let named = format!("{BINDINGS}{id}");
             let stored: Stored = host_keys::decode(&named, &bytes)?;
             let read = stored.into_binding(id);
             let (host, binding, extra) = read.map_err(|reason| format!("{named}: {reason}"))?;
             held.extra.insert(host.clone(), extra);
+            held.versions.insert(host.clone(), version);
             held.bindings.insert(host, skew.to_server(binding));
         }
         let bindings = held.bindings.clone();
@@ -487,13 +630,14 @@ impl BindingStore {
     }
 
     /// The binding the store holds for `host` now, read by its key, which is also held from
-    /// here on as what the store holds (so a change made after it puts back, on undo, what
-    /// the store held). `None` when the store holds none, and in file mode: the file is the
-    /// one server's, and its bindings are those read at start.
+    /// here on as what the store holds, with the version of the row (so a change made after it
+    /// is conditional on that version). `None`
+    /// when the store holds none, and in file mode: the file is the one server's, and its
+    /// bindings are those read at start.
     ///
-    /// A server reads it at the hello of a host its registry does not know
-    /// ([`crate::agents::Agents::restore_stored`]): the host may come from another server
-    /// over the same store, which stored a taint or a cordon for it after this one started.
+    /// A server reads it at the hello of a host, before the hello is judged
+    /// ([`crate::agents::Agents::restore_stored`]): the host may come from another server over
+    /// the same store, which stored a taint or a cordon for it after this one started.
     ///
     /// # Errors
     ///
@@ -503,25 +647,8 @@ impl BindingStore {
             return Ok(None);
         };
         self.measure()?;
-        let name = key(host);
-        let Some(row) = store.get(&name).map_err(io::Error::other)? else {
-            // Another server dropped it since it was read: what was read is not what the
-            // store holds, so a change puts the binding again rather than taking it for
-            // stored. (The registry does not know the host, so it holds no binding of it.)
-            let mut written = self.lock();
-            written.bindings.remove(host);
-            written.extra.remove(host);
-            return Ok(None);
-        };
-        let stored: Stored = host_keys::decode(&name, &row.value).map_err(io::Error::other)?;
-        let (_, binding, extra) = stored
-            .into_binding(host.to_string())
-            .map_err(|reason| io::Error::other(format!("{name}: {reason}")))?;
-        let mut written = self.lock();
-        let binding = written.skew.to_server(binding);
-        written.bindings.insert(host.clone(), binding.clone());
-        written.extra.insert(host.clone(), extra);
-        Ok(Some(binding))
+        let row = fetch(&**store, host)?;
+        Ok(self.lock().saw(host, row))
     }
 
     /// Whether the bindings are kept in the file (no store setting).
@@ -539,11 +666,23 @@ impl BindingStore {
     /// them as they were and is retried by the next call, which finds the bindings still
     /// different.
     ///
-    /// The file is the one server's, and holds exactly `current`. The store is written in
-    /// one transaction: a put for each binding that changed, and a delete for each host the
-    /// registry held and let go of; a binding of a host the registry never held is another
-    /// server's and is left as it is ([`Held`]).
-    pub(crate) fn save<F>(&self, current: F) -> io::Result<()>
+    /// The file is the one server's, and holds exactly `current`. The store is written one
+    /// host at a time, each at the version of its row this server holds: a put for each
+    /// binding that changed, and a delete for each host the registry held and let go of; a
+    /// binding of a host the registry never held is another server's and is left as it is
+    /// ([`Held`]). A write that loses its version to another server's is not made, and the
+    /// row is read again: the answer is the binding of each such row that holds one, for the
+    /// caller to take what another server stored (a taint) into the registry. The next save
+    /// writes the registry's binding over the row it read, or none when they agree.
+    ///
+    /// # Errors
+    ///
+    /// The file or the store could not be written, or a row could not be read again.
+    pub(crate) fn save<F>(
+        &self,
+        current: F,
+        served: &dyn Fn(&HostId) -> bool,
+    ) -> io::Result<Vec<(HostId, Binding)>>
     where
         F: FnOnce() -> BTreeMap<HostId, Binding>,
     {
@@ -553,32 +692,34 @@ impl BindingStore {
         match &self.keeper {
             Keeper::File(path) => {
                 if written.bindings == bindings {
-                    return Ok(());
+                    return Ok(Vec::new());
                 }
                 replace(path, render(&bindings)?.as_bytes())?;
                 written.bindings = bindings;
+                Ok(Vec::new())
             }
-            Keeper::Store(store, _) => {
-                host_keys::commit(&**store, written.writes_to(&bindings))?;
-                written.settle(bindings);
-            }
+            Keeper::Store(store, _) => written.save_each(&**store, bindings, served),
         }
-        Ok(())
     }
 
     /// Makes the file or the store hold `bindings`, the bindings a start read with the taints
     /// it put back on them ([`crate::agents_taints`]), before the registry holds any of them.
     /// The file is written whole, as [`BindingStore::save`] writes it. In the store only the
-    /// bindings that differ from what it holds are put, in one transaction, and nothing is
-    /// deleted or held as the registry's: a host whose binding is not the registry's yet may
-    /// be served by another server over the same store ([`Held`]).
+    /// bindings that differ from what it holds are put, in one transaction, each at the
+    /// version the start read for its row, and nothing is deleted or held as the registry's: a
+    /// host whose binding is not the registry's yet may be served by another server over the
+    /// same store ([`Held`]). The version of a row it wrote is not known after (the revision
+    /// of a commit of several rows is the last one's), so the next write of it reads the row
+    /// first, as every hello and cordon does.
     ///
     /// # Errors
     ///
-    /// The file or the store could not be written: it holds what it held.
+    /// The file or the store could not be written, or another server wrote a row since the
+    /// start read it (the write is not made over it): nothing is written, the start is
+    /// refused, and the next one reads the rows again.
     pub(crate) fn restore(&self, bindings: &BTreeMap<HostId, Binding>) -> io::Result<()> {
         let Keeper::Store(store, _) = &self.keeper else {
-            return self.save(|| bindings.clone());
+            return self.save(|| bindings.clone(), &|_| false).map(drop);
         };
         let mut written = self.lock();
         let changed = bindings
@@ -590,43 +731,42 @@ impl BindingStore {
             .map(|(host, binding)| written.write(host, Some(binding)));
         host_keys::commit(&**store, writes.collect())?;
         for (host, binding) in changed {
-            written.bindings.insert(host.clone(), binding.clone());
+            written.remember(host, binding);
         }
         Ok(())
     }
 
     /// The change that makes `host`'s binding `after`. Its writes are empty in file mode and
-    /// when the store holds `after` already; otherwise they put `after`, and its undo puts
-    /// back what the store holds now.
+    /// when the store holds `after` already; otherwise they put `after` at the version of the
+    /// row this server holds ([`Held`]).
     pub(crate) fn change(&self, host: &HostId, after: Binding) -> Change {
         let written = self.lock();
         let before = written.bindings.get(host).cloned();
         let stored = matches!(self.keeper, Keeper::Store(..));
-        let (writes, undo) = match stored && before.as_ref() != Some(&after) {
-            true => (
-                vec![written.write(host, Some(&after))],
-                vec![written.write(host, before.as_ref())],
-            ),
-            false => (Writes::new(), Writes::new()),
+        let writes = match stored && before.as_ref() != Some(&after) {
+            true => vec![written.write(host, Some(&after))],
+            false => Writes::new(),
         };
         Change {
             host: host.clone(),
-            before,
             after,
             writes,
-            undo,
         }
     }
 
-    /// Commits `writes` to the store in one transaction. A file keeps nothing here (its
-    /// writes are empty): the save after the change writes it.
+    /// Commits `writes` to the store in one transaction, and answers its revision: the version
+    /// of the binding written when `writes` is a change's one write, or the last of the writes
+    /// of a hello's transaction ([`crate::join_tokens::JoinTokens::admit_writing`]); none when
+    /// there was nothing to commit. A file keeps nothing here (its writes are empty): the save
+    /// after the change writes it.
     ///
     /// # Errors
     ///
-    /// The store failed or refused the transaction: nothing was written.
-    pub(crate) fn commit(&self, writes: Writes) -> io::Result<()> {
+    /// The store failed or refused the transaction (a write whose row another server wrote
+    /// since is refused): nothing was written.
+    pub(crate) fn commit(&self, writes: Writes) -> io::Result<Option<Revision>> {
         match &self.keeper {
-            Keeper::File(_) => Ok(()),
+            Keeper::File(_) => Ok(None),
             Keeper::Store(store, _) => host_keys::commit(&**store, writes),
         }
     }
@@ -636,18 +776,24 @@ impl BindingStore {
     /// host) and the binding is as it was read: the write is conditional on the version just
     /// read, so a write of another server between the read and the commit is refused, and a
     /// taint another server reported or cleared is never overwritten by a report or a clear
-    /// made on what this server saw before. Nothing in file mode (the one server is the
-    /// file's only writer), and nothing to commit is a success.
+    /// made on what this server saw before. Answers the revision of the commit, the version of
+    /// the binding written. Nothing in file mode (the one server is the file's only writer),
+    /// and nothing to commit is a success with no revision.
     ///
     /// # Errors
     ///
     /// The store failed or refused the write, or holds a different taint than `expected`:
     /// nothing was written, and the heartbeat is answered with an error so that the agent
     /// reports again.
-    pub(crate) fn commit_taint(&self, change: &Change, expected: Option<&Taint>) -> io::Result<()> {
-        let (Keeper::Store(store, _), Some((name, value))) = (&self.keeper, change.writes.first())
+    pub(crate) fn commit_taint(
+        &self,
+        change: &Change,
+        expected: Option<&Taint>,
+    ) -> io::Result<Option<Revision>> {
+        let (Keeper::Store(store, _), Some((name, value, _))) =
+            (&self.keeper, change.writes.first())
         else {
-            return Ok(());
+            return Ok(None);
         };
         let name = name.as_str();
         let row = store
@@ -666,7 +812,7 @@ impl BindingStore {
         // A change that sets a taint is a put, so there is a value; a delete would put nothing.
         let value = value.clone().unwrap_or_default();
         let txn = Txn::new().put(name, value, Cond::Version(row.version));
-        host_keys::committed(store.txn(txn))
+        host_keys::committed(store.txn(txn)).map(Some)
     }
 
     /// Ends the taint the store holds for `host` when the agent reports `cleared`: the stored
@@ -689,6 +835,7 @@ impl BindingStore {
             (
                 written.bindings.get(host).cloned(),
                 written.extra.get(host).cloned(),
+                written.versions.get(host).copied(),
             )
         };
         let ended = self.stored(host).and_then(|stored| {
@@ -698,41 +845,48 @@ impl BindingStore {
             let expected = stored.as_ref().and_then(|bound| bound.taint().cloned());
             let change = stored.map(|bound| self.change(host, bound.with_taint(None)));
             let commit = |change| self.commit_taint(change, expected.as_ref());
-            change.as_ref().map_or(Ok(()), commit)?;
-            Ok(change)
+            let revision = change.as_ref().map_or(Ok(None), commit)?;
+            Ok(change.map(|change| (change, revision)))
         });
         match &ended {
-            Ok(Some(change)) => self.applied(change),
+            Ok(Some((change, revision))) => self.applied(change, *revision),
             _ => {
                 let mut written = self.lock();
-                let (binding, extra) = kept;
+                let (binding, extra, version) = kept;
                 written.bindings.remove(host);
                 written.extra.remove(host);
+                written.versions.remove(host);
                 written
                     .bindings
                     .extend(binding.map(|binding| (host.clone(), binding)));
                 written
                     .extra
                     .extend(extra.map(|extra| (host.clone(), extra)));
+                written
+                    .versions
+                    .extend(version.map(|version| (host.clone(), version)));
             }
         }
-        ended
+        ended.map(|ended| ended.map(|(change, _)| change))
     }
 
-    /// Holds `change` as the store holds it once its writes are committed. Nothing in file
-    /// mode, where what the file holds changes only when [`BindingStore::save`] writes it.
-    pub(crate) fn applied(&self, change: &Change) {
-        self.hold(&change.host, Some(&change.after));
-    }
-
-    /// Holds the binding before `change` once its undo is committed. Nothing in file mode.
-    pub(crate) fn undone(&self, change: &Change) {
-        self.hold(&change.host, change.before.as_ref());
-    }
-
-    fn hold(&self, host: &HostId, binding: Option<&Binding>) {
+    /// Holds `change` as the store holds it once its writes are committed at `revision` (that
+    /// of [`BindingStore::commit`]): the binding, and the version of its row, which the next
+    /// write of the host is conditional on. Nothing in file mode, where what the file holds
+    /// changes only when [`BindingStore::save`] writes it.
+    pub(crate) fn applied(&self, change: &Change, revision: Option<Revision>) {
         if let Keeper::Store(..) = self.keeper {
-            self.lock().hold(host, binding);
+            let mut written = self.lock();
+            let read = written.versions.get(&change.host).copied();
+            written.hold(&change.host, Some(&change.after));
+            // A change that wrote leaves its commit's revision as the row's version; one with
+            // no write left the row as it was, at the version read.
+            let wrote = change.writes.first().and(revision);
+            let version = wrote.map(|revision| Version(revision.0)).or(read);
+            let host = &change.host;
+            written
+                .versions
+                .extend(version.map(|version| (host.clone(), version)));
         }
     }
 }
@@ -792,193 +946,9 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod clock_tests;
 
 #[cfg(test)]
-mod tests {
-    use js_testkit::dir::TestDir;
+#[path = "agent_state_conditional_tests.rs"]
+mod conditional_tests;
 
-    use super::*;
-
-    fn bound(token: &str, instance: Option<(&str, &str)>) -> Binding {
-        let instance = instance.map(|(provider, instance_id)| InstanceIdentity {
-            provider: provider.to_string(),
-            instance_id: instance_id.to_string(),
-        });
-        Binding::new(Credential::of_token(token), instance)
-    }
-
-    fn host(name: &str) -> HostId {
-        HostId::new(name).unwrap()
-    }
-
-    const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    /// A taint commit over a file writes nothing and succeeds: the file is saved after the
-    /// registry takes the change, and no other server shares it. It catches a commit that
-    /// reaches for a store the server does not have.
-    #[test]
-    fn a_taint_commit_over_a_file_writes_nothing() {
-        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-taint-file");
-        let path = dir.join("taint.agents");
-        let store = BindingStore::new(path.clone(), BTreeMap::new());
-        let change = store.change(&host("a"), bound("token-a", None));
-        assert!(change.writes.is_empty());
-        store.commit_taint(&change, None).unwrap();
-        assert!(!path.exists());
-    }
-
-    /// The snapshot is taken while the store's lock is held, so of two saves the one that
-    /// writes last holds the newest bindings. It catches a save that reads the registry
-    /// first and locks after, which lets a slower save put an older snapshot over a newer
-    /// file; the closure runs in the place of that read and finds the lock taken or not.
-    #[test]
-    fn the_snapshot_is_taken_under_the_lock() {
-        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-snapshot");
-        let path = dir.join("snapshot.agents");
-        let store = BindingStore::new(path.clone(), BTreeMap::new());
-        let mut bindings = BTreeMap::new();
-        bindings.insert(host("a"), bound("token-a", None));
-        let mut locked = false;
-        store
-            .save(|| {
-                locked = store.written.try_lock().is_err();
-                bindings.clone()
-            })
-            .unwrap();
-        assert!(locked, "the snapshot was read before the store's lock");
-        assert_eq!(load(&path).unwrap(), bindings);
-    }
-
-    /// What is written reads back as the same bindings, with and without an instance, and
-    /// the text holds a digest and no token. It catches a binding that comes back as
-    /// another credential or without its instance (a restart that lets a different
-    /// machine take the lease) and a file that carries the secret itself.
-    #[test]
-    fn bindings_survive_the_file() {
-        let mut bindings = BTreeMap::new();
-        bindings.insert(host("a"), bound("token-a", None));
-        bindings.insert(host("b"), bound("token-b", Some(("aws", "i-0abc"))));
-        let text = render(&bindings).unwrap();
-        assert_eq!(parse(&text).unwrap(), bindings);
-        assert!(text.contains("version = 1"), "{text}");
-        assert!(!text.contains("token-a"), "{text}");
-        assert!(!text.contains("token-b"), "{text}");
-        assert_eq!(parse("version = 1\n").unwrap(), BTreeMap::new());
-    }
-
-    /// A taint, with and without its run and check, reads back as written, and a host
-    /// without one reads back without. It catches a restart that makes a tainted host
-    /// clean, and one that taints a host that was not.
-    #[test]
-    fn a_taint_survives_the_file() {
-        let taint = |run_id: Option<&str>, check: Option<&str>| Taint {
-            reason: "residue".to_string(),
-            run_id: run_id.map(str::to_string),
-            check: check.map(str::to_string),
-        };
-        let mut bindings = BTreeMap::new();
-        bindings.insert(
-            host("a"),
-            bound("t", None).with_taint(Some(taint(None, None))),
-        );
-        bindings.insert(
-            host("b"),
-            bound("t", None).with_taint(Some(taint(Some("run-1-1"), Some("tmp")))),
-        );
-        bindings.insert(host("c"), bound("t", None));
-        let text = render(&bindings).unwrap();
-        assert_eq!(parse(&text).unwrap(), bindings);
-        assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
-    }
-
-    /// A run or a check of a taint with no reason is a file that cannot be read as
-    /// written. It catches a taint that loads as no taint.
-    #[test]
-    fn a_taint_without_a_reason_is_refused() {
-        for extra in ["taint_run_id = \"r\"\n", "taint_check = \"c\"\n"] {
-            let text = format!(
-                "version = 1\n[[host]]\nid = \"a\"\ncredential = \"{CREDENTIAL}\"\n{extra}"
-            );
-            let reason = parse(&text).unwrap_err();
-            assert!(reason.contains("taint"), "{reason}");
-        }
-    }
-
-    /// A later version's keys, at the top and in an entry, are ignored whatever the
-    /// version number says, and a file with no version at all is refused as not this
-    /// file: the format is additive, so an older build reads a newer file. It catches a
-    /// reader that refuses a file for a key it does not know, and one that takes any
-    /// TOML with a `host` table for its own.
-    #[test]
-    fn unknown_keys_are_ignored() {
-        let text = format!(
-            "version = 9\nfuture = true\n[[host]]\nid = \"a\"\ncredential = \"{CREDENTIAL}\"\nnote = \"x\"\n"
-        );
-        let parsed = parse(&text).unwrap();
-        assert_eq!(parsed.len(), 1);
-        let unversioned = format!("[[host]]\nid = \"a\"\ncredential = \"{CREDENTIAL}\"\n");
-        assert!(parse(&unversioned).is_err());
-    }
-
-    /// Every way a file can be wrong is refused with a reason that names the fault and
-    /// repeats nothing of the entry: text that is not TOML, a bad host id, a credential
-    /// that is not a digest, half an instance, and a host listed twice. It catches a
-    /// file that loads as a smaller set of bindings (a start that quietly drops the
-    /// protection it exists to give).
-    #[test]
-    fn a_file_that_cannot_be_read_as_written_is_refused() {
-        let entry = |id: &str, credential: &str, extra: &str| {
-            format!("version = 1\n[[host]]\nid = \"{id}\"\ncredential = \"{credential}\"\n{extra}")
-        };
-        let twice = format!(
-            "{}[[host]]\nid = \"a\"\ncredential = \"{CREDENTIAL}\"\n",
-            entry("a", CREDENTIAL, "")
-        );
-        let cases = [
-            ("version = [".to_string(), ""),
-            (entry("Bad Id", CREDENTIAL, ""), "host id"),
-            (entry("a", "abc", ""), "credential"),
-            (entry("a", CREDENTIAL, "instance_id = \"i\"\n"), "instance"),
-            (
-                entry("a", CREDENTIAL, "instance_provider = \"aws\"\n"),
-                "instance",
-            ),
-            (twice, "twice"),
-        ];
-        for (text, names) in cases {
-            let reason = parse(&text).unwrap_err();
-            assert!(reason.contains(names), "{names}: {reason}");
-            assert!(!reason.contains("Bad Id"), "{reason}");
-            assert!(!reason.contains(CREDENTIAL), "{reason}");
-        }
-        let both = entry(
-            "a",
-            CREDENTIAL,
-            "instance_provider = \"aws\"\ninstance_id = \"i\"\n",
-        );
-        assert!(parse(&both).is_ok());
-    }
-
-    /// A temporary file left beside the target by a crash, with a wider mode and other
-    /// bytes, does not decide the mode of what is written: the result is owner-only and
-    /// holds the new bytes. A temporary name that cannot be removed (a directory) is an
-    /// error and the target is untouched. It catches a rename of a world-readable stale file
-    /// into place.
-    #[test]
-    fn a_stale_temporary_file_does_not_decide_the_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TestDir::under(std::env::temp_dir(), "agent_state_unit-stale");
-        let path = dir.join("stale.state");
-        let temp = dir.join("stale.state.tmp");
-        fs::write(&temp, "left by a crash").unwrap();
-        fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).unwrap();
-        replace(&path, b"new").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-        assert!(!temp.exists());
-
-        fs::create_dir(&temp).unwrap();
-        assert!(replace(&path, b"newer").is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        fs::remove_dir(&temp).unwrap();
-    }
-}
+#[cfg(test)]
+#[path = "agent_state_unit_tests.rs"]
+mod tests;

@@ -292,6 +292,7 @@
 //! job worker stops, 2 for a flag or file that is wrong, a job engine that cannot be used
 //! and a server that refuses the host for good.
 
+pub mod agent_process;
 mod backoff;
 pub mod bundle;
 #[cfg(target_os = "linux")]
@@ -865,7 +866,8 @@ fn execute(
     let cell = dispatch::Cell::new(kept);
     let health = Health::default();
     let host_id = offer.hello.host_id.clone();
-    let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
+    let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter)
+        .with_agent_process(agent_process::draw());
     if let Some((worker, drain, outbox)) = &jobs {
         // The worker rings the sleeper's bell when it has news, so a start taken and its
         // `running` are reported at once (`Session::beats_on_news`).

@@ -114,8 +114,11 @@ pub(super) async fn poll(
         let served = agents.serve_join(presented, poll.host_id.clone()).await;
         served.map_err(Refused::join)?;
     }
-    // The session is judged as a beat's is and nothing is recorded: a poll is not a beat.
+    // The session is judged as a beat's is and nothing is recorded: a poll is not a beat. A
+    // poll of an epoch this server's registry does not hold may be of a session another
+    // server's hello began: the registry takes it from the host's row first, as for a beat.
     let beat = Heartbeat {
+        seq: None,
         host_id: poll.host_id.clone(),
         epoch: poll.epoch,
         session: poll.session.clone(),
@@ -133,6 +136,8 @@ pub(super) async fn poll(
         retired_jobs: Vec::new(),
         log_grant_state: None,
     };
+    let refreshed = super::rows::refresh_for_beat(&agents, &beat).await;
+    refreshed.map_err(|error| super::unread_binding(&beat.host_id, &error))?;
     agents.registry.check_heartbeat(&beat, &who)?;
     let served = agents
         .jobs

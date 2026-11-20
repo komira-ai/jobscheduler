@@ -293,6 +293,16 @@ pub struct Heartbeat {
         deserialize_with = "log_sink::lenient"
     )]
     pub log_grant_state: Option<LogGrantState>,
+    /// The beat's sequence in its session: the agent raises it for every heartbeat it sends,
+    /// a retry of an unanswered one included, and starts it again at 1 after each welcome. A
+    /// server applies a beat of the session only when its sequence is newer than the newest it
+    /// applied, so a beat that reaches it late, after a newer one, changes nothing and is
+    /// answered from what the server holds. Absent from an agent that predates the field: the
+    /// server then applies beats in the order they reach it, and frees a container such an
+    /// agent confirmed gone only once two applied beats in a row leave it out. A server from
+    /// before the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 /// The server's verdict on a [`RunResult`] (and, in a [`JobResultAck`], on a job's result).

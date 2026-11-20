@@ -245,6 +245,7 @@ impl Cell {
     /// when it brings one, goes into the cell, as the agent's session puts it.
     async fn beat(&self, jobs: Vec<HeldJob>) -> HeartbeatReply {
         let beat = Heartbeat {
+            seq: None,
             host_id: self.host.clone(),
             epoch: self.session.0,
             session: self.session.1.clone(),

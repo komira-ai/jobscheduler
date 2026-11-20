@@ -43,7 +43,8 @@ pub struct HeartbeatCheck {
     pub taint: Option<Taint>,
     /// The beat ends the host's taint: it reports the taint cleared (`taint_cleared` is the
     /// taint the host holds), or it says the agent holds none (`tainted` is false) while
-    /// the host holds a taint the agent made. The host holds [`HeartbeatCheck::taint`]
+    /// the host holds a taint the agent made, and the beat is not a late one ([`Heartbeat::seq`]
+    /// no newer than the newest taken in the session). The host holds [`HeartbeatCheck::taint`]
     /// after it, which is none unless the same beat reports a new taint. A caller that makes the taint durable before the
     /// registry records it commits the binding when this is set, as when `taint` is.
     pub cleared: bool,
@@ -53,9 +54,18 @@ pub struct HeartbeatCheck {
 /// taint but the two the server makes itself, a host job's placement (`host-job`) and a
 /// refused whole-host prepare (`host-unsafe`). The agent's own report that it holds none
 /// does not speak for those two.
-fn agent_made(taint: &Taint) -> bool {
+pub(super) fn agent_made(taint: &Taint) -> bool {
     let server_made = [HOST_JOB.to_string(), prepare_taint().reason];
     !server_made.contains(&taint.reason)
+}
+
+/// Whether the registry already took a beat of this session whose sequence number is at least
+/// as new as `heartbeat`'s, so `heartbeat` is a late arrival: the agent's word of its taint
+/// (`tainted`) in it is older than the word the registry holds, and is not acted on. A beat
+/// without a sequence number (an agent that predates it) is never overtaken, and one taken
+/// when the session had no sequence number yet overtakes nothing.
+fn overtaken(record: &Record, heartbeat: &Heartbeat) -> bool {
+    matches!((heartbeat.seq, record.last_seq), (Some(seq), Some(last)) if seq <= last)
 }
 
 /// Whether `heartbeat` ends the taint `record` holds, in one of two ways. The agent says it
@@ -67,12 +77,15 @@ fn agent_made(taint: &Taint) -> bool {
 /// (reason `host-tainted`), which only mirrors the agent's own taint and which the agent,
 /// clean again, never reports, so its report of any cleared taint ends it. A host whose held
 /// taint is a host job's or a refused whole-host prepare's stays tainted for the agent's
-/// word; only the operator's [`Registry::clear_taint`] ends those.
+/// word; only the operator's [`Registry::clear_taint`] ends those. A beat that is overtaken
+/// ([`overtaken`]) says nothing of the agent's taint by `tainted`: its report of a cleared taint
+/// still counts, the agent sends it until acknowledged.
 pub(super) fn clears(record: &Record, heartbeat: &Heartbeat) -> bool {
     let Some(held) = &record.taint else {
         return false;
     };
-    let holds_none = heartbeat.tainted == Some(false) && agent_made(held);
+    let says_none = heartbeat.tainted == Some(false) && !overtaken(record, heartbeat);
+    let holds_none = says_none && agent_made(held);
     let reported = heartbeat
         .taint_cleared
         .as_ref()
@@ -93,7 +106,8 @@ pub(super) fn clears(record: &Record, heartbeat: &Heartbeat) -> bool {
 /// mirror of it, naming no run: the agent is tainted and the server holds none (the
 /// operator cleared the server's taint while the marker stayed), and the agent's next clean
 /// beat then ends it. The first taint is kept, so a host that holds a taint after the
-/// clearing keeps it.
+/// clearing keeps it. A beat that is overtaken ([`overtaken`]) gives no mirror, as it ends no
+/// taint by `tainted`.
 pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Taint> {
     let refused_start = heartbeat.results.iter().find(|result| {
         let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
@@ -107,12 +121,12 @@ pub(super) fn taint_after(record: &Record, heartbeat: &Heartbeat) -> Option<Tain
             check: None,
         })
     });
-    let mirror =
-        (heartbeat.tainted == Some(true) && heartbeat.taint_cleared.is_none()).then(|| Taint {
-            reason: refusal_code::HOST_TAINTED.to_string(),
-            run_id: None,
-            check: None,
-        });
+    let says_tainted = heartbeat.tainted == Some(true) && !overtaken(record, heartbeat);
+    let mirror = (says_tainted && heartbeat.taint_cleared.is_none()).then(|| Taint {
+        reason: refusal_code::HOST_TAINTED.to_string(),
+        run_id: None,
+        check: None,
+    });
     let held = record.taint.clone().filter(|_| !clears(record, heartbeat));
     held.or(reported).or(mirror)
 }
@@ -282,6 +296,7 @@ mod tests {
 
     fn hello() -> Hello {
         Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "a".into(),
             pool: "builders".into(),
@@ -308,6 +323,7 @@ mod tests {
 
     fn heartbeat(session: String) -> Heartbeat {
         Heartbeat {
+            seq: None,
             host_id: "a".into(),
             epoch: 1,
             session,

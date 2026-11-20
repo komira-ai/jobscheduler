@@ -64,6 +64,34 @@ impl Agents {
         }
     }
 
+    /// Takes the taint the store holds for `host` into the registry
+    /// ([`Registry::take_stored_taint`]) after [`Agents::keep_taint`] failed for a beat's taint:
+    /// the commit is conditional on the taint the registry holds, which another server's change
+    /// can leave behind the store's, and a registry that stays behind fails every beat of that
+    /// agent that reaches this server the same way. The failure does not say whether the store
+    /// was out or held another taint, so this runs after either: for an outage the read fails
+    /// too and the registry is left as it was, and when the store was back or only the commit
+    /// failed the store holds what the registry does and nothing changes. A host with no
+    /// binding row in the store (or in file mode) is left as it is, as is a taint the server
+    /// made itself. Logs one line when the registry took a taint or ended one. The caller holds
+    /// [`Agents::host_writes`] and answers the beat with the error it got.
+    pub(super) async fn resync_taint(self: &Arc<Self>, host: &HostId) {
+        let this = Arc::clone(self);
+        let named = host.clone();
+        let Ok(Some(binding)) = blocking(move || this.store.stored(&named)).await else {
+            return;
+        };
+        let stored = binding.taint().cloned();
+        let reason = stored.as_ref().map(|taint| taint.reason.clone());
+        if self.registry.take_stored_taint(host, stored) {
+            info!(
+                %host,
+                reason,
+                "the taint another server stored is taken into the registry after a refused commit"
+            );
+        }
+    }
+
     /// Logs that a heartbeat of `host` ended the taint the registry holds for it by saying the
     /// agent holds none (`tainted` false), with the reason of the taint held, before the
     /// registry records the beat. The caller has committed the clear; nothing is logged for a
@@ -88,14 +116,16 @@ impl Agents {
     ///
     /// # Errors
     ///
-    /// [`CordonFault::NotHeld`] for a host the registry does not hold;
-    /// [`CordonFault::Unsaved`] when the commit failed or was refused (nothing changed), or in
+    /// [`CordonFault::NotHeld`] for a host the registry does not hold and the rows do not
+    /// know ([`Agents::take_from_rows`]); [`CordonFault::Unsaved`] when the rows could not be
+    /// read, the commit failed or was refused (nothing changed), or in
     /// file mode when the save after it did (the clear holds on this server).
     pub(crate) async fn clear_taint(
         self: &Arc<Self>,
         host: &HostId,
     ) -> Result<Option<Taint>, CordonFault> {
         let gate = self.host_writes.lock().await;
+        self.take_from_rows(host).await?;
         let held = self.registry.own_host(host).ok_or(CordonFault::NotHeld)?;
         if held.host.taint.is_none() {
             drop(gate);
@@ -139,7 +169,7 @@ pub(super) fn log_cleared(host: &HostId, taint: &Taint, by: &'static str) {
 /// the registry without the host, so a host it holds after the call was put back here;
 /// nothing is logged when the registry took nothing (a binding with neither a taint nor a
 /// cordon still to run).
-pub(super) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
+pub(crate) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
     registry.restore_tainted(host, binding.clone());
     if registry.own_host(host).is_none() {
         return;
@@ -154,6 +184,23 @@ pub(super) fn put_back(registry: &Registry, host: &HostId, binding: &Binding, wh
         cordon_until_ms = binding.cordon_until_ms(),
         "a host's stored taint or cordon is put back"
     );
+}
+
+/// Takes what the store holds in `binding`, the row of `host` as read `when`, into the registry:
+/// [`put_back`] for a host the registry does not know, and for one it knows the taint of the
+/// binding when the registry holds none ([`Registry::taint_host`]; the first taint a host has
+/// stands, so a taint the registry holds is not replaced). A write of the host's binding made
+/// from what the registry holds would otherwise put a binding without the taint over the row
+/// that holds it.
+pub(crate) fn take_in(registry: &Registry, host: &HostId, binding: &Binding, when: &'static str) {
+    if registry.own_host(host).is_none() {
+        put_back(registry, host, binding, when);
+        return;
+    }
+    let taint = binding.taint().cloned();
+    if taint.is_some_and(|taint| registry.taint_host(host, taint)) {
+        info!(%host, when, "a taint another server stored is taken into the registry");
+    }
 }
 
 /// Puts each taint row of the job store on the binding of its host, when that binding holds

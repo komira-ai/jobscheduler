@@ -391,12 +391,14 @@ fn the_agent_sends_its_load_to_a_real_server() {
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
-/// Asserts that a job outlives a server restart: after the server restarts over its files,
-/// the agent's next heartbeat is refused as an unknown host, it says hello again at once with
-/// the job in its held list, the server (which kept the job in its store) adopts it and the
-/// job still reads running; when the container then exits its result reaches the restarted
-/// server. It catches a restart that loses a running job, an agent that heartbeats a dead
-/// session for ever, and a hello that makes the server stop a job it holds.
+/// Asserts that a job outlives a server restart and the agent keeps its session: after the
+/// server restarts over its files, the agent's next heartbeat is served from the host's row
+/// (the wait stays the interval, not the immediate retry of a refused beat) with no second
+/// hello, the host is live, the job (kept in the job store) still reads running and the server
+/// sends no stop for it; when the container then exits its result reaches the restarted server.
+/// It catches a restart that loses a running job, a restarted server that refuses a beat of a
+/// session its rows hold (which costs a hello and a re-adoption of every held job), an agent
+/// that heartbeats a dead session for ever, and a server that stops a job it holds.
 #[test]
 fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     let rig = rig("jobs_e2e_restart", &[]);
@@ -414,19 +416,15 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     } = rig;
     let server = server.restart();
     *address.lock().unwrap() = server.url();
+    // A served beat with nothing to send is held (the wait is `HELD`); a refused one is also
+    // an immediate retry, and the hello that follows it waits an interval. Two held waits
+    // mean the beat was served and no hello was sent.
     agent.elapse();
-    assert_eq!(
-        agent.next_wait(),
-        Duration::ZERO,
-        "the heartbeat is refused"
-    );
-    agent.elapse();
-    assert_eq!(agent.next_wait(), INTERVAL, "the hello");
+    assert_eq!(agent.next_wait(), HELD, "the beat is served");
     assert!(worker.settle());
     assert_eq!(server.host("h1")["state"], "live");
-
     agent.elapse();
-    agent.next_wait();
+    assert_eq!(agent.next_wait(), HELD, "no hello followed");
     assert!(worker.settle());
     assert_eq!(server.job_state(&job), RUNNING);
     assert!(!machine.world.log().contains(&format!("stop {job}")));
@@ -439,7 +437,8 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
     // The server's acknowledgement of the result is in the reply to that heartbeat: the
     // worker takes it before the stop, so the drain finds nothing left to wait for.
     assert!(worker.settle());
-    agent.stop();
+    let ran = agent.stop();
+    assert!(!ran.err.contains("lost the session"), "{}", ran.err);
 }
 
 /// Asserts what a server that forgot a job does to the agent's work: after the server
