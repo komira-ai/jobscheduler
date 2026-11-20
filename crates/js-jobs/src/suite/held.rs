@@ -218,7 +218,8 @@ pub fn a_held_refusal_requeues_the_job_without_counting_a_failure<B: Backend>(ba
 
 /// The requeue is refused, writing nothing and asking for no rows, for a job that is queued,
 /// running or ended, for one whose cancel was asked for (it is cancelled, not requeued), for an
-/// allocation that is freed, releasing or missing, and for a job that does not exist.
+/// allocation that is freed, releasing or missing, and for a job that does not exist; a requeue
+/// that lands asks for its rows once.
 pub fn a_held_refusal_refuses_what_it_cannot_requeue<B: Backend>(backend: &B) {
     let name = "a_held_refusal_refuses_what_it_cannot_requeue";
     let rig = rig(backend);
@@ -291,6 +292,16 @@ pub fn a_held_refusal_refuses_what_it_cannot_requeue<B: Backend>(backend: &B) {
     }
     assert_eq!(rig.snapshot(), before, "{name}: a refused requeue wrote");
     assert_eq!(asked.get(), 0, "{name}: a refused requeue asked for rows");
+
+    let placed = rig.placed("hn-placed");
+    rig.jobs
+        .requeue_held(&placed, held_on_a(&rig), beside)
+        .expect("a placed job's refused start requeues");
+    assert_eq!(
+        asked.get(),
+        1,
+        "{name}: a requeue that lands did not ask for its rows once"
+    );
 }
 
 /// A requeue whose commit fails writes nothing; one whose job or allocation another writer
