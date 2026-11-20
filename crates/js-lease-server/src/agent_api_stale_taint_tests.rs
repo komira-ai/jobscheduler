@@ -74,6 +74,8 @@ async fn an_agent_that_holds_no_taint_ends_the_taint_stored_from_its_earlier_ses
     );
     assert_eq!(second.binding("host-a")["taint_reason"], "residue");
 
+    // The agent restarts: its last session goes silent past the grace, so the hello is taken.
+    second.clock.advance(Duration::from_secs(60));
     let again = second.pooled("host-a", "burst").await.unwrap();
     assert_ne!(again.epoch, hello.epoch);
     let lines = Lines::default();
@@ -106,6 +108,7 @@ async fn a_new_hello_keeps_the_taint_and_the_first_clean_beat_ends_it() {
     let reply = rig.beat((&rig.pool, None), "host-a", &welcome, residue());
     assert!(reply.await.unwrap().taint_ack);
 
+    rig.clock.advance(Duration::from_secs(60));
     let again = rig.pooled("host-a", "burst").await.unwrap();
     assert_ne!(again.epoch, welcome.epoch);
     assert_eq!(rig.listed_taint("host-a").unwrap().reason, "residue");

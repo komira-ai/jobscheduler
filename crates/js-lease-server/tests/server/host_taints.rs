@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -379,7 +380,8 @@ async fn a_job_submitted_while_the_only_host_is_tainted_queues_and_places_after_
 
 /// Asserts that an agent that restarted with no marker ends the taint the server kept for
 /// its host: the host's agent reported a taint, so a job submitted after it queues and is
-/// placed nowhere; the agent says hello again (the taint is kept through the hello), its first
+/// placed nowhere; the agent says hello again once its last session is silent past the grace
+/// (the taint is kept through the hello), its first
 /// heartbeat says `"tainted": false`, and then `GET /v1/hosts` lists no taint, the reply names
 /// none (`host_taint` is absent), the taint is gone from the state file after the tick that
 /// writes it, and the queued job is started on the host. It catches a server that keeps an
@@ -397,6 +399,8 @@ async fn an_agent_that_restarts_with_no_marker_ends_the_taint_the_server_kept() 
     h.ticks.step().await;
     assert_eq!(job_state(&h, "waits-for-agent").await, "JOB_STATE_QUEUED");
 
+    // The agent restarts: its last session goes silent past the grace, so the hello is taken.
+    h.clock.advance(Duration::from_secs(60));
     let again = job_agent(&h, &cpu_hello("burst-1")).await;
     let shown = entry(&hosts(&h).await, "burst-1");
     assert_eq!(shown["taint"]["reason"], "residue", "{shown}");

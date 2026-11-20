@@ -270,6 +270,9 @@ fn reply_exclusive_lease_id_is_checked() {
     }
 }
 
+/// One edit of a taint at the caps, with the field and the rule its check then names.
+type Case = (fn(&mut Taint), &'static str, Rule);
+
 /// The taint the server reports is held to the bounds of a heartbeat's taint: none and a good
 /// one (a reason, a run id and a check at their caps) pass; an empty reason, a reason over
 /// the cap, a path-like run id and a check with a control character fail `host_taint` under
@@ -293,7 +296,7 @@ fn reply_host_taint_is_checked() {
     };
     assert_eq!(with(None).validate().host_taint, Ok(()));
     assert_eq!(with(taint(|_| {})).validate().host_taint, Ok(()));
-    let cases: [(fn(&mut Taint), &str, Rule); 4] = [
+    let cases: [Case; 4] = [
         (
             |t: &mut Taint| t.reason.clear(),
             "taint.reason",
