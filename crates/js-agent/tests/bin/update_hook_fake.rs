@@ -35,7 +35,7 @@ use std::time::Duration;
 use js_agent::update_hook::step::{self, Env, MaintainEnv, TokenFacts};
 #[cfg(target_os = "linux")]
 use js_agent::update_hook::{
-    Clock, DirStat, Done, DrainParams, Host, Invocation, Lease, MaintainInvocation,
+    Clock, DirStat, Done, DrainParams, Host, Invocation, Lease, Machine, MaintainInvocation,
     MaintenanceStep, Manager, NoGate, Outcome, Params, Ports, Step, run,
 };
 
@@ -204,6 +204,9 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         } else {
             &as_root
         },
+        // A systemd host: the host setup of a Mac is refused before it looks at anything.
+        look: Machine::system().look,
+        fstab: Machine::system().fstab,
     };
     let done = match step_now {
         Step::Prepare => step::prepare(&env, params),

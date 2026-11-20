@@ -57,7 +57,7 @@ use crate::own_host::{
 use crate::{CredentialFile, Login};
 
 use super::ports::{Facts, NoGate, Ports, StateView, SystemClock, SystemLink};
-use super::step::{self, Env, MaintainEnv, TokenFacts, TokenFn};
+use super::step::{self, Env, FSTAB, LookFn, MaintainEnv, PathFacts, TokenFacts, TokenFn};
 use super::{
     ConnectParams, DirStat, Done, DrainParams, FLAGS_FILE_KEY, Invocation, MaintainInvocation,
     MaintenanceStep, Manager, Outcome, Params, PlatformUnits, PortError, Reason, Report,
@@ -83,10 +83,23 @@ pub struct Machine<'a> {
     /// The user the hook runs as: who may own the flags file besides root, and who must own
     /// the token file.
     pub euid: u32,
+    /// How the host setup of a Mac looks at the state root and the scratch root.
+    pub look: &'a LookFn,
+    /// The file system table the host setup of a Mac names the scratch volume in.
+    pub fstab: &'a Path,
 }
 
 fn system_stat(_: &Path, fd: BorrowedFd<'_>) -> io::Result<DirStat> {
     fd_stat(fd)
+}
+
+/// A root as the system has it, a link followed: its file system's device and its owner.
+fn system_look(path: &Path) -> io::Result<PathFacts> {
+    let meta = std::fs::metadata(path)?;
+    Ok(PathFacts {
+        device: meta.dev(),
+        uid: meta.uid(),
+    })
 }
 
 /// The token file as the system has it, a link followed (secret mounts are links).
@@ -130,6 +143,8 @@ impl Machine<'static> {
             token: &system_token,
             flags: &flags_file::read_system,
             euid: rustix::process::geteuid().as_raw(),
+            look: &system_look,
+            fstab: Path::new(FSTAB),
         }
     }
 }
@@ -560,6 +575,8 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         token: machine.token,
         host_identity: host_identity.as_ref(),
         stat: machine.stat,
+        look: machine.look,
+        fstab: machine.fstab,
     };
     match invocation.step {
         Step::Prepare => step::prepare(&env, params),
