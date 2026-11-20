@@ -80,8 +80,9 @@ struct Trouble {
 }
 
 /// Whether the host reads as one that nothing runs on and nothing is about to: no lease, not
-/// releasing, and not set aside. It is what a script's drain gate checks on `GET /v1/hosts`.
-fn idle(host: &HostReading) -> bool {
+/// releasing, and not set aside. It is what a script's drain gate checks on `GET /v1/hosts`,
+/// and what the update hook's `drain` waits for.
+pub(crate) fn idle(host: &HostReading) -> bool {
     [
         host.lease.is_none(),
         host.leases == 0,

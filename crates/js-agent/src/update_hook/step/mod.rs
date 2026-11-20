@@ -1,5 +1,7 @@
 //! The steps of the hook: `prepare`, `cutover`, `verify`, `rollback` and `cleanup`
-//! (host-updates design, 4.2).
+//! (host-updates design, 4.2), and the two steps of a maintenance run, `drain` and `resume`
+//! (hostkeeper's maintenance-updates design, 5.2), which take a [`MaintainEnv`] of their own and
+//! keep no record: what they did is the hold file of the agent's state root and the cordon.
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
 //! and the last line. It takes the state directory's lock first (making the directory when it
@@ -12,8 +14,11 @@
 
 mod cleanup;
 mod cutover;
+mod drain;
+mod held;
 mod helper;
 mod prepare;
+mod resume;
 mod rollback;
 mod supersede;
 mod verify;
@@ -27,14 +32,16 @@ use js_client::HostIdentity;
 use crate::facts::CommandRunner;
 
 use super::{
-    Class, DirStat, Done, Held, LeaseError, Manager, Outcome, Params, Ports, Reason, Record,
-    Report, StateError, Step, validate,
+    Class, Clock, DirStat, Done, Facts, Gate, Held, Holds, Lease, LeaseError, Manager, Outcome,
+    Params, PortError, Ports, Reason, Record, Report, StateError, Step, Units, validate,
 };
 
 pub use cleanup::cleanup;
 pub use cutover::cutover;
 pub(crate) use cutover::{Life, life};
+pub use drain::drain;
 pub use prepare::prepare;
+pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
 pub use rollback::rollback;
 pub use verify::verify;
 
@@ -76,6 +83,24 @@ pub struct Env<'a> {
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
 }
 
+/// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file
+/// of the agent's state root, the unit manager and the host facts (`resume` restarts the agent
+/// when the facts changed), time and the kill points.
+pub struct MaintainEnv<'a> {
+    /// The lease server.
+    pub lease: &'a dyn Lease,
+    /// The hold file.
+    pub holds: &'a dyn Holds,
+    /// The unit manager.
+    pub units: &'a dyn Units,
+    /// The host facts.
+    pub facts: &'a dyn Facts,
+    /// Time.
+    pub clock: &'a dyn Clock,
+    /// Kill points: one before each change.
+    pub gate: &'a dyn Gate,
+}
+
 /// Whether `step` on a host whose record is `record` is past its commit, so that every ending
 /// of it says `reversible: false`: `cutover` and `rollback` once the first irreversible act is
 /// begun (the stop, or a first install's move of the link; see `cutover`).
@@ -107,6 +132,14 @@ fn state_failure(error: StateError) -> Done {
 /// The lease server did not answer as asked: not the release's fault.
 fn lease_failure(error: LeaseError) -> Done {
     let mut done = failure(Reason::LeaseUnreachable, error.to_string());
+    done.report.class = Class::Environment;
+    done
+}
+
+/// The hold file could not be read, written or ended: the state root's matter, not the
+/// release's.
+fn hold_failure(error: PortError) -> Done {
+    let mut done = failure(Reason::HoldFailed, format!("the hold file: {error}"));
     done.report.class = Class::Environment;
     done
 }

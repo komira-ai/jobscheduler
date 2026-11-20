@@ -139,6 +139,8 @@ the package: `cargo xtask release desired` writes it into the `targets` that
   "package": "js-agent",
   "hook": {
     "command": ["/usr/bin/js-agent", "update-hook"],
+    "drain": "drain",
+    "resume": "resume",
     "timeoutSecs": {"prepare": "3900", "cutover": "4320", "verify": "615", "rollback": "8220", "cleanup": "120"},
     "verifyDeadlineSecs": "9000",
     "cleanupRetries": 3
@@ -153,6 +155,14 @@ the package: `cargo xtask release desired` writes it into the `targets` that
 - `hook.command` is the program of every step. hostkeeper runs the update steps (prepare,
   cutover, verify, rollback, cleanup) as `/usr/bin/js-agent update-hook <step> [<dir>] --params
   <file>`.
+- `hook.drain` and `hook.resume` name the two maintenance steps, run as `/usr/bin/js-agent
+  update-hook drain|resume --params <file>` around a hostkeeper run that needs the host quiet.
+  `drain` writes the hold file in the agent's state root, cordons the host and returns once it is
+  idle; it has no bound unless the run gives a deadline, past which it puts the host back and
+  exits 75 (`drain_deadline`). `resume` restarts the agent when the host's facts changed, removes
+  the hold file and lifts the cordon; without a `drain` before it, it changes nothing. A
+  hostkeeper coordinator older than komira-ai/hostkeeper#468 refuses a manifest with these fields,
+  so that hostkeeper release is deployed first.
 - The bounds: `prepare` 3900 s (the step waits for the agent's running jobs to be cordoned and
   drained, up to 3600 s, plus a margin), `cutover` 4320 s (the stop of the agent, a drain of up to
   3600 s and 120 s to stop jobs, the wait for the unit's cgroup to empty, and the start), `verify`
