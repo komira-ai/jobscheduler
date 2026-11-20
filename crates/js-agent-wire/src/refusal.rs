@@ -133,6 +133,9 @@ pub const INVALID_HEARTBEAT: &str = "invalid-heartbeat";
 /// A welcome whose body is malformed: a zero interval, a grace that does not cover the
 /// interval, a pool or protocol the agent cannot accept.
 pub const INVALID_WELCOME: &str = "invalid-welcome";
+/// A dispatch poll whose body is malformed: a bad host id, session or acknowledgement
+/// ([`crate::DispatchPoll::validate`]).
+pub const INVALID_DISPATCH: &str = "invalid-dispatch";
 /// A reply whose commands or acknowledgements are malformed.
 pub const INVALID_REPLY: &str = "invalid-reply";
 /// A hello naming a pool this server does not serve.

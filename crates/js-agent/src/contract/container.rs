@@ -154,8 +154,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use js_agent_wire::{
-        HELD_BEAT_CAPABILITY, HeldRun, PER_JOB_CAPABILITY, Phase, ProtocolRange,
-        START_FENCE_CAPABILITY, WireShape,
+        DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HeldRun, PER_JOB_CAPABILITY, Phase,
+        ProtocolRange, START_FENCE_CAPABILITY, WireShape,
     };
 
     use super::*;
@@ -228,7 +228,7 @@ mod tests {
         hello
     }
 
-    /// Asserts that `start-fence` and `held-beat` are reported as `true`, beside `per-job`, by
+    /// Asserts that `start-fence`, `held-beat` and `dispatch-poll` are reported as `true`, beside `per-job`, by
     /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
     /// and stops its jobs after a silence; its session beats again at once after a held reply),
     /// and that the hello still validates. It catches a server never told that a container
@@ -249,6 +249,10 @@ mod tests {
             flag(&contained, HELD_BEAT_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(&contained, DISPATCH_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(contained.validate(), Ok(()));
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
     }
@@ -265,6 +269,7 @@ mod tests {
             PER_JOB_CAPABILITY,
             START_FENCE_CAPABILITY,
             HELD_BEAT_CAPABILITY,
+            DISPATCH_CAPABILITY,
             js_caps::LAYERED_ROOTFS,
         ] {
             assert_eq!(

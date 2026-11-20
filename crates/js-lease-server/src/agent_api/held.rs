@@ -25,10 +25,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, NetworkCeiling};
-use js_types::{Clock, HostId, Resources};
+use js_types::{Clock, HostId, Resources, Shape};
 use tracing::warn;
 
-use crate::agents::Agents;
+use crate::admit::{
+    reported_mount_providers, reported_xcodes, reports_dispatch_poll, reports_host_jobs,
+    reports_layered_rootfs,
+};
+use crate::agents::{Agents, Session};
 use crate::held_beat::Watch;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
@@ -36,8 +40,44 @@ use crate::metrics::MetricsSink;
 use crate::per_job::{self, BeatContext};
 use crate::util::blocking;
 
+/// What the registry holds of a host that said hello, as the starts and stops of the host are
+/// built from it: read by the heartbeat's per-job half and by the dispatch poll.
+pub(super) struct HostFacts {
+    pub(super) id: HostId,
+    pub(super) session: Session,
+    /// The shape the host announced at its hello, with the capabilities it reported.
+    pub(super) claim: Shape,
+    /// What the registry books for the host: what a start of the whole host books.
+    pub(super) booked: Resources,
+    /// Whether the registry holds the host tainted.
+    pub(super) tainted: bool,
+}
+
+impl HostFacts {
+    /// The facts of the host named `host` as the registry holds it, `None` for a text that is
+    /// not a host id, a host the registry does not know, and one it holds no hello claim of
+    /// (after a restart of the server, before the host says hello again).
+    pub(super) fn of(agents: &Agents, host: &str) -> Option<HostFacts> {
+        HostId::new(host)
+            .ok()
+            .and_then(|host| agents.registry.own_host(&host))
+            .and_then(|own| {
+                let session = (own.host.epoch, own.session_started.map(|at| at.millis()));
+                let tainted = own.host.taint.is_some();
+                let booked = own.host.shape.resources().clone();
+                own.host.claim.map(|claim| HostFacts {
+                    id: own.host.id,
+                    session,
+                    claim,
+                    booked,
+                    tainted,
+                })
+            })
+    }
+}
+
 /// What the per-job half of a heartbeat reads besides the store: kept, so that a held reply
-/// is built again from the same beat.
+/// is built again from the same beat. The dispatch poll builds its starts from the same.
 pub(super) struct Inputs {
     pub(super) jobs: Arc<ServerJobs>,
     pub(super) host: HostId,
@@ -46,6 +86,9 @@ pub(super) struct Inputs {
     pub(super) layered_rootfs: bool,
     pub(super) mount_providers: Vec<String>,
     pub(super) xcodes: Vec<String>,
+    /// Whether the host's agent polls dispatch (and the server holds the job tables, as it
+    /// does when it has these inputs): the reply leaves out what the queue carries.
+    pub(super) polls_dispatch: bool,
     /// What the registry books for the host: what a start of the whole host books.
     pub(super) booked: Resources,
     pub(super) logs: Option<Arc<LogGrants>>,
@@ -56,6 +99,33 @@ pub(super) struct Inputs {
 }
 
 impl Inputs {
+    /// The inputs for the host `facts` describes, over `jobs`, its starts carrying the sinks
+    /// of `logs`, for a beat that lists `listed` and `retired` with room for `room` commands
+    /// (the dispatch poll lists nothing and has the whole room of a reply).
+    pub(super) fn new(
+        jobs: &Arc<ServerJobs>,
+        facts: &HostFacts,
+        logs: Option<Arc<LogGrants>>,
+        (listed, retired, room): (Vec<HeldJob>, Vec<String>, usize),
+    ) -> Inputs {
+        let capabilities = facts.claim.capabilities();
+        Inputs {
+            jobs: Arc::clone(jobs),
+            host: facts.id.clone(),
+            ceiling: NetworkCeiling::from_capabilities(capabilities).unwrap_or_default(),
+            host_jobs: reports_host_jobs(capabilities),
+            layered_rootfs: reports_layered_rootfs(capabilities),
+            mount_providers: reported_mount_providers(capabilities),
+            xcodes: reported_xcodes(capabilities),
+            polls_dispatch: reports_dispatch_poll(capabilities),
+            booked: facts.booked.clone(),
+            logs,
+            listed,
+            retired,
+            room,
+        }
+    }
+
     /// The context the per-job half builds the starts in, counting into `metrics`.
     pub(super) fn context<'a>(&'a self, metrics: &'a dyn MetricsSink) -> BeatContext<'a> {
         BeatContext {
@@ -67,6 +137,7 @@ impl Inputs {
             xcodes: &self.xcodes,
             shape: Some(&self.booked),
             logs: self.logs.as_deref(),
+            polls_dispatch: self.polls_dispatch,
             metrics,
         }
     }

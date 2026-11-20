@@ -281,9 +281,9 @@
 //! # Secrets
 //!
 //! The join token is read from its file by `js-client`, held there, and sent in the
-//! `Authorization` header only. The session secret lives in the [`Session`] and in the
-//! body of the heartbeats. Neither is in argv, in a log line, in an error or in a `Debug`
-//! output.
+//! `Authorization` header only. The session secret lives in the [`Session`], in the dispatch
+//! [`dispatch::Cell`] and in the body of the heartbeats and of the dispatch polls. Neither is
+//! in argv, in a log line, in an error or in a `Debug` output.
 //!
 //! # Exit status
 //!
@@ -306,6 +306,7 @@ pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
 pub mod disk;
+pub mod dispatch;
 pub mod egress;
 mod exclusive;
 mod facts;
@@ -428,6 +429,9 @@ pub struct Services<'a> {
     pub files: &'a dyn FileReader,
     /// Makes the transport the flags name.
     pub connector: &'a dyn Connector,
+    /// Makes the transports of the dispatch poll, which runs on a thread of its own and so
+    /// needs a connector it can share (see [`dispatch`]).
+    pub dispatch: &'a (dyn Connector + Sync),
     /// Randomness for the backoff.
     pub jitter: &'a mut dyn Jitter,
     /// Lets time pass and reports stop requests.
@@ -552,6 +556,7 @@ pub fn main_with(
                 commands: &SystemCommands::default(),
                 files: &SystemFiles,
                 connector: &Dialer,
+                dispatch: &Dialer,
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
@@ -801,9 +806,10 @@ fn execute(
         .as_ref()
         .filter(|_| !by_identity)
         .map(|state| CredentialFile::in_dir(state.path()));
+    let mut kept = None;
     if let Some(file) = &credentials {
-        let found = file.load().map_err(Failure::Usage)?;
-        if let Some(credential) = found {
+        kept = file.load().map_err(Failure::Usage)?;
+        if let Some(credential) = &kept {
             transport
                 .adopt_credential(credential.expose())
                 .map_err(|why| Failure::Usage(format!("{}: {why}", file.path().display())))?;
@@ -847,6 +853,7 @@ fn execute(
         .as_ref()
         .map(|(worker, ..)| WorkerHost::new(worker.handle()));
     let clock = jobs.as_ref().map(|(worker, ..)| worker.clock());
+    let cell = dispatch::Cell::new(kept);
     let host_id = offer.hello.host_id.clone();
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain, outbox)) = &jobs {
@@ -854,7 +861,10 @@ fn execute(
         // `running` are reported at once (`Session::beats_on_news`).
         let bell = services.sleeper.bell();
         bell.into_iter().for_each(|bell| worker.ring_on_news(bell));
-        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
+        session = session
+            .with_jobs(worker, *drain)
+            .with_usage(outbox.clone())
+            .with_dispatch(&cell);
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
@@ -883,7 +893,23 @@ fn execute(
             clock: &*hold_clock,
         })
     });
-    match drive_holding(&mut session, &mut *services.sleeper, err, keeper.as_mut()) {
+    // The dispatch poller runs beside the heartbeat loop for as long as the loop does.
+    let dial = dispatch::Dial {
+        connector: services.dispatch,
+        server: &cli.server,
+        login: &login,
+        ca_cert,
+    };
+    let exit = std::thread::scope(|scope| {
+        if let Some((worker, ..)) = &jobs {
+            let (cell, dial) = (&cell, &dial);
+            scope.spawn(move || dispatch::serve(cell, dial, worker, Box::new(SystemJitter)));
+        }
+        let exit = drive_holding(&mut session, &mut *services.sleeper, err, keeper.as_mut());
+        cell.close();
+        exit
+    });
+    match exit {
         Exit::Stopped => Ok(()),
         Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         Exit::Failed(why) => Err(Failure::Worker(why)),

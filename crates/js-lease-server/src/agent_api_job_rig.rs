@@ -138,8 +138,8 @@ pub(crate) struct Rig {
     pub(crate) jobs: Arc<ServerJobs>,
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
-    who: Credential,
-    sessions: BTreeMap<String, (u64, String)>,
+    pub(crate) who: Credential,
+    pub(crate) sessions: BTreeMap<String, (u64, String)>,
     /// The GPUs of each host the rig's hosts announce.
     gpus: u64,
     _dir: TestDir,
@@ -569,7 +569,7 @@ impl Rig {
     }
 
     /// The shape the rig's hosts announce: eight cores, 16 GiB and the pool's GPUs.
-    fn shape(&self) -> serde_json::Value {
+    pub(crate) fn shape(&self) -> serde_json::Value {
         let mut shape = json!({
             "cpu_millis": 8000,
             "memory_bytes": 17179869184u64,
@@ -623,7 +623,7 @@ impl Rig {
     }
 
     /// Registers `host`, whose agent reports `capabilities`, past the route.
-    fn register_with(&mut self, host: &str, capabilities: serde_json::Value) {
+    pub(crate) fn register_with(&mut self, host: &str, capabilities: serde_json::Value) {
         let hello: Hello = serde_json::from_value(json!({
             "host_id": host,
             "pool": "burst",

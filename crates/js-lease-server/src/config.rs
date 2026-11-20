@@ -30,6 +30,7 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod dispatch;
 mod estimate_feed;
 mod feed_retention;
 mod job_wall;
@@ -43,6 +44,9 @@ mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 use agent_setup::{MorePool, agents, check_more};
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub(crate) use dispatch::{
+    DEFAULT_LEASE_SECS, DEFAULT_RECHECK_MS, DispatchTimes, MOST_LEASE_SECS, MOST_RECHECK_MS,
+};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
     DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
@@ -683,6 +687,7 @@ impl Config {
             jobs: server.agents.job_store(server.job_store_windows()),
             job_sources: JobSources::default(),
             providers,
+            dispatch: server.dispatch,
         });
         let elastic = plan;
         let alerts = alert_sink(server.alerts.as_ref(), files)?;

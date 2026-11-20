@@ -9,7 +9,9 @@ use js_agent_wire::{
     WireShape,
 };
 
-use js_agent_wire::{HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
+use js_agent_wire::{
+    DISPATCH_CAPABILITY, HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+};
 use js_caps::{DETECTED_KEYS, DISK_GIB, OS_VERSION, REPORT_ONLY_KEYS, is_mount_provider_key};
 use js_types::normalise_arch;
 
@@ -75,6 +77,7 @@ fn capabilities(
                 | PER_JOB_CAPABILITY
                 | HOST_JOBS_CAPABILITY
                 | START_FENCE_CAPABILITY
+                | DISPATCH_CAPABILITY
                 | EGRESS_CAPABILITY
                 | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)

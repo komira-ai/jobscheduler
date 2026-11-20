@@ -42,22 +42,23 @@ use crate::held_beat::Wakes;
 use crate::metrics::PassSink;
 
 /// The [`JobStarts`] of the server's pass: a start is built from the job table on the host's
-/// heartbeat, so a placement only wakes the host's heartbeat this server holds, if it holds
-/// one ([`crate::held_beat`]), whose reply then carries the start; a taint is put on the
+/// heartbeat, or by its dispatch poll, so a placement wakes the host's heartbeat and the
+/// host's dispatch poll this server holds, if it holds either ([`crate::held_beat`],
+/// [`crate::dispatch_state`]), whose reply then carries the start; a taint is put on the
 /// registry's record of the host as soon as its placement is committed, and the host kept when
 /// that record had no taint before.
 struct Tainted<'a> {
     /// The registry the taints are put on.
     registry: &'a Registry,
-    /// The held heartbeats a placement wakes.
-    wakes: &'a Wakes,
+    /// The held heartbeats and the held dispatch polls a placement wakes.
+    wakes: [&'a Wakes; 2],
     /// The hosts this pass tainted, in the order of their commits.
     hosts: Mutex<Vec<HostId>>,
 }
 
 impl JobStarts for Tainted<'_> {
     fn placed(&self, _: &JobId, host: &HostId) {
-        self.wakes.wake(host);
+        self.wakes.iter().for_each(|wakes| wakes.wake(host));
     }
 
     fn tainted(&self, host: &HostId, job: &JobId) {
@@ -185,7 +186,7 @@ impl Agents {
         };
         let starts = Tainted {
             registry: &self.registry,
-            wakes: &self.wakes,
+            wakes: [&self.wakes, &self.dispatching.wakes],
             hosts: Mutex::default(),
         };
         let sink = PassSink(self.meter().sink());

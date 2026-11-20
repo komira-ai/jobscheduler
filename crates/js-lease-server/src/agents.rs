@@ -36,6 +36,7 @@ use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::{AgentTokens, PoolTokens};
 use crate::clock::SharedClock;
 use crate::config::{AgentSetup, CpuSlack, placer, split};
+use crate::dispatch_state::DispatchState;
 use crate::drain::Drain;
 use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
@@ -131,6 +132,9 @@ pub(crate) struct Agents {
     /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
     /// pass commits wakes.
     pub(crate) wakes: Wakes,
+    /// The dispatch poll's timings, held polls' wakes and claimer name
+    /// ([`crate::dispatch_state`]); the pass wakes these beside `wakes`.
+    pub(crate) dispatching: DispatchState,
     /// The drain of a stopping server ([`crate::drain`]): once it has begun, no pass places a
     /// job and no heartbeat's reply is held.
     pub(crate) draining: Drain,
@@ -267,6 +271,7 @@ fn placed_in(
         jobs,
         job_sources,
         providers,
+        dispatch,
     } = *agents;
     let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
     let joins = joins.requiring_credential(require_host_credential);
@@ -346,6 +351,7 @@ fn placed_in(
         meter: OnceLock::new(),
         placing: Mutex::default(),
         wakes: Wakes::default(),
+        dispatching: DispatchState::new(dispatch),
         draining: Drain::default(),
         hold_bound: held_beat::hold_bound(interval),
         starting_hold: held_beat::starting_hold(interval),
@@ -420,6 +426,7 @@ impl Agents {
             meter: OnceLock::new(),
             placing: Mutex::default(),
             wakes: Wakes::default(),
+            dispatching: DispatchState::new(Default::default()),
             draining: Drain::default(),
             hold_bound,
             starting_hold,
