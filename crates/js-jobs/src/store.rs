@@ -5,10 +5,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use js_state::{
-    Commit, Cond, Conflict, ResumeToken, ScanRange, Store, StoreTime, Txn, TxnRead, Version,
-    Versioned,
-};
+use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, TxnRead, Version, Versioned};
 use js_types::HostId;
 
 use crate::codec::{Carried, DecodeError, decode_allocation, decode_job};
@@ -46,7 +43,7 @@ pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
 
-pub use written::Written;
+pub use written::{Step, Written};
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -79,6 +76,8 @@ pub struct Inserted {
     pub record: JobRecord,
     /// Whether this call recorded it.
     pub created: bool,
+    /// The step this call's commit made, when it recorded the job ([`Step::after`]).
+    pub step: Option<Step>,
 }
 
 /// A page of [`JobStore::list_jobs`].
@@ -393,6 +392,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(Some(Inserted {
             record,
             created: false,
+            step: None,
         }))
     }
 
@@ -408,10 +408,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let record = self.queued_record(id, spec, priority, client)?;
         let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
-        match self.write(txn)? {
-            Ok(_) => Ok(Inserted {
+        match self.write_stepped(txn)? {
+            Ok((_, step)) => Ok(Inserted {
                 record,
                 created: true,
+                step: Some(step),
             }),
             // Another writer recorded the id between the read and the commit.
             Err(_) => self
@@ -432,10 +433,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let id = JobId::minted(self.ids.mint()?);
             let record = self.queued_record(id, spec.clone(), priority, client.cloned())?;
             let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
-            if self.write(txn)?.is_ok() {
+            if let Ok((_, step)) = self.write_stepped(txn)? {
                 return Ok(Inserted {
                     record,
                     created: true,
+                    step: Some(step),
                 });
             }
         }
@@ -797,39 +799,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     fn allocation_row(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
         self.read_allocation(id)?
             .ok_or(JobStoreError::NoAllocation { id: id.clone() })
-    }
-
-    /// Sends `txn` to the store and counts it ([`JobStore::written`]): the one way this job
-    /// store writes once it is made, but for [`JobStore::place_claimed`].
-    ///
-    /// A guarded view ([`JobStore::guarded`]) adds the check of its node row to `txn`, and a
-    /// conflict on that row is [`JobStoreError::NodeMoved`]. A job store that is not guarded
-    /// sends `txn` as it is.
-    /// Commits `txn`, which writes only a host's node row, without counting it as a write of
-    /// the job tables ([`JobStore::written`]): every heartbeat writes its host's row, and a
-    /// reader of the tables is not to read them again for that.
-    fn write_node(&self, txn: Txn) -> Result<Result<Commit, Conflict>, JobStoreError> {
-        let answer = self.store.txn(self.guard_txn(txn));
-        match answer? {
-            Err(conflict) => self.refuse_moved(conflict).map(Err),
-            committed => Ok(committed),
-        }
-    }
-
-    fn write(&self, txn: Txn) -> Result<Result<Commit, Conflict>, JobStoreError> {
-        let answer = self.store.txn(self.guard_txn(txn));
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        match answer? {
-            Err(conflict) => self.refuse_moved(conflict).map(Err),
-            committed => Ok(committed),
-        }
-    }
-
-    /// Commits `txn`, whose preconditions are the versions of the job `id`'s rows the caller
-    /// read: a conflict is [`JobStoreError::Stale`].
-    fn commit(&self, id: &JobId, txn: Txn) -> Result<Commit, JobStoreError> {
-        self.write(txn)?
-            .map_err(|_| JobStoreError::Stale { id: id.clone() })
     }
 }
 

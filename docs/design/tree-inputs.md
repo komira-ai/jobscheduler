@@ -391,7 +391,7 @@ reserved (`tree-read-failed` in each case). The last is the case of 6.1, whose g
 After an `INPUT_FAILED` result (or any other), a client may resubmit the job under a new id with
 `JobSpec.avoid_hosts` naming the host the failed run had (`Job.host_id`, field 10, which every job carries once
 placed). The placer never places the job on a listed host: `walk_jobs`'s `fits`
-(`crates/js-sched-placer/src/jobs.rs:386-394`) gains one conjunct, and the whole-host walk drops the listed hosts from
+(`crates/js-sched-placer/src/jobs.rs:388-396`) gains one conjunct, and the whole-host walk drops the listed hosts from
 its candidates the same way. Rules: at most 16 entries, each a host id (`js_types::HostId`), none repeated, else
 `INVALID_AVOID_HOSTS`. A host that no longer exists is allowed. The submit's capable-host check does not read the list,
 since a pool may still launch a new host; a job that every present host is listed against waits, and ends by the
