@@ -1,8 +1,8 @@
-//! The job, allocation and mark records, as the store's callers read and write them.
+//! The job, allocation, mark and dispatch records, as the store's callers read and write them.
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{HostPort, JobMount, Layer};
+use js_agent_wire::{HostPort, JobMount, JobStartSpec, Layer};
 use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources};
 use sha2::{Digest as _, Sha256};
@@ -651,6 +651,73 @@ impl MarkRecord {
             exclusions: BTreeMap::new(),
             carried: Carried::default(),
         }
+    }
+}
+
+/// What a dispatch message tells a host's agent to do with one allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DispatchKind {
+    /// Start the job of the allocation.
+    Start,
+    /// Stop the job of the allocation.
+    Stop,
+}
+
+/// A message to a host's agent, the row `dispatch/<host>/<seq>` (`docs/design/multi-instance.md`
+/// section 0.2): a start, which the transaction that books the host writes, or a stop, which a
+/// transaction that ends the job or asks for its cancel writes. Any server hands it out to the
+/// host's agent ([`crate::JobStore::claim_dispatch`]) and deletes it when the agent acknowledges
+/// it ([`crate::JobStore::ack_dispatch`]); a start is deleted with its job's end, and every
+/// message of a job with the job's row at its retention end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchMessage {
+    /// Start or stop.
+    pub kind: DispatchKind,
+    /// The job.
+    pub job: JobId,
+    /// The allocation the message is for: the placement it starts or stops.
+    pub allocation_id: AllocationId,
+    /// The host whose agent takes the message.
+    pub host: HostId,
+    /// The store's time the message was queued at; with the host, the allocation and the kind,
+    /// it makes the row's key ([`crate::keys::DISPATCH`]).
+    pub queued_at: StoreTime,
+    /// For a start, the body the agent starts the job from, when the placement was given one
+    /// ([`crate::Placement::start`]); its job id, allocation id and placement time are the
+    /// placement's own. `None` for a stop and for a start queued without one.
+    pub start: Option<JobStartSpec>,
+    /// The server that last handed the message out, as it named itself; `None` until one has.
+    pub claimed_by: Option<String>,
+    /// Until when, on the store's clock, the last hand-out holds the message: no server hands it
+    /// out again while the clock reads at or before it. `None` until one has.
+    pub claim_until: Option<StoreTime>,
+    /// Fields a later build wrote, kept for the next write of the row.
+    pub(crate) carried: Carried,
+}
+
+impl DispatchMessage {
+    /// A message of `kind` for `allocation`, queued at `queued_at`, with no start body and
+    /// never handed out.
+    #[must_use]
+    pub fn new(kind: DispatchKind, allocation: &AllocationRecord, queued_at: StoreTime) -> Self {
+        DispatchMessage {
+            kind,
+            job: allocation.job.clone(),
+            allocation_id: allocation.allocation_id,
+            host: allocation.host.clone(),
+            queued_at,
+            start: None,
+            claimed_by: None,
+            claim_until: None,
+            carried: Carried::default(),
+        }
+    }
+
+    /// Whether a server may hand the message out when the store's clock reads `now`: it was
+    /// never handed out, or its last hand-out's hold ended before `now`.
+    #[must_use]
+    pub fn is_due(&self, now: StoreTime) -> bool {
+        self.claim_until.is_none_or(|until| until < now)
     }
 }
 

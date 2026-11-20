@@ -23,6 +23,7 @@ use crate::record::{
 use crate::result::{JobEnd, Output, Retention};
 
 mod cordons;
+mod dispatch;
 mod duties;
 mod ending;
 mod host_rows;
@@ -39,7 +40,6 @@ mod written;
 pub use cordons::{CordonWrite, UncordonWrite};
 
 pub use index::Backfill;
-
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
@@ -452,9 +452,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((placed, allocation))
     }
 
-    /// Moves a job from `expected` to `next` where `next` has not ended: placed to starting,
-    /// and starting to running, which sets `started_at`. A job ends only through
-    /// [`JobStore::end_job`], which writes its result and retention end with the end.
+    /// Moves a job from `expected` to `next` where `next` has not ended: placed to starting, which
+    /// for a whole-host job queues its start for its host in the same transaction, and starting to
+    /// running, which sets `started_at`. A job ends only through [`JobStore::end_job`], which
+    /// writes its result and retention end with the end.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not in
@@ -494,7 +495,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             ..job.clone()
         };
         let txn = index::put_job(Txn::new(), Some(&job), &moved, Cond::Version(job_version))?;
-        self.commit(id, txn)?;
+        self.commit(id, self.start_on_move(txn, &job, next, now)?)?;
         Ok(moved)
     }
 
@@ -508,11 +509,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ///
     /// # Errors
     /// [`JobStoreError::UnexpectedState`] when the job is not placed;
-    /// [`JobStoreError::IllegalTransition`] when it does not need the whole host or a cancel
-    /// was asked for (it is then cancelled, not requeued); [`JobStoreError::NoAllocation`];
-    /// [`JobStoreError::AllocationNotBooked`] when the allocation is already releasing or
-    /// freed (its first end stands);
-    /// [`JobStoreError::Stale`]; as for any read and write.
+    /// [`JobStoreError::IllegalTransition`] when it does not need the whole host or a cancel was
+    /// asked for (it is then cancelled, not requeued); [`JobStoreError::NoAllocation`];
+    /// [`JobStoreError::AllocationNotBooked`] when the allocation is already releasing or freed
+    /// (its first end stands); [`JobStoreError::Stale`]; as for any read and write.
     pub fn requeue_failed_prepare(
         &self,
         id: &JobId,
@@ -543,13 +543,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// The client's cancel (design section 5.3): a queued job is cancelled at once (it has no
-    /// allocation to release), ended as [`JobStore::end_job`] ends it, with a result of
-    /// reason cancelled and no exit code or output, and its retention end, and its mark, if it
-    /// has one, deleted in the same transaction (at the version read, or its absence a
-    /// precondition when there is none, so a mark written in between makes the cancel stale);
-    /// a placed, starting or running job gets the cancel intent and nothing else, the job
-    /// ending when the host reports it stopped; an ended job, or one whose cancel was already
-    /// asked for, is returned as it is, unwritten.
+    /// allocation to release), ended as [`JobStore::end_job`] ends it, with a result of reason
+    /// cancelled and no exit code or output, and its retention end, and its mark, if it has one,
+    /// deleted in the same transaction (at the version read, or its absence a precondition when
+    /// there is none, so a mark written in between makes the cancel stale); a placed, starting or
+    /// running job gets the cancel intent, with a stop for its host queued if its start may have
+    /// reached it (else its start deleted), and ends when the host reports it stopped; an ended
+    /// job, or one whose cancel was already asked for, is returned as it is, unwritten.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::Stale`]; as for any read and write.
@@ -573,7 +573,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             (self.without_mark(txn, id)?, next)
         } else {
             let txn = index::put_job(Txn::new(), Some(&job), &asked, Cond::Version(job_version))?;
-            (txn, asked)
+            (self.stop_on_cancel(txn, &job, now)?, asked)
         };
         self.commit(id, txn)?;
         Ok(next)

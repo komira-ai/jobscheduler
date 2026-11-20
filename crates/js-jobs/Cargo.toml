@@ -25,7 +25,8 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 # A placement's transaction reads whether the server's binding of the host (a JSON object)
-# holds a taint.
+# holds a taint; a dispatch message keeps the agent's job start as the agent protocol writes
+# it (JSON).
 serde_json.workspace = true
 # An ended job keeps the SHA-256 of each of its files in place of their contents.
 sha2.workspace = true

@@ -43,6 +43,9 @@ pub struct Interfere<S> {
     /// What the decisions of [`Store::claim_decide`] read, in order, since the last
     /// [`Interfere::take_claim_reads`]; apart from `reads`, which the passes' own reads are.
     claim_reads: Arc<Mutex<Vec<Read>>>,
+    /// Whether the next get a decision of [`Store::claim_decide`] makes fails
+    /// ([`Interfere::fail_next_decision_get`]).
+    fail_decision_get: AtomicBool,
     /// Whether a decision of [`Store::claim_decide`] is running.
     deciding: AtomicBool,
     /// The calls made on this store while a decision ran, by name, in order, since the last
@@ -50,14 +53,20 @@ pub struct Interfere<S> {
     while_deciding: Mutex<Vec<&'static str>>,
 }
 
-/// The reads of a claimed decision, logged as they are made.
+/// The reads of a claimed decision, logged as they are made; a get fails instead when
+/// `fail_get` is set, which it clears.
 struct LoggedRead<'a> {
     read: &'a mut dyn TxnRead,
     log: &'a Mutex<Vec<Read>>,
+    fail_get: &'a AtomicBool,
+    error: &'a Mutex<StoreError>,
 }
 
 impl TxnRead for LoggedRead<'_> {
     fn get(&mut self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        if self.fail_get.swap(false, Ordering::SeqCst) {
+            return Err(lock(self.error).clone());
+        }
         lock(self.log).push(Read::Get(key.to_owned()));
         self.read.get(key)
     }
@@ -95,6 +104,7 @@ impl<S: Store> Interfere<S> {
             error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
             reads: Mutex::new(Vec::new()),
             claim_reads: Arc::new(Mutex::new(Vec::new())),
+            fail_decision_get: AtomicBool::new(false),
             deciding: AtomicBool::new(false),
             while_deciding: Mutex::new(Vec::new()),
         }
@@ -137,6 +147,14 @@ impl<S: Store> Interfere<S> {
     /// it, so a test shows what a caller does with the clock alone gone.
     pub fn fail_clock(&self, failing: bool) {
         self.fail_clock.store(failing, Ordering::SeqCst);
+    }
+
+    /// Fails the next get that a decision of [`Store::claim_decide`] makes through the view it
+    /// is given, with [`StoreError::Failed`] or the error [`Interfere::fail_with`] set: a
+    /// database that fails inside a claimed transaction. Such gets are not counted by
+    /// [`Interfere::fail_read_after`], and the gets after it pass.
+    pub fn fail_next_decision_get(&self) {
+        self.fail_decision_get.store(true, Ordering::SeqCst);
     }
 
     /// Fails the next commit ([`Interfere::fail_after`] of 0).
@@ -242,9 +260,16 @@ impl<S: Store> Store for Interfere<S> {
         self.countdown(&self.fail_at)?;
         let log = &self.claim_reads;
         let deciding = &self.deciding;
+        let (fail_get, error) = (&self.fail_decision_get, &self.error);
         self.inner.claim_decide(claim, &mut |read| {
             deciding.store(true, Ordering::SeqCst);
-            let decided = decide(&mut LoggedRead { read, log });
+            let mut logged = LoggedRead {
+                read,
+                log,
+                fail_get,
+                error,
+            };
+            let decided = decide(&mut logged);
             deciding.store(false, Ordering::SeqCst);
             decided
         })

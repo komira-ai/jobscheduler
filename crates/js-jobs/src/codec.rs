@@ -1,4 +1,4 @@
-//! The bytes of the job, allocation, mark, taint and node rows (the last three in `*_fields`).
+//! The bytes of the job, allocation, mark, taint, node and dispatch rows (most in `*_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -16,16 +16,15 @@
 //! whose value is `None` is not written; a list or map that is empty is written empty.
 //!
 //! **Additive only (B8).** A reader skips a tag it does not know and keeps its bytes, and the
-//! record carries them ([`Carried`]) into the next write of the row, so a build one release
-//! back can move a job a newer build wrote without losing the newer fields. A field this
-//! build knows but the row lacks reads as its default (`None`, empty, zero, the default
-//! network policy), so a row an older build wrote reads too. A row whose format byte is above
-//! [`FORMAT`] (for a job row, above `rootfs_fields::FORMAT_NO_IMAGE`, the format of a job
-//! without an image, which a build before it so leaves out), or which holds an enum value this
-//! build does not know (but a queue code or event kind, which reads as unspecified:
-//! `queue_fields`), is [`DecodeError::Newer`]: the store answers it as an unknown row.
-//! Any other row that does not parse is an error naming what is wrong; nothing here panics or
-//! reads past a length.
+//! record carries them ([`Carried`]) into the next write of the row, so a build one release back
+//! can move a job a newer build wrote without losing the newer fields. A field this build knows but
+//! the row lacks reads as its default (`None`, empty, zero, the default network policy), so a row
+//! an older build wrote reads too. A row whose format byte is above [`FORMAT`] (for a job row,
+//! above `rootfs_fields::FORMAT_NO_IMAGE`, the format of a job without an image, which a build
+//! before it so leaves out), or which holds an enum value this build does not know (but a queue
+//! code or event kind, which reads as unspecified: `queue_fields`), is [`DecodeError::Newer`]: the
+//! store answers it as an unknown row. Any other row that does not parse is an error naming what is
+//! wrong; nothing here panics or reads past a length.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -40,6 +39,7 @@ use crate::record::{
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 
+pub(crate) mod dispatch_fields;
 mod file_fields;
 pub(crate) mod host_fields;
 mod mark_fields;

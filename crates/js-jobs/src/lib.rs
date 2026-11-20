@@ -1,4 +1,5 @@
-//! The job, allocation, mark, taint, cordon and node tables, as typed records over the `js-state`
+//! The job, allocation, mark, taint, cordon and node tables and the dispatch queue, as typed
+//! records over the `js-state`
 //! [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
@@ -59,6 +60,13 @@
 //! ([`JobStore::hello_node_in_pool`]), a beat writes the row when it changes it or it is old
 //! ([`JobStore::refresh_node`]), and a row silent long enough that holds nothing is deleted
 //! ([`JobStore::forget_silent_nodes`]).
+//!
+//! The **dispatch queue** holds what a host's agent is to do, one [`DispatchMessage`] per row
+//! (`dispatch/<host>/<seq>`): a start, queued by the transaction that books the host (by the
+//! move to starting for a whole-host job), and a stop, queued by a cancel or by an end the
+//! server decided. Any server hands a host's due messages out ([`JobStore::claim_dispatch`]),
+//! holding each for a lease on the store's clock, and deletes them when the agent acknowledges
+//! them ([`JobStore::ack_dispatch`]); an end deletes its job's start.
 //!
 //! # Results and retention
 //!
@@ -224,9 +232,10 @@ pub use node::{
 };
 pub use queue::{JobEvent, MAX_JOB_EVENTS, QueueTrail};
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, EndReason,
-    Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord,
-    JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, ScaleMark, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, DispatchKind,
+    DispatchMessage, EndReason, Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint,
+    Isolation, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, ScaleMark,
+    StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

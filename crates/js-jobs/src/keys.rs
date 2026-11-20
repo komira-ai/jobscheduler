@@ -4,7 +4,8 @@
 use js_state::StoreTime;
 use js_types::HostId;
 
-use crate::ids::JobId;
+use crate::ids::{AllocationId, JobId};
+use crate::record::DispatchKind;
 
 /// `job/<id>`: a job's record.
 pub const JOB: &str = "job/";
@@ -57,6 +58,14 @@ pub const HOSTBOOK: &str = "hostbook/";
 /// row with a compare-and-set ([`crate::JobStore::claim_duty`]); the one whose advance
 /// commits runs the duty for that period.
 pub const PERIODIC: &str = "periodic/";
+
+/// `dispatch/<host>/<seq>`: a message to the host's agent ([`crate::DispatchMessage`]), a start
+/// or a stop of one allocation. `<seq>` is `<at>-<allocation>-<kind>`: `<at>` the nanoseconds of
+/// the store's time the message was queued at as twenty digits, `<allocation>` the allocation id
+/// and `<kind>` `start` or `stop`, so the keys of a host sort in the order its messages were
+/// queued, and the start of an allocation before its stop. The host's agent takes them in that
+/// order ([`crate::JobStore::claim_dispatch`]). No `idx/` space names them.
+pub const DISPATCH: &str = "dispatch/";
 
 /// `node/<host>`: a host's presence ([`crate::NodeRecord`]): its session, what its hello
 /// announced and what its last applied beat left, written by [`crate::JobStore::hello_node`]
@@ -138,6 +147,27 @@ pub fn duty(duty: &str) -> String {
 #[must_use]
 pub fn hostbook(host: &HostId) -> String {
     format!("{HOSTBOOK}{host}")
+}
+
+/// The prefix of every dispatch message of `host`.
+#[must_use]
+pub fn dispatch_prefix(host: &HostId) -> String {
+    format!("{DISPATCH}{host}/")
+}
+
+/// The key of the dispatch message of `kind` for the allocation `allocation` on `host`, queued
+/// at `at`.
+pub(crate) fn dispatch(
+    host: &HostId,
+    at: StoreTime,
+    allocation: AllocationId,
+    kind: DispatchKind,
+) -> String {
+    let word = match kind {
+        DispatchKind::Start => "start",
+        DispatchKind::Stop => "stop",
+    };
+    format!("{DISPATCH}{host}/{}-{allocation}-{word}", stamp(at))
 }
 
 /// `idx/`: the secondary key spaces. Each entry is a key with an empty value, written in the
@@ -349,5 +379,35 @@ mod tests {
         );
         assert_eq!(node(&host), "node/host-a");
         assert_eq!(unread(&node(&host)), None, "a node row has no unread entry");
+    }
+
+    // Catches dispatch keys that do not sort in the order a host's agent must take them: by the
+    // time they were queued (fixed-width, so 10 after 9), then a start before the stop of the
+    // same allocation; and a key that strays out of its host's prefix or into an index space.
+    #[test]
+    fn dispatch_keys_sort_by_queue_time_then_start_before_stop() {
+        let host = HostId::new("host-a").expect("a host");
+        let one = AllocationId::from_bits([1; 16]);
+        let nine = StoreTime::from_duration(Duration::from_nanos(9));
+        let ten = StoreTime::from_duration(Duration::from_nanos(10));
+        let start = dispatch(&host, nine, one, DispatchKind::Start);
+        assert_eq!(
+            start,
+            format!("dispatch/host-a/00000000000000000009-{one}-start")
+        );
+        let stop = dispatch(&host, nine, one, DispatchKind::Stop);
+        assert!(start < stop, "a start sorts before its stop");
+        assert!(
+            stop < dispatch(
+                &host,
+                ten,
+                AllocationId::from_bits([0; 16]),
+                DispatchKind::Start
+            )
+        );
+        assert_eq!(dispatch_prefix(&host), "dispatch/host-a/");
+        assert!(start.starts_with(&dispatch_prefix(&host)));
+        assert_eq!(indexed_row(&start), None);
+        assert_eq!(unread(&start), None, "a dispatch row has no unread entry");
     }
 }

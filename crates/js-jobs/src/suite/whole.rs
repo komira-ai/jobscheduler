@@ -42,6 +42,7 @@ pub(super) fn engine_placement() -> Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: None,
         queue: Vec::new(),
+        start: None,
     }
 }
 
@@ -100,6 +101,7 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: Some(1200),
         queue: Vec::new(),
+        start: None,
     };
     let commits = rig.store.commit_stats().txns;
     let (job, allocation) = rig
