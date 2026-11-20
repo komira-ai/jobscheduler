@@ -436,6 +436,7 @@ impl MetricsSink for Failures {
     fn job_lost(&self) {}
     fn store_write_failed(&self) {}
     fn job_pass_took(&self, _: Duration) {}
+    fn job_tables(&self, _: js_sched_placer::engine::TablesFrom) {}
     fn acquire_answered(&self, _: &str, _: &js_elastic::Acquired) {}
 }
 
