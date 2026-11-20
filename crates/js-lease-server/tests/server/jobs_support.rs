@@ -170,6 +170,10 @@ pub fn per_job_hello(host: &str) -> Value {
     let mut hello = hello_body(host);
     hello["capabilities"]["per-job"] = json!("true");
     hello["capabilities"]["arch"] = json!("x86_64");
+    // The process the agent runs as: a restarted server over the same store holds the live
+    // session of the host's row, and the same process's hello replaces it where another's
+    // would be refused `host-live`.
+    hello["agent_process"] = json!(format!("process-of-{host}"));
     hello
 }
 

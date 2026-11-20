@@ -176,6 +176,7 @@ pub fn cred(token: &str) -> Credential {
 /// `builders`, serving, on [`ARCH`].
 pub fn hello(host: &str) -> Hello {
     Hello {
+        agent_process: None,
         protocol: ProtocolRange { min: 1, max: 1 },
         host_id: host.into(),
         pool: "builders".into(),
@@ -202,6 +203,7 @@ pub fn hello(host: &str) -> Hello {
 
 pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
     Heartbeat {
+        seq: None,
         host_id: host.into(),
         epoch,
         session: String::new(),

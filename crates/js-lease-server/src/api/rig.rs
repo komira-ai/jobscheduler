@@ -90,6 +90,7 @@ impl Rig {
             Arc::new(placer),
         );
         let hello = Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "a".into(),
             pool: "builders".into(),
