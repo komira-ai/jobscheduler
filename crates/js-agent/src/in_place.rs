@@ -47,8 +47,8 @@ pub fn run_again(
     let why = exec(args);
     let _ = writeln!(
         err,
-        "js-agent: cannot run {program} again in place: {why}; the runs are left to the next \
-         process"
+        "js-agent: cannot run {program} again in place: {why}; the runs are left as they are \
+         for the agent the unit starts next"
     );
     ExitCode::from(exit::FAILED)
 }

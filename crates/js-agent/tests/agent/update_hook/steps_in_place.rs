@@ -268,11 +268,12 @@ fn a_cutover_rerun_after_the_signal_signals_again_while_the_request_is_there() {
     assert_eq!(again.act_names(), Vec::<String>::new());
 }
 
-/// Asserts that a signal the unit manager refuses takes the request back and fails the
-/// cutover as an environment matter, irreversibly, with the agent still running. Catches a
-/// request left on disk for the next stop of an agent that never saw a signal.
+/// Asserts that a signal the unit manager refuses fails the cutover as an environment matter
+/// with the request left on disk, and that the rerun, finding it, signals again and ends as an
+/// uninterrupted cutover; the same for a rollback. Catches a rerun that reads a request the hook
+/// withdrew as one the agent took, and reports an update done while the old agent still runs.
 #[test]
-fn a_signal_the_unit_manager_refuses_takes_the_request_back() {
+fn a_signal_the_unit_manager_refuses_leaves_the_request_and_the_rerun_signals_again() {
     let rig = in_place("hook-in-place-refused");
     let spy = Spy::new(&rig);
     spy.fail("kill");
@@ -285,9 +286,31 @@ fn a_signal_the_unit_manager_refuses_takes_the_request_back() {
         Some(format!("cannot signal {UNIT} to hand its runs over in place: kill is down").as_str())
     );
     assert!(!done.report.reversible);
-    assert_eq!(spy.act_names(), [REQUEST, &kill(), "handover.withdraw"]);
-    assert!(!file(&rig).exists());
+    assert_eq!(spy.act_names(), [REQUEST, &kill()]);
+    assert!(file(&rig).exists());
     assert_eq!(rig.world.show(UNIT).unwrap().active, "active");
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.3.0"));
+
+    let rerun = Spy::new(&rig);
+    let done = rerun.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rerun.act_names(), [kill()]);
+    assert!(!file(&rig).exists());
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.4.0"));
+
+    let rig = cut_over("hook-in-place-rb-refused");
+    let spy = Spy::new(&rig);
+    spy.fail("kill");
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(spy.act_names(), [REQUEST, &kill()]);
+    assert!(file(&rig).exists());
+    let rerun = Spy::new(&rig);
+    let done = rerun.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rerun.act_names(), [kill()]);
+    assert!(rig.record().is_none());
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.3.0"));
 }
 
 /// Asserts that a request that cannot be looked at ends the wait as an environment failure that

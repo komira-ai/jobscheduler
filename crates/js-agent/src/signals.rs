@@ -146,6 +146,21 @@ fn watch<const N: usize>(
         })
 }
 
+/// Readies the signals for an exec of the program in this process: SIGHUP is ignored, a
+/// disposition the exec keeps, so a repeated replace request cannot end the next program before
+/// it installs its own handler; SIGTERM and SIGINT get their default action back, so one sent
+/// from now on ends the process instead of reaching a handler nobody reads any more.
+pub(crate) fn hand_signals_over() {
+    // SAFETY: `SIG_IGN` and `SIG_DFL` are dispositions, not handlers: no code of this program
+    // runs in a signal context because of them, and `signal(2)` touches no memory of ours. The
+    // handlers tokio installed are replaced; the process executes another program next.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
+}
+
 /// Puts `request` on the line for every delivery on `stream`.
 async fn relay(mut stream: Signal, to: Arc<Line>, request: Request) {
     loop {
@@ -160,6 +175,15 @@ async fn relay(mut stream: Signal, to: Arc<Line>, request: Request) {
 impl Sleeper for SystemSleeper {
     fn sleep(&mut self, duration: Duration) -> Wake {
         self.line.wait(duration, false)
+    }
+
+    /// Hands the signals over to the program that runs next ([`hand_signals_over`]), then looks
+    /// at the line once more: a stop request taken by the handlers before that is there and
+    /// wins; one sent after it ends the process the default way, before or after the exec, which
+    /// is a clean stop for systemd.
+    fn ready_to_run_again(&mut self) -> bool {
+        hand_signals_over();
+        self.line.wait(Duration::ZERO, false) != Wake::Stop
     }
 
     fn sleep_or_bell(&mut self, duration: Duration) -> Wake {

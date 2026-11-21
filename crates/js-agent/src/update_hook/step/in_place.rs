@@ -13,16 +13,18 @@
 use crate::update_hook::{Done, Held, Params, Reason, Record, SYSTEMCTL};
 
 use super::Env;
-use super::cutover::{Life, bring_up, environment, life, pause, show, withdraw_handover};
+use super::cutover::{Life, bring_up, environment, life, pause, show};
 
 /// Signals the main process of `unit` with SIGHUP, the request that the agent hands its runs
-/// over in place. A signal the unit manager refuses reached no agent: the request written for
-/// it is withdrawn and the step fails as an environment matter.
-pub(super) fn signal(env: &Env<'_>, record: &Record, unit: &str) -> Result<(), Done> {
+/// over in place. A signal the unit manager refuses reached no agent, and the step fails as an
+/// environment matter with the request left on disk: the marks of the act are written already,
+/// so the request is what tells a rerun that the agent has not taken it, and the rerun signals
+/// again. (A stop that reaches the agent before a rerun finds the request too, and hands the runs
+/// over instead of draining, as the update meant.)
+pub(super) fn signal(env: &Env<'_>, unit: &str) -> Result<(), Done> {
     env.ports.point();
     let args = ["kill", "--kill-whom=main", "--signal=SIGHUP", "--", unit];
     env.runner.run(SYSTEMCTL, &args).map(|_| ()).map_err(|why| {
-        withdraw_handover(env, record);
         environment(
             Reason::StopFailed,
             format!("cannot signal {unit} to hand its runs over in place: {why}"),

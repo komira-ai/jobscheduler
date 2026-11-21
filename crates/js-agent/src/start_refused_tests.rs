@@ -12,8 +12,8 @@ use std::process::ExitCode;
 use js_testkit::dir::TestDir;
 
 use super::{
-    Host, PAUSES, VERB, dispatch, list_dirs, pause_one_second, read_file, result_word, run,
-    systemctl_version, write_file,
+    Host, PAUSES, VERB, dispatch, list_dirs, read_file, result_word, run, systemctl_version,
+    write_file,
 };
 
 /// The unit's cgroup below the mount, and the leaf `ExecStopPost=` runs in.
@@ -99,8 +99,9 @@ fn run_on(
         read: &read_file,
         write: &write_file,
         list: &list_dirs,
-        systemctl: &|| printed.clone(),
-        pause: &|| tree.kernel(&seen),
+        systemctl: "systemctl",
+        version: &|_| printed.clone(),
+        pause: &|_| tree.kernel(&seen),
         mount: &tree.mount,
         self_cgroup: &tree.own,
     };
@@ -260,8 +261,9 @@ fn a_cgroup_that_stays_populated_is_reported() {
         read: &read_file,
         write: &write_file,
         list: &list_dirs,
-        systemctl: &|| Ok("systemd 258\n".to_owned()),
-        pause: &|| *pauses.borrow_mut() += 1,
+        systemctl: "systemctl",
+        version: &|_| Ok("systemd 258\n".to_owned()),
+        pause: &|_| *pauses.borrow_mut() += 1,
         mount: &tree.mount,
         self_cgroup: &tree.own,
     };
@@ -300,8 +302,9 @@ fn a_cgroup_that_empties_at_the_last_look_is_ended() {
         read: &read,
         write: &write_file,
         list: &list_dirs,
-        systemctl: &|| Ok("systemd 258\n".to_owned()),
-        pause: &|| {},
+        systemctl: "systemctl",
+        version: &|_| Ok("systemd 258\n".to_owned()),
+        pause: &|_| {},
         mount: &tree.mount,
         self_cgroup: &tree.own,
     };
@@ -412,12 +415,15 @@ fn the_system_adapters_work_on_files_and_programs() {
         "systemd 259 (259.5)\n"
     );
     assert!(systemctl_version(dir.path().join("none").to_str().unwrap()).is_err());
-    pause_one_second();
     let system = Host::system();
+    (system.pause)(std::time::Duration::ZERO);
     assert_eq!(system.mount, Path::new("/sys/fs/cgroup"));
     assert_eq!(system.self_cgroup, Path::new("/proc/self/cgroup"));
-    // The machine's own `systemctl --version`: whatever it answers, the call is made.
-    let _ = (system.systemctl)();
+    assert_eq!(system.systemctl, "/usr/bin/systemctl");
+    assert_eq!(
+        (system.version)(program.to_str().unwrap()).unwrap(),
+        "systemd 259 (259.5)\n"
+    );
 }
 
 /// The verb is answered only for its own word; `main_with` runs the rest as usual.

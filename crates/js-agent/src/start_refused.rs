@@ -37,6 +37,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -53,8 +54,11 @@ const REFUSED: &str = "resources";
 /// The program that prints systemd's version.
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
-/// How many pauses of one second a cgroup gets to empty after its kill.
+/// How many pauses a cgroup gets to empty after its kill.
 const PAUSES: u32 = 30;
+
+/// One pause.
+const PAUSE: Duration = Duration::from_secs(1);
 
 /// The line every message starts with.
 const PREFIX: &str = "crun-start-refused: ";
@@ -76,10 +80,12 @@ pub(crate) struct Host<'a> {
     pub(crate) write: &'a dyn Fn(&Path, &str) -> io::Result<()>,
     /// The names of the directories in a directory, sorted.
     pub(crate) list: &'a dyn Fn(&Path) -> io::Result<Vec<String>>,
-    /// What `systemctl --version` prints.
-    pub(crate) systemctl: &'a dyn Fn() -> Result<String, String>,
-    /// Waits one second.
-    pub(crate) pause: &'a dyn Fn(),
+    /// The program that prints systemd's version (`/usr/bin/systemctl`).
+    pub(crate) systemctl: &'a str,
+    /// What a program run with `--version` prints.
+    pub(crate) version: &'a dyn Fn(&str) -> Result<String, String>,
+    /// Waits for the duration.
+    pub(crate) pause: &'a dyn Fn(Duration),
     /// The cgroup version 2 mount.
     pub(crate) mount: &'a Path,
     /// The file that names this process's cgroup (`/proc/self/cgroup`).
@@ -93,8 +99,9 @@ impl Host<'static> {
             read: &read_file,
             write: &write_file,
             list: &list_dirs,
-            systemctl: &|| systemctl_version(SYSTEMCTL),
-            pause: &pause_one_second,
+            systemctl: SYSTEMCTL,
+            version: &systemctl_version,
+            pause: &std::thread::sleep,
             mount: Path::new("/sys/fs/cgroup"),
             self_cgroup: Path::new("/proc/self/cgroup"),
         }
@@ -127,11 +134,6 @@ fn list_dirs(path: &Path) -> io::Result<Vec<String>> {
 /// What `program --version` prints.
 fn systemctl_version(program: &str) -> Result<String, String> {
     SystemCommands::default().run(program, &["--version"])
-}
-
-/// Waits one second.
-fn pause_one_second() {
-    std::thread::sleep(std::time::Duration::from_secs(1));
 }
 
 /// The `--result` word of the command line `args` (the program name, then the verb), or the
@@ -187,7 +189,7 @@ pub(crate) fn run(
 
 /// Ends the runs left, or says why there is nothing to end; an error is what could not be done.
 fn end_runs(host: &Host<'_>) -> Result<String, String> {
-    let found = match (host.systemctl)() {
+    let found = match (host.version)(host.systemctl) {
         Ok(printed) => {
             version(&printed).ok_or("`systemctl --version` printed no version".to_owned())
         }
@@ -286,7 +288,7 @@ fn end(host: &Host<'_>, path: &Path) -> Result<(), String> {
         if !populated(host, path)? {
             return Ok(());
         }
-        (host.pause)();
+        (host.pause)(PAUSE);
     }
     match populated(host, path)? {
         true => Err(format!(

@@ -59,8 +59,8 @@
 //! over and runs the new release's program as the same process, so the unit stays active and
 //! systemd places no process in its cgroup; it removes the handover file at its start, and the
 //! step waits for that, for at most the stop's bound (see [`in_place`]): a signal the unit
-//! manager refuses takes the request back and fails the step (`stop_failed`, class
-//! environment); a bound that passes with the request still there fails it the same way and
+//! manager refuses fails the step (`stop_failed`, class environment) and leaves the request on
+//! disk, which tells the rerun that no agent took it; a bound that passes with the request still there fails it the same way and
 //! leaves the request for the agent; a unit that is no longer active (the agent ended instead
 //! of running again, or the new program died) is started and waited for as in step 5. A rerun
 //! that finds the start issued with the unit up signals again while the request is there (an
@@ -225,7 +225,7 @@ fn hand_over_in_place(
         mark(env, held, record, |record| record.start_issued = true)?;
     }
     let unit = record.update.unit.clone();
-    in_place::signal(env, record, &unit)?;
+    in_place::signal(env, &unit)?;
     let note = staged_not_running(env, record);
     in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
 }

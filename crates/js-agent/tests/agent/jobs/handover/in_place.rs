@@ -250,6 +250,8 @@ fn a_handover_in_place_held_past_the_drain_wait_ends_replaced() {
 struct Replacing {
     root: std::path::PathBuf,
     waits: usize,
+    /// A stop request comes between the end of the loop and the exec.
+    stop_before_exec: bool,
 }
 
 impl js_agent::Sleeper for Replacing {
@@ -257,6 +259,10 @@ impl js_agent::Sleeper for Replacing {
         self.waits += 1;
         handover::write(&self.root).unwrap();
         Wake::Replace
+    }
+
+    fn ready_to_run_again(&mut self) -> bool {
+        !self.stop_before_exec
     }
 }
 
@@ -292,6 +298,7 @@ fn the_agent_runs_its_command_line_again_in_place_and_ends_with_status_one_when_
     let mut sleeper = Replacing {
         root: private(&dir, "state"),
         waits: 0,
+        stop_before_exec: false,
     };
     let machine = Arc::new(FakeMachine::new());
     let jobs: Jobs<'_> = (machine, None);
@@ -325,10 +332,58 @@ fn the_agent_runs_its_command_line_again_in_place_and_ends_with_status_one_when_
     assert!(handed < again_line, "{}", ran.err);
     assert!(
         ran.err.ends_with(
-            "js-agent: cannot run js-agent again in place: stand-in; the runs are left to the \
-             next process\n"
+            "js-agent: cannot run js-agent again in place: stand-in; the runs are left as they \
+             are for the agent the unit starts next\n"
         ),
         "{}",
         ran.err
     );
+}
+
+/// Asserts that a stop request that comes after the loop ended for a handover in place, and
+/// before the exec, wins: the program is not run again and the agent ends with status 0, its
+/// runs handed over. It catches an agent that runs its program again over a stop, which the new
+/// program never sees, so that systemd's stop waits out its whole timeout.
+#[test]
+fn a_stop_after_the_handover_in_place_and_before_the_exec_ends_the_agent() {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use crate::jobs::drain::container_flags;
+    use crate::jobs::private;
+    use crate::support::{Jobs, Script, ScriptConnector, code, flags, linux_host, run_in_place};
+
+    let dir = Scratch::new("jobs-in-place-stop-before-exec");
+    let owned = container_flags(&dir);
+    let words: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let args = flags(&words);
+    let (script, _) = Script::new(vec![welcome(1), beat_ok()]);
+    let mut sleeper = Replacing {
+        root: private(&dir, "state"),
+        waits: 0,
+        stop_before_exec: true,
+    };
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran_again = Cell::new(false);
+    let again = |_: &[std::ffi::OsString]| {
+        ran_again.set(true);
+        std::io::Error::other("stand-in")
+    };
+    let ran = run_in_place(
+        &args,
+        &linux_host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        jobs,
+        &again,
+    );
+
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(!ran_again.get());
+    assert!(
+        ran.err.contains("js-agent: handed over: every run is left"),
+        "{}",
+        ran.err
+    );
+    assert!(!ran.err.contains("running js-agent again"), "{}", ran.err);
 }

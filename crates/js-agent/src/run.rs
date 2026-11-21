@@ -44,7 +44,10 @@
 //! instead of [`Exit::Stopped`]: the program then runs again in the same process (see
 //! `crate::in_place`), so systemd sees no stop and starts nothing, and the next process of the
 //! agent adopts the runs as after any handover. A stop request during that hand-over ends it
-//! with [`Exit::Stopped`]: a stop wins, the process exits and nothing is run again. Another
+//! with [`Exit::Stopped`]: a stop wins, the process exits and nothing is run again; so does one
+//! that comes after the loop ended and before the exec ([`Sleeper::ready_to_run_again`], which
+//! also gives SIGTERM and SIGINT their default action and ignores SIGHUP until the next program
+//! installs its handlers). Another
 //! replace request during it is ignored. A replace request with no handover file, or one that
 //! is not of its form, or in a session with no jobs, is ignored with a line that says why, and
 //! the loop goes on as before; one during a drain is ignored too.
@@ -109,6 +112,14 @@ pub trait Sleeper {
     /// The default has no bell and only sleeps.
     fn sleep_or_bell(&mut self, duration: Duration) -> Wake {
         self.sleep(duration)
+    }
+
+    /// Readies the process to run its program again in place ([`crate::in_place`]) after the
+    /// loop ended [`Exit::Replaced`], and says whether it may: `false` when a stop request came
+    /// in the meantime, which then wins (the process exits, its runs handed over). The default,
+    /// a test's sleeper, readies nothing and finds no stop.
+    fn ready_to_run_again(&mut self) -> bool {
+        true
     }
 
     /// The bell [`Sleeper::sleep_or_bell`] wakes on, for the job worker to ring; none for a

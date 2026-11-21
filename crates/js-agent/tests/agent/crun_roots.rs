@@ -26,7 +26,7 @@ fn mode(path: &Path) -> u32 {
 /// have given.
 #[test]
 fn missing_roots_are_made_with_their_modes() {
-    let dir = TestDir::under("/tmp", "crun-roots-make");
+    let dir = TestDir::under(std::env::temp_dir(), "crun-roots-make");
     let (state, scratch) = (dir.path().join("state"), dir.path().join("scratch"));
     make_roots(&request(&state, &scratch));
     assert_eq!((mode(&state), mode(&scratch)), (0o700, 0o711));
@@ -36,7 +36,7 @@ fn missing_roots_are_made_with_their_modes() {
 /// its fix; a root whose parent is missing is not made, so the check reports the miss.
 #[test]
 fn an_existing_root_is_not_changed_and_a_missing_parent_is_not_made() {
-    let dir = TestDir::under("/tmp", "crun-roots-keep");
+    let dir = TestDir::under(std::env::temp_dir(), "crun-roots-keep");
     let state = dir.path().join("state");
     fs::create_dir(&state).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();

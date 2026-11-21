@@ -622,7 +622,9 @@ pub fn run_with_exec(
 ) -> ExitCode {
     let original = args.clone();
     match execute(args, err, services) {
-        Ok(Ended::Replaced) => in_place::run_again(&original, exec, err),
+        Ok(Ended::Replaced) if services.sleeper.ready_to_run_again() => {
+            in_place::run_again(&original, exec, err)
+        }
         result => finish(result.map(|_| ()), out, err),
     }
 }

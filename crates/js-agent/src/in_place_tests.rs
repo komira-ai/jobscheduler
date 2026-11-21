@@ -39,8 +39,8 @@ fn an_exec_that_returns_ends_with_status_one_and_says_why() {
     assert_eq!(
         String::from_utf8(err).expect("utf8"),
         "js-agent: handed over in place: running /usr/bin/js-agent again\n\
-         js-agent: cannot run /usr/bin/js-agent again in place: stand-in; the runs are left to \
-         the next process\n"
+         js-agent: cannot run /usr/bin/js-agent again in place: stand-in; the runs are left as they \
+         are for the agent the unit starts next\n"
     );
 }
 
@@ -52,8 +52,8 @@ fn a_command_line_with_no_program_is_an_error_and_names_none() {
     assert_eq!(
         String::from_utf8(err).expect("utf8"),
         "js-agent: handed over in place: running  again\n\
-         js-agent: cannot run  again in place: there is no program name; the runs are left to \
-         the next process\n"
+         js-agent: cannot run  again in place: there is no program name; the runs are left as they \
+         are for the agent the unit starts next\n"
     );
 }
 

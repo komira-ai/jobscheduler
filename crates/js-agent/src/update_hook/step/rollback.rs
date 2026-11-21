@@ -364,7 +364,7 @@ fn signal_and_wait(
     record: &mut Record,
     unit: &str,
 ) -> Result<(), Done> {
-    in_place::signal(env, record, unit)?;
+    in_place::signal(env, unit)?;
     let note = previous_not_running(record);
     in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
 }
