@@ -8,7 +8,7 @@
 //! is optional. Its default is what a host that announced nothing of it reads as: no session
 //! digest, no shape, no labels, the phase `quarantined` (a phase text this build does not know
 //! reads so too, as on the wire: fail closed), no load, the first listing applied, the last
-//! listing clean, no beat applied, no container missed. The two listing flags are markers
+//! listing clean, no beat applied, no container missed, no agent process (a hello from an agent that sent none). The two listing flags are markers
 //! named so that their absence is that default (`FIRST_LISTING_PENDING`, `LISTING_UNCLEAN`).
 //!
 //! A shape is a marker tag and the six tags after it: the resources as a job row writes them
@@ -52,6 +52,8 @@ pub(crate) mod node_tag {
     pub const BEAT_SEQ: u16 = 11;
     /// The confirmed containers left out by applied beats in a row (map of job id to u32).
     pub const MISSING: u16 = 12;
+    /// The agent process whose hello wrote the row (text); absent for an agent that sent none.
+    pub const AGENT_PROCESS: u16 = 13;
     /// Present (empty) when the row holds the host's announced shape, in the six tags after.
     pub const CLAIM: u16 = 20;
     /// Present (empty) when the row holds the shape the pool books, in the six tags after.
@@ -241,6 +243,7 @@ pub(crate) fn encode_node(node: &NodeRecord) -> Result<Vec<u8>, JobStoreError> {
         row.put_opt(t::BEAT_SEQ, beat.seq.map(|seq| seq.to_be_bytes().to_vec()));
     }
     row.put(t::MISSING, missing_value(&state.missing_in_a_row));
+    row.put_opt(t::AGENT_PROCESS, node.agent_process.as_deref().map(text));
     put_shape(&mut row, t::CLAIM, node.claim.as_ref());
     put_shape(&mut row, t::SHAPE, node.shape.as_ref());
     put_load(&mut row, state.load.as_ref());
@@ -277,6 +280,7 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
         None => None,
     };
     let missing_in_a_row = fields.opt(t::MISSING, missing_of)?.unwrap_or_default();
+    let agent_process = fields.opt(t::AGENT_PROCESS, text_of)?;
     let claim = take_shape(&mut fields, t::CLAIM)?;
     let shape = take_shape(&mut fields, t::SHAPE)?;
     let load = take_load(&mut fields)?;
@@ -288,6 +292,7 @@ pub(crate) fn decode_node(row: &[u8]) -> Result<NodeRecord, DecodeError> {
         claim,
         shape,
         labels,
+        agent_process,
         state: NodeState {
             phase,
             load,

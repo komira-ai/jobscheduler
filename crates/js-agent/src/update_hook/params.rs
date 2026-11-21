@@ -12,6 +12,12 @@
 //! - `helper_unit` (optional, launchd only): the label of the agent's root helper job, which the
 //!   package's release tree carries as `tree/Library/LaunchDaemons/<helper_unit>.plist`; the hook
 //!   boots it out and bootstraps it again with each agent start (a file name: no `/`);
+//! - `socket_group` (optional, launchd only): the group the root helper gives its socket, which
+//!   `prepare` makes when the host has none (a name of letters, digits, `_`, `-` and `.`);
+//! - `scratch_root` (optional, launchd only): the agent's `--scratch-root`, which `prepare` makes
+//!   and gives a volume of its own when it shares the state root's file system (an absolute
+//!   path of plain components with no white space, the form a file system table takes, that is
+//!   not `state_root`, inside it or above it);
 //! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
 //! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
 //!   the hook finds the lease server, the certificate to trust and the host id;
@@ -92,6 +98,12 @@ pub const UNIT_KEY: &str = "unit";
 
 /// The key of the launchd job of the agent's root helper (optional).
 pub const HELPER_UNIT_KEY: &str = "helper_unit";
+
+/// The key of the group the root helper gives its socket (optional).
+pub const SOCKET_GROUP_KEY: &str = "socket_group";
+
+/// The key of the agent's scratch root, as the agent's `--scratch-root` (optional).
+pub const SCRATCH_ROOT_KEY: &str = "scratch_root";
 
 /// The key of the directory of the hook record.
 pub const STATE_DIR_KEY: &str = "state_dir";
@@ -196,6 +208,23 @@ pub enum ParamsError {
     /// in the release tree.
     #[error("params key {0:?} must be a plain file name: not empty, not . or .., no /")]
     NotFileName(String),
+    /// `socket_group` is not a group name: empty, or with a character other than an ASCII
+    /// letter, a digit, `_`, `-` or `.`.
+    #[error("params key {0:?} must be a group name: ASCII letters, digits, _, - and .")]
+    NotGroupName(String),
+    /// `scratch_root` is not an absolute path of plain components without white space, which a
+    /// line of the file system table can name.
+    #[error("params key {0:?} must be an absolute path of plain components with no white space")]
+    NotMountPath(String),
+    /// `scratch_root` is `state_root`, inside it or above it: the two must be apart for the
+    /// scratch root to have a file system of its own.
+    #[error("params key {scratch:?} and {state:?} must be apart: neither may be inside the other")]
+    RootsOverlap {
+        /// `scratch_root`.
+        scratch: &'static str,
+        /// `state_root`.
+        state: &'static str,
+    },
     /// `runtime` is not one of the runtimes an agent has.
     #[error("runtime {0:?} is not one of crun, docker, native")]
     UnknownRuntime(String),
@@ -274,6 +303,10 @@ pub struct Params {
     pub state_root: PathBuf,
     /// The join token file (`token_file`).
     pub token_file: PathBuf,
+    /// The agent's scratch root (`scratch_root`), when the params name it: `prepare` makes it
+    /// and gives it a file system apart from the state root's. Only a launchd host is set up
+    /// so.
+    pub scratch_root: Option<PathBuf>,
 }
 
 impl Params {
@@ -307,7 +340,7 @@ impl Params {
         if !is_digest(&artifact_digest) {
             return Err(ParamsError::NotDigest(ARTIFACT_DIGEST_KEY.to_owned()));
         }
-        Ok(Params {
+        let params = Params {
             settings: settings(&table)?,
             cordon_lease_secs,
             cordon_max_secs,
@@ -324,8 +357,45 @@ impl Params {
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
             state_root: required_path(&table, STATE_ROOT_KEY)?,
             token_file: required_path(&table, TOKEN_FILE_KEY)?,
+            scratch_root: None,
+        };
+        let scratch_root = scratch_root_of(&table, &params.state_root)?;
+        Ok(Params {
+            scratch_root,
+            ..params
         })
     }
+}
+
+/// `scratch_root`, when the table names it: a path a file system table line can name, apart
+/// from `state_root`.
+///
+/// # Errors
+/// [`ParamsError::NotText`], [`ParamsError::Relative`], [`ParamsError::NotMountPath`] or
+/// [`ParamsError::RootsOverlap`].
+fn scratch_root_of(table: &toml::Table, state_root: &Path) -> Result<Option<PathBuf>, ParamsError> {
+    let Some(root) = path(table, SCRATCH_ROOT_KEY)? else {
+        return Ok(None);
+    };
+    if !is_plain(&root) || root.to_string_lossy().contains(char::is_whitespace) {
+        return Err(ParamsError::NotMountPath(SCRATCH_ROOT_KEY.to_owned()));
+    }
+    if root.starts_with(state_root) || state_root.starts_with(&root) {
+        return Err(ParamsError::RootsOverlap {
+            scratch: SCRATCH_ROOT_KEY,
+            state: STATE_ROOT_KEY,
+        });
+    }
+    Ok(Some(root))
+}
+
+/// Whether `name` is a group name the hook makes: not empty, and only ASCII letters, digits,
+/// `_`, `-` and `.`.
+fn is_group_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// The table of a params file's text: TOML, a flat table of scalars.
@@ -382,6 +452,13 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     {
         return Err(ParamsError::NotFileName(HELPER_UNIT_KEY.to_owned()));
     }
+    let socket_group = string_of(table, SOCKET_GROUP_KEY)?;
+    if socket_group
+        .as_deref()
+        .is_some_and(|name| !is_group_name(name))
+    {
+        return Err(ParamsError::NotGroupName(SOCKET_GROUP_KEY.to_owned()));
+    }
     let runtime = string_of(table, RUNTIME_KEY)?.ok_or(ParamsError::Missing(RUNTIME_KEY))?;
     if !RUNTIMES.contains(&runtime.as_str()) {
         return Err(ParamsError::UnknownRuntime(runtime));
@@ -407,6 +484,7 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
         state_dir,
         unit,
         helper_unit,
+        socket_group,
         runtime,
         timeouts,
         verify_deadline_secs,

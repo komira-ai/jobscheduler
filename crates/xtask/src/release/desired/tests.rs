@@ -708,8 +708,13 @@ fn the_packages_reader_finds_a_stanza_by_its_filename() {
 /// The reserved keys the updater adds to the params file, as hostkeeper writes them: quoted
 /// dotted keys beside the manifest's own.
 fn params_file() -> String {
+    params_file_of(&manifest::params())
+}
+
+/// The params file hostkeeper writes for the manifest `params` table `params`.
+pub(super) fn params_file_of(params: &Value) -> String {
     let mut table = toml::Table::new();
-    for (key, value) in manifest::params().as_object().expect("table") {
+    for (key, value) in params.as_object().expect("table") {
         let scalar = if let Some(text) = value.get("text") {
             toml::Value::String(text.as_str().expect("text").to_owned())
         } else {

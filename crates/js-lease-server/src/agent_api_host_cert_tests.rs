@@ -63,11 +63,11 @@ async fn a_live_token_host_is_not_rebound_and_nothing_is_written() {
     assert_eq!(stored_credential(&rig, "host-a"), rig.pool.to_hex());
 }
 
-/// Asserts that a certificate hello the registry refuses after the new binding was committed
-/// (it names a pool the server does not serve) puts the token's binding back by a second
-/// commit, so that the store and the registry hold the token's binding as before.
+/// Asserts that a certificate hello the registry refuses (it names a pool the server does not
+/// serve) is judged before the new binding is written: the store takes no commit, and the store
+/// and the registry hold the token's binding as before.
 #[tokio::test]
-async fn a_refused_rebinding_goes_back_to_the_token_binding() {
+async fn a_refused_rebinding_writes_nothing_and_keeps_the_token_binding() {
     let rig = rig("rebind_undo");
     rig.pooled("host-a", "burst").await.unwrap();
     rig.clock.advance(Duration::from_secs(60));
@@ -77,7 +77,36 @@ async fn a_refused_rebinding_goes_back_to_the_token_binding() {
         (refused.status.as_u16(), refused.error),
         (403, "unknown-pool")
     );
-    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(rig.commits(), before);
     assert_eq!(stored_credential(&rig, "host-a"), rig.pool.to_hex());
     assert_eq!(rig.held("host-a").unwrap().credential(), &rig.pool);
+}
+
+/// Asserts that a certificate hello from the process of a live host bound to the pool's join
+/// token (the registry takes it for the same agent coming back, so it is not `host-live`) moves
+/// the stored binding onto the certificate's credential as the registry moves its own: the store
+/// and the registry hold the certificate's credential. It catches a hello that decides in the
+/// store whether the host is idle, which leaves the store bound to the token while the registry
+/// is bound to the certificate (a restart would then refuse the host).
+#[tokio::test]
+async fn a_certificate_hello_of_the_live_hosts_own_process_moves_the_stored_binding() {
+    let rig = rig("rebind_same_process");
+    let with_process = |host: &str| {
+        let mut hello: Value = serde_json::from_slice(&body(host, "burst", false)).unwrap();
+        hello["agent_process"] = json!("process-1");
+        Bytes::from(hello.to_string())
+    };
+    let first = Ok(with_process("host-a"));
+    let welcome = super::super::serve_hello(&rig.agents, rig.pool.clone(), None, first, &|| ());
+    drop(welcome.await.unwrap());
+
+    let id = HostId::new("host-a").unwrap();
+    let who = Credential::of_host_certificate(&id);
+    let certified = CertifiedHost(id);
+    let given = (who.clone(), None, None, Some(&certified));
+    let again = Ok(with_process("host-a"));
+    let welcome = super::super::serve_hello_in(&rig.agents, given, again, &|| ());
+    drop(welcome.await.expect("the same process is admitted"));
+    assert_eq!(stored_credential(&rig, "host-a"), who.to_hex());
+    assert_eq!(rig.held("host-a").unwrap().credential(), &who);
 }

@@ -133,7 +133,8 @@ const CONFIG: &str =
 
 /// The stand-in. Its behaviour is chosen by the end of the container's name (a run id such
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
-/// and fails when the node has a file `delete-fails`. `state` notes each ask in
+/// and fails when the node has a file `delete-fails`; for a container `*-delhold` it first
+/// waits until the test writes the pipe `release-<name>` the test made. `state` notes each ask in
 /// `asks-<name>` and says the container runs with the pid [`PID`], except for a container
 /// `*-nopid` or `*-deaf` (it fails: no container), `*-late` (it fails twice, then names it),
 /// `*-badpid` (a state with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid`
@@ -206,6 +207,7 @@ case "$cmd" in
     kill -TERM "$(cat "$root/pid")";;
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
+    case "$name" in *-delhold) read x < "$DIR/release-$name";; esac
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
     rm -f "$cg/ctr/cgroup.procs"
     rmdir "$root/$name" 2>/dev/null

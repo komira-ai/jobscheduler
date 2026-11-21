@@ -60,11 +60,14 @@ pub enum Reason {
     DrainDeadline,
     /// The hold file of the agent's state root could not be read, written or ended.
     HoldFailed,
+    /// A Mac's host setup is not complete and `prepare` could not complete it: the helper's
+    /// socket group, the agent's state root or the scratch root's own volume (exit 75).
+    HostSetupMissing,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 23] = [
+    pub const ALL: [Reason; 24] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -88,6 +91,7 @@ impl Reason {
         Reason::UnitNotEmpty,
         Reason::DrainDeadline,
         Reason::HoldFailed,
+        Reason::HostSetupMissing,
     ];
 
     /// The token in the JSON.
@@ -117,6 +121,7 @@ impl Reason {
             Reason::UnitNotEmpty => "unit_not_empty",
             Reason::DrainDeadline => "drain_deadline",
             Reason::HoldFailed => "hold_failed",
+            Reason::HostSetupMissing => "host_setup_missing",
         }
     }
 }

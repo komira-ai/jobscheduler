@@ -176,7 +176,9 @@ async fn the_binding_refuses_another_instance_and_the_token_dies_at_the_first_he
     let rig = Rig::start("e2e_binding").await;
     let (name, token) = rig.launch().await;
 
-    let wrong = rig.hello(&token, &name, "someone-elses-machine").await;
+    // The agent's own hello (one the registry admits), from an instance the token was not minted
+    // for: the registry judges first, so only a hello it would admit reaches the token.
+    let wrong = rig.agent_says_hello(&token, "someone-elses-machine").await;
     assert_eq!(wrong.status, 403, "{}", wrong.body);
     assert_eq!(code(&wrong), "join-token-instance");
     assert!(rig.registry().hosts().is_empty());
