@@ -2,12 +2,15 @@
 //! the bytes, the fields a later build adds and every way a taint row can fail to parse.
 
 use super::cordon_tag;
+use super::hostmark_tag;
 use super::taint_tag as t;
-use super::{decode_cordon, decode_taint, encode_cordon, encode_taint};
+use super::{
+    decode_cordon, decode_hostmark, decode_taint, encode_cordon, encode_hostmark, encode_taint,
+};
 use crate::codec::tests::{full_job, job_row, with, without};
 use crate::codec::{DecodeError, FORMAT, LATER_FORMAT, decode_job, field_of, job_host_tag};
 use crate::ids::JobId;
-use crate::record::{HostTaint, Isolation, JobRecord};
+use crate::record::{HostTaint, Isolation, JobRecord, ScaleMark};
 use crate::suite::host_spec;
 use js_types::CordonHolder;
 
@@ -170,6 +173,42 @@ fn every_malformed_cordon_row_is_an_error() {
         decode_cordon(&with(&row, cordon_tag::HOLDER, b"Not A Holder")),
         Err(DecodeError::BadValue {
             tag: cordon_tag::HOLDER
+        })
+    );
+}
+
+/// Asserts that each scale-down mark reads back as written, in a row of the one field and the
+/// mark's byte (1 draining, 2 releasing). Catches a mark written under another byte, and two
+/// marks that read back as one.
+#[test]
+fn a_hostmark_reads_back_as_written() {
+    for (mark, byte) in [(ScaleMark::Draining, 1), (ScaleMark::Releasing, 2)] {
+        let row = encode_hostmark(mark).expect("encodes");
+        assert_eq!(field_of(&row, hostmark_tag::MARK), Some(vec![byte]));
+        assert_eq!(decode_hostmark(&row), Ok(mark));
+    }
+}
+
+/// Asserts that a mark byte this build does not know is a later build's row (`Newer`, an
+/// unknown row to the store, not a corrupt one), that a row of a later format is `Newer` too, and
+/// that an empty row, a bad format byte, a missing mark and a mark of the wrong length are
+/// refused. Catches a mark byte of a later build read as a known mark, and a bad row read
+/// as no mark.
+#[test]
+fn every_malformed_hostmark_row_is_an_error() {
+    let row = encode_hostmark(ScaleMark::Draining).expect("encodes");
+    assert_eq!(
+        decode_hostmark(&with(&row, hostmark_tag::MARK, &[3])),
+        Err(DecodeError::Newer)
+    );
+    assert_eq!(decode_hostmark(&[LATER_FORMAT]), Err(DecodeError::Newer));
+    assert_eq!(decode_hostmark(&[]), Err(DecodeError::Empty));
+    assert_eq!(decode_hostmark(&[0]), Err(DecodeError::BadFormat));
+    assert!(decode_hostmark(&[FORMAT]).is_err());
+    assert_eq!(
+        decode_hostmark(&with(&row, hostmark_tag::MARK, &[1, 2])),
+        Err(DecodeError::BadLength {
+            tag: hostmark_tag::MARK
         })
     );
 }

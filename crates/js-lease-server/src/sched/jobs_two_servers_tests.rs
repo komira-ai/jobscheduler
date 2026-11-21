@@ -115,3 +115,58 @@ fn two_servers_place_each_job_once_and_never_book_a_host_past_its_cores() {
         );
     }
 }
+
+/// Two servers, each with its own registry, placer and store handle, place 24 one-core jobs
+/// queued in the one store over the `node/` rows, from two threads, at once: `host-a` said
+/// hello to one server and `host-b` to the other, so each server places on both. Every job is
+/// placed once with one allocation on one host, no host books more than its capacity, and once
+/// each server has read what the other wrote the 16 cores are all booked. It catches two
+/// servers that place one job twice from their own pictures of the queue, and hosts offered
+/// from the rows that a server books past their cores because it does not see the other's
+/// bookings.
+#[test]
+fn two_servers_racing_over_rows_place_each_job_once_and_never_book_a_host_past_its_cores() {
+    use super::rows_two_tests::{Server, say_hello, server};
+
+    let database = test_database();
+    let url = database.url();
+    let (a, b) = (server("rows_race_a", &url), server("rows_race_b", &url));
+    say_hello(a.agents(), "host-a", &[]).unwrap();
+    say_hello(b.agents(), "host-b", &[]).unwrap();
+    for n in 0..24 {
+        queue(a.jobs(), &format!("job-{n:02}"), 1, 0);
+    }
+    let rounds = |server: &Server, n: usize| {
+        for _ in 0..n {
+            server.agents().place_jobs();
+        }
+    };
+    thread::scope(|scope| {
+        scope.spawn(|| rounds(&a, 6));
+        scope.spawn(|| rounds(&b, 6));
+    });
+    rounds(&a, 2);
+    rounds(&b, 2);
+
+    let mut per_host: BTreeMap<String, u64> = BTreeMap::new();
+    for n in 0..24 {
+        let id = JobId::parse(&format!("job-{n:02}")).unwrap();
+        let job = a.jobs().get_job(&id).unwrap().unwrap();
+        let allocation = a.jobs().get_allocation(&id).unwrap();
+        match job.state {
+            JobState::Queued => assert!(allocation.is_none(), "{id} is queued with an allocation"),
+            JobState::Placed => {
+                let allocation = allocation.expect("a placed job has its allocation");
+                assert_eq!(job.host.as_ref(), Some(&allocation.host), "{id}");
+                *per_host.entry(allocation.host.to_string()).or_default() += 1;
+            }
+            other => panic!("{id} is {other:?}"),
+        }
+    }
+    assert_eq!(per_host.values().sum::<u64>(), 16, "{per_host:?}");
+    for name in ["host-a", "host-b"] {
+        let booking = a.jobs().booked_on(&host(name)).unwrap();
+        assert!(booking.cpu_millis <= 8800, "{name} books {booking:?}");
+        assert_eq!(booking.allocations, per_host[name], "{name}");
+    }
+}

@@ -720,6 +720,30 @@ fn the_server_places_queued_jobs_on_the_hosts_the_registry_opens() {
     assert_eq!(state(&jobs, "job-b"), JobState::Placed);
 }
 
+/// Asserts that a pass that read the hosts' rows but cannot read the job tables places
+/// nothing, and the next pass places the job. It catches a failed read of the tables that
+/// is taken for an empty queue, or that ends placement for good.
+#[test]
+fn a_pass_whose_job_tables_cannot_be_read_places_nothing_and_the_next_one_does() {
+    let (agents, store, _dir) = served("jobs-tables-unread");
+    let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
+    queue(&jobs, "job-a", 2, 0);
+    // The pass reads the hosts first, as many reads as a read of them makes once the rows were
+    // read whole; the read after those, of the job tables, fails.
+    let placer = agents.placer.as_ref().unwrap();
+    let now = js_types::Clock::now(&agents.clock);
+    agents.offered(&jobs, placer, now).unwrap();
+    store.take_reads();
+    let now = js_types::Clock::now(&agents.clock);
+    agents.offered(&jobs, placer, now).unwrap();
+    let hosts = store.take_reads().len();
+    store.fail_read_after(hosts);
+    agents.place_jobs();
+    assert_eq!(state(&jobs, "job-a"), JobState::Queued);
+    agents.place_jobs();
+    assert_eq!(state(&jobs, "job-a"), JobState::Placed);
+}
+
 /// Asserts that a placement commit that fails leaves the pass going: the next job is placed.
 /// It catches a failed commit that ends the pass, so one bad write holds back every job
 /// behind it.

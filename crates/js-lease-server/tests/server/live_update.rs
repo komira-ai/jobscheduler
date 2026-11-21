@@ -149,8 +149,9 @@ async fn submit(server: &Harness, id: &str) {
 /// heartbeat reaches the second server, which serves the session the first took from the
 /// hosts' rows (no `unknown-host`, no second hello), and the agent keeps its runs; the host
 /// that had not been told its starts is told them by the second server, under the allocations
-/// the first booked. After the first has stopped (its last tick included) the second server
-/// places the two queued jobs on the third host, and every host ends its jobs. In the end every
+/// the first booked. By the time the first has stopped (its last tick included), the second
+/// server has placed the two queued jobs on the third host (whose row it reads, though the host
+/// said hello to the first), and every host ends its jobs. In the end every
 /// job succeeded, each was started under one allocation on one host, each agent said hello
 /// once in all, and no agent was told to stop a job. It catches a beat the second server
 /// refuses because another server took the hello (the agent would say hello again and its
@@ -224,9 +225,13 @@ fn an_update_during_live_jobs_loses_doubles_and_strands_nothing() {
             "the second host was told its starts"
         );
         first.running.shutdown().await.unwrap();
+        // The second server places over every live host row, so the passes of those beats
+        // already placed the two queued jobs on the third host (its row is live from its hello
+        // to the first server), and its beats there were told the starts.
         let moved = states(&second, &all).await;
-        assert_eq!(count(&moved, "JOB_STATE_RUNNING"), 4, "{moved:?}");
-        // The second server's tick places the two queued jobs on the third host.
+        assert_eq!(count(&moved, "JOB_STATE_RUNNING"), 6, "{moved:?}");
+        assert_eq!(hosts[2].running.len(), 2, "{moved:?}");
+        // The second server's tick changes nothing of it.
         second.ticks.step().await;
         for host in &mut hosts {
             host.beat(&second).await;

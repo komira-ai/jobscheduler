@@ -302,7 +302,9 @@ async fn a_listing_that_cannot_read_the_job_tables_is_unavailable() {
     let s = server("store-down");
     s.register("h1");
     let unavailable = (Code::Unavailable, STORE_UNAVAILABLE.to_owned());
-    s.store.fail_read_after(0);
+    // The listing reads the rows' three tables first (rows, marks, taints; a failure of those is
+    // logged and the registry's hosts are listed alone); the booking read after them fails.
+    s.store.fail_read_after(3);
     let answer = list_hosts(&s.api, Request::new(ListHostsRequest {})).await;
     assert_eq!(refused(answer), unavailable);
     s.store.fail_read_after(0);

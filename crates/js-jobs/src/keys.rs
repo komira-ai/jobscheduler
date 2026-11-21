@@ -19,8 +19,8 @@ pub const ALLOCATION: &str = "alloc/";
 pub const MARK: &str = "mark/";
 
 /// `taint/<host>`: the taint a host-isolation job's placement put on the host, written in the
-/// transaction that places the job and deleted only by [`crate::JobStore::drop_taints`]. No
-/// `idx/` space names it.
+/// transaction that places the job and deleted only by [`crate::JobStore::drop_taints`], at
+/// the version read. Every placement's transaction checks it absent. No `idx/` space names it.
 pub const TAINT: &str = "taint/";
 
 /// `cordon/<host>`: the cordon of a host, a row with a time to live that lapses when the
@@ -28,6 +28,23 @@ pub const TAINT: &str = "taint/";
 /// [`crate::JobStore::uncordon_host`]. Every placement's transaction checks it absent. No
 /// `idx/` space names it.
 pub const CORDON: &str = "cordon/";
+
+/// `hostmark/<host>`: the scale-down mark of a host ([`crate::ScaleMark`]), written at the
+/// version read by [`crate::JobStore::mark_host`] and deleted at it by
+/// [`crate::JobStore::unmark_host`]. Every placement's transaction checks it absent. No `idx/`
+/// space names it.
+pub const HOSTMARK: &str = "hostmark/";
+
+/// `pool/<pool>`: the admission row of a pool. Its value is empty and means nothing: the hello
+/// of a host new to the pool writes it at the version read, beside the host's `node/` row, so
+/// two such hellos of one pool are serialized and each counts the other's row
+/// ([`crate::JobStore::hello_node_in_pool`]).
+pub const POOL: &str = "pool/";
+
+/// `hosts/binding/<host>`: the server's binding of a host, a JSON object it writes and reads
+/// itself. The job store reads one only to find whether it holds a taint (its `taint_reason`),
+/// in the transaction that places a job on the host.
+pub const BINDING: &str = "hosts/binding/";
 
 /// `hostbook/<host>`: the reservation row of a host. Every placement made through
 /// [`crate::JobStore::place_claimed`] writes it in the transaction that places the job, at the
@@ -94,6 +111,24 @@ pub fn taint(host: &HostId) -> String {
 #[must_use]
 pub fn cordon(host: &HostId) -> String {
     format!("{CORDON}{host}")
+}
+
+/// The key of the scale-down mark of `host`.
+#[must_use]
+pub fn hostmark(host: &HostId) -> String {
+    format!("{HOSTMARK}{host}")
+}
+
+/// The key of the admission row of the pool `pool`.
+#[must_use]
+pub fn pool(pool: &str) -> String {
+    format!("{POOL}{pool}")
+}
+
+/// The key of the server's binding of `host`.
+#[must_use]
+pub fn binding(host: &HostId) -> String {
+    format!("{BINDING}{host}")
 }
 
 /// The key of the presence row of `host`.
