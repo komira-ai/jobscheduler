@@ -188,9 +188,11 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The directory could not be asked.
     fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>>;
-    /// Sets the pool-owned attributes of the existing record `user.name` to what
-    /// [`Host::create_user`] gives a new one (uid, primary group, home path, shell, real
-    /// name, hidden), leaving its password and its membership of `admin` alone.
+    /// Sets the pool-owned attributes of the existing record `user.name` that macOS lets
+    /// root write on an existing account to what [`Host::create_user`] gives a new one:
+    /// its primary group, shell and hidden flag. Its uid, home path, real name, password
+    /// and membership of `admin` are left alone (macOS 27 refuses root a write of an
+    /// existing account's home attribute; the caller compares the uid and home first).
     ///
     /// # Errors
     /// The record could not be found or an attribute could not be set.

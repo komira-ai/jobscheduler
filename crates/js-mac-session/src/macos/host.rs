@@ -148,7 +148,17 @@ impl Host for MacHost {
             let node = local_node()?;
             let record = find(&node, &user.name)?
                 .ok_or_else(|| io::Error::other(format!("no user record {}", user.name)))?;
-            set_pool_attributes(&record, user)
+            // Only what root may write on an existing account (measured on macOS 27 with
+            // SIP on: the shell, the hidden flag and the primary group may be set, the home
+            // attribute may not, nor may the account be deleted).
+            for (attribute, value) in [
+                ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
+                ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
+                ("dsAttrTypeNative:IsHidden", "1".to_owned()),
+            ] {
+                set(&record, attribute, &value)?;
+            }
+            Ok(())
         })
     }
 

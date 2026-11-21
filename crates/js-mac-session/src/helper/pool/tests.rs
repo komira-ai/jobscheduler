@@ -147,10 +147,52 @@ fn reset_leaves_no_residue() {
     );
 }
 
+/// Catches a reset that writes an existing account's uid or home attribute, which macOS 27
+/// refuses root, or that takes a record whose home or uid is not the slot's as repaired:
+/// the slot stays broken, the message names what differs and that it cannot be repaired,
+/// no attribute is written and no record is deleted or made, and every `pool-create` says
+/// the same until the record is the slot's again.
+#[test]
+fn a_record_whose_home_is_not_the_slot_s_leaves_the_slot_broken_and_is_never_rewritten() {
+    let rig = rig("pool-home-attr", 1);
+    let uid = rig.helper.user_create("73.1", None).unwrap();
+    let home = home(&rig, 0);
+    rig.host.state().records.insert(
+        "kbf-lease-pool-0".to_owned(),
+        UserRecord {
+            uid,
+            gid: my_gid(),
+            home: PathBuf::from("/var/empty"),
+            hidden: true,
+            shell: "/bin/zsh".to_owned(),
+        },
+    );
+    log(&rig);
+    let error = rig.helper.user_delete("73.1").unwrap_err();
+    let why = format!(
+        "slot 0's user kbf-lease-pool-0 could not be reset in place, so the slot is broken \
+         and lent to no one until pool-create resets it again: setting back the record of \
+         user kbf-lease-pool-0: its home is /var/empty, not {}; macOS lets no process \
+         rewrite these on an existing account, so the slot cannot be repaired",
+        home.display()
+    );
+    assert_eq!(error, why);
+    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
+    let created = rig.helper.pool_create();
+    assert_eq!(created.free, slots(&[]));
+    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("restore_user")),
+        "{calls:#?}"
+    );
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+}
+
 /// Catches a broken slot that is deleted and made again (its record, its home or a
 /// system-placed folder removed, as macOS 27 refuses root) instead of reset where it is:
-/// a lease changes its user's record and leaves files in the home and in the per-user
-/// folder, and its first reset fails at the home; the slot is broken, and the next
+/// a lease changes what its user's record lets root write back (its primary group, shell
+/// and hidden flag) and leaves files in the home and in the per-user folder, and its first reset fails at the home; the slot is broken, and the next
 /// `pool-create` resets it again in place: no record deleted or made, the home and the
 /// folder emptied and kept, the pool-owned attributes set back, the slot free and lent
 /// again with the same uid.
@@ -172,7 +214,7 @@ fn a_broken_slot_is_reset_in_place_and_nothing_is_deleted() {
         UserRecord {
             uid,
             gid: my_gid() + 1,
-            home: PathBuf::from("/var/empty"),
+            home: home.clone(),
             hidden: false,
             shell: "/bin/sh".to_owned(),
         },

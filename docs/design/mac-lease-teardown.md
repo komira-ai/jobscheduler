@@ -51,7 +51,7 @@ The lease is recorded over (the ledger's `deleted`, then the slot's `resetting`)
 7. Settle again.
 8. Ask the directory that the user is not in `admin` (`dseditgroup -o checkmember`): only its "no" passes.
 
-8a. Before step 7's last look, the record's attributes that the pool owns are set back (primary group, home path, shell, real name, hidden) and the user is taken out of `admin`; step 8 then asks the directory.
+8a. Before step 7's last look, the record's attributes that the pool owns and macOS lets root write on an existing account are set back (primary group, shell, hidden), its uid and home path are compared and never written (macOS 27 refuses root a write of an existing account's home attribute, so a record whose uid or home is not the slot's leaves the slot broken, naming what differs), and the user is taken out of `admin`; step 8 then asks the directory.
 
 A clean reset records the slot free. One that is not leaves the slot broken, naming the entry or step that blocked it. Nothing of a pool user is ever deleted: the pool's users are made once and are permanent. Measured on macOS 27.0.1 with System Integrity Protection on, as root from a launchd daemon and from an ssh root shell: root may not delete a local user record (`dscl . -delete` fails with eDSPermissionError -14120, and so does the helper's OpenDirectory delete), may not remove an existing account's home, and may not remove the per-user folders the system placed (`/private/var/folders/<xx>/<hash>` and its `0`, `C`, `T` and `X` carry `sunlnk`); everything can be emptied, and making users works.
 

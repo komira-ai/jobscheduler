@@ -33,7 +33,9 @@
 //!   emptied (every entry below it removed; the folder itself is kept; its owner, group,
 //!   mode, flags, ACL and extended attributes given back), its `DARWIN_USER_DIR` entry
 //!   emptied (its `0`, `C` and `T` kept), the attributes of its record that the pool owns
-//!   set back (primary group, home path, shell, real name, hidden), the user taken out of
+//!   set back where root may write them on an existing account (primary group, shell,
+//!   hidden; its uid and home path are compared, not written, and a record whose uid or
+//!   home is not the slot's leaves the slot broken), the user taken out of
 //!   `admin`, and last the directory asked that the user is not in `admin`. Each step is
 //!   judged by its outcome, as the teardown's are; only a reset with every step clean
 //!   returns the slot to free.
@@ -56,6 +58,8 @@
 //! - The boot reset ends every live lease but the one whose session it keeps (as above),
 //!   and then resets every slot that is resetting or leased to a lease that is not live
 //!   (a crash between two records, or during a reset), before `pool-create`.
+
+use std::io;
 
 use js_types::LeaseId;
 
@@ -493,15 +497,46 @@ impl Helper {
     }
 
     /// Sets back the attributes of the record of the pool user `name`, with `uid`, that
-    /// the pool owns (primary group, home path, shell, real name, hidden), and takes the
-    /// user out of `admin` (a lease's grant put it there); the directory is asked last,
-    /// by [`Self::not_admin`].
+    /// the pool owns and macOS lets root write on an existing account (its primary group,
+    /// shell and hidden flag), and takes the user out of `admin` (a lease's grant put it
+    /// there); the directory is asked last, by [`Self::not_admin`]. The record's uid and
+    /// home path are read and compared, never written: macOS 27 refuses root a write of an
+    /// existing account's home attribute (as it refuses the account's deletion), so a
+    /// record whose uid or home is not the slot's cannot be repaired, and its slot stays
+    /// broken, naming what differs.
     fn restore_record(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        let failed = |source: io::Error| TeardownError::Restore {
+            name: name.to_owned(),
+            source,
+        };
+        let home = self.settings.homes.join(name);
+        let record = self
+            .host
+            .user_record(name)
+            .map_err(failed)?
+            .ok_or_else(|| failed(io::Error::other("there is no record")))?;
+        let mut differs = Vec::new();
+        if record.uid != uid {
+            differs.push(format!("its uid is {}, not {uid}", record.uid));
+        }
+        if record.home != home {
+            differs.push(format!(
+                "its home is {}, not {}",
+                record.home.display(),
+                home.display()
+            ));
+        }
+        if !differs.is_empty() {
+            return Err(failed(io::Error::other(format!(
+                "{}; macOS lets no process rewrite these on an existing account, so the slot cannot be repaired",
+                differs.join(", ")
+            ))));
+        }
         let user = super::NewUser {
             name: name.to_owned(),
             uid,
             gid: self.settings.gid,
-            home: self.settings.homes.join(name),
+            home,
             admin: false,
         };
         self.host
