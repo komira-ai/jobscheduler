@@ -32,8 +32,8 @@ pub fn a_claimed_placement_books_only_what_the_host_has_room_for<B: Backend>(bac
     let capacity = two_shares();
     let a = host("host-a");
     let first = rig.queue("c-first");
-    let second = rig.queue("c-second");
-    let third = rig.queue("c-third");
+    let second = rig.queue_portless("c-second");
+    let third = rig.queue_portless("c-third");
     let plain = Placement::default();
 
     rig.other()
@@ -76,7 +76,7 @@ pub fn a_claimed_placement_books_only_what_the_host_has_room_for<B: Backend>(bac
     rig.jobs
         .place_claimed(&third, &host("host-b"), share(), &plain, Some(&capacity))
         .expect("another host has room");
-    let fourth = rig.queue("c-fourth");
+    let fourth = rig.queue_portless("c-fourth");
     rig.jobs
         .place_claimed(&fourth, &a, share(), &plain, None)
         .expect("a placement given no capacity is not held to one");
@@ -212,8 +212,8 @@ pub fn a_claimed_placement_moves_the_hosts_reservation_row<B: Backend>(backend: 
     let plain = Placement::default();
     let (a, b) = (host("host-a"), host("host-b"));
     let first = rig.queue("b-first");
-    let second = rig.queue("b-second");
-    let third = rig.queue("b-third");
+    let second = rig.queue_portless("b-second");
+    let third = rig.queue_portless("b-third");
     assert!(
         rig.raw("hostbook/host-a").is_none(),
         "{name}: a row before any placement"

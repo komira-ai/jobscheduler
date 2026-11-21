@@ -14,7 +14,7 @@ use js_jobs::{
 };
 use js_state::{Store, StoreTime, Versioned};
 
-use super::job_rig::{FakeAgent, Rig, START_MS, starts, whole_over, whole_rig};
+use super::job_rig::{FakeAgent, Rig, START_MS, WHOLE_GRACE, starts, whole_over, whole_rig};
 use super::whole_tests::{
     SECOND, beat, now, pass_time, place_all, queue_share, queue_whole, rules, run_share, served,
 };
@@ -108,7 +108,8 @@ async fn a_marked_deadline_before_boot_plus_120s_is_raised_to_it() {
     assert_eq!(stood.made, mark.made);
 }
 
-/// A server is started again and the marked host never says hello. The stored mark stands
+/// A server is started again, after the marked host's row went past the grace, and the host
+/// never says hello. The stored mark stands
 /// until the server's start plus `regain_grace` (the job is not queued in the engine meanwhile),
 /// and is deleted at that instant; the job stays queued, and when the host does say hello the
 /// job is marked again, on a mark made then. It catches a mark dropped at once, one kept for
@@ -117,7 +118,10 @@ async fn a_marked_deadline_before_boot_plus_120s_is_raised_to_it() {
 #[tokio::test]
 async fn a_restored_mark_whose_host_never_says_hello_is_dropped_after_claim_by() {
     let (rig, _, whole, mark) = marked("whole_restart_claim").await;
-    let boot_ms = START_MS + 10_000;
+    // The server starts again once the host's row is past the grace too: a live row is a host
+    // heard from (another server may hold it), whose mark stands.
+    let grace_ms = u64::try_from(WHOLE_GRACE.as_millis()).unwrap();
+    let boot_ms = START_MS + grace_ms + 10_000;
     let mut again = restarted("whole_restart_claim_again", &rig, boot_ms);
     place_all(&again);
     assert_eq!(again.jobs.get_mark(&whole).unwrap(), Some(mark.clone()));

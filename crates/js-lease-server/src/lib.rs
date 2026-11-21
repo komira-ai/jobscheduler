@@ -795,6 +795,7 @@ mod listener;
 mod logs;
 mod metrics;
 pub mod network;
+mod node_rows;
 mod per_job;
 mod platform;
 mod pool;

@@ -21,6 +21,7 @@ mod cordon;
 mod marks;
 mod placer_side;
 mod record;
+mod rows;
 mod taint;
 mod view;
 
