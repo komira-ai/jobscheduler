@@ -120,6 +120,13 @@ fn a_first_install_whose_cutover_failed_as_on_the_studios_leaves_a_host_the_next
         real.join("js-agent").join(&version),
         "hostkeeper names the staged release by its real path"
     );
+    // The runner checks this before every step; a refusal here would halt the update with
+    // `artifact_changed` before the hook runs.
+    if let Err(refused) = staged.check(Path::new(
+        "tree/Library/Application Support/js-agent/bin/js-agent",
+    )) {
+        panic!("hostkeeper's check refuses the staged release: {refused}");
+    }
     let order = daemon.order(&staged, 1);
     let failed = daemon.run(&order, daemon.switch(false), &store(1));
     assert!(

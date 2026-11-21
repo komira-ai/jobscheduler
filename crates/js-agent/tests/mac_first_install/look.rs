@@ -102,6 +102,26 @@ impl Diagnose {
                 output("/bin/ls", &["-la", &dir.to_string_lossy()])
             );
         }
+        for dir in &self.stores {
+            let record = dir.join("step-record.json");
+            eprintln!(
+                "== {}\n{}",
+                record.display(),
+                output("/bin/cat", &[&record.to_string_lossy()])
+            );
+        }
+        // Every directory above the staged releases, which hostkeeper's check holds to root's
+        // ownership and closed to group and others, and the tree of each release.
+        let mut above: Vec<PathBuf> = service_dir().ancestors().map(Path::to_path_buf).collect();
+        above.reverse();
+        let mut args = vec!["-ldn".to_owned()];
+        args.extend(above.iter().map(|dir| dir.to_string_lossy().into_owned()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        eprintln!("== above the releases\n{}", output("/bin/ls", &args));
+        eprintln!(
+            "== the releases\n{}",
+            output("/bin/ls", &["-laRn", &service_dir().to_string_lossy()])
+        );
         eprintln!(
             "== the record directory of the hook\n{}",
             output(
