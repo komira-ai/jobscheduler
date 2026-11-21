@@ -216,3 +216,26 @@ fn an_administrator_s_user_is_added_for_the_lease_and_removed_at_its_end() {
     rig.host.state().answers.clear();
     assert_eq!(rig.helper.pool_create().free, slots(&[0]));
 }
+
+/// Catches an adoption that takes a pool user's missing home for a failure, or lends the
+/// slot with no home: a record that is the pool's own whose home folder is gone (macOS's
+/// own `sysadminctl -deleteUser` removes the home and then fails to delete the record,
+/// leaving just this) is adopted, its home made again (the host's `make_home`, which makes a missing home
+/// private and the user's), and the slot recorded free; no record is made or deleted.
+#[test]
+fn a_pool_user_whose_home_is_gone_is_adopted_with_its_home_made_again() {
+    let rig = rig("pool-adopt-no-home", 1);
+    let uid = me();
+    assert!(!home(&rig, 0).exists(), "the pool user's home is gone");
+    std::fs::remove_file(rig.dir.join("ledger")).unwrap();
+    std::fs::remove_file(rig.dir.join("pool")).unwrap();
+    let rig = restarted(rig, "pool-adopt-no-home");
+    log(&rig);
+    rig.helper.boot_reset(&[]).unwrap();
+    let calls = log(&rig);
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
+    let made = format!("make_home {} {uid}:{}", home(&rig, 0).display(), my_gid());
+    assert!(calls.contains(&made), "{calls:#?}");
+    assert_eq!(rig.helper.user_create("87.1", None), Ok(uid));
+}

@@ -423,7 +423,7 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     assert!(user_exists(&name), "the pool user's record was deleted");
     assert!(
         root("/bin/ls", &["-A", &home(&name)]).said().is_empty(),
-        "the home of {name} was not emptied"
+        "the pool user's home was not emptied"
     );
     let mut gone = vec![
         tabs,
@@ -712,8 +712,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
     );
     assert!(
         user_exists(&held.name()),
-        "{} was deleted by the reset",
-        held.name()
+        "the held session's pool user was deleted by the reset"
     );
     let auto_login = root(
         "/usr/bin/defaults",
