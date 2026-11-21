@@ -333,7 +333,7 @@ pub mod host_ports;
 mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
-mod in_place;
+pub mod in_place;
 pub mod integrity;
 mod jobs;
 pub mod leak_scan;

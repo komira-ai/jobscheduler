@@ -56,6 +56,7 @@ mod provider_wire;
 mod quota;
 mod readiness;
 mod retired;
+mod run_again;
 mod runtime_conformance;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

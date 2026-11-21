@@ -73,28 +73,29 @@ struct Args {
 }
 
 /// What the verb reads and writes the host through.
-pub(crate) struct Host<'a> {
+pub struct Host<'a> {
     /// The text of a file.
-    pub(crate) read: &'a dyn Fn(&Path) -> io::Result<String>,
+    pub read: &'a dyn Fn(&Path) -> io::Result<String>,
     /// Writes a file with the text.
-    pub(crate) write: &'a dyn Fn(&Path, &str) -> io::Result<()>,
+    pub write: &'a dyn Fn(&Path, &str) -> io::Result<()>,
     /// The names of the directories in a directory, sorted.
-    pub(crate) list: &'a dyn Fn(&Path) -> io::Result<Vec<String>>,
+    pub list: &'a dyn Fn(&Path) -> io::Result<Vec<String>>,
     /// The program that prints systemd's version (`/usr/bin/systemctl`).
-    pub(crate) systemctl: &'a str,
+    pub systemctl: &'a str,
     /// What a program run with `--version` prints.
-    pub(crate) version: &'a dyn Fn(&str) -> Result<String, String>,
+    pub version: &'a dyn Fn(&str) -> Result<String, String>,
     /// Waits for the duration.
-    pub(crate) pause: &'a dyn Fn(Duration),
+    pub pause: &'a dyn Fn(Duration),
     /// The cgroup version 2 mount.
-    pub(crate) mount: &'a Path,
+    pub mount: &'a Path,
     /// The file that names this process's cgroup (`/proc/self/cgroup`).
-    pub(crate) self_cgroup: &'a Path,
+    pub self_cgroup: &'a Path,
 }
 
 impl Host<'static> {
     /// This machine.
-    pub(crate) fn system() -> Self {
+    #[must_use]
+    pub fn system() -> Self {
         Self {
             read: &read_file,
             write: &write_file,
@@ -159,7 +160,7 @@ pub(crate) fn dispatch(
 }
 
 /// Runs the verb on `args` (the program name, then the verb).
-pub(crate) fn run(
+pub fn run(
     args: &[OsString],
     out: &mut dyn Write,
     err: &mut dyn Write,
