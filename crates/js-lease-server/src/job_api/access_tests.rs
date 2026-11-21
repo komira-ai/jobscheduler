@@ -681,6 +681,137 @@ async fn each_state_change_logs_one_line_with_who_what_and_how_it_ended() {
     }
 }
 
+/// The events of this crate at `level` among `events`.
+fn at(level: Level, events: &[Event]) -> Vec<&Event> {
+    events
+        .iter()
+        .filter(|event| event.level == level)
+        .filter(|event| event.target.starts_with("js_lease_server"))
+        .collect()
+}
+
+/// Asserts that a read call that answered writes its one line at debug and none at info, with
+/// the same fields as an info line, for each of the eight read calls, a job read and a fleet
+/// read among them; and, at the boundary, that the same reads refused or failed write their
+/// line at info: another client's job (`denied`), a job with no row (`not-found`), a result
+/// asked for before its job ended (`refused`) and a client's fleet read (`denied`). Catches
+/// the line of every answered poll at info, which buries the refusals and errors of an
+/// incident under hundreds of lines a second, and a refusal or failure that drops out of
+/// the info log with them.
+#[tokio::test]
+async fn an_answered_read_logs_at_debug_and_a_refused_one_at_info() {
+    let (events, _scope) = Events::scoped();
+    let rig = served().await;
+    recorded(&rig, "kbf-job", Some("kbf"));
+    recorded(&rig, "ci-job", Some("ci"));
+    let _ = events.take();
+    let answered = [
+        (
+            CI,
+            Call::Get("ci-job"),
+            line("GetJob", "ci", "client", "ci-job", "ok", "Ok"),
+        ),
+        (
+            CI,
+            Call::List,
+            line("ListJobs", "ci", "client", "", "ok", "Ok"),
+        ),
+        (
+            CI,
+            Call::Logs("ci-job"),
+            line("GetLogs", "ci", "client", "ci-job", "ok", "Ok"),
+        ),
+        (
+            OPS,
+            Call::ListHosts,
+            line("ListHosts", "ops", "operator", "", "ok", "Ok"),
+        ),
+        (
+            OPS,
+            Call::ListPools,
+            line("ListPools", "ops", "operator", "", "ok", "Ok"),
+        ),
+        (
+            OPS,
+            Call::ListProviders,
+            line("ListProviders", "ops", "operator", "", "ok", "Ok"),
+        ),
+        (
+            OPS,
+            Call::GetUsage,
+            line("GetUsage", "ops", "operator", "", "ok", "Ok"),
+        ),
+    ];
+    let refused = [
+        (
+            CI,
+            Call::Get("kbf-job"),
+            line("GetJob", "ci", "client", "kbf-job", "denied", "NotFound"),
+        ),
+        (
+            CI,
+            Call::Get("gone-job"),
+            line(
+                "GetJob",
+                "ci",
+                "client",
+                "gone-job",
+                "not-found",
+                "NotFound",
+            ),
+        ),
+        (
+            CI,
+            Call::Result("ci-job"),
+            line(
+                "GetResult",
+                "ci",
+                "client",
+                "ci-job",
+                "refused",
+                "FailedPrecondition",
+            ),
+        ),
+        (
+            CI,
+            Call::ListHosts,
+            line(
+                "ListHosts",
+                "ci",
+                "client",
+                "",
+                "denied",
+                "PermissionDenied",
+            ),
+        ),
+    ];
+    for (token, call, wants) in answered {
+        let (code, _) = answer(&rig, token, call).await;
+        assert_eq!(code, Code::Ok, "{call:?}");
+        let taken = events.take();
+        assert!(info(&taken).is_empty(), "{call:?}: {taken:#?}");
+        let debug = at(Level::DEBUG, &taken);
+        let lines: Vec<_> = debug
+            .iter()
+            .filter(|event| {
+                event
+                    .fields
+                    .get("message")
+                    .is_some_and(|m| m == "job service call")
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{call:?}: {taken:#?}");
+        assert_eq!(lines[0].fields, wants, "{call:?}");
+    }
+    for (token, call, wants) in refused {
+        answer(&rig, token, call).await;
+        let taken = events.take();
+        let lines = info(&taken);
+        assert_eq!(lines.len(), 1, "{call:?}: {lines:#?}");
+        assert_eq!(lines[0].fields, wants, "{call:?}");
+    }
+}
+
 /// The service of [`served`] with a listing that reads windows of two rows and at most two
 /// rows a call, so a page is cut at the bound after one window.
 async fn served_in_small_windows() -> Writes {
