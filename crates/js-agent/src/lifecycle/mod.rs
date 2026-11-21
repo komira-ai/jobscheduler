@@ -307,6 +307,7 @@ mod quota_flags;
 pub(crate) mod run_files;
 mod runtime;
 mod scratch;
+pub mod scratch_volume;
 mod settle;
 mod silence;
 pub mod taint;
