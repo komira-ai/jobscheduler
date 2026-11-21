@@ -366,3 +366,53 @@ fn a_handover_rollback_killed_at_any_point_and_run_again_ends_with_the_previous_
         }
     }
 }
+
+/// Asserts that a stop the unit manager refuses, in `cutover` and in `rollback`, takes the
+/// request back: the step fails as an environment matter with the agent still running, and no
+/// handover file is left for a later stop of that agent, which an operator means as a drain.
+/// Catches a request left behind by a stop that never reached the agent.
+#[test]
+fn a_stop_the_unit_manager_refuses_takes_the_request_back() {
+    let rig = handing("hook-handover-stop-refused");
+    let spy = Spy::new(&rig);
+    spy.fail("stop");
+    let done = spy.cutover(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StopFailed));
+    assert_eq!(done.report.class, Class::Environment);
+    assert!(spy.act_names().contains(&REQUEST.to_owned()));
+    assert!(!file(&rig).exists());
+    assert_eq!(rig.world.show(UNIT).unwrap().active, "active");
+
+    let rig = handing("hook-handover-rb-stop-refused");
+    assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+    let spy = Spy::new(&rig);
+    spy.fail("stop");
+    let done = spy.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Failure, "{done:?}");
+    assert_eq!(done.report.reason, Some(Reason::StopFailed));
+    assert!(spy.act_names().contains(&REQUEST.to_owned()));
+    assert!(!file(&rig).exists());
+    assert_eq!(rig.world.show(UNIT).unwrap().active, "active");
+}
+
+/// Asserts the record's `handover` field is additive: the record of an update that drains is
+/// written without it, as before the field existed, and such a record reads back as one that
+/// drains; the record of a handover carries `"handover": true` and reads back as one. Catches a
+/// record that an earlier hook can no longer read for an update that drains, and a record of
+/// a handover read as a drain after a rerun.
+#[test]
+fn the_record_carries_the_handover_only_when_there_is_one() {
+    let drains = Rig::new("hook-handover-record-drains");
+    drains.world.seed_unit(&drains.unit, "active", "running");
+    assert_eq!(Spy::new(&drains).prepare(&drains).outcome, Outcome::Success);
+    let bytes = drains.record_bytes().unwrap();
+    let text: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(text.get("handover").is_none(), "{text}");
+    assert!(!drains.record().unwrap().handover);
+
+    let hands = handing("hook-handover-record-hands");
+    let text: serde_json::Value = serde_json::from_slice(&hands.record_bytes().unwrap()).unwrap();
+    assert_eq!(text["handover"], json!(true));
+    assert!(hands.record().unwrap().handover);
+}

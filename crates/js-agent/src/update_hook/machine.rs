@@ -344,7 +344,14 @@ fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
 /// run (their network wiring cannot be taken over), so an update cannot hand them over.
 #[cfg(target_os = "linux")]
 fn egress_of(cli: &Cli) -> bool {
-    cli.os.egress.as_deref().is_some_and(|mode| mode != "none")
+    egress_set(cli.os.egress.as_deref())
+}
+
+/// Whether `--egress` given as `mode` (`None` when it is not given) sets a ceiling: anything but
+/// `none`, a value the agent would refuse included (such an agent does not start).
+#[cfg(target_os = "linux")]
+fn egress_set(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| mode != "none")
 }
 
 /// Off Linux there is no `--egress`: the macOS build's network ceiling keeps no wiring that a
@@ -847,6 +854,21 @@ mod tests {
         assert_eq!(root.taint(), None);
         assert!(!root.restored_rechecks(&taint));
         assert_eq!(root.owed().unwrap(), Vec::<String>::new());
+    }
+
+    /// Asserts which `--egress` values of the flags file keep an update from handing the runs
+    /// over: `allow-list`, `open` and anything else but `none`; not the flag left out, nor
+    /// `none`. It catches an agent with a ceiling asked to hand over, whose next process would
+    /// remove the runs it was to adopt.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_egress_but_none_keeps_an_update_from_handing_over() {
+        use super::egress_set;
+        assert!(!egress_set(None));
+        assert!(!egress_set(Some("none")));
+        assert!(egress_set(Some("allow-list")));
+        assert!(egress_set(Some("open")));
+        assert!(egress_set(Some("other")));
     }
 
     /// Asserts the handover request through the hook's state root: with no state root it

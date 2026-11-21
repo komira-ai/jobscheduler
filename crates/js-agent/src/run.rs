@@ -64,6 +64,11 @@ use crate::lifecycle::handover::Handover;
 use crate::session::{Drain, Fatal, Note, Session, Step};
 use crate::worker::{Parked, Snapshot};
 
+/// The longest a handover waits for the worker's answer to a park before it heartbeats again
+/// and asks later: a worker inside a slow runtime call holds neither the heartbeats nor the
+/// handover's bound.
+const PARK_WAIT: Duration = Duration::from_secs(5);
+
 /// How a wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
@@ -255,7 +260,7 @@ fn hand_over(
         };
         // Asked after the heartbeat, so the worker has the reply's stops and acknowledgements
         // before it looks.
-        if session.park_jobs() != Some(Parked::Busy) {
+        if session.park_jobs(PARK_WAIT) != Some(Parked::Busy) {
             let _ = writeln!(
                 log,
                 "js-agent: handed over: every run is left as it is to the next process"

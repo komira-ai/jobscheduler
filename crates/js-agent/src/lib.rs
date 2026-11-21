@@ -859,8 +859,7 @@ fn execute(
     // that process can adopt the ones still running: an agent with an egress ceiling removes
     // them at its start (the wiring of an earlier process cannot be taken over), so its stop
     // always drains.
-    let adoptable = local.egress.mode() == egress::Mode::None;
-    let handover_root = held_root.clone().filter(|_| adoptable);
+    let handover_root = lifecycle::handover::root_for(held_root.as_ref(), &local.egress);
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     // A handover file is a request to the process running when it was written: one left

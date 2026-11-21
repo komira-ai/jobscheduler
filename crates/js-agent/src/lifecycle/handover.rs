@@ -8,9 +8,11 @@
 //! runs finish for `--drain-wait`, then stops them. When the stop request finds
 //! [`HANDOVER_FILE`] in the state root (`--state-root`), and the agent's runs can be adopted
 //! by its next process, it hands over instead: it takes no new job, announces `draining`, waits
-//! until no start and no post-job check is under way (a start the process left half made, or a
-//! check it left owed, would cost the job or taint the host at the next start), and exits with
-//! status 0 leaving every run as it is. The next process adopts the runs, lists them in its
+//! until no start, stop or post-job check is under way (a start the process left half made
+//! would cost the job, a stop would be left unfinished, and a check left owed taints the host
+//! at the next start), and exits with status 0 leaving every run as it is, but for the host-port
+//! connections the agent itself carries for a run (`--host-port`), which end with it: the next
+//! process offers the ports again. The next process adopts the runs, lists them in its
 //! first heartbeat and reports their results.
 //!
 //! The file is looked at once, when the stop request is taken; one written later changes
@@ -29,6 +31,8 @@ use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+
+use super::taint::StateRoot;
 
 /// The name of the handover file in the state root.
 pub const HANDOVER_FILE: &str = "handover";
@@ -117,6 +121,16 @@ pub fn remove(root: &Path) -> io::Result<bool> {
         Err(why) => Err(why),
         Ok(()) => sync(root).map(|()| true),
     }
+}
+
+/// The state root a stop request looks in for a handover: `state`, unless the agent has an
+/// egress ceiling (`egress` above mode none). Such an agent's next process removes, at its
+/// start, every run of an earlier process that may still run (the network wiring of an earlier
+/// process cannot be taken over), so its stop always drains.
+#[must_use]
+pub fn root_for(state: Option<&StateRoot>, egress: &crate::egress::Config) -> Option<StateRoot> {
+    let adoptable = egress.mode() == crate::egress::Mode::None;
+    state.filter(|_| adoptable).cloned()
 }
 
 /// Syncs the directory `root`, so a rename or a removal in it survives a power cut.

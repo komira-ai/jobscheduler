@@ -8,7 +8,8 @@
 //! settle and another park, drops every other order, and ends when its queue is gone.
 
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::time::Duration;
 
 use super::{Order, Shared, Worker};
 use crate::lifecycle::Lifecycle;
@@ -18,8 +19,9 @@ use crate::lifecycle::Lifecycle;
 pub enum Parked {
     /// The worker stopped for good with the lifecycle quiet: the process may end.
     Parked,
-    /// A start, a stop or a finished job's cleanup is under way, or the worker is not closed:
-    /// it goes on, and the session asks again later.
+    /// A start, a stop or a finished job's cleanup is under way, the worker is not closed, or
+    /// it did not answer within the wait (it is inside a long order or step, and takes the
+    /// park when it is out of it): it goes on, and the session asks again later.
     Busy,
     /// The worker's thread is gone: nothing it holds can change any more.
     Ended,
@@ -27,15 +29,21 @@ pub enum Parked {
 
 impl Worker {
     /// Asks the worker to park (see the module): it answers once every order sent before
-    /// this one is done. Only a closed worker ([`Worker::close`]) parks.
-    pub fn park(&self) -> Parked {
+    /// this one is done, and this waits for the answer at most `wait`, so a worker stuck in a
+    /// slow call never holds the session (its heartbeats, the bound of the handover, a second
+    /// stop request). Only a closed worker ([`Worker::close`]) parks; one that takes the order
+    /// after the wait parks then, and answers the next ask at once.
+    pub fn park(&self, wait: Duration) -> Parked {
         let (done, answer) = sync_channel(1);
-        // A worker that is gone drops the order, and with it `done`.
-        let _ = self.handle.orders.send(Order::Park(done));
-        match answer.recv() {
+        // A worker that is behind is asked again later. One that is gone, or ends before it
+        // takes the order, drops the order and with it `done`, which the wait below reads.
+        if let Err(TrySendError::Full(_)) = self.handle.orders.try_send(Order::Park(done)) {
+            return Parked::Busy;
+        }
+        match answer.recv_timeout(wait) {
             Ok(true) => Parked::Parked,
-            Ok(false) => Parked::Busy,
-            Err(_) => Parked::Ended,
+            Ok(false) | Err(RecvTimeoutError::Timeout) => Parked::Busy,
+            Err(RecvTimeoutError::Disconnected) => Parked::Ended,
         }
     }
 }

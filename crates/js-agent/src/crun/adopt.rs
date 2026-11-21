@@ -45,7 +45,9 @@
 //! Every other lease of this agent is torn down and reported with its [`Reason`]: a sidecar
 //! of version 1, one whose container never started, one that failed a check, and a lease of
 //! this agent's name that has no sidecar at all. The sidecars and leases of other agents are
-//! left alone, as they always were.
+//! left alone, as they always were. A sidecar this agent cannot read (a form it does not know,
+//! or a broken file) is left alone too, with its lease, and reported in a line of its own: its
+//! job, if it still runs, is neither taken over nor stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;

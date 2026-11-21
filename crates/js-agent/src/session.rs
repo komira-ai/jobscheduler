@@ -475,9 +475,10 @@ impl<'a> Session<'a> {
         self.handover.as_ref().map_or(Handover::Absent, read)
     }
 
-    /// Asks the worker to park for a handover ([`Worker::park`]); `None` with no worker.
-    pub fn park_jobs(&self) -> Option<Parked> {
-        self.jobs.as_ref().map(|jobs| jobs.worker.park())
+    /// Asks the worker to park for a handover, waiting at most `wait` ([`Worker::park`]);
+    /// `None` with no worker.
+    pub fn park_jobs(&self, wait: Duration) -> Option<Parked> {
+        self.jobs.as_ref().map(|jobs| jobs.worker.park(wait))
     }
 
     /// The same session saying hello as agent process `id` in every hello it sends (see the

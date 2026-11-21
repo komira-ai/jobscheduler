@@ -107,7 +107,7 @@ use crate::update_hook::{
 
 use super::cutover::{
     Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
-    request_handover, show,
+    request_handover, show, withdraw_handover,
 };
 use super::helper;
 use super::prepare::{place, refuse_host, refuse_host_in, renew};
@@ -446,15 +446,15 @@ fn stop(
     }
     request_handover(env, record)?;
     env.ports.point();
-    env.ports
-        .units
-        .stop_no_block(unit)
-        .map_err(|why| environment(Reason::StopFailed, format!("cannot stop {unit}: {why}")))?;
-    wait_down(env, params, held, record, unit)?;
-    if record.handover {
-        // As in `cutover`: the previous agent removes a file it finds at its start.
-        let _ = env.ports.state.withdraw_handover();
+    if let Err(why) = env.ports.units.stop_no_block(unit) {
+        withdraw_handover(env, record);
+        return Err(environment(
+            Reason::StopFailed,
+            format!("cannot stop {unit}: {why}"),
+        ));
     }
+    wait_down(env, params, held, record, unit)?;
+    withdraw_handover(env, record);
     Ok(())
 }
 

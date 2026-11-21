@@ -143,11 +143,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         }
         let since = env.ports.clock.now_ms();
         stop(env, held, record, params, state, entered_begun)?;
-        if record.handover {
-            // The agent that read the request has ended. The new one removes a file it finds
-            // at its start, so one this cannot remove asks nothing of it.
-            let _ = env.ports.state.withdraw_handover();
-        }
+        withdraw_handover(env, record);
         // A unit started by an earlier run holds the new agent: nothing to wait for.
         if !record.start_issued {
             wait_empty(env, held, record, params, since)?;
@@ -186,6 +182,15 @@ pub(super) fn request_handover(env: &Env<'_>, record: &Record) -> Result<(), Don
             format!("cannot ask the agent to hand its runs over: {why}"),
         )
     })
+}
+
+/// Removes the handover file of an update that hands the runs over: the agent that read it has
+/// ended, or no stop reached it. The agent removes a file it finds at its start, so one this
+/// cannot remove asks nothing of a later process, and the failure is let be.
+pub(super) fn withdraw_handover(env: &Env<'_>, record: &Record) {
+    if record.handover {
+        let _ = env.ports.state.withdraw_handover();
+    }
 }
 
 /// A failure of something remote or shared: not the release's doing.
@@ -416,9 +421,14 @@ fn stop(
             }
             request_handover(env, record)?;
             env.ports.point();
-            env.ports.units.stop_no_block(&unit).map_err(|why| {
-                environment(Reason::StopFailed, format!("cannot stop {unit}: {why}"))
-            })?;
+            if let Err(why) = env.ports.units.stop_no_block(&unit) {
+                // No stop reached the agent: a later one is not the update's to hand over.
+                withdraw_handover(env, record);
+                return Err(environment(
+                    Reason::StopFailed,
+                    format!("cannot stop {unit}: {why}"),
+                ));
+            }
         }
     }
     // The step is killed at the declared bound; ending a little before it says why.

@@ -5,9 +5,6 @@
 //! is a real thread; the sleepers settle it, or wait for an event, never for a time.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::Duration;
 
 use js_agent::lifecycle::handover;
@@ -59,6 +56,10 @@ impl Sleeper for Acting<'_> {
         (self.act)(n)
     }
 }
+
+/// How long a test waits for the worker's answer to a park: a guard against a hang, never an
+/// expectation (a worker that is not stuck answers at once).
+const ANSWER: Duration = Duration::from_secs(60);
 
 const LONG: Drain = Drain {
     wait: Duration::from_secs(3600),
@@ -310,59 +311,46 @@ fn a_start_under_way_is_waited_for_and_then_handed_over_running() {
 }
 
 /// Asserts that a job's post-job check under way when the stop request comes holds the
-/// handover until the check has run: while the check runs the agent has not ended and the
-/// record of the owed check is on disk; after it the record is gone, the agent has handed
-/// over, and the next process starts untainted with the job's result to send. Catches a
-/// handover that ends the process inside a check, which taints the host at the next start
-/// (`check-owed`), and an update that waits for anything more than the check.
+/// handover until the check has run: the park is answered busy and the agent heartbeats on,
+/// with the record of the owed check on disk and nothing said of a handover; once the check
+/// has run the record is gone, the agent hands over, and the next process starts untainted
+/// with the job's result to send. Catches a handover that ends the process inside a check,
+/// which taints the host at the next start (`check-owed`), and an update that waits for
+/// anything more than the check.
 #[test]
 fn a_check_under_way_is_waited_for_and_the_next_process_starts_untainted() {
     let dir = Scratch::new("jobs-handover-check");
     let machine = FakeMachine::new();
     let worker = running(&dir, &machine, &["r1"]);
     machine.world.hold_checks();
-    let ended = Arc::new(AtomicBool::new(false));
-    let releaser = {
-        let (world, ended) = (machine.world.clone(), ended.clone());
-        let dir_state = state(&dir);
-        thread::spawn(move || {
-            world.wait_checking(1);
-            let names = std::fs::read_dir(&dir_state).unwrap();
-            let owed = names
-                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                .any(|name| name == "owed-r1");
-            let left = ended.load(Ordering::SeqCst);
-            world.release();
-            (owed, left)
-        })
-    };
     let world = machine.world.clone();
+    let seen = std::cell::RefCell::new(None);
     let mut sleeper = Acting {
         calls: 0,
-        act: Box::new(move |n| {
-            if n == 0 {
+        act: Box::new(|n| match n {
+            0 => {
                 // The job ends just as the stop request comes: its cleanup begins at the
                 // worker's next step, inside the handover.
                 world.exit("r1", 0);
+                Wake::Stop
             }
-            Wake::Stop
+            _ => {
+                // The park was answered busy: the check is under way, its record on disk.
+                world.wait_checking(1);
+                *seen.borrow_mut() = Some(owed(&dir));
+                world.release();
+                Wake::Elapsed
+            }
         }),
         budget: WakeBudget::new(),
     };
     let root = state(&dir);
     let replies = vec![welcome(1), beat_ok(), beat_ok(), beat_ok()];
-    let (exit, log, _) = driven(&worker, Some(&root), replies, LONG, &mut sleeper);
-    ended.store(true, Ordering::SeqCst);
-    let (owed_while_checking, left_while_checking) = releaser.join().unwrap();
+    let (exit, log, sent) = driven(&worker, Some(&root), replies, LONG, &mut sleeper);
 
-    assert!(
-        owed_while_checking,
-        "the check was under way with its record on disk"
-    );
-    assert!(
-        !left_while_checking,
-        "the agent had not ended while the check ran"
-    );
+    assert_eq!(*seen.borrow(), Some(vec!["owed-r1".to_owned()]));
+    assert_eq!(sleeper.calls, 2, "one wait while the check ran");
+    assert_eq!(phases(&sent), ["serving", "draining", "draining"]);
     assert_eq!(exit, Exit::Stopped);
     assert!(log.contains("js-agent: handed over"), "{log}");
     assert!(owed(&dir).is_empty(), "{:?}", owed(&dir));
@@ -498,17 +486,17 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
 
-    assert_eq!(worker.park(), Parked::Busy, "open");
+    assert_eq!(worker.park(ANSWER), Parked::Busy, "open");
     worker.close();
-    assert_eq!(worker.park(), Parked::Busy, "a start under way");
+    assert_eq!(worker.park(ANSWER), Parked::Busy, "a start under way");
     machine.world.end_pull(&image, false);
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().held[0].state, HeldState::Running);
-    assert_eq!(worker.park(), Parked::Parked);
+    assert_eq!(worker.park(ANSWER), Parked::Parked);
 
     machine.world.exit("r1", 0);
     assert!(worker.handle().settle());
-    assert_eq!(worker.park(), Parked::Parked);
+    assert_eq!(worker.park(ANSWER), Parked::Parked);
     let snapshot = worker.snapshot();
     assert_eq!(
         snapshot.held[0].state,
@@ -529,8 +517,9 @@ fn a_worker_parks_only_closed_and_quiet_and_then_does_nothing_more() {
 }
 
 /// Asserts that a stop asked to hand over by an agent whose job stop is under way (the
-/// server's stop for the job came with the heartbeat) waits until that job has ended, been
-/// reported and checked, and then hands the other job over. Catches a handover that leaves a
+/// server's stop for the job came with the heartbeat) finishes that stop first: the job has
+/// ended and been checked, its result kept for the next process to send, before the other job
+/// is handed over. Catches a handover that leaves a
 /// stop half done, which the next process would not finish.
 #[test]
 fn a_stop_the_server_asked_for_is_finished_before_the_handover() {
@@ -584,5 +573,32 @@ fn a_refusal_during_the_handover_ends_it_and_a_dead_worker_parks_as_ended() {
     machine.world.panic_at("create");
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(!worker.handle().settle(), "the worker died in the create");
-    assert_eq!(worker.park(), js_agent::Parked::Ended);
+    assert_eq!(worker.park(ANSWER), js_agent::Parked::Ended);
+}
+
+/// Asserts that a park never holds the caller on a worker stuck in a slow call: with the worker
+/// inside a create that does not return, a park answers busy once its wait is over, and so
+/// does one asked while the worker's queue is full; once the create returns, the worker takes
+/// the parks that waited and parks, and the next ask finds it parked. Catches a handover that
+/// stops heartbeating, and stops counting its bound, behind a wedged worker.
+#[test]
+fn a_park_asked_of_a_worker_stuck_in_a_call_answers_busy_and_parks_once_it_is_out() {
+    use js_agent::Parked;
+    let dir = Scratch::new("jobs-handover-stuck");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    machine.world.wait_entered(1);
+    worker.close();
+    // The worker is inside the create: no answer comes, whatever the wait.
+    assert_eq!(worker.park(Duration::from_millis(1)), Parked::Busy);
+    let reply = js_agent_wire::HeartbeatReply::default;
+    while worker.try_deliver(reply()) == Delivery::Delivered {}
+    assert_eq!(worker.try_deliver(reply()), Delivery::Full);
+    assert_eq!(worker.park(ANSWER), Parked::Busy, "a full queue");
+    machine.world.release();
+    assert!(worker.handle().settle());
+    assert_eq!(worker.snapshot().held[0].state, HeldState::Running);
+    assert_eq!(worker.park(ANSWER), Parked::Parked);
 }

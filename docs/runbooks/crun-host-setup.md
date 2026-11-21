@@ -173,9 +173,10 @@ for no lease, stop):
 - the running agent can hand over: `js-agent --version` prints `stops: drain handover`. The
   first update from a release without that line still drains.
 
-What does not survive the restart's few seconds: a job's `--host-port` listeners are down until
-the new agent offers them again (a job that took the port itself meanwhile is stopped, its result
-`host-port-lost`), and the CPU and memory use of a job taken over is no longer sampled.
+What does not survive the restart's few seconds: a job's `--host-port` listeners, and the
+connections open through them, are the agent's and end with it; they are down until the new
+agent offers the ports again (a job that took the port itself meanwhile is stopped, its result
+`host-port-lost`). The CPU and memory use of a job taken over is no longer sampled.
 
 The maintenance `drain` step (an OS update or a reboot) is not an agent update: it still cordons
 the node and waits until no job runs.
