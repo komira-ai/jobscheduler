@@ -69,7 +69,8 @@
 //!   if the host is quiet (it lists no run) and checks that under the registry's lock; a
 //!   busy host answers [`Busy`] and keeps its mark. [`Registry::undrain`] ends a drain,
 //!   [`Registry::remove`] drops a releasing host and frees its place in the machine limit.
-//!   The marks have no deadline and are in memory only.
+//!   The marks have no deadline. With a job store they are the cache of the
+//!   `hostmark/<host>` rows ([`Registry::mirror_marks`]); without one they are in memory only.
 //! - **Whole-host jobs.** [`prepare_exclusion`] is the table of what a failed prepare does
 //!   to its host, which the job engine reads, and [`Registry::taint_after_prepare`] records
 //!   the taint of a `host-unsafe` refusal.

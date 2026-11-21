@@ -259,7 +259,7 @@ async fn hello(
 /// on timing. `who` is the credential the registry knows the host by; `one_time` is the digest
 /// of the one-time token or host credential the request carried, when it carried one.
 #[cfg(test)]
-async fn serve_hello(
+pub(crate) async fn serve_hello(
     agents: &Arc<Agents>,
     who: Credential,
     one_time: Option<Credential>,
@@ -324,6 +324,9 @@ async fn serve_hello_in(
         .registry
         .judge_hello(&hello, &who, certified.is_some());
     let admission = judged.map_err(|refusal| refused_hello(&hello, &refusal))?;
+    // A host new to its pool is judged against the pool's cap over every server's rows, still
+    // before anything is written ([`rows::room_in_pool`]).
+    rows::room_in_pool(agents, &host, &hello).await?;
     let change = agents.hello_change(&host, &hello, (&who, certified.is_some()));
     let writes = change.writes.clone();
     let (issued, revision) = write_hello(agents, one_time.as_ref(), &hello, writes).await?;
@@ -743,8 +746,16 @@ mod store_tests;
 pub(crate) mod job_rig;
 
 #[cfg(test)]
+#[path = "agent_api_peer_rig.rs"]
+pub(crate) mod peer_rig;
+
+#[cfg(test)]
 #[path = "agent_api_job_tests.rs"]
 mod job_tests;
+
+#[cfg(test)]
+#[path = "agent_api_pool_tests.rs"]
+pub(crate) mod pool_tests;
 
 #[cfg(test)]
 #[path = "agent_api_job_cases.rs"]

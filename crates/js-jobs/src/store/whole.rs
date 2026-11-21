@@ -19,7 +19,7 @@ use js_state::{Claim, Cond, Store, StoreTime, Txn, TxnRead, Version};
 use js_types::{HostId, QueueNote};
 
 use super::index::{put_allocation, put_job};
-use super::{Beside, JobStore, allocation_at, booked_in, ensure, job_at, with_rows};
+use super::{Beside, JobStore, allocation_at, booked_in, ensure, host_rows, job_at, with_rows};
 use crate::codec::Carried;
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
@@ -113,6 +113,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     ///   reserves the capacity: the booking and the check are one transaction);
     /// - the host must not be cordoned: a live `cordon/<host>` row is [`JobStoreError::HostCordoned`]
     ///   and nothing is written (the commit checks the row absent too);
+    /// - the host must not be tainted: a live `taint/<host>` row, or a text `taint_reason` in
+    ///   the host's binding row (`hosts/binding/<host>`), is [`JobStoreError::HostTainted`];
+    /// - the host must not be marked to scale down: a `hostmark/<host>` row is
+    ///   [`JobStoreError::HostMarked`];
+    /// - none of the job's host ports may be held by a live allocation on the host, else
+    ///   [`JobStoreError::PortTaken`];
     /// - the host's reservation row (`hostbook/<host>`) is written at the version the
     ///   transaction read, so a reader that works from a picture of the host sees it moved.
     ///
@@ -121,8 +127,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
     /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`];
-    /// [`JobStoreError::HostCordoned`]. On a guarded view ([`JobStore::guarded`]) the commit also
-    /// checks the node row, and a row that moved is [`JobStoreError::NodeMoved`].
+    /// [`JobStoreError::HostCordoned`]; [`JobStoreError::HostTainted`];
+    /// [`JobStoreError::HostMarked`]; [`JobStoreError::PortTaken`]. On a guarded view
+    /// ([`JobStore::guarded`]) the commit also checks the node row, and a row that moved is
+    /// [`JobStoreError::NodeMoved`].
     pub fn place_claimed(
         &self,
         id: &JobId,
@@ -207,6 +215,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 host: host.clone(),
             },
         )?;
+        let ports = job.spec.ports.iter().map(|port| port.host).collect();
+        let (binding_key, binding_cond) = host_rows::refuse_host(read, (id, host), &ports)?;
         let (txn, placed, allocation) = self.build_placement(
             id,
             (job, row.version),
@@ -220,6 +230,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             None => txn.check(mark_key, Cond::Absent),
         };
         let txn = txn.put(book_key, allocation.allocation_id.to_string(), cond);
+        let txn = txn.check(binding_key, binding_cond);
         Ok((txn, placed, allocation))
     }
 
@@ -301,8 +312,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let txn = put_allocation(txn, earlier, &allocation, allocation_cond)?;
         let txn = super::taints::with_taint(txn, &placed, &allocation.host)?;
         let txn = super::dispatch::with_start(txn, &allocation, placement.start, now)?;
-        // A host with a cordon in force is placed on by no one: the commit conflicts.
+        // A host with a cordon in force, or marked to scale down, is placed on by no one: the
+        // commit conflicts.
         let txn = txn.check(keys::cordon(&allocation.host), Cond::Absent);
+        let txn = txn.check(keys::hostmark(&allocation.host), Cond::Absent);
         Ok((txn, placed, allocation))
     }
 

@@ -306,3 +306,39 @@ fn a_new_hello_keeps_a_retired_host_retired() {
     fx.join("a", "t");
     assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
 }
+
+/// Asserts that `mirror_marks` sets the marks of the rows on the hosts it names (draining
+/// and releasing), clears the mark of a held host the rows do not name, ignores a host the
+/// registry does not hold and a mark that is no scale-down mark (a host so named is left
+/// unmarked), and leaves the ending set alone, so a host marked ending ahead of its hello is
+/// still admitted releasing. Catches a mirror that leaves a mark the rows dropped, which
+/// would keep a host out of service after another server's undrain, and one that forgets the
+/// ending set, which would admit a host being given back as plain.
+#[test]
+fn mirror_marks_sets_clears_ignores_unknown_hosts_and_keeps_ending() {
+    use std::collections::BTreeMap;
+
+    let fx = fixture(5);
+    for name in ["a", "b", "c", "d"] {
+        fx.join(name, "t");
+    }
+    fx.registry.drain(&host("c")).unwrap();
+    fx.registry.mark_ending(&host("ghost"));
+    let rows = BTreeMap::from([
+        (host("a"), HostMark::Draining),
+        (host("b"), HostMark::Releasing),
+        (host("d"), HostMark::Held),
+        (host("nobody"), HostMark::Draining),
+    ]);
+    fx.registry.mirror_marks(&rows);
+    assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
+    assert_eq!(mark(&fx, "b"), Some(HostMark::Releasing));
+    assert_eq!(mark(&fx, "c"), None);
+    assert_eq!(mark(&fx, "d"), None);
+    assert!(fx.registry.hosts().iter().all(|h| h.id != host("nobody")));
+    fx.registry.mirror_marks(&BTreeMap::new());
+    assert_eq!(mark(&fx, "a"), None);
+    assert_eq!(mark(&fx, "b"), None);
+    fx.join("ghost", "t");
+    assert_eq!(mark(&fx, "ghost"), Some(HostMark::Releasing));
+}

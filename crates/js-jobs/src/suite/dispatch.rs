@@ -327,12 +327,12 @@ pub fn every_placement_that_books_a_host_queues_its_start_and_a_refused_one_none
         start: Some(start_body("someone-else", "not-this-one")),
         ..Placement::default()
     };
-    let with = rig.queue("q-with");
+    let with = rig.queue_portless("q-with");
     let (placed, made) = rig
         .jobs
         .place_with(&with, host("host-b"), share(), given.clone())
         .expect("placed");
-    let claimed = rig.queue("q-claimed");
+    let claimed = rig.queue_portless("q-claimed");
     rig.tick();
     let (claimed_job, claimed_made) = rig
         .jobs

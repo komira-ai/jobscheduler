@@ -41,7 +41,7 @@ use crate::record::{
 
 pub(crate) mod dispatch_fields;
 mod file_fields;
-mod host_fields;
+pub(crate) mod host_fields;
 mod mark_fields;
 pub(crate) mod node_fields;
 mod queue_fields;

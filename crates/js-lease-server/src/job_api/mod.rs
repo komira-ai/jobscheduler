@@ -61,9 +61,9 @@
 //! The job service holds no handle on the registry: a call that held it while reading the store
 //! would add a second lock to the server's order. The fleet group reaches it only through
 //! the narrow traits of its context (`fleet::Hosts`), whose calls take and drop the lock
-//! and return before the group reads the job tables. The submit group reads the registry's hosts
-//! and the providers' cached catalogs only through its admission trait (`submit::Admission`),
-//! whose call takes the registry's lock alone, calls no provider, and returns before the
+//! and return before the group reads the job tables. The submit group reads the registry's hosts,
+//! the job store's `node/` rows and the providers' cached catalogs only through its admission
+//! trait (`submit::Admission`), whose call takes the registry's lock (and reads the rows), calls no provider, and returns before the
 //! group writes the job tables.
 //!
 //! # The job tables are read and written off the runtime's workers
