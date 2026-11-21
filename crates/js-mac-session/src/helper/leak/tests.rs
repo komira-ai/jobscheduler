@@ -150,6 +150,31 @@ fn an_unset_auto_login_scans_clean_in_the_words_of_macos_26_and_27() {
     }
 }
 
+/// Makes the next reset fail, and the replacement after it fail to delete the user, so
+/// the slot breaks with its user still there.
+fn break_the_reset(rig: &Rig) {
+    let mut state = rig.host.state();
+    state.fail_script.insert("make_home", [true].into());
+    state.fail.insert("delete_user");
+}
+
+/// Catches: the user of a live lease reported as a leak, so that a scan while a lease
+/// runs comes back dirty though nothing leaked; or the user of a lease that ended and
+/// whose slot broke passed over as if its lease were still live.
+#[test]
+fn a_live_lease_s_user_is_no_item_and_is_one_once_its_lease_ended() {
+    let rig = baselined("leak-live-lease");
+    let uid = rig.helper.user_create("5.1", None).unwrap();
+    rig.helper.user_create("5.2", None).unwrap();
+    assert_eq!(rig.helper.scan().unwrap(), ScanReport::default());
+    break_the_reset(&rig);
+    rig.helper.user_delete("5.1").unwrap_err();
+    let report = rig.helper.scan().unwrap();
+    assert_eq!(report.diff.added, [format!("lease-users uid {uid}")]);
+    assert_eq!(report.diff.removed, Vec::<String>::new());
+    assert_eq!(report.errors, Vec::<String>::new());
+}
+
 /// One planted leak per item class: what it plants, and the start of the line the scan
 /// must add.
 type Plant = fn(&Rig);
@@ -186,9 +211,11 @@ const PLANTS: [(&str, Plant, &str); 11] = [
         "lease-users uid ",
     ),
     (
-        "a pool user lent to a lease",
+        "the user of a slot broken at the end of its lease",
         |rig| {
             rig.helper.user_create("5.1", None).unwrap();
+            break_the_reset(rig);
+            rig.helper.user_delete("5.1").unwrap_err();
         },
         "lease-users uid ",
     ),

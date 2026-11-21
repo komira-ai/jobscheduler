@@ -438,7 +438,7 @@ const SYSV_SHM: &str =
 
 /// Asserts what a reused uid finds. The helper's uids are reused (ten runs on ten uids, so
 /// the eleventh runs as the first did). The first run makes a System V shared memory segment
-/// and leaves it: the profile does not deny IPC, so the segment is made, and the test
+/// and leaves it: the profile does not deny System V IPC, so the segment is made, and the test
 /// requires that once the user is deleted no IPC object belongs to its uid and no file on
 /// the work volume does either. It fails, and says so, when the helper's removal leaves the
 /// segment: that is the open risk, measured here. It catches a run that finds what an

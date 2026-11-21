@@ -178,11 +178,12 @@ use js_types::LeaseId;
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Body, CheckFinding, CheckHook, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
-    RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env,
+    Body, Exit, Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError,
+    Status, check_run_env,
 };
 use crate::logs::{LiveLogs, RunLogs};
 
+pub use crate::leak_scan::NativeChecks;
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
@@ -958,19 +959,6 @@ impl Runtime for NativeRuntime {
 fn limits_of(config: &NativeConfig) -> Result<Limits, RuntimeError> {
     Limits::new(config.max_file_bytes, config.max_processes)
         .map_err(|why| fail(&"the limits", &why))
-}
-
-/// The post-job check of a native agent. A Mac has no `/proc` for the container agent's
-/// checks to read; what a run leaves behind is the helper's to find, and `user-delete`
-/// refuses while any process of the user remains and sweeps what the user owns, so a run
-/// that left residue fails its removal (and taints the host) before this runs.
-#[derive(Debug, Clone, Copy)]
-pub struct NativeChecks;
-
-impl CheckHook for NativeChecks {
-    fn run(&mut self, _: &Finished<'_>) -> Result<(), CheckFinding> {
-        Ok(())
-    }
 }
 
 /// An error of `what`, for the operator's log.
