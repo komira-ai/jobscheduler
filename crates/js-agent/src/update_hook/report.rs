@@ -21,7 +21,10 @@ pub enum Reason {
     /// The agent holds a taint a restart does not re-check (anything but a residue of a post-job
     /// check that its pin file does not name): no version can repair it (exit 76).
     Tainted,
-    /// A job's post-job checks are owed: no version can repair it (exit 76).
+    /// A job's post-job checks are owed where no running agent can settle them: on a first
+    /// install, or once the update stopped the agent. No version can repair it (exit 76). Before
+    /// the stop, a record is a check the running agent has yet to run, and the drain waits for
+    /// it (`drain_bound`, exit 75, when the bound passes first).
     OwedCheck,
     /// The staged release is not an agent this hook can run.
     BadArtifact,
