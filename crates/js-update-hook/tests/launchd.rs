@@ -497,6 +497,25 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
     assert_eq!(stopper.calls().len(), 1);
 }
 
+/// A kickstart goes to the stop runner, which allows launchd's throttle: a service launchd has
+/// scheduled (`spawn scheduled`, as a real Mac showed for the session helper bootstrapped again
+/// within its throttle during an update) is kicked there, and the main runner only reads.
+///
+/// Catches a kickstart run with the main runner's 10 s bound, which a throttled start outlasted
+/// and which failed an update's cutover with start_failed.
+#[test]
+fn a_kickstart_is_run_by_the_stop_runner() {
+    let tool = Script::default().prints(&[
+        &print_with("spawn scheduled", ""),
+        &print_with("running", "\truns = 1\n"),
+    ]);
+    let stopper = Script::default().ok(&kick_line());
+    let units = LaunchUnits::new(&tool).with_stop_runner(&stopper);
+    assert_eq!(units.start(LABEL), Ok(()));
+    assert_eq!(stopper.calls(), [kick_line()]);
+    assert!(!tool.calls().contains(&kick_line()), "{:?}", tool.calls());
+}
+
 /// Without a stop runner the main runner runs `bootout`.
 #[test]
 fn without_a_stop_runner_the_main_runner_boots_out() {

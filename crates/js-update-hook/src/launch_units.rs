@@ -49,7 +49,10 @@
 //! `systemctl stop --no-block` the call blocks for as long as the agent takes to exit. A runner
 //! that bounds its helpers (js-agent's kills one after 10 s) would cut the stop short: the stop
 //! is given a runner of its own ([`LaunchUnits::with_stop_runner`]), whose limit the caller
-//! builds from the daemon's exit timeout so that it outlasts it.
+//! builds from the daemon's exit timeout so that it outlasts it. `kickstart -k` of a service
+//! launchd has scheduled (`spawn scheduled`: after a bootstrap of a job that ran within its
+//! throttle, 30 s for the package's daemons) waits for the throttle to pass, so it runs through
+//! that runner too: a Mac's update showed the 10 s bound cut a kickstart of the session helper.
 //!
 //! `bootstrap` and `kickstart` return before the program has begun: `launchctl print` can say
 //! "not running" for a moment after either, where systemd says `activating`. `start` therefore
@@ -97,7 +100,8 @@ const SETTLE_PAUSE: Duration = Duration::from_millis(500);
 /// [`Units`] over `launchctl`.
 pub struct LaunchUnits<'a> {
     runner: &'a dyn CommandRunner,
-    /// Runs `bootout`, which waits for the agent to exit; `runner` when none was given.
+    /// Runs `bootout`, which waits for the agent to exit, and `kickstart`, which waits out
+    /// launchd's throttle; `runner` when none was given.
     stopper: Option<&'a dyn CommandRunner>,
     /// Paces the reads that follow a start.
     clock: &'a dyn Clock,
@@ -117,8 +121,8 @@ impl<'a> LaunchUnits<'a> {
         }
     }
 
-    /// Runs `bootout` through `stopper` instead of the runner: it must allow the daemon's whole
-    /// `ExitTimeOut`.
+    /// Runs `bootout` and `kickstart` through `stopper` instead of the runner: it must allow the
+    /// daemon's whole `ExitTimeOut`, which is longer than launchd's throttle.
     #[must_use]
     pub fn with_stop_runner(mut self, stopper: &'a dyn CommandRunner) -> Self {
         self.stopper = Some(stopper);
@@ -344,7 +348,8 @@ impl Units for LaunchUnits<'_> {
             Some(text) if printed_state(&text)? == "running" => return Ok(()),
             Some(text) => {
                 self.allow_kick(unit)?;
-                let kick = self.launchctl(&["kickstart", "-k", &format!("system/{unit}")]);
+                let target = format!("system/{unit}");
+                let kick = self.stopper().run(LAUNCHCTL, &["kickstart", "-k", &target]);
                 (kick, runs_of(&text))
             }
         };
