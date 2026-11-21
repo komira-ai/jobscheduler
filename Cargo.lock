@@ -1257,11 +1257,7 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hex",
- "hostkeeper-config",
  "hostkeeper-hook",
- "hostkeeper-install",
- "hostkeeper-launchd",
- "hostkeeper-placed",
  "hostkeeper-steps",
  "hyper-util",
  "js-agent-usage",
@@ -1667,6 +1663,27 @@ dependencies = [
  "thiserror",
  "time",
  "ureq",
+]
+
+[[package]]
+name = "js-mac-first-install"
+version = "0.1.0"
+dependencies = [
+ "hostkeeper-config",
+ "hostkeeper-hook",
+ "hostkeeper-install",
+ "hostkeeper-launchd",
+ "hostkeeper-placed",
+ "hostkeeper-steps",
+ "js-client",
+ "js-lease-server",
+ "js-testkit",
+ "js-types",
+ "rcgen",
+ "rustix",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
 ]
 
 [[package]]

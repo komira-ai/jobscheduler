@@ -1,5 +1,6 @@
 # The js-agent installer package on a Mac, run end to end on a hosted Apple silicon runner: the
-# integration test `mac_first_install` of crates/js-agent (macOS only, `#[ignore]`d, run as root)
+# integration test `mac_first_install` of crates/js-mac-first-install (macOS only, `#[ignore]`d,
+# run as root)
 # installs the unsigned package this run's package workflow built, the way hostkeeper does,
 # through hostkeeper's own installer and step runner, and runs the update hook's prepare,
 # cutover, verify and cleanup as root with launchd loading the jobs. On the host that leaves it
@@ -78,9 +79,9 @@ jobs:
           version: ${{ env.VERSION }}
       - run: rustup toolchain install
       - name: Build the test as the runner's user
-        run: cargo test --locked -p js-agent --test mac_first_install --no-run
+        run: cargo test --locked -p js-mac-first-install --test mac_first_install --no-run
       - name: Install the package, roll the config package over it and update it, as root
         env:
           CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION,JS_FIRST_INSTALL_UPDATE_PKG,JS_FIRST_INSTALL_UPDATE_VERSION
           UPDATE_VERSION: ${{ steps.next.outputs.version }}
-        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_VERSION="$VERSION" JS_FIRST_INSTALL_UPDATE_PKG="$PWD/dist-update/js-agent-$UPDATE_VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_UPDATE_VERSION="$UPDATE_VERSION" cargo test --locked -p js-agent --test mac_first_install -- --ignored --nocapture --test-threads=1
+        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_VERSION="$VERSION" JS_FIRST_INSTALL_UPDATE_PKG="$PWD/dist-update/js-agent-$UPDATE_VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_UPDATE_VERSION="$UPDATE_VERSION" cargo test --locked -p js-mac-first-install --test mac_first_install -- --ignored --nocapture --test-threads=1

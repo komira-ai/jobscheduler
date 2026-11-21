@@ -210,8 +210,9 @@ fn problems(text: &str) -> Vec<String> {
     want(
         build.is_some_and(|b| {
             run.is_some_and(|r| b < r)
-                && step_text(b)
-                    .contains("cargo test --locked -p js-agent --test mac_first_install --no-run")
+                && step_text(b).contains(
+                    "cargo test --locked -p js-mac-first-install --test mac_first_install --no-run",
+                )
         }),
         "the test is not built with --no-run before it is run",
     );
@@ -387,8 +388,8 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "sudo is used other than as the cargo target runner that keeps the packages",
         ),
         (
-            "cargo test --locked -p js-agent --test mac_first_install --no-run",
-            "cargo build --locked -p js-agent --test mac_first_install",
+            "cargo test --locked -p js-mac-first-install --test mac_first_install --no-run",
+            "cargo build --locked -p js-mac-first-install --test mac_first_install",
             "not built with --no-run",
         ),
         (

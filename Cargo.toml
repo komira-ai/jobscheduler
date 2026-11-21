@@ -151,7 +151,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 # whose tests drive `js-agent update-hook` through the harness), the daemon's step runner
 # (`hostkeeper-steps`, a dev-dependency of js-agent, whose tests run a first install of the
 # package as a native entry through it). And, for the macOS first-install test of js-agent
-# (crates/js-agent/tests/mac_first_install.rs, built on macOS only), the daemon's macos-pkg
+# (crates/js-mac-first-install/tests/mac_first_install.rs, built on macOS only), the daemon's macos-pkg
 # installer and version directories (`hostkeeper-install`), its launchd step launcher, boot id
 # and unit control (`hostkeeper-launchd`), its switch of `current` (`hostkeeper-placed`) and the
 # names they take (`hostkeeper-config`).
