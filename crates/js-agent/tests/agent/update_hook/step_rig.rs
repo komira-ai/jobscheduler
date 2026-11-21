@@ -26,9 +26,9 @@ use js_client::HostIdentity;
 use js_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 
-pub use super::alias_rig::{end_state, marks, pre_stop};
 use super::fake_mac::FakeMac;
 use super::fakes::{START_MS, World};
+pub use super::step_rig_state::{end_state, marks, pre_stop};
 
 pub const UNIT: &str = "js-agent-crun.service";
 /// The launchd label of the agent on a Mac: the service's name, as hostkeeper requires.
@@ -42,6 +42,10 @@ pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
 /// The bound of the drain wait and the poll interval the steps use.
 pub const DRAIN_WAIT_SECS: u64 = 3600;
+
+/// What a prepare of a host whose previous agent lists no `handover` says of why it drains.
+pub const DRAINS_NO_HANDOVER: &str = "the cutover drains the host first: the previous release's \
+     agent does not hand its jobs over (no `handover` on its `stops:` line, or it could not be run)";
 pub const POLL_SECS: u64 = 10;
 /// The retry hint a deferred `prepare` gives.
 pub const RETRY_AFTER_SECS: u64 = 300;
@@ -488,8 +492,13 @@ pub struct Spy<'a> {
     pub operator_races: Cell<bool>,
     /// The code the server refuses a reading of the host with (`LeaseError::Refused`), while set.
     pub host_refuses: Cell<Option<&'static str>>,
-    /// What the staged agent prints to `--version`.
+    /// What the staged agent prints to `--version`; the previous release's agent too, unless
+    /// `previous_version` is set.
     pub version: RefCell<Result<String, String>>,
+    /// What the previous release's agent prints to `--version` instead of `version`, while set.
+    pub previous_version: RefCell<Option<Result<String, String>>>,
+    /// The previous release's agent binary, as the hook runs it; none for a first install.
+    previous_agent: Option<String>,
     /// The changes made to the unit and the link, in order.
     pub acts: RefCell<Vec<Act>>,
     /// The unit state a stop leaves behind instead of `inactive`, `(ActiveState, SubState)`.
@@ -604,6 +613,12 @@ impl<'a> Spy<'a> {
             operator_races: Cell::new(false),
             host_refuses: Cell::new(None),
             version: RefCell::new(Ok(format!("js-agent {}\n", rig.params.target_version))),
+            previous_version: RefCell::new(None),
+            previous_agent: rig.params.previous_release.as_deref().map(|release| {
+                agent_in(rig.manager, release)
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             acts: RefCell::new(Vec::new()),
             stop_leaves: RefCell::new(None),
             start_leaves: RefCell::new(None),
@@ -937,6 +952,13 @@ impl CommandRunner for Spy<'_> {
                 .borrow_mut()
                 .pop_front()
                 .unwrap_or_else(|| Ok("0\n".to_owned()));
+        }
+        let previous = self.previous_version.borrow();
+        if let (Some(answer), true) = (
+            previous.as_ref(),
+            self.previous_agent.as_deref() == Some(program),
+        ) {
+            return answer.clone();
         }
         self.version.borrow().clone()
     }

@@ -5,9 +5,10 @@
 //! - Run under any name but `sudo`, it is cargo: it appends its arguments as one line to
 //!   `target/debug/cargo-args` in its working directory and prints the file
 //!   `cargo-messages` in its working directory, the JSON messages a test wrote for it
-//!   (every build it is asked for is `--no-run`).
+//!   (every test build it is asked for is `--no-run`; a `cargo build` prints the same file).
 //! - Run as `sudo`, it appends `<working directory>: <arguments>` as one line to
-//!   `sudo-args` next to it, and exits 0 (the tests it was asked to run passed). Asked for
+//!   `sudo-args` next to it, whatever the command (`mac-root-tests` runs it too), and exits
+//!   0 (the tests it was asked to run passed). Asked for
 //!   `systemctl show <unit> ...`, it prints the properties of a unit whose main process
 //!   exited 0; asked for `systemctl reset-failed`, it does nothing.
 //!
@@ -91,7 +92,8 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     if args.get(1).is_some_and(|program| program == "systemctl") {
         return systemctl(&args[2..], &defect);
     }
-    // Past `systemctl`, the only command is `systemd-run`, whose unit runs `count-run`.
+    // Past `systemctl`, a `systemd-run` (whose unit runs `count-run`) writes its count; any
+    // other command (`mac-root-tests`'s) is only recorded.
     write_count(args, &defect);
     if failing {
         ExitCode::from(101)
@@ -102,10 +104,9 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
 
 /// What the wrapper in a `systemd-run` command would have written to its count file.
 fn write_count(args: &[String], defect: &str) {
-    let at = args
-        .iter()
-        .position(|a| a == "--count-file")
-        .expect("a systemd-run of count-run");
+    let Some(at) = args.iter().position(|a| a == "--count-file") else {
+        return;
+    };
     let text = match defect {
         "no-count" => return,
         "zero-tests" => "0\n",

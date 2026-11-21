@@ -43,7 +43,7 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
     let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
     let config = allow_list(&["192.0.2.10:9300"], &[]);
-    let egress = Egress::start(config.clone()).expect("start");
+    let egress = Egress::start(config.clone(), None).expect("start");
     let script = "echo started; \
         t() { o=$(\"$@\" 2>&1); echo \"tamper rc=$? [$*] $o\"; }; \
         t ip link set lo down; t ip link set eth0 down; t ip addr add 198.18.9.9/30 dev eth0; \
@@ -174,7 +174,7 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
     let _serial = serial();
     let far_host = Far::new();
     let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
-    let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
+    let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[]), None).expect("start");
     let holder = Holder::new();
     let attachment = egress
         .attach("control", holder.pid(), JobNetwork::AllowList, &[])
@@ -214,7 +214,7 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
 
     // A restart puts all of it back: the agent that held the host's egress has ended.
     drop(egress);
-    let restarted = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("restart");
+    let restarted = Egress::start(allow_list(&["192.0.2.10:9300"], &[]), None).expect("restart");
     restarted
         .check()
         .expect("a restart loads the firewall again");

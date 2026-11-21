@@ -119,7 +119,7 @@ fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
     assert_eq!(id, RunHandle("7.0".to_owned()));
     assert_eq!(
         s.rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
     let home = s.rig.fake.home_of("7.0");
     let run = s.rig.fake.run_of("7.0");
@@ -416,6 +416,7 @@ fn a_bundle_job_runs_to_its_result_and_its_pins_are_released() {
         [
             "boot-reset",
             "user-create 7.0",
+            "pool-status",
             "run 7.0",
             "kill-uid 7.0",
             "user-delete 7.0"

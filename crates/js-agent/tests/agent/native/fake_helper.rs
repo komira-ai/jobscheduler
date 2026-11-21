@@ -2,13 +2,20 @@
 //! test connects to a Unix socket exactly as it connects to the helper, so the frames, the
 //! nonce, the descriptors a `run` carries and the answers are the helper's own; only what
 //! the verbs do on the machine is faked: a user is a directory, a run waits until a test
-//! ends it, a kill ends it with `SIGKILL`.
+//! ends it, a kill ends it with `SIGKILL`. As a helper with a pool does, `user-create`
+//! lends each lease a pool slot, whose user is `kbf-lease-pool-<slot>` with its home below
+//! the homes directory, `pool-status` names the slot each live lease holds, and
+//! `user-delete` returns the slot (its home removed). The fake lends a slot once only,
+//! counting up from 0 (or from where [`FakeHelper::lend_from`] says), so a home a test
+//! left behind is never made again; the real helper lends the lowest free slot. A fake
+//! that is old ([`FakeHelper::be_old`]) is a helper from before the pool: it makes a user
+//! of each lease's own, `kbf-lease-<term>-<seq>`.
 //!
 //! On a Mac a test can ask the fake to start the program of a `run` for real, as the
 //! user running the tests (`real_runs`), which is how the `sandbox-exec` command line the
 //! runtime builds is applied without root.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
@@ -73,13 +80,6 @@ struct State {
     killed: BTreeSet<String>,
     /// Whether `user-create` leaves out the home directory the real helper makes.
     skip_homes: bool,
-    /// Whether the fake lends users of a pool, as the real helper does: `user-create` takes
-    /// the lowest free slot, whose user `kbf-lease-pool-<slot>` has its home made, and
-    /// `pool-status` lists the slot leased to the lease. Without it the fake makes a user
-    /// named for the lease, as a helper before the pool did, and its pool is empty.
-    pool: bool,
-    /// The slots leased, each with its lease, in pool mode.
-    leased: Vec<(u32, String)>,
     /// Whether a `run` starts its program for real.
     real: bool,
     /// The journal to look in when a `user-create` arrives.
@@ -106,6 +106,20 @@ struct State {
     /// A journal a `run` turns into a directory before it starts, so nothing can be added
     /// to it any more.
     break_at_run: Option<PathBuf>,
+    /// What the next `scan`s answer, in order; a clean scan once they are used up.
+    scan_answers: VecDeque<Reply>,
+    /// How many `scan`s were asked. They are not in `seen`: the post-job checks ask one
+    /// after every job and one when the host is idle, and the tests of the runs' verbs
+    /// list what was done to a lease.
+    scans: usize,
+    /// The pool slot each lease was lent, kept after the lease ends.
+    slots: BTreeMap<String, u32>,
+    /// The slot the next `user-create` lends.
+    next_slot: u32,
+    /// The slots a live lease holds.
+    held: BTreeSet<u32>,
+    /// Whether `pool-status` leaves out which lease holds which slot.
+    status_names_none: bool,
 }
 
 struct Shared {
@@ -115,6 +129,15 @@ struct Shared {
 }
 
 impl Shared {
+    /// The user lent to `lease`: the name of its slot, or for an old fake the lease's own.
+    fn user_of(&self, lease: &str) -> String {
+        let state = self.lock();
+        match state.old {
+            true => user_name(parse_lease(lease).unwrap()),
+            false => pool_user_name(Slot::new(state.slots[lease])),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -124,35 +147,6 @@ impl Shared {
         let path = self.lock().journal.clone();
         let text = path.and_then(|path| fs::read_to_string(path).ok());
         text.is_some_and(|text| text.lines().any(|line| line == format!("+ {lease}")))
-    }
-
-    /// Gives `lease` its user, as `user-create` does: in pool mode the lowest free slot,
-    /// recorded leased; returns the name of the user's home.
-    fn lease_user(&self, lease: &str) -> String {
-        let mut state = self.lock();
-        if !state.pool {
-            drop(state);
-            return self.home_name(lease);
-        }
-        let slot = (0..)
-            .find(|n| state.leased.iter().all(|(slot, _)| slot != n))
-            .unwrap();
-        state.leased.push((slot, lease.to_owned()));
-        pool_user_name(Slot::new(slot))
-    }
-
-    /// The name of the home of the user of `lease`: its pool user's, or its own.
-    fn home_name(&self, lease: &str) -> String {
-        let slot = self
-            .lock()
-            .leased
-            .iter()
-            .find(|(_, held)| held == lease)
-            .map(|(slot, _)| *slot);
-        match slot {
-            Some(slot) => pool_user_name(Slot::new(slot)),
-            None => user_name(parse_lease(lease).unwrap()),
-        }
     }
 
     /// Notes a request and returns the reason it is refused, when it is.
@@ -240,15 +234,19 @@ impl FakeHelper {
         js_agent::Backend::Native(settings.unwrap().unwrap())
     }
 
-    /// The home of the user of `lease`: its pool user's while it holds a slot, or its own.
+    /// The home of the pool user lent to `lease` (also once the lease is over).
     pub fn home_of(&self, lease: &str) -> PathBuf {
-        self.shared.homes.join(self.shared.home_name(lease))
+        self.shared.homes.join(self.shared.user_of(lease))
     }
 
-    /// From now on `user-create` lends users of a pool, `kbf-lease-pool-<slot>`, and
-    /// `pool-status` names the slot of each lease, as the real helper does.
-    pub fn lend_pool_users(&self) {
-        self.shared.lock().pool = true;
+    /// From now on `pool-status` names no lease's slot.
+    pub fn status_names_no_lease(&self) {
+        self.shared.lock().status_names_none = true;
+    }
+
+    /// The next `user-create` lends the slot `slot`, and the ones after count up from it.
+    pub fn lend_from(&self, slot: u32) {
+        self.shared.lock().next_slot = slot;
     }
 
     /// From now on a `user-create` notes whether the journal at `path` names its lease.
@@ -292,6 +290,16 @@ impl FakeHelper {
             .iter()
             .find(|one| one.verb == "run" && one.lease == lease);
         found.expect("no such run").clone()
+    }
+
+    /// Answers the next `scan`s with `answers`, in order.
+    pub fn scan_answers(&self, answers: Vec<Reply>) {
+        self.shared.lock().scan_answers.extend(answers);
+    }
+
+    /// How many `scan`s were asked.
+    pub fn scans(&self) -> usize {
+        self.shared.lock().scans
     }
 
     /// From now on refuses `verb` with `reason`.
@@ -396,16 +404,6 @@ fn serve(stream: &UnixStream, shared: &Shared) {
     else {
         return;
     };
-    let pool_status = serde_json::from_value::<Call>(value.clone())
-        .is_ok_and(|call| matches!(call.request, Request::PoolStatus));
-    if pool_status && shared.lock().old {
-        // A helper from before the pool cannot read `pool-status`; not noted among the
-        // verbs, as `pool-status` never is (the agent asks it at every start).
-        return refused(
-            stream,
-            "bad request: unknown variant `pool-status`".to_owned(),
-        );
-    }
     if shared.lock().old {
         // As a helper from before the new verbs and fields reads a request: the old shape,
         // unknown fields refused, the refusal the real server gives a request it cannot read.
@@ -441,26 +439,40 @@ fn serve(stream: &UnixStream, shared: &Shared) {
         }) {
             Some(reason) => refused(stream, reason),
             None => {
-                let home = shared.lease_user(&lease);
-                if !shared.lock().skip_homes {
-                    fs::create_dir(shared.homes.join(home)).unwrap();
+                let mut state = shared.lock();
+                if !state.old {
+                    let slot = state.next_slot;
+                    state.next_slot += 1;
+                    state.held.insert(slot);
+                    state.slots.insert(lease.clone(), slot);
+                }
+                let skip = state.skip_homes;
+                drop(state);
+                if !skip {
+                    fs::create_dir(shared.homes.join(shared.user_of(&lease))).unwrap();
                 }
                 let uid = rustix::process::getuid().as_raw();
                 reply(stream, &Reply::Created { uid });
             }
         },
-        // Not noted among the verbs: the agent asks it at every start, beside `user-create`.
-        Request::PoolStatus => {
-            let state = shared.lock();
-            let size = u32::try_from(state.leased.len()).unwrap();
-            let pool = PoolState {
-                size,
-                leased: state.leased.clone(),
-                ..PoolState::default()
-            };
-            drop(state);
-            reply(stream, &Reply::Pool(Box::new(pool)));
-        }
+        Request::PoolStatus => match shared.take(seen("pool-status", "")) {
+            Some(reason) => refused(stream, reason),
+            None => {
+                let state = shared.lock();
+                let leased = state
+                    .slots
+                    .iter()
+                    .filter(|(_, slot)| state.held.contains(slot) && !state.status_names_none)
+                    .map(|(lease, slot)| (*slot, lease.clone()))
+                    .collect();
+                let pool = PoolState {
+                    size: 100,
+                    leased,
+                    ..PoolState::default()
+                };
+                reply(stream, &Reply::Pool(Box::new(pool)));
+            }
+        },
         Request::Run {
             lease,
             argv,
@@ -485,12 +497,30 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 if let Some((path, read)) = shared.lock().read_at_delete.as_mut() {
                     *read = Some(fs::read(&*path).ok());
                 }
-                let home = shared.home_name(&lease);
-                shared.lock().leased.retain(|(_, held)| *held != lease);
-                let existed = fs::remove_dir_all(shared.homes.join(home)).is_ok();
+                let held = {
+                    let mut state = shared.lock();
+                    let slot = state.slots.get(&lease).copied();
+                    state.old || slot.is_some_and(|slot| state.held.remove(&slot))
+                };
+                let existed =
+                    held && fs::remove_dir_all(shared.homes.join(shared.user_of(&lease))).is_ok();
                 reply(stream, &Reply::Deleted { existed });
             }
         },
+        Request::Scan => {
+            let answer = {
+                let mut state = shared.lock();
+                state.scans += 1;
+                state.scan_answers.pop_front()
+            };
+            let clean = Reply::Scanned {
+                clean: true,
+                added: Vec::new(),
+                removed: Vec::new(),
+                errors: Vec::new(),
+            };
+            reply(stream, &answer.unwrap_or(clean));
+        }
         other => panic!("the fake helper does not answer {other:?}"),
     }
 }
@@ -546,7 +576,7 @@ fn run(
     if real {
         return real_run(
             stream,
-            &shared.homes,
+            shared,
             (lease, argv, env, limits),
             [stdin, stdout, stderr, cwd],
         );
@@ -654,7 +684,7 @@ fn wait_for_end(shared: &Shared, lease: &str) -> End {
 #[cfg(target_os = "macos")]
 fn real_run(
     stream: &UnixStream,
-    homes: &Path,
+    shared: &Shared,
     ask: RunAsk,
     [stdin, stdout, stderr, cwd]: [OwnedFd; 4],
 ) {
@@ -664,11 +694,11 @@ fn real_run(
     use js_mac_session::spawn::{self, Spawn};
 
     let (lease, argv, env, limits) = ask;
-    let name = user_name(parse_lease(&lease).unwrap());
+    let name = shared.user_of(&lease);
     let child = spawn::spawn(Spawn {
         uid: rustix::process::getuid().as_raw(),
         gid: rustix::process::getgid().as_raw(),
-        home: homes.join(&name),
+        home: shared.homes.join(&name),
         user: name,
         argv,
         env,
@@ -690,7 +720,7 @@ fn real_run(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn real_run(_: &UnixStream, _: &Path, _: RunAsk, _: [OwnedFd; 4]) {
+fn real_run(_: &UnixStream, _: &Shared, _: RunAsk, _: [OwnedFd; 4]) {
     panic!("real runs are for a Mac");
 }
 
@@ -737,5 +767,6 @@ mod old {
             #[serde(default)]
             held: Vec<String>,
         },
+        Scan,
     }
 }

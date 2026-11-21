@@ -17,6 +17,13 @@ use tracing::subscriber::DefaultGuard;
 /// Held by every [`capture`] while its subscriber is installed.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+/// Waits until no [`capture`] is installed and keeps others out while held: for a test that
+/// installs a subscriber of its own (`crate::warnings`'s), which races the captures as two
+/// captures would.
+pub(crate) fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A subscriber installed for this thread; dropping it removes the subscriber, then
 /// releases the lock that keeps other captures out.
 pub(crate) struct Capture {
@@ -33,7 +40,7 @@ pub(crate) fn capture<W>(writer: W, level: Level) -> Capture
 where
     W: Write + Clone + Send + Sync + 'static,
 {
-    let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let serial = serial();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(move || writer.clone())
         .with_ansi(false)

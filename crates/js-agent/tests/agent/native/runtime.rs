@@ -49,7 +49,7 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     assert_eq!(id, handle("7.0"));
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
     let home = rig.fake.home_of("7.0");
     for dir in ["exec", "tmp"] {
@@ -105,58 +105,90 @@ fn each_start_gets_a_user_of_its_own() {
     assert!(rig.fake.home_of("7.1").join("exec").is_dir());
 }
 
-/// Asserts that a lease the helper lends a pool user (`kbf-lease-pool-<slot>`, as the real
-/// helper does) gets its run directory in that user's own home, which the profile grants as
-/// the run's (`RUN`): two leases, slots 0 and 1, two homes of the pool and no other. It
-/// catches a run directory made in a home named for the lease (`kbf-lease-<term>-<seq>`),
-/// which no pool user has: on a Mac every native job then ended `start-failed:
-/// /Users/kbf-lease-<term>-<seq>/exec: No such file or directory`.
+/// Asserts that a run's home is the home of the pool user the helper lent its lease,
+/// named by the slot `pool-status` gives (`kbf-lease-pool-<slot>`), and not a name made
+/// from the lease id: the helper lends slots 4 and 5 to the leases `7.0` and `7.1`, and
+/// each run's directory and its profile's write grant are in that slot's home. It catches
+/// a run directory made below a home the helper never made (`kbf-lease-<term>-<seq>`, or
+/// a slot guessed from the lease's sequence), which fails every start on a Mac whose
+/// helper lends pool users.
 #[test]
-fn a_pool_user_runs_in_its_own_home_named_for_its_slot() {
-    let mut rig = Rig::new("pool-home");
-    rig.fake.lend_pool_users();
-    let first = rig.start("r1", "/bin/true", &[]);
-    let second = rig.start("r2", "/bin/true", &[]);
-    assert_eq!((first, second), (handle("7.0"), handle("7.1")));
+fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
+    let mut rig = Rig::new("poolhome");
+    rig.fake.lend_from(4);
+    rig.start("r1", "/bin/true", &[]);
+    rig.start("r2", "/bin/true", &[]);
     let homes = rig.fake.homes().to_path_buf();
-    assert_eq!(rig.fake.home_of("7.0"), homes.join("kbf-lease-pool-0"));
-    assert_eq!(rig.fake.home_of("7.1"), homes.join("kbf-lease-pool-1"));
-    let mut made: Vec<String> = fs::read_dir(&homes)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    made.sort();
-    assert_eq!(made, ["kbf-lease-pool-0", "kbf-lease-pool-1"]);
-    for home in &made {
-        assert!(homes.join(home).join("exec").is_dir(), "{home}");
-        assert!(homes.join(home).join("tmp").is_dir(), "{home}");
+    for (lease, slot) in [("7.0", 4), ("7.1", 5)] {
+        let home = homes.join(format!("kbf-lease-pool-{slot}"));
+        assert_eq!(rig.fake.home_of(lease), home);
+        assert!(home.join("exec").is_dir(), "{}", home.display());
+        let ran = parse(&rig.fake.run_of(lease).argv);
+        assert_eq!(
+            ran.params[0],
+            ("RUN".to_owned(), home.display().to_string())
+        );
     }
-    let parsed = parse(&rig.fake.run_of("7.1").argv);
+    for name in ["kbf-lease-7-0", "kbf-lease-pool-0", "kbf-lease-pool-1"] {
+        assert!(!homes.join(name).exists(), "{name}");
+    }
     assert_eq!(
-        parsed.params[0],
-        (
-            "RUN".to_owned(),
-            homes.join("kbf-lease-pool-1").display().to_string()
-        )
+        rig.fake.verbs()[..4],
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
 }
 
-/// Asserts that a helper from before the pool, which refuses `pool-status` as a request it
-/// cannot read and makes a user named for the lease, still gets runs in that user's home
-/// (`kbf-lease-<term>-<seq>`). It catches a start that fails, or looks in a pool user's home,
-/// when the helper has no pool to ask.
+/// Asserts that on a helper from before the pool, which refuses `pool-status` as a verb it
+/// cannot read, a run's home is the user that helper made for the lease alone
+/// (`kbf-lease-<term>-<seq>`). It catches an agent that cannot run a job while its helper
+/// is still the release before the pool, as during an update.
 #[test]
-fn a_helper_before_the_pool_runs_in_the_home_named_for_the_lease() {
-    let mut rig = Rig::new("pre-pool-home");
+fn on_a_helper_from_before_the_pool_a_run_lives_in_its_leases_own_home() {
+    let mut rig = Rig::new("prepool");
     rig.fake.be_old();
     rig.start("r1", "/bin/true", &[]);
-    let home = rig.fake.home_of("7.0");
-    let id = js_mac_session::lease::parse_lease("7.0").unwrap();
-    assert_eq!(
-        home,
-        rig.fake.homes().join(js_mac_session::lease::user_name(id))
-    );
+    let home = rig.fake.homes().join("kbf-lease-7-0");
+    assert_eq!(rig.fake.home_of("7.0"), home);
     assert!(home.join("exec").is_dir());
+    assert_eq!(
+        rig.fake.verbs(),
+        ["boot-reset", "user-create 7.0", "unreadable", "run 7.0"]
+    );
+}
+
+/// Asserts that a start whose lease `pool-status` cannot place fails by name and ends the
+/// user it was lent: when the helper refuses `pool-status`, and when the status names no
+/// slot for the lease. Nothing is made below the homes directory and no `run` is sent.
+/// It catches a run directory guessed when the helper did not say which user the lease
+/// holds, and a lent user left behind by such a start.
+#[test]
+fn a_lease_the_pool_status_does_not_place_fails_the_start_and_is_ended() {
+    let ended = [
+        "boot-reset",
+        "user-create 7.0",
+        "pool-status",
+        "kill-uid 7.0",
+        "user-delete 7.0",
+    ];
+    let mut rig = Rig::new("nostatus");
+    rig.fake.refuse("pool-status", "busy");
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.starts_with("pool-status: "), "{}", error.0);
+    assert!(error.0.contains("busy"), "{}", error.0);
+    assert_eq!(rig.fake.verbs(), ended);
+    assert!(!rig.fake.home_of("7.0").exists());
+
+    let mut rig = Rig::new("unnamed");
+    rig.fake.status_names_no_lease();
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert_eq!(
+        error.0,
+        "pool-status: the helper names no pool user for lease 7.0"
+    );
+    assert_eq!(rig.fake.verbs(), ended);
+    assert!(!rig.fake.home_of("7.0").exists());
 }
 
 /// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,

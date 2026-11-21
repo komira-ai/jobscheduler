@@ -50,9 +50,10 @@ fn ports(list: &[u16]) -> Ports {
     Ports::new(list).expect("ports")
 }
 
-/// The last eight lines of every profile, written out here on its own.
+/// The last nine lines of every profile, written out here on its own.
 const FLOOR_TEXT: &str = "(deny mach-register)
 (deny file-mount)
+(deny ipc-posix-shm-write-create)
 (deny job-creation)
 (deny lsopen)
 (deny file-read* file-write* (subpath \"/private/var/protected/sfanalytics\") (subpath \"/private/var/protected/trustd/private\"))

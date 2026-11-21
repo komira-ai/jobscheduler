@@ -200,3 +200,31 @@ fn a_list_logs_each_row_it_skips() {
         "{said}"
     );
 }
+
+// Catches a backfill or a boot raise that reads rows again without a word, or says it once a
+// row: each logs one line with the count of rows it read again, and nothing when it read none.
+#[test]
+fn a_backfill_and_a_raise_that_read_rows_again_each_say_so_once_with_the_count() {
+    use std::io::Write as _;
+
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        super::index::said_again(0);
+        super::index::said_again(3);
+        super::ending::raise_said_again(0);
+        super::ending::raise_said_again(2);
+    });
+    lines.clone().flush().expect("flushes");
+    let said = String::from_utf8(lines.0.lock().expect("unpoisoned").clone()).expect("text");
+    assert_eq!(
+        said,
+        " INFO js_jobs::store::index: the index backfill read again the rows another server \
+         changed while it ran again=3\n INFO js_jobs::store::ending: the boot's raise read again \
+         the rows another server changed before its commit again=2\n"
+    );
+}

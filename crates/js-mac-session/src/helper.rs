@@ -128,6 +128,10 @@ pub const EXIT_LOOKS: usize = 50;
 /// helper started: a caller that finds it after the helper restarted under it asks again.
 pub const RESET_NEEDED: &str = "the boot reset has not run since the helper started";
 
+/// What a `scan` on a node whose leak-scan baseline was never recorded is refused with:
+/// a caller can tell that the scan has nothing to compare with from a scan that failed.
+pub const NO_BASELINE: &str = "no baseline was recorded; baseline first";
+
 /// The refusal of a second `boot-reset` since the helper started: a daemon that
 /// restarted on its own (the helper did not) finds the reset done.
 pub const RESET_ALREADY: &str = "the boot reset ran already; it runs once per start";

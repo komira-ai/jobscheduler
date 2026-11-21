@@ -170,4 +170,8 @@ pub enum CrunError {
     /// What a job's layers and mounts are made with could not be set up.
     #[error(transparent)]
     Fs(#[from] FsError),
+    /// What an earlier process left of the host's egress and no adopted run took over could
+    /// not be removed.
+    #[error(transparent)]
+    Egress(#[from] crate::egress::EgressError),
 }

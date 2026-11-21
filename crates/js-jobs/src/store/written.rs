@@ -20,6 +20,10 @@ use crate::keys;
 /// than that since then counts as a change of the tables.
 const FEED_PAGE: usize = 512;
 
+/// How many transactions one store batch of [`JobStore::write_each`] carries. Each is one
+/// row's (with its index entries), so a batch locks about this many rows for one round trip.
+pub(crate) const GROUP: usize = 100;
+
 /// The store's head as the last reading read it, and the head at the last commit that changed
 /// a job table as far as the readings since have told.
 #[derive(Debug, Default)]
@@ -127,6 +131,33 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Ok(commit) => Ok(Ok(step(commit))),
             Err(conflict) => self.refuse_moved(conflict).map(Err),
         }
+    }
+
+    /// Commits each transaction of `txns`, in order, on its own preconditions, [`GROUP`] to a
+    /// store batch ([`Store::apply_batch`]: one round trip and one sync for the batch), and
+    /// answers, for each in order, whether it committed. Each counts as one write
+    /// ([`JobStore::written`]) and carries a guarded view's check of its node row. A lost
+    /// precondition loses that transaction alone: the others of its batch commit.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NodeMoved`] on a guarded view whose node row moved;
+    /// [`JobStoreError::Store`].
+    pub(super) fn write_each(&self, txns: Vec<Txn>) -> Result<Vec<bool>, JobStoreError> {
+        let mut held = Vec::with_capacity(txns.len());
+        let mut txns = txns.into_iter().map(|txn| self.guard_txn(txn)).peekable();
+        while txns.peek().is_some() {
+            let batch: Vec<Txn> = txns.by_ref().take(GROUP).collect();
+            let sent = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+            let answers = self.store.apply_batch(batch);
+            self.writes.fetch_add(sent, Ordering::SeqCst);
+            for answer in answers? {
+                held.push(match answer {
+                    Ok(_) => true,
+                    Err(conflict) => self.refuse_moved(conflict).map(|_| false)?,
+                });
+            }
+        }
+        Ok(held)
     }
 
     /// [`JobStore::write_stepped`], without the step.

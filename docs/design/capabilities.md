@@ -34,8 +34,8 @@ sender that lists `16` and `16.0` is read as listing it once.
 | `arch` | `text` | the CPU architecture in one spelling, `x86_64` or `arm64` (the merged `Platform`). An older agent reports `aarch64`; the scheduler reads `aarch64` as `arm64` in a request, an offer and a hello, so either spelling of a constraint matches either report |
 | `os` | `text` | `macos`, `linux` (the merged `Platform`) |
 | `os_version` | `version` | the product version where it parses to the grammar (macOS: the product version); absent otherwise |
-| `xcode` | `set_text` | the build ids of the Xcode applications installed (`16C5032a`): the `ProductBuildVersion` of each `/Applications/Xcode*.app/Contents/version.plist`, whatever the app's directory is called. A build, not a version, because a build names one Xcode exactly. See **Xcode**, below |
-| `sim.ios`, `sim.tvos`, `sim.watchos`, `sim.visionos` | `set_version` | the simulator runtime versions installed, one key per platform |
+| `xcode` | `set_text` | the build ids of the Xcode applications installed (`16C5032a`) that can run a job: the `ProductBuildVersion` of each `/Applications/Xcode*.app/Contents/version.plist`, whatever the app's directory is called, kept when that Xcode answers the agent's survey. A build, not a version, because a build names one Xcode exactly. See **Xcode**, below |
+| `sim.ios`, `sim.tvos`, `sim.watchos`, `sim.visionos` | `set_version` | the versions of the available simulator runtimes the ready Xcodes list, one key per platform. See **Xcode**, below |
 | `base_images` | `set_text` | the names of the primed VM base images the host holds (5.14) |
 | `vms` | `count` | the most VMs the host runs at once: the agent's flag, lowered to what its probe allows (hosts.md, section 4) |
 | `virt` | `text` | `none`, `nested` or `bare-metal`: how a VM would run on the host; the provider declares it per launch option and the agent's probe bounds it. Absent is unmet |
@@ -50,12 +50,26 @@ kind; a set is given by repeating the flag), which overrides the probe for that 
 `capabilities` map as `xcode`: the builds ascending, joined with `,` (a build never holds one), as many as fit the 128-byte value
 (decisions.md, D27 (a)); the scheduler reads each as one member (`js-caps`). A job names one build (the job API's `Constraints.xcode`):
 it is placed only on a host whose set has that build, waits while none has it, and is started with that build
-(`JobStartSpec.xcode`). The agent runs it with `DEVELOPER_DIR` set to that app's `Contents/Developer`, never through `xcode-select`,
+(`JobStartSpec.xcode`). The agent runs it with `DEVELOPER_DIR` set to that app's `Contents/Developer` (the app's real path), never through `xcode-select`,
 whose global selection a job must not depend on; a start naming a build the host no longer holds is refused `xcode-not-held`. The
 agent reads its Xcodes when it starts and not again: on a Mac the builds are part of the host facts that `js-agent update-hook resume`
 compares with the ones the drain noted, so an Xcode installed or removed during a maintenance run is advertised once `resume` has
 restarted the agent, before it lifts the cordon, and never while the host is drained (hostkeeper's maintenance-updates design, 6).
 A pinned `--cap xcode=...` is not offered: the operator's `--capability` flag cannot set `xcode`.
+
+A found Xcode is advertised and held only when it can run a job: the agent puts each one to the Xcode catalog of `js-mac-pool`
+(`Catalog::survey`), which checks that the app and every directory above it are root's and writable by no one else but the
+`wheel` and `admin` groups, then asks that
+Xcode, under its own `DEVELOPER_DIR`, `xcodebuild -version` (the build must be the plist's), `xcodebuild -license check`,
+`xcodebuild -checkFirstLaunchStatus` and `xcrun --find clang`, each with a 60-second deadline. An Xcode that fails a question is left
+out of `xcode` with a warning naming its app, its build and why (its licence is not accepted, its first launch has not run, or it did
+not answer). Each ready Xcode whose `xcrun` finds `simctl` is asked `xcrun simctl list runtimes -j`; the `sim.<platform>` keys are the
+union of the available runtimes, by the platform of the runtime's identifier (`xrOS` is `sim.visionos`), each set's versions ascending
+and joined with `,` within the 128-byte value. The scheduler does not match `sim.*` yet: no job constraint names it, and `js-caps` passes the
+keys over when it reads a report. A Mac with no Xcode runs none of these programs and reports neither key, and the operator's
+`--capability` flag cannot set a `sim.` key either. The survey runs when the agent starts; the
+host facts `resume` compares list the found builds, not which are ready, so an Xcode whose licence
+is accepted or whose simulator runtimes change while the agent runs is advertised at its next start.
 
 **Image profiles.** A VM job runs inside a base image, so what it needs (the Xcode, the runtime) is a property of the *image*, not of the
 host. Each primed image carries a profile in its manifest: the same typed map, over the same schema (`os`, `os_version`, `arch`, `xcode`,
