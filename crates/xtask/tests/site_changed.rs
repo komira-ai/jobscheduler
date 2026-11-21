@@ -1,5 +1,6 @@
 //! `site-changed` against real git repositories (no network): each test is a pull request
-//! with a base on `origin/main` and a head, and the answer the site steps get.
+//! with a base on `origin/main` and a head, or a merge group built on a base commit, and the
+//! answer the site steps get.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -37,7 +38,7 @@ impl Repo {
         std::fs::write(path, text).expect("write");
     }
 
-    fn git(&self, args: &[&str]) {
+    fn git(&self, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.name=t"])
             .args(["-c", "user.email=t@example.com"])
@@ -46,6 +47,15 @@ impl Repo {
             .output()
             .expect("git");
         assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout)
+            .expect("utf-8")
+            .trim()
+            .to_owned()
+    }
+
+    /// The full commit id of `rev`.
+    fn commit_id(&self, rev: &str) -> String {
+        self.git(&["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
     }
 
     fn commit(&self, message: &str) {
@@ -65,6 +75,7 @@ impl Repo {
         Args {
             event: event.to_owned(),
             base: base.to_owned(),
+            group_base: String::new(),
             paths: self.dir.join("site/ci-paths"),
             github_output: self.dir.join("github_output"),
             repo_dir: self.dir.to_path_buf(),
@@ -220,7 +231,7 @@ fn changed_files_lists_unquoted_names_since_the_merge_base() {
     let repo = Repo::new("sc-seam", Some(REAL));
     repo.change(&["caf\u{e9}/\u{4e2d}.md", "a b.txt"]);
     let git = Path::new("git");
-    let mut names = changed_files(git, &repo.dir, "main").expect("diff");
+    let mut names = changed_files(git, &repo.dir, "origin/main").expect("diff");
     names.sort();
     assert_eq!(names, ["a b.txt", "caf\u{e9}/\u{4e2d}.md"]);
     // The base moves on after the branch was made: its own new file is not a change.
@@ -229,11 +240,11 @@ fn changed_files_lists_unquoted_names_since_the_merge_base() {
     repo.commit("later");
     repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     repo.git(&["checkout", "--quiet", "pr"]);
-    let again = changed_files(git, &repo.dir, "main").expect("diff");
+    let again = changed_files(git, &repo.dir, "origin/main").expect("diff");
     assert!(!again.contains(&"later.txt".to_owned()), "{again:?}");
-    assert_eq!(changed_files(git, &repo.dir, "gone"), None);
+    assert_eq!(changed_files(git, &repo.dir, "origin/gone"), None);
     assert_eq!(
-        changed_files(Path::new("no-such-git-program"), &repo.dir, "main"),
+        changed_files(Path::new("no-such-git-program"), &repo.dir, "origin/main"),
         None
     );
 }
@@ -265,6 +276,103 @@ fn an_output_file_that_cannot_be_written_is_an_error() {
             .map(std::io::Error::kind),
         Some(std::io::ErrorKind::IsADirectory)
     );
+}
+
+/// A merge group in `repo`: `main` moved on to the pull requests ahead in the queue (`ahead`
+/// written), then the group's own squash commit (`own` written), checked out. Returns the
+/// group's `base_sha` and the commit `main` was at before the ones ahead.
+fn merge_group(repo: &Repo, ahead: &[&str], own: &[&str]) -> (String, String) {
+    let main = repo.commit_id("origin/main");
+    repo.git(&["checkout", "--quiet", "--detach", "origin/main"]);
+    repo.change(ahead);
+    let base = repo.commit_id("HEAD");
+    repo.change(own);
+    (base, main)
+}
+
+/// The answer for a merge group built on `group_base`.
+fn decide_group(repo: &Repo, group_base: &str) -> String {
+    let mut args = repo.args("merge_group", "");
+    args.group_base = group_base.to_owned();
+    repo.decide_with(&args)
+}
+
+/// Asserts that a merge group reads its own change since its `base_sha`: a listed file runs
+/// the steps and an unrelated one skips them, whatever the base branch says.
+#[test]
+fn a_merge_group_reads_its_change_since_its_base_commit() {
+    let site = Repo::new("sc-group-site", Some(REAL));
+    let (base, _) = merge_group(&site, &["crates/js-core/src/a.rs"], &["site/a.html"]);
+    assert_eq!(decide_group(&site, &base), "run=true");
+    let skip = Repo::new("sc-group-skip", Some(REAL));
+    let (base, _) = merge_group(&skip, &["crates/js-core/src/a.rs"], &["crates/js-x/a.rs"]);
+    assert_eq!(decide_group(&skip, &base), "run=false");
+    // `--base` is not read for a merge group: a base branch that does not exist changes nothing.
+    let mut args = skip.args("merge_group", "gone");
+    args.group_base.clone_from(&base);
+    args.github_output = skip.dir.join("second_output");
+    assert_eq!(skip.decide_with(&args), "run=false");
+}
+
+/// Asserts that the pull requests ahead of a group are not its change, and that they are when
+/// the group is built on the commit before them (the files between its base and HEAD count).
+#[test]
+fn a_merge_group_counts_the_files_between_its_base_and_its_head() {
+    let repo = Repo::new("sc-group-ahead", Some(REAL));
+    let (base, main) = merge_group(&repo, &["site/ahead.html"], &["crates/js-x/a.rs"]);
+    assert_eq!(decide_group(&repo, &base), "run=false");
+    let mut args = repo.args("merge_group", "");
+    args.group_base = main;
+    args.github_output = repo.dir.join("second_output");
+    assert_eq!(repo.decide_with(&args), "run=true");
+}
+
+/// Asserts the fail-closed answer for a merge group whose base is missing, not a full commit
+/// id, or a commit id the repository does not have: the steps run.
+#[test]
+fn a_merge_group_without_a_usable_base_runs_the_site_steps() {
+    let repo = Repo::new("sc-group-bad-base", Some(REAL));
+    let (base, _) = merge_group(&repo, &[], &["crates/js-x/a.rs"]);
+    for (i, bad) in [
+        String::new(),
+        "origin/main".to_owned(),
+        "HEAD^1".to_owned(),
+        base[..12].to_owned(),
+        base.to_uppercase(),
+        "0".repeat(40),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut args = repo.args("merge_group", "main");
+        args.group_base.clone_from(bad);
+        args.github_output = repo.dir.join(format!("output-{i}"));
+        assert_eq!(repo.decide_with(&args), "run=true", "{bad}");
+    }
+    // The same group with its real base skips, so each answer above is the base's doing.
+    assert_eq!(decide_group(&repo, &base), "run=false");
+}
+
+/// Asserts that a pull request is read against its base branch even when a group base is
+/// given, and that a push ignores both.
+#[test]
+fn only_a_merge_group_reads_the_group_base() {
+    let repo = Repo::new("sc-group-pr", Some(REAL));
+    repo.change(&["site/a.html"]);
+    repo.change(&["crates/js-x/a.rs"]);
+    // Read against the group base (the commit before HEAD) only the last commit's file would
+    // count and the steps would be skipped; against its base branch the site file counts.
+    let mut pr = repo.args("pull_request", "main");
+    pr.group_base = repo.commit_id("HEAD~1");
+    assert_eq!(repo.decide_with(&pr), "run=true");
+    let mut group = repo.args("merge_group", "main");
+    group.group_base = repo.commit_id("HEAD~1");
+    group.github_output = repo.dir.join("second_output");
+    assert_eq!(repo.decide_with(&group), "run=false");
+    let mut push = repo.args("push", "");
+    push.group_base = repo.commit_id("HEAD~1");
+    push.github_output = repo.dir.join("third_output");
+    assert_eq!(repo.decide_with(&push), "run=true");
 }
 
 fn xtask(repo: &Repo, args: &[&str]) -> Output {
@@ -316,4 +424,33 @@ fn the_command_line_writes_the_answer_and_fails_on_an_unwritable_output() {
     );
     assert_eq!(bad.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&bad.stderr).starts_with("xtask: cannot write ."));
+}
+
+/// Asserts the command line of a merge group, as ci.yml runs it: an empty `--base` and the
+/// group's `--group-base`.
+#[test]
+fn the_command_line_reads_a_merge_group_against_its_group_base() {
+    let repo = Repo::new("sc-cli-group", Some(REAL));
+    let (base, _) = merge_group(&repo, &["site/ahead.html"], &["crates/js-x/a.rs"]);
+    let out = xtask(
+        &repo,
+        &[
+            "--event",
+            "merge_group",
+            "--base",
+            "",
+            "--group-base",
+            &base,
+            "--paths",
+            "site/ci-paths",
+            "--github-output",
+            "out.txt",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "run=false\n");
+    assert_eq!(
+        std::fs::read_to_string(repo.dir.join("out.txt")).expect("out"),
+        "run=false\n"
+    );
 }
