@@ -1,6 +1,6 @@
 # Mac lease user teardown
 
-How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `user-delete`), what each step proves, and what happens when one fails. A lease's user is a pool user (`kbf-lease-pool-<slot>`): `user-delete` resets it for the next lease, and deletes it (then makes a new one in the slot) only when the reset is not clean. The deletion below is that replacement's, and is also how the user of a lease that a release before the pool created is ended. The native runtime (`crates/js-agent/src/native`) calls both verbs when a run is removed and again, from its journal, at the next start. The two-run isolation test (`crates/js-agent/tests/native_isolation`) checks the result on a real Mac.
+How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `user-delete`), what each step proves, and what happens when one fails. A lease's user is a pool user (`kbf-lease-pool-<slot>`): `user-delete` resets it in place for the next lease, and nothing of it is ever deleted (the pool's users are permanent). The deletion below is how the user of a lease that a release before the pool created is ended. The native runtime (`crates/js-agent/src/native`) calls both verbs when a run is removed and again, from its journal, at the next start. The two-run isolation test (`crates/js-agent/tests/native_isolation`) checks the result on a real Mac.
 
 ## What can outlive a user
 
@@ -51,9 +51,13 @@ The lease is recorded over (the ledger's `deleted`, then the slot's `resetting`)
 7. Settle again.
 8. Ask the directory that the user is not in `admin` (`dseditgroup -o checkmember`): only its "no" passes.
 
-A clean reset records the slot free. One that is not replaces the user: the kill again, the deletion below (with step 4 of the reset before its sweep), a new record with the same name, uid and home (the emptied home, kept: the deletion below empties a pool user's home and does not remove it), and step 8. The slot is free only once that holds. The user of an administrator's lease is always replaced, never reset; its `resetting` record says so, so the recovery after a crash replaces it too.
+8a. Before step 7's last look, the record's attributes that the pool owns are set back (primary group, home path, shell, real name, hidden) and the user is taken out of `admin`; step 8 then asks the directory.
 
-## The deletion (`user-delete` of a lease from before the pool, and a pool user's replacement)
+A clean reset records the slot free. One that is not leaves the slot broken, naming the entry or step that blocked it. Nothing of a pool user is ever deleted: the pool's users are made once and are permanent. Measured on macOS 27.0.1 with System Integrity Protection on, as root from a launchd daemon and from an ssh root shell: root may not delete a local user record (`dscl . -delete` fails with eDSPermissionError -14120, and so does the helper's OpenDirectory delete), may not remove an existing account's home, and may not remove the per-user folders the system placed (`/private/var/folders/<xx>/<hash>` and its `0`, `C`, `T` and `X` carry `sunlnk`); everything can be emptied, and making users works.
+
+The user of an administrator's lease is reset like any other. The grant adds the slot's user to `admin` for the lease (`user-create`), and the reset takes it out and asks the directory that it is out. A slot is not retired for having been an administrator's: a retired slot could never be reclaimed, so a few grants would end the pool. What the reset removes is what a replacement removed (the uid's processes, files, launchd domains, IPC objects, record attributes and membership); what an administrator may have put in root's own places (a launch daemon naming the user, say) a replacement never reached either, and the leak scan below is what looks for that. The ledger's `resetting <slot> replace` record is still written and read, and is reset in place too.
+
+## The deletion (`user-delete` of a lease from before the pool)
 
 1. **The entry.**
    - While the record exists, ask for the uid's `DARWIN_USER_DIR` (`getconf DARWIN_USER_DIR`, run as the uid and its group with an empty environment, `/` as its working directory and empty input). Take only an answer of the form `/var/folders/<xx>/<hash>/0`; the entry is `<user_folders>/<xx>/<hash>`. Never guess the path from the uid.
@@ -63,16 +67,18 @@ A clean reset records the slot free. One that is not replaces the user: the kill
    - Boot out `user/<uid>`, and `gui/<uid>` while it is owed, as in `kill-uid` (a failure logged); if one still prints, or `launchctl print` gave no answer, the delete is refused. Otherwise `gui/<uid>` is not asked about: with no process of the uid left there is no login session. After the last settle an owed `gui/<uid>` is discharged.
    - Look for processes again, once, without waiting: a job launchd started before the bootout ended its domain is found here, and any process seen refuses the delete at once. Such a job may have written again what the sweep removed before exiting, so it is never waited out; the repeated delete sweeps everything again.
 3. Remove the crontab and `at` jobs. No process may remain. Remove the uid's System V IPC objects, as in the reset's step 4.
-4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it (the home of a pool user is the exception: it is emptied and kept, as in step 5 of the reset):
+4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it:
    - nothing is followed;
    - nothing past the entry's filesystem is touched;
    - a subtree too deep to remove in place is moved up *inside* the entry, so a removal cut short leaves everything under the entry, where the next removal finds it.
 5. Settle again.
-6. Delete the record. For a lease from before the pool, then record the deletion in the ledger.
+6. Delete the record. For a lease from before the pool, then record the deletion in the ledger. This is the one deletion left, and it fails on macOS 27 (the record, the home and the placed folders are refused, as above): the lease stays live and its uid held, unless the helper holds Full Disk Access (see `mac-hostkeeper-package.md`).
 
 ## Failure: the uid is held
 
-A pool user is lent only from a free slot. A reset that is not clean replaces the user; a replacement that fails leaves the slot broken: it is lent to no one, `pool-status` and the pool-full refusal name it, and the next `pool-create` (the boot reset runs one) replaces it again. A slot found resetting after a restart, or leased to a lease that is not live, is reset (or replaced) by the boot reset before it is free. A ledger write that fails leaves the slot not free. Either way no other lease gets the uid until a reset or a replacement completes.
+A pool user is lent only from a free slot. A reset that is not clean leaves the slot broken: it is lent to no one, `pool-status`, the pool-full refusal and the `pool-create` log line name it (the refusal and the log line with the entry or step that blocked it), and the next `pool-create` (the boot reset runs one) resets it again in place. A slot found resetting after a restart, or leased to a lease that is not live, is reset by the boot reset before it is free. A ledger write that fails leaves the slot not free. Either way no other lease gets the uid until a reset completes.
+
+`pool-create` adopts a user record that is already there for a slot's uid when it is the pool's own: named `kbf-lease-pool-<n>`, with that uid, hidden, and the home `/Users/kbf-lease-pool-<n>`. It resets it in place and only then records the slot free, so a first install on a Mac that already has the pool's users (left by an earlier install, and kept by it for good) works, with or without the ledger. A record with that uid that differs in any of those is refused, naming how, and the slot is left unmade.
 
 For a lease from before the pool, a step that fails leaves the lease live in the helper's ledger: the uid is quarantined. A live lease's uid is never handed to another lease, nor made a pool slot. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
 

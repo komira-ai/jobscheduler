@@ -110,6 +110,15 @@ hostkeeper lists the three labels in the manifest's `run` and enables them, and 
 them at every boot. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
 
+The helper's pool users (`kbf-lease-pool-<n>`, hidden) are made once, by the helper's boot reset,
+and stay for good: the system refuses root the deletion of a local user record, of an existing
+home and of the per-user folders it placed (all can be emptied), so the helper never deletes one
+and resets a user in place when a lease ends. A first install on a Mac that already has them (an
+earlier install left them, even with `/var/db/js-mac-session` gone) adopts each that is the pool's
+own (its name, uid, hidden flag and home `/Users/kbf-lease-pool-<n>` match), resets it and
+makes the slot free; a record on a pool uid that is not the pool's is refused and the slot is
+left unmade, which the helper's log and `pool-status` name. Removing the package leaves the users.
+
 ## Signing
 
 The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls

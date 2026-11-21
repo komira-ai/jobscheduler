@@ -33,7 +33,7 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSError", "NSString"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
 objc2-open-directory = { workspace = true, features = [
     "CFOpenDirectory",
     "CFOpenDirectoryConstants",

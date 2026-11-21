@@ -56,8 +56,8 @@ pub fn user_name(lease: LeaseId) -> String {
 }
 
 /// One place in the pool of lease users: `0` to the pool's size less one. A slot keeps
-/// its user's name ([`pool_user_name`]) and uid ([`UidRange::uid`]) for good; a user
-/// that is replaced is replaced under the same slot, with the same name and uid.
+/// its user's name ([`pool_user_name`]) and uid ([`UidRange::uid`]) for good: the user is
+/// made once and reset in place, never deleted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Slot(u32);
 
@@ -162,7 +162,7 @@ impl fmt::Display for PoolSize {
 ///
 /// Its name can never be a lease user's: a lease user is `kbf-lease-pool-<slot>` (or,
 /// from before the pool, `kbf-lease-<term>-<seq>`), and every user the boot reset,
-/// `user-delete` and a pool user's replacement delete is named by a ledger entry, so a
+/// `user-delete` deletes (a lease's from before the pool) or resets is named by a ledger entry, so a
 /// name that does not start with [`USER_PREFIX`] is never among them. The name is also
 /// refused when it is the daemon's role account (`_kbf`) or root, and it is limited to
 /// lower-case letters, digits, `-` and `_` (starting with a letter), at most 31 bytes:

@@ -14,14 +14,14 @@ use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
 use crate::disclaim::Program;
-use crate::helper::{self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
+use crate::helper::{
+    self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord,
+};
 
 const USERS: &str = "dsRecTypeStandard:Users";
 const GROUPS: &str = "dsRecTypeStandard:Groups";
 /// The group whose members are administrators.
 const ADMIN_GROUP: &str = "admin";
-/// A new lease user's login shell.
-const SHELL: &str = "/bin/zsh";
 
 /// `libproc`'s filters (`sys/proc_info.h`): processes by effective and by real uid.
 const PROC_UID_ONLY: u32 = 4;
@@ -105,18 +105,7 @@ impl Host for MacHost {
                 )
             }
             .ok_or_else(|| od_error("creating the record", error))?;
-            let home = user.home.to_string_lossy();
-            for (attribute, value) in [
-                ("dsAttrTypeStandard:UniqueID", user.uid.to_string()),
-                ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
-                ("dsAttrTypeStandard:NFSHomeDirectory", home.into_owned()),
-                ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
-                ("dsAttrTypeStandard:RealName", user.name.clone()),
-                // Kept off the login window's list of users.
-                ("dsAttrTypeNative:IsHidden", "1".to_owned()),
-            ] {
-                set(&record, attribute, &value)?;
-            }
+            set_pool_attributes(&record, user)?;
             // A random password nobody is told: the account cannot be logged into with
             // a password, and macOS gives it no secure token.
             random_password(&record)?;
@@ -127,6 +116,58 @@ impl Host for MacHost {
                 if !unsafe { admin.addMemberRecord_error(Some(&record), Some(&mut error)) } {
                     return Err(od_error("adding to the admin group", error));
                 }
+            }
+            Ok(())
+        })
+    }
+
+    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
+        autoreleasepool(|_| {
+            let node = local_node()?;
+            let Some(record) = find(&node, name)? else {
+                return Ok(None);
+            };
+            let number = |attribute: &str| -> io::Result<u32> {
+                let value = first_value(&record, attribute)?;
+                value.parse().map_err(|_| {
+                    io::Error::other(format!("{attribute} of {name} is not a number: {value}"))
+                })
+            };
+            Ok(Some(UserRecord {
+                uid: number("dsAttrTypeStandard:UniqueID")?,
+                gid: number("dsAttrTypeStandard:PrimaryGroupID")?,
+                home: PathBuf::from(first_value(&record, "dsAttrTypeStandard:NFSHomeDirectory")?),
+                hidden: first_value(&record, "dsAttrTypeNative:IsHidden")? == "1",
+                shell: first_value(&record, "dsAttrTypeStandard:UserShell")?,
+            }))
+        })
+    }
+
+    fn restore_user(&self, user: &NewUser) -> io::Result<()> {
+        autoreleasepool(|_| {
+            let node = local_node()?;
+            let record = find(&node, &user.name)?
+                .ok_or_else(|| io::Error::other(format!("no user record {}", user.name)))?;
+            set_pool_attributes(&record, user)
+        })
+    }
+
+    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()> {
+        autoreleasepool(|_| {
+            let node = local_node()?;
+            let record = find(&node, name)?
+                .ok_or_else(|| io::Error::other(format!("no user record {name}")))?;
+            let group = group(&node, ADMIN_GROUP)?;
+            let mut error = None;
+            if admin {
+                // SAFETY: both are records of the local node.
+                if !unsafe { group.addMemberRecord_error(Some(&record), Some(&mut error)) } {
+                    return Err(od_error("adding to the admin group", error));
+                }
+            } else {
+                // SAFETY: both are records of the local node. Not a member is an error
+                // that changes nothing; the helper asks the directory afterwards.
+                unsafe { group.removeMemberRecord_error(Some(&record), Some(&mut error)) };
             }
             Ok(())
         })
@@ -174,10 +215,9 @@ impl Host for MacHost {
                 };
             };
             // A stale membership would make the next holder of the name an
-            // administrator: a pool user is replaced under the same name (after an
-            // administrator's lease, too), so the group is cleaned first. A removal
-            // that fails is not judged here: the helper asks the directory afterwards
-            // whether the new user is a member, and a slot whose user is never goes free.
+            // administrator, so the group is cleaned first. A removal that fails is not
+            // judged here. Only a lease user from before the pool is deleted (a pool
+            // user is permanent), and macOS 27 refuses root the deletion of a record.
             let admin = group(&node, ADMIN_GROUP)?;
             let mut ignored = None;
             // SAFETY: both are records of the local node. Not a member is an error
@@ -418,6 +458,60 @@ fn group(node: &ODNode, name: &str) -> io::Result<Retained<ODRecord>> {
         )
     }
     .ok_or_else(|| od_error(&format!("looking up group {name}"), error))
+}
+
+/// The user record `name` of `node`; `None` when there is none.
+fn find(node: &ODNode, name: &str) -> io::Result<Option<Retained<ODRecord>>> {
+    let mut error = None;
+    // SAFETY: the record type and name are NSStrings; no attributes needed.
+    let record = unsafe {
+        node.recordWithRecordType_name_attributes_error(
+            Some(&NSString::from_str(USERS)),
+            Some(&NSString::from_str(name)),
+            None,
+            Some(&mut error),
+        )
+    };
+    match (record, error) {
+        (Some(record), _) => Ok(Some(record)),
+        (None, None) => Ok(None),
+        (None, error) => Err(od_error("looking the user up", error)),
+    }
+}
+
+/// The first value of `attribute` of `record`, as text.
+fn first_value(record: &ODRecord, attribute: &str) -> io::Result<String> {
+    let mut error = None;
+    // SAFETY: the attribute name is an NSString.
+    let values = unsafe {
+        record.valuesForAttribute_error(Some(&NSString::from_str(attribute)), Some(&mut error))
+    }
+    .ok_or_else(|| od_error(&format!("reading {attribute}"), error))?;
+    let first = values
+        .firstObject()
+        .ok_or_else(|| io::Error::other(format!("{attribute} has no value")))?;
+    first
+        .downcast_ref::<NSString>()
+        .map(ToString::to_string)
+        .ok_or_else(|| io::Error::other(format!("{attribute} is not text")))
+}
+
+/// Sets on `record` the attributes the pool owns, as [`Host::create_user`] gives a new
+/// user and a reset gives them back.
+fn set_pool_attributes(record: &ODRecord, user: &NewUser) -> io::Result<()> {
+    let home = user.home.to_string_lossy();
+    for (attribute, value) in [
+        ("dsAttrTypeStandard:UniqueID", user.uid.to_string()),
+        ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
+        ("dsAttrTypeStandard:NFSHomeDirectory", home.into_owned()),
+        ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
+        ("dsAttrTypeStandard:RealName", user.name.clone()),
+        // Kept off the login window's list of users.
+        ("dsAttrTypeNative:IsHidden", "1".to_owned()),
+    ] {
+        set(record, attribute, &value)?;
+    }
+    Ok(())
 }
 
 /// Sets the single value of `attribute` on `record`.

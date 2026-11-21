@@ -1,7 +1,11 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
 //! fail with ([`TeardownError`], worded for the refusal at the protocol boundary). The
-//! kill and the deletion here are also the steps of a pool user's reset and replacement
-//! (`super::pool`); `user-delete` of a pool user's lease goes there.
+//! kill, the looks and the sweeps here are also the steps of a pool user's reset in place
+//! (`super::pool`); `user-delete` of a pool user's lease goes there, and deletes nothing.
+//! The deletion of a user record here is only for a lease user from before the pool; a
+//! pool user is never deleted, and on macOS 27 root is refused the deletion of a record
+//! and of a home, so that path fails there (the lease stays live, its uid held) unless the
+//! helper holds Full Disk Access.
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
 //! process of the uid is left, and the uid's launchd domains are gone. A
@@ -38,17 +42,7 @@ use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
 use crate::autologin::{Intent, read_intent};
 use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
-use crate::sweep::{Swept, empty, owned_entries, remove_owned, sweep};
-
-/// What [`Helper::remove_account`] does with the user's home folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Home {
-    /// Removes it whole, with the rest of the sweep.
-    Remove,
-    /// Empties it and keeps the folder: macOS refuses a process without Full Disk Access
-    /// the removal of a folder of `/Users`.
-    Keep,
-}
+use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
 
 /// Why a step of `kill-uid` or `user-delete` failed. Its text is the refusal the caller
 /// reads.
@@ -136,6 +130,9 @@ pub(crate) enum TeardownError {
     /// A user record could not be made.
     #[error("creating user {name}: {source}")]
     Create { name: String, source: io::Error },
+    /// The attributes of a pool user's record could not be set back.
+    #[error("setting back the record of user {name}: {source}")]
+    Restore { name: String, source: io::Error },
     /// The user may be in the `admin` group: the directory says so, or could not say.
     #[error("user {name} may be an administrator: {why}")]
     Admin { name: String, why: String },
@@ -480,16 +477,16 @@ impl Helper {
     }
 
     /// `user-delete <lease>`: ends the lease. A pool user's lease is recorded over and
-    /// its user reset or replaced (`super::pool`), returning `true`, or refused naming
-    /// why when the slot broke. For a lease from before the pool: sweeps what the user
+    /// its user reset in place (`super::pool`), returning `true`, or refused naming
+    /// what blocked the reset when the slot broke. For a lease from before the pool: sweeps what the user
     /// leaves, deletes its record and records the deletion, returning whether a record
     /// was there to delete. A lease already over returns `false` and touches nothing.
     ///
     /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
     /// asked first, while the record is there ([`super::Host::user_dir`]); an answer that
     /// is not an entry of [`super::Settings::user_folders`] is refused, never guessed at,
-    /// and the entry is removed whole with the rest of the sweep (emptied and kept where the system
-    /// placed it). When the record is gone
+    /// and the entry is removed whole with the rest of the sweep (emptied and kept where
+    /// the system placed it). When the record is gone
     /// already (a delete repeated after it went, or a record removed by someone else),
     /// there is no `DARWIN_USER_DIR` of the uid's own to ask for: every entry of the
     /// per-user folders that the uid owns is removed instead.
@@ -565,7 +562,7 @@ impl Helper {
         name: &str,
         uid: u32,
     ) -> Result<bool, TeardownError> {
-        let existed = self.remove_account(name, uid, Home::Remove)?;
+        let existed = self.remove_account(name, uid)?;
         ledger
             .record_deleted(lease)
             .map_err(|source| TeardownError::Record {
@@ -578,27 +575,19 @@ impl Helper {
 
     /// Deletes the user `name`, with `uid`, and sweeps what it leaves, in the order of
     /// [`Self::user_delete`]. Returns whether a record was there to delete.
-    /// The home is removed whole when `home` is [`Home::Remove`] (a lease from before the
-    /// pool); emptied and kept when it is [`Home::Keep`] (a pool user's, which the
-    /// replacement's new user has again).
-    pub(super) fn remove_account(
-        &self,
-        name: &str,
-        uid: u32,
-        home: Home,
-    ) -> Result<bool, TeardownError> {
+    /// The home is removed whole. This is the one path that deletes a user record, and
+    /// only for a lease user from before the pool, which `user-create` no longer makes: a
+    /// pool user is never passed here. On macOS 27 and later, root is refused the removal
+    /// of a local user record, of an account's home and of the per-user folders the
+    /// system placed, so this delete fails there (the lease stays live, its uid held)
+    /// unless the helper holds Full Disk Access.
+    pub(super) fn remove_account(&self, name: &str, uid: u32) -> Result<bool, TeardownError> {
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;
         let mut removed = Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
         self.none_left(uid)?;
         self.remove_ipc(name, uid)?;
-        match home {
-            Home::Remove => removed += Self::swept(sweep(&self.with_home(), name, uid), name)?,
-            Home::Keep => {
-                removed += Self::swept(sweep(&self.settings.sweep, name, uid), name)?;
-                removed += Self::swept(empty(&self.settings.homes.join(name), uid), name)?;
-            }
-        }
+        removed += Self::swept(sweep(&self.with_home(), name, uid), name)?;
         for entry in &entries {
             removed += Self::swept(remove_owned(entry, uid), name)?;
         }

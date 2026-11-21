@@ -1,6 +1,6 @@
-//! The reset and the replacement of a pool user keep its home folder: they empty it and
-//! never remove or make it again, which macOS refuses for a folder of `/Users` to a
-//! process without Full Disk Access.
+//! The reset of a pool user keeps its home folder: it empties it and never removes or
+//! makes it again, which macOS refuses for a folder of `/Users` to a process without Full
+//! Disk Access.
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -136,12 +136,13 @@ fn an_entry_below_the_home_that_cannot_be_removed_fails_the_reset_naming_it() {
     std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Catches a replacement that removes the home folder: a reset that is not clean (the
-/// home cannot be given back) replaces the user, and the emptied home is the one the
-/// new user is made over, the same folder, where the folder above refuses the removal of
-/// its entries; the account is deleted and made again with the same name and uid.
+/// Catches a reset that removes the home folder, or deletes the user, when a step fails:
+/// a reset whose home cannot be given back leaves the slot broken, naming that step, and
+/// deletes no record; the home was emptied and is the same folder, where the folder above
+/// refuses the removal of its entries, and the next `pool-create` resets the user again
+/// in place and frees the slot.
 #[test]
-fn a_replacement_keeps_the_emptied_home() {
+fn a_reset_that_fails_keeps_the_emptied_home_and_the_next_one_frees_the_slot() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
@@ -155,18 +156,18 @@ fn a_replacement_keeps_the_emptied_home() {
         .fail_script
         .insert("make_home", [true].into());
     log(&rig);
-    assert_eq!(rig.helper.user_delete("80.1"), Ok(true));
-    let calls = log(&rig);
-    let deleted = calls
-        .iter()
-        .position(|c| c == "delete_user kbf-lease-pool-0")
-        .unwrap();
-    let created = calls
-        .iter()
-        .position(|c| c == "create_user kbf-lease-pool-0")
-        .unwrap();
-    assert!(deleted < created, "{calls:#?}");
+    let error = rig.helper.user_delete("80.1").unwrap_err();
+    assert!(
+        error.contains(&format!("making {}: make_home failed", home.display())),
+        "{error}"
+    );
+    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
     assert_eq!(std::fs::metadata(&home).unwrap().ino(), before);
     assert_eq!(names(&home), Vec::<String>::new());
-    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
+    assert_eq!(rig.helper.pool_create().free, slots(&[0]));
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("delete_user")),
+        "{calls:#?}"
+    );
 }

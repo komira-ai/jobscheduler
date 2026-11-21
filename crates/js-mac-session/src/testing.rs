@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::autologin::CommandOutput;
-use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
+use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord};
 
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
@@ -31,6 +31,10 @@ pub(crate) struct State {
     pub(crate) log: Vec<String>,
     /// Users by name.
     pub(crate) users: BTreeMap<String, NewUser>,
+    /// The pool-owned attributes of a record, where they are not what a new user has
+    /// (hidden, the shell, the group and home of its [`NewUser`]): a record someone
+    /// changed, or one that is not the pool's.
+    pub(crate) records: BTreeMap<String, UserRecord>,
     /// Uids some user record outside the helper's has.
     pub(crate) foreign: BTreeSet<u32>,
     /// Live processes per uid.
@@ -46,7 +50,7 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
+    /// "delete_user", "user_record", "restore_user", "set_admin", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
     /// "term_group").
@@ -327,13 +331,60 @@ impl Host for FakeHost {
 
     fn create_user(&self, user: &NewUser) -> io::Result<()> {
         self.call("create_user", format!("create_user {}", user.name))?;
-        self.state().users.insert(user.name.clone(), user.clone());
+        let mut state = self.state();
+        state.records.remove(&user.name);
+        state.users.insert(user.name.clone(), user.clone());
         Ok(())
     }
 
     fn delete_user(&self, name: &str) -> io::Result<bool> {
         self.call("delete_user", format!("delete_user {name}"))?;
-        Ok(self.state().users.remove(name).is_some())
+        let mut state = self.state();
+        state.records.remove(name);
+        Ok(state.users.remove(name).is_some())
+    }
+
+    /// The record `records` holds for `name`, else what a pool user made for its
+    /// [`NewUser`] has.
+    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
+        self.call("user_record", format!("user_record {name}"))?;
+        let state = self.state();
+        Ok(state.records.get(name).cloned().or_else(|| {
+            state.users.get(name).map(|user| UserRecord {
+                uid: user.uid,
+                gid: user.gid,
+                home: user.home.clone(),
+                hidden: true,
+                shell: SHELL.to_owned(),
+            })
+        }))
+    }
+
+    /// Gives the record `user.name` the attributes of a new user, whatever `records`
+    /// held; its membership of `admin` stays.
+    fn restore_user(&self, user: &NewUser) -> io::Result<()> {
+        self.call("restore_user", format!("restore_user {}", user.name))?;
+        let mut state = self.state();
+        state.records.remove(&user.name);
+        let admin = state.users.get(&user.name).is_some_and(|held| held.admin);
+        state.users.insert(
+            user.name.clone(),
+            NewUser {
+                admin,
+                ..user.clone()
+            },
+        );
+        Ok(())
+    }
+
+    /// Changes the membership of the record `name` if it exists.
+    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()> {
+        self.call("set_admin", format!("set_admin {name} {admin}"))?;
+        self.state()
+            .users
+            .entry(name.to_owned())
+            .and_modify(|user| user.admin = admin);
+        Ok(())
     }
 
     /// The next answer of `print_script`, or launchd's: exit 0 for a domain in

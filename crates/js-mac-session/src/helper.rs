@@ -9,8 +9,9 @@
 //! Rules every verb keeps:
 //! - A lease id is parsed strictly and is used once.
 //! - A lease's user is a pool user, `kbf-lease-pool-<slot>`, lent for the lease and
-//!   reset (or replaced) when it ends ([`pool`]); or, for a lease a release before the
-//!   pool created, its own `kbf-lease-<term>-<seq>`, deleted when it ends.
+//!   reset in place when it ends ([`pool`]; the pool's users are permanent, never
+//!   deleted); or, for a lease a release before the pool created, its own
+//!   `kbf-lease-<term>-<seq>`, deleted when it ends (which macOS 27 refuses root).
 //! - The uid comes from the ledger, never from a lookup, and must be in the lease
 //!   range; a uid outside it is never touched.
 //! - `user-create` is refused for a lease id used before (so a grant is single-use),
@@ -40,10 +41,12 @@
 //!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
 //!   user starts after it returns. An outcome that does not hold after the last attempt
 //!   fails, naming what remains, and the lease stays live: its uid is quarantined.
-//! - `user-delete` of a pool user's lease records the lease over and resets the user;
-//!   a reset that is not clean replaces it, and a replacement that fails breaks the slot
-//!   ([`pool`]). The deletion of a user (a lease's from before the pool, or a pool user
-//!   being replaced) refuses while any process of the uid remains. It first asks for the
+//! - `user-delete` of a pool user's lease records the lease over and resets the user in
+//!   place (its home and per-user folder emptied and kept, its record's pool-owned
+//!   attributes set back, its membership of `admin` removed); a reset that is not clean
+//!   breaks the slot, naming what blocked it ([`pool`]). Nothing of a pool user is
+//!   deleted. The deletion of a lease's user from before the pool refuses while any
+//!   process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
 //!   any answer that is not such an entry; then it looks (and boots out the domains),
@@ -172,11 +175,33 @@ pub trait Host: Send + Sync {
     /// The record could not be created.
     fn create_user(&self, user: &NewUser) -> io::Result<()>;
     /// Deletes the user record `name` (and any group membership it has); `false` when
-    /// there is none.
+    /// there is none. Only a lease user from before the pool is ever deleted: the pool's
+    /// users are permanent, and macOS refuses root the deletion of a local user record
+    /// unless the helper holds Full Disk Access.
     ///
     /// # Errors
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
+    /// The attributes of the record `name` that the pool owns ([`UserRecord`]); `None`
+    /// when there is no such record.
+    ///
+    /// # Errors
+    /// The directory could not be asked.
+    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>>;
+    /// Sets the pool-owned attributes of the existing record `user.name` to what
+    /// [`Host::create_user`] gives a new one (uid, primary group, home path, shell, real
+    /// name, hidden), leaving its password and its membership of `admin` alone.
+    ///
+    /// # Errors
+    /// The record could not be found or an attribute could not be set.
+    fn restore_user(&self, user: &NewUser) -> io::Result<()>;
+    /// Puts the user `name` in the `admin` group (`admin`) or takes it out. Taking out a
+    /// user that is not a member is not an error; whether it worked is read back from
+    /// the directory.
+    ///
+    /// # Errors
+    /// The user could not be found or added (or, on a host that can tell, removed).
+    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()>;
     /// How `launchctl print <domain>` ended: its exit code and its standard output
     /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
     /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
@@ -309,6 +334,25 @@ pub struct LiveProcess {
     pub command: String,
 }
 
+/// The login shell of every pool user.
+pub const SHELL: &str = "/bin/zsh";
+
+/// The attributes of a user record that the pool owns: what `pool-create` makes and
+/// every reset sets back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRecord {
+    /// The uid.
+    pub uid: u32,
+    /// The primary group.
+    pub gid: u32,
+    /// The home folder's path.
+    pub home: PathBuf,
+    /// Whether the record is kept off the login window's list of users.
+    pub hidden: bool,
+    /// The login shell.
+    pub shell: String,
+}
+
 /// A user record to create.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewUser {
@@ -343,8 +387,9 @@ pub struct Settings {
     /// [`Self::user_folders`].
     pub sweep: SweepPlan,
     /// Where macOS keeps each user's `DARWIN_USER_DIR` entry (`/private/var/folders`): the
-    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is removed whole by
-    /// `user-delete`, or emptied and kept where the system placed it (`sunlnk`).
+    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is emptied and kept (a pool
+    /// user's reset) or, for a lease from before the pool, removed whole by `user-delete`
+    /// (emptied and kept where the system placed it, `sunlnk`).
     pub user_folders: PathBuf,
     /// The gate's grant keys; without them no administrator is ever made.
     pub grant_keys: Option<GrantKeys>,
@@ -494,7 +539,7 @@ impl Helper {
     }
 
     /// `user-create <lease> [grant]`: the lease takes a free pool user (an administrator,
-    /// replaced for the lease, with a valid grant), whose home folder is empty and only it
+    /// added to `admin` for the lease, with a valid grant), whose home folder is empty and only it
     /// can enter. Returns its uid.
     ///
     /// # Errors

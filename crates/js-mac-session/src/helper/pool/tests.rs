@@ -1,18 +1,19 @@
 //! The pool against the fake host: a lease takes a free pool user and gives it back
-//! reset, a reset that is not clean replaces the user, a replacement that fails breaks
-//! the slot, and the pool is made, and recovered after a restart, from the ledger.
+//! reset in place, a reset that is not clean breaks the slot (nothing is ever deleted),
+//! `pool-create` resets a broken slot again and adopts the pool's own users that are
+//! already there, and the pool is made, and recovered after a restart, from the ledger.
 
 use std::path::PathBuf;
 
 use super::*;
 use crate::helper::tests::{Rig, add_legacy, log, me, my_gid, rig, rig_with};
-use crate::helper::{DSEDITGROUP, IPCS, NewUser, Outcome};
+use crate::helper::{DSEDITGROUP, Host as _, IPCS, NewUser, Outcome, UserRecord};
 use crate::lease::{PoolSize, UidRange};
 use crate::proto::{PoolState, Reply, Request};
 use crate::testing::empty_domain;
 
 /// The calls in `calls` that make or delete a user record.
-fn records(calls: &[String]) -> Vec<String> {
+pub(super) fn records(calls: &[String]) -> Vec<String> {
     calls
         .iter()
         .filter(|c| c.starts_with("create_user") || c.starts_with("delete_user"))
@@ -26,7 +27,7 @@ pub(super) fn home(rig: &Rig, n: u32) -> PathBuf {
 }
 
 /// The `DARWIN_USER_DIR` entry of `uid` in `rig`: what the fake host's answer names.
-fn entry(rig: &Rig, uid: u32) -> PathBuf {
+pub(super) fn entry(rig: &Rig, uid: u32) -> PathBuf {
     rig.dir.join(format!("folders/zz/{uid}"))
 }
 
@@ -37,7 +38,7 @@ pub(super) fn slots(slots: &[u32]) -> Vec<Slot> {
 
 /// A rig over `rig`'s state directory and fake host after a restart, its boot reset not
 /// yet run.
-fn restarted(rig: Rig, name: &str) -> Rig {
+pub(super) fn restarted(rig: Rig, name: &str) -> Rig {
     let range = rig.helper.settings.range;
     let host = rig.host.clone();
     let dir = rig.dir.clone();
@@ -146,80 +147,111 @@ fn reset_leaves_no_residue() {
     );
 }
 
-/// Catches: a reset that is not clean returning the user to free as it is, a
-/// replacement that keeps the old record (or makes the new one under another name or
-/// uid), or a slot free before its new user exists.
+/// Catches a broken slot that is deleted and made again (its record, its home or a
+/// system-placed folder removed, as macOS 27 refuses root) instead of reset where it is:
+/// a lease changes its user's record and leaves files in the home and in the per-user
+/// folder, and its first reset fails at the home; the slot is broken, and the next
+/// `pool-create` resets it again in place: no record deleted or made, the home and the
+/// folder emptied and kept, the pool-owned attributes set back, the slot free and lent
+/// again with the same uid.
 #[test]
-fn failed_reset_deletes_and_replaces() {
-    let rig = rig("pool-replace", 1);
+fn a_broken_slot_is_reset_in_place_and_nothing_is_deleted() {
+    let rig = rig("pool-in-place", 1);
     let uid = rig.helper.user_create("72.1", None).unwrap();
-    std::fs::create_dir_all(home(&rig, 0)).unwrap();
-    std::fs::write(home(&rig, 0).join("left"), "x").unwrap();
-    // The reset's last step fails (its home cannot be made again): not clean.
+    let home = home(&rig, 0);
+    std::fs::create_dir_all(home.join("Documents")).unwrap();
+    std::fs::write(home.join("left"), "x").unwrap();
+    let entry = entry(&rig, uid);
+    for folder in ["0", "C", "T"] {
+        std::fs::create_dir_all(entry.join(folder)).unwrap();
+    }
+    std::fs::write(entry.join("T/scratch"), "x").unwrap();
+    std::fs::write(entry.join("stray"), "x").unwrap();
+    rig.host.state().records.insert(
+        "kbf-lease-pool-0".to_owned(),
+        UserRecord {
+            uid,
+            gid: my_gid() + 1,
+            home: PathBuf::from("/var/empty"),
+            hidden: false,
+            shell: "/bin/sh".to_owned(),
+        },
+    );
+    // The reset's home step fails: not clean.
     rig.host
         .state()
         .fail_script
         .insert("make_home", [true].into());
     log(&rig);
-    assert_eq!(rig.helper.user_delete("72.1"), Ok(true));
+    let error = rig.helper.user_delete("72.1").unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "slot 0's user kbf-lease-pool-0 could not be reset in place, so the slot is \
+             broken and lent to no one until pool-create resets it again: making {}: \
+             make_home failed",
+            home.display()
+        )
+    );
+    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
+
+    // Reset again in place.
+    let created = rig.helper.pool_create();
+    assert_eq!(created.errors, Vec::<String>::new());
+    assert_eq!(created.free, slots(&[0]));
     let calls = log(&rig);
-    let made = format!("make_home {} {uid}:{}", home(&rig, 0).display(), my_gid());
-    let deleted = calls
-        .iter()
-        .position(|c| c == "delete_user kbf-lease-pool-0")
-        .unwrap();
-    let homes: Vec<usize> = calls
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c == made)
-        .map(|(i, _)| i)
-        .collect();
-    let created = calls
-        .iter()
-        .position(|c| c == "create_user kbf-lease-pool-0")
-        .unwrap();
-    // The reset's failed home, then the deletion, the new home and the new record.
-    assert_eq!(homes.len(), 2, "{calls:#?}");
-    assert!(homes[0] < deleted && deleted < homes[1] && homes[1] < created);
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+    assert!(calls.contains(&"restore_user kbf-lease-pool-0".to_owned()));
     assert_eq!(
         rig.host.state().users["kbf-lease-pool-0"],
         NewUser {
             name: "kbf-lease-pool-0".to_owned(),
             uid,
             gid: my_gid(),
-            home: home(&rig, 0),
+            home: home.clone(),
             admin: false,
         }
     );
-    assert!(!home(&rig, 0).join("left").exists());
-    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
-    assert_eq!(rig.helper.user_create("72.2", None), Ok(uid));
-    let pool = std::fs::read_to_string(rig.dir.join("pool")).unwrap();
     assert_eq!(
-        pool,
-        "made 0 1000\nfree 0\nleased 0 72.1\nresetting 0\nfree 0\nleased 0 72.2\n"
-            .replace("1000", &uid.to_string())
+        rig.host.user_record("kbf-lease-pool-0").unwrap(),
+        Some(UserRecord {
+            uid,
+            gid: my_gid(),
+            home: home.clone(),
+            hidden: true,
+            shell: "/bin/zsh".to_owned(),
+        })
     );
+    assert!(home.is_dir());
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    let mut kept: Vec<_> = std::fs::read_dir(&entry)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["0", "C", "T"]);
+    assert_eq!(std::fs::read_dir(entry.join("T")).unwrap().count(), 0);
+    assert_eq!(rig.helper.user_create("72.2", None), Ok(uid));
 }
 
-/// Catches: a slot whose reset and replacement both failed handed to a lease, or
-/// shown as anything but broken; and a broken slot that `pool-create` never repairs.
+/// Catches a reset in place that cannot finish going back to free, or showing as anything
+/// but broken, naming what blocked it, and handed to a lease; and a broken slot that
+/// `pool-create` never repairs.
 #[test]
-fn replacement_failure_marks_slot_broken() {
+fn a_reset_that_cannot_finish_leaves_the_slot_broken_naming_the_blocker() {
     let rig = rig("pool-broken", 2);
     let uid = rig.helper.user_create("73.1", None).unwrap();
     rig.helper.user_create("73.2", None).unwrap();
-    rig.host
-        .state()
-        .fail_script
-        .insert("make_home", [true].into());
-    rig.host.state().fail.insert("create_user");
+    rig.host.state().fail.insert("make_home");
     let error = rig.helper.user_delete("73.1").unwrap_err();
     assert_eq!(
         error,
-        "slot 0's user kbf-lease-pool-0 could be neither reset nor replaced, so the slot \
-         is broken and lent to no one until pool-create replaces it: creating user \
-         kbf-lease-pool-0: create_user failed"
+        format!(
+            "slot 0's user kbf-lease-pool-0 could not be reset in place, so the slot \
+             is broken and lent to no one until pool-create resets it again: making {}: \
+             make_home failed",
+            home(&rig, 0).display()
+        )
     );
     // The lease is over all the same: a repeat finds nothing to do.
     assert_eq!(rig.helper.user_delete("73.1"), Ok(false));
@@ -235,16 +267,17 @@ fn replacement_failure_marks_slot_broken() {
         "the pool has no free user: of 2 slots, 1 leased, 0 resetting, broken: [0], not \
          made: []; retry when a lease ends"
     );
-    // A pool-create that cannot replace it either leaves it broken, and says why.
+    // A pool-create that cannot reset it either leaves it broken, and says why.
     let created = rig.helper.pool_create();
     assert_eq!(created.broken, slots(&[0]));
     assert_eq!(
         created.errors,
-        [
-            "slot 0: slot 0's user kbf-lease-pool-0 could be neither reset nor replaced, \
-             so the slot is broken and lent to no one until pool-create replaces it: \
-             creating user kbf-lease-pool-0: create_user failed"
-        ]
+        [format!(
+            "slot 0: slot 0's user kbf-lease-pool-0 could not be reset in place, so the \
+             slot is broken and lent to no one until pool-create resets it again: making \
+             {}: make_home failed",
+            home(&rig, 0).display()
+        )]
     );
     // One that can repairs it.
     rig.host.state().fail.clear();
@@ -423,7 +456,8 @@ fn pool_create_makes_a_slot_only_on_a_uid_nothing_else_has() {
         created.errors,
         [
             format!(
-                "slot 1: a user record the ledger does not hold has uid {}; it is not adopted",
+                "slot 1: a user record the ledger does not hold has uid {} and is not \
+                 kbf-lease-pool-1; it is not adopted",
                 base + 1
             ),
             "slot 5: the uid range ".to_owned()
@@ -546,9 +580,9 @@ fn a_pool_record_that_cannot_be_written_stops_the_slot() {
     );
 }
 
-/// Catches: an orphan whose reset and replacement fail stopping the boot reset (the Mac
-/// would serve nothing for one bad user), or one lent anyway; and an administrator's
-/// orphan reset rather than replaced.
+/// Catches: an orphan whose reset fails stopping the boot reset (the Mac would serve
+/// nothing for one bad user), or one lent anyway; and an administrator's orphan deleted
+/// or left in `admin` instead of reset in place.
 #[test]
 fn an_orphan_that_cannot_be_reset_is_broken_and_the_reset_goes_on() {
     let rig = rig("pool-orphan-broken", 2);
@@ -564,40 +598,45 @@ fn an_orphan_that_cannot_be_reset_is_broken_and_the_reset_goes_on() {
     rig.host
         .state()
         .fail_script
-        .insert("create_user", [true].into());
+        .insert("make_home", [true].into());
     rig.helper.boot_reset(&[]).unwrap();
     let calls = log(&rig);
-    // The administrator's slot was replaced (and failed), never reset; the other reset.
-    assert_eq!(
-        records(&calls),
-        [
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0",
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0",
-        ],
-        "replaced, failed, then repaired by the reset's pool-create"
-    );
+    // The administrator's slot was reset in place, never deleted, and failed; the other
+    // was reset; the reset's pool-create then reset the broken one again.
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+    let pool = std::fs::read_to_string(rig.dir.join("pool")).unwrap();
+    assert!(pool.contains("broken 0\n"), "{pool}");
     let status = rig.helper.pool_status();
     assert_eq!(status.free, slots(&[0, 1]));
     assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
 }
 
 /// Catches: each step of the reset that does not hold taken as clean (so the user goes
-/// back free as it is): its kill not sent, its record gone, its record not readable, its IPC objects not
-/// listed or not removed, its home not made again. Each replaces the user.
+/// back free as it is): its kill not sent, its record not readable, its IPC objects not
+/// listed or not removed, its home not made again, its record not set back. Each leaves
+/// the slot broken, deletes nothing, and is mended by the next `pool-create`; a user
+/// with no record is made.
 #[test]
-fn every_reset_step_that_does_not_hold_replaces_the_user() {
+fn every_reset_step_that_does_not_hold_breaks_the_slot_and_the_next_reset_frees_it() {
     type Break = fn(&Rig, u32);
-    let breaks: [(&str, Break); 6] = [
+    let breaks: [(&str, Break); 7] = [
+        ("it cannot be taken out of admin", |rig, _| {
+            rig.host
+                .state()
+                .fail_script
+                .insert("set_admin", [true].into());
+        }),
         ("the kill cannot be sent", |rig, _| {
             rig.host
                 .state()
                 .fail_script
                 .insert("kill_all", [true].into());
         }),
-        ("its record is gone", |rig, _| {
-            rig.host.state().users.remove("kbf-lease-pool-0");
+        ("its record cannot be set back", |rig, _| {
+            rig.host
+                .state()
+                .fail_script
+                .insert("restore_user", [true].into());
         }),
         ("its record cannot be read", |rig, _| {
             rig.host
@@ -632,20 +671,27 @@ fn every_reset_step_that_does_not_hold_replaces_the_user() {
         let uid = rig.helper.user_create("79.1", None).unwrap();
         broken(&rig, uid);
         log(&rig);
-        assert_eq!(rig.helper.user_delete("79.1"), Ok(true), "{what}");
-        let calls = log(&rig);
-        assert_eq!(
-            records(&calls).last().map(String::as_str),
-            Some("create_user kbf-lease-pool-0"),
-            "{what}: {calls:#?}"
-        );
+        let error = rig.helper.user_delete("79.1").unwrap_err();
         assert!(
-            calls.iter().any(|c| c == "delete_user kbf-lease-pool-0"),
-            "{what}: {calls:#?}"
+            error.contains("could not be reset in place"),
+            "{what}: {error}"
         );
-        assert_eq!(rig.helper.pool_status().free, slots(&[0]), "{what}");
+        assert_eq!(rig.helper.pool_status().broken, slots(&[0]), "{what}");
+        assert_eq!(rig.helper.pool_create().free, slots(&[0]), "{what}");
+        let calls = log(&rig);
+        assert_eq!(records(&calls), Vec::<String>::new(), "{what}: {calls:#?}");
         assert!(rig.host.state().ipc.is_empty(), "{what}");
     }
+
+    // A user whose record is gone is made, then reset.
+    let rig = rig("pool-step-gone", 1);
+    rig.helper.user_create("79.2", None).unwrap();
+    rig.host.state().users.remove("kbf-lease-pool-0");
+    log(&rig);
+    assert_eq!(rig.helper.user_delete("79.2"), Ok(true));
+    let calls = log(&rig);
+    assert_eq!(records(&calls), ["create_user kbf-lease-pool-0"]);
+    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
 }
 
 /// Catches: `pool-create` and `pool-status` routed to the wrong verb, or a reply that
@@ -672,8 +718,7 @@ fn pool_verbs_are_routed_and_answer_each_slot() {
 }
 
 /// Catches an `ipcs` that fails (so the uid's IPC objects cannot be looked at) read as
-/// none: neither the reset nor the replacement, which looks too, goes on, and the slot is
-/// broken, naming why.
+/// none: the reset does not go on, and the slot is broken, naming why.
 #[test]
 fn ipc_objects_that_cannot_be_listed_break_the_slot() {
     let rig = rig("pool-ipcs", 1);
@@ -690,9 +735,9 @@ fn ipc_objects_that_cannot_be_listed_break_the_slot() {
     assert_eq!(
         rig.helper.user_delete("81.1"),
         Err(format!(
-            "slot 0's user kbf-lease-pool-0 could be neither reset nor replaced, so the slot \
-             is broken and lent to no one until pool-create replaces it: listing the IPC \
-             objects of uid {uid}: ipcs failed: ipcs: sysctl failed"
+            "slot 0's user kbf-lease-pool-0 could not be reset in place, so the slot \
+             is broken and lent to no one until pool-create resets it again: listing the \
+             IPC objects of uid {uid}: ipcs failed: ipcs: sysctl failed"
         ))
     );
     assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
@@ -713,25 +758,18 @@ fn ipc_objects_that_cannot_be_listed_break_the_slot() {
     assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
 }
 
-/// Catches a leftover lease whose pool user can be neither reset nor replaced stopping
-/// the boot reset (the Mac would serve nothing for one bad user), or that user lent
-/// again: the lease is ended all the same and its slot is broken.
+/// Catches a leftover lease whose pool user cannot be reset stopping the boot reset (the
+/// Mac would serve nothing for one bad user), or that user lent again: the lease is ended
+/// all the same and its slot is broken.
 #[test]
 fn a_leftover_lease_whose_user_breaks_does_not_stop_the_boot_reset() {
     let rig = rig("pool-leftover-broken", 2);
     rig.helper.user_create("82.1", None).unwrap();
     let rig = restarted(rig, "pool-leftover-broken");
-    rig.host
-        .state()
-        .fail_script
-        .insert("make_home", [true].into());
-    rig.host
-        .state()
-        .fail_script
-        .insert("create_user", [true, true].into());
+    rig.host.state().fail.insert("make_home");
     let reset = rig.helper.boot_reset(&[]).unwrap();
     assert_eq!(reset.deleted, [LeaseId::new(82, 1)]);
-    // Its replacement failed at the end of the lease and again at the repair.
+    // Its reset failed at the end of the lease and again at the repair.
     let status = rig.helper.pool_status();
     assert_eq!(status.broken, slots(&[0]));
     assert_eq!(status.free, slots(&[1]));
@@ -739,18 +777,19 @@ fn a_leftover_lease_whose_user_breaks_does_not_stop_the_boot_reset() {
 }
 
 /// The grant of lease `lease` from the rig's gate key.
-fn grant(lease: &str) -> String {
+pub(super) fn grant(lease: &str) -> String {
     crate::grant::testing::sign(
         7,
         &crate::grant::testing::text("SERIAL1", lease, crate::testing::NOW.cast_signed()),
     )
 }
 
-/// Catches an administrator's user that a crash during the end of its lease leaves to
-/// the recovery as a slot to reset (which never looks at `admin`): its `resetting`
-/// record says the user is replaced, and after the restart it is.
+/// Catches an administrator's user that a crash during the end of its lease leaves in
+/// `admin`: whatever its `resetting` record says (a `replace` record is still read), the
+/// recovery after the restart resets it in place, takes it out of `admin` and deletes
+/// nothing.
 #[test]
-fn an_administrator_s_lease_cut_off_mid_end_is_replaced_after_a_restart() {
+fn an_administrator_s_lease_cut_off_mid_end_is_reset_in_place_after_a_restart() {
     let rig = rig("pool-admin-crash", 1);
     rig.helper
         .user_create("83.1", Some(&grant("83.1")))
@@ -764,21 +803,16 @@ fn an_administrator_s_lease_cut_off_mid_end_is_replaced_after_a_restart() {
     let rig = restarted(rig, "pool-admin-crash");
     log(&rig);
     rig.helper.boot_reset(&[]).unwrap();
-    assert_eq!(
-        records(&log(&rig)),
-        [
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0"
-        ]
-    );
+    let calls = log(&rig);
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+    assert!(calls.contains(&"set_admin kbf-lease-pool-0 false".to_owned()));
     assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
     assert_eq!(rig.helper.pool_status().free, slots(&[0]));
 }
 
-/// Catches a pool user that is still in `admin` (a membership a deletion did not remove,
-/// which a new user of the same name inherits) going back free: the reset and the
-/// replacement each end by asking the directory, a "yes" or no clear answer is not
-/// clean, and a slot whose user stays one is broken.
+/// Catches a pool user that is still in `admin` (a membership the next lease inherits)
+/// going back free: the reset takes it out and ends by asking the directory, a "yes" or
+/// no clear answer is not clean, and a slot whose user stays one is broken.
 #[test]
 fn a_pool_user_left_an_administrator_is_never_free() {
     let ask = format!("{DSEDITGROUP} -o checkmember -m kbf-lease-pool-0 admin");
@@ -787,7 +821,7 @@ fn a_pool_user_left_an_administrator_is_never_free() {
         stdout: stdout.to_owned(),
         stderr: stderr.to_owned(),
     };
-    // A user that is still one: the reset asks, finds it, and the replacement is not.
+    // A user that is still one: the reset takes it out, asks, and finds it is not.
     let rig = rig("pool-admin-left", 1);
     rig.helper.user_create("84.1", None).unwrap();
     rig.host
@@ -799,17 +833,11 @@ fn a_pool_user_left_an_administrator_is_never_free() {
     log(&rig);
     assert_eq!(rig.helper.user_delete("84.1"), Ok(true));
     let calls = log(&rig);
-    assert_eq!(
-        records(&calls),
-        [
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0"
-        ]
-    );
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
     let asked = format!("command {ask}");
     assert_eq!(
         calls.iter().filter(|c| **c == asked).count(),
-        2,
+        1,
         "{calls:#?}"
     );
     assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
@@ -839,9 +867,9 @@ fn a_pool_user_left_an_administrator_is_never_free() {
             Some(said) => {
                 rig.host.state().answers.insert(ask.clone(), said);
             }
-            // The reset's two programs, ipcs and dseditgroup, then the replacement's.
+            // The reset's two programs: ipcs, then dseditgroup.
             None => {
-                let script = [false, true, false, true];
+                let script = [false, true];
                 rig.host
                     .state()
                     .fail_script
@@ -851,8 +879,8 @@ fn a_pool_user_left_an_administrator_is_never_free() {
         assert_eq!(
             rig.helper.user_delete("84.2"),
             Err(format!(
-                "slot 0's user kbf-lease-pool-0 could be neither reset nor replaced, so the \
-                 slot is broken and lent to no one until pool-create replaces it: user \
+                "slot 0's user kbf-lease-pool-0 could not be reset in place, so the \
+                 slot is broken and lent to no one until pool-create resets it again: user \
                  kbf-lease-pool-0 may be an administrator: {why}"
             )),
             "{name}"

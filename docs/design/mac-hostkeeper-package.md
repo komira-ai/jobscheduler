@@ -262,6 +262,20 @@ when the pool names it; every native agent of a release that takes mounts report
 at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
 must reach its agent listener.
 
+## The pool's users stay for good
+
+The helper (`js-mac-session`) makes the pool's users (`kbf-lease-pool-<n>`) once and never deletes one, nor a home, nor a
+per-user folder the system placed: measured on macOS 27.0.1 with System Integrity Protection on, root (from a launchd
+daemon and from an ssh root shell) may not delete a local user record, may not remove an existing account's home, and
+may not remove `/private/var/folders/<xx>/<hash>`, though everything can be emptied. A lease's end resets its user in
+place, and a first install on a Mac that already has the pool's users (an earlier install left them) adopts the ones
+that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
+users: a Mac that must lose them is reset by its administrator.
+
+A management profile that grants Full Disk Access to the helper (a privacy-policy payload for its signed binary, which
+needs device management) would be an option, not a need: with it the helper could delete a user's record and home, and
+the one deletion that is left, of a lease user from before the pool, would work. Nothing here asks for it.
+
 ## Platform properties
 
 The hello reports `os=macos`, `arch=arm64` and `os_version`, the major version of the Mac's `ProductVersion`. A

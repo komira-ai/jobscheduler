@@ -1,7 +1,7 @@
 //! `js-mac-session`: the root helper that lends every Mac lease a user of its pool: the
 //! verbs `user-create` (a free pool user for the lease), `run` (in the background, or in
 //! the lease user's GUI session), `kill-uid` and `user-delete` (the lease ends: its user
-//! is reset for the next lease, or replaced), `pool-create` and `pool-status`, the GUI
+//! is reset in place for the next lease), `pool-create` and `pool-status`, the GUI
 //! session switch (`session-login`, `session-ready`, `session-idle`), the boot reset
 //! (which also makes the pool), and the leak scan's `scan`, `baseline` and
 //! `reboot-dirty` over a minimal item set.

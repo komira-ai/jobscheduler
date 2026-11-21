@@ -419,9 +419,13 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     );
 
     says(&lease.call("delete"), "existed", "user-delete");
-    assert!(!user_exists(&name), "the user record survived");
+    // A pool user is permanent: macOS refuses root the deletion of its record and home.
+    assert!(user_exists(&name), "the pool user's record was deleted");
+    assert!(
+        root("/bin/ls", &["-A", &home(&name)]).said().is_empty(),
+        "the home of {name} was not emptied"
+    );
     let mut gone = vec![
-        home(&name),
         tabs,
         format!("{shared}/kbf-ci-owned"),
         format!("{shared}/kbf-ci-dir"),
@@ -431,7 +435,11 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     gone.extend(override_plist);
     let survived: Vec<&String> = gone.iter().filter(|path| exists(path)).collect();
     assert!(survived.is_empty(), "survived the sweep: {survived:?}");
-    let files = root("/usr/bin/find", &["/private/var/folders", "-user", &uid]);
+    // The folders the system placed stay (emptied); no file is left in them.
+    let files = root(
+        "/usr/bin/find",
+        &["/private/var/folders", "-user", &uid, "-type", "f"],
+    );
     assert_eq!(
         files.said(),
         "",
@@ -677,9 +685,10 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         user_exists(&held.name()),
         "the held session's user was deleted"
     );
+    // The pool's users are permanent: the leftover lease is over, its user stays, reset.
     assert!(
-        !user_exists(&leftover.name()),
-        "the leftover user survived the reset"
+        user_exists(&leftover.name()),
+        "the leftover pool user was deleted"
     );
     says(
         &root(
@@ -702,8 +711,8 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "reset, nothing held"
     );
     assert!(
-        !user_exists(&held.name()),
-        "{} survived the reset",
+        user_exists(&held.name()),
+        "{} was deleted by the reset",
         held.name()
     );
     let auto_login = root(
