@@ -10,7 +10,9 @@
 //! 2. unless the stop is begun already: a taint the restarted agent will not re-check (see
 //!    `refuse_host` in `prepare`), or an `owed-*`
 //!    record, halts (76), and the host
-//!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
+//!    must be cordoned and hold no lease. An update that hands the runs over (the record's
+//!    `handover`, see `prepare`) looks at the taint alone and reads the host once, for its
+//!    session, with no cordon and whatever leases it holds; `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
 //!    within the cap, and a cap that is spent or a lease that came in defers (75, class
 //!    environment) with nothing stopped (a failed lift of the cordon on the way is no reason to
@@ -23,7 +25,11 @@
 //!    the host in the reading of step 2 (one save, so that the stop is never marked without it
 //!    and it is never written without the stop; a rerun that finds the stop begun reads no host
 //!    and keeps it), and the unit is stopped and waited for (renewing the cordon if it is
-//!    ours), for at most the declared bound less the start wait and a margin;
+//!    ours), for at most the declared bound less the start wait and a margin. On a handover the
+//!    handover file is written in the agent's state root just before every stop issued (the
+//!    agent reads it when the stop reaches it, finishes the starts, stops and post-job checks
+//!    under way, and exits leaving its runs), and removed once the unit is down (the new agent
+//!    removes one it finds at its start, so a removal that fails is let be);
 //! 4. if the record holds a restart plan (the unit changed, see `prepare`) on systemd, the wait
 //!    for the unit's cgroup to hold no process, so that the new `Slice`, `Delegate` and
 //!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
@@ -59,7 +65,7 @@ use crate::update_hook::{
     Params, Reason, Record, Report, START_WAIT_SECS, SYSTEMCTL, UnitState,
 };
 
-use super::prepare::{ask_secs, place, refuse_host, renew};
+use super::prepare::{ask_secs, place, refuse_host_in, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
 use super::{helper, pf};
 
@@ -117,8 +123,11 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     // that finds the stop begun reads nothing and keeps what the record holds.
     let mut session = None;
     if !entered_begun {
-        refuse_host(env)?;
-        session = hold(env, held, record, params)?;
+        refuse_host_in(env, record.handover)?;
+        session = match record.handover {
+            true => look(env)?,
+            false => hold(env, held, record, params)?,
+        };
     }
     // A first install has no unit to stop.
     if record.update.previous.is_some() {
@@ -134,6 +143,11 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         }
         let since = env.ports.clock.now_ms();
         stop(env, held, record, params, state, entered_begun)?;
+        if record.handover {
+            // The agent that read the request has ended. The new one removes a file it finds
+            // at its start, so one this cannot remove asks nothing of it.
+            let _ = env.ports.state.withdraw_handover();
+        }
         // A unit started by an earlier run holds the new agent: nothing to wait for.
         if !record.start_issued {
             wait_empty(env, held, record, params, since)?;
@@ -150,6 +164,28 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     }
     start(env, held, record, params)?;
     Ok(success())
+}
+
+/// The session the lease server shows for the host, for an update that hands the runs over:
+/// the last reading before the stop, with no cordon placed and no idle host waited for.
+fn look(env: &Env<'_>) -> Result<Option<u64>, Done> {
+    let host = env.ports.lease.host().map_err(lease_failure)?;
+    Ok(host.session_started_ms)
+}
+
+/// Asks the agent the stop is about to reach to hand its runs over (see `prepare`): written
+/// before every stop issued, so a rerun asks again.
+pub(super) fn request_handover(env: &Env<'_>, record: &Record) -> Result<(), Done> {
+    if !record.handover {
+        return Ok(());
+    }
+    env.ports.point();
+    env.ports.state.request_handover().map_err(|why| {
+        environment(
+            Reason::StopFailed,
+            format!("cannot ask the agent to hand its runs over: {why}"),
+        )
+    })
 }
 
 /// A failure of something remote or shared: not the release's doing.
@@ -378,6 +414,7 @@ fn stop(
             if entered_begun && record.start_issued {
                 return Ok(());
             }
+            request_handover(env, record)?;
             env.ports.point();
             env.ports.units.stop_no_block(&unit).map_err(|why| {
                 environment(Reason::StopFailed, format!("cannot stop {unit}: {why}"))

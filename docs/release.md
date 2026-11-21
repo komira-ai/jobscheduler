@@ -478,6 +478,14 @@ SHA-256 as the pin, and the manifest:
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
 
+The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
+running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
+and no `--egress` in its flags file): `prepare` neither cordons nor waits, and `cutover` and
+`rollback` write the handover file in the agent's state root before they stop the unit, so the
+stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
+(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
+drain of any other host.
+
 The two maintenance steps. `drain` writes the hold file in the agent's state root, cordons the
 host on the lease server and returns once the host is idle (no lease, no running job, not
 releasing, no mark). It has no bound unless the run gives a deadline; once the deadline passes

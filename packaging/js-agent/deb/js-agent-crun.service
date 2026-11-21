@@ -56,9 +56,17 @@
 #                         adopts no container that may still run (its start removes the
 #                         network wiring): it removes those, and their jobs are lost; a
 #                         container that ended meanwhile is adopted and its result reported
-#   --drain-wait 3600 --stop-grace 120   a stop (an update) still drains: the agent lets the
-#                         running jobs finish for up to an hour (the most --drain-wait
-#                         allows) and then stops them within 120 s before it exits
+#   --drain-wait 3600 --stop-grace 120   a plain stop (systemctl stop) drains: the agent lets
+#                         the running jobs finish for up to an hour (the most --drain-wait
+#                         allows) and then stops them within 120 s before it exits. An update
+#                         does not drain: its cutover writes the file handover in the state
+#                         root just before it stops the unit, and the agent that finds it at the
+#                         stop takes no new job, waits only until no start, stop or post-job
+#                         check is under way (seconds; --drain-wait at most), and exits leaving
+#                         every run as it is; the agent the cutover starts adopts them, as after
+#                         a crash. The update hook asks for it only of an agent that lists
+#                         `handover` in `js-agent --version` and has no --egress in its flags
+#                         file; see docs/runbooks/crun-host-setup.md
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
 #                         killed (its main process alone, as above: what it still ran is

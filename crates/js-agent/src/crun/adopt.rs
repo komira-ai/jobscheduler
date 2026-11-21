@@ -62,7 +62,7 @@ use js_types::JobNetwork;
 
 use super::dirs::cgroup_dir;
 use super::ledger::{
-    Booked, Entry, Failed, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
+    Booked, Entry, Failed, Left, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
 };
 use super::spec::{adopted_spec, concluded};
 use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
@@ -237,7 +237,19 @@ pub(super) fn report_lines(report: &SweepReport) -> Vec<String> {
             lease.run_id, lease.why
         )
     });
-    adopted.chain(removed).chain(failed).collect()
+    // A sidecar this process cannot read (a form it does not know, as one a later agent wrote
+    // would be, or a broken file) names a lease it neither takes over nor removes: its job, if
+    // it still runs, goes on with no agent to bound it, and the server finds it lost. That is
+    // said, never left silent. Another agent's sidecar is that agent's.
+    let left = report.left.iter().filter_map(|left| match left {
+        Left::Malformed { path, why } => Some(format!(
+            "crun: left the lease {} alone: its sidecar cannot be read ({why}), so its job, if it \
+             still runs, is neither taken over nor stopped",
+            path.file_stem().unwrap_or_default().to_string_lossy()
+        )),
+        Left::Foreign { .. } => None,
+    });
+    adopted.chain(removed).chain(failed).chain(left).collect()
 }
 
 impl CrunRuntime {

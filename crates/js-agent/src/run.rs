@@ -19,6 +19,22 @@
 //! What is left then is not dropped: a run whose container still exists is adopted by the
 //! next process of the agent, which lists it first, and its result is sent from there.
 //!
+//! # The handover
+//!
+//! A stop request that finds the handover file in the state root (the update hook writes it
+//! before it stops the agent to restart it on another release, see
+//! [`crate::lifecycle::handover`]) does not drain, in a session given the state root to look
+//! in ([`Session::with_handover`]): the worker takes no new job and the next heartbeat says
+//! `draining` at once, as in a drain; then, after each heartbeat, the worker is asked to park
+//! ([`Worker::park`](crate::Worker::park)), which it does only once no start, no stop and no
+//! finished job's cleanup is under way. Parked, it does nothing more, and the loop ends with
+//! status 0, every run left as it is for the next process to adopt and every result not yet
+//! acknowledged kept in the state root for it to send. Nothing is stopped and no result is
+//! waited for. When [`Drain::wait`] passes before the worker parks, or at a second stop
+//! request, the loop ends all the same and says so: what was under way is then the next
+//! process's, as after a crash. A file that is there but not of its form is not a request:
+//! the stop drains, and the log says why.
+//!
 //! # The other ends
 //!
 //! The agent never leaves a container without somebody to enforce its wall limit if it can
@@ -44,8 +60,9 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::hold_cordon::Keeper;
+use crate::lifecycle::handover::Handover;
 use crate::session::{Drain, Fatal, Note, Session, Step};
-use crate::worker::Snapshot;
+use crate::worker::{Parked, Snapshot};
 
 /// How a wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +181,17 @@ fn print(session: &Session<'_>, log: &mut dyn Write) {
 /// The end after a stop request.
 fn stop(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn Write) -> Exit {
     match session.drain_plan() {
-        Some(plan) => drain_jobs(session, plan, sleeper, log),
+        Some(plan) => match session.handover() {
+            Handover::Asked => hand_over(session, plan, sleeper, log),
+            Handover::Absent => drain_jobs(session, plan, sleeper, log),
+            Handover::Refused(why) => {
+                let _ = writeln!(
+                    log,
+                    "js-agent: the handover file is not used ({why}): the agent drains"
+                );
+                drain_jobs(session, plan, sleeper, log)
+            }
+        },
         None => {
             session.drain().iter().for_each(|note| {
                 let _ = writeln!(log, "js-agent: {note}");
@@ -189,17 +216,9 @@ fn drain_jobs(
         // What this heartbeat lists is what the server then believes: the drain is done
         // when a heartbeat that listed nothing has been sent.
         let idle = !session.drain_left();
-        let step = session.tick();
-        print(session, log);
-        let after = match step {
-            Step::Fatal(fatal) => return refused(session, fatal, log),
-            Step::Failed(why) => return failed(session, why, log),
-            Step::Wait { after, note } => {
-                note.iter().for_each(|note| {
-                    let _ = writeln!(log, "js-agent: {note}");
-                });
-                after
-            }
+        let after = match beat(session, log) {
+            Ok(after) => after,
+            Err(exit) => return exit,
         };
         waited = waited.saturating_add(after);
         if idle || waited >= end {
@@ -210,6 +229,64 @@ fn drain_jobs(
         }
         if sleeper.sleep(after) == Wake::Stop {
             return leave(session, log);
+        }
+    }
+}
+
+/// The handover of a session with jobs, see the module documentation. Time passes only in
+/// `sleeper`, and is counted as the waits asked for.
+fn hand_over(
+    session: &mut Session<'_>,
+    plan: Drain,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+) -> Exit {
+    session.begin_drain();
+    let _ = writeln!(
+        log,
+        "js-agent: handing over: no new job is taken, and the runs are left to the next \
+         process once no start, stop or check is under way"
+    );
+    let mut waited = Duration::ZERO;
+    loop {
+        let after = match beat(session, log) {
+            Ok(after) => after,
+            Err(exit) => return exit,
+        };
+        // Asked after the heartbeat, so the worker has the reply's stops and acknowledgements
+        // before it looks.
+        if session.park_jobs() != Some(Parked::Busy) {
+            let _ = writeln!(
+                log,
+                "js-agent: handed over: every run is left as it is to the next process"
+            );
+            return Exit::Stopped;
+        }
+        waited = waited.saturating_add(after);
+        if waited >= plan.wait || sleeper.sleep(after) == Wake::Stop {
+            let _ = writeln!(
+                log,
+                "js-agent: handing over: a start, a stop or a check is still under way and is \
+                 left to the next process"
+            );
+            return Exit::Stopped;
+        }
+    }
+}
+
+/// One heartbeat of a drain or a handover, and the lines it makes: the wait it asks for, or the
+/// end a refusal for good or the end of the worker makes (see the module documentation).
+fn beat(session: &mut Session<'_>, log: &mut dyn Write) -> Result<Duration, Exit> {
+    let step = session.tick();
+    print(session, log);
+    match step {
+        Step::Fatal(fatal) => Err(refused(session, fatal, log)),
+        Step::Failed(why) => Err(failed(session, why, log)),
+        Step::Wait { after, note } => {
+            note.iter().for_each(|note| {
+                let _ = writeln!(log, "js-agent: {note}");
+            });
+            Ok(after)
         }
     }
 }

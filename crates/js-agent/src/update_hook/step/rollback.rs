@@ -5,7 +5,8 @@
 //!
 //! In this order, each before anything is changed:
 //! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
-//!    `owed-*` record, halts (76), here and again before each phase below (an agent with such a
+//!    `owed-*` record (not on an update that hands the runs over, whose agents run their checks
+//!    while this step waits), halts (76), here and again before each phase below (an agent with such a
 //!    taint refuses every start, the old release included, so nothing is gained by going on; a
 //!    taint it will re-check, a residue of a process the pin file does not name, does not halt the
 //!    step; if the previous release is one that predates
@@ -39,11 +40,14 @@
 //!    after `cutover` issued the start, and before this step has, is the new agent and is drained
 //!    and stopped; any other unit that is up is the previous agent and needs no act; a stopped
 //!    unit needs the start;
-//! 5. drain (new agent only; the cordon is kept up, or put back if it lapsed, within the cap):
+//! 5. drain (new agent only, and not on an update that hands the runs over, whose new agent hands
+//!    them back as the cutover's did; the cordon is kept up, or put back if it lapsed, within
+//!    the cap):
 //!    wait up to the drain bound for the host to hold no lease, then mark `rb.drained`. A lease
 //!    after the bound fails the step (`drain_bound`, class environment) with nothing stopped
 //!    and the cordon left to lapse: the SIGTERM would land on a job of unknown phase;
-//! 6. stop (`rb.stop_begun` first, then the stop and a wait for the unit to be down), the mark
+//! 6. stop (`rb.stop_begun` first, then, on a handover, the handover file as `cutover` writes
+//!    it, the stop and a wait for the unit to be down, and the file removed), the mark
 //!    that the link is on the previous release (`rb.link_restored`, first), the start
 //!    (`rb.start_issued` first, and before it, with a `helper_unit` in the params, the helper
 //!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
@@ -102,10 +106,11 @@ use crate::update_hook::{
 };
 
 use super::cutover::{
-    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause, show,
+    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
+    request_handover, show,
 };
 use super::helper;
-use super::prepare::{place, refuse_host, renew};
+use super::prepare::{place, refuse_host, refuse_host_in, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
 use crate::cordon::CREDENTIAL_CODES;
 
@@ -139,7 +144,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 }
 
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !begun(record) {
         return finish(env, held, record);
     }
@@ -261,20 +266,23 @@ fn restore(
         if !new_agent {
             return await_hello(env, params, held, record);
         }
-        drain(env, params, held, record)?;
+        // The new agent hands its runs over to the previous one as the cutover's did.
+        if !record.handover {
+            drain(env, params, held, record)?;
+        }
         stop(env, params, held, record, &unit)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.link_restored {
         mark_act(env, params, held, record, set_link_restored)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     // The helper of the previous release runs before its agent starts; a rerun that finds the
     // start issued has done this already.
     if !record.rb.start_issued {
         helper::replace(env, held, record, params, previous)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.start_issued {
         mark_act(env, params, held, record, set_start_issued)?;
     }
@@ -432,16 +440,22 @@ fn stop(
     record: &mut Record,
     unit: &str,
 ) -> Result<(), Done> {
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.stop_begun {
         mark_act(env, params, held, record, set_stop_begun)?;
     }
+    request_handover(env, record)?;
     env.ports.point();
     env.ports
         .units
         .stop_no_block(unit)
         .map_err(|why| environment(Reason::StopFailed, format!("cannot stop {unit}: {why}")))?;
-    wait_down(env, params, held, record, unit)
+    wait_down(env, params, held, record, unit)?;
+    if record.handover {
+        // As in `cutover`: the previous agent removes a file it finds at its start.
+        let _ = env.ports.state.withdraw_handover();
+    }
+    Ok(())
 }
 
 fn wait_down(
@@ -454,7 +468,7 @@ fn wait_down(
     let bound_ms = stop_bound_ms(params);
     let began = env.ports.clock.now_ms();
     loop {
-        refuse_host(env)?;
+        refuse_host_in(env, record.handover)?;
         let state = show(env, unit, Reason::StopFailed)?;
         if matches!(life(&state), Life::Down) {
             return Ok(());
@@ -527,7 +541,7 @@ fn await_hello(
     let began = env.ports.clock.now_ms();
     let mut last = Look::Silent;
     loop {
-        refuse_host(env)?;
+        refuse_host_in(env, record.handover)?;
         let state = show(env, &unit, Reason::StartFailed)?;
         let down = matches!(
             state.active.as_str(),

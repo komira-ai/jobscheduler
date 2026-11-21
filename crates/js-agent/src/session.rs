@@ -160,6 +160,7 @@
 //! minutes of leases that just ended are not left behind.
 
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -177,11 +178,12 @@ use crate::disk::DiskGauge;
 use crate::dispatch::Cell;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
+use crate::lifecycle::handover::{self, Handover};
 use crate::logs::HostGrant;
 use crate::refused_body::{code_of, field_of, reason_of, supported_of};
 use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
-use crate::worker::{Delivery, Snapshot, Worker};
+use crate::worker::{Delivery, Parked, Snapshot, Worker};
 
 mod fatal;
 mod reason;
@@ -416,6 +418,9 @@ pub struct Session<'a> {
     seq: u64,
     /// Where each welcome is told to the dispatch poller, when the agent has one.
     dispatch: Option<&'a Cell>,
+    /// The state root a stop request looks in for a handover, when the next process can
+    /// adopt the runs ([`Session::with_handover`]).
+    handover: Option<&'a Path>,
 }
 
 impl<'a> Session<'a> {
@@ -447,7 +452,32 @@ impl<'a> Session<'a> {
             news: false,
             seq: 0,
             dispatch: None,
+            handover: None,
         }
+    }
+
+    /// The same session handing its runs over to the next process of the agent at a stop
+    /// request that finds the handover file in the state root `root`, instead of draining
+    /// (see [`crate::lifecycle::handover`]); `None` when that process could not adopt them,
+    /// and every stop drains.
+    #[must_use]
+    pub fn with_handover(self, root: Option<&'a Path>) -> Self {
+        Self {
+            handover: root,
+            ..self
+        }
+    }
+
+    /// What the state root says of a handover now; absent for a session given none.
+    pub fn handover(&self) -> Handover {
+        let owner = rustix::process::geteuid().as_raw();
+        let read = |root: &&Path| handover::read(root, owner);
+        self.handover.as_ref().map_or(Handover::Absent, read)
+    }
+
+    /// Asks the worker to park for a handover ([`Worker::park`]); `None` with no worker.
+    pub fn park_jobs(&self) -> Option<Parked> {
+        self.jobs.as_ref().map(|jobs| jobs.worker.park())
     }
 
     /// The same session saying hello as agent process `id` in every hello it sends (see the

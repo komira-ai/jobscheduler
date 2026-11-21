@@ -115,12 +115,14 @@ use crate::readiness::{HookWindow, WorkerHook};
 
 mod bell;
 mod nudge;
+mod park;
 mod quiesce;
 mod replies;
 
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 use crate::vm::VmSettings;
+pub use park::Parked;
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
 use replies::{describe, stops, without_starts};
@@ -424,6 +426,8 @@ enum Order {
     Nudge,
     /// Answer on `0` once every order before this one is done and one step more is.
     Settle(SyncSender<()>),
+    /// Stop for good if closed and quiet for a handover, answering on `0` (module `park`).
+    Park(SyncSender<bool>),
     /// Find out whether the host is quiet for the lease asked about last (the order names
     /// none: see `Shared::asked_prepare`), run the readiness hook if there is one, and
     /// publish the answer.
@@ -939,6 +943,11 @@ fn work(
                 lines.extend(describe(&events));
             }
             Ok(Order::Settle(done)) => settle = Some(done),
+            Ok(Order::Park(done)) => {
+                if park::park(&life, shared, &done, inbox) {
+                    return;
+                }
+            }
             Ok(Order::Prepare) => {
                 shared.prepare_queued.store(false, Ordering::SeqCst);
                 // A second order whose lease the first took does nothing.

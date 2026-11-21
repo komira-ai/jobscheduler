@@ -339,6 +339,21 @@ fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
         .map_err(|why| format!("{FLAGS_FILE_KEY}: {why}"))
 }
 
+/// Whether the flags set an egress ceiling above `none` (`--egress allow-list` or `open`): an
+/// agent started with one removes, at its start, every run of an earlier process that may still
+/// run (their network wiring cannot be taken over), so an update cannot hand them over.
+#[cfg(target_os = "linux")]
+fn egress_of(cli: &Cli) -> bool {
+    cli.os.egress.as_deref().is_some_and(|mode| mode != "none")
+}
+
+/// Off Linux there is no `--egress`: the macOS build's network ceiling keeps no wiring that a
+/// start removes.
+#[cfg(not(target_os = "linux"))]
+fn egress_of(_cli: &Cli) -> bool {
+    false
+}
+
 /// The host's certificate and key when the flags name both. It does not depend on the host id:
 /// a host id that cannot be resolved leaves the files named.
 fn identity_of(cli: &Cli) -> Option<HostIdentity> {
@@ -490,6 +505,17 @@ impl StateView for Root {
     fn has_credential(&self) -> bool {
         self.open().is_some_and(StateView::has_credential)
     }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        match self.open() {
+            Some(root) => root.request_handover(),
+            None => Err(PortError::Io("there is no state root".to_owned())),
+        }
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        self.open().map_or(Ok(()), StateView::withdraw_handover)
+    }
 }
 
 /// The unit manager of this platform: on a Mac, [`launch_units`], gated on `token_file`.
@@ -549,6 +575,9 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     // the join token as before, and a step that asks the lease server ends with the reason.
     let flags = read_flags(&params.flags_file, machine);
     let host_identity = flags.as_ref().ok().and_then(identity_of);
+    // A flags file that cannot be read says nothing of the egress: it counts as one, and the
+    // update drains as before.
+    let egress = flags.as_ref().map_or(true, egress_of);
     let connect =
         flags.and_then(|cli| connect_from(cli, &params.state_root, &params.token_file, machine));
     let lease = match &connect {
@@ -574,6 +603,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         euid: machine.euid,
         token: machine.token,
         host_identity: host_identity.as_ref(),
+        egress,
         stat: machine.stat,
         look: machine.look,
         fstab: machine.fstab,
@@ -817,5 +847,32 @@ mod tests {
         assert_eq!(root.taint(), None);
         assert!(!root.restored_rechecks(&taint));
         assert_eq!(root.owed().unwrap(), Vec::<String>::new());
+    }
+
+    /// Asserts the handover request through the hook's state root: with no state root it
+    /// cannot be made (the error says why) and withdrawing it is a no-op; with one, the request
+    /// writes the handover file and the withdrawal removes it, twice over. It catches a request
+    /// reported as made where no agent could read it.
+    #[test]
+    fn a_handover_is_asked_in_the_state_root_and_cannot_be_without_one() {
+        let absent = Root::Absent;
+        assert_eq!(
+            absent.request_handover().unwrap_err().to_string(),
+            "there is no state root"
+        );
+        assert!(absent.withdraw_handover().is_ok());
+
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hook-root-handover");
+        let path = dir.path().join("state");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let open = Root::Open(crate::lifecycle::StateRoot::open(&path).unwrap());
+        let file = path.join(crate::lifecycle::handover::HANDOVER_FILE);
+        open.request_handover().unwrap();
+        assert!(file.is_file());
+        open.withdraw_handover().unwrap();
+        assert!(!file.exists());
+        open.withdraw_handover().unwrap();
     }
 }

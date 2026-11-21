@@ -68,7 +68,7 @@
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | run a start with `isolation = host`: an OCI container run by `crun` as root in the host's own namespaces (pid, network, mount, IPC, UTS, cgroup; no user namespace), with the host's `/` as its root and every capability, in a cgroup of its own below its lease's, which accounts and limits it and whose kill ends it whole on a stop or a cancel. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine runs contained jobs only); the agent then reports `host-jobs`. The server taints a host for good when it places a host job, and the machine must be reimaged before it is used again (docs/runbooks/host-jobs.md). Without the flag a start with `isolation = host` is refused (`host-jobs-not-allowed`) and creates nothing |
 //! | `--allow-fuse-jobs` | give a contained job that asks for it (a start with `fuse`) the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN` of its own user namespace (never the host's), with `io_uring_setup`, `io_uring_enter` and `io_uring_register` allowed in its seccomp filter; its network, `noNewPrivileges` and masked paths are unchanged. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine does not give the device). The agent reports `fuse-jobs` when the kernel is at least 6.14 and `/dev/fuse` is the FUSE device (char 10:229), and `fuse-uring` besides when the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0; otherwise it warns at start, naming what is missing, and reports neither. Without the flag such a start is refused (`fuse-jobs-not-allowed`) and creates nothing (docs/runbooks/fuse-jobs.md) |
-//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it. It also holds the hold file `hold`, written by the step that drains the host for an update: while it is there the agent starts no work (each start is refused `host-held`) and keeps its host cordoned on the lease server, from its first hello on, across restarts (see [`lifecycle::hold`] and [`hold_cordon`]) |
+//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it. It also holds the hold file `hold`, written by the step that drains the host for an update: while it is there the agent starts no work (each start is refused `host-held`) and keeps its host cordoned on the lease server, from its first hello on, across restarts (see [`lifecycle::hold`] and [`hold_cordon`]); and the handover file `handover`, written by the update hook just before it stops the agent, which makes that stop leave the runs to the next process instead of draining (see [`lifecycle::handover`]) |
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; Linux build only, and not with `--no-jobs`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount. With the crun runtime it is a prefix of the host paths a job start's layers and mounts name (the longest wins; a link is followed only inside it), opened when the agent starts, and a run start's mount of a named root is refused (`invalid-mount`). With the native runtime (a Mac) it is the root a job start's mounts of host paths lie beneath once their links are followed (checked when the host paths are looked up, so a link inside a root that leads out is refused `input-not-allowed`), and every root is a read deny of every run: a run reads only the mounts it was given, which its profile grants back; keep nothing a job reads without mounting it (a tool) under a root, and a `--bundle-store` or a files root may not lie under one |
 //! | `--mount-root-ro <name>=<path>` | like `--mount-root`, in the same namespace of names, but a start with a read-write mount from it is refused (`invalid-mount`; a job start's, `input-not-allowed`) and nothing is created; it may be on the scratch root's file system under `--scratch-quota`; the `st_dev` comparison sees a root's own device only, not a scratch device mounted below a root (a submount a recursive bind brings along), so the operator must guarantee there is none; on a Mac it is a read deny of every run as `--mount-root` is, and a read-write mount whose canonical path lies beneath it is refused `input-not-allowed` |
@@ -125,7 +125,7 @@
 //! | `--gpu-env <name>=<value>` | (Linux build only) a variable set in a `crun` GPU job's environment, over the image's of that name, such as the library path; repeatable; the name `[A-Z_][A-Z0-9_]*`, not starting with `JS_`, given once; needs `--gpu-device` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci, for a job's image and its image layers; the container engine pulls as `--container-pull` says and do not read it. `--image-allow-loopback <127.0.0.1:port/prefix>` (or `[::1]:port/prefix`) is an entry for a registry on the host's own loopback, pulled over plain http; repeatable, the crun runtime only, and a host that is not a loopback address or an entry without a port is refused at start. A Mac agent with `--bundle-store` also reads it: a start named by its image must be on an entry or it is refused `image-not-allowed`, and `--bundle-pull missing` fetches by it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; not with `--no-jobs` |
-//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; not with `--no-jobs` |
+//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; also the longest a stop asked to hand the runs over waits for the starts, stops and post-job checks under way (see [`lifecycle::handover`]); not with `--no-jobs` |
 //! | `--settle-ms <milliseconds>` | (Linux build only) how long the agent lets the host settle before it counts what it sees against a job: a process or mount the baseline did not have is a job's leftover (`daemonised-child`, `process-as-job-user`, `new-mount`) only when it is still there this long after the check first saw it, and a running run whose control group the runtime cannot name taints the host as unchecked (`cgroup-not-found`, which clears itself) only when it is still so this long after the first step that saw it and its container's first process then runs in another group; a host's own short-lived processes and mounts at the moment a job ends, a container not made yet, and a container read as running after it exited and its group was removed, are neither. By default 1000, from 1 to 60000; not with `--no-jobs` |
 //! | `--taint-recheck-ms <milliseconds>` | (Linux build only) how long the agent waits between the re-checks of a taint it may clear itself: a taint that a check judged (`residue` of a process, `daemonised-child` or `process-as-job-user`, or `unchecked` for an input the check could not read or a run whose container group was not found, `cgroup-not-found`) is re-checked while no run is held, and ends after two clean re-checks this far apart and the server's acknowledgement of the clear; the marker is then kept as `taint.json.cleared-<unix seconds>` and the clear is logged (`taint-cleared`). A process still there keeps the host tainted. A residue of a process read from the marker when the agent starts is re-checked too, with two rules that need no baseline (a process of the job users' range, or one whose parent is `init` in a control group a job can be in, is a finding even if the restart baseline holds it); any other taint read from the marker stays. `cleanup-failed`, `check-owed`, `host-job` and a change of mounts, users, groups, modules or a watched directory are never cleared by the agent. By default 60000, from 1 to 3600000; not with `--no-jobs` |
 //! | `--silence-stop <seconds>` | how long the agent runs its jobs while it hears nothing from the server (contact is a welcome or a heartbeat reply it accepted, one its worker had no room for included, counted on the agent's monotonic clock from the last of them, or from the agent's start before the first): then it stops every job it holds as a stop from the server would (SIGTERM, the stop grace, the kill; a native run through the helper's `stop`, or killed at once by a helper from before it), retires each job's fence (job id and allocation id, in the state root before the stop is reported, so a start of it never runs again here, after a restart too) and reports each `killed` with the detail `silence-stop`; once for each silence. By default 300 (twenty times the server's default grace of 15 s, and more than the 140 s a server restart costs a well agent beside the restart's own time: one heartbeat interval, the 120 s cap on `Retry-After` and the old session's grace), from 1 to 7200; no value turns the stop off. It must be above the stop grace plus the server's default grace (status 2 at start otherwise: a `--stop-grace` of 285 or more needs a longer `--silence-stop`), and a welcome whose grace plus the stop grace is not below it ends the agent (status 1, naming the flag). It runs only while the agent runs: a native run is bounded while no agent does only by the deadline the helper holds for it (`--native-helper-socket`). Not with `--no-jobs` |
@@ -244,6 +244,14 @@
 //! and [`DRAIN_SETTLE`] more have passed. A second signal ends it at once. A result that
 //! is not acknowledged is never dropped: its run stays listed, and a container that is
 //! still there is adopted by the next process.
+//!
+//! A stop that finds the handover file in the state root (the update hook writes it just
+//! before it stops the agent to restart it on another release) does not drain, in an agent
+//! with jobs and no egress ceiling: it takes no new job and announces `draining`, waits until
+//! no start, stop or post-job check is under way (at most `--drain-wait`), and exits 0
+//! leaving every run as it is for the next process to adopt (see [`lifecycle::handover`] and
+//! [`drive`]). An agent with an egress ceiling always drains: its next process removes the runs
+//! it would adopt. An agent removes a handover file it finds at its start.
 //!
 //! # A whole-node lease
 //!
@@ -393,9 +401,9 @@ pub use signals::SystemSleeper;
 pub use system::{Backend, Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
-    STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, WorkerHost,
-    stall_bound,
+    Delivery, Handle, LINES_CAP, LeaseAnswers, Parked, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX,
+    Rescue, STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker,
+    WorkerHost, stall_bound,
 };
 
 /// The exit statuses of `js-agent`.
@@ -847,8 +855,34 @@ fn execute(
         bundle: bundle.map(|settings| Admission::new(settings, host.clone())),
         quota: scratch_quota,
     };
+    // A stop hands the runs over to the next process (see `lifecycle::handover`) only when
+    // that process can adopt the ones still running: an agent with an egress ceiling removes
+    // them at its start (the wiring of an earlier process cannot be taken over), so its stop
+    // always drains.
+    let adoptable = local.egress.mode() == egress::Mode::None;
+    let handover_root = held_root.clone().filter(|_| adoptable);
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
+    // A handover file is a request to the process running when it was written: one left
+    // there (by an update step that was killed) is removed once the runs are adopted, so this
+    // process's stop drains unless the next request is made of it.
+    let leftover = held_root.as_ref().filter(|_| jobs.is_some());
+    match leftover.map(|root| lifecycle::handover::remove(root.path())) {
+        Some(Ok(true)) => {
+            let _ = writeln!(
+                err,
+                "js-agent: removed a handover file left by an earlier stop"
+            );
+        }
+        Some(Err(why)) => {
+            let _ = writeln!(
+                err,
+                "js-agent: warning: a handover file left by an earlier stop cannot be removed \
+                 ({why}): a stop of this process may hand its runs over instead of draining"
+            );
+        }
+        Some(Ok(false)) | None => {}
+    }
     // The session asks the worker about a whole-node lease; the worker answers on its own
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
@@ -868,6 +902,7 @@ fn execute(
             .with_jobs(worker, *drain)
             .with_usage(outbox.clone())
             .with_dispatch(&cell);
+        session = session.with_handover(handover_root.as_ref().map(StateRoot::path));
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
