@@ -6,6 +6,7 @@
 //! | `arch` (required, once) | the CPU's architecture: `x86_64` or `arm64`, and `aarch64`, which an agent built before `arm64` was the one spelling reports, read as `arm64` |
 //! | `cpu.features` (repeated) | the CPU's features; the ISA level follows from them |
 //! | `cpus`, `mem_gib`, `nvme_gib`, `gpu` (once each) | countable capacity |
+//! | `os_version` (once) | the major version of the node's operating system (`26`, `26.1` is 26), a least version a request is matched against; a value that is no version is skipped, so the node has none, as an agent whose probe failed reports none |
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring`, `mount-provider.<name>` (once each) | exact values |
 //! | `gpu.cores`, `gpu.metal_family` (a Mac reports them) | not read: a request cannot name them yet |
 //! | `xcode` (repeated; each value holds one or more builds joined with `,`, empty pieces skipped) | a set of the builds, matched by membership |
@@ -97,6 +98,9 @@ impl NodeCaps {
         let mut members: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut consumables = BTreeMap::new();
         let mut report_only = BTreeSet::new();
+        // Whether `os_version` was seen: a value that is no version is not kept, and is still
+        // the one entry the key may have.
+        let mut os_version_seen = false;
         let number = |key: &str, value: &str| {
             value.parse::<u64>().map_err(|_| ReportError::NotANumber {
                 key: key.to_owned(),
@@ -146,6 +150,13 @@ impl NodeCaps {
                 number(key, value)?;
                 if !report_only.insert(key) {
                     return Err(repeated(key));
+                }
+            } else if key == crate::host::OS_VERSION {
+                if std::mem::replace(&mut os_version_seen, true) {
+                    return Err(repeated(key));
+                }
+                if let Some(major) = js_types::os_major(value) {
+                    consumables.insert(Consumable::OsVersion, u64::from(major));
                 }
             } else if let Some(what) = Consumable::from_name(key) {
                 let amount = number(key, value)?;

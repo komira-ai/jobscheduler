@@ -25,7 +25,8 @@
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
 //! much free disk), [`LAYERED_ROOTFS`], [`FUSE_JOBS`], [`FUSE_URING`], a `mount-provider.<name>` key (the same
-//! value) and [`XCODE`] (one build the host has); see [`crate::Request`]. The provider keys are a family, not names, so they are
+//! value), [`XCODE`] (one build the host has) and [`OS_VERSION`] (at least that major
+//! version); see [`crate::Request`]. The provider keys are a family, not names, so they are
 //! not among [`DETECTED_KEYS`]: [`is_mount_provider_key`] says whether a key is one.
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
