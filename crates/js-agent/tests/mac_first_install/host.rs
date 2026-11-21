@@ -18,7 +18,7 @@ use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_client::Client;
+use js_client::{Client, HostIdentity};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
 use js_types::{ManualClock, Timestamp};
 use rcgen::string::Ia5String;
@@ -216,6 +216,29 @@ impl LeaseServer {
         found
             .unwrap_or_else(|| panic!("{host} is not listed: {listing}"))
             .clone()
+    }
+}
+
+impl LeaseServer {
+    /// `GET /v1/hosts/<host>` as the agent reads itself (the route the hook's verify reads): by
+    /// the host certificate the Studio holds, which the server takes the host's id from.
+    pub fn host_as_itself(&self, host: &str) -> Value {
+        let identity = HostIdentity::new(
+            Path::new(IDENTITY_DIR).join("host.crt"),
+            Path::new(IDENTITY_DIR).join("host.key"),
+        );
+        let client = Client::connect_with_identity(
+            &self.url,
+            &identity,
+            Some(&self.server_cert),
+            Duration::from_secs(10),
+        )
+        .expect("a client of the server by the host certificate");
+        let reply = client
+            .get(&format!("/v1/hosts/{host}"))
+            .expect("the server answers");
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.body
     }
 }
 

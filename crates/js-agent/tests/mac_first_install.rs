@@ -191,5 +191,7 @@ fn a_first_install_whose_cutover_failed_as_on_the_studios_leaves_a_host_the_next
     let seen = server.host(HOST_ID);
     assert_eq!(seen["state"], "live", "{seen}");
     assert_eq!(seen["agent_version"], version.as_str(), "{seen}");
-    assert_eq!(seen["runtime"], "sandbox-exec", "{seen}");
+    // The runtime the agent's hello named, which the host list does not show.
+    let itself = server.host_as_itself(HOST_ID);
+    assert_eq!(itself["runtime"], "sandbox-exec", "{itself}");
 }
