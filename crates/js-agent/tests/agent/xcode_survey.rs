@@ -30,7 +30,9 @@ pub fn owner() -> u32 {
 /// each a real `Contents/Developer` tree, and the fake files that list it and hold each
 /// app's `version.plist`.
 pub fn applications(scratch: &Scratch, apps: &[(&str, &str)]) -> (PathBuf, FakeFiles) {
-    // Whatever the umask: a group-writable directory above an app is not trusted.
+    // The directories made here are writable by their owner only whatever the umask (a
+    // group-writable directory above an app is not trusted); those above the scratch
+    // directory are as the host made them.
     fs::set_permissions(scratch.path(""), fs::Permissions::from_mode(0o755)).unwrap();
     let dir = scratch.path("Applications");
     app_dir(&dir);

@@ -67,7 +67,9 @@ not answer). Each ready Xcode whose `xcrun` finds `simctl` is asked `xcrun simct
 union of the available runtimes, by the platform of the runtime's identifier (`xrOS` is `sim.visionos`), each set's versions ascending
 and joined with `,` within the 128-byte value. The scheduler does not match `sim.*` yet: no job constraint names it, and `js-caps` passes the
 keys over when it reads a report. A Mac with no Xcode runs none of these programs and reports neither key, and the operator's
-`--capability` flag cannot set a `sim.` key either.
+`--capability` flag cannot set a `sim.` key either. The survey runs when the agent starts; the
+host facts `resume` compares list the found builds, not which are ready, so an Xcode whose licence
+is accepted or whose simulator runtimes change while the agent runs is advertised at its next start.
 
 **Image profiles.** A VM job runs inside a base image, so what it needs (the Xcode, the runtime) is a property of the *image*, not of the
 host. Each primed image carries a profile in its manifest: the same typed map, over the same schema (`os`, `os_version`, `arch`, `xcode`,

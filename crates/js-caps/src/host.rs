@@ -54,8 +54,8 @@ pub const OS_VERSION: &str = js_types::OS_VERSION_KEY;
 
 /// The capability key of the ready Xcodes a Mac's agent found: their builds (`16C5032a`, the
 /// `ProductBuildVersion` of each `Xcode*.app` that answered the agent's survey), ascending
-/// and comma-separated in the one
-/// value a hello holds per key. A job names one build under it, and a host is capable when
+/// and comma-separated in the one value a hello holds per key. A job names one build under
+/// it, and a host is capable when
 /// that build is among its builds (membership, not equality).
 pub const XCODE: &str = "xcode";
 

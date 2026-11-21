@@ -297,15 +297,45 @@ fn a_mac_without_xcode_has_no_xcode_capability() {
     assert_eq!(sent.borrow()[0].1["capabilities"].get("xcode"), None);
 }
 
-/// A Linux host is never asked for its `/Applications`: with Xcode apps in that directory its
-/// hello still has no `xcode` key. It catches a probe on every host.
+/// A Linux host is never asked for its Xcodes: with an Xcode in its applications directory
+/// that would answer the survey, its hello still has no `xcode` key and no program of the
+/// survey runs. It catches a probe or a survey on every host.
 #[test]
 fn a_linux_host_is_not_asked_for_its_applications() {
+    let scratch = Scratch::new("xcode-linux");
+    let (dir, _) = applications(&scratch, &[("Xcode-16.2.app", "16C5032a")]);
+    let dev = developer(&dir, "Xcode-16.2.app");
+    let plist = dir.join("Xcode-16.2.app/Contents/version.plist");
     let mut host = linux_host();
-    host.files = with_installed(host.files.clone(), &[("Xcode-16.2.app", "16C5032a")]);
+    host.files = with_installed(host.files.clone(), &[("Xcode-16.2.app", "16C5032a")])
+        .with_dir(&dir.to_string_lossy(), &["Xcode-16.2.app"])
+        .with(&plist.to_string_lossy(), &version_plist("16C5032a"));
+    host.applications = dir;
+    host.xcode_owner = owner();
+    host.commands = host
+        .commands
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -version"),
+            Ok(&version_text("16.2", "16C5032a")),
+        )
+        .with(&format!("{dev}/usr/bin/xcodebuild -license check"), Ok(""))
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -checkFirstLaunchStatus"),
+            Ok(""),
+        )
+        .with(
+            "/usr/bin/xcrun --find clang",
+            Ok(&format!("{dev}/usr/bin/clang\n")),
+        );
     let (ran, sent, _) = run_scripted(&[], &host, vec![welcome(1)], 1);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(sent.borrow()[0].1["capabilities"].get("xcode"), None);
+    let lines = host.commands.ran.borrow();
+    let asked: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("xcodebuild") || line.contains("xcrun"))
+        .collect();
+    assert_eq!(asked, Vec::<&String>::new());
 }
 
 /// Every file and directory under `dir` with its bytes (a file) and modification time.
