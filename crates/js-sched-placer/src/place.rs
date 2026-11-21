@@ -73,7 +73,8 @@ pub struct SchedPlacer {
     /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
     pub(crate) outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
     /// How many times the registry changed the engine: the calls the passes over the queued
-    /// jobs depend on ([`SchedPlacer::engine_changes`]).
+    /// jobs depend on, and every call kept while the engine was held
+    /// ([`SchedPlacer::engine_changes`]).
     changes: AtomicU64,
     /// What the last pass over the queued jobs that ran found, while it failed nothing
     /// (`engine::jobs_seen`). Its lock is a leaf.
@@ -148,6 +149,9 @@ impl SchedPlacer {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(tell);
+                // The holder may have let go between the try and the push: an engine free now
+                // is told of the kept calls here rather than at its next taker.
+                drop(self.free_engine());
                 true
             }
         };

@@ -341,6 +341,7 @@ impl Captured {
         crate::api::rig::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || Buffer(Arc::clone(&sink)))
             .finish();
         let scope = tracing::subscriber::set_default(subscriber);
@@ -435,12 +436,13 @@ async fn the_token_never_appears_in_debug_errors_or_logs() {
         .iter()
         .filter(|line| line.contains("job service call"))
         .collect();
-    // The reads answered, so their lines are at debug, which the capture leaves out.
-    assert_eq!(calls.len(), 2, "{lines:#?}");
-    for (line, (call, job)) in calls
-        .iter()
-        .zip([("SubmitJob", "logged-grpc"), ("SubmitJob", "logged-json")])
-    {
+    assert_eq!(calls.len(), 4, "{lines:#?}");
+    for (line, (call, job)) in calls.iter().zip([
+        ("SubmitJob", "logged-grpc"),
+        ("GetJob", "logged-grpc"),
+        ("SubmitJob", "logged-json"),
+        ("GetJob", "logged-json"),
+    ]) {
         for field in [call, "marker", job, "Ok"] {
             assert!(line.contains(field), "{field} in {line}");
         }
