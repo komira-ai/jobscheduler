@@ -628,8 +628,11 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
 /// The host facts that work on the host besides an update can change, as the agent reads them
 /// when it starts (the CPUs, the memory, the GPUs, and on a Mac the major version of macOS and
 /// the builds of the installed Xcodes, `xcode=16C5032a,16F6`, as [`crate::xcode::probe`] finds
-/// them), as one line: equal facts give equal lines, and a Mac that gains an Xcode gives a
-/// different line. Off a Mac the line has no `xcode` part and nothing is listed.
+/// them: every Xcode found, ready or not), as one line: equal facts give equal lines, and a
+/// Mac that gains an Xcode gives a different line. Off a Mac the line has no `xcode` part and
+/// nothing is listed. Whether an Xcode is ready, and its simulator runtimes
+/// ([`crate::xcode::survey`]), are not part of the line: a change in those is advertised when
+/// the agent next starts.
 ///
 /// # Errors
 /// A fact cannot be read (see [`detect`]).

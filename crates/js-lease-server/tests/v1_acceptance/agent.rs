@@ -339,6 +339,7 @@ impl Agent {
                 euid,
                 ancestors_floor: &floor,
                 secret_owner: euid,
+                xcode_site: js_agent::xcode::Site::system(),
             };
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let status = run_with(args, &mut out, &mut err, &mut services);

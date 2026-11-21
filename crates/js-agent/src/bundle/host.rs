@@ -286,8 +286,9 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
     }
 
     fn xcodes(&self) -> Vec<HostXcode> {
-        // The Xcode catalog arrives with the profile builder; until then a host reports
-        // none, and a bundle that needs Xcode is refused `bundle-xcode-mismatch`.
+        // The bundle's Xcode need is not met from the agent's survey (`crate::xcode::survey`)
+        // yet; until it is, a host reports none, and a bundle that needs Xcode is refused
+        // `bundle-xcode-mismatch`.
         Vec::new()
     }
 
