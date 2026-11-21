@@ -11,9 +11,11 @@
 //! The lease server is the one the agent's end-to-end tests start in their process (js-lease-server
 //! `start`), over TLS with the certificate the flags file's `--ca-cert` names, trusting the test's
 //! CA for agents (`--agent-client-ca`), with a pool `mac-build` that asks `os=macos` and
-//! `arch=arm64`. Its clock stands at a fixed instant inside the certificates' validity, and moves
-//! only when the test moves it ([`LeaseServer::advance`]): a session of a host is told from the
-//! one before it by the instant it began, so the test moves the clock before an agent restarts.
+//! `arch=arm64`. Its clock starts at a fixed instant inside the certificates' validity and then
+//! runs with the real time, and the server is ticked as its own interval would tick it (see
+//! [`Pump`]): a restarted agent's hello is refused `host-live` until the session before it has
+//! gone without a beat for the pool's grace, as on a real server, which a clock that stood still
+//! would never let happen.
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -130,8 +132,7 @@ impl Ca {
 pub struct LeaseServer {
     running: Option<Running>,
     runtime: Runtime,
-    _ticks: TickHandle,
-    clock: ManualClock,
+    pump: Option<Pump>,
     url: String,
     /// The server's own certificate, which the agent and the test trust.
     server_cert: PathBuf,
@@ -185,11 +186,11 @@ impl LeaseServer {
             .block_on(start(config, SharedClock::new(clock.clone()), ticker))
             .expect("the lease server starts");
         let url = format!("https://{}", running.addr());
+        let pump = Pump::start(clock, ticks, runtime.handle().clone());
         LeaseServer {
             running: Some(running),
             runtime,
-            _ticks: ticks,
-            clock,
+            pump: Some(pump),
             url,
             server_cert,
             client_token,
@@ -199,12 +200,6 @@ impl LeaseServer {
     /// The address the flags file's `--server` names.
     pub fn url(&self) -> &str {
         &self.url
-    }
-
-    /// Moves the server's clock forward by `by`, so that the next session a host opens begins at
-    /// another instant than the one it has now.
-    pub fn advance(&self, by: Duration) {
-        self.clock.advance(by);
     }
 
     /// The entry of `host` in `GET /v1/hosts`, read with the client token, as JSON
@@ -260,8 +255,52 @@ impl LeaseServer {
     }
 }
 
+/// How often [`Pump`] moves the server's clock and ticks it.
+const PUMP_EVERY: Duration = Duration::from_millis(250);
+
+/// Moves the lease server's clock on with the real time and ticks the server each
+/// [`PUMP_EVERY`], from a thread of its own, until it is dropped. Nothing is judged by how long
+/// anything takes: it only lets the server's time pass as a real server's does, so that a
+/// session that has stopped beating ends.
+struct Pump {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Pump {
+    fn start(clock: ManualClock, ticks: TickHandle, runtime: tokio::runtime::Handle) -> Pump {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let mut last = std::time::Instant::now();
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(PUMP_EVERY)
+            {
+                let now = std::time::Instant::now();
+                clock.advance(now - last);
+                last = now;
+                runtime.block_on(ticks.step());
+            }
+        });
+        Pump {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Pump {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl Drop for LeaseServer {
     fn drop(&mut self) {
+        // The pump first: it ticks the server on its runtime.
+        drop(self.pump.take());
         if let Some(running) = self.running.take() {
             let _ = self.runtime.block_on(running.shutdown());
         }

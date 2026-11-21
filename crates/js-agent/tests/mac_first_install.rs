@@ -38,7 +38,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use hostkeeper_hook::Verdict;
 use hostkeeper_steps::Staged;
@@ -234,9 +233,6 @@ fn config_update(daemon: &Arc<Daemon>, server: &LeaseServer, scratch: &Path) {
     let before = launchd_pid("js-agent").expect("the agent has a process before the config update");
     let session = server.session_started(HOST_ID);
     assert!(session.is_some(), "the agent is in a session: {session:?}");
-    // A session is told from the one before it by the instant it began, and the server's clock
-    // stands still.
-    server.advance(Duration::from_secs(1));
 
     let current = fs::read_to_string(FLAGS_FILE).expect("the flags file");
     let flags = format!("{current}# A change the config package makes.\n");
