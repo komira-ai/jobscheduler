@@ -473,6 +473,8 @@ pub struct Services<'a> {
     /// The user a `--registry-credentials` file must be owned by: root (0) outside a test,
     /// which cannot make a root-owned file.
     pub secret_owner: u32,
+    /// Where a Mac's Xcodes are and whose they must be: [`xcode::Site::system`] outside a test.
+    pub xcode_site: xcode::Site<'a>,
 }
 
 /// Why the program ends without a stop request.
@@ -583,6 +585,7 @@ pub fn main_with(
                 euid: rustix::process::geteuid().as_raw(),
                 ancestors_floor: Path::new("/"),
                 secret_owner: 0,
+                xcode_site: xcode::Site::system(),
             };
             run_with(args, out, err, services)
         }
@@ -688,8 +691,9 @@ fn execute(
         host: &**host,
         long_values: services.long_bundle_values,
     });
+    let site = services.xcode_site;
     let mut offer =
-        offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
+        offer(&cli, platform, commands, files, site, version, store).map_err(Failure::Usage)?;
     // A host that authenticates by its own certificate is issued no host credential, and
     // says it keeps none.
     let by_identity = matches!(login, Login::HostCertificate(_));

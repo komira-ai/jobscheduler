@@ -31,8 +31,9 @@ pub struct Offer {
     pub hello: Hello,
     /// Warnings, such as a failed GPU probe.
     pub warnings: Vec<String>,
-    /// The Xcodes the hello's `xcode` capability was made from (all that were found, ascending
-    /// by build; empty off a Mac), which the native runtime runs jobs with.
+    /// The Xcodes the hello's `xcode` capability was made from (the ready ones, ascending by
+    /// build, each with its app's real path; empty off a Mac), which the native runtime runs
+    /// jobs with.
     pub xcodes: Vec<crate::xcode::Xcode>,
 }
 
@@ -64,8 +65,8 @@ fn class(
 /// The capabilities to report: the operator's, and `os` and `arch` as detected, the
 /// architecture in the one spelling (`arm64`, never `aarch64`). The keys of the host
 /// contract and the network ceiling (`egress`, `egress-ports`) are detected too and cannot be
-/// given, nor can `mount-provider.<name>`: a host reports the providers its `--mount-provider`
-/// flags name.
+/// given, nor can `mount-provider.<name>` (a host reports the providers its `--mount-provider`
+/// flags name) or a key under `sim.` (a Mac reports the simulator runtimes its Xcodes list).
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -81,6 +82,7 @@ fn capabilities(
                 | EGRESS_CAPABILITY
                 | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)
+            || key.starts_with(crate::xcode::sim::SIM_PREFIX)
             || is_mount_provider_key(key)
             || REPORT_ONLY_KEYS.contains(key)
     });
@@ -213,10 +215,12 @@ pub struct StoreView<'a> {
 }
 
 /// Detects the host and applies the flags. A Mac also reports its operating system's major
-/// version as `os_version` (read by the `os_version` module) and the builds of its installed
-/// Xcodes as `xcode` (read by the [`crate::xcode`] module; none, no key), and the Xcodes it
-/// found are in [`Offer::xcodes`]. A host that has a bundle store (`store`) also
-/// reports `bundle-root` and `bundle` (see [`crate::bundle`]), and the disk it offers (the
+/// version as `os_version` (read by the `os_version` module), the builds of the Xcodes of
+/// `site` that answered the survey as `xcode` ([`crate::xcode::survey`]; none, no key), and
+/// the versions of the simulator runtimes those Xcodes offer as `sim.<platform>`
+/// ([`crate::xcode::sim`]; none, no key); the ready Xcodes are in [`Offer::xcodes`]. A host
+/// that has a bundle store (`store`) also reports `bundle-root` and `bundle` (see
+/// [`crate::bundle`]), and the disk it offers (the
 /// shape's `disk_bytes` and `disk-gib`) leaves out the unused part of the store's budget:
 /// `floor((free - max(0, budget - used) - low_water) / GiB)`.
 ///
@@ -230,6 +234,7 @@ pub fn offer(
     platform: &Platform,
     runner: &dyn CommandRunner,
     files: &dyn FileReader,
+    site: crate::xcode::Site<'_>,
     agent_version: &str,
     store: Option<StoreView<'_>>,
 ) -> Result<Offer, String> {
@@ -241,13 +246,15 @@ pub fn offer(
     let mut capabilities = capabilities(platform, &cli.capabilities)?;
     let (os_version, os_version_warning) = os_version::report(platform, runner);
     capabilities.extend(os_version.map(|major| (OS_VERSION.to_owned(), major)));
-    let (xcodes, mut xcode_warnings) = match platform.is_macos() {
-        true => crate::xcode::probe(files),
-        false => (Vec::new(), Vec::new()),
+    let surveyed = match platform.is_macos() {
+        true => crate::xcode::survey(files, runner, site),
+        false => crate::xcode::Surveyed::default(),
     };
+    let (xcodes, mut xcode_warnings) = (surveyed.ready, surveyed.warnings);
     let (xcode_value, xcode_limit_warning) = crate::xcode::hello_value(&xcodes);
     xcode_warnings.extend(xcode_limit_warning);
     capabilities.extend(xcode_value.map(|builds| (XCODE_CAPABILITY.to_owned(), builds)));
+    capabilities.extend(surveyed.sims);
     if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
         return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
     }
