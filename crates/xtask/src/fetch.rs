@@ -1,5 +1,5 @@
-//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
-//! [--cache <path>]`: installs a pinned tool for a CI job.
+//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz --member <path> |
+//! --extract zst] [--cache <path>]`: installs a pinned tool for a CI job.
 //!
 //! The order is the point:
 //!
@@ -12,7 +12,8 @@
 //!    refused here, before any byte is unpacked or written: nothing is created on disk.
 //!    A cached file that does not match is refused too, not replaced by a download.
 //! 3. They are unpacked in memory: as is, or one regular file (`--member`, its path
-//!    inside the archive) out of a gzip tar (`--extract tar.gz`).
+//!    inside the archive) out of a gzip tar (`--extract tar.gz`), or one zstd-compressed
+//!    file decompressed whole (`--extract zst`, the form buck2's releases take).
 //! 4. With `--cache` and no file there, the download as it came (the archive, not the
 //!    file taken out of it) is written to the `--cache` path, for the actions cache to
 //!    save: only a download that matched the pin and unpacked is kept.
@@ -87,6 +88,9 @@ pub enum Format {
     /// A gzip-compressed tar: the file is its `--member`.
     #[value(name = "tar.gz")]
     TarGz,
+    /// One zstd-compressed file: the file is the download decompressed (no `--member`).
+    #[value(name = "zst")]
+    Zst,
 }
 
 /// How the installed file comes out of the download.
@@ -100,6 +104,8 @@ pub enum Unpack {
         /// The path of the file inside the archive.
         member: PathBuf,
     },
+    /// The download is one zstd-compressed file; the file is the download decompressed.
+    Zst,
 }
 
 impl Unpack {
@@ -109,6 +115,10 @@ impl Unpack {
         match (extract, member) {
             (None, None) => Ok(Unpack::Raw),
             (Some(Format::TarGz), Some(member)) => Ok(Unpack::TarGz { member }),
+            (Some(Format::Zst), None) => Ok(Unpack::Zst),
+            (Some(Format::Zst), Some(_)) => {
+                Err("--extract zst is one compressed file: it takes no --member".to_owned())
+            }
             (Some(Format::TarGz), None) => {
                 Err("--extract tar.gz needs --member, the file to take".to_owned())
             }
@@ -129,8 +139,18 @@ impl Unpack {
                     .map_err(unpack_error)?;
                 tar_member(&tar, member)
             }
+            Unpack::Zst => decompress_zst(bytes),
         }
     }
+}
+
+/// The file inside a zstd-compressed download.
+fn decompress_zst(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(bytes)
+        .map_err(|e| Error::Unpack(format!("not a zstd frame: {e}")))?;
+    let mut file = Vec::new();
+    decoder.read_to_end(&mut file).map_err(unpack_error)?;
+    Ok(file)
 }
 
 /// Why a fetch failed.

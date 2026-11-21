@@ -234,8 +234,8 @@ fn the_verb_refuses_plain_http_with_exit_1_and_writes_nothing() {
     assert!(!out.exists() && !fetch::part_path(&out).exists());
 }
 
-/// Asserts that a malformed pin, a tar without `--member` and a `--member` without a tar
-/// all exit 2 (the usage status) before any download.
+/// Asserts that a malformed pin, a tar without `--member`, a `--member` without a tar and a
+/// `--member` with `--extract zst` all exit 2 (the usage status) before any download.
 #[test]
 fn flags_that_do_not_fit_together_exit_2() {
     let dir = scratch("cli-usage");
@@ -253,6 +253,10 @@ fn flags_that_do_not_fit_together_exit_2() {
             "needs --extract tar.gz",
         ),
         (&["--sha256", PIN, "--extract", "rar"][..], "invalid value"),
+        (
+            &["--sha256", PIN, "--extract", "zst", "--member", "a"][..],
+            "xtask: --extract zst is one compressed file: it takes no --member\n",
+        ),
     ] {
         let mut args = vec!["--url", url, "--out", out];
         args.extend_from_slice(extra);

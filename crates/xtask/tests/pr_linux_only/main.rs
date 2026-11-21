@@ -78,7 +78,12 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
     let (jobs, problems) = lint(&repository_workflows());
     assert_eq!(problems, Vec::<String>::new());
     // The lint is not vacuous: it sees the checks a pull request runs.
-    for job in ["ci.yml/lint", "ci.yml/test", "ci.yml/coverage"] {
+    for job in [
+        "ci.yml/lint",
+        "ci.yml/test",
+        "ci.yml/coverage",
+        "farm.yml/build",
+    ] {
         assert!(jobs.iter().any(|j| j == job), "{job} in {jobs:?}");
     }
     // None of the beta stage's jobs is one.

@@ -49,6 +49,17 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     e.finish().expect("gzip")
 }
 
+fn zst(bytes: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// The first half of a zstd frame of 4 KiB that does not repeat, so the cut falls inside a block.
+fn cut_zst() -> Vec<u8> {
+    let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+    let full = zst(&data);
+    full[..full.len() / 2].to_vec()
+}
+
 fn member(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
@@ -155,13 +166,28 @@ fn a_tar_gz_yields_the_tool() {
     assert_eq!(std::fs::read(&out).expect("read"), TOOL);
 }
 
-/// Asserts that a gzip stream that does not decode, and a tar whose header is not a
-/// tar's, are unpack errors with nothing written.
+/// Asserts that a zstd file yields its decompressed bytes.
+#[test]
+fn a_zst_yields_the_tool() {
+    let (result, out) = install_own("zst", &zst(TOOL), &Unpack::Zst);
+    result.expect("install");
+    assert_eq!(std::fs::read(&out).expect("read"), TOOL);
+}
+
+/// Asserts that a gzip stream that does not decode, a tar whose header is not a tar's, and a
+/// zstd download that is not zstd, is empty or is cut short, are unpack errors with nothing
+/// written.
 #[test]
 fn an_archive_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
     let not_tar = [1u8; 1024];
-    for (name, bytes) in [("gz", b"not gzip".to_vec()), ("tar", gzip(&not_tar))] {
-        let (result, out) = install_own(&format!("undecodable-{name}"), &bytes, &tar_gz("x"));
+    for (name, bytes, unpack) in [
+        ("gz", b"not gzip".to_vec(), tar_gz("x")),
+        ("tar", gzip(&not_tar), tar_gz("x")),
+        ("zst", b"not zstd".to_vec(), Unpack::Zst),
+        ("zst-empty", Vec::new(), Unpack::Zst),
+        ("zst-cut", cut_zst(), Unpack::Zst),
+    ] {
+        let (result, out) = install_own(&format!("undecodable-{name}"), &bytes, &unpack);
         assert!(
             matches!(result, Err(Error::Unpack(_))),
             "{name}: {result:?}"
@@ -238,6 +264,12 @@ fn extract_and_member_must_agree() {
     assert!(e.contains("needs --member"), "{e}");
     let e = Unpack::new(None, Some(member("d/tool"))).expect_err("member out of place");
     assert!(e.contains("needs --extract tar.gz"), "{e}");
+    assert_eq!(Unpack::new(Some(Format::Zst), None), Ok(Unpack::Zst));
+    let e = Unpack::new(Some(Format::Zst), Some(member("d/tool"))).expect_err("zst, member");
+    assert_eq!(
+        e,
+        "--extract zst is one compressed file: it takes no --member"
+    );
 }
 
 /// Asserts that the part file sits in the same directory as `--out`, so the rename
