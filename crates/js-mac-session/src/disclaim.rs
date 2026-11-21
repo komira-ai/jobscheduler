@@ -216,7 +216,9 @@ impl Program {
         self
     }
 
-    /// Sets the user id the program runs as (`CommandExt::uid`).
+    /// Sets the user id the program runs as (`CommandExt::uid`). When the caller is root,
+    /// std then calls `setgroups(0)`, which macOS turns into group 0 (`wheel`): nothing that
+    /// starts a program as a lease user uses it; they drop with the steps of `crate::spawn`.
     pub fn uid(&mut self, id: u32) -> &mut Self {
         std::os::unix::process::CommandExt::uid(&mut self.command, id);
         self
