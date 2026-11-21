@@ -66,9 +66,10 @@
 //! - `channels descriptor write --bucket <b> --work <dir> [--distribution-id <id>]`
 //!   ([`channels::descriptor`]): `js-agent` mapped to `pkg/jobscheduler` in the repository's
 //!   `hostkeeper-repository.json`, the one entry of it this repository writes.
-//! - `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): the macOS installer package's
-//!   payload (it has no script), laid down for `pkgbuild`, and the built package read back with
-//!   `pkgutil` and `lsbom` and refused unless it is exactly that.
+//! - `pkg entitle-macos`, `pkg stage-macos` and `pkg check-macos` ([`macpkg`]): `js-vmm` signed
+//!   ad hoc with the virtualization entitlement, the macOS installer package's payload (it has
+//!   no script) laid down for `pkgbuild`, and the built package read back with `pkgutil`,
+//!   `lsbom` and `codesign` and refused unless it is exactly that.
 //! - `site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>] [--ready-timeout <s>]` ([`site_demo`]):
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
@@ -360,6 +361,10 @@ enum Verb {
 /// The `pkg` verbs.
 #[derive(Subcommand)]
 enum PkgVerb {
+    /// Sign `js-vmm` ad hoc with the hardened runtime and the virtualization entitlement (a Mac
+    /// only).
+    #[command(name = "entitle-macos")]
+    Entitle(macpkg::EntitleArgs),
     /// Lay the macOS package's payload and scripts down, ready for `pkgbuild`.
     StageMacos(macpkg::StageArgs),
     /// Refuse a macOS package that is not exactly the js-agent package (a Mac only).
@@ -482,6 +487,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Channels { verb } => Ok(channels::run(verb)?.join("\n")),
         Verb::Pkg { verb } => Ok(match verb {
+            PkgVerb::Entitle(args) => macpkg::entitle(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,
             PkgVerb::CheckMacos(args) => macpkg::check(&args)?,
         }),

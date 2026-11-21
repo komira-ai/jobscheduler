@@ -33,6 +33,8 @@ js-agent = { path = "../js-agent" }
 # and its served paragraph from the calls the lease server serves.
 js-api-gateway = { path = "../js-api-gateway" }
 js-lease-server = { path = "../js-lease-server" }
+# `pkg check-macos` reads the entitlements `codesign` prints of the package's programs.
+plist.workspace = true
 # `gen-job-surface` reads the job service's descriptor set: the one js-proto builds, decoded
 # with prost into prost-types' descriptor messages.
 js-proto = { path = "../js-proto" }

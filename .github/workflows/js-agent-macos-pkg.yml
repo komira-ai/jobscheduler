@@ -1,10 +1,12 @@
 # The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted
-# Apple silicon runner from the release build of js-agent, js-mac-session and js-mac-provision,
-# with pkgbuild and productbuild, and read back by the xtask `pkg check-macos` verb, which
-# refuses anything but the files, modes and owners the package is meant to have, and any
-# script. It is a hostkeeper `macos-pkg` package (docs/design/mac-hostkeeper-package.md): the
-# file is `js-agent-<version>-macos-arm64.pkg`, it carries no preinstall or postinstall script,
-# and hostkeeper's coordinator orders it onto the Macs of a host group. It publishes nothing
+# Apple silicon runner from the release build of js-agent, js-mac-session, js-mac-provision
+# and the VM launcher js-vmm, with pkgbuild and productbuild, and read back by the xtask
+# `pkg check-macos` verb, which refuses anything but the files, modes and owners the package
+# is meant to have, any script, and any program whose signature does not verify or carries
+# other entitlements than its own. It is a hostkeeper `macos-pkg` package
+# (docs/design/mac-hostkeeper-package.md): the file is `js-agent-<version>-macos-arm64.pkg`,
+# it carries no preinstall or postinstall script, and hostkeeper's coordinator orders it onto
+# the Macs of a host group. It publishes nothing
 # itself: release.yml's `pkg-upload` job puts the signed package in the package repository.
 #
 # Two jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
@@ -12,7 +14,11 @@
 # the package unsigned, and no secret is named anywhere in it, so no code of a branch (a build
 # script, a macro, xtask) can see one. The root helper's plist names the agent by the cdhash of
 # the `js-agent` binary of this same package, which `build` reads from the binary on the macOS
-# runner (the linker signs an arm64 binary ad hoc), so the helper needs no flags file.
+# runner (the linker signs an arm64 binary ad hoc), so the helper needs no flags file. js-vmm
+# starts virtual machines, which Virtualization.framework allows only to a process with the
+# entitlement com.apple.security.virtualization: `build` signs it ad hoc with the hardened
+# runtime and that entitlement (`pkg entitle-macos`), which needs no key, before staging. The
+# other programs keep the linker's signature.
 #
 # `sign` runs only on main: by hand, or in the release's call (`sign: true`, on a push, with
 # `secrets: inherit`, without which a called workflow reads every secret as empty). It runs
@@ -96,10 +102,11 @@ jobs:
           cargo build --locked --release -p js-agent --bin js-agent
           cargo build --locked --release -p js-mac-session --bin js-mac-session
           cargo build --locked --release -p js-mac-provision --bin js-mac-provision
+          cargo build --locked --release -p js-vmm --bin js-vmm
       - name: The programs print the version
         run: |
           set -euo pipefail
-          for bin in js-agent js-mac-session js-mac-provision; do
+          for bin in js-agent js-mac-session js-mac-provision js-vmm; do
             printed="$(target/release/$bin --version | sed -n 1p)"
             echo "$printed"
             case "$printed" in
@@ -110,6 +117,8 @@ jobs:
                 ;;
             esac
           done
+      - name: Entitle js-vmm
+        run: cargo xtask pkg entitle-macos --bin-dir target/release
       - name: Stage the payload
         run: |
           set -euo pipefail

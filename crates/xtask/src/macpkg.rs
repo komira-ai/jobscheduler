@@ -1,14 +1,17 @@
 //! The js-agent installer package for macOS (`packaging/js-agent-macos`).
 //!
 //! The package is a hostkeeper `macos-pkg` service: it lays its files down and runs no script.
+//! `pkg entitle-macos` signs the one program that needs an entitlement, `js-vmm`, ad hoc with
+//! the hardened runtime and the virtualization entitlement, in place, before staging.
 //! `pkg stage-macos` lays the payload down in a directory from the built programs, the
 //! licence and the three plists (the agent, its root helper and the daemon that keeps the pool's
 //! pf anchor loaded); the workflow gives that directory to `pkgbuild` without
-//! `--scripts`. `pkg check-macos` reads the package back with Apple's `pkgutil` and `lsbom`
-//! and refuses it unless it holds exactly [`entries`], each with its mode and root as owner,
-//! no script at all, and the identifier and version of the release.
+//! `--scripts`. `pkg check-macos` reads the package back with Apple's `pkgutil`, `lsbom` and
+//! `codesign` and refuses it unless it holds exactly [`entries`], each with its mode and root
+//! as owner, no script at all, the identifier and version of the release, and programs whose
+//! signatures verify and carry exactly the entitlements of [`entitlements_of`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::release::Version;
@@ -39,12 +42,48 @@ pub struct Entry {
 /// The directory of the package's own files, below the volume.
 const PREFIX: &str = "Library/Application Support/js-agent";
 
+/// The programs of the package, in `bin/` below [`PREFIX`]: the agent, its root helper, the
+/// install-time tool and the VM launcher the agent starts (`--vm-driver`).
+pub const PROGRAMS: [&str; 4] = ["js-agent", "js-mac-session", "js-mac-provision", "js-vmm"];
+
+/// The entitlement Virtualization.framework asks of a process that starts a virtual machine.
+/// It needs no provisioning profile, so an ad hoc signature can carry it.
+pub const VIRTUALIZATION: &str = "com.apple.security.virtualization";
+
+/// The entitlements `program` is signed with: [`VIRTUALIZATION`] for `js-vmm`, none for every
+/// other program.
+#[must_use]
+pub fn entitlements_of(program: &str) -> &'static [&'static str] {
+    if program == "js-vmm" {
+        &[VIRTUALIZATION]
+    } else {
+        &[]
+    }
+}
+
+/// The entitlements file `codesign --entitlements` reads: each key of `keys` set to true.
+#[must_use]
+pub fn entitlements_plist(keys: &[&str]) -> String {
+    let mut text = String::from(concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<plist version=\"1.0\">\n<dict>\n",
+    ));
+    for key in keys {
+        text.push_str(&format!("\t<key>{key}</key>\n\t<true/>\n"));
+    }
+    text.push_str("</dict>\n</plist>\n");
+    text
+}
+
 /// The files of the payload: path, mode.
 fn files() -> Vec<(String, u32)> {
-    vec![
-        (format!("{PREFIX}/bin/js-agent"), 0o755),
-        (format!("{PREFIX}/bin/js-mac-session"), 0o755),
-        (format!("{PREFIX}/bin/js-mac-provision"), 0o755),
+    let mut files: Vec<(String, u32)> = PROGRAMS
+        .iter()
+        .map(|program| (format!("{PREFIX}/bin/{program}"), 0o755))
+        .collect();
+    files.extend([
         (format!("{PREFIX}/LICENSE"), 0o644),
         ("Library/LaunchDaemons/js-agent.plist".to_owned(), 0o644),
         (
@@ -55,7 +94,8 @@ fn files() -> Vec<(String, u32)> {
             "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
             0o644,
         ),
-    ]
+    ]);
+    files
 }
 
 /// The directories the package makes that hold no file of its own: the log directory the
@@ -100,7 +140,8 @@ pub struct StageArgs {
     /// The release version.
     #[arg(long)]
     pub version: Version,
-    /// The directory with the built `js-agent`, `js-mac-session` and `js-mac-provision`.
+    /// The directory with the built `js-agent`, `js-mac-session`, `js-mac-provision` and
+    /// `js-vmm` (the last signed by `pkg entitle-macos`).
     #[arg(long)]
     pub bin_dir: PathBuf,
     /// The license file.
@@ -131,6 +172,29 @@ pub struct CheckArgs {
     pub version: Version,
 }
 
+/// The arguments of `pkg entitle-macos`.
+#[derive(clap::Args)]
+pub struct EntitleArgs {
+    /// The directory with the built `js-vmm`, which is signed in place.
+    #[arg(long)]
+    pub bin_dir: PathBuf,
+}
+
+/// What `codesign` says of one program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signature {
+    /// The program's name, one of [`PROGRAMS`].
+    pub program: String,
+    /// `codesign --verify --strict`: what it printed when it refused the program.
+    pub verified: Result<(), String>,
+    /// `codesign --display --verbose=4` (its standard error, which holds the code directory
+    /// flags).
+    pub display: String,
+    /// `codesign --display --entitlements - --xml` (its standard output: empty when the
+    /// program has no entitlement).
+    pub entitlements: String,
+}
+
 /// What was read back from a package.
 pub struct Inspected {
     /// `lsbom` of the component's bill of materials.
@@ -139,6 +203,8 @@ pub struct Inspected {
     pub scripts: Vec<String>,
     /// The component's `PackageInfo`.
     pub package_info: String,
+    /// The signatures of the payload's programs.
+    pub signatures: Vec<Signature>,
 }
 
 /// Why a verb failed.
@@ -150,11 +216,16 @@ pub enum Error {
     /// The package is not the package.
     #[error("the package is not the js-agent package: {}", .0.join("; "))]
     Refused(Vec<String>),
-    /// `pkgutil` or `lsbom` failed.
+    /// `pkgutil`, `lsbom` or `codesign` failed.
     #[error("{0}")]
     Tool(String),
-    /// The package is read with Apple's tools.
-    #[error("pkg check-macos reads the package with pkgutil and lsbom, which only a Mac has")]
+    /// A program `pkg entitle-macos` signed does not carry the signature it was given.
+    #[error("the signed program is not as the package needs it: {}", .0.join("; "))]
+    Unsigned(Vec<String>),
+    /// The package is read, and `js-vmm` signed, with Apple's tools.
+    #[error(
+        "pkg check-macos and pkg entitle-macos run pkgutil, lsbom and codesign, which only a Mac has"
+    )]
     NeedsMac,
 }
 
@@ -178,19 +249,16 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), Error> {
 /// [`Error`]: a source is unreadable, or the output directory exists.
 pub fn stage(args: &StageArgs) -> Result<String, Error> {
     let version = args.version.to_string();
-    let sources: Vec<(String, PathBuf)> = vec![
-        (
-            format!("{PREFIX}/bin/js-agent"),
-            args.bin_dir.join("js-agent"),
-        ),
-        (
-            format!("{PREFIX}/bin/js-mac-session"),
-            args.bin_dir.join("js-mac-session"),
-        ),
-        (
-            format!("{PREFIX}/bin/js-mac-provision"),
-            args.bin_dir.join("js-mac-provision"),
-        ),
+    let mut sources: Vec<(String, PathBuf)> = PROGRAMS
+        .iter()
+        .map(|program| {
+            (
+                format!("{PREFIX}/bin/{program}"),
+                args.bin_dir.join(program),
+            )
+        })
+        .collect();
+    sources.extend([
         (format!("{PREFIX}/LICENSE"), args.license.clone()),
         (
             "Library/LaunchDaemons/js-agent.plist".to_owned(),
@@ -204,7 +272,7 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
             "Library/LaunchDaemons/js-agent.pf-pool.plist".to_owned(),
             args.pf_pool_plist.clone(),
         ),
-    ];
+    ]);
     let mut bytes = BTreeMap::new();
     for (dest, source) in sources {
         bytes.insert(dest, std::fs::read(&source).map_err(failure(&source))?);
@@ -320,10 +388,195 @@ pub fn problems(inspected: &Inspected, version: &str) -> Vec<String> {
     {
         found.push(format!("PackageInfo does not name the version {version}"));
     }
+    for program in PROGRAMS {
+        match inspected.signatures.iter().find(|s| s.program == program) {
+            Some(signature) => found.extend(signature_problems(signature)),
+            None => found.push(format!("bin/{program}: its signature was not read")),
+        }
+    }
     found
 }
 
-/// Reads the package with `pkgutil` and `lsbom`.
+/// The names of the code directory flags of `codesign --display --verbose=4`: `adhoc` and
+/// `runtime` of `flags=0x10002(adhoc,runtime)`.
+fn code_flags(display: &str) -> BTreeSet<String> {
+    display
+        .lines()
+        .find_map(|l| l.split_once("flags=").map(|(_, rest)| rest))
+        .and_then(|flags| flags.split_once('('))
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(inside, _)| inside.split(',').map(|f| f.trim().to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// The entitlements of `codesign --display --entitlements - --xml`, each key with its value
+/// (`true`, or what else it is).
+fn granted(xml: &str) -> Result<BTreeMap<String, String>, String> {
+    if xml.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let value = plist::Value::from_reader_xml(xml.as_bytes()).map_err(|e| e.to_string())?;
+    let dict = value
+        .into_dictionary()
+        .ok_or_else(|| "it is not a dictionary".to_owned())?;
+    Ok(dict
+        .into_iter()
+        .map(|(key, value)| {
+            let shown = match value {
+                plist::Value::Boolean(true) => "true".to_owned(),
+                other => format!("{other:?}"),
+            };
+            (key, shown)
+        })
+        .collect())
+}
+
+/// What is wrong with the signature of one program, one line each: `codesign --verify
+/// --strict` refuses it, its entitlements are not exactly [`entitlements_of`] it, each set to
+/// true, or it has an entitlement and no hardened runtime.
+#[must_use]
+pub fn signature_problems(signature: &Signature) -> Vec<String> {
+    let program = &signature.program;
+    let mut found = Vec::new();
+    if let Err(why) = &signature.verified {
+        found.push(format!(
+            "bin/{program}: codesign --verify --strict refuses it: {}",
+            why.trim()
+        ));
+    }
+    let want: BTreeMap<String, String> = entitlements_of(program)
+        .iter()
+        .map(|key| ((*key).to_owned(), "true".to_owned()))
+        .collect();
+    match granted(&signature.entitlements) {
+        Err(why) => found.push(format!(
+            "bin/{program}: cannot read its entitlements: {why}"
+        )),
+        Ok(got) if got != want => found.push(format!(
+            "bin/{program}: carries the entitlements {got:?}, not {want:?}"
+        )),
+        Ok(_) => {}
+    }
+    if !want.is_empty() && !code_flags(&signature.display).contains("runtime") {
+        found.push(format!(
+            "bin/{program}: is not signed with the hardened runtime"
+        ));
+    }
+    found
+}
+
+/// Apple's code signing tool, by its absolute path.
+#[cfg(target_os = "macos")]
+const CODESIGN: &str = "/usr/bin/codesign";
+
+/// Runs `program`: its exit status and both outputs, whatever the status.
+#[cfg(target_os = "macos")]
+fn output(program: &str, args: &[&std::ffi::OsStr]) -> Result<std::process::Output, Error> {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| Error::Tool(format!("{program}: {e}")))
+}
+
+/// What `codesign` says of `program` at `path`.
+#[cfg(target_os = "macos")]
+fn read_signature(program: &str, path: &Path) -> Result<Signature, Error> {
+    let path = path.as_os_str();
+    let verify = output(CODESIGN, &["--verify".as_ref(), "--strict".as_ref(), path])?;
+    let display = output(
+        CODESIGN,
+        &["--display".as_ref(), "--verbose=4".as_ref(), path],
+    )?;
+    let entitlements = output(
+        CODESIGN,
+        &[
+            "--display".as_ref(),
+            "--entitlements".as_ref(),
+            "-".as_ref(),
+            "--xml".as_ref(),
+            path,
+        ],
+    )?;
+    Ok(Signature {
+        program: program.to_owned(),
+        verified: if verify.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&verify.stderr).into_owned())
+        },
+        display: String::from_utf8_lossy(&display.stderr).into_owned(),
+        entitlements: String::from_utf8_lossy(&entitlements.stdout).into_owned(),
+    })
+}
+
+/// Signs each program of `bin_dir` that has an entitlement ad hoc, with the hardened runtime
+/// and its entitlements, and reads the signature back.
+#[cfg(target_os = "macos")]
+fn sign_programs(bin_dir: &Path) -> Result<String, Error> {
+    let mut found = Vec::new();
+    let mut signed = Vec::new();
+    for program in PROGRAMS.iter().filter(|p| !entitlements_of(p).is_empty()) {
+        let path = bin_dir.join(program);
+        // One file per call: tests of one process sign side by side.
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let plist = std::env::temp_dir().join(format!(
+            "xtask-entitle-{}-{call}-{program}.plist",
+            std::process::id()
+        ));
+        std::fs::write(&plist, entitlements_plist(entitlements_of(program)))
+            .map_err(failure(&plist))?;
+        let out = output(
+            CODESIGN,
+            &[
+                "--force".as_ref(),
+                "--sign".as_ref(),
+                "-".as_ref(),
+                "--options".as_ref(),
+                "runtime".as_ref(),
+                "--entitlements".as_ref(),
+                plist.as_os_str(),
+                path.as_os_str(),
+            ],
+        );
+        let _ = std::fs::remove_file(&plist);
+        let out = out?;
+        if !out.status.success() {
+            return Err(Error::Tool(format!(
+                "codesign {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        found.extend(signature_problems(&read_signature(program, &path)?));
+        signed.push(*program);
+    }
+    if !found.is_empty() {
+        return Err(Error::Unsigned(found));
+    }
+    Ok(format!(
+        "signed {} ad hoc with the hardened runtime and its entitlements",
+        signed.join(", ")
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sign_programs(_bin_dir: &Path) -> Result<String, Error> {
+    Err(Error::NeedsMac)
+}
+
+/// Signs `js-vmm` in `args.bin_dir` in place: ad hoc, with the hardened runtime and
+/// [`VIRTUALIZATION`], and refuses it unless `codesign` then reads that signature back.
+/// The other programs keep the linker's signature (the helper's plist names `js-agent` by the
+/// code directory hash of that signature).
+///
+/// # Errors
+/// [`Error`]: not a Mac, `codesign` failed, or the signature read back is not the one given.
+pub fn entitle(args: &EntitleArgs) -> Result<String, Error> {
+    sign_programs(&args.bin_dir)
+}
+
+/// Reads the package with `pkgutil`, `lsbom` and `codesign`.
 #[cfg(target_os = "macos")]
 fn inspect(pkg: &Path) -> Result<Inspected, Error> {
     use std::process::Command;
@@ -372,10 +625,24 @@ fn inspect(pkg: &Path) -> Result<Inspected, Error> {
         }
         let info = component.join("PackageInfo");
         let package_info = std::fs::read_to_string(&info).map_err(|e| io(&info, e))?;
+        // `--expand-full` lays the payload down under `Payload/`; a program it lacks is
+        // reported by the bill of materials and as a signature not read.
+        let mut signatures = Vec::new();
+        for program in PROGRAMS {
+            let path = component
+                .join("Payload")
+                .join(PREFIX)
+                .join("bin")
+                .join(program);
+            if path.is_file() {
+                signatures.push(read_signature(program, &path)?);
+            }
+        }
         Ok(Inspected {
             bom,
             scripts,
             package_info,
+            signatures,
         })
     };
     let inspected = read();
@@ -404,7 +671,8 @@ pub fn verdict(inspected: &Inspected, version: &str, pkg: &Path) -> Result<Strin
     ))
 }
 
-/// Reads the package with `pkgutil` and `lsbom` and refuses it unless it is the package.
+/// Reads the package with `pkgutil`, `lsbom` and `codesign` and refuses it unless it is the
+/// package.
 ///
 /// # Errors
 /// [`Error`].

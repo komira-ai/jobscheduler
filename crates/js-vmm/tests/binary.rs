@@ -20,9 +20,8 @@ fn scratch(name: &str) -> TestDir {
 }
 
 /// Catches a binary that does not answer `--version` with its name and version and exit
-/// status 0: `cargo xtask sign-darwin` runs `<binary> --version` to show the signed
-/// binary starts, so such a binary fails the signing job for a reason other than its
-/// signature.
+/// status 0: the macOS package's workflow runs `js-vmm --version` to check the version it
+/// packages, so such a binary fails the package's build for a reason other than its version.
 #[test]
 fn version_prints_name_and_version() {
     let out = run(&["--version"]);

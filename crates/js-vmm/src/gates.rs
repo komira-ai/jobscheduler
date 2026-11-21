@@ -654,7 +654,7 @@ pub fn p6(ctx: &Ctx<'_>) -> Report {
     if !(sig.adhoc && sig.hardened_runtime && sig.virtualization_entitlement) {
         return Report::needs_manual(
             "p6",
-            "this binary is not signed ad hoc with the hardened runtime and the virtualization entitlement; run the binary `cargo xtask sign-darwin` signed (the CI artifact)",
+            "this binary is not signed ad hoc with the hardened runtime and the virtualization entitlement; run the js-vmm of the js-agent package, which `cargo xtask pkg entitle-macos` signed",
             json!({"signature": sig_json}),
         );
     }

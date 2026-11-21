@@ -4069,6 +4069,7 @@ dependencies = [
  "js-testkit",
  "js-update-hook",
  "md-5",
+ "plist",
  "proc-macro2",
  "prost",
  "prost-types",
