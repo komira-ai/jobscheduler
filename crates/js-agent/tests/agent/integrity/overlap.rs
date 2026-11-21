@@ -80,7 +80,7 @@ fn a_run_whose_create_is_under_way_leaves_no_residue_for_a_run_that_ends() {
 /// host when a run ends beside a run whose create is under way: one left in the ended run's
 /// own lease group and one in the lease group of a run the agent does not hold are both
 /// named, the neighbour's two processes are not, and the finding is the whole detail by
-/// exact equality. Catches an exemption of every lease group under `actions/`, or of every
+/// exact equality (it fits the bound). Catches an exemption of every lease group under `actions/`, or of every
 /// process of the job user, which would let a real leftover pass.
 #[test]
 fn a_leftover_outside_every_live_run_still_taints_beside_a_create_under_way() {
@@ -102,9 +102,8 @@ fn a_leftover_outside_every_live_run_still_taints_beside_a_create_under_way() {
     assert_eq!(
         h.life.findings()[0].message,
         format!(
-            "process-as-job-user: pid 500 (stray, state S, cgroup {}) of user {JOB_UID} is \
-             running after job r1, pid 501 (stray, state S, cgroup {}) of user {JOB_UID} is \
-             running after job r1",
+            "pid 500 (stray, state S, cgroup {}, owner {JOB_UID}) is running after job r1, \
+             pid 501 (stray, state S, cgroup {}, owner {JOB_UID}) is running after job r1",
             ctr_of("r1"),
             ctr_of("r9")
         )
@@ -130,9 +129,8 @@ fn the_neighbours_processes_stay_out_of_the_baseline_and_count_against_it() {
     assert_eq!(
         h.life.findings()[0].message,
         format!(
-            "process-as-job-user: pid 400 (js-init, state S, cgroup {0}) of user {JOB_UID} is \
-             running after job r2, pid 401 (kbf-task, state R, cgroup {0}) of user {JOB_UID} \
-             is running after job r2",
+            "pid 400 (js-init, state S, cgroup {0}, owner {JOB_UID}) is running after job r2, \
+             pid 401 (kbf-task, state R, cgroup {0}, owner {JOB_UID}) is running after job r2",
             ctr_of("r2")
         )
     );

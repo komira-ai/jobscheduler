@@ -98,7 +98,7 @@ enter. The code path is `ProcHost::watched` through `Integrity`.
 |---|---|---|
 | An unreadable watch directory is an **error**, never an empty listing | `Permission denied` is returned | `watch::a_non_root_agent_without_a_capability_gets_an_error_for_a_root_only_watch_dir` |
 | At start an unreadable directory stops the baseline: the agent does not start, naming `watch-unreadable` | yes | `watch::an_unreadable_watch_dir_stops_the_agent_from_taking_its_baseline` |
-| A directory readable at the baseline and unreadable after a job is an **unchecked** finding with code `watch-unreadable` (the slot is not freed, the host is tainted), run against the real `/proc` | yes | `watch::a_watch_dir_closed_after_the_baseline_taints_the_host_as_unchecked` |
+| A directory readable at the baseline and unreadable after a job is a **note** with code `watch-unreadable` (the check passes and the directory's value is taken as the baseline's: no contained job can write a watch directory, so the host is not tainted), run against the real `/proc` | yes | `watch::a_watch_dir_closed_after_the_baseline_is_noted_and_taints_nothing` |
 | Under B | root lists a directory that belongs to another user with mode 0 | `watch::a_root_agent_reads_a_closed_watch_dir_of_another_user` |
 | Under A (caps) | `CAP_DAC_READ_SEARCH` alone lists a root-only directory; `CAP_FOWNER` and `CAP_CHOWN` do not | `watch::cap_dac_read_search_alone_reads_a_root_only_watch_dir` |
 | The real `/root` (parent of `/root/.ssh`) on the runner | closed without the capability, open with it | `watch::the_real_root_home_needs_cap_dac_read_search_for_a_non_root_agent` |
@@ -112,7 +112,7 @@ grant that forgets `x`) is not an error. Its entries cannot be examined, so they
 only and a rewrite of a file in it is not seen
 (`watch::a_watch_dir_the_agent_may_list_but_not_search_is_digested_by_names_only`; with
 `CAP_DAC_READ_SEARCH` the same rewrite changes the digest). Any ACL route therefore grants `rx`,
-and a follow-up should make a listing whose entries cannot be examined a `watch-unreadable` finding.
+and a follow-up should make a listing whose entries cannot be examined a `watch-unreadable` note.
 
 ### Duty 3. The per-run scratch quota
 
@@ -431,7 +431,7 @@ Proven in CI (the `agent-privilege` job and the `test` job):
 
 - Duty 1: A needs exactly `CAP_SYS_PTRACE`; nothing else stands in; B passes; every other host input
   needs no capability.
-- Duty 2: unreadable watch directory is an error, a refused start, and an unchecked finding after a
+- Duty 2: unreadable watch directory is an error, a refused start, and a note after a
   job; `CAP_DAC_READ_SEARCH` suffices; the list-without-search gap is real.
 - Duty 3: which quota call needs which capability, with the limits read back as root.
 - Duty 4: the before/after kernel behaviour of the layout, the unit tests of both rules, and the

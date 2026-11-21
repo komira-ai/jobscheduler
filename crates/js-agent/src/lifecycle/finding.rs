@@ -1,4 +1,7 @@
-//! What a post-job check reports when the host is not known to be clean ([`CheckFinding`]).
+//! What a post-job check reports when the host is not known to be clean ([`CheckFinding`]),
+//! and what it reports of a change that does not taint the host ([`CheckNote`]).
+
+use super::{Event, Finding};
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
 pub const CHECK_DETAIL_MAX: usize = 256;
@@ -57,6 +60,38 @@ impl CheckFinding {
         match self {
             Self::Residue { detail, .. } | Self::Unchecked { detail, .. } => bounded(detail),
         }
+    }
+}
+
+/// What a post-job check saw change on the host that does not taint it: the host's own
+/// doing, which no contained job can cause. Logged as one line, never sealed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckNote {
+    /// The check's code (one of `crate::integrity::code`).
+    pub code: &'static str,
+    /// What changed, cut to [`CHECK_DETAIL_MAX`] bytes at a character boundary.
+    pub detail: String,
+}
+
+impl CheckNote {
+    /// A note of `code`; `detail` is cut to [`CHECK_DETAIL_MAX`] bytes, at a character
+    /// boundary.
+    pub fn new(code: &'static str, detail: &str) -> Self {
+        Self {
+            code,
+            detail: bounded(detail).to_owned(),
+        }
+    }
+
+    /// The finding event that logs a note of a check that belongs to no run (a taint's
+    /// re-check, the check of a whole-node lease): the note's code and detail. It taints
+    /// nothing. A note after a job's checks is the job's finding instead (`Job::note`).
+    pub(super) fn event(self) -> Event {
+        Event::Finding(Finding {
+            run_id: None,
+            code: self.code,
+            message: self.detail,
+        })
     }
 }
 

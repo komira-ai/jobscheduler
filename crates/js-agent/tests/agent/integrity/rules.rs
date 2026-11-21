@@ -1,24 +1,27 @@
-//! The rules of the checks that a change to the code of one rule could break unseen: what
-//! counts as a change in the user, group and module lists, what a kernel thread is, what
+//! The rules of the checks that a change to the code of one rule could break unseen: how a
+//! change in the user, group and module lists is named, what a kernel thread is, what
 //! the baseline keeps out, and which namespaces the agent must share with `init`.
 
 use js_agent::integrity::{FakeHost, Integrity, Mount, code};
+use js_agent::lifecycle::CheckNote;
 
-use super::{JOB_USERS, after, beside, process, said, started};
+use super::{JOB_USERS, codes, noted_after, process, quiet, quiet_beside, started};
 
-/// Asserts that a user line removed from the database and one changed in place (the same
-/// name with another shell) are each a finding under the user code, and so are the same two
-/// in the group database under the group code. It catches a comparison that sees only what
-/// was added (an account deleted, or a group's members replaced, unseen).
+/// Asserts that a user line removed from the database and one changed in place (the line
+/// replaced with the same name and another shell) are each a note under the user code, as
+/// `removed root` and `changed root`, and so are the same two in the group database under the
+/// group code, and that the check passes for each. It catches a comparison that sees only what
+/// was added (an account deleted, or a group's members replaced, unnoted), and a taint for a
+/// change of `/etc`, which a package install makes and a contained job cannot.
 #[test]
-fn a_user_or_group_line_removed_or_changed_is_a_finding() {
+fn a_user_or_group_line_removed_or_changed_is_a_note() {
     const ROOT: &str = "root:x:0:0:root:/root:/bin/sh";
     const GROUP: &str = "root:x:0:";
     for (name, change, expected) in [
         (
             "user-removed",
             (|host: &FakeHost| host.remove_user(ROOT)) as fn(&FakeHost),
-            (code::USER_CHANGED, "user-changed: root"),
+            (code::USER_CHANGED, "removed root"),
         ),
         (
             "user-changed",
@@ -26,12 +29,12 @@ fn a_user_or_group_line_removed_or_changed_is_a_finding() {
                 host.remove_user(ROOT);
                 host.add_user("root:x:0:0:root:/root:/bin/evil");
             },
-            (code::USER_CHANGED, "user-changed: root"),
+            (code::USER_CHANGED, "changed root"),
         ),
         (
             "group-removed",
             |host| host.remove_group(GROUP),
-            (code::GROUP_CHANGED, "group-changed: root"),
+            (code::GROUP_CHANGED, "removed root"),
         ),
         (
             "group-changed",
@@ -39,65 +42,54 @@ fn a_user_or_group_line_removed_or_changed_is_a_finding() {
                 host.remove_group(GROUP);
                 host.add_group("root:x:0:mallory");
             },
-            (code::GROUP_CHANGED, "group-changed: root"),
+            (code::GROUP_CHANGED, "changed root"),
         ),
     ] {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         change(&host);
-        let found = after(&mut checks, "r1").unwrap_err();
         assert_eq!(
-            said(&found),
-            (true, expected.0, expected.1.to_owned()),
+            noted_after(&mut checks, "r1"),
+            [CheckNote::new(expected.0, expected.1)],
             "{name}"
         );
     }
 }
 
-/// Asserts that a kernel module that was loaded at the baseline and is gone after the job
-/// is a finding, as unloaded, that a module loaded is one as loaded, and that both are
-/// named when one job does both. An unload is a finding on purpose: a job that cannot load
-/// a module (it holds no capability) has no business seeing one go, and a host where an
-/// operator unloads modules while jobs run is one the agent cannot call clean. It catches a
-/// comparison that sees only what was loaded.
+/// Asserts that an account removed, one changed and one added in one job are each named with
+/// what happened to it, in the order of the names, in one note. It catches a note that
+/// names the accounts and not what became of them.
 #[test]
-fn a_module_unloaded_is_a_finding() {
+fn removed_changed_and_added_accounts_are_named_with_what_happened() {
     let host = FakeHost::quiet();
+    host.add_user("daemon:x:1:1::/:/usr/sbin/nologin");
+    host.add_user("gone:x:5:5::/:/bin/sh");
     let mut checks = started(&host, vec![]);
-    host.unload_module("ext4");
-    let found = after(&mut checks, "r1").unwrap_err();
+    host.remove_user("gone:x:5:5::/:/bin/sh");
+    host.remove_user("daemon:x:1:1::/:/usr/sbin/nologin");
+    host.add_user("daemon:x:1:1::/:/bin/sh");
+    host.add_user("new:x:6:6::/:/bin/sh");
     assert_eq!(
-        said(&found),
-        (
-            true,
-            code::MODULE_CHANGED,
-            "kernel-module-changed: unloaded ext4".to_owned()
-        )
-    );
-
-    let host = FakeHost::quiet();
-    let mut checks = started(&host, vec![]);
-    host.unload_module("ext4");
-    host.load_module("evil");
-    let found = after(&mut checks, "r2").unwrap_err();
-    assert_eq!(
-        found.detail(),
-        "kernel-module-changed: loaded evil, unloaded ext4"
+        noted_after(&mut checks, "r1"),
+        [CheckNote::new(
+            code::USER_CHANGED,
+            "changed daemon, removed gone, added new"
+        )]
     );
 }
 
 /// Asserts that a kernel thread that started during the job (its parent is `kthreadd`, pid
-/// 2, and it belongs to root) is not a finding, while a process whose parent is `init` is.
-/// A host starts kernel threads all the time, so a rule that took every parent of low pid
-/// for a daemonised child would taint nearly every host after nearly every job. It catches
-/// that rule.
+/// 2, and it belongs to root) is no note, while a process whose parent is `init` is a
+/// `daemonised-child` note. A host starts kernel threads all the time, so a rule that took
+/// every parent of low pid for a daemonised child would log a line after nearly every job. It
+/// catches that rule.
 #[test]
 fn a_new_kernel_thread_is_not_a_daemonised_child() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
     host.start_process(process(900, 2, 0, 5000, "0::/"));
     assert!(
-        after(&mut checks, "r1").is_ok(),
+        quiet(&mut checks, "r1"),
         "a thread of kthreadd is the kernel's"
     );
     host.start_process(process(
@@ -107,14 +99,14 @@ fn a_new_kernel_thread_is_not_a_daemonised_child() {
         5001,
         "0::/machine.slice/libpod-9e1.scope",
     ));
-    let found = after(&mut checks, "r2").unwrap_err();
-    assert_eq!(found.code(), code::DAEMONISED_CHILD);
-    assert!(found.detail().contains("pid 901"), "{found:?}");
-    assert!(!found.detail().contains("pid 900"), "{found:?}");
+    let notes = noted_after(&mut checks, "r2");
+    assert_eq!(codes(&notes), [code::DAEMONISED_CHILD]);
+    assert!(notes[0].detail.starts_with("pid 901"), "{notes:?}");
+    assert!(!notes[0].detail.contains("pid 900"), "{notes:?}");
 }
 
 /// A mount of `root`, `point` and `source` appears while the container `c2` is on the host
-/// beside the finished job `r1`: it is no finding then, and it is a new mount once the
+/// beside the finished job `r1`: it is no note then, and it is a `new-mount` note once the
 /// container is gone and the mount is not, because the baseline of the clean check of `r1`
 /// kept it out.
 fn neighbours_mount_stays_out_of_the_baseline(root: &str, point: &str, source: &str) {
@@ -126,14 +118,17 @@ fn neighbours_mount_stays_out_of_the_baseline(root: &str, point: &str, source: &
         fstype: "ext4".to_owned(),
         source: source.to_owned(),
     });
-    assert!(beside(&mut checks, "r1", &["c2"]).is_ok());
-    let found = after(&mut checks, "r2").unwrap_err();
-    assert_eq!(found.code(), code::NEW_MOUNT, "left behind");
+    assert!(quiet_beside(&mut checks, "r1", &["c2"]));
+    assert_eq!(
+        codes(&noted_after(&mut checks, "r2")),
+        [code::NEW_MOUNT],
+        "left behind"
+    );
 }
 
 /// Asserts that a mount whose root names a container that was still on the host beside a
-/// finished job is no finding for that job and is kept out of the baseline its clean check
-/// takes, so that what is left of it is found once the container is gone. It catches a
+/// finished job is no note for that job and is kept out of the baseline its clean check
+/// takes, so that what is left of it is noted once the container is gone. It catches a
 /// baseline filter without the root arm, which would absorb the leftover into the baseline
 /// for good.
 #[test]

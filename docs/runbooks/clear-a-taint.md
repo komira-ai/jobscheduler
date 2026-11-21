@@ -1,11 +1,19 @@
 # Clear a js-agent taint
 
-A tainted agent refuses every job (`host-tainted`) until its taint ends. A taint the agent
-judged itself (a leftover process, a check that could not read its input) clears by itself once
-two re-checks pass (docs/design/taint-self-clearing.md). Every other taint (`cleanup-failed`,
-`check-owed`, a change of mounts, users, groups, modules or a watched directory, a pinned residue,
-an unreadable marker) stays until the host is reimaged or an operator clears it. This is how an
-operator clears it, once the cause is understood and the host is known to be clean.
+A tainted agent refuses every job (`host-tainted`) until its taint ends. The post-job checks taint only
+for what a contained job could have left behind: a process running as a job's user after the job ended
+(`process-as-job-user`), or a process table the agent could not read (`processes-unreadable`). Those
+clear by themselves once two re-checks pass (docs/design/taint-self-clearing.md): when the process is
+gone, or the table can be read again, nothing is needed. What the host does itself never taints: a
+package install while jobs run (new users and groups, mounts, services, kernel modules, a changed
+`/etc`) is one journal line naming what changed (`js-agent: job: Finding(...)` with the code
+`user-changed`, `group-changed`, `new-mount`, `kernel-module-changed`, `watch-dir-changed` or
+`daemonised-child`), and the agent goes on. A marker written by an agent that predates this change, with
+one of those codes, is re-checked at the first start of the new one and clears the same way, so it needs
+no operator either. The taints that stay until the host is reimaged or an operator clears them are
+`cleanup-failed`, `check-owed`, a pinned residue, an unchecked taint the restarted agent holds, and an
+unreadable marker. This is how an operator clears one, once the cause is understood and the host is
+known to be clean.
 
 A host job's taint (`host-job`) is not cleared this way, and the verb refuses it (`host_job`):
 the machine is reimaged (docs/runbooks/host-jobs.md).
@@ -13,7 +21,13 @@ the machine is reimaged (docs/runbooks/host-jobs.md).
 ## 1. Find out why
 
 `js host list` (or the hostkeeper host page) shows the taint the server stores for each host: its
-reason, check and run. On the host, `journalctl -u js-agent-crun` has the finding that tainted it.
+reason, check and run. On the host, `journalctl -u js-agent-crun` has the finding that tainted it,
+and a line `tainted: <reason> (check <check>, run <run>): <what changed>` naming what the check saw. A
+process taint names the process: `pid <pid> (<command>, state <state>, cgroup <cgroup>, owner <user>
+(<uid>), cmd "<command line>") is running after job <run>`, so the line says whether it is the host's
+own helper or a job's leftover. The agent's health route (`/healthz`) gives the same text in its
+reason, `the agent holds a taint on this host: <what changed>`. A taint read back from the marker after
+a restart has no such line (the marker holds no text); read the journal of the run that made it.
 Decide that what the check found is gone, or was never the job's.
 
 ## 2. Clear the agent's taint
@@ -60,14 +74,30 @@ the line's `reason` and `detail` say why, and so does standard error:
 | `record_failed` | the files were kept aside but the record was not written | keep the journal line |
 | `start_failed` | the clear stands but the unit did not start | `systemctl status js-agent-crun` |
 
-## 3. Clear the server's taint
+## 3. Check the server's taint
 
-The lease server keeps its own record of the taint. Once the agent has restarted, clear it with
-the operator's credential:
+The lease server keeps its own record of the taint, but the agent's marker is the truth of every
+taint the agent made (a residue, an unchecked input, a failed cleanup, an unreadable marker,
+owed checks, the mirror of a refused start). Every heartbeat says whether the agent holds a
+taint (`tainted`), so the agent that step 2 restarted, which holds no marker, ends the server's
+record at its first heartbeat: the host is listed without a taint (`js host list`) within one
+heartbeat interval, and the server's journal has one line, "a host's taint is cleared", with
+`by="agent-holds-none"` and the taint's reason. Nothing more is needed.
+
+The agent's word does not end two taints the server makes itself: a host job's (`host-job`) and
+a refused whole-host prepare's (`host-unsafe`). Clear one of those, or the record held for an
+agent too old to send `tainted`, with the operator's credential:
 
 ```text
 js host host-taint --host-id ID
 ```
 
-Do it after step 2: while the agent's marker is there, the agent refuses the next start, and the
-server takes that refusal as the host's taint again.
+Do it after step 2 (and, for a host job's taint, after the machine is reimaged): while the
+agent's marker is there, the agent says it is tainted at every heartbeat, and the server takes
+that as the host's taint again (reason `host-tainted`).
+
+While a taint stands, the server logs once, as a warning, that the placement pass skips the host
+for it ("a live host is skipped by placement for the taint the server holds"), with the host, the
+reason, the check and the run, so a job that stays queued has its cause in the journal. On a host
+whose agent runs with `--health-listen` (the packaged unit does), the agent's health route
+(`/healthz`) reports it not placeable for the same cause.

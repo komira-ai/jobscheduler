@@ -133,16 +133,51 @@ async fn a_reply_with_a_taint_acknowledgement_is_not_held_and_says_beat_now() {
         run_id: None,
         check: None,
     };
-    let reply = rig.beat_reporting(&agent, Some(taint)).await.unwrap();
+    let reply = rig
+        .beat_reporting(&agent, Some(taint.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         reply,
         HeartbeatReply {
             taint_ack: true,
+            host_taint: Some(taint),
             beat_now: true,
             ..HeartbeatReply::default()
         }
     );
     assert_eq!(waits(&rig), 0);
+}
+
+/// Asserts that the reply to a host the registry holds tainted, which names the taint
+/// (`host_taint`) and carries nothing else, is held as a clean host's is: it waits once and
+/// ends at the bound with the taint named and `beat_now`. It catches a reply that names the
+/// taint counted as something to send, which would answer every beat of a tainted host at
+/// once and leave it beating in a loop with no hold.
+#[tokio::test]
+async fn a_reply_that_only_names_the_held_taint_is_held() {
+    let (rig, agent) = held_rig("held_host_taint", Duration::ZERO);
+    let taint = js_agent_wire::Taint {
+        reason: "residue".to_owned(),
+        run_id: None,
+        check: None,
+    };
+    let reported = rig
+        .beat_reporting(&agent, Some(taint.clone()))
+        .await
+        .unwrap();
+    assert!(reported.taint_ack);
+    assert_eq!(waits(&rig), 0);
+
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(
+        reply,
+        HeartbeatReply {
+            host_taint: Some(taint),
+            ..quiet_held()
+        }
+    );
+    assert_eq!(waits(&rig), 1);
 }
 
 /// Asserts that a wake that brings nothing to send (no job placed on the host) keeps the reply
