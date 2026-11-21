@@ -131,5 +131,17 @@ hostkeeper-steps.workspace = true
 # The certificates the host certificate tests mint (tests/agent/update_hook/machine_host_certificate.rs).
 rcgen.workspace = true
 
+# The macOS first-install test (tests/mac_first_install.rs) runs hostkeeper's own code for what
+# its daemon does with the package; none of it is built for Linux.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# A service's name and a version, and a package's SHA-256, as hostkeeper's installer takes them.
+hostkeeper-config.workspace = true
+# The macos-pkg installer (stage, activate, remove) and the sealed version directory it fills.
+hostkeeper-install.workspace = true
+# The daemon's launchd step launcher, the boot id, `launchctl` and the unit control of the switch.
+hostkeeper-launchd.workspace = true
+# The switch of the package's `current` link.
+hostkeeper-placed.workspace = true
+
 [lints]
 workspace = true
