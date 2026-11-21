@@ -482,7 +482,10 @@ one store are `js-lease-server/src/sched/jobs_two_servers_tests.rs::two_servers_
 `js-lease-server/src/job_pass_tests.rs::a_pass_another_server_claimed_is_left_to_it_until_the_period_is_out`,
 `js-jobs/src/suite/duties.rs::a_duty_is_claimed_by_one_server_for_each_period`,
 `js-jobs/src/suite/idempotency.rs::minted_ids_do_not_repeat_across_instances` and
-`js-state/tests/claim_decide.rs::writers_racing_for_one_row_place_it_once`.
+`js-state/tests/claim_decide.rs::writers_racing_for_one_row_place_it_once`. The whole update is
+`js-lease-server/tests/server/live_update_load.rs`: `a_rolling_update_of_two_servers_under_load_fails_no_job` (two
+start-first rolls under load, each old server signalled inside a placement it pulled and inside a dispatch claim) and
+`a_server_killed_mid_dispatch_leaves_the_start_to_the_other_after_the_lease` (the crash case of section 0.1).
 
 ## 9. The gaps, one pull request each
 

@@ -68,6 +68,8 @@ mod lambda_e2e_support;
 mod layering;
 mod limits;
 mod live_update;
+mod live_update_load;
+mod live_update_rig;
 mod logs_round_trip;
 mod memory_percent;
 mod metrics_listen;
