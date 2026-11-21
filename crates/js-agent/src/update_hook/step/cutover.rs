@@ -50,6 +50,28 @@
 //!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
 //!    at any look); a unit still waiting in `start` is not.
 //!
+//! An update that hands the runs over in place (the record's `in_place`, see `prepare`) does not
+//! stop the unit: with the unit up, steps 3 to 5 are replaced by the following. The record gets
+//! `stop_begun` with `pre_stop_session_ms` as in step 3; the handover file is written; the
+//! record gets `link_moved` and then `start_issued` (each before its act: the one act is the
+//! signal, which both ends the old program and starts the new one); and the unit's main process
+//! is sent SIGHUP (`systemctl kill --kill-whom=main --signal=SIGHUP`). The agent hands the runs
+//! over and runs the new release's program as the same process, so the unit stays active and
+//! systemd places no process in its cgroup; it removes the handover file at its start, and the
+//! step waits for that, for at most the stop's bound (see [`in_place`]): a signal the unit
+//! manager refuses takes the request back and fails the step (`stop_failed`, class
+//! environment); a bound that passes with the request still there fails it the same way and
+//! leaves the request for the agent; a unit that is no longer active (the agent ended instead
+//! of running again, or the new program died) is started and waited for as in step 5. A rerun
+//! that finds the start issued with the unit up signals again while the request is there (an
+//! agent that has taken it ignores a repeat) and is done when it is gone. A unit that is not up
+//! when the cutover begins has no agent to hand over: it is started as in step 5.
+//!
+//! A start that fails ends `start_failed` (class by the rule of step 5) and its detail adds
+//! that the staged release is installed and its agent is not running (on systemd: the manager
+//! retries the unit, `Restart=always`): the commit is made and the node runs no agent until
+//! the unit starts. `reversible` is `false` all the same.
+//!
 //! Each mark is written before its act, so a run that is killed leaves the marks of every act
 //! it may have made. A rerun does not rely on them: it asks the unit manager, and does what is
 //! not yet done, so every act is a no-op when its effect is already there. The state of the unit
@@ -71,7 +93,7 @@ use crate::update_hook::{
 
 use super::prepare::{ask_secs, busy_detail, idle, owed, place, refuse_host, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
-use super::{helper, pf};
+use super::{helper, in_place, pf};
 
 /// Runs `cutover`.
 pub fn cutover(env: &Env<'_>, params: &Params) -> Done {
@@ -146,6 +168,14 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         // leaves nothing begun.
         let unit = record.update.unit.clone();
         let state = show(env, &unit, Reason::StopFailed)?;
+        if record.in_place && matches!(life(&state), Life::Up) {
+            if !entered_begun {
+                record.pre_stop_session_ms = session;
+                mark(env, held, record, |record| record.stop_begun = true)?;
+            }
+            hand_over_in_place(env, held, record, params)?;
+            return Ok(success());
+        }
         if !entered_begun {
             // One save: the stop is never marked without the session it is to be judged against
             // (`mark` saves a copy of the record as it stands, with the session in it).
@@ -171,6 +201,33 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     }
     start(env, held, record, params)?;
     Ok(success())
+}
+
+/// The hand-over in place, with the unit up (see [`in_place`]): the request, the marks of the
+/// move of the link and of the start, each before the act, and the signal, which both ends the
+/// old program and starts the new one; then the wait until the agent has taken the request. A
+/// rerun that finds the start issued does not ask again: with the request gone the new agent
+/// runs, and with it still there the signal is sent again (an agent that has taken the request
+/// ignores a repeat).
+fn hand_over_in_place(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
+    if record.start_issued {
+        if !in_place::pending(env)? {
+            return Ok(());
+        }
+    } else {
+        request_handover(env, record)?;
+        mark_link_moved(env, held, record)?;
+        mark(env, held, record, |record| record.start_issued = true)?;
+    }
+    let unit = record.update.unit.clone();
+    in_place::signal(env, record, &unit)?;
+    let note = staged_not_running(env, record);
+    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
 }
 
 /// The session the lease server shows for the host, for an update that hands the runs over:
@@ -556,14 +613,22 @@ fn mark_link_moved(env: &Env<'_>, held: &Held, record: &mut Record) -> Result<()
 }
 
 /// A start that failed: the release's fault only if the unit ran and died, now or at an earlier
-/// look (`seen_crash`); a unit that is anything else says nothing of the binary.
-fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) -> Done {
+/// look (`seen_crash`); a unit that is anything else says nothing of the binary. `suffix` is
+/// what the caller adds to the detail about the node's state.
+fn start_failure(
+    env: &Env<'_>,
+    unit: &str,
+    detail: String,
+    seen_crash: bool,
+    suffix: &str,
+) -> Done {
     let ran = seen_crash
         || env
             .ports
             .units
             .show(unit)
             .is_ok_and(|state| state.crashed());
+    let detail = format!("{detail}{suffix}");
     if ran {
         failure(Reason::StartFailed, detail)
     } else {
@@ -571,25 +636,41 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
     }
 }
 
+/// What a failed start of the staged agent adds to the detail: the staged release is the
+/// installed one and no agent runs.
+pub(super) fn staged_not_running(env: &Env<'_>, record: &Record) -> String {
+    let retry = match env.manager {
+        Manager::Systemd => " (systemd retries the unit: Restart=always)",
+        Manager::Launchd => "",
+    };
+    format!(
+        "; the staged release {} is installed and its agent is not running{retry}",
+        record.update.target
+    )
+}
+
 /// Marks the start, then starts the unit and waits for it to be active.
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
     if !record.start_issued {
         mark(env, held, record, |record| record.start_issued = true)?;
     }
-    bring_up(env, held, record, params)
+    let note = staged_not_running(env, record);
+    bring_up(env, held, record, params, &note)
 }
 
 /// Starts the unit if it is down and waits for it to be active, for at most the start wait. A
-/// start that fails is the release's fault only if the unit ran and died. The mark of the
-/// start is the caller's: `cutover`'s and `rollback`'s are not the same.
+/// start that fails is the release's fault only if the unit ran and died; `suffix` is added to
+/// the detail of such an ending. The mark of the start is the caller's: `cutover`'s and
+/// `rollback`'s are not the same.
 pub(super) fn bring_up(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
     params: &Params,
+    suffix: &str,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
-    bring_up_unit(env, held, record, params, &unit)
+    bring_up_unit(env, held, record, params, &unit, suffix)
 }
 
 /// [`bring_up`] for the unit `unit`, which is the agent's or its helper's.
@@ -599,12 +680,19 @@ pub(super) fn bring_up_unit(
     record: &mut Record,
     params: &Params,
     unit: &str,
+    suffix: &str,
 ) -> Result<(), Done> {
     let state = show(env, unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();
         env.ports.units.start(unit).map_err(|why| {
-            start_failure(env, unit, format!("cannot start {unit}: {why}"), false)
+            start_failure(
+                env,
+                unit,
+                format!("cannot start {unit}: {why}"),
+                false,
+                suffix,
+            )
         })?;
     }
     let bound_ms = START_WAIT_SECS * 1000;
@@ -621,6 +709,7 @@ pub(super) fn bring_up_unit(
                     unit,
                     format!("{unit} is {} after it was started", state.active),
                     seen_crash,
+                    suffix,
                 ));
             }
             Life::Starting => {}
@@ -631,6 +720,7 @@ pub(super) fn bring_up_unit(
                 unit,
                 format!("{unit} is still {} after {START_WAIT_SECS} s", state.active),
                 seen_crash,
+                suffix,
             ));
         }
         pause(env, held, record, params)?;

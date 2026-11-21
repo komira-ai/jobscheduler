@@ -482,13 +482,23 @@ SHA-256 as the pin, and the manifest:
 The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
 running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
 and, where the flags file sets an `--egress` ceiling, `egress-handover` on the `stops:` line of
-both the running and the staged agent): `prepare` neither cordons nor waits, and `cutover` and
-`rollback` write the handover file in the agent's state root before they stop the unit, so the
-stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
-(under an egress ceiling each job's wiring stays in the kernel and its record in the state root's
-`egress` directory, from which the new agent takes the wiring over)
-(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
-drain of any other host.
+both the running and the staged agent): `prepare` neither cordons nor waits. When both agents
+also list `in-place` on that line, `cutover` and `rollback` hand the jobs over in place: they
+write the handover file in the agent's state root and send SIGHUP to the unit's main process
+(`systemctl kill --kill-whom=main --signal=SIGHUP`), and the agent hands over and runs its
+program again as the same process, so the unit is not stopped and not started and the hook waits
+until the agent has removed the file. Otherwise they write the file before they stop the unit, so
+the stopping agent exits within seconds leaving its jobs to the agent started next, which adopts
+them; that is allowed only on a systemd older than 258, and a host with a newer systemd (or whose
+`systemctl --version` cannot be read) whose agents do not both list `in-place` drains instead
+(systemd 258 starts a service's first process in the unit's own cgroup, which the jobs a stop
+leaves keep from taking one). Under an egress ceiling each job's wiring stays in the kernel and
+its record in the state root's `egress` directory, from which the new agent takes the wiring over
+(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). A start that fails after the
+cutover says in its report that the staged release is installed and its agent is not running; a
+rollback whose start fails says that the previous release is installed again but its agent is
+not running. The timeouts above cover the drain of any other host, and the in-place wait is
+bounded by the cutover's and the rollback's stop bounds.
 
 The two maintenance steps. `drain` writes the hold file in the agent's state root, cordons the
 host on the lease server and returns once the host is idle (no lease, no running job, not

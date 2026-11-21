@@ -59,6 +59,17 @@
 //!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
 //!    does for the staged one) and the wait for the previous agent's hello, and then
 //!    `rb.hello_ok`, after it;
+//!    An update that hands the runs over in place (the record's `in_place`, see `prepare`)
+//!    does not stop the new agent when it runs: the record gets `rb.stop_begun` and
+//!    `rb.link_restored`, the handover file is written, the record gets `rb.start_issued`, and
+//!    the unit's main process is sent SIGHUP (see `cutover` and [`in_place`]); the previous
+//!    release's program runs in its place as the same process, and the step waits until it has
+//!    taken the request, for at most the stop's bound, before it waits for its hello. A rerun
+//!    that finds `rb.start_issued` with the unit up and the request still there signals again.
+//!    A unit that is not up goes the way above (it is started). A start that fails ends
+//!    `start_failed` and its detail adds that the previous release is installed again (the
+//!    release link is on it) but its agent is not running, so the update is undone on disk
+//!    and the host runs no agent until the unit starts;
 //! 7. the cordon is lifted if this update placed it and it has not lapsed or been left
 //!    unconfirmed, and the record is deleted. A lease server that does not answer the lift
 //!    does not hold the step: the cordon is ours and nothing renews it any more, so it lapses
@@ -115,9 +126,9 @@ use super::cutover::{
     Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
     request_handover, show, withdraw_handover,
 };
-use super::helper;
 use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
+use super::{helper, in_place};
 use crate::cordon::CREDENTIAL_CODES;
 
 /// Runs `rollback`.
@@ -272,6 +283,15 @@ fn restore(
     if !down {
         let new_agent = record.start_issued && !record.rb.start_issued;
         if !new_agent {
+            // A rerun after the signal that handed the runs back in place: the request may
+            // still be there, and the signal is sent again.
+            if record.in_place && record.rb.start_issued && in_place::pending(env)? {
+                signal_and_wait(env, params, held, record, &unit)?;
+            }
+            return await_hello(env, params, held, record);
+        }
+        if record.in_place {
+            hand_back(env, params, held, record, &unit)?;
             return await_hello(env, params, held, record);
         }
         // The new agent hands its runs over to the previous one as the cutover's did.
@@ -294,8 +314,59 @@ fn restore(
     if !record.rb.start_issued {
         mark_act(env, params, held, record, set_start_issued)?;
     }
-    bring_up(env, held, record, params)?;
+    let note = previous_not_running(record);
+    bring_up(env, held, record, params, &note)?;
     await_hello(env, params, held, record)
+}
+
+/// What a failed start of the previous agent adds to the detail: the previous release is
+/// installed again, and no agent runs.
+fn previous_not_running(record: &Record) -> String {
+    format!(
+        "; the previous release {} is installed again (the release link is on it) but its agent is not running, so the update is undone on disk but the host runs no agent until the unit starts",
+        record.update.previous.as_deref().unwrap_or_default()
+    )
+}
+
+/// Hands the runs back to the previous release's agent in place, with the new agent running
+/// (the cutover's in-place hand-over undone): the marks of the stop and of the link, the
+/// request, the mark of the start, each before the act it names, and the signal; then the wait
+/// until the agent has taken the request.
+fn hand_back(
+    env: &Env<'_>,
+    params: &Params,
+    held: &Held,
+    record: &mut Record,
+    unit: &str,
+) -> Result<(), Done> {
+    refuse_host_in(env, record.handover)?;
+    if !record.rb.stop_begun {
+        mark_act(env, params, held, record, set_stop_begun)?;
+    }
+    if !record.rb.link_restored {
+        mark_act(env, params, held, record, set_link_restored)?;
+    }
+    // The request is on disk before the start is marked, so that a rerun that finds the start
+    // marked and the request gone knows the agent has taken it.
+    request_handover(env, record)?;
+    if !record.rb.start_issued {
+        mark_act(env, params, held, record, set_start_issued)?;
+    }
+    signal_and_wait(env, params, held, record, unit)
+}
+
+/// Signals the agent and waits until it has taken the request, for at most the stop's bound; a
+/// unit that is not active meanwhile is brought up.
+fn signal_and_wait(
+    env: &Env<'_>,
+    params: &Params,
+    held: &Held,
+    record: &mut Record,
+    unit: &str,
+) -> Result<(), Done> {
+    in_place::signal(env, record, unit)?;
+    let note = previous_not_running(record);
+    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
 }
 
 fn set_start_issued(record: &mut Record) {
