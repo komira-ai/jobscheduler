@@ -5,8 +5,8 @@
 //! dispatch poll (the agent's second route for a job start and stop, which a server that
 //! welcomes it with `dispatch_poll` uses in place of the heartbeat reply) beside them, under
 //! `dispatched`. The poll's answers are held back from the agent until the recording lets
-//! them go, so that the order of the poll and of the heartbeats is the recording's, not a
-//! race.
+//! them go, and so is the poll that acknowledges the delivered stop, so that the order of the
+//! poll and of the heartbeats is the recording's, not a race.
 //!
 //! No frame is built from a wire type of either side: a frame is the JSON the transport
 //! carried. The code uses only the agent program's test harness and the lease server's job
@@ -126,18 +126,25 @@ pub enum Act {
     /// The submitter cancels the job.
     Cancel,
     /// The dispatch poll's answer that the server handed out at the cancel, held until now,
-    /// reaches the agent, and its worker has acted on it.
+    /// reaches the agent, and its worker has acted on it. The poll after it, which
+    /// acknowledges the stop, is held before it reaches the server.
     Deliver,
+    /// The poll that acknowledges the stop, held since [`Act::Deliver`], reaches the server.
+    /// It comes after the heartbeat that reports the job killed: a server that ends a
+    /// cancelled job queues a stop when none is queued, so an acknowledgement that deleted
+    /// the stop first would have a second stop handed out for a job the agent no longer
+    /// holds.
+    Ack,
 }
 
 /// The conversation, after the hello: the job is queued, started (the start leaves in the
 /// dispatch poll, before the first beat), reported running, cancelled, the stop handed out by
 /// the poll but held from the agent for one beat (which therefore reports the job running and
 /// is answered with no command, where the previous release's reply carried the stop),
-/// delivered, the job reported killed and acknowledged; the last heartbeat holds nothing. The
-/// agent is then asked to stop.
+/// delivered, the job reported killed and acknowledged, the stop's delivery acknowledged; the
+/// last heartbeat holds nothing. The agent is then asked to stop.
 #[cfg(target_os = "linux")]
-pub const SCENARIO: [Act; 9] = [
+pub const SCENARIO: [Act; 10] = [
     Act::Submit,
     Act::Beat,
     Act::Beat,
@@ -146,6 +153,7 @@ pub const SCENARIO: [Act; 9] = [
     Act::Beat,
     Act::Deliver,
     Act::Beat,
+    Act::Ack,
     Act::Beat,
 ];
 
@@ -449,7 +457,8 @@ impl Transport for Taping {
 /// What the dispatch poll's transports tell the recording.
 #[cfg(target_os = "linux")]
 enum Poll {
-    /// A poll was sent.
+    /// A poll is being sent: the next poll after a [`Polls::deliver`] is then held until
+    /// [`Polls::send`] before it reaches the server.
     Sent,
     /// A poll was answered with messages, which are written down.
     Handed,
@@ -464,6 +473,8 @@ pub struct Listening {
     events: Mutex<Sender<Poll>>,
     gate: Arc<Mutex<Receiver<()>>>,
     open: Arc<AtomicBool>,
+    hold_send: Arc<AtomicBool>,
+    send_gate: Arc<Mutex<Receiver<()>>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -473,6 +484,8 @@ struct Listened {
     events: Sender<Poll>,
     gate: Arc<Mutex<Receiver<()>>>,
     open: Arc<AtomicBool>,
+    hold_send: Arc<AtomicBool>,
+    send_gate: Arc<Mutex<Receiver<()>>>,
 }
 
 /// The messages the poll is handed, and the events of the poll in the order they happen.
@@ -482,6 +495,8 @@ pub struct Polls {
     events: Receiver<Poll>,
     release: Sender<()>,
     open: Arc<AtomicBool>,
+    hold_send: Arc<AtomicBool>,
+    send: Sender<()>,
 }
 
 #[cfg(target_os = "linux")]
@@ -491,12 +506,16 @@ impl Polls {
         let handed = Arc::new(Mutex::new(Vec::new()));
         let (events, receiver) = channel();
         let (release, gate) = channel();
+        let (send, send_gate) = channel();
         let open = Arc::new(AtomicBool::new(false));
+        let hold_send = Arc::new(AtomicBool::new(false));
         let listening = Listening {
             handed: handed.clone(),
             events: Mutex::new(events),
             gate: Arc::new(Mutex::new(gate)),
             open: open.clone(),
+            hold_send: hold_send.clone(),
+            send_gate: Arc::new(Mutex::new(send_gate)),
         };
         (
             listening,
@@ -505,6 +524,8 @@ impl Polls {
                 events: receiver,
                 release,
                 open,
+                hold_send,
+                send,
             },
         )
     }
@@ -535,6 +556,22 @@ impl Polls {
             }
         }
     }
+
+    /// [`Polls::release`] with no later answer held, and the poll after it (which carries the
+    /// acknowledgement of what was released) held before it reaches the server, until
+    /// [`Polls::send`].
+    #[track_caller]
+    pub fn deliver(&self) {
+        self.hold_send.store(true, Ordering::SeqCst);
+        self.release(true);
+    }
+
+    /// Lets the poll [`Polls::deliver`] held reach the server.
+    pub fn send(&self) {
+        self.send
+            .send(())
+            .expect("the held poll is waiting to be sent");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -552,6 +589,8 @@ impl Connector for Listening {
             events: events.clone(),
             gate: self.gate.clone(),
             open: self.open.clone(),
+            hold_send: self.hold_send.clone(),
+            send_gate: self.send_gate.clone(),
         }))
     }
 }
@@ -559,7 +598,17 @@ impl Connector for Listening {
 #[cfg(target_os = "linux")]
 impl Transport for Listened {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        // Decided before the event, so the test's `send` after it is never early.
+        let held = self.hold_send.swap(false, Ordering::SeqCst);
         let _ = self.events.send(Poll::Sent);
+        if held {
+            let gate = self
+                .send_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            gate.recv_timeout(HANG_GUARD)
+                .map_err(|_| "the test never let the held poll be sent".to_owned())?;
+        }
         let answer = self.inner.post(path, body)?;
         let messages = answer.body["messages"].as_array().filter(|m| !m.is_empty());
         if let (200, Some(messages)) = (answer.status, messages) {
@@ -623,7 +672,11 @@ pub fn record(name: &str) -> Value {
                 json!({ "cancelled": id })
             }
             Act::Deliver => {
-                polls.release(true);
+                polls.deliver();
+                return;
+            }
+            Act::Ack => {
+                polls.send();
                 return;
             }
             Act::Beat => unreachable!("the play does the beats"),
