@@ -764,8 +764,8 @@ integrity baseline, so they are no finding.
 **Integrity.** The check runs after a job's container and scratch are gone (`crates/js-agent/src/integrity/mod.rs`), so
 the job's own mounts are already removed. Other jobs' mounts are not, so `new-mount` excludes a mount whose point lies
 under `<mounts>/<lease>/` of a lease the agent holds, as it excludes the other jobs' containers. Any other new mount is
-still a finding when it is still there after the settle wait (`--settle-ms`): a mount the host or the runtime holds for
-a moment at the job's end is gone by then.
+a note (one journal line, no taint: a job has its own mount namespace, so a new host mount is the host's or the runtime's; the
+agent's own lease mounts that fail to unmount taint `cleanup-failed`).
 
 ### 4.7 Admission and the preparing stage
 
@@ -1178,8 +1178,8 @@ port 0.
   restart with an adopted run's mounts below it;
 - previous release: the start sweep of the previous release, run over a scratch root and a `<mounts>` holding a live
   layered lease with a read-write mount, leaves the host directory behind the mount whole;
-- integrity: another live lease's mount under `<mounts>` is not a finding; the same mount with no lease, and any other
-  new mount, is `new-mount`;
+- integrity: another live lease's mount under `<mounts>` is not named; the same mount with no lease, and any other
+  new mount, is a `new-mount` note, and taints nothing;
 - the kernel check: a fake that answers `ENOSYS` for each of the four system calls leaves `layered-rootfs` unreported,
   with the warning;
 - a job whose read of a lower fails while it runs, and one that fills its quota, keep their own results, with no

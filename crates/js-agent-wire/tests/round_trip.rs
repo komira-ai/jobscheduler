@@ -15,7 +15,7 @@ use js_agent_wire::limits::*;
 use js_agent_wire::{
     Ack, Caps, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, HelloReply,
     Isolation, JobSpec, JobStartSpec, Outcome, Phase, ReadModel, Refused, ResultAck, Rule,
-    RunResult, Welcome,
+    RunResult, Taint, Welcome,
 };
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
@@ -42,6 +42,20 @@ fn ident() -> impl Strategy<Value = String> {
 /// A host id: lower case, in the grammar of `js_types::HostId`.
 fn host_ident() -> impl Strategy<Value = String> {
     "[a-z0-9][a-z0-9._-]{0,40}"
+}
+
+/// A taint whose parts are in the bounds the wire holds one to.
+fn taint() -> impl Strategy<Value = Taint> {
+    (
+        text(),
+        proptest::option::of(ident()),
+        proptest::option::of(text()),
+    )
+        .prop_map(|(reason, run_id, check)| Taint {
+            reason,
+            run_id,
+            check,
+        })
 }
 
 /// Distinct ids, as a list that must hold none twice.
@@ -146,8 +160,9 @@ fn heartbeat_frame() -> impl Strategy<Value = Heartbeat> {
         phase(),
         held(),
         proptest::collection::vec(run_result(), 0..4),
+        proptest::option::of(any::<bool>()),
     )
-        .prop_map(|(host_id, epoch, session, phase, held, results)| {
+        .prop_map(|(host_id, epoch, session, phase, held, results, tainted)| {
             let mut results = results;
             results.sort_by(|a, b| a.run_id.cmp(&b.run_id));
             results.dedup_by(|a, b| a.run_id == b.run_id);
@@ -159,6 +174,7 @@ fn heartbeat_frame() -> impl Strategy<Value = Heartbeat> {
                 held,
                 results,
                 taint: None,
+                tainted,
                 ..heartbeat()
             }
         })
@@ -257,9 +273,10 @@ fn reply_frame() -> impl Strategy<Value = HeartbeatReply> {
         any::<bool>(),
         proptest::option::of(ident()),
         idents(6),
+        proptest::option::of(taint()),
     )
         .prop_map(
-            |(commands, acks, taint_ack, exclusive, retired_acks)| HeartbeatReply {
+            |(commands, acks, taint_ack, exclusive, retired_acks, host_taint)| HeartbeatReply {
                 commands,
                 result_acks: acks
                     .into_iter()
@@ -268,6 +285,7 @@ fn reply_frame() -> impl Strategy<Value = HeartbeatReply> {
                 taint_ack,
                 exclusive,
                 retired_acks,
+                host_taint,
                 ..HeartbeatReply::default()
             },
         )
@@ -353,7 +371,7 @@ proptest! {
     }
 
     /// A generated reply decodes to itself, and every command of it passes, with the
-    /// acknowledgements and the exclusive lease acceptable.
+    /// acknowledgements, the exclusive lease and the host taint acceptable.
     #[test]
     fn heartbeat_reply_round_trips_and_validates(frame in reply_frame()) {
         survives(&frame);
@@ -365,6 +383,7 @@ proptest! {
         prop_assert_eq!(checked.job_acks, Ok(()));
         prop_assert_eq!(checked.retired_acks, Ok(()));
         prop_assert_eq!(checked.log_grant, Ok(()));
+        prop_assert_eq!(checked.host_taint, Ok(()));
     }
 
     /// A generated command, each kind of it, is valid and decodes to itself.
