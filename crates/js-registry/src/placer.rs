@@ -41,8 +41,10 @@ pub trait Placer: Send + Sync {
 
     /// Whether the placer holds work on `host` (a job's allocation): such a host is not
     /// forgotten however long it is silent, since only its own confirmation or the
-    /// provider's absence frees that work. Asked under the registry's lock. The default,
-    /// `false`, holds nothing there.
+    /// provider's absence frees that work. Asked under the registry's lock, so a placer that
+    /// cannot answer at once (its scheduler is busy) answers `true`: the host is kept, and a
+    /// beat of it is checked as of a host still listed, until a later call asks again. The
+    /// default, `false`, holds nothing there.
     fn holds_work_on(&self, host: &HostId) -> bool {
         let _ = host;
         false

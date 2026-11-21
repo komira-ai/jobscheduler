@@ -23,6 +23,8 @@ mod cold_tests;
 #[cfg(test)]
 pub(crate) mod cordon_tests;
 #[cfg(test)]
+mod engine_held_tests;
+#[cfg(test)]
 mod engine_hosts_tests;
 #[cfg(test)]
 mod engine_rig;

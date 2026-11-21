@@ -636,6 +636,7 @@ mod tests {
     /// A hello of a host with no capabilities but its os.
     fn hello() -> Hello {
         Hello {
+            agent_process: None,
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "mac-1".into(),
             pool: "macs".into(),
