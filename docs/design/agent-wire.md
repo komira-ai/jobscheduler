@@ -37,10 +37,12 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 - `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`, `dispatch_poll` (the server serves the dispatch poll to this host). Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `taint_cleared` (the taint the agent
-  cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `exclusive_ready`,
+  cleared itself, until `taint_ack`; `docs/design/taint-self-clearing.md`), `tainted` (whether the agent holds a taint as it sends the beat;
+  absent from an agent that predates it and from a session that runs no jobs), `exclusive_ready`,
   `exclusive_refused`, `load` (`NodeLoad`, telemetry: a malformed one reads as absent), `disk_gib`, and the per-job lists `jobs`
   (`HeldJob`, each with its `JobResult`) and `retired_jobs`, and `seq` (the beat's sequence in its session: raised for every heartbeat the agent sends, a retry included, starting at 1 after each welcome; a server applies a beat only when its `seq` is newer than the newest it applied; absent from an older agent, ignored by an older server).
-- `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `exclusive`, and the per-job lists `job_acks`
+- `HeartbeatReply`: `commands`, `result_acks` (`ResultAck`), `taint_ack`, `taint_cleared_ack`, `host_taint` (the taint the server holds for
+  the host once it has taken the beat, informational, absent when it holds none), `exclusive`, and the per-job lists `job_acks`
   (`JobResultAck`) and `retired_acks`.
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
   `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`). A tag this version does not know reads as `Command::Unknown`.

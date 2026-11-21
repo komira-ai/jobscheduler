@@ -15,10 +15,10 @@
 //!    an `owed-*` record (a job of the running agent whose checks have not run yet: stopping the
 //!    agent now would leave the record and taint the host) defers (75, class environment,
 //!    `drain_bound`) with nothing stopped; the records are read after the host and the taint
-//!    again after the records, so a check that failed meanwhile halts (76). A failed lift of
-//!    the cordon on the way is no reason to
-//!    fail: the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or
-//!    rollback to lift. A cordon that is not ours (an operator's) is neither renewed nor
+//!    again after the records, so a check that failed meanwhile with a taint the restarted agent
+//!    will not re-check halts (76). A failed lift of the cordon on the way is no reason to fail:
+//!    the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or rollback
+//!    to lift. A cordon that is not ours (an operator's) is neither renewed nor
 //!    lifted. A cordon in force under a mark that was never confirmed may be ours or not, and
 //!    nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit is read, so that a read that fails leaves nothing begun; then the record gets

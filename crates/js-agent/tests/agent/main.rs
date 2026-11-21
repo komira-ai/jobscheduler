@@ -35,6 +35,7 @@ mod exclusive;
 mod facts;
 mod flags;
 mod flags_file;
+mod health_flag;
 #[cfg(target_os = "linux")]
 mod helper_modes;
 mod hold_cordon;

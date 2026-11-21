@@ -13,7 +13,7 @@
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
 //! 2. a taint the restarted agent will not re-check halts (76); a taint it will re-check (a
-//!    residue of a process the pin file does not name, see
+//!    residue of a post-job check the pin file does not name, see
 //!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
 //!    step goes on as for a clean host. An `owed-*` record halts a first install (no agent runs
 //!    that could settle it, so the agent the install starts would taint itself for it); on an
@@ -44,7 +44,8 @@
 //!    the state root holds no `owed-*` record. The records are read after the host, and a
 //!    taint is looked for after the records at every poll: the agent writes the taint of a
 //!    check that failed before it removes the record, so a check that fails during the wait
-//!    halts the step (76), the cordon left in place. A drain bound that passes with a record
+//!    with a taint the restarted agent will not re-check (item 2) halts the step (76), the
+//!    cordon left in place. A drain bound that passes with a record
 //!    still there defers (75, `drain_bound`) as for a lease, and the detail names the runs.
 //!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
@@ -279,19 +280,21 @@ fn bad_artifact(why: impl ToString) -> Done {
 }
 
 /// A taint the restarted agent will not re-check halts: no version can repair it. A taint it
-/// will re-check does not: a residue of a process (`process-as-job-user`, `daemonised-child`)
-/// that the state root's pin file does not name. The marker stays, the restarted agent restores
-/// it, and its own re-checks clear it, so a halt would only keep the release that carries that
-/// clearing from reaching the host. Every unchecked taint (`*-unreadable`, `watch-over-bound`,
+/// will re-check does not: a residue of a post-job check (`process-as-job-user`, or
+/// `daemonised-child`, `new-mount`, `user-changed`, `group-changed`, `kernel-module-changed` or
+/// `watch-dir-changed`, which an older agent wrote and which the checks now only note) that the
+/// state root's pin file does not name. The marker stays, the restarted agent restores it, and
+/// its own re-checks clear it, so a halt would only keep the release that carries that clearing
+/// from reaching the host. Every unchecked taint (`*-unreadable`, `watch-over-bound`,
 /// `cgroup-not-found`) still halts, because a restart restores it pinned, as does a residue the
 /// pin file names.
 ///
 /// The `owed-*` records are not looked at: while the agent that wrote them runs, a record is a
 /// job whose post-job checks have not run yet, which the agent settles in seconds, and on a
 /// busy host there almost always is one. The steps that would stop that agent wait for them
-/// (`owed`); a check that fails writes its taint before its record goes, and this refuses it.
-/// A record left by an agent that stopped inside the window becomes a `check-owed` taint at
-/// the agent's next start, which this refuses too.
+/// (`owed`); a check that fails writes its taint before its record goes, and this judges that
+/// taint as any other. A record left by an agent that stopped inside the window becomes a
+/// `check-owed` taint at the agent's next start, which this refuses.
 pub(super) fn refuse_taint(env: &Env<'_>) -> Result<(), Done> {
     let state = env.ports.state;
     match state

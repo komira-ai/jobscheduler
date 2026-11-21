@@ -109,6 +109,7 @@ impl Registry {
                 labels: node.labels,
                 held: BTreeSet::new(),
                 beats: 0,
+                last_seq: None,
                 taint,
                 cordon,
                 cordon_holder,

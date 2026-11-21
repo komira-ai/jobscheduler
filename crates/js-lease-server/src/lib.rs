@@ -577,7 +577,7 @@
 //! toward `max_machines`, is never forgotten for being silent, and keeps its taint across its own
 //! hello and a server restart (the `.agents` file or the store holds it, see "Restart"). The runs
 //! it already holds finish: their stops are sent, their results are acknowledged, and the budget
-//! returns when the host stops listing them. A taint ends in one of two ways. The first is the
+//! returns when the host stops listing them. A taint ends in one of three ways. The first is the
 //! agent's own heartbeat, which reports it cleared (`taint_cleared`: the agent re-checked an idle host twice, see its
 //! `--taint-recheck-ms`): the server clears the host's taint when `taint_cleared` equals the
 //! taint it holds, field for field, commits the binding without it first (as for a report), and
@@ -585,13 +585,35 @@
 //! any taint, in the registry and in the store alike (the taint another server of an update stored); a cleared report of any other
 //! taint (a host job's, say) changes nothing and is acknowledged all the same. A start refused
 //! `host-tainted` in the beat that reports the clear taints nothing: those results predate it.
-//! The second is the operator's `ClearHostTaint` call of the job service (`js host host-taint`),
-//! for a taint the agent will not report cleared (an agent too old to report a clear, a marker
-//! moved aside by hand, a reimaged host): the server commits the binding without the taint by
+//! The second is the agent's saying it holds none: a heartbeat with `tainted: false` ends the
+//! taint the host holds when the agent made it (any reason but `host-job` and `host-unsafe`,
+//! which the server makes itself and only the third way ends), committed as a reported clear is
+//! and logged as "a host's taint is cleared" with `by="agent-holds-none"`; the reply carries no
+//! `taint_cleared_ack`, since the agent reported no clear. The agent's marker is the truth of the taints the agent makes, so a taint
+//! the server kept from before the agent's restart without a marker (an operator moved it aside,
+//! the host was reimaged) ends at the agent's first beat that holds none; a beat without the field (an agent that predates it) ends nothing this way. The
+//! converse holds as well: a beat with `tainted: true` that reports no clear, on a host the
+//! server holds no taint for (the operator cleared the server's taint, the marker stayed), gives
+//! the host the `host-tainted` taint naming no run, which the agent's next beat with
+//! `tainted: false` ends. With a store setting, a taint commit another server's change makes fail
+//! (the store holds another taint than this server's registry does: the agent reported to the
+//! other server, or its clear reached the other) is answered 503 `state-write-failed` as any failed commit is, and the
+//! registry takes the stored taint before that answer (a host job's or a refused prepare's taint,
+//! which the server makes itself, is kept), so the agent's next beat is judged on what the store
+//! holds. Every reply names the taint the host holds once the beat is taken
+//! (`host_taint`; absent when it holds none), which the agent shows on its health route and acts
+//! on in no other way, and a reply that names only it is held as any other quiet reply is. The
+//! pass over the queued jobs logs each live host it skips for a taint once, as a warning, "a live
+//! host is skipped by placement for the taint the server holds", with the host, reason, check and
+//! run id; it logs the host again when its taint changed or after it left the set and came back
+//! tainted. The third is the operator's `ClearHostTaint` call of the job service (`js host host-taint`),
+//! for a taint the agent's word does not end (a host job's, a refused whole-host prepare's, one
+//! held for an agent too old to send `tainted`): the server commits the binding without the taint by
 //! the same compare-and-set as a heartbeat's clear, under the same lock, then forgets it in the
 //! registry; a host that has none changes nothing and writes nothing. The call does not reach
-//! the agent, so an agent whose marker still holds the taint refuses the next start
-//! `host-tainted`, which the server takes as the host's taint again: the operator moves the
+//! the agent, so an agent whose marker still holds the taint says `tainted: true` at its next beat
+//! (or refuses the next start `host-tainted`), which the server takes as the host's taint again
+//! (the `host-tainted` mirror): the operator moves the
 //! agent's `taint.json`, `taint.pinned` and its `owed-*` records aside first (`js-agent
 //! clear-taint`, `docs/runbooks/clear-a-taint.md`). A job with host isolation taints its host when
 //! its placement commits (reason `host-job`, `run_id` the job's id; `docs/runbooks/host-jobs.md`),

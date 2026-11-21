@@ -24,10 +24,10 @@ fn settle(rig: &Rig) {
     rig.state_root().settle(RUN).unwrap();
 }
 
-/// The checks of `RUN` found a change of host state: the agent writes the taint, then removes
-/// the record, in that order.
+/// The checks of `RUN` could not read the process table, a taint a restart does not re-check:
+/// the agent writes the taint, then removes the record, in that order.
 fn fail_check(rig: &Rig) {
-    rig.taint_with("residue", Some("mount-change"));
+    rig.taint_with("unchecked", Some("processes-unreadable"));
     settle(rig);
 }
 
@@ -121,7 +121,7 @@ fn a_check_that_fails_while_prepare_waits_for_it_halts() {
     assert_eq!(done.report.reason, Some(Reason::Tainted));
     assert_eq!(
         done.report.detail.as_deref(),
-        Some("the agent is tainted: residue")
+        Some("the agent is tainted: unchecked")
     );
     assert!(rig.record().unwrap().cordon.placed);
     assert!(rig.cordon_expiry().is_some(), "left to lapse");

@@ -29,6 +29,12 @@ pub(super) struct Record {
     pub(super) held: BTreeSet<String>,
     /// The heartbeats taken in this session.
     pub(super) beats: u64,
+    /// The newest [`Heartbeat::seq`] the registry took in this session; `None` until a beat
+    /// that carries one is taken, and at every hello that begins a session, so a new session's
+    /// numbering is never compared with the old one's. A beat whose `seq` is not newer than
+    /// it is late: it neither ends a taint by `tainted: false` nor records the mirror by
+    /// `tainted: true`.
+    pub(super) last_seq: Option<u64>,
     /// The first taint the host reported, until the host reports it cleared. It outlives a
     /// session and, through the file of bindings, a restart.
     pub(super) taint: Option<Taint>,
@@ -82,6 +88,7 @@ impl Record {
             labels: BTreeMap::new(),
             held: BTreeSet::new(),
             beats: 0,
+            last_seq: None,
             leaving: None,
             claim: None,
             load: load::Kept::default(),
