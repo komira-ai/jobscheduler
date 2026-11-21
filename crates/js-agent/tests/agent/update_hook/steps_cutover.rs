@@ -526,7 +526,7 @@ fn a_record_that_breaks_a_rule_is_refused_and_nothing_is_done() {
 }
 
 #[test]
-fn a_taint_or_an_owed_check_halts_the_cutover_before_anything_is_stopped() {
+fn a_taint_halts_the_cutover_before_anything_is_stopped_and_an_owed_check_defers_it() {
     let rig = running(Rig::new("hook-cutover-taint"));
     rig.taint();
     rig.updater_links_staged();
@@ -539,12 +539,13 @@ fn a_taint_or_an_owed_check_halts_the_cutover_before_anything_is_stopped() {
     assert_eq!(spy.act_names(), Vec::<String>::new());
     assert_eq!(end_state(&rig), before);
 
+    // A check the running agent still owes is work: the stop waits (steps_owed_checks.rs).
     let rig = running(Rig::new("hook-cutover-owed"));
     rig.state_root().owe("run-7").unwrap();
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
-    assert_eq!(done.outcome, Outcome::Halt);
-    assert_eq!(done.report.reason, Some(Reason::OwedCheck));
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(done.report.reason, Some(Reason::DrainBound));
     assert_eq!(spy.act_names(), Vec::<String>::new());
 
     let rig = running(Rig::new("hook-cutover-owed-unreadable"));

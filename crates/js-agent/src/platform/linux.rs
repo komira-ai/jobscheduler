@@ -23,8 +23,14 @@ use crate::{Failure, Services, crun, crun_host, disk, integrity};
 
 /// What `--version` prints after the version: the runtimes this build runs jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`): `crun`, and
-/// the container engine (`docker`, Docker or Podman) behind `--allow-container-engine`.
-pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
+/// the container engine (`docker`, Docker or Podman) behind `--allow-container-engine`; then the
+/// ways its stop can go: `drain`, and `handover`, which the update hook looks for in the agent
+/// it is to stop before it asks that agent to leave its runs to the next process (see
+/// [`crate::lifecycle::handover`]).
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nruntimes: docker crun\nstops: drain handover"
+);
 
 /// The one warning of an agent that runs its jobs through the container engine.
 pub const ENGINE_WARNING: &str = "--allow-container-engine: the container engine runs this \

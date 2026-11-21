@@ -242,7 +242,12 @@ not read its input, `watch-over-bound`, `cgroup-not-found`) still halts the hook
 it pinned and it never clears; so does a residue the pin file names. A halt there would keep the release that carries
 the clearing from reaching the host, so one tainted host would stop every release of the group. A
 taint the restarted agent does not re-check (`cleanup-failed`, `check-owed`, `host-job`, an unchecked taint, a taint with no
-check named) still halts the hook with reason `tainted` (76), and so does an `owed-*` record. The
+check named) still halts the hook with reason `tainted` (76). An `owed-*` record halts it (`owed_check`,
+76) only where no running agent can settle it: a first install, and the steps after the update stopped
+the agent. Before the stop it is a job of the running agent whose post-job checks have not run yet, which
+a busy host almost always has: `prepare` and `cutover` count it as work and wait for it as for a lease
+(`drain_bound`, 75, when the bound passes first), a check that fails writes its taint before its record
+goes and that taint is judged as any other, and `rollback` before the stop does not look at it. The
 success line names no taint: the report has a detail on success only for a changed unit, and a
 second detail would need a format change. A rollback onto a release that predates self-clearing
 leaves such a taint standing, and that agent refuses starts until an operator clears it; that is

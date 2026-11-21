@@ -97,8 +97,10 @@ fn a_clean_prepare_records_then_cordons_waits_for_the_drain_and_succeeds() {
         ),
         (false, false, false, false)
     );
-    // The cordon calls, and nothing else done to the machine.
-    let acts: Vec<_> = spy.log().into_iter().skip(1).collect();
+    // The cordon calls, and nothing else done to the machine: the two version checks (the
+    // staged agent's, and the previous agent's, which says whether it can hand its runs over:
+    // this one cannot) only read.
+    let acts: Vec<_> = spy.log().into_iter().skip(2).collect();
     assert_eq!(acts, vec!["cordon(30)"; 3]);
     assert!(rig.host().cordon.is_some(), "left for cutover");
 }
@@ -110,7 +112,11 @@ fn a_host_with_no_lease_needs_no_wait() {
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success);
     assert_eq!(rig.world.ticks(), 0);
-    assert_eq!(spy.log().len(), 2, "the version check and one cordon");
+    assert_eq!(
+        spy.log().len(),
+        3,
+        "the version checks of the staged and the previous agent, and one cordon"
+    );
     assert!(rig.record().unwrap().cordon.placed);
 }
 
@@ -141,9 +147,11 @@ fn a_taint_halts_with_nothing_changed() {
     nothing_changed(&rig, &spy);
 }
 
+/// An update over a check the running agent still owes waits for it (steps_owed_checks.rs);
+/// a first install, which has no agent to settle it, halts with nothing changed.
 #[test]
-fn an_owed_check_halts_with_nothing_changed() {
-    let rig = Rig::new("hook-prepare-owed");
+fn an_owed_check_halts_a_first_install_with_nothing_changed() {
+    let rig = Rig::first_install("hook-prepare-owed");
     rig.state_root().owe("run-7").unwrap();
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
