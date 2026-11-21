@@ -54,9 +54,11 @@ Everything in the list below that is not one of the six scenarios above.
 - an unknown phase value is read as quarantined; usage is reported on failure and on kill;
 - each start-contract rule (5.2) refuses before any call: non-positive wall time, unstated fence, reserved label key, retries passed on;
 - after a job the container and scratch are gone before the slot is freed, and a failed removal frees nothing and taints; a `host` `Start`
-  is refused without all three consents (5.12); a host job taints on completion whatever its outcome; each post-job check (stray
-  process, file outside the roots, mounts, users, kernel modules, cleanup failure) taints on its own, and a check that cannot run is a
-  finding; a taint is resent until acknowledged, survives an agent restart, and is not cleared by a later clean hello; a tainted host
+  is refused without all three consents (5.12); a host job taints on completion whatever its outcome; each check that taints (a process
+  of a job's user left after the job, cleanup failure) taints on its own, and the process check that cannot run is a finding; a
+  package install while jobs run (a new user or group, a mount, a module, a change in a watched directory, a daemonised process of
+  the host) taints nothing, is logged as one line naming what changed, and is taken into the baseline (see
+  [taint-self-clearing.md](taint-self-clearing.md), What taints and what is noted); a taint is resent until acknowledged, survives an agent restart, and is not cleared by a later clean hello; a tainted host
   takes no `Start`; a fake agent that reports no taint after a host job still leaves the host tainted at the scheduler (recorded at the
   `host_jobs` grant or the host `Start`), which grants it no new lease, and a Result, hello or heartbeat does not untaint it;
 - per session (5.1): the leasee's session obeys the cancel, grace, ack and never-started rules for its placements, and the scheduler

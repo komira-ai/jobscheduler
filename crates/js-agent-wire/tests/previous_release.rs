@@ -109,6 +109,59 @@ fn an_old_agent_ignores_taint_cleared_ack() {
     assert_eq!(old.result_acks.len(), 1);
 }
 
+/// Asserts that a server of the previous release reads a heartbeat that says whether its agent
+/// holds a taint, whichever it says, as it reads one without (its host, epoch, held runs and
+/// results intact), and that this version reads that release's heartbeat with no `tainted`.
+/// It catches a new field an older server cannot skip, which would refuse every agent that
+/// sends it.
+#[test]
+fn an_old_server_ignores_tainted() {
+    for tainted in [true, false] {
+        let beat = Heartbeat {
+            tainted: Some(tainted),
+            ..heartbeat()
+        };
+        assert_eq!(beat.validate(), Ok(()));
+        let wire = serde_json::to_value(&beat).unwrap();
+        assert_eq!(wire["tainted"], json!(tainted));
+        let old: previous::Heartbeat = serde_json::from_value(wire).unwrap();
+        assert_eq!((old.host_id.as_str(), old.epoch), ("mac-01", 3));
+        assert_eq!(old.held.len(), 1);
+        assert_eq!(old.results.len(), 1);
+    }
+    let decoded: Heartbeat = serde_json::from_value(fixture(HEARTBEAT)).unwrap();
+    assert_eq!(decoded.tainted, None);
+}
+
+/// Asserts that an agent of the previous release reads a reply that carries the taint the
+/// server holds as it reads one without (its taint acknowledgement and results intact, the
+/// new field ignored), and that this version reads that release's reply with no `host_taint`.
+/// It catches a new field an older agent cannot skip, which would cost it the whole reply.
+#[test]
+fn an_old_agent_ignores_host_taint() {
+    let reply = HeartbeatReply {
+        taint_ack: true,
+        host_taint: Some(js_agent_wire::Taint {
+            reason: "host-unsafe".into(),
+            run_id: None,
+            check: Some("whole-host".into()),
+        }),
+        result_acks: vec![ResultAck {
+            run_id: "r3".into(),
+            ack: Ack::Stale,
+        }],
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(reply.validate().host_taint, Ok(()));
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["host_taint"]["reason"], json!("host-unsafe"));
+    let old: previous::HeartbeatReply = serde_json::from_value(wire).unwrap();
+    assert!(old.taint_ack);
+    assert_eq!(old.result_acks.len(), 1);
+    let decoded: HeartbeatReply = serde_json::from_value(fixture(REPLY)).unwrap();
+    assert_eq!(decoded.host_taint, None);
+}
+
 /// The structs of the previous release, as far as the fields a receiver of that release
 /// read. Unknown fields are ignored, as they were.
 mod previous {

@@ -7,7 +7,7 @@
 //! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
 //!    `owed-*` record, halts (76), here and again before each phase below (an agent with such a
 //!    taint refuses every start, the old release included, so nothing is gained by going on; a
-//!    taint it will re-check, a residue of a process the pin file does not name, does not halt the
+//!    taint it will re-check, a residue of a post-job check the pin file does not name, does not halt the
 //!    step; if the previous release is one that predates
 //!    self-clearing, such a taint stays standing and that agent refuses starts until an operator
 //!    clears it, which is accepted because a halt would stop every release of the group). A rollback with no

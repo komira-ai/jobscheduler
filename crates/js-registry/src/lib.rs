@@ -53,8 +53,10 @@
 //!   [`Registry::taint_host`] (the first one stands), is kept with its binding
 //!   ([`Binding::taint`], [`Registry::bindings`]), so that a caller that persists
 //!   bindings keeps it across a restart ([`Registry::restore_tainted`]). A tainted host
-//!   takes no new job and is never forgotten for being silent. The registry never clears a
-//!   taint.
+//!   takes no new job and is never forgotten for being silent. A taint ends by the host's
+//!   own word (its report that it cleared the taint, or, for a taint the agent made, its
+//!   saying it holds none) or by [`Registry::clear_taint`]; the taints the caller sets
+//!   itself (a host job's, a refused `host-unsafe` prepare's) end only by the latter.
 //! - **Cordon.** A host can cordon itself for a while ([`Registry::cordon`]): it takes no
 //!   new job until the cordon lapses or [`Registry::uncordon`] ends it, and the work it
 //!   has is untouched. The requester sets the length, a repeat renews and never shortens,

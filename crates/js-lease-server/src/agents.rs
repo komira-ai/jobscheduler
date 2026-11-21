@@ -50,6 +50,7 @@ use crate::metrics::Meter;
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::sched::rank::static_then;
+use crate::sched::taint_skips::TaintSkips;
 use crate::store::ServerStore;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
@@ -148,6 +149,9 @@ pub(crate) struct Agents {
     /// its hosts name them: the order the pass offers the hosts in
     /// ([`crate::sched::rank`]).
     pub(crate) providers: Vec<ProviderId>,
+    /// The live hosts the pass over the queued jobs has said it skips for their taint
+    /// ([`TaintSkips`]), so that each taint is logged once.
+    pub(crate) taint_skips: TaintSkips,
 }
 
 /// Why a cordon or its lift was not done, or not saved.
@@ -349,6 +353,7 @@ fn placed_in(
         starting_hold: held_beat::starting_hold(interval),
         starts: held_beat::Starts::default(),
         providers,
+        taint_skips: TaintSkips::default(),
     };
     Ok((Arc::new(agents), placer))
 }
@@ -423,6 +428,7 @@ impl Agents {
             starting_hold,
             starts: held_beat::Starts::default(),
             providers,
+            taint_skips: TaintSkips::default(),
         }
     }
 
@@ -630,11 +636,15 @@ impl Agents {
     }
 
     /// Makes the taint `heartbeat` would record, or the clearing of the host's taint it
-    /// reports, durable before the registry records it
+    /// reports or implies, durable before the registry records it
     /// ([`Registry::check_heartbeat`]): the host's binding with the taint (none for a clear)
     /// is committed under [`Agents::host_writes`], whose guard is returned for the caller to
     /// hold until the registry has recorded the beat. Nothing when the beat would record no
     /// taint and clear none, or the registry refuses it (the beat is then refused the same).
+    /// A clear a beat implies is its saying the agent holds no taint (`tainted` false) while
+    /// the host's taint is one the agent made: it is committed as a reported clear is, and
+    /// logged with `by="agent-holds-none"` ([`Agents::log_agent_holds_none`]), where a
+    /// reported clear is logged with `by="agent"`.
     ///
     /// A beat that reports cleared a taint the registry does not hold, on a host the registry
     /// holds no taint for, ends the taint the store holds when it is that one, or the one a
@@ -646,7 +656,11 @@ impl Agents {
     /// # Errors
     ///
     /// The store failed or refused the commit: the taint is not recorded, and the caller
-    /// answers the heartbeat with an error so that the agent reports it again.
+    /// answers the heartbeat with an error so that the agent reports it again. The commit is
+    /// conditional on the taint the registry holds ([`Agents::keep_taint`]), so a taint another
+    /// server stored or ended since the registry took the host would fail every later beat the
+    /// same way; before the error is returned the registry takes the taint the store holds
+    /// ([`Agents::resync_taint`]), and the agent's repeat is judged on that.
     pub(crate) async fn durable_taint<'a>(
         self: &'a Arc<Self>,
         heartbeat: &Heartbeat,
@@ -674,9 +688,15 @@ impl Agents {
             return Ok(None);
         }
         let gate = self.host_writes.lock().await;
-        self.keep_taint(&check.host, check.taint.clone()).await?;
+        if let Err(error) = self.keep_taint(&check.host, check.taint.clone()).await {
+            self.resync_taint(&check.host).await;
+            return Err(error);
+        }
         if let Some(cleared) = heartbeat.taint_cleared.as_ref().filter(|_| check.cleared) {
             taints::log_cleared(&check.host, cleared, "agent");
+        }
+        if check.cleared && heartbeat.taint_cleared.is_none() {
+            self.log_agent_holds_none(&check.host);
         }
         if let Some(taint) = &check.taint {
             taints::log_stored(&check.host, taint);

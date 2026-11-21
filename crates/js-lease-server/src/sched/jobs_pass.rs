@@ -14,6 +14,10 @@
 //! ([`js_jobs::JobStore::place_claimed`]): its taint, its scale-down mark, its cordon and the
 //! ports its live allocations hold.
 //!
+//! A live host that holds a taint is offered to no job; the pass logs it once for its taint
+//! ([`super::taint_skips::TaintSkips`]), so that a job that stays queued has its cause in the
+//! journal.
+//!
 //! A job with host isolation taints the host it is placed on. The placement commit writes
 //! the taint row of the job store; right after it, still inside the placer's pass, the taint
 //! is put on the registry's record of the host ([`js_registry::Registry::taint_host`]: reason
@@ -28,7 +32,7 @@ use std::sync::{Mutex, PoisonError};
 
 use js_agent_wire::Taint;
 use js_jobs::{HOST_JOB_TAINT, Inserted, JobId};
-use js_registry::{Registry, WholeNodeConfig};
+use js_registry::{HostState, Registry, WholeNodeConfig};
 use js_types::Clock;
 use js_types::HostId;
 use tracing::warn;
@@ -147,6 +151,12 @@ impl Agents {
         // before another pass tainted one would offer it again.
         let _placing = self.placing.lock().unwrap_or_else(PoisonError::into_inner);
         let now = self.clock.now();
+        // The live hosts the registry holds tainted, which no pass offers, are noted so that a
+        // job that stays queued has its cause in the log.
+        let views = self.registry.hosts();
+        let skipped = views.iter().filter(|view| view.state == HostState::Live);
+        self.taint_skips
+            .note(skipped.filter_map(|view| view.taint.as_ref().map(|taint| (&view.id, taint))));
         let offered = match self.offered(jobs, placer, now) {
             Ok(offered) => offered,
             Err(error) => {
