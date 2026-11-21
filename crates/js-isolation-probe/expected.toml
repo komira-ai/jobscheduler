@@ -1,0 +1,155 @@
+# The answers js-isolation-probe must give on a Mac pool host, one table per phase, judged
+# by name (src/expect.rs). The run fails when an answer differs or a pinned probe did not run;
+# a probe with no line here is printed as UNPINNED and fails nothing.
+#
+# They are what a job gets with the job's network `none` and the arguments of
+# docs/runbooks/mac-isolation-probe.md, on macOS 27 with the agent's Seatbelt profile.
+# A change of an answer is a change of what a job can do: it comes with the code that
+# changes it, in the same pull request, and the runbook's table says why each one is so.
+#
+# Words: allowed, denied, n/a, found, gone, limited, unlimited, info, error.
+
+[probe]
+# The run directory is the job's own; the whole home is writable (the profile's write grant).
+"write:run-dir" = "allowed"
+"write:home-launchagents" = "allowed"
+"write:home-preferences" = "allowed"
+# Every place outside the home: the profile denies the write.
+"write:private-tmp" = "denied"
+"write:private-var-tmp" = "denied"
+"write:users-shared" = "denied"
+"write:library-caches" = "denied"
+"write:opt-homebrew" = "denied"
+"write:usr-local" = "denied"
+"write:etc" = "denied"
+"write:library-launchdaemons" = "denied"
+"write:user-temp-dir" = "denied"
+"write:other-home" = "denied"
+"write:bundle-store" = "denied"
+# Reads: the other pool user's home is 0700, the agent's and helper's state are root's.
+"read:sudoers" = "denied"
+"read:other-home" = "denied"
+"read:agent-flags" = "denied"
+"read:agent-token" = "denied"
+"read:agent-state" = "denied"
+"read:helper-state" = "denied"
+# A job whose network is `none` runs under the profile's `(deny network*)`.
+"connect:job-service" = "denied"
+"connect:lan-host" = "denied"
+"connect:metadata" = "denied"
+"connect:public" = "denied"
+"connect:loopback" = "denied"
+"lookup:public-name" = "denied"
+# A pool user is no administrator and has no password.
+"priv:sudo" = "denied"
+"priv:su" = "denied"
+"priv:admin-group" = "denied"
+"priv:record-same-value" = "denied"
+"priv:account-attribute" = "denied"
+# The profile denies job creation; the setuid tools still write under the profile.
+"priv:launchd-user" = "denied"
+"priv:launchd-gui" = "denied"
+"priv:crontab" = "denied"
+"priv:at-job" = "denied"
+# The native runtime sets the file size and process limits only.
+"limit:file-size" = "limited"
+"limit:processes" = "limited"
+"limit:descriptors" = "limited"
+"limit:memory" = "unlimited"
+"limit:data" = "unlimited"
+"limit:resident" = "unlimited"
+"space:run-volume" = "info"
+"files:10000" = "allowed"
+
+[leave]
+# Named semaphores are left allowed on purpose (Python's multiprocessing needs them).
+"leave:named-semaphore" = "allowed"
+# System V objects are not denied by the profile; the reset removes the uid's.
+"leave:sysv-semaphore" = "allowed"
+"leave:sysv-shared-memory" = "allowed"
+# The profile denies user preference writes.
+"leave:preferences" = "denied"
+"leave:launch-services" = "denied"
+"leave:pasteboard" = "denied"
+"leave:keychain" = "denied"
+# Nothing stops a process from starting its own session; the reset kills by uid.
+"leave:background-process" = "allowed"
+"leave:crontab" = "denied"
+"leave:at-job" = "denied"
+"leave:launchd-user" = "denied"
+"leave:launchd-gui" = "denied"
+"leave:account-attribute" = "denied"
+"leave:file:run-dir" = "allowed"
+"leave:file:home-launchagents" = "allowed"
+"leave:file:home-preferences" = "allowed"
+"leave:file:private-tmp" = "denied"
+"leave:file:private-var-tmp" = "denied"
+"leave:file:users-shared" = "denied"
+"leave:file:library-caches" = "denied"
+"leave:file:opt-homebrew" = "denied"
+"leave:file:usr-local" = "denied"
+"leave:file:etc" = "denied"
+"leave:file:library-launchdaemons" = "denied"
+"leave:file:user-temp-dir" = "denied"
+"leave:file:other-home" = "denied"
+"leave:file:bundle-store" = "denied"
+
+[find-same-slot]
+# A named semaphore outlives the reset: no interface of macOS lists it.
+"find:named-semaphore" = "found"
+"find:sysv-semaphore" = "gone"
+"find:sysv-shared-memory" = "gone"
+"find:preferences" = "gone"
+"find:launch-services" = "gone"
+"find:pasteboard" = "gone"
+"find:keychain" = "gone"
+"find:background-process" = "gone"
+"find:crontab" = "gone"
+"find:at-job" = "gone"
+"find:launchd-user" = "gone"
+"find:launchd-gui" = "gone"
+"find:account-attribute" = "gone"
+"find:file:run-dir" = "gone"
+"find:file:home-launchagents" = "gone"
+"find:file:home-preferences" = "gone"
+"find:file:private-tmp" = "gone"
+"find:file:private-var-tmp" = "gone"
+"find:file:users-shared" = "gone"
+"find:file:library-caches" = "gone"
+"find:file:opt-homebrew" = "gone"
+"find:file:usr-local" = "gone"
+"find:file:etc" = "gone"
+"find:file:library-launchdaemons" = "gone"
+"find:file:user-temp-dir" = "gone"
+"find:file:other-home" = "gone"
+"find:file:bundle-store" = "gone"
+
+[find-other-slot]
+# The semaphore's name is the host's, not the user's: another user sees it exists.
+"find:named-semaphore" = "found"
+"find:sysv-semaphore" = "gone"
+"find:sysv-shared-memory" = "gone"
+"find:preferences" = "gone"
+"find:launch-services" = "gone"
+"find:pasteboard" = "gone"
+"find:keychain" = "gone"
+"find:background-process" = "gone"
+"find:crontab" = "gone"
+"find:at-job" = "gone"
+"find:launchd-user" = "gone"
+"find:launchd-gui" = "gone"
+"find:account-attribute" = "gone"
+# Another user's home is 0700: its files cannot be looked at.
+"find:file:run-dir" = "n/a"
+"find:file:home-launchagents" = "n/a"
+"find:file:home-preferences" = "n/a"
+"find:file:private-tmp" = "gone"
+"find:file:private-var-tmp" = "gone"
+"find:file:users-shared" = "gone"
+"find:file:library-caches" = "gone"
+"find:file:opt-homebrew" = "gone"
+"find:file:usr-local" = "gone"
+"find:file:etc" = "gone"
+"find:file:library-launchdaemons" = "gone"
+"find:file:other-home" = "gone"
+"find:file:bundle-store" = "gone"

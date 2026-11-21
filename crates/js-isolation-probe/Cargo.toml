@@ -1,0 +1,30 @@
+[package]
+name = "js-isolation-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Runs AS a native job on a Mac pool host and says what a job can write, read, reach and
+# leave behind (docs/runbooks/mac-isolation-probe.md). The probes are written against an
+# injected host, so they build and are tested everywhere; only the glue that hands them the
+# real host is macOS only.
+[[bin]]
+name = "js-isolation-probe"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+
+[lints]
+workspace = true
