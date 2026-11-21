@@ -531,7 +531,8 @@ async fn off_runtime<T: Send + 'static>(wait: impl FnOnce() -> T + Send + 'stati
 }
 
 /// The serving server's side of a roll, as it writes to the store: its own job store over the
-/// shared database, and the jobs it holds that have not ended, with their states.
+/// shared database, and the jobs it holds that have not ended, with their states. The unit test
+/// of the open, `src/job_store_busy_tests.rs`, drives the open with the same kind of writer.
 pub struct Serving {
     jobs: JobStore<Arc<dyn Store>, RandomIds>,
     /// The jobs that have not ended, by id.
