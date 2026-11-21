@@ -384,6 +384,11 @@ struct Gate {
 /// answers within milliseconds and the tests assert on what was said, not on how soon.
 const HANG_GUARD: Duration = Duration::from_secs(120);
 
+/// The most waits [`Agent::stop_draining`] lets a drain ask for: far more heartbeats than a
+/// drain that hands over what it owes takes, so a guard against one that never ends.
+#[cfg(target_os = "linux")]
+const DRAIN_WAITS_MAX: usize = 100;
+
 impl Sleeper for Gate {
     fn sleep(&mut self, duration: Duration) -> Wake {
         let _ = self.slept.send(duration);
@@ -615,6 +620,33 @@ impl Agent {
     pub fn stop(self) -> Ran {
         self.go.send(Wake::Stop).unwrap();
         self.handle.join().unwrap()
+    }
+
+    /// Asks the agent to stop, as a signal would, and lets each wait of its drain pass until
+    /// it ends; returns what it printed and the waits it asked for after the stop. A drain
+    /// beats again while the worker owes the server something (a result, or a retired job id
+    /// not yet acknowledged), so how many waits it asks for is the agent's to decide: the
+    /// test answers each one and never races one. The bound on their number only ends a
+    /// drain that would go on for ever.
+    #[cfg(target_os = "linux")]
+    pub fn stop_draining(self) -> (Ran, Vec<Duration>) {
+        self.go.send(Wake::Stop).unwrap();
+        let mut waits = Vec::new();
+        loop {
+            match self.slept.recv_timeout(HANG_GUARD) {
+                Ok(wait) => {
+                    waits.push(wait);
+                    assert!(waits.len() <= DRAIN_WAITS_MAX, "the drain never ended");
+                    self.go.send(Wake::Elapsed).unwrap();
+                }
+                // The agent's thread has ended, and its gate with it.
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("the agent neither ended nor waited after its stop")
+                }
+            }
+        }
+        (self.handle.join().unwrap(), waits)
     }
 
     /// Waits for an agent that ends by itself.
