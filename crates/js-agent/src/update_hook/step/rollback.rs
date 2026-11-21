@@ -4,15 +4,21 @@
 //! point goes on from there and makes no act twice.
 //!
 //! In this order, each before anything is changed:
-//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
-//!    `owed-*` record (not on an update that hands the runs over, whose agents run their checks
-//!    while this step waits), halts (76), here and again before each phase below (an agent with such a
-//!    taint refuses every start, the old release included, so nothing is gained by going on; a
-//!    taint it will re-check, a residue of a post-job check the pin file does not name, does not halt the
-//!    step; if the previous release is one that predates
-//!    self-clearing, such a taint stays standing and that agent refuses starts until an operator
-//!    clears it, which is accepted because a halt would stop every release of the group). A rollback with no
-//!    record has nothing to undo: it has finished before, or `prepare` never wrote one;
+//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check
+//!    halts (76), here and again before each phase below (an agent with such a taint refuses
+//!    every start, the old release included, so nothing is gained by going on; a taint it will
+//!    re-check, a residue of a post-job check the pin file does not name, does not halt the
+//!    step; if the previous release is one that predates self-clearing, such a taint stays
+//!    standing and that agent refuses starts until an operator clears it, which is accepted
+//!    because a halt would stop every release of the group). An `owed-*` record halts too once
+//!    the agent was signalled (`stop_begun`; for a first install, `link_moved`), here and before
+//!    each phase below, except on an update that hands the runs over, whose agents run their
+//!    checks while this step waits: the stop left it, and the agent started next taints itself
+//!    for it. Before the signal it does not: the agent that runs is the one that wrote it and
+//!    settles it once the job's checks have run, and this step does not touch that agent (a
+//!    `prepare` or `cutover` that deferred for the record is rolled back here). A rollback with
+//!    no record has nothing to undo: it has finished before, or `prepare` never wrote one, and
+//!    only a taint halts it;
 //! 2. the agent was never signalled (no `stop_begun`; for a first install, no `link_moved`):
 //!    there is nothing to repair beyond the cordon. It is lifted if this update placed it, the
 //!    record is deleted, and the step ends `reversible: true`;
@@ -81,8 +87,8 @@
 //! cannot tell it from the record of an update that was abandoned.
 //!
 //! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint
-//! the agent cannot clear, or an owed check. Never 75: the declared contract gives a rollback no
-//! deferral. A lease server that
+//! the agent cannot clear, or an owed check after the stop. Never 75: the declared contract
+//! gives a rollback no deferral. A lease server that
 //! does not answer before the first act is waited for inside the step (bounded as below), and then
 //! the step fails with `lease_unreachable` (class
 //! environment) having changed nothing.
@@ -110,7 +116,7 @@ use super::cutover::{
     request_handover, show, withdraw_handover,
 };
 use super::helper;
-use super::prepare::{place, refuse_host, refuse_host_in, renew};
+use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
 use crate::cordon::CREDENTIAL_CODES;
 
@@ -122,7 +128,7 @@ pub fn rollback(env: &Env<'_>, params: &Params) -> Done {
 fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
     let Some(mut record) = loaded else {
-        refuse_host(env)?;
+        refuse_taint(env)?;
         return Ok(Done {
             report: Report {
                 detail: Some(
@@ -144,10 +150,12 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 }
 
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
-    refuse_host_in(env, record.handover)?;
     if !begun(record) {
+        // The agent was never signalled: an owed check is one it is still running.
+        refuse_taint(env)?;
         return finish(env, held, record);
     }
+    refuse_host_in(env, record.handover)?;
     let Some(previous) = record.update.previous_target.clone() else {
         retire(env, params, held, record)?;
         return finish(env, held, record);

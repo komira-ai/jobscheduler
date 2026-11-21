@@ -479,6 +479,10 @@ pub struct Spy<'a> {
     on_pause: RefCell<Option<PauseHook<'a>>>,
     /// The calls that fail, by name: `host`, `cordon`, `uncordon`, `owed`.
     pub fail: RefCell<BTreeSet<&'static str>>,
+    /// The checks of this run fail just before the next listing of the owed records: the agent
+    /// writes a taint a restart does not re-check (`unchecked`, `processes-unreadable`) and then
+    /// removes the run's record, so the listing no longer shows it.
+    pub check_fails_at_list: Cell<Option<&'static str>>,
     /// The operator cordons just before the next cordon call reaches the server.
     pub operator_races: Cell<bool>,
     /// The code the server refuses a reading of the host with (`LeaseError::Refused`), while set.
@@ -594,6 +598,7 @@ impl<'a> Spy<'a> {
             log: RefCell::new(Vec::new()),
             on_pause: RefCell::new(None),
             fail: RefCell::new(BTreeSet::new()),
+            check_fails_at_list: Cell::new(None),
             operator_races: Cell::new(false),
             host_refuses: Cell::new(None),
             version: RefCell::new(Ok(format!("js-agent {}\n", rig.params.target_version))),
@@ -841,6 +846,16 @@ impl StateView for Spy<'_> {
     fn owed(&self) -> Result<Vec<String>, PortError> {
         if self.fail.borrow().contains("owed") {
             return Err(PortError::Io("the state root cannot be listed".to_owned()));
+        }
+        if let Some(run) = self.check_fails_at_list.take() {
+            self.state
+                .write(&Taint {
+                    reason: "unchecked".to_owned(),
+                    run_id: Some(run.to_owned()),
+                    check: Some("processes-unreadable".to_owned()),
+                })
+                .unwrap();
+            self.state.settle(run).unwrap();
         }
         StateView::owed(&self.state)
     }
