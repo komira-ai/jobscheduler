@@ -27,6 +27,8 @@ const FARM_PROGRAM: &str = "/opt/js-agent/link/current/js-agent";
 /// The operator's flags file and token file.
 const FLAGS: &str = "/etc/js-agent/flags";
 const TOKEN: &str = "/etc/js-agent/token";
+/// The route's address the unit gives `--health-listen`: the release manifest's `healthUrl` names it.
+const HEALTH: &str = "127.0.0.1:7311";
 /// Where the package installs the units and the tmpfiles file.
 const INSTALLED_UNIT: &str = "/usr/lib/systemd/system/js-agent-crun.service";
 const INSTALLED_TMPFILES: &str = "/usr/lib/tmpfiles.d/js-agent-crun.conf";
@@ -180,6 +182,11 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
     );
     assert_eq!(cli.host.host_id.as_deref(), Some("node-5"));
     assert!(js_agent::crun_host::flags(&cli).is_ok());
+    assert_eq!(cli.health_listen, Some(HEALTH.parse().unwrap()));
+    assert!(
+        cli.health_listen
+            .is_some_and(|addr| addr.ip().is_loopback())
+    );
 }
 
 /// No file of the package sets the environment or holds token text: outside comments, the
@@ -208,12 +215,13 @@ fn no_file_of_the_package_sets_the_environment_or_holds_token_text() {
 }
 
 /// The unit is the farm unit of the setup script with the program at `/usr/bin/js-agent`, the
-/// server and pool read from the flags file and the tmpfiles file at the package's path.
+/// server and pool read from the flags file, the loopback health route the release manifest's
+/// `healthUrl` names, and the tmpfiles file at the package's path.
 ///
 /// Catches a setting that drifted between the two (a Delegate, a KillMode or a stop bound that
 /// one has and the other lacks), which the farm unit's own tests pin for the farm unit only.
 #[test]
-fn the_unit_equals_the_farm_unit_except_the_program_the_flags_file_and_the_tmpfiles_path() {
+fn the_unit_equals_the_farm_unit_except_program_flags_file_health_route_and_tmpfiles_path() {
     let (packaged, farm) = (read(UNIT), read(FARM_UNIT));
     assert_eq!(rest(&packaged), rest(&farm));
     let words = |text: &str| -> Vec<String> {
@@ -237,7 +245,10 @@ fn the_unit_equals_the_farm_unit_except_the_program_the_flags_file_and_the_tmpfi
         out
     };
     assert_eq!(
-        strip(&packaged_words, &[&["--flags-file", FLAGS]]),
+        strip(
+            &packaged_words,
+            &[&["--flags-file", FLAGS], &["--health-listen", HEALTH]]
+        ),
         strip(
             &farm_words,
             &[

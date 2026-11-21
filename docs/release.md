@@ -17,7 +17,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests`, which starts beside `plan`, still runs).
    Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
-   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests), and
+   runs with `cargo nextest run --workspace`; not its `--ignored` live steps and not doctests), and
    with them the four longest test binaries of `js-sim-cell` (`faults`, `smoke`, `replay` and
    `whole_host_prepare`, built with `--features js-sim-cell/slow-families`) that `test` leaves out,
    under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
@@ -474,6 +474,7 @@ SHA-256 as the pin, and the manifest:
 | `hook.timeoutSecs` | prepare 3900, cutover 4320, verify 615, rollback 8220, cleanup 120; no uninstall: hostkeeper refuses an uninstall order of the agent |
 | `hook.verifyDeadlineSecs`, `hook.cleanupRetries` | 9000, 3 |
 | `run` | `js-agent-crun.service` |
+| `healthUrl` | `http://127.0.0.1:7311/healthz`: the route of the agent's `--health-listen` in the package's unit (a test holds the two equal). hostkeeper probes it once per round and reports the service unhealthy unless it answers `2xx`; the agent answers `503` while it or the lease server holds a taint on the host, so a tainted host is shown as unhealthy and holds a rollout's bake |
 | `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
@@ -617,6 +618,7 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
 | `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
 | `run` | the launchd labels `js-agent`, `js-agent.session` and `js-agent.pf-pool` (the agent, its root helper and the job that keeps the pool's pf anchor loaded) |
+| `healthUrl` | none: the Mac agent is started without `--health-listen` |
 | `params.unit`, `params.helper_unit`, `params.pf_unit` | `js-agent`, `js-agent.session`, `js-agent.pf-pool` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |

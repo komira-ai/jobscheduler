@@ -132,7 +132,7 @@ impl Lifecycle {
     }
 
     /// Runs the post-job checks once with nothing live. A finding taints the host and is
-    /// returned with its text.
+    /// returned with its text; what the checks only note is logged and taints nothing.
     fn recheck(&mut self, run_id: &str, events: &mut Vec<Event>) -> Result<(), String> {
         let verdict = self.checks.run(&Finished {
             run_id,
@@ -141,6 +141,7 @@ impl Lifecycle {
             live_slots: &[],
             held_mounts: &[],
         });
+        events.extend(self.checks.notes().into_iter().map(|note| note.event()));
         let Err(found) = verdict else { return Ok(()) };
         let message = match &found {
             CheckFinding::Residue { .. } => found.detail().to_owned(),
@@ -148,7 +149,8 @@ impl Lifecycle {
                 format!("the check could not run: {}", found.detail())
             }
         };
-        if let Err(why) = self.taint.seal(check_taint_of(None, &found), events) {
+        let tainted = check_taint_of(None, &found);
+        if let Err(why) = self.taint.seal(tainted, Some(message.clone()), events) {
             events.push(Event::Finding(Finding {
                 run_id: None,
                 code: super::code::TAINT_WRITE_FAILED,

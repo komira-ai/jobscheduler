@@ -118,6 +118,18 @@
 //! [`ReplyCheck::log_grant`] while the rest of the reply applies, and an inconsistent `logs`
 //! report is dropped by [`JobResult::logs_report`] while the result is recorded.
 //!
+//! # Taint fields
+//!
+//! Two optional fields, added within major 1, let the agent and the server compare what each
+//! holds as a taint. A heartbeat's [`Heartbeat::tainted`] says whether the agent holds one as it
+//! sends the beat (absent from an agent from before the field and from a session that runs no
+//! jobs; the server then judges the beat as before). A reply's [`HeartbeatReply::host_taint`]
+//! is the taint the server holds once it has taken the beat (absent when it holds none, and
+//! from a server from before the field). The first is a bool and needs no check; the second
+//! is held to the bounds of a heartbeat's [`Taint`] and the verdict is
+//! [`ReplyCheck::host_taint`], set aside like [`ReplyCheck::log_grant`]: a bad one is
+//! ignored and the rest of the reply applies. An older receiver skips either field.
+//!
 //! # Two keyings in one major
 //!
 //! A start, stop and report are keyed by run and lease ([`Command::Start`], [`HeldRun`],

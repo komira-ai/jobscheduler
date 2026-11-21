@@ -310,12 +310,12 @@ fn the_jobs_of_other_runs_are_read_into_states() {
     let got = peers(&args(gh, 5, "1.0.0")).expect("read");
     assert_eq!(
         got,
-        vec![
+        Round::Peers(vec![
             peer(4, Job::Succeeded, Job::Running),
             with_publish(6, Job::Queued, Job::Absent, Job::Ended),
             with_publish(7, Job::Ended, Job::Absent, Job::Queued),
             with_publish(8, Job::Absent, Job::Absent, Job::Absent),
-        ]
+        ])
     );
     let log = std::fs::read_to_string(dir.join("gh.log")).expect("log");
     assert!(!log.contains("runs/12/"), "{log}");
@@ -324,7 +324,7 @@ fn the_jobs_of_other_runs_are_read_into_states() {
         5,
         "1.0.0",
     ));
-    assert_eq!(none, Ok(vec![]));
+    assert_eq!(none, Ok(Round::Peers(vec![])));
 }
 
 /// Asserts that the newest published release is the highest `vX.Y.Z` tag, ignoring drafts,
@@ -398,13 +398,24 @@ fn answers_that_are_not_what_was_asked_for_are_refused_with_context() {
         failed(check("{\"workflow_runs\":[]}", &good_jobs, NO_RELEASES)),
         format!("{what}: `total_count` is not a number")
     );
+    // A full page short of the count is an error at once; one entry fewer than a full page,
+    // short of the count, is read again and is an error only on the tenth round in a row.
+    let runs = |listed: u64, total: u64| {
+        let items: Vec<String> = (0..listed)
+            .map(|n| format!("{{\"id\":{},\"run_number\":{}}}", 100 + n, n + 1))
+            .collect();
+        format!(
+            "{{\"total_count\":{total},\"workflow_runs\":[{}]}}",
+            items.join(",")
+        )
+    };
     assert_eq!(
-        failed(check(
-            "{\"total_count\":101,\"workflow_runs\":[{\"id\":11,\"run_number\":4}]}",
-            &good_jobs,
-            NO_RELEASES
-        )),
-        format!("{what}: 101 entries, one page of 1 was read")
+        failed(check(&runs(100, 101), &good_jobs, NO_RELEASES)),
+        format!("{what}: 101 entries, one page of 100 was read")
+    );
+    assert_eq!(
+        failed(check(&runs(99, 100), &good_jobs, NO_RELEASES)),
+        format!("{what}: GitHub counts 100 entries and lists 99, on 10 reads in a row")
     );
     assert_eq!(
         failed(check(
@@ -424,13 +435,17 @@ fn answers_that_are_not_what_was_asked_for_are_refused_with_context() {
     );
 
     let what = "jobs of run 11 (#4) of o/r";
+    let jobs = |listed: usize, total: usize| {
+        let items = vec!["{\"name\":\"turn\",\"status\":\"queued\"}"; listed];
+        format!("{{\"total_count\":{total},\"jobs\":[{}]}}", items.join(","))
+    };
     assert_eq!(
-        failed(check(
-            &good_runs,
-            "{\"total_count\":3,\"jobs\":[{\"name\":\"turn\",\"status\":\"queued\"}]}",
-            NO_RELEASES
-        )),
-        format!("{what}: 3 entries, one page of 1 was read")
+        failed(check(&good_runs, &jobs(100, 101), NO_RELEASES)),
+        format!("{what}: 101 entries, one page of 100 was read")
+    );
+    assert_eq!(
+        failed(check(&good_runs, &jobs(1, 3), NO_RELEASES)),
+        format!("{what}: GitHub counts 3 entries and lists 1, on 10 reads in a row")
     );
     assert_eq!(
         failed(check(
@@ -565,4 +580,133 @@ fn the_verb_waits_while_an_older_run_holds_the_turn_then_goes() {
     );
     // The same stand-in, now past its second round, makes `run` decide without waiting.
     assert!(run(&a).is_ok());
+}
+
+/// Writes a stand-in `gh` whose `n`th list of runs answers `runs[n - 1]` and whose `n`th list
+/// of the jobs of run 11 answers `jobs[n - 1]` (each the last of its list once past its end),
+/// with no release; every call's path is appended to `gh.log`.
+fn sequenced_gh(dir: &TestDir, runs: &[String], jobs: &[String]) -> String {
+    for (kind, answers) in [("runs", runs), ("jobs", jobs)] {
+        for (n, text) in answers.iter().enumerate() {
+            std::fs::write(dir.join(format!("{kind}.{}", n + 1)), text).expect("answer");
+        }
+        if let Some(last) = answers.last() {
+            std::fs::write(dir.join(format!("{kind}.last")), last).expect("answer");
+        }
+    }
+    let log = dir.join("gh.log");
+    let body = format!(
+        "#!/bin/sh\necho \"$*\" >> '{log}'\n\
+         answer() {{ f='{dir}/'$1.$(grep -c \"$2\" '{log}'); [ -f \"$f\" ] || f='{dir}/'$1.last; cat \"$f\"; }}\n\
+         case \"$2\" in\n\
+         'repos/o/r/actions/workflows/release.yml/runs?branch=main&event=push&status=in_progress&per_page=100') answer runs /workflows/;;\n\
+         'repos/o/r/actions/runs/11/jobs?per_page=100&filter=latest') answer jobs /runs/11/jobs;;\n\
+         'repos/o/r/releases?per_page=100') echo '[]';;\n\
+         *) echo \"unexpected: $*\" >&2; exit 9;;\n\
+         esac\n",
+        log = log.display(),
+        dir = dir.path().display(),
+    );
+    let path = dir.join("gh");
+    std::fs::write(&path, body).expect("script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    path.display().to_string()
+}
+
+/// How many calls of `gh.log` name `what`.
+fn calls(dir: &TestDir, what: &str) -> usize {
+    std::fs::read_to_string(dir.join("gh.log"))
+        .expect("gh.log")
+        .lines()
+        .filter(|l| l.contains(what))
+        .count()
+}
+
+/// The list of runs GitHub counts as 1 and lists empty, as it answered while one run of the
+/// workflow was in progress.
+const RUNS_BEHIND: &str = "{\"total_count\":1,\"workflow_runs\":[]}";
+
+/// Asserts that a list of runs, then a list of jobs, that GitHub counts longer than it lists
+/// (the page not full) is not an error: each round prints one line naming the list and reads
+/// again, and the verb decides once the lists are whole.
+#[test]
+fn a_list_behind_its_count_is_read_again_until_it_is_whole() {
+    let (_serial, dir) = setup("turn-behind");
+    let done = job_list(&[
+        ("turn", "completed", Some("success")),
+        ("deployed", "completed", Some("success")),
+    ]);
+    let jobs_behind = "{\"total_count\":2,\"jobs\":[{\"name\":\"turn\",\"status\":\"completed\",\"conclusion\":\"success\"}]}";
+    let gh = sequenced_gh(
+        &dir,
+        &[RUNS_BEHIND.to_owned(), run_list(&[(11, 4)])],
+        &[jobs_behind.to_owned(), done],
+    );
+    let mut printed = Vec::new();
+    assert_eq!(
+        run_to(&args(gh, 5, "1.0.0"), &mut printed),
+        Ok("no newer release, no newer run at its turn, no older run holding it\ngo=true".into())
+    );
+    assert_eq!(
+        String::from_utf8(printed).expect("utf-8"),
+        "waiting: runs of release.yml of o/r: GitHub counts 1 entries and lists 0; reading again\n\
+         waiting: jobs of run 11 (#4) of o/r: GitHub counts 2 entries and lists 1; reading again\n"
+    );
+    assert_eq!(calls(&dir, "/workflows/"), 3);
+    assert_eq!(calls(&dir, "/runs/11/jobs"), 2);
+    assert_eq!(calls(&dir, "/releases"), 3);
+}
+
+/// Asserts that a list GitHub counts longer than it lists on ten rounds in a row is an error
+/// naming the list, after nine waiting lines and no tenth: the verb does not read forever.
+#[test]
+fn a_list_behind_its_count_ten_rounds_in_a_row_is_an_error() {
+    let (_serial, dir) = setup("turn-behind-ten");
+    let gh = sequenced_gh(&dir, &[RUNS_BEHIND.to_owned()], &[]);
+    let mut printed = Vec::new();
+    assert_eq!(
+        failed(run_to(&args(gh, 5, "1.0.0"), &mut printed)),
+        "runs of release.yml of o/r: GitHub counts 1 entries and lists 0, on 10 reads in a row"
+    );
+    assert_eq!(
+        String::from_utf8(printed).expect("utf-8"),
+        "waiting: runs of release.yml of o/r: GitHub counts 1 entries and lists 0; reading again\n"
+            .repeat(9)
+    );
+    assert_eq!(calls(&dir, "/workflows/"), 10);
+}
+
+/// Asserts that a round whose lists are whole starts the count of rounds behind again: nine
+/// rounds behind, a whole round in which an older run holds the turn, nine more behind, then a
+/// whole round that goes; nineteen rounds behind in all and no error.
+#[test]
+fn a_whole_round_between_rounds_behind_starts_their_count_again() {
+    let (_serial, dir) = setup("turn-behind-reset");
+    let holding = job_list(&[
+        ("turn", "completed", Some("success")),
+        ("deployed", "in_progress", None),
+    ]);
+    let done = job_list(&[
+        ("turn", "completed", Some("success")),
+        ("deployed", "completed", Some("success")),
+    ]);
+    let whole = run_list(&[(11, 4)]);
+    let mut runs = vec![RUNS_BEHIND.to_owned(); 9];
+    runs.push(whole.clone());
+    runs.extend(vec![RUNS_BEHIND.to_owned(); 9]);
+    runs.push(whole);
+    let gh = sequenced_gh(&dir, &runs, &[holding, done]);
+    let mut printed = Vec::new();
+    assert_eq!(
+        run_to(&args(gh, 5, "1.0.0"), &mut printed),
+        Ok("no newer release, no newer run at its turn, no older run holding it\ngo=true".into())
+    );
+    let behind =
+        "waiting: runs of release.yml of o/r: GitHub counts 1 entries and lists 0; reading again\n"
+            .repeat(9);
+    assert_eq!(
+        String::from_utf8(printed).expect("utf-8"),
+        format!("{behind}waiting: run #4 has published and not yet deployed\n{behind}")
+    );
+    assert_eq!(calls(&dir, "/workflows/"), 20);
 }

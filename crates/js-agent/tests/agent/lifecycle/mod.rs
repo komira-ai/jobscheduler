@@ -31,6 +31,7 @@ mod logs;
 mod mounts;
 mod native_bodies;
 mod network;
+mod notes;
 mod owed;
 mod per_job;
 mod prepare;
@@ -350,7 +351,7 @@ pub fn names(events: &[Event]) -> Vec<String> {
             Event::ContainerRemoved { run_id } => format!("container removed {run_id}"),
             Event::ScratchRemoved { run_id } => format!("scratch removed {run_id}"),
             Event::ChecksPassed { run_id } => format!("checks passed {run_id}"),
-            Event::Tainted(taint) => format!(
+            Event::Tainted { taint, .. } => format!(
                 "tainted {} {}",
                 taint.run_id.as_deref().unwrap_or("-"),
                 taint.reason

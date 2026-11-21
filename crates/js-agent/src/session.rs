@@ -83,9 +83,10 @@
 //!
 //! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
 //!   results not yet acknowledged, the jobs a job start began (with their results) and the
-//!   retired job ids, and the taint to report. Every hello carries the held runs as its
-//!   held list, so a server that restarted learns what the agent still runs. A new epoch
-//!   keeps the worker and everything it holds.
+//!   retired job ids, the taint to report, and whether the host is tainted at all (`tainted`,
+//!   which the server reads as the agent's word that it holds none when it is false). Every
+//!   hello carries the held runs as its held list, so a server that restarted learns what the
+//!   agent still runs. A new epoch keeps the worker and everything it holds.
 //! - Every accepted reply that says anything (a command, an acknowledgement of a result or
 //!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
 //!   and acts on each command in order; a command it refuses is logged by its place in the
@@ -138,6 +139,16 @@
 //! every uploader of the host reads it, and reports what the cell holds in every heartbeat
 //! (`log_grant_state`). Without one it sends no state and ignores a grant.
 //!
+//! # Health
+//!
+//! A session given a [`Health`] ([`Session::with_health`], an agent started with
+//! `--health-listen`) tells it what it knows of the host's taints: every welcome admits the
+//! host and a lost session withdraws that; every heartbeat sent says whether the worker's
+//! snapshot holds a taint (a session with no worker says none); every reply it accepts says
+//! what taint the server holds (`host_taint`, used only when it passes its check, and never
+//! handed to the worker: a reply that carries nothing else is not delivered). The lines of
+//! the changes of its verdict are printed with the worker's ([`Session::job_lines`]).
+//!
 //! # Free disk
 //!
 //! A session given a [`DiskGauge`] ([`Session::with_disk`]) asks it before each heartbeat and puts the
@@ -159,15 +170,13 @@
 //! the server dedupes by (lease, minute). The draining beat of [`Session::drain`] carries the load too, so the last
 //! minutes of leases that just ended are not left behind.
 
-use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, RefusalReason,
-    ValidationError, Welcome,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, NodeLoad, Phase, ValidationError, Welcome,
 };
 use js_caps::DISK_GIB;
 use serde_json::Value;
@@ -177,6 +186,7 @@ use crate::credential::CredentialStore;
 use crate::disk::DiskGauge;
 use crate::dispatch::Cell;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
+use crate::health::Health;
 use crate::lifecycle::Clock;
 use crate::lifecycle::handover::{self, Handover};
 use crate::logs::HostGrant;
@@ -186,8 +196,10 @@ use crate::usage::Outbox;
 use crate::worker::{Delivery, Parked, Snapshot, Worker};
 
 mod fatal;
+mod note;
 mod reason;
 pub use fatal::Fatal;
+pub use note::Note;
 pub use reason::{CredentialState, Reason};
 
 /// The route of the hello.
@@ -205,93 +217,6 @@ struct Live {
     epoch: u64,
     secret: Secret,
     interval: Duration,
-}
-
-/// Something the operator may want to read in the log. None of them holds a token or a
-/// session secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Note {
-    /// The server welcomed the host.
-    Registered {
-        /// The session's epoch.
-        epoch: u64,
-        /// How often the host heartbeats.
-        interval: Duration,
-        /// What became of the host credential the welcome carried, if it carried one.
-        credential: CredentialState,
-    },
-    /// The server no longer holds the session; the agent says hello again.
-    Lost {
-        /// The server's code.
-        code: String,
-    },
-    /// An exchange failed and will be tried again.
-    Retrying {
-        /// `hello` or `heartbeat`.
-        what: &'static str,
-        /// Why it failed.
-        reason: Reason,
-    },
-    /// A heartbeat answer carried commands, which this agent does not act on: it runs no
-    /// jobs.
-    Ignored {
-        /// How many.
-        commands: usize,
-    },
-    /// The server granted a whole-node lease; the agent prepares the host for it.
-    Preparing {
-        /// The lease.
-        lease: String,
-    },
-    /// The agent refused the lease it was preparing for.
-    Refused {
-        /// The code sent.
-        code: RefusalReason,
-    },
-    /// The lease ended; the agent restores the host.
-    Restoring,
-    /// The job worker had no room for a heartbeat answer, which was dropped; the server
-    /// sends what it said again.
-    Busy,
-    /// The host announced that it is draining.
-    Draining {
-        /// Whether the server acknowledged it.
-        told: bool,
-    },
-}
-
-impl fmt::Display for Note {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Registered {
-                epoch,
-                interval,
-                credential,
-            } => write!(
-                f,
-                "registered, epoch {epoch}, heartbeat every {}ms{credential}",
-                interval.as_millis()
-            ),
-            Self::Lost { code } => write!(f, "the server lost the session ({code})"),
-            Self::Retrying { what, reason } => write!(f, "{what} failed: {reason}"),
-            Self::Ignored { commands } => {
-                write!(f, "ignoring {commands} command(s): this agent runs no jobs")
-            }
-            Self::Preparing { lease } => write!(f, "preparing the host for lease {lease}"),
-            Self::Refused { code } => {
-                write!(f, "refusing the whole-node lease: {}", String::from(*code))
-            }
-            Self::Restoring => write!(f, "the whole-node lease ended: restoring the host"),
-            Self::Busy => write!(
-                f,
-                "the job worker is busy: an answer was dropped and will be sent again"
-            ),
-            Self::Draining { told: true } => write!(f, "draining: the server was told"),
-            Self::Draining { told: false } => {
-                write!(f, "draining: the server could not be told")
-            }
-        }
-    }
 }
 
 /// What one [`Session::tick`] decided.
@@ -421,6 +346,8 @@ pub struct Session<'a> {
     /// The state root a stop request looks in for a handover, when the next process can
     /// adopt the runs ([`Session::with_handover`]).
     handover: Option<&'a Path>,
+    /// What the host's health route answers from, when the agent has one.
+    health: Option<&'a Health>,
 }
 
 impl<'a> Session<'a> {
@@ -453,6 +380,7 @@ impl<'a> Session<'a> {
             seq: 0,
             dispatch: None,
             handover: None,
+            health: None,
         }
     }
 
@@ -516,6 +444,16 @@ impl<'a> Session<'a> {
     pub fn with_dispatch(self, cell: &'a Cell) -> Self {
         Self {
             dispatch: Some(cell),
+            ..self
+        }
+    }
+
+    /// The same session telling `health` what it knows of the host's taints (see the module
+    /// documentation).
+    #[must_use]
+    pub fn with_health(self, health: &'a Health) -> Self {
+        Self {
+            health: Some(health),
             ..self
         }
     }
@@ -671,10 +609,11 @@ impl<'a> Session<'a> {
         rescued.collect()
     }
 
-    /// The lines the worker wants printed since the last call.
+    /// The lines to print since the last call: the worker's, and the health verdict's changes.
     pub fn job_lines(&self) -> Vec<String> {
         let lines = self.jobs.iter().map(|jobs| jobs.worker.take_lines());
-        lines.flatten().collect()
+        let health = self.health.iter().map(|health| health.take_lines());
+        lines.chain(health).flatten().collect()
     }
 
     /// What the worker publishes (nothing, for a session with no worker), and whether the
@@ -706,6 +645,10 @@ impl<'a> Session<'a> {
             .disk
             .and_then(|gauge| gauge.gib())
             .filter(|gib| Some(*gib) != self.told);
+        let tainted = jobs.tainted.unwrap_or_default();
+        self.health
+            .iter()
+            .for_each(|health| health.own_taint(tainted, jobs.taint_detail.as_deref()));
         let message = self.heartbeat_message(live, lease, jobs, load);
         let sent = self.post(HEARTBEAT_PATH, message);
         if let Some(outbox) = &self.usage {
@@ -736,6 +679,7 @@ impl<'a> Session<'a> {
             results: jobs.results,
             taint: jobs.taint,
             taint_cleared: jobs.taint_cleared,
+            tainted: jobs.tainted,
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
             load,
@@ -820,6 +764,7 @@ impl<'a> Session<'a> {
             .capabilities
             .get(DISK_GIB)
             .and_then(|gib| gib.parse().ok());
+        self.health.iter().for_each(|health| health.admitted(true));
         self.usage
             .iter()
             .for_each(|outbox| outbox.set_window(interval));
@@ -883,6 +828,7 @@ impl<'a> Session<'a> {
                 });
                 let refused = self.hold.as_mut().and_then(Hold::take_note);
                 self.keep_log_grant(&reply);
+                self.keep_host_taint(&reply);
                 let beat_now = reply.beat_now;
                 let accepted = self.accept(HeartbeatReply {
                     beat_now: false,
@@ -921,6 +867,16 @@ impl<'a> Session<'a> {
         pairs.for_each(|(cell, grant)| cell.replace(grant));
     }
 
+    /// Tells the health state the taint `reply` says the server holds: `None` when it names
+    /// none or the taint fails its check (an unusable one is not shown).
+    fn keep_host_taint(&self, reply: &HeartbeatReply) {
+        let checked = reply.validate().host_taint.is_ok();
+        let held = reply.host_taint.clone().filter(|_| checked);
+        self.health
+            .iter()
+            .for_each(|health| health.server_taint(held.clone()));
+    }
+
     /// What a decoded reply does: handed to the worker, or counted as ignored when there
     /// is none.
     fn accept(&mut self, reply: HeartbeatReply) -> Option<Note> {
@@ -932,6 +888,7 @@ impl<'a> Session<'a> {
         let reply = HeartbeatReply {
             taint_ack: reply.taint_ack & self.carried,
             taint_cleared_ack: reply.taint_cleared_ack & self.carried_clear,
+            host_taint: None,
             ..reply
         };
         match reply == HeartbeatReply::default() {
@@ -950,6 +907,7 @@ impl<'a> Session<'a> {
     /// The session is gone on the server: say hello again now when the heartbeat before
     /// was accepted, after a backoff when it was not.
     fn rehello(&mut self, code: String) -> Step {
+        self.health.iter().for_each(|health| health.admitted(false));
         let proven = self.proven;
         self.proven = false;
         self.lost_young = !proven;

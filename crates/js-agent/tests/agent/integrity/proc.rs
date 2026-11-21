@@ -584,3 +584,64 @@ fn a_link_is_read_through_the_file_seam() {
         Err("/proc/1/ns/mnt: No such file or directory".to_owned())
     );
 }
+
+/// A host that records the text of `/proc/<pid>/cmdline` of the process `pid`, or none.
+fn with_cmdline(pid: u32, text: Option<&str>) -> ProcHost {
+    let mut recorded = Recorded::default();
+    if let Some(text) = text {
+        recorded
+            .files
+            .insert(format!("/proc/{pid}/cmdline"), text.to_owned());
+    }
+    host(recorded)
+}
+
+/// Asserts that the command line is read from `/proc/<pid>/cmdline` with the NULs between the
+/// arguments as spaces and the trailing NUL trimmed, that any other control character is a
+/// space too (a newline cannot split a log line), that a text that only needs trimming is not
+/// cut, and that one exactly at the bound of 80 bytes is kept whole. It catches a command
+/// line that runs its arguments together, or one that breaks the line it is printed in.
+#[test]
+fn a_command_line_is_read_with_its_arguments_apart() {
+    assert_eq!(
+        with_cmdline(7, Some("/usr/bin/sleep\x003600\x00")).cmdline(7),
+        "/usr/bin/sleep 3600"
+    );
+    assert_eq!(
+        with_cmdline(7, Some("sh\0-c\0echo a\nb\0")).cmdline(7),
+        "sh -c echo a b"
+    );
+    let exact = "a".repeat(80);
+    assert_eq!(with_cmdline(7, Some(&exact)).cmdline(7), exact);
+}
+
+/// Asserts that a command line longer than 80 bytes is cut at 80 bytes and ends with `...`,
+/// that the cut falls on a character boundary (a two-byte character that straddles the bound
+/// is dropped whole, never split), and that the cut is of the trimmed text. It catches a
+/// finding that grows with a program's arguments, and a cut that splits a character.
+#[test]
+fn a_long_command_line_is_cut_at_a_character_boundary() {
+    let long = format!("{}\0{}", "a".repeat(100), "b");
+    assert_eq!(
+        with_cmdline(7, Some(&long)).cmdline(7),
+        format!("{}...", "a".repeat(80))
+    );
+    let straddling = format!("{}é{}", "a".repeat(79), "b".repeat(20));
+    assert_eq!(
+        with_cmdline(7, Some(&straddling)).cmdline(7),
+        format!("{}...", "a".repeat(79))
+    );
+    let spaced = format!("   {}   ", "a".repeat(80));
+    assert_eq!(with_cmdline(7, Some(&spaced)).cmdline(7), "a".repeat(80));
+}
+
+/// Asserts that a command line that cannot be read (the process ended, or the file is not
+/// recorded) and one that is empty (a kernel thread) are the empty text, never an error. It
+/// catches a process that ends between the listing and the look failing the finding that
+/// names it.
+#[test]
+fn a_command_line_that_cannot_be_read_is_empty() {
+    assert_eq!(with_cmdline(7, None).cmdline(7), "");
+    assert_eq!(with_cmdline(7, Some("")).cmdline(7), "");
+    assert_eq!(with_cmdline(7, Some("\0\0")).cmdline(7), "");
+}

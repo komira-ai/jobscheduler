@@ -66,10 +66,11 @@ The state root and the other directories are the package's tmpfiles file's, made
 the unit.
 
 `js-agent-crun.service` is `packaging/js-agent/js-agent-crun.service`, the unit of the setup script
-(`crun_host_setup.sh`), with one difference of substance: the server and pool are not in the unit
-but read from a flags file. The setup script, its unit and its machine image stay for hosts that
-are not on hostkeeper yet. `crates/xtask/tests/js_agent_deb_units.rs` pins the units against the
-farm unit and the hook's params.
+(`crun_host_setup.sh`), with two differences of substance: the server and pool are not in the unit
+but read from a flags file, and the unit passes `--health-listen 127.0.0.1:7311`, the route
+hostkeeper probes as the package's `healthUrl` (below). The setup script, its unit and its machine
+image stay for hosts that are not on hostkeeper yet. `crates/xtask/tests/js_agent_deb_units.rs`
+pins the units against the farm unit and the hook's params.
 
 The unit is in `/usr/lib/systemd/system`, so an operator's override is a drop-in in
 `/etc/systemd/system/js-agent-crun.service.d` (`systemctl edit js-agent-crun`), and the GPU oneshot
@@ -146,12 +147,22 @@ the package: `cargo xtask release desired` writes it into the `targets` that
     "cleanupRetries": 3
   },
   "run": ["js-agent-crun.service"],
+  "healthUrl": "http://127.0.0.1:7311/healthz",
   "params": { ... },
   "minHostkeeper": "0.1.225",
   "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"}
 }
 ```
 
+- `healthUrl` is the route the agent answers on at the address of `--health-listen` in the unit
+  (a test holds the two equal). hostkeeper probes it once per round over plain HTTP to the
+  loopback and reports the service unhealthy unless it answers `2xx`, which holds a rollout's bake.
+  `GET /healthz` answers `200` and `placeable` while the agent holds a welcome of the lease server
+  and neither the agent (its marker) nor the lease server (the `host_taint` of its last reply)
+  holds a taint on the host, and `503` and `not placeable: <reason>` otherwise; `journalctl -u
+  js-agent-crun` has one `health:` line for each change. The route has no authentication, so the
+  agent refuses an address that is not a loopback one. The Mac package's entry has no
+  `healthUrl`: its agent is started without the flag.
 - `hook.command` is the program of every step. hostkeeper runs the update steps (prepare,
   cutover, verify, rollback, cleanup) as `/usr/bin/js-agent update-hook <step> [<dir>] --params
   <file>`.

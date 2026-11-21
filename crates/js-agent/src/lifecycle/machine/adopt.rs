@@ -266,7 +266,7 @@ impl Lifecycle {
     /// Taints the host with `taint` and writes the marker; a marker that cannot be written
     /// is a finding that belongs to no run.
     fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) {
-        if let Err(why) = self.taint.seal(taint, events) {
+        if let Err(why) = self.taint.seal(taint, None, events) {
             events.push(Event::Finding(Finding {
                 run_id: None,
                 code: code::TAINT_WRITE_FAILED,

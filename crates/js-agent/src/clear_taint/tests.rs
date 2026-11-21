@@ -307,8 +307,9 @@ fn a_clear_keeps_every_file_aside_records_it_and_restarts_the_agent() {
         "cleared the taint (reason residue, check process-as-job-user, run r1) at 1700000000 \
          by ops.lead: kept owed-r1 as owed.r1.{TAIL}, owed-r2.x as owed.r2.x.{TAIL}, \
          taint.pinned as taint.pinned.{TAIL}, taint.json as taint.json.{TAIL}; reason: the \
-         leftover process was a host daemon; the lease server keeps its own record of the \
-         taint until the operator's ClearHostTaint"
+         leftover process was a host daemon; the lease server ends its record of the taint \
+         at the restarted agent's first heartbeat, except a host-job or host-unsafe taint, \
+         which stays until the operator's ClearHostTaint"
     );
     assert_eq!(err, format!("js-agent clear-taint: {told}\n"));
     assert_eq!(

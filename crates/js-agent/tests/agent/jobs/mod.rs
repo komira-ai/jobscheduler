@@ -67,6 +67,8 @@ mod session;
 mod silence;
 mod system;
 #[cfg(target_os = "linux")]
+mod taint_health;
+#[cfg(target_os = "linux")]
 mod unmounted;
 #[cfg(target_os = "linux")]
 mod usage;

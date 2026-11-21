@@ -249,6 +249,7 @@ impl Registry {
                 labels: hello.labels.clone(),
                 held,
                 beats: 0,
+                last_seq: None,
                 taint: kept.taint,
                 cordon: kept.cordon,
                 cordon_holder: kept.cordon_holder,

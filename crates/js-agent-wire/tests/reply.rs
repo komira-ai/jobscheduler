@@ -6,7 +6,9 @@ mod common;
 use common::{expect, job};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
-use js_agent_wire::{Ack, Command, HeartbeatReply, ReplyCheck, ResultAck, Rule, ValidationError};
+use js_agent_wire::{
+    Ack, Command, HeartbeatReply, ReplyCheck, ResultAck, Rule, Taint, ValidationError,
+};
 
 fn stop(run: &str) -> Command {
     Command::Stop { run_id: run.into() }
@@ -29,6 +31,7 @@ fn reply(commands: Vec<Command>) -> HeartbeatReply {
         result_acks: Vec::new(),
         taint_ack: false,
         taint_cleared_ack: false,
+        host_taint: None,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
@@ -261,6 +264,68 @@ fn reply_exclusive_lease_id_is_checked() {
         expect(
             check.exclusive.unwrap_err(),
             "exclusive",
+            rule,
+            refusal::INVALID_REPLY,
+        );
+    }
+}
+
+/// One edit of a taint at the caps, with the field and the rule its check then names.
+type Case = (fn(&mut Taint), &'static str, Rule);
+
+/// The taint the server reports is held to the bounds of a heartbeat's taint: none and a good
+/// one (a reason, a run id and a check at their caps) pass; an empty reason, a reason over
+/// the cap, a path-like run id and a check with a control character fail `host_taint` under
+/// the reply code, and leave the commands and acknowledgements alone. It catches an unchecked
+/// peer string reaching the agent's health route and log.
+#[test]
+fn reply_host_taint_is_checked() {
+    let with = |taint: Option<Taint>| HeartbeatReply {
+        host_taint: taint,
+        taint_ack: true,
+        ..reply(vec![stop("r1")])
+    };
+    let taint = |edit: fn(&mut Taint)| {
+        let mut taint = Taint {
+            reason: "a".repeat(MAX_TAINT_TEXT_LEN),
+            run_id: Some("a".repeat(MAX_ID_LEN)),
+            check: Some("a".repeat(MAX_TAINT_TEXT_LEN)),
+        };
+        edit(&mut taint);
+        Some(taint)
+    };
+    assert_eq!(with(None).validate().host_taint, Ok(()));
+    assert_eq!(with(taint(|_| {})).validate().host_taint, Ok(()));
+    let cases: [Case; 4] = [
+        (
+            |t: &mut Taint| t.reason.clear(),
+            "taint.reason",
+            Rule::Empty,
+        ),
+        (
+            |t: &mut Taint| t.reason.push('a'),
+            "taint.reason",
+            Rule::TooLong,
+        ),
+        (
+            |t: &mut Taint| t.run_id = Some("../x".into()),
+            "taint.run_id",
+            Rule::BadChars,
+        ),
+        (
+            |t: &mut Taint| t.check = Some("a\nb".into()),
+            "taint.check",
+            Rule::BadChars,
+        ),
+    ];
+    for (edit, field, rule) in cases {
+        let body = with(taint(edit));
+        let check = body.validate();
+        assert_eq!(check.commands, vec![&stop("r1")]);
+        assert_eq!(check.acks, Ok(()));
+        expect(
+            check.host_taint.unwrap_err(),
+            field,
             rule,
             refusal::INVALID_REPLY,
         );
