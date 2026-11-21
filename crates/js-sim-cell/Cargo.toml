@@ -49,7 +49,35 @@ name = "sweep"
 path = "tests/sweep.rs"
 harness = false
 
+# The four longest families of the cell. Each is built only with the feature `slow-families`:
+# a pull request's `test` job leaves them out, and the
+# runs after the merge and the coverage jobs turn the feature on, so every one of them
+# still runs on every pull request under coverage and on every push to main
+# (crates/xtask/tests/slow_families.rs holds the workflows to this).
+[[test]]
+name = "faults"
+path = "tests/faults.rs"
+required-features = ["slow-families"]
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+required-features = ["slow-families"]
+
+[[test]]
+name = "replay"
+path = "tests/replay.rs"
+required-features = ["slow-families"]
+
+[[test]]
+name = "whole_host_prepare"
+path = "tests/whole_host_prepare.rs"
+required-features = ["slow-families"]
+
 [features]
+# The families above: `cargo test -p js-sim-cell --features slow-families`, or
+# `--features js-sim-cell/slow-families` over the workspace.
+slow-families = []
 # The Postgres store of the cell's server (`Store::Postgres`, src/server/store.rs): a database
 # of its own on the test server for each server node, made by `js_state::postgres::test_database`
 # (feature `test-database`, which brings js-state's `postgres` and js-testkit's `postgres`).
