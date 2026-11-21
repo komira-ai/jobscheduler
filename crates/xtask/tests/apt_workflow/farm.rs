@@ -27,7 +27,8 @@
 //!   (crates/xtask/src/farm.rs).
 //!
 //! [`token_problems`] holds every other workflow to the same scope: in a workflow that starts on
-//! `pull_request` or `pull_request_target`, no job and no top level holds `id-token: write`
+//! `pull_request`, `pull_request_target` or `merge_group` (a merge group of the merge queue runs a
+//! queued pull request's code, docs/ci.md), no job and no top level holds `id-token: write`
 //! unless the job's `if:` pins a push (`github.event_name == 'push'`), as the jobs of `release.yml`
 //! that sign and publish do.
 
@@ -203,8 +204,8 @@ fn holds_token(permissions: Option<&Node>) -> bool {
 }
 
 /// What is wrong with the grants of `id-token: write` in `workflows` (file name, text), other than
-/// those of [`FILE`]: a workflow that starts on a pull request holds none at its top level, and
-/// a job of it holds one only when its `if:` pins a push.
+/// those of [`FILE`]: a workflow that starts on a pull request or a merge group holds none at its
+/// top level, and a job of it holds one only when its `if:` pins a push.
 pub fn token_problems(workflows: &[(String, String)]) -> Vec<String> {
     let mut problems = Vec::new();
     for (file, text) in workflows.iter().filter(|(file, _)| file != FILE) {
@@ -218,7 +219,7 @@ pub fn token_problems(workflows: &[(String, String)]) -> Vec<String> {
         let on = names(entry(&doc, "on"));
         if !on
             .iter()
-            .any(|e| e == "pull_request" || e == "pull_request_target")
+            .any(|e| e == "pull_request" || e == "pull_request_target" || e == "merge_group")
         {
             continue;
         }

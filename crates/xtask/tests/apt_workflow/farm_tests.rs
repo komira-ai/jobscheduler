@@ -306,15 +306,16 @@ fn no_other_workflow_holds_the_token_on_a_pull_request_but_under_a_push() {
 
 #[test]
 fn a_new_workflow_that_a_pull_request_starts_may_not_hold_the_token_without_a_push() {
-    // Catches: the grant spelled as `write-all`, or in a workflow on `pull_request_target`, or in
-    // the list form of `on`; and that a workflow no pull request starts, or a job that pins a
-    // push, is left alone.
+    // Catches: the grant spelled as `write-all`, or in a workflow on `pull_request_target` or on a
+    // merge group, or in the list form of `on`; and that a workflow no pull request starts, or a
+    // job that pins a push, is left alone.
     let refused = "new.yml: job token holds `id-token: write` on a pull request (its `if:` does not pin a push)";
     let push_only = "    if: ${{ github.event_name == 'push' }}\n";
     for on in [
         "on: pull_request",
         "on: [push, pull_request_target]",
         "on:\n  pull_request:\n    paths: [a]",
+        "on:\n  merge_group:\n    types: [checks_requested]",
     ] {
         for grant in ["{ id-token: write }", "write-all"] {
             assert_eq!(

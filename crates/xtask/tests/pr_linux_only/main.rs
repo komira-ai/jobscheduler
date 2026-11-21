@@ -10,11 +10,12 @@
 //! (`release-red`, `release-green`) need a beta job besides.
 //!
 //! A job is one a pull request starts when
-//!   - its workflow starts on `pull_request` or `pull_request_target`, or it is a job of a
-//!     workflow that a job of such a workflow calls (`uses: ./.github/workflows/<file>`);
+//!   - its workflow starts on `pull_request`, `pull_request_target` or `merge_group` (the merge
+//!     queue's check of a queued pull request, docs/ci.md), or it is a job of a workflow that a
+//!     job of such a workflow calls (`uses: ./.github/workflows/<file>`);
 //!   - and its `if:` does not pin another event: no `&&`-joined part of it, outside
-//!     parentheses, is `github.event_name == '<another event>'` or
-//!     `github.event_name != 'pull_request'`.
+//!     parentheses, is `github.event_name == '<another event>'`, or
+//!     `github.event_name != 'pull_request'` in a workflow that does not start on `merge_group`.
 //!
 //! Such a job must run on `ubuntu-latest` or `ubuntu-<YY>.<MM>`: its `runs-on:` value (one
 //! line, a list, or `labels:`) names only those, and a `${{ matrix.<key> }}` runner is read
@@ -82,6 +83,7 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
         "ci.yml/lint",
         "ci.yml/test",
         "ci.yml/coverage",
+        "ci.yml/all-passed",
         "farm.yml/build",
     ] {
         assert!(jobs.iter().any(|j| j == job), "{job} in {jobs:?}");
@@ -110,6 +112,20 @@ fn a_pull_request_check_moved_back_to_macos_is_refused() {
     assert_eq!(
         lint(&workflows).1,
         ["ci.yml/lint: runs on macos-15, not Linux x86_64 (ubuntu-*)"]
+    );
+}
+
+#[test]
+fn the_merge_queue_check_moved_to_macos_is_refused() {
+    // ci.yml's aggregate, the one check of a merge group, on macOS.
+    let workflows = changed(
+        "ci.yml",
+        "    runs-on: ubuntu-latest\n    timeout-minutes: 5\n",
+        "    runs-on: macos-15\n    timeout-minutes: 5\n",
+    );
+    assert_eq!(
+        lint(&workflows).1,
+        ["ci.yml/all-passed: runs on macos-15, not Linux x86_64 (ubuntu-*)"]
     );
 }
 
