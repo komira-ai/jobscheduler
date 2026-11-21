@@ -64,3 +64,13 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: src/fake.rs's tests read PATH, which a farm test does not set as they
+# expect; its dir, database and reaped targets holds `#[ignore]`d tests, and buildrules' test gate
+# refuses a test target with an ignored test (child tests run through the test binary). They run in
+# ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

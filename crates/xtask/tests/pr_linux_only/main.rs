@@ -84,6 +84,7 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
         "ci.yml/test",
         "ci.yml/coverage",
         "ci.yml/all-passed",
+        "farm.yml/build",
     ] {
         assert!(jobs.iter().any(|j| j == job), "{job} in {jobs:?}");
     }
