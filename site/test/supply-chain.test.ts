@@ -100,13 +100,14 @@ test('the site-step checks can fail', () => {
   assert.match(siteStepProblems(steps.replace('working-directory: site\n        run: npm test', 'run: npm test')).join(), /3 of 4 npm steps/);
 });
 
-/** What is wrong with the step `id: site`: it is the one `cargo xtask site-changed` command reading site/ci-paths, fed the event and the base branch, with no shell of its own. */
+/** What is wrong with the step `id: site`: it is the one `cargo xtask site-changed` command reading site/ci-paths, fed the event, the base branch and a merge group's base commit, with no shell of its own. */
 function siteDecisionProblems(step: string, runs: readonly string[]): string[] {
   const out: string[] = [];
   if (runs.length !== 1 || runs[0] !== SITE_COMMAND) out.push(`runs ${JSON.stringify(runs)}, not the one command ${SITE_COMMAND}`);
   if (/^\s*run: [|>]/m.test(step)) out.push('has a multi-line script');
   if (!step.includes('EVENT: ${{ github.event_name }}\n')) out.push('does not pass the event name');
   if (!step.includes('BASE: ${{ github.base_ref }}\n')) out.push('does not pass the base branch');
+  if (!step.includes('GROUP_BASE: ${{ github.event.merge_group.base_sha }}\n')) out.push('does not pass the merge group\'s base commit');
   return out;
 }
 
@@ -127,6 +128,8 @@ test('the decision-step checks can fail', () => {
   assert.match(siteDecisionProblems(step.replace(/run: .*/, 'run: |\n          bash x'), runs).join(), /multi-line script/);
   assert.match(siteDecisionProblems(step.replace('github.event_name', 'x'), runs).join(), /event name/);
   assert.match(siteDecisionProblems(step.replace('github.base_ref', 'x'), runs).join(), /base branch/);
+  assert.match(siteDecisionProblems(step.replace('github.event.merge_group.base_sha', 'github.event.merge_group.head_sha'), runs).join(), /merge group's base commit/);
+  assert.match(siteDecisionProblems(step, [runs[0].replace(' --group-base "$GROUP_BASE"', '')]).join(), /not the one command/);
 });
 
 test('the site steps follow the repository\'s rules: no permission at the top or added, pinned actions, no deploy', () => {
