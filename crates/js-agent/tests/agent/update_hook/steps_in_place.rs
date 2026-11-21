@@ -611,3 +611,83 @@ fn the_record_carries_in_place_only_when_set_and_the_rules_need_a_handover_for_i
     let error = validate(&broken, &rig.params).unwrap_err();
     assert_eq!(error.to_string(), "in_place is set but handover is not");
 }
+
+/// Asserts that a rollback after an in-place cutover killed at any point ends with the previous
+/// agent saying hello and no handover request left on disk: where the cutover never marked its
+/// start (so never signalled), the previous agent still runs and only the request is taken
+/// back; where it did, the runs are handed back in place. Catches a request the cutover wrote
+/// and nobody removes, which turns an operator's later stop into a hand-over.
+#[test]
+fn a_rollback_after_an_in_place_cutover_killed_at_any_point_leaves_no_request() {
+    let baseline = in_place("hook-in-place-rb-after-kill-base");
+    assert_eq!(
+        Spy::new(&baseline).cutover(&baseline).outcome,
+        Outcome::Success
+    );
+    let points = baseline.kill.points();
+    let mut never_signalled = 0;
+    for k in 1..=points {
+        let rig = in_place(&format!("hook-in-place-rb-after-kill-{k}"));
+        rig.kill.arm(k);
+        assert!(
+            killable(|| Spy::new(&rig).cutover(&rig)).is_none(),
+            "kill point {k} of {points} is reached"
+        );
+        rig.kill.disarm();
+        let record = rig.record().unwrap();
+        never_signalled += usize::from(!record.start_issued);
+        let rollback = Spy::new(&rig);
+        let done = rollback.rollback(&rig);
+        assert_eq!(
+            done.outcome,
+            Outcome::Success,
+            "killed at point {k}: {done:?}"
+        );
+        assert!(!file(&rig).exists(), "killed at point {k}");
+        assert!(rig.record().is_none(), "killed at point {k}");
+        assert_eq!(
+            rig.host().agent_version.as_deref(),
+            Some("1.3.0"),
+            "killed at point {k}"
+        );
+        assert!(
+            !rollback.act_names().contains(&stop()) && !rollback.act_names().contains(&start()),
+            "killed at point {k}"
+        );
+        if !record.start_issued {
+            assert!(
+                !rollback.act_names().contains(&kill()),
+                "killed at point {k}: an agent never signalled is not signalled by the rollback"
+            );
+        }
+    }
+    assert!(
+        never_signalled > 0,
+        "some kill point comes before the start mark"
+    );
+}
+
+/// Asserts that a rollback run again after its signal, when the agent has taken the request in
+/// the meantime, sends no second signal and only waits for the previous agent's hello. Catches a
+/// rerun that hands the runs over once more to an agent that already runs the previous release.
+#[test]
+fn a_rollback_rerun_after_the_agent_took_the_request_only_waits_for_the_hello() {
+    let rig = cut_over("hook-in-place-rb-taken");
+    let spy = Spy::new(&rig);
+    spy.on_signal.set(OnSignal::Ignores);
+    let base = rig.world.ticks();
+    spy.on_pause(move |_, ticks| assert!(ticks < base + 3, "killed during the wait"));
+    assert!(killable(|| spy.rollback(&rig)).is_none());
+    assert!(file(&rig).exists());
+    // The agent takes the request after the hook was killed: it removes the file and says hello
+    // as the previous release.
+    std::fs::remove_file(file(&rig)).unwrap();
+    rig.world.hello_again().unwrap();
+
+    let rerun = Spy::new(&rig);
+    let done = rerun.rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rerun.act_names().is_empty(), "{:?}", rerun.act_names());
+    assert!(rig.record().is_none());
+    assert_eq!(rig.host().agent_version.as_deref(), Some("1.3.0"));
+}

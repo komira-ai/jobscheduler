@@ -66,7 +66,9 @@
 //!    release's program runs in its place as the same process, and the step waits until it has
 //!    taken the request, for at most the stop's bound, before it waits for its hello. A rerun
 //!    that finds `rb.start_issued` with the unit up and the request still there signals again.
-//!    A unit that is not up goes the way above (it is started). A start that fails ends
+//!    A previous agent that runs because the cutover never marked its start was never
+//!    signalled: a request the cutover wrote is removed, so that a later stop drains, and only
+//!    its hello is awaited. A unit that is not up goes the way above (it is started). A start that fails ends
 //!    `start_failed` and its detail adds that the previous release is installed again (the
 //!    release link is on it) but its agent is not running, so the update is undone on disk
 //!    and the host runs no agent until the unit starts;
@@ -283,10 +285,19 @@ fn restore(
     if !down {
         let new_agent = record.start_issued && !record.rb.start_issued;
         if !new_agent {
-            // A rerun after the signal that handed the runs back in place: the request may
-            // still be there, and the signal is sent again.
-            if record.in_place && record.rb.start_issued && in_place::pending(env)? {
-                signal_and_wait(env, params, held, record, &unit)?;
+            if record.in_place {
+                if record.rb.start_issued {
+                    // A rerun after the signal that handed the runs back in place: the request
+                    // may still be there, and the signal is sent again.
+                    if in_place::pending(env)? {
+                        signal_and_wait(env, params, held, record, &unit)?;
+                    }
+                } else {
+                    // The previous agent runs and was never signalled (the cutover's marks
+                    // come before its signal): a request the cutover wrote is taken back, so
+                    // that a later stop drains as it should.
+                    withdraw_handover(env, record);
+                }
             }
             return await_hello(env, params, held, record);
         }
@@ -349,9 +360,8 @@ fn hand_back(
     // The request is on disk before the start is marked, so that a rerun that finds the start
     // marked and the request gone knows the agent has taken it.
     request_handover(env, record)?;
-    if !record.rb.start_issued {
-        mark_act(env, params, held, record, set_start_issued)?;
-    }
+    // Not marked yet: only an agent this step has not signalled is handed the runs back here.
+    mark_act(env, params, held, record, set_start_issued)?;
     signal_and_wait(env, params, held, record, unit)
 }
 

@@ -250,8 +250,6 @@ fn a_handover_in_place_held_past_the_drain_wait_ends_replaced() {
 struct Replacing {
     root: std::path::PathBuf,
     waits: usize,
-    /// A stop request comes between the end of the loop and the exec.
-    stop_before_exec: bool,
 }
 
 impl js_agent::Sleeper for Replacing {
@@ -260,9 +258,18 @@ impl js_agent::Sleeper for Replacing {
         handover::write(&self.root).unwrap();
         Wake::Replace
     }
+}
+
+/// [`Replacing`], with a stop request that comes between the end of the loop and the exec.
+struct ReplacingThenStopped(Replacing);
+
+impl js_agent::Sleeper for ReplacingThenStopped {
+    fn sleep(&mut self, duration: Duration) -> Wake {
+        self.0.sleep(duration)
+    }
 
     fn ready_to_run_again(&mut self) -> bool {
-        !self.stop_before_exec
+        false
     }
 }
 
@@ -298,7 +305,6 @@ fn the_agent_runs_its_command_line_again_in_place_and_ends_with_status_one_when_
     let mut sleeper = Replacing {
         root: private(&dir, "state"),
         waits: 0,
-        stop_before_exec: false,
     };
     let machine = Arc::new(FakeMachine::new());
     let jobs: Jobs<'_> = (machine, None);
@@ -358,11 +364,10 @@ fn a_stop_after_the_handover_in_place_and_before_the_exec_ends_the_agent() {
     let words: Vec<&str> = owned.iter().map(String::as_str).collect();
     let args = flags(&words);
     let (script, _) = Script::new(vec![welcome(1), beat_ok()]);
-    let mut sleeper = Replacing {
+    let mut sleeper = ReplacingThenStopped(Replacing {
         root: private(&dir, "state"),
         waits: 0,
-        stop_before_exec: true,
-    };
+    });
     let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
     let ran_again = Cell::new(false);
     let again = |_: &[std::ffi::OsString]| {

@@ -155,6 +155,19 @@ fn an_empty_supervisor_cgroup_is_left_alone() {
     assert_eq!(tree.get("actions/cgroup.kill").as_deref(), Some("1"));
 }
 
+/// A supervisor cgroup that is not there holds nothing: it gets no kill write, and the leases
+/// are still ended. Catches a missing `supervisor` read as an error that ends nothing.
+#[test]
+fn a_supervisor_cgroup_that_is_not_there_is_left_alone() {
+    let tree = Tree::new("start-refused-supervisor-gone");
+    fs::remove_dir_all(tree.unit().join("supervisor")).unwrap();
+    let (code, out, err, _) = run_on(&tree, NEW, "resources");
+    assert!(same(code, 0), "{err}");
+    assert!(out.contains("lease-a, lease-b"), "{out}");
+    assert!(!tree.unit().join("supervisor").exists());
+    assert_eq!(tree.get("actions/cgroup.kill").as_deref(), Some("1"));
+}
+
 /// A result other than `resources` is no refused start: nothing is read, nothing is said.
 #[test]
 fn another_result_does_nothing_and_says_nothing() {

@@ -48,3 +48,27 @@ fn an_existing_root_is_not_changed_and_a_missing_parent_is_not_made() {
     assert!(!scratch.exists());
     assert!(!dir.path().join("no-parent").exists());
 }
+
+/// `js-agent crun-start-refused` is answered by `main_with` before the signal handlers are
+/// installed: after a stop whose result is not `resources` it reads nothing, says nothing and
+/// exits 0, as it does after every plain stop of the unit. Catches the verb falling through to
+/// the agent's own flags (exit 2, `--result` unknown) or installing the handlers.
+#[test]
+fn main_with_answers_the_start_refused_verb_before_it_installs_the_signal_handlers() {
+    let installed = std::cell::Cell::new(false);
+    let install = || {
+        installed.set(true);
+        Err(std::io::Error::other("no signal handlers for the verb"))
+    };
+    let args: Vec<std::ffi::OsString> = ["js-agent", "crun-start-refused", "--result", "success"]
+        .map(Into::into)
+        .to_vec();
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let status = js_agent::main_with(&install, args, &mut stdout, &mut stderr);
+    assert!(!installed.get(), "the verb installed the signal handlers");
+    assert_eq!(
+        format!("{status:?}"),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+    assert_eq!((stdout, stderr), (Vec::new(), Vec::new()));
+}

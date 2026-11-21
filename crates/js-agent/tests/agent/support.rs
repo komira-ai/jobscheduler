@@ -870,7 +870,8 @@ fn run_exactly(
 pub type Again<'a> = &'a dyn Fn(&[std::ffi::OsString]) -> std::io::Error;
 
 /// [`run_on`] with the program that runs the command line again after a handover in place
-/// given, and the arguments exactly as given.
+/// given, and the arguments exactly as given. Linux only, as its tests are (they run jobs).
+#[cfg(target_os = "linux")]
 pub fn run_in_place(
     args: &[&str],
     host: &Host,
