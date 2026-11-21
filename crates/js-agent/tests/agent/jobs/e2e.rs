@@ -551,8 +551,10 @@ fn the_heartbeats_go_on_while_the_runtime_is_slow() {
     let rig = rig_over(server, address, "jobs_e2e_slow", &flags, move |_| {
         beats.clone()
     });
-    let run = rig.queued(2000);
+    // Held before the job exists: the dispatch poller can hand the start to the worker as soon
+    // as the job is queued, and a create that began before the hold was armed would not wait.
     rig.machine.world.hold_creates();
+    let run = rig.queued(2000);
 
     for _ in 0..2 {
         rig.agent.elapse();
