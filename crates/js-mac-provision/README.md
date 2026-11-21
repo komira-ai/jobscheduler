@@ -8,9 +8,11 @@ the policy names, to IPv4 loopback, and to nothing else.
 ```text
 js-mac-provision render  --uid-start 600 --uid-count 100 --endpoint 192.0.2.10:443 --endpoint 198.51.100.7:8443
 js-mac-provision install --uid-start 600 --uid-count 100 --endpoint ...   # root
+js-mac-provision install --flags-file /etc/js-agent/flags                 # root; the agent's own policy
 js-mac-provision check   --uid-start 600 --uid-count 100 --endpoint ...   # exits 1 on drift
 js-mac-provision remove                                                   # root
-js-mac-provision launchd-plist --program /usr/local/bin/js-mac-provision --uid-start ... > /Library/LaunchDaemons/com.komira.js.pf-pool.plist
+js-mac-provision pf-pool-plist                                            # the js-agent package's daemon
+js-mac-provision launchd-plist --program /usr/local/bin/js-mac-provision --uid-start ... > /Library/LaunchDaemons/js-agent.pf-pool.plist
 sudo -u <pool user> js-mac-provision probe 169.254.169.254:80             # "refused"
 ```
 
@@ -65,6 +67,22 @@ block return out quick proto { tcp, udp } from any to any user { 600, 601, 602 }
   `-sr`), and `check` refuses such a stored one.
   It replaces the anchor's rules whole, so it is safe to run again. A reload does not touch
   pf's state table: a connection to an endpoint the new rules refuse stays open until it ends.
+- **install --flags-file PATH** takes the policy from the macOS agent's flags file
+  (`/etc/js-agent/flags`) instead of the flags above, so that the anchor loaded is the one the
+  agent checks: its `--native-network`, `--native-pf-uid-start`, `--native-pf-uid-count`,
+  `--native-pf-endpoint`, `--native-pf-anchor`, `--native-pf-state-dir` and `--native-pfctl`
+  lines, read as the agent reads them (`src/agent_flags.rs`: a regular file of root's or of the
+  user running it, not writable by group or others, at most 64 KiB of UTF-8, one `--flag=value`
+  per line; every other line is the agent's and is skipped). It runs `check` first and loads
+  nothing when the anchor is in force already, so a run every 30 seconds does not reload the rules
+  (and delete the readback) under the agent's own checks; a changed policy fails the check and is
+  loaded. A file that is not there, or that sets a network ceiling other than `on`, loads nothing
+  and exits 0, as the daemon runs before the host's configuration package arrives. A pf flag
+  beside a ceiling other than `on`, a ceiling of `on` without the pool's uids, a value the agent
+  would refuse, a flag given twice (`--native-pf-endpoint` aside) and an untrusted file are
+  refused. The anchor, the state directory and the `pfctl` are the file's (the agent's defaults
+  when it names none), not this run's `--anchor`, `--state-dir` and `--pfctl`: they are the ones
+  the agent checks with.
 - **check** is the enforcement question (below, `enforced`) and **changes nothing**: pf is
   enabled (`pfctl -s info` says `Status: Enabled`), the main ruleset (`pfctl -sr`) evaluates
   the anchor, the rules `install` stored equal what the policy renders now (so a changed
@@ -128,12 +146,25 @@ is decided the default stays under `com.apple/`.
 The rules live in the kernel and are gone at reboot, and an OS update may reload
 `/etc/pf.conf`. Rather than a file under `/etc/pf.anchors` plus an include in the main
 ruleset (an edit of an OS file), a LaunchDaemon runs `install` at boot and every
-`interval` seconds (default 30). `launchd-plist` prints it, with the whole policy as
-arguments, so the daemon reads no file of its own. Running `install` repeatedly is the
-design: it puts the anchor back whatever removed it, and an install that ran before the
-system's own pf start-up fails (`NotReferenced`) and succeeds on the next run. The host
-step puts the plist in `/Library/LaunchDaemons` (owner root:wheel, mode 0644) and
-`launchctl bootstrap system <plist>`; to take it down, `launchctl bootout system/com.komira.js.pf-pool`, then `remove`.
+`interval` seconds (default 30), with the label `js-agent.pf-pool` (a label of the js-agent
+service, as hostkeeper requires of every label a package runs). Running `install` repeatedly is
+the design: it puts the anchor back whatever removed it, and an install that ran before the
+system's own pf start-up fails (`NotReferenced`) and succeeds on the next run.
+
+The js-agent package for macOS ships the daemon: `pf-pool-plist` prints its fixed plist,
+`/Library/LaunchDaemons/js-agent.pf-pool.plist`, which runs
+`/Library/Application Support/js-agent/bin/js-mac-provision install --flags-file
+/etc/js-agent/flags` at load and every 30 seconds as root (the golden file is
+`tests/golden/pf-pool.plist`). The policy is read from the agent's flags file at every run, so the
+configuration package that writes the flags file changes the anchor too, within 30 seconds, and
+the plist holds no policy. hostkeeper lists the label in the package's `run` labels and enables it,
+and the update hook bootstraps it at `cutover`, after it has run the same `install --flags-file`
+itself from the staged release, before the agent starts (the hook's `pf_unit` param). After a reboot launchd loads it from `/Library/LaunchDaemons`.
+
+`launchd-plist` prints the daemon for a policy given as flags, with the whole policy as
+arguments, for a host without the package; put the plist in `/Library/LaunchDaemons` (owner
+root:wheel, mode 0644) and `launchctl bootstrap system <plist>`. To take either down,
+`launchctl bootout system/js-agent.pf-pool`, then `remove`.
 
 ### The pf enable token
 
