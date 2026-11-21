@@ -91,7 +91,7 @@ as owner), any script, and another identifier or version.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
-  /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch
+  /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs
   --native-helper-socket /var/run/js-mac-session/socket`; it runs as root, with `RunAtLoad` false, `ThrottleInterval`
   30, `ExitTimeOut` 120 and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
   conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
@@ -127,7 +127,7 @@ as owner), any script, and another identifier or version.
   `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
   `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
-  `/var/db/js-agent/scratch`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
+  `/var/db/js-agent/scratch/runs`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
   `socket_group` and `scratch_root` are the helper plist's `--socket-group` and the agent plist's `--scratch-root`
   (a test of xtask holds them equal); they name the host setup the hook makes (below).
 - `helper_unit` is a launchd-only parameter of the hook (`crates/js-agent`, the update hook). When it is present the
@@ -198,29 +198,42 @@ install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs
 - the helper's socket group (`socket_group`, `_jsagent`): made with `dseditgroup -o create` when the local directory
   does not list it, under the gid macOS picks; a group with staff's gid (20, the lease users' group the helper's
   plist leaves at its default) is refused, as the helper refuses it;
-- the agent's state root (`state_root`) and scratch root (`scratch_root`), mode 0700, root's, with `/var/db/js-agent`
-  0755;
+- the agent's state root (`state_root`) and scratch root (`scratch_root`, `/var/db/js-agent/scratch/runs`), mode 0700,
+  root's, with `/var/db/js-agent` 0755;
 - a file system of its own for the scratch root (the agent refuses a state root on the scratch root's device): while
-  the two share a device, the hook gives the scratch root the APFS volume `js-agent-scratch` in the Data volume's
-  container, with a quota of nine tenths of the container so that jobs that fill it leave room for the system and
-  the state root. A volume of that name that is there already is used. The volume is made unmounted (`diskutil apfs
-  addVolume <container> APFS js-agent-scratch -quota <N>G -nomount`) and mounted on the scratch root (`diskutil mount
-  nobrowse -mountPoint /var/db/js-agent/scratch <device>`, unmounted first if it is mounted elsewhere); a volume root
-  that ignores ownership is given it (`diskutil enableOwnership`, which macOS keeps for the volume across mounts and
-  boots). A volume rather than a disk image or a second partition: it needs no space set aside and shares the
-  container's free space up to its quota.
+  the scratch root's parent, `/var/db/js-agent/scratch`, shares a device with the state root, the hook gives that
+  directory the APFS volume `js-agent-scratch` in the Data volume's container, with a quota of nine tenths of the
+  container so that jobs that fill it leave room for the system and the state root. A volume of that name that is
+  there already is used. The volume is made unmounted (`diskutil apfs addVolume <container> APFS js-agent-scratch
+  -quota <N>G -nomount`) and mounted on the scratch root's parent (`diskutil mount nobrowse -mountPoint
+  /var/db/js-agent/scratch <device>`, unmounted first if it is mounted elsewhere; a Mac whose volume is mounted there
+  already needs no mount); a volume root that ignores ownership is given it (`diskutil enableOwnership`, which macOS
+  keeps for the volume across mounts and boots). A volume rather than a disk image or a second partition: it needs
+  no space set aside and shares the container's free space up to its quota. The volume is mounted on the parent, not
+  on the scratch root, because the bundle store, `--bundle-store /var/db/js-agent/scratch/bundles`, must lie on the
+  scratch volume and cannot lie in the scratch root: the agent's start removes every entry of the scratch root that
+  is not a run's directory. The mount point is root's, mode 0711 (search only for others): a native job runs as a
+  lease user, which must walk down through it to a bundle's programs in the store, and cannot list it; the scratch
+  root on the volume is root's, 0700. The hook makes no store directory: the agent makes it at its start (below);
 - no file system table line. Since macOS 26.6 the system's sandbox lets only a process with Full Disk Access (a TCC
   grant, which root does not imply) write `/etc/fstab`, and answers any other process with `EPERM`; hostkeeper's
   daemon has no such grant and a Mac without device management has no way to give it one. So the agent mounts the
   volume itself, at each start, before it opens either root (`crates/js-agent/src/lifecycle/scratch_volume.rs`,
-  `mount_at_start`): while the scratch root is on the state root's file system (as after every boot), it finds
+  `mount_at_start`): while the scratch root's parent is on the state root's file system (as after every boot), it finds
   `js-agent-scratch` in the Data volume's container and mounts it as above, and a start that cannot ends with the
   reason and is started again by launchd. A boot thus needs nothing that macOS refuses, and `verify` sees the mount:
   an agent whose roots share a file system refuses to start, so it says no hello. An earlier release's copy of the
   table beside it (`/etc/fstab.js-agent`) is removed by the setup.
 
-Each part is looked at before it is changed and only what is not as required is made (the scratch root's owner and
-mode are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
+- the bundle store, when the host's flags give `--bundle-store`, is made by the agent at its start, after it has
+  mounted the volume: the directory, root's, 0711, when it is missing. The agent refuses to start (exit 2, naming the
+  directory) for a store inside the scratch root, and for a store with a directory above it, or itself, that a lease
+  user cannot search (not a directory, not root's, writable by group or others, or without `o+x`)
+  (`crates/js-agent/src/bundle/layout.rs`); the lab's config package may therefore keep
+  `--bundle-store=/var/db/js-agent/scratch/bundles`.
+
+Each part is looked at before it is changed and only what is not as required is made (the owner and mode of the state
+root, the mount point and the scratch root are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
 again ends as an uninterrupted one. A part that cannot be read or made defers the step
 (exit 75, `host_setup_missing`, the part and the cause in the detail) with no record written and no cordon placed;
 hostkeeper orders the host again later. A system call the system refuses (`EPERM`), which no retry changes, fails the

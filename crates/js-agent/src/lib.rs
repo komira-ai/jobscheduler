@@ -681,6 +681,8 @@ fn execute(
     // The bundle flags are checked before the host registers, so a store that cannot work
     // stops the agent now and not at the first job.
     let host = &services.bundle;
+    // A Mac's scratch volume is mounted first: the bundle store is made on it and checked there.
+    platform::mount_scratch(&cli, services)?;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
     let bundle = bundle.map(|settings| settings.with_credentials(credentials.clone()));
     // The runtime's checks that come before the host is described (a macOS build's bundle

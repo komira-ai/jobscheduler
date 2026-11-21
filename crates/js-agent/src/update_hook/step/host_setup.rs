@@ -9,24 +9,32 @@
 //!   with staff's gid ([`STAFF_GID`], the lease users' group, which the helper's plist leaves at
 //!   its default) is refused, as the helper refuses it at its start.
 //! - `scratch_root`: the agent's `--scratch-root`, which must be on another file system than its
-//!   `--state-root` (the agent refuses a shared `st_dev`). The state root and the scratch root
-//!   are made when they are not there, with each missing directory above them (mode 0755), and
-//!   on every run are made the hook's user's, mode 0700, as the agent requires of them. While the
-//!   two share a device the scratch root is given an APFS volume of its own, [`SCRATCH_VOLUME`],
-//!   in the container of the Data volume ([`DATA_VOLUME`]), with a quota of [`QUOTA_TENTHS`]
-//!   tenths of the container's free space when it is made. The quota is a ceiling, not a
-//!   reservation: jobs that fill the volume leave the rest of that free space to the system and
-//!   the state root, as long as they do not grow into it themselves. A volume that is there
-//!   already is used, not made again. The volume is made unmounted (`diskutil apfs addVolume
-//!   ... -nomount`) and then mounted on the scratch root (`diskutil mount nobrowse -mountPoint`);
-//!   one that is mounted elsewhere is unmounted first (see
-//!   [`scratch_volume`](crate::lifecycle::scratch_volume)). Nothing names it in the file system
-//!   table, which macOS does not let the hook write: the agent mounts it again at each of its
-//!   starts, which is what makes a boot find it on the scratch root. A scratch root its user
-//!   does not own (a volume that ignores ownership) is given ownership (`diskutil
-//!   enableOwnership`) before it is made the hook's user's again. Last, the
-//!   copy of the file system table that an earlier release's setup wrote beside it and could
-//!   not rename over it ([`FSTAB_LEFTOVER`]) is removed: nothing reads it.
+//!   `--state-root` (the agent refuses a shared `st_dev`). The scratch volume is not mounted on
+//!   the scratch root but on its parent, the scratch volume's mount point, so that the bundle
+//!   store can lie beside the scratch root on the same volume (the agent's start sweeps every
+//!   entry of the scratch root that is not a run's directory, and a lease user must be able to
+//!   walk down to the store, which a private mount point would not let it). The state root, the
+//!   mount point and the scratch root are made when they are not there, with each missing
+//!   directory above them (mode 0755), and on every run are made the hook's user's: the state
+//!   root and the scratch root mode 0700, as the agent requires of them, and the mount point
+//!   mode [`MOUNT_POINT_MODE`] (0711, search only for others). The hook makes no store
+//!   directory: the agent makes it at its start. While the mount point shares a device with the
+//!   state root it is given an APFS volume of its own, [`SCRATCH_VOLUME`], in the container of
+//!   the Data volume ([`DATA_VOLUME`]), with a quota of [`QUOTA_TENTHS`] tenths of the
+//!   container's free space when it is made; a Mac whose volume is mounted on the mount point
+//!   already needs no mount. The quota is a ceiling, not a reservation: jobs that fill the
+//!   volume leave the rest of that free space to the system and the state root, as long as they
+//!   do not grow into it themselves. A volume that is there already is used, not made again.
+//!   The volume is made unmounted (`diskutil apfs addVolume ... -nomount`) and then mounted on
+//!   the mount point (`diskutil mount nobrowse -mountPoint`); one that is mounted elsewhere is
+//!   unmounted first (see [`scratch_volume`](crate::lifecycle::scratch_volume)). The scratch
+//!   root is made once the volume is mounted, so that it lies on the volume. Nothing names the
+//!   volume in the file system table, which macOS does not let the hook write: the agent mounts
+//!   it again at each of its starts, which is what makes a boot find it on the mount point. A
+//!   mount point its user does not own (a volume that ignores ownership) is given ownership
+//!   (`diskutil enableOwnership`) before it is made the hook's user's again. Last, the copy of
+//!   the file system table that an earlier release's setup wrote beside it and could not rename
+//!   over it ([`FSTAB_LEFTOVER`]) is removed: nothing reads it.
 //!
 //! Each part looks before it changes anything and makes only what is not as required (the
 //! owner and mode of the two roots are set on every run), so a run killed at any point and run
@@ -60,6 +68,10 @@ pub const DSCL: &str = "/usr/bin/dscl";
 
 /// The tool that makes a group.
 pub const DSEDITGROUP: &str = "/usr/sbin/dseditgroup";
+
+/// The mode of the scratch volume's mount point: search only for others, so that a lease user
+/// can walk down through it to the bundle store beside the scratch root and cannot list it.
+pub const MOUNT_POINT_MODE: u32 = 0o711;
 
 /// The scratch volume's quota, in tenths of its container's free space when it is made: a
 /// ceiling on what jobs write there, so that the rest of that space stays for the system and the
@@ -164,39 +176,48 @@ fn gid_of(env: &Env<'_>, params: &Params, group: &str) -> Result<Option<u32>, Do
     }
 }
 
-/// The state root and the scratch root are there, on file systems of their own, and both are the
-/// hook's user's, mode 0700; the leftover copy of the file system table is gone.
+/// The state root, the scratch volume's mount point (the scratch root's parent) and the scratch
+/// root are there: the state root and the scratch root are the hook's user's, mode 0700, the
+/// mount point is the hook's user's, mode [`MOUNT_POINT_MODE`], and the scratch root is on the
+/// scratch volume, a file system of its own; the leftover copy of the file system table is gone.
+/// The scratch root is made after the mount, so that it lies on the volume and not below it.
 fn roots(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
+    // The params refuse a scratch root that is `/` (the state root is inside it), so it has a
+    // parent.
+    let mount = scratch.parent().unwrap_or(scratch);
     make_dir(env, params, &params.state_root)?;
-    own(env, params, &params.state_root)?;
-    make_dir(env, params, scratch)?;
-    if shared(env, params, scratch)? {
-        volume(env, params, scratch)?;
-        if shared(env, params, scratch)? {
+    own(env, params, &params.state_root, 0o700)?;
+    make_dir(env, params, mount)?;
+    if shared(env, params, mount)? {
+        volume(env, params, mount)?;
+        if shared(env, params, mount)? {
             return Err(missing(
                 params,
                 format!(
-                    "the scratch root {} is on the file system of the state root {} after {SCRATCH_VOLUME} was mounted on it",
+                    "the scratch root {} is on the file system of the state root {} after {SCRATCH_VOLUME} was mounted on {}",
                     scratch.display(),
-                    params.state_root.display()
+                    params.state_root.display(),
+                    mount.display()
                 ),
             ));
         }
     }
-    let scratch_arg = scratch.to_string_lossy();
-    if look(env, params, scratch)?.uid != env.euid {
+    let mount_arg = mount.to_string_lossy();
+    if look(env, params, mount)?.uid != env.euid {
         env.ports.point();
-        command(env, params, DISKUTIL, &["enableOwnership", &scratch_arg])?;
+        command(env, params, DISKUTIL, &["enableOwnership", &mount_arg])?;
     }
-    own(env, params, scratch)?;
+    own(env, params, mount, MOUNT_POINT_MODE)?;
+    make_dir(env, params, scratch)?;
+    own(env, params, scratch, 0o700)?;
     clear_leftover(env, params)
 }
 
-/// Makes `dir` the hook's user's, mode 0700 (a link followed).
-fn own(env: &Env<'_>, params: &Params, dir: &Path) -> Result<(), Done> {
+/// Makes `dir` the hook's user's, mode `mode` (a link followed).
+fn own(env: &Env<'_>, params: &Params, dir: &Path, mode: u32) -> Result<(), Done> {
     env.ports.point();
     chown(dir, Some(env.euid), None)
-        .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(0o700)))
+        .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(mode)))
         .map_err(|why| io_ending(params, dir, &why))
 }
 
@@ -220,14 +241,14 @@ fn look(env: &Env<'_>, params: &Params, path: &Path) -> Result<PathFacts, Done> 
     (env.look)(path).map_err(|why| io_ending(params, path, &why))
 }
 
-/// Whether the scratch root is on the state root's file system.
-fn shared(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<bool, Done> {
-    Ok(look(env, params, scratch)?.device == look(env, params, &params.state_root)?.device)
+/// Whether `dir` is on the state root's file system.
+fn shared(env: &Env<'_>, params: &Params, dir: &Path) -> Result<bool, Done> {
+    Ok(look(env, params, dir)?.device == look(env, params, &params.state_root)?.device)
 }
 
 /// Gives the scratch root its volume: found in the Data volume's container or made there, and
-/// mounted on the scratch root.
-fn volume(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
+/// mounted on `mount`, the scratch root's parent.
+fn volume(env: &Env<'_>, params: &Params, mount: &Path) -> Result<(), Done> {
     let found = scratch_volume::find(env.runner).map_err(volume_missing(params))?;
     let volume = match found.volume {
         Some(volume) => volume,
@@ -257,7 +278,7 @@ fn volume(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
             })?
         }
     };
-    scratch_volume::mount_on(env.runner, &|| env.ports.point(), &volume, scratch)
+    scratch_volume::mount_on(env.runner, &|| env.ports.point(), &volume, mount)
         .map_err(volume_missing(params))
 }
 

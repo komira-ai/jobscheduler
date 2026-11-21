@@ -506,6 +506,15 @@ pub(crate) fn image_allow(
     credentials.image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
 }
 
+/// Nothing to mount: a Linux build's scratch root is mounted by its unit before the agent starts.
+///
+/// # Errors
+///
+/// None; the signature is the macOS build's.
+pub(crate) fn mount_scratch(_cli: &Cli, _services: &Services<'_>) -> Result<(), Failure> {
+    Ok(())
+}
+
 /// What a Linux build checks before the host is described: nothing (its checks need the
 /// GPUs the host offers, [`check`]).
 pub(crate) struct Opened;

@@ -251,9 +251,12 @@ Known limits:
 - The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
   root, from its params (`socket_group`, `scratch_root`): the helper's socket group
   `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root
-  `/var/db/js-agent/scratch` on an APFS volume of its own (`js-agent-scratch`), as the agent
-  requires. Nothing names the volume in `/etc/fstab`, which macOS lets only a process with Full
-  Disk Access write: the agent mounts the volume on its scratch root at each start
+  `/var/db/js-agent/scratch/runs` on an APFS volume of its own (`js-agent-scratch`), as the agent
+  requires. The volume is mounted on `/var/db/js-agent/scratch` (root's, 0711), the scratch root's
+  parent, so that the bundle store `/var/db/js-agent/scratch/bundles` (made by the agent at its
+  start, root's, 0711) lies beside the scratch root on the same volume and a lease user can walk
+  down to it. Nothing names the volume in `/etc/fstab`, which macOS lets only a process with Full
+  Disk Access write: the agent mounts the volume on that directory at each start
   (`diskutil mount nobrowse -mountPoint`), so a reboot needs nothing more. `/etc/js-agent/flags`
   comes from the group's config package. The setup and the agent's mount have run against
   fakes of `dscl`, `dseditgroup` and `diskutil` only.

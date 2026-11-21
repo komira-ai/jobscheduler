@@ -626,7 +626,7 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |
 | `params.socket_group` | `_jsagent`, the helper's socket group, which the hook's `prepare` makes when the Mac has none |
-| `params.scratch_root` | `/var/db/js-agent/scratch`, which `prepare` makes and gives an APFS volume of its own |
+| `params.scratch_root` | `/var/db/js-agent/scratch/runs`, the agent's scratch root, which `prepare` makes on an APFS volume of its own mounted on its parent `/var/db/js-agent/scratch` (root's, 0711) |
 | `params.runtime` | `native` |
 
 The `release_link` (`/var/lib/hostkeeper/packages/js-agent/current`), `flags_file` and `token_file`

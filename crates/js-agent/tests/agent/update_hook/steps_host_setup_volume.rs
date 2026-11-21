@@ -1,5 +1,5 @@
 //! The scratch volume of a Mac's host setup: a volume that is there is found and not made again,
-//! one mounted elsewhere is moved onto the scratch root, and every way `diskutil` or a root can
+//! one mounted elsewhere is moved onto the scratch root's parent (its mount point), and every way `diskutil` or a root can
 //! fail defers `host_setup_missing` naming the cause.
 
 use std::fs;
@@ -10,8 +10,8 @@ use js_agent::update_hook::Outcome;
 use js_agent::update_hook::step::{DATA_VOLUME, DISKUTIL, SCRATCH_VOLUME};
 
 use super::fake_mac::{
-    CONTAINER, DEVICE, FakeMac, QUOTA, UUID, Volume, container, dictionary, mac_rig, scratch_of,
-    spy_on,
+    CONTAINER, DEVICE, FakeMac, QUOTA, UUID, Volume, container, dictionary, mac_rig, mount_of,
+    scratch_of, spy_on,
 };
 use super::steps_host_setup::assert_missing;
 
@@ -37,17 +37,17 @@ fn a_scratch_volume_that_is_there_is_mounted_and_not_made_again() {
     });
     let done = spy_on(&rig, &mac).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let scratch = scratch_of(&rig).display().to_string();
+    let mount = mount_of(&rig).display().to_string();
     assert_eq!(
         mac.changes()[1..],
         [format!(
-            "{DISKUTIL} mount nobrowse -mountPoint {scratch} {DEVICE}"
+            "{DISKUTIL} mount nobrowse -mountPoint {mount} {DEVICE}"
         )]
     );
 }
 
 /// Asserts that a scratch volume mounted somewhere else (in `/Volumes`, where macOS may mount
-/// a volume by itself) is unmounted and then mounted on the scratch root.
+/// a volume by itself) is unmounted and then mounted on the scratch root's parent.
 #[test]
 fn a_scratch_volume_mounted_elsewhere_is_moved_onto_the_scratch_root() {
     let rig = mac_rig("hook-setup-volume-elsewhere", false);
@@ -58,22 +58,22 @@ fn a_scratch_volume_mounted_elsewhere_is_moved_onto_the_scratch_root() {
     });
     let done = spy_on(&rig, &mac).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let scratch = scratch_of(&rig);
+    let mount = mount_of(&rig);
     assert_eq!(
         mac.changes()[1..],
         [
             format!("{DISKUTIL} unmount {DEVICE}"),
             format!(
                 "{DISKUTIL} mount nobrowse -mountPoint {} {DEVICE}",
-                scratch.display()
+                mount.display()
             ),
         ]
     );
-    assert_eq!(mac.volume.borrow().as_ref().unwrap().mount, Some(scratch));
+    assert_eq!(mac.volume.borrow().as_ref().unwrap().mount, Some(mount));
 }
 
-/// Asserts that a mount that leaves the scratch root on the state root's file system defers
-/// naming both roots.
+/// Asserts that a mount that leaves the scratch volume's mount point on the state root's file
+/// system defers naming both roots and the mount point.
 #[test]
 fn a_mount_that_does_not_move_the_scratch_root_off_the_state_root_defers() {
     let rig = mac_rig("hook-setup-mount-no-effect", false);
@@ -83,9 +83,10 @@ fn a_mount_that_does_not_move_the_scratch_root_off_the_state_root_defers() {
     assert_missing(
         &done,
         &format!(
-            "the scratch root {} is on the file system of the state root {} after {SCRATCH_VOLUME} was mounted on it",
+            "the scratch root {} is on the file system of the state root {} after {SCRATCH_VOLUME} was mounted on {}",
             scratch_of(&rig).display(),
-            rig.params.state_root.display()
+            rig.params.state_root.display(),
+            mount_of(&rig).display()
         ),
     );
     assert!(rig.record().is_none());
@@ -168,12 +169,12 @@ fn every_diskutil_answer_the_setup_cannot_use_defers_naming_it() {
 fn a_root_that_cannot_be_looked_at_defers() {
     let rig = mac_rig("hook-setup-look-fails", false);
     let mac = FakeMac::new();
-    let scratch = scratch_of(&rig);
-    mac.look_fails.borrow_mut().insert(scratch.clone());
+    let mount = mount_of(&rig);
+    mac.look_fails.borrow_mut().insert(mount.clone());
     let done = spy_on(&rig, &mac).prepare(&rig);
     assert_missing(
         &done,
-        &format!("{}: the disk does not answer", scratch.display()),
+        &format!("{}: the disk does not answer", mount.display()),
     );
 }
 
@@ -184,15 +185,15 @@ fn a_root_that_cannot_be_made_defers() {
     let mut rig = mac_rig("hook-setup-root-unmade", false);
     let file = rig.tmp.path().join("db-file");
     fs::write(&file, "not a directory").unwrap();
-    let scratch = file.join("scratch");
-    rig.params.scratch_root = Some(scratch.clone());
+    let mount = file.join("scratch");
+    rig.params.scratch_root = Some(mount.join("runs"));
     let why = fs::DirBuilder::new()
         .recursive(true)
         .create(&file)
         .unwrap_err();
     let mac = FakeMac::new();
     let done = spy_on(&rig, &mac).prepare(&rig);
-    assert_missing(&done, &format!("{}: {why}", scratch.display()));
+    assert_missing(&done, &format!("{}: {why}", mount.display()));
     assert!(mac.volume.borrow().is_none());
 }
 
@@ -215,15 +216,15 @@ fn every_diskutil_change_that_fails_defers_naming_it() {
         ("unmount", format!("unmount {DEVICE}"), Some(elsewhere())),
         (
             "mount",
-            "mount nobrowse -mountPoint <scratch> disk3s7".to_owned(),
+            "mount nobrowse -mountPoint <mount> disk3s7".to_owned(),
             None,
         ),
-        ("owners", "enableOwnership <scratch>".to_owned(), None),
+        ("owners", "enableOwnership <mount>".to_owned(), None),
     ];
     for (name, args, volume) in cases {
         let rig = mac_rig(&format!("hook-setup-diskutil-refuses-{name}"), false);
-        let scratch = scratch_of(&rig).display().to_string();
-        let line = format!("{DISKUTIL} {}", args.replace("<scratch>", &scratch));
+        let mount = mount_of(&rig).display().to_string();
+        let line = format!("{DISKUTIL} {}", args.replace("<mount>", &mount));
         let mac = FakeMac::new();
         if let Some(volume) = volume {
             mac.with_volume(volume);
@@ -235,8 +236,8 @@ fn every_diskutil_change_that_fails_defers_naming_it() {
     }
 }
 
-/// Asserts that a state root that cannot be looked at, and a scratch root that can no longer be
-/// looked at once its volume is mounted, defer naming the root.
+/// Asserts that a state root that cannot be looked at, and a mount point that can no longer be
+/// looked at once its volume is mounted, defer naming the path.
 #[test]
 fn a_root_that_cannot_be_looked_at_before_or_after_the_mount_defers() {
     let rig = mac_rig("hook-setup-look-state", false);
@@ -255,14 +256,14 @@ fn a_root_that_cannot_be_looked_at_before_or_after_the_mount_defers() {
 
     let rig = mac_rig("hook-setup-look-after-mount", false);
     let mac = FakeMac::new();
-    let scratch = scratch_of(&rig);
+    let mount = mount_of(&rig);
     mac.look_fails_after_mount
         .borrow_mut()
-        .insert(scratch.clone());
+        .insert(mount.clone());
     let done = spy_on(&rig, &mac).prepare(&rig);
     assert_missing(
         &done,
-        &format!("{}: the disk does not answer", scratch.display()),
+        &format!("{}: the disk does not answer", mount.display()),
     );
 }
 
@@ -318,13 +319,37 @@ fn a_state_root_that_cannot_be_made_defers() {
 fn a_root_whose_directory_cannot_be_made_under_its_parent_defers() {
     let mut rig = mac_rig("hook-setup-root-too-long", false);
     let parent = rig.tmp.path().join("db/js-agent");
-    let scratch = parent.join("s".repeat(300));
-    rig.params.scratch_root = Some(scratch.clone());
+    let mount = parent.join("s".repeat(300));
+    rig.params.scratch_root = Some(mount.join("runs"));
     fs::create_dir_all(&parent).unwrap();
-    let why = fs::create_dir(&scratch).unwrap_err();
+    let why = fs::create_dir(&mount).unwrap_err();
     assert_ne!(why.kind(), std::io::ErrorKind::AlreadyExists);
     let mac = FakeMac::new();
     let done = spy_on(&rig, &mac).prepare(&rig);
-    assert_missing(&done, &format!("{}: {why}", scratch.display()));
+    assert_missing(&done, &format!("{}: {why}", mount.display()));
     assert!(mac.volume.borrow().is_none());
+}
+
+/// Asserts that a scratch root that cannot be made on the mounted volume (a name longer than a
+/// file system allows) defers naming it and the cause, with the volume mounted and the mount
+/// point already given its mode, and no record written.
+#[test]
+fn a_scratch_root_that_cannot_be_made_on_the_volume_defers() {
+    let mut rig = mac_rig("hook-setup-runs-too-long", false);
+    let mount = mount_of(&rig);
+    let scratch = mount.join("r".repeat(300));
+    rig.params.scratch_root = Some(scratch.clone());
+    let mac = FakeMac::new();
+    let done = spy_on(&rig, &mac).prepare(&rig);
+    let why = fs::create_dir(&scratch).unwrap_err();
+    assert_missing(&done, &format!("{}: {why}", scratch.display()));
+    assert_eq!(
+        mac.volume.borrow().as_ref().unwrap().mount,
+        Some(mount.clone())
+    );
+    assert_eq!(
+        fs::metadata(&mount).unwrap().permissions().mode() & 0o7777,
+        0o711
+    );
+    assert!(rig.record().is_none());
 }
