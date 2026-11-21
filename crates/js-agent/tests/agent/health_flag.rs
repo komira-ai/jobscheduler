@@ -153,6 +153,7 @@ fn the_agent_serves_its_verdict_on_the_loopback_address_it_was_given() {
         euid: host.euid,
         ancestors_floor: &host.ancestors_floor,
         secret_owner: host.secret_owner,
+        xcode_site: host.site(),
     };
     let args = flags(&["--health-listen", "127.0.0.1:0"]);
     let named = no_job_runtime(&args).iter().chain(&args).copied();

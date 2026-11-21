@@ -94,7 +94,7 @@ fn a_job_cannot_send_from_an_address_that_is_not_its_own() {
         ),
     ] {
         let seen = allowed.accepted();
-        let egress = Egress::start(config).expect("start");
+        let egress = Egress::start(config, None).expect("start");
         let (a, b) = (Holder::new(), Holder::new());
         let _first = egress.attach("a", a.pid(), level, &[]).expect("attach a");
         let _second = egress.attach("b", b.pid(), level, &[]).expect("attach b");

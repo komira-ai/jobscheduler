@@ -256,7 +256,10 @@ fn usage_errors_and_help() {
     // The line the node-setup script reads to know the crun runtime is wired, and on Linux the
     // line the update hook reads to know the agent it stops can hand its runs over.
     let after: &[&str] = match cfg!(target_os = "linux") {
-        true => &["runtimes: docker crun", "stops: drain handover"],
+        true => &[
+            "runtimes: docker crun",
+            "stops: drain handover egress-handover",
+        ],
         false => &["runtimes: native"],
     };
     let lines: Vec<&str> = version.out.lines().collect();

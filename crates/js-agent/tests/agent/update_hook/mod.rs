@@ -43,6 +43,7 @@ mod rollback_entries;
 mod scratch_volume_start;
 #[allow(dead_code)]
 mod step_rig;
+mod step_rig_state;
 mod steps_cleanup;
 mod steps_cutover;
 mod steps_cutover_cordon;

@@ -225,19 +225,278 @@ fn an_install_replaces_an_old_tool_and_a_stale_part_file() {
     assert!(!part_path(&out).exists());
 }
 
-/// Asserts that `--extract` and `--member` must agree: a tar format needs its member
-/// and a member needs a tar format.
+/// Asserts that `--extract`, `--member` and `--tree` must agree: a tar format needs its
+/// member (a file, or with `--tree` a directory), and a member or `--tree` needs a tar
+/// format; each refusal is the whole message.
 #[test]
-fn extract_and_member_must_agree() {
-    assert_eq!(Unpack::new(None, None), Ok(Unpack::Raw));
+fn extract_member_and_tree_must_agree() {
+    assert_eq!(Unpack::new(None, None, false), Ok(Unpack::Raw));
     assert_eq!(
-        Unpack::new(Some(Format::TarGz), Some(member("d/tool"))),
+        Unpack::new(Some(Format::TarGz), Some(member("d/tool")), false),
         Ok(tar_gz("d/tool"))
     );
-    let e = Unpack::new(Some(Format::TarGz), None).expect_err("no member");
-    assert!(e.contains("needs --member"), "{e}");
-    let e = Unpack::new(None, Some(member("d/tool"))).expect_err("member out of place");
-    assert!(e.contains("needs --extract tar.gz"), "{e}");
+    assert_eq!(
+        Unpack::new(Some(Format::TarXz), Some(member("d/tool")), false),
+        Ok(tar_xz("d/tool"))
+    );
+    for format in [Format::TarGz, Format::TarXz] {
+        assert_eq!(
+            Unpack::new(Some(format), Some(member("d")), true),
+            Ok(Unpack::Tree {
+                format,
+                top: member("d")
+            })
+        );
+    }
+    let no_member = "--extract needs --member, the file to take (with --tree, the directory)";
+    let no_extract = "--member and --tree name what to take out of a tar: they need --extract";
+    let refused = [
+        (Some(Format::TarGz), None, false, no_member),
+        (Some(Format::TarXz), None, true, no_member),
+        (None, Some(member("d/tool")), false, no_extract),
+        (None, Some(member("d")), true, no_extract),
+        (None, None, true, no_extract),
+    ];
+    for (extract, path, tree, expected) in refused {
+        assert_eq!(
+            Unpack::new(extract, path.clone(), tree),
+            Err(expected.to_owned()),
+            "{extract:?} {path:?} {tree}"
+        );
+    }
+}
+
+fn xz(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    lzma_rs::xz_compress(&mut &bytes[..], &mut out).expect("xz");
+    out
+}
+
+fn tar_xz(path: &str) -> Unpack {
+    Unpack::TarXz {
+        member: member(path),
+    }
+}
+
+fn tree(format: Format, top: &str) -> Unpack {
+    Unpack::Tree {
+        format,
+        top: member(top),
+    }
+}
+
+/// Appends a regular file of mode `mode` at `path`.
+fn file(b: &mut tar::Builder<Vec<u8>>, path: &str, mode: u32, data: &[u8]) {
+    let mut h = tar::Header::new_gnu();
+    h.set_mode(mode);
+    h.set_size(data.len() as u64);
+    b.append_data(&mut h, path, data).expect("file");
+}
+
+/// Appends a directory at `path`.
+fn dir(b: &mut tar::Builder<Vec<u8>>, path: &str) {
+    let mut h = tar::Header::new_gnu();
+    h.set_entry_type(tar::EntryType::Directory);
+    h.set_mode(0o755);
+    h.set_size(0);
+    b.append_data(&mut h, path, &[][..]).expect("dir");
+}
+
+/// A tar of a toolchain directory `cc-1/`: the executable `cc-1/cc`, the header
+/// `cc-1/lib/std.h` (mode 0644) in a listed directory, `cc-1/lib/sub/deep.h` whose
+/// directory is not listed, and an empty listed directory `cc-1/empty/`; around them the
+/// decoys `cc-1.txt`, `other/cc` and `cc-1-extra/cc` (the last shares `cc-1` as a text
+/// prefix, not as a directory).
+fn toolchain() -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    file(&mut b, "cc-1.txt", 0o644, b"decoy");
+    dir(&mut b, "cc-1/");
+    file(&mut b, "cc-1/cc", 0o755, b"compiler");
+    dir(&mut b, "cc-1/lib/");
+    file(&mut b, "cc-1/lib/std.h", 0o644, b"header");
+    file(&mut b, "cc-1/lib/sub/deep.h", 0o640, b"deep");
+    dir(&mut b, "cc-1/empty/");
+    file(&mut b, "other/cc", 0o755, b"decoy");
+    file(&mut b, "cc-1-extra/cc", 0o755, b"decoy");
+    b.into_inner().expect("tar")
+}
+
+/// Every path under `root`, sorted, with `/` after a directory, and each file's mode and
+/// contents.
+fn listing(root: &Path) -> Vec<(String, u32, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut todo = vec![root.to_owned()];
+    while let Some(at) = todo.pop() {
+        for entry in std::fs::read_dir(&at).expect("ls") {
+            let path = entry.expect("entry").path();
+            let name = path
+                .strip_prefix(root)
+                .expect("under")
+                .display()
+                .to_string();
+            let meta = std::fs::metadata(&path).expect("stat");
+            if meta.is_dir() {
+                found.push((format!("{name}/"), 0, Vec::new()));
+                todo.push(path);
+            } else {
+                let mode = meta.permissions().mode() & 0o777;
+                found.push((name, mode, std::fs::read(&path).expect("read")));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Asserts that an xz tar yields its named member, as a gzip tar does.
+#[test]
+fn a_tar_xz_yields_the_tool() {
+    let (result, out) = install_own("tar-xz", &xz(&tar()), &tar_xz("tool-1.0/tool"));
+    result.expect("install");
+    assert_eq!(std::fs::read(&out).expect("read"), TOOL);
+}
+
+/// Asserts that an xz stream that does not decode is an unpack error, for a file and for a
+/// tree, with nothing written.
+#[test]
+fn an_xz_stream_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
+    for (name, unpack) in [("file", tar_xz("x")), ("tree", tree(Format::TarXz, "x"))] {
+        let (result, out) = install_own(&format!("undecodable-xz-{name}"), b"not xz", &unpack);
+        assert!(
+            matches!(result, Err(Error::Unpack(_))),
+            "{name}: {result:?}"
+        );
+        assert!(!out.exists(), "{name}");
+        assert!(!part_path(&out).exists(), "{name}");
+    }
+}
+
+/// Asserts that a tree install, from an xz and from a gzip tar, writes exactly the
+/// directory taken: every directory (an empty one and one the archive does not list) and
+/// every file under it, an executable file 0755 and any other 0644, and none of the
+/// decoys beside it; and that no part directory is left.
+#[test]
+fn a_tree_is_installed_whole_with_its_modes_and_nothing_beside_it() {
+    let expected = vec![
+        ("cc".to_owned(), 0o755, b"compiler".to_vec()),
+        ("empty/".to_owned(), 0, Vec::new()),
+        ("lib/".to_owned(), 0, Vec::new()),
+        ("lib/std.h".to_owned(), 0o644, b"header".to_vec()),
+        ("lib/sub/".to_owned(), 0, Vec::new()),
+        ("lib/sub/deep.h".to_owned(), 0o644, b"deep".to_vec()),
+    ];
+    for (name, bytes, format) in [
+        ("tree-xz", xz(&toolchain()), Format::TarXz),
+        ("tree-gz", gzip(&toolchain()), Format::TarGz),
+    ] {
+        let (result, out) = install_own(name, &bytes, &tree(format, "cc-1"));
+        result.expect("install");
+        assert_eq!(listing(&out), expected, "{name}");
+        assert!(!part_path(&out).exists(), "{name}");
+    }
+}
+
+/// Asserts that a tree install replaces the part directory a killed run left.
+#[test]
+fn a_tree_install_replaces_a_stale_part_directory() {
+    let out = scratch("tree-stale-part").join("cc");
+    std::fs::create_dir_all(part_path(&out).join("half")).expect("stale part");
+    let bytes = gzip(&toolchain());
+    install(
+        &bytes,
+        &Sha256::of(&bytes),
+        &tree(Format::TarGz, "cc-1"),
+        &out,
+    )
+    .expect("install");
+    assert!(out.join("cc").is_file());
+    assert!(!out.join("half").exists(), "nothing of the stale part");
+    assert!(!part_path(&out).exists());
+}
+
+/// Asserts that a tree is refused, with nothing written, when the directory is not in the
+/// archive, when an entry under it is a link, and when an entry's path climbs out of it.
+#[test]
+fn a_tree_with_no_top_a_link_or_a_climbing_path_is_refused() {
+    let mut climbing = tar::Builder::new(Vec::new());
+    dir(&mut climbing, "cc-1/");
+    // The builder refuses `..` in a path it is given, so the name is set in the header.
+    let mut h = tar::Header::new_gnu();
+    let name = b"cc-1/../evil";
+    h.as_old_mut().name[..name.len()].copy_from_slice(name);
+    h.set_mode(0o644);
+    h.set_size(1);
+    h.set_cksum();
+    climbing.append(&h, &b"x"[..]).expect("climbing entry");
+    let climbing = climbing.into_inner().expect("tar");
+    let cases = [
+        (
+            "no-top",
+            gzip(&toolchain()),
+            "cc-2",
+            Error::NoMember(member("cc-2")),
+        ),
+        (
+            "link",
+            gzip(&tar()),
+            "tool-1.0",
+            Error::NotAFile(member("tool-1.0/link")),
+        ),
+        (
+            "climbs",
+            gzip(&climbing),
+            "cc-1",
+            Error::Climbs(member("cc-1/../evil")),
+        ),
+    ];
+    for (name, bytes, top, expected) in cases {
+        let (result, out) = install_own(&format!("tree-{name}"), &bytes, &tree(Format::TarGz, top));
+        assert_eq!(result, Err(expected), "{name}");
+        assert!(!out.exists(), "{name}");
+        assert!(!part_path(&out).exists(), "{name}");
+    }
+    assert_eq!(
+        Error::Climbs(member("a/../b")).to_string(),
+        "\"a/../b\" in the archive climbs out of the directory taken"
+    );
+}
+
+/// Asserts that a tree install whose writing or renaming fails leaves no part directory
+/// and keeps the old `--out`: once because `--out` is a directory that holds a file (the
+/// rename fails after the tree was written), once because the "directory" taken is a
+/// regular file (writing it where the part directory is fails).
+#[test]
+fn a_tree_install_that_fails_leaves_no_part_directory() {
+    let out = scratch("tree-rename-fails").join("cc");
+    std::fs::create_dir_all(&out).expect("dir");
+    std::fs::write(out.join("old"), b"old").expect("old");
+    let bytes = gzip(&toolchain());
+    let result = install(
+        &bytes,
+        &Sha256::of(&bytes),
+        &tree(Format::TarGz, "cc-1"),
+        &out,
+    );
+    let Err(Error::Install { path, why }) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(path, out);
+    assert!(!why.is_empty());
+    assert!(!part_path(&out).exists(), "part directory removed");
+    assert_eq!(
+        std::fs::read(out.join("old")).expect("read"),
+        b"old",
+        "old --out kept"
+    );
+
+    let (result, out) = install_own(
+        "tree-top-is-a-file",
+        &bytes,
+        &tree(Format::TarGz, "cc-1/cc"),
+    );
+    assert!(matches!(result, Err(Error::Install { .. })), "{result:?}");
+    assert!(!out.exists());
+    assert!(!part_path(&out).exists(), "part directory removed");
 }
 
 /// Asserts that the part file sits in the same directory as `--out`, so the rename

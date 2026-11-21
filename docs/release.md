@@ -12,7 +12,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. Nothing in the release waits for `ci` or reports its result: a failing job of `ci` is that run's own
-   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
+   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a). What macOS compiles is checked on the pull request all the same, from Linux: `ci`'s `lint` job runs clippy over the workspace's code and tests for `aarch64-apple-darwin`, the crates and features the beta stage tests (`cargo test -p xtask --test macos_clippy` holds the two lists together), so a change that breaks code under `cfg(target_os = "macos")` fails its pull request; nothing is linked and no macOS test runs there.
 3. `plan` (`cargo xtask release plan`) decides at once whether to release and as which version
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests`, which starts beside `plan`, still runs).
@@ -481,9 +481,12 @@ SHA-256 as the pin, and the manifest:
 
 The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
 running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
-and no `--egress` in its flags file): `prepare` neither cordons nor waits, and `cutover` and
+and, where the flags file sets an `--egress` ceiling, `egress-handover` on the `stops:` line of
+both the running and the staged agent): `prepare` neither cordons nor waits, and `cutover` and
 `rollback` write the handover file in the agent's state root before they stop the unit, so the
 stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
+(under an egress ceiling each job's wiring stays in the kernel and its record in the state root's
+`egress` directory, from which the new agent takes the wiring over)
 (docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
 drain of any other host.
 

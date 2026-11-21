@@ -78,6 +78,8 @@ tonic = { workspace = true, features = ["channel"] }
 # The protobuf codec of a provider call (src/provider).
 tonic-prost.workspace = true
 tracing.workspace = true
+# The subscriber that writes the agent's warnings to its journal (src/warnings.rs).
+tracing-subscriber.workspace = true
 # The metadata service of `--identity-source` (src/identity), over plain HTTP.
 ureq.workspace = true
 
@@ -122,7 +124,6 @@ clap.workspace = true
 rustix = { workspace = true, features = ["event", "net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
-tracing-subscriber.workspace = true
 # hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
 hostkeeper-hook = { workspace = true, features = ["conformance"] }
 # hostkeeper's daemon's step runner: a first install of the package as a native entry, run as the

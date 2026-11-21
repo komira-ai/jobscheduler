@@ -542,6 +542,28 @@ fn exited_from(status: Option<u32>, error: Option<&io::Error>) -> bool {
     }
 }
 
+/// Sends `signal` to the process group `pgid`; a group with no process left is what the
+/// caller wants. A group of 1 or less (every process, the caller's group, init's) is refused
+/// before any signal.
+fn signal_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
+    if pgid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("process group {pgid} is not one the helper signals"),
+        ));
+    }
+    // SAFETY: killpg(2) takes plain integers, and the group is above 1 (checked above).
+    if unsafe { libc::killpg(pgid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,27 +639,5 @@ mod tests {
             .map(|&b| libc::c_char::from_ne_bytes([b]))
             .collect();
         assert_eq!(c_name(&full), "abcd");
-    }
-}
-
-/// Sends `signal` to the process group `pgid`; a group with no process left is what the
-/// caller wants. A group of 1 or less (every process, the caller's group, init's) is refused
-/// before any signal.
-fn signal_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
-    if pgid <= 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("process group {pgid} is not one the helper signals"),
-        ));
-    }
-    // SAFETY: killpg(2) takes plain integers, and the group is above 1 (checked above).
-    if unsafe { libc::killpg(pgid, signal) } == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
     }
 }

@@ -46,6 +46,11 @@
 # A pull request runs Linux x86_64 on GitHub's hosted ubuntu runners and nothing else: macOS and
 # arm64 are the beta stage of the release (beta.yml, called by release.yml on a push to main;
 # crates/xtask/tests/pr_linux_only holds every workflow that a pull request starts to that).
+# What macOS compiles is still checked on the pull request, from Linux: the `lint` job runs
+# clippy over the workspace's code and tests for aarch64-apple-darwin, the crates beta.yml tests
+# on Apple silicon, so code under `cfg(target_os = "macos")` (which no Linux build compiles)
+# fails the pull request that breaks it instead of the release after the merge. Nothing is
+# linked and no test runs there; the macOS tests still run in the beta stage only.
 name: ci
 
 on:
@@ -85,9 +90,16 @@ jobs:
   # hold back fmt and clippy.
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The macOS clippy below is a second clippy of the workspace; a cold one takes about as long
+    # as the first.
+    timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      ZIG_VERSION: 0.15.2
+      ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+      ZIGBUILD_VERSION: 0.24.0
+      ZIGBUILD_SHA256: 52be2cb85ad3875682564a29bac1832b2ab3db68b1c504765c92d5249cc9b96f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,6 +128,41 @@ jobs:
       - run: cargo check --locked --manifest-path crates/js-agent-wire/fuzz/Cargo.toml --target-dir target/fuzz-check
       - run: cargo check --locked --manifest-path crates/js-api-gateway/fuzz/Cargo.toml --target-dir target/fuzz-check
       - run: cargo check --locked --manifest-path crates/js-jobs/fuzz/Cargo.toml --target-dir target/fuzz-check
+      # The workspace's code and tests as macOS compiles them: clippy for aarch64-apple-darwin
+      # over the crates and features beta.yml's `macos` job tests (crates/xtask/tests/
+      # macos_clippy holds the two to the same list). Code under `cfg(target_os = "macos")` is
+      # compiled by no Linux build, so without this a change that breaks it (a struct literal
+      # in a macOS-only test, a call a dependency lacks on Apple targets) fails only the
+      # release's beta stage, after the merge. ring's and libsqlite3-sys's build scripts compile
+      # C for the target; zig is that C compiler (it carries macOS's libc headers), and
+      # cargo-zigbuild runs cargo with it. Nothing is linked and no test runs.
+      - run: rustup target add aarch64-apple-darwin
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zig-cache
+        with:
+          path: ${{ runner.temp }}/pinned/zig.tar.xz
+          key: pinned-zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256 }}
+      - name: Install zig (pinned version and checksum)
+        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256" --cache "$RUNNER_TEMP/pinned/zig.tar.xz" --out "$RUNNER_TEMP/zig" --extract tar.xz --member "zig-x86_64-linux-$ZIG_VERSION" --tree
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/zig.tar.xz
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zigbuild-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-zigbuild.tar.xz
+          key: pinned-cargo-zigbuild-${{ env.ZIGBUILD_VERSION }}-${{ env.ZIGBUILD_SHA256 }}
+      - name: Install cargo-zigbuild (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz" --sha256 "$ZIGBUILD_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-zigbuild.tar.xz" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member cargo-zigbuild-x86_64-unknown-linux-musl/cargo-zigbuild
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.zigbuild-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-zigbuild.tar.xz
+          key: ${{ steps.zigbuild-cache.outputs.cache-primary-key }}
+      - run: echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mdm -- -D warnings
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

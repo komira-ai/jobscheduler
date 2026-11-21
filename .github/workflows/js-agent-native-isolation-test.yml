@@ -3,7 +3,7 @@
 # (crates/js-agent/tests/native_isolation/, the Mac part `#[ignore]`) serves the real
 # `js-mac-session` helper from the test process with a range of one uid, has run A leave
 # things behind as that user (files, a process, a keychain item, a defaults key, a launchd
-# agent, System V and POSIX shared memory, semaphores, a message queue), ends the run as the
+# agent, System V and POSIX shared memory (which the profile refuses), semaphores, a message queue), ends the run as the
 # agent does, and has run B on the same uid look for them. It needs root, makes a user and
 # changes the machine: an operator runs it once on a provisioned Mac that has no other use.
 # Download the artifact, check SHA256SUMS, copy the binary over, chmod +x it (the artifact zip

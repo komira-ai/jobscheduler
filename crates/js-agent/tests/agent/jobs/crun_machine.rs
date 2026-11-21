@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use js_agent::crun::EgressPort;
 use js_agent::crun_host::CrunHost;
 use js_agent::integrity::HostView;
 use js_agent::lifecycle::{
@@ -13,7 +14,7 @@ use js_agent::lifecycle::{
 };
 use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock, System};
-use js_agent_wire::{LogTail, PortRange};
+use js_agent_wire::{LogTail, NetworkCeiling, PortRange};
 
 use super::crun_e2e::seams;
 use super::fake::FakeMachine;
@@ -125,6 +126,14 @@ impl Runtime for Noting {
         self.inner.host_ports()
     }
 
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.inner.check_egress()
+    }
+
+    fn network_ceiling(&self) -> NetworkCeiling {
+        self.inner.network_ceiling()
+    }
+
     fn host_port_lost(&self, id: &RunHandle) -> Option<String> {
         self.inner.host_port_lost(id)
     }
@@ -169,4 +178,13 @@ impl Machine for CrunMachine {
     fn crun_host(&self) -> CrunHost {
         self.system.crun_host()
     }
+
+    fn egress_port(&self) -> Option<Arc<dyn EgressPort>> {
+        self.system.egress_port()
+    }
+}
+
+/// The effective user id of the test, as the agent reads its own.
+pub(super) fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
 }

@@ -98,6 +98,19 @@ impl EgressPort for Gate {
         }
         Ok(Box::new(Wire))
     }
+
+    fn adopt(
+        &self,
+        _run: &str,
+        _level: JobNetwork,
+        _ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        Ok(Box::new(Wire))
+    }
+
+    fn settle(&self) -> Result<(), EgressError> {
+        Ok(())
+    }
 }
 
 /// A wiring that is taken down at once.
@@ -107,6 +120,8 @@ impl Wired for Wire {
     fn release(self: Box<Self>) -> Result<(), EgressError> {
         Ok(())
     }
+
+    fn leave(self: Box<Self>) {}
 }
 
 /// A runtime on `node` behind `gate`, whose waits after a kill are spent at once, and what
