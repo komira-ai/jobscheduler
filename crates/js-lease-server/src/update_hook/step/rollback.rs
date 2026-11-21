@@ -34,7 +34,7 @@
 
 use std::path::Path;
 
-use js_update_hook::{ROLLBACK_MARGIN_SECS, START_WAIT_SECS};
+use js_update_hook::{PortError, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, resolved, same_dir};
 
 use crate::update_hook::ports::Writer;
 use crate::update_hook::{Done, LOCK_WAIT_SECS, Params, Reason, Record, SERVE_WAIT_SECS};
@@ -99,18 +99,24 @@ fn restore(
 ) -> Result<(), Done> {
     let unit = record.unit.clone();
     let state = life(env, &unit, Reason::StopFailed)?;
-    let target = env.ports.link.target(link).map_err(|why| {
+    let unreadable = |why: PortError| {
         failure(
             Reason::LinkFailed,
             format!("cannot read {}: {why}", link.display()),
         )
-    })?;
-    let at_previous = target.as_deref() == Some(previous);
+    };
+    let target = env.ports.link.target(link).map_err(unreadable)?;
+    // Where the link leads, by real path, against one release.
+    let leads_to = |release: &Path| match &target {
+        Some(target) => same_dir(env.ports.link, &resolved(link, target), release),
+        None => Ok(false),
+    };
+    let at_previous = leads_to(previous).map_err(unreadable)?;
     if state == Life::Up && at_previous {
         return Ok(());
     }
     if state != Life::Down {
-        if !at_previous && target.as_deref() != Some(record.staged.as_path()) {
+        if !at_previous && !leads_to(&record.staged).map_err(unreadable)? {
             return Err(halt(
                 Reason::StateInvalid,
                 format!(

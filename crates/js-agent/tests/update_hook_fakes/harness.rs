@@ -655,6 +655,10 @@ impl Link for Faulted<'_> {
             target.display()
         );
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.world.real(path)
+    }
 }
 
 impl Lease for Faulted<'_> {

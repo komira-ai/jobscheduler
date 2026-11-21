@@ -11,7 +11,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::runner::CommandRunner;
@@ -174,6 +174,73 @@ pub trait Link {
     /// # Errors
     /// The link could not be made.
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError>;
+
+    /// The real path of `path`: absolute, with every symbolic link on the way resolved (on
+    /// macOS `/var/lib/x` is `/private/var/lib/x`); `None` when nothing is there.
+    ///
+    /// # Errors
+    /// The path cannot be resolved for another reason (a component that is not a directory, a
+    /// directory that cannot be searched).
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError>;
+}
+
+/// Where a link at `link` that holds `target` points, by name: an absolute target as it is, a
+/// relative one from the link's directory, with `.` and `..` taken away (nothing is looked up).
+#[must_use]
+pub fn resolved(link: &Path, target: &Path) -> PathBuf {
+    let mut path = link.parent().unwrap_or(link).to_path_buf();
+    for part in target.components() {
+        match part {
+            Component::RootDir => path = PathBuf::from("/"),
+            Component::ParentDir => {
+                path.pop();
+            }
+            Component::CurDir | Component::Prefix(_) => {}
+            Component::Normal(name) => path.push(name),
+        }
+    }
+    path
+}
+
+/// Whether the link at `link` points at the directory `dir`: the place its target names (a
+/// relative target read from the link's directory, see [`resolved`]) and `dir` have the same
+/// real path ([`Link::real`]). Two names of one directory are the same directory: on macOS
+/// `/var` is a link to `/private/var`, and hostkeeper names a staged release by its real path
+/// while the link sits under `/var`. A missing link, or a link or `dir` that leads to nothing,
+/// points nowhere.
+///
+/// # Errors
+/// The link cannot be read, or one of the two paths cannot be resolved.
+pub fn points_at(port: &dyn Link, link: &Path, dir: &Path) -> Result<bool, PortError> {
+    match port.target(link)? {
+        Some(target) => same_dir(port, &resolved(link, &target), dir),
+        None => Ok(false),
+    }
+}
+
+/// Whether `a` and `b` are one directory: both lead somewhere, and to the same real path
+/// ([`Link::real`]).
+///
+/// # Errors
+/// One of the two paths cannot be resolved.
+pub fn same_dir(port: &dyn Link, a: &Path, b: &Path) -> Result<bool, PortError> {
+    let Some(a) = port.real(a)? else {
+        return Ok(false);
+    };
+    Ok(port.real(b)?.is_some_and(|b| b == a))
+}
+
+/// The real path of `path` ([`fs::canonicalize`]); `None` when nothing is there, or a link on
+/// the way leads to nothing.
+///
+/// # Errors
+/// The path cannot be resolved for another reason.
+pub fn real_path(path: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::canonicalize(path) {
+        Ok(real) => Ok(Some(real)),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(why),
+    }
 }
 
 /// The name of the new link before it is renamed over the old: `<link>.relink`.
@@ -230,6 +297,10 @@ impl Link for SystemLink {
 
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
         Ok(swap_link(link, target)?)
+    }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        Ok(real_path(path)?)
     }
 }
 

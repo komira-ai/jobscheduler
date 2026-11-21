@@ -11,7 +11,7 @@ use std::time::Duration;
 use js_testkit::dir::TestDir;
 use js_update_hook::{
     Clock, CommandRunner, Gate, Link, NoGate, PortError, SYSTEMCTL, SystemClock, SystemLink,
-    SystemUnits, UnitState, Units, read_link, swap_link,
+    SystemUnits, UnitState, Units, points_at, read_link, real_path, resolved, same_dir, swap_link,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -264,6 +264,218 @@ fn the_link_port_reads_the_target_and_calls_a_regular_file_an_io_error() {
     let file = tmp.path().join("plain");
     fs::write(&file, "x").unwrap();
     assert!(matches!(SystemLink.target(&file), Err(PortError::Io(_))));
+}
+
+/// The shape of a Mac: `<tmp>/private/var/lib/pk/svc/{1.4.0,1.3.0}` are real directories,
+/// `<tmp>/var` is a link to `private/var`, and `<tmp>/var/lib/pk/svc/current` holds the
+/// relative target `1.4.0`. Returns the scratch directory.
+fn mac_tree(name: &str) -> TestDir {
+    let tmp = dir(name);
+    let svc = tmp.path().join("private/var/lib/pk/svc");
+    fs::create_dir_all(svc.join("1.4.0")).unwrap();
+    fs::create_dir_all(svc.join("1.3.0")).unwrap();
+    symlink("private/var", tmp.path().join("var")).unwrap();
+    symlink("1.4.0", tmp.path().join("var/lib/pk/svc/current")).unwrap();
+    tmp
+}
+
+/// A link reached through a symlinked directory that holds a relative target is on the release
+/// directory whether the release is named by its real path or through the same symlink; it is
+/// not on another existing release.
+///
+/// Catches a comparison of the two paths by name, which says no to the real path of a release
+/// the link sits beside under another spelling (every first install on a Mac), and one so loose
+/// that it says yes to a sibling release.
+#[test]
+fn a_link_is_on_a_release_by_real_path_whatever_symlinked_directory_it_is_reached_through() {
+    let tmp = mac_tree("ports-points-at-mac");
+    let link = tmp.path().join("var/lib/pk/svc/current");
+    let real = tmp.path().join("private/var/lib/pk/svc");
+    let spelt = tmp.path().join("var/lib/pk/svc");
+    assert_eq!(points_at(&SystemLink, &link, &real.join("1.4.0")), Ok(true));
+    assert_eq!(
+        points_at(&SystemLink, &link, &spelt.join("1.4.0")),
+        Ok(true)
+    );
+    // The link named by its real path too.
+    let real_link = real.join("current");
+    assert_eq!(
+        points_at(&SystemLink, &real_link, &spelt.join("1.4.0")),
+        Ok(true)
+    );
+    assert_eq!(
+        points_at(&SystemLink, &link, &real.join("1.3.0")),
+        Ok(false)
+    );
+    assert_eq!(
+        points_at(&SystemLink, &link, &spelt.join("1.3.0")),
+        Ok(false)
+    );
+}
+
+/// A link that is absent, that leads nowhere, or a release directory that is not there, are not
+/// "on" anything: false, not an error.
+///
+/// Catches a missing path reported as a failure of the step, or two missing paths taken as the
+/// same place.
+#[test]
+fn a_link_that_is_missing_or_dangling_or_a_release_that_is_missing_is_on_nothing() {
+    let tmp = mac_tree("ports-points-at-missing");
+    let svc = tmp.path().join("var/lib/pk/svc");
+    let staged = tmp.path().join("private/var/lib/pk/svc/1.4.0");
+    assert_eq!(
+        points_at(&SystemLink, &svc.join("absent"), &staged),
+        Ok(false)
+    );
+    symlink("9.9.9", svc.join("dangling")).unwrap();
+    assert_eq!(
+        points_at(&SystemLink, &svc.join("dangling"), &staged),
+        Ok(false)
+    );
+    // Both lead nowhere: still not the same directory.
+    assert_eq!(
+        points_at(&SystemLink, &svc.join("dangling"), &svc.join("9.9.9")),
+        Ok(false)
+    );
+    assert_eq!(
+        points_at(&SystemLink, &svc.join("current"), &svc.join("2.0.0")),
+        Ok(false)
+    );
+}
+
+/// A link path that is a regular file cannot be read as a link, and a path that cannot be
+/// resolved for another reason than being absent (a regular file on the way) is an error, from
+/// either side of the comparison; neither is "false".
+///
+/// Catches an unreadable link or a failing lookup taken for "not on the release", which would
+/// let a step go on with a link it never read.
+#[test]
+fn a_link_that_cannot_be_read_or_a_path_that_cannot_be_resolved_is_an_io_error() {
+    let tmp = mac_tree("ports-points-at-errors");
+    let svc = tmp.path().join("var/lib/pk/svc");
+    let staged = svc.join("1.4.0");
+    let file = svc.join("plain");
+    fs::write(&file, "x").unwrap();
+    assert!(matches!(
+        points_at(&SystemLink, &file, &staged),
+        Err(PortError::Io(_))
+    ));
+    // The link's target leads through a regular file.
+    symlink("plain/x", svc.join("through-file")).unwrap();
+    assert!(matches!(
+        points_at(&SystemLink, &svc.join("through-file"), &staged),
+        Err(PortError::Io(_))
+    ));
+    // The release path leads through a regular file.
+    assert!(matches!(
+        points_at(&SystemLink, &svc.join("current"), &file.join("x")),
+        Err(PortError::Io(_))
+    ));
+}
+
+/// Two names are one directory when both lead somewhere and to the same real path; a name that
+/// leads nowhere on either side is not one, and a name that cannot be resolved is an error.
+///
+/// Catches two absent names called equal, a lookup that stops at the first name and never looks
+/// at the second, and a failing lookup read as "different".
+#[test]
+fn two_paths_are_one_directory_by_their_real_paths_and_absent_ones_are_not() {
+    let tmp = mac_tree("ports-same-dir");
+    let real = tmp.path().join("private/var/lib/pk/svc");
+    let spelt = tmp.path().join("var/lib/pk/svc");
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("1.4.0"), &spelt.join("1.4.0")),
+        Ok(true)
+    );
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("1.4.0"), &spelt.join("current")),
+        Ok(true)
+    );
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("1.4.0"), &spelt.join("1.3.0")),
+        Ok(false)
+    );
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("absent"), &real.join("1.4.0")),
+        Ok(false)
+    );
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("1.4.0"), &real.join("absent")),
+        Ok(false)
+    );
+    assert_eq!(
+        same_dir(&SystemLink, &real.join("absent"), &spelt.join("absent")),
+        Ok(false)
+    );
+    let file = real.join("plain");
+    fs::write(&file, "x").unwrap();
+    assert!(matches!(
+        same_dir(&SystemLink, &file.join("x"), &real.join("1.4.0")),
+        Err(PortError::Io(_))
+    ));
+    assert!(matches!(
+        same_dir(&SystemLink, &real.join("1.4.0"), &file.join("x")),
+        Err(PortError::Io(_))
+    ));
+}
+
+/// The real path of a name is the canonical path with every link on the way followed; a name
+/// that is absent, or a link that leads nowhere, is `None`; a regular file on the way is an
+/// error.
+///
+/// Catches a real path that keeps the link's own spelling, an absent path reported as an error,
+/// and a not-a-directory error swallowed as absent.
+#[test]
+fn the_real_path_follows_every_link_and_tells_absent_from_unresolvable() {
+    let tmp = mac_tree("ports-real-path");
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    assert_eq!(
+        real_path(&tmp.path().join("var/lib/pk/svc/current")).unwrap(),
+        Some(root.join("private/var/lib/pk/svc/1.4.0"))
+    );
+    assert_eq!(
+        SystemLink.real(&tmp.path().join("var")),
+        Ok(Some(root.join("private/var")))
+    );
+    assert_eq!(real_path(&tmp.path().join("nothing")).unwrap(), None);
+    symlink("nowhere", tmp.path().join("dangling")).unwrap();
+    assert_eq!(real_path(&tmp.path().join("dangling")).unwrap(), None);
+    let file = tmp.path().join("plain");
+    fs::write(&file, "x").unwrap();
+    assert!(real_path(&file.join("x")).is_err());
+    assert!(matches!(
+        SystemLink.real(&file.join("x")),
+        Err(PortError::Io(_))
+    ));
+}
+
+/// Where a link holding a target points, by name: an absolute target as it is, a relative one
+/// from the link's directory, with `.` and `..` taken away; nothing is looked up.
+///
+/// Catches a relative target read from the wrong directory, a `..` that is kept as a name or
+/// that climbs one level too few or too many, and an absolute target joined to the link's
+/// directory.
+#[test]
+fn a_link_target_is_resolved_by_name_from_the_links_directory() {
+    let link = Path::new("/a/b/current");
+    for (target, want) in [
+        ("1.4.0", "/a/b/1.4.0"),
+        ("./1.4.0", "/a/b/1.4.0"),
+        ("x/./y", "/a/b/x/y"),
+        ("../1.4.0", "/a/1.4.0"),
+        ("../../c/d", "/c/d"),
+        ("x/../y", "/a/b/y"),
+        ("/z/1.4.0", "/z/1.4.0"),
+        ("1.4.0/", "/a/b/1.4.0"),
+    ] {
+        assert_eq!(
+            resolved(link, Path::new(target)),
+            Path::new(want),
+            "{target}"
+        );
+    }
+    // A link with no parent resolves from itself.
+    assert_eq!(resolved(Path::new("/"), Path::new("x")), Path::new("/x"));
 }
 
 /// Relink makes the link, repoints it, and leaves no .relink name behind.

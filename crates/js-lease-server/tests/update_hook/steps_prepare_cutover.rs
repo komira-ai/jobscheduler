@@ -87,6 +87,10 @@ impl Link for ScriptedLink<'_> {
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
         self.inner.relink(link, target)
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.inner.real(path)
+    }
 }
 
 /// The rig's environment with its unit manager replaced.

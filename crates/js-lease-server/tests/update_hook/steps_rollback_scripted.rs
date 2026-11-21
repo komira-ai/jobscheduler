@@ -70,6 +70,10 @@ impl Link for ReadsFail<'_> {
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
         self.inner.relink(link, target)
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.inner.real(path)
+    }
 }
 
 /// A store whose lock follows the unit: nobody holds it while the unit is not active, `new`
