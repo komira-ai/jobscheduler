@@ -1,5 +1,6 @@
 //! The registry client of this repository: an OCI artifact named by manifest digest is
-//! pulled from its registry with every byte checked against a digest on the way in.
+//! pulled from its registry with every byte checked against a digest on the way in, and an
+//! artifact on disk is published to one under a tag (see "Publishing" below).
 //!
 //! What is verified, and when:
 //! - the manifest's bytes hash to the digest the artifact is pinned by, before anything
@@ -93,6 +94,12 @@
 //!
 //! The client decodes nothing: layer bytes go to the caller as they were stored.
 //!
+//! Publishing ([`Repository::publish`]): an artifact read from a [`BundleSource`] is put
+//! under a [`Tag`] with the same checks on its bytes as a pull's, a tag that names the same
+//! manifest already is left as it is, and one that names another is refused, never moved.
+//! The token for it is asked for with the repository's `pull,push` scope, with the entry's
+//! credentials, by the rules above; the uploads go to the registry's own host only.
+//!
 //! Where the bytes come from is a [`BundleSource`]: a [`Repository`] of a registry, or a
 //! [`Layout`], an OCI image-layout directory on disk (a release asset unpacked for a host
 //! with no registry, or a test). Both run the same checks (the manifest's digest, kind,
@@ -121,6 +128,7 @@ mod layout;
 mod location;
 mod manifest;
 mod policy;
+mod push;
 mod source;
 mod text;
 mod verify;
@@ -134,4 +142,5 @@ pub use layout::{Layout, LayoutFault};
 pub use location::{Authority, Location};
 pub use manifest::{Descriptor, IndexPolicy, Kind, Limits, Manifest, Platform, media};
 pub use policy::{AddressClass, Allow, Policy, classify};
+pub use push::{Published, Tag};
 pub use source::{BundleSource, Selected};

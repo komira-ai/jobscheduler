@@ -229,6 +229,8 @@ impl Descriptor {
 pub struct Manifest {
     digest: Digest,
     bytes: Vec<u8>,
+    /// The `mediaType` the manifest states, if it does.
+    media_type: Option<String>,
     artifact_type: Option<String>,
     config: Descriptor,
     layers: Vec<Descriptor>,
@@ -247,6 +249,13 @@ impl Manifest {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The media type to store the manifest under: the one it states, or an OCI image
+    /// manifest's when it states none (an OCI manifest may leave it out; a Docker one may
+    /// not).
+    pub(crate) fn media_type(&self) -> &str {
+        self.media_type.as_deref().unwrap_or(media::OCI_MANIFEST)
     }
 
     /// The `artifactType` the manifest states, if it does.
@@ -409,6 +418,7 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
     Ok(Manifest {
         digest: pinned.clone(),
         bytes: bytes.to_vec(),
+        media_type: doc.media_type,
         artifact_type: doc.artifact_type,
         config: config.descriptor()?,
         layers,

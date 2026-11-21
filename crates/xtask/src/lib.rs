@@ -36,6 +36,12 @@
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
 //!   what the control plane's deploy of `js-server` is given.
+//! - `release smoke-bundle pack --tree <dir> --out <dir>`, `release smoke-bundle push --layout
+//!   <dir> --user <name> --password-file <file>` and `release smoke-bundle check --tree <dir>
+//!   --scratch <dir>` ([`release::smoke_bundle`]): the smoke bundle packed from its committed
+//!   tree and refused unless it gives the digest its recipe names, pushed to the recipe's
+//!   repository and tag (a held tag is never moved), and pulled back by digest anonymously and
+//!   compared with the tree, every byte.
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
@@ -156,6 +162,9 @@ pub enum Error {
     /// `release image-digest` gave no digest.
     #[error(transparent)]
     ImageDigest(#[from] release::image_digest::Error),
+    /// `release smoke-bundle` failed.
+    #[error(transparent)]
+    SmokeBundle(#[from] release::smoke_bundle::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -410,6 +419,12 @@ enum ReleaseVerb {
     ImageDigest(release::image_digest::DigestArgs),
     /// Wait for this run's turn to publish and deploy, or skip it when a newer one has it.
     Turn(release::turn::TurnArgs),
+    /// Pack, push or check the smoke bundle (`packaging/js-smoke-bundle/`).
+    SmokeBundle {
+        /// Which step.
+        #[command(subcommand)]
+        verb: release::smoke_bundle::Verb,
+    },
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -539,6 +554,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 release::turn::Error::Usage(why) => Error::Usage(why),
                 other => Error::Turn(other),
             })?,
+            ReleaseVerb::SmokeBundle { verb } => release::smoke_bundle::run(&verb)?,
         }),
     }
 }

@@ -32,6 +32,11 @@ js-agent = { path = "../js-agent" }
 # `gen-job-surface` renders the route table of docs/http-gateway.md from the gateway's routes,
 # and its served paragraph from the calls the lease server serves.
 js-api-gateway = { path = "../js-api-gateway" }
+# `release smoke-bundle`: the smoke bundle packed and pushed with `js-bundle`'s own commands,
+# pulled back with the agent's registry client and extracted with the agent's extractor.
+js-bundle = { path = "../js-bundle" }
+js-bundle-cli = { path = "../js-bundle-cli" }
+js-oci = { path = "../js-oci" }
 js-lease-server = { path = "../js-lease-server" }
 # `gen-job-surface` reads the job service's descriptor set: the one js-proto builds, decoded
 # with prost into prost-types' descriptor messages.
@@ -56,12 +61,19 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["clone-impls"] }
 tar.workspace = true
 thiserror.workspace = true
+# The runtime `release smoke-bundle check` pulls on.
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
-# The named pipe the stand-in test copies from (tests/stand_in_busy.rs).
+# The registry in this process the smoke bundle is published to and pulled from
+# (tests/smoke_bundle.rs).
+js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+# The named pipe the stand-in test copies from (tests/stand_in_busy.rs), and the one in a tree
+# the smoke bundle's check refuses (tests/smoke_bundle.rs).
 rustix = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # The server addresses the client refuses (tests/js_agent_package.rs). js-agent, which the tests
 # also read, is a dependency above.
 js-client = { path = "../js-client" }

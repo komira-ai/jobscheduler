@@ -8,8 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 # `js-bundle`: packs directories into a darwin bundle in an OCI image-layout directory,
-# prints one, and verifies one. The format is the `js-bundle` crate's, the layout reader is
-# the `js-oci` crate's; this crate is the command line around them.
+# prints one, verifies one, and pushes one to a registry. The format is the `js-bundle`
+# crate's, the layout reader and the registry client are the `js-oci` crate's; this crate is
+# the command line around them.
 [[bin]]
 name = "js-bundle"
 path = "src/main.rs"
@@ -22,10 +23,13 @@ rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+# `net` and `time` for `push`, whose registry client connects and bounds every wait.
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 
 [dev-dependencies]
-js-testkit = { path = "../js-testkit" }
+# The registry in this process that `push` is run against (tests/push.rs).
+js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
