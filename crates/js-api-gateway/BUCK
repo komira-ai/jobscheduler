@@ -1,0 +1,13 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond what buildrules gives each of its units (a library src/ and
+# build.rs, a test target tests/), which a Buck2 action sees only when declared:
+# tests/annotation.rs includes docs/http-gateway.md, and the library's tests compile js-proto's
+# proto/ files when they run.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "//:docs/http-gateway.md",
+        "//crates/js-proto:proto",
+    ],
+)
