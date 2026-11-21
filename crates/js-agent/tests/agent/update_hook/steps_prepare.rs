@@ -147,9 +147,11 @@ fn a_taint_halts_with_nothing_changed() {
     nothing_changed(&rig, &spy);
 }
 
+/// An update over a check the running agent still owes waits for it (steps_owed_checks.rs);
+/// a first install, which has no agent to settle it, halts with nothing changed.
 #[test]
-fn an_owed_check_halts_with_nothing_changed() {
-    let rig = Rig::new("hook-prepare-owed");
+fn an_owed_check_halts_a_first_install_with_nothing_changed() {
+    let rig = Rig::first_install("hook-prepare-owed");
     rig.state_root().owe("run-7").unwrap();
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
