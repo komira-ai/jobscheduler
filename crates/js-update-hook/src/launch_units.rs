@@ -24,7 +24,7 @@
 //! | `not running`, `exited`, `waiting`       | exit 0, never, or not printed    | `inactive`, `dead`        |
 //! | `spawn scheduled`                        | exit 0                           | `activating`, `start`     |
 //! | `spawn scheduled`                        | anything else                    | `activating`, `auto-restart` |
-//! | `spawning`                               | (any)                            | `activating`, `start`     |
+//! | `spawning`, `xpcproxy`                   | (any)                            | `activating`, `start`     |
 //! | not loaded (never loaded, or booted out) | -                                | `inactive`, `dead`        |
 //!
 //! So a Mac agent that crashes ends `failed` (the release's fault) as it does on Linux, and the
@@ -251,7 +251,10 @@ fn unit_state(state: &str, ended: Ended) -> Result<UnitState, PortError> {
         ("not running" | "waiting" | "exited", Ended::Badly) => ("failed", "failed"),
         ("not running" | "waiting" | "exited", _) => ("inactive", "dead"),
         // A start that is coming after a clean exit is only a start.
-        ("spawn scheduled", Ended::Cleanly) | ("spawning", _) => ("activating", "start"),
+        // `xpcproxy`: launchd has forked the job and its exec is under way.
+        ("spawn scheduled", Ended::Cleanly) | ("spawning" | "xpcproxy", _) => {
+            ("activating", "start")
+        }
         // Between two starts of a `KeepAlive` daemon that died, the throttle running.
         ("spawn scheduled", _) => ("activating", "auto-restart"),
         (other, _) => {

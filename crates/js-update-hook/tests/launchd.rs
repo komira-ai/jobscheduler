@@ -170,6 +170,7 @@ fn the_states_launchd_prints_map_to_the_states_the_steps_know() {
         ("exited", "inactive", "dead"),
         ("spawn scheduled", "activating", "auto-restart"),
         ("spawning", "activating", "start"),
+        ("xpcproxy", "activating", "start"),
     ] {
         assert_reads(printed, "", active, sub);
     }
@@ -256,6 +257,19 @@ fn a_negative_exit_code_is_a_bad_end() {
 fn a_spawning_service_reads_as_a_start_however_it_last_ended() {
     for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
         assert_reads("spawning", extra, "activating", "start");
+    }
+}
+
+/// A service launchd has forked and is executing (`state = xpcproxy`, which a real
+/// `launchctl print` showed for the session helper just after its bootstrap) is a start under
+/// way, however the last run ended.
+///
+/// Catches a reading of `xpcproxy` as an unknown state, which failed the first install's cutover
+/// with `start_failed` after its commit.
+#[test]
+fn a_service_launchd_is_executing_reads_as_a_start_however_it_last_ended() {
+    for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
+        assert_reads("xpcproxy", extra, "activating", "start");
     }
 }
 
