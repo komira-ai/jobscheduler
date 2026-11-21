@@ -47,6 +47,10 @@ pub(super) struct Indices {
     outstanding: BTreeMap<HostId, BTreeMap<JobId, FarmTime>>,
     /// When each host first read a verdict on each job's result.
     acked: BTreeMap<(HostId, JobId), FarmTime>,
+    /// When each host refused a start of each job because the host is held, each time it did.
+    held_refused: BTreeMap<(HostId, JobId), Vec<FarmTime>>,
+    /// The allocations each job was sent a start under, by any host.
+    sent_under: BTreeMap<JobId, BTreeSet<AllocationId>>,
     /// When each host first read a start of each job that it did not refuse.
     started: BTreeMap<(HostId, JobId), FarmTime>,
     /// The first `Accepted` verdict on each job's result: the host that read it, and when.
@@ -150,6 +154,10 @@ impl Indices {
         for made in observations.results_made.iter().skip(self.results) {
             let host = self.outstanding.entry(made.host.clone()).or_default();
             host.insert(made.job.clone(), made.at);
+            if made.held {
+                let key = (made.host.clone(), made.job.clone());
+                self.held_refused.entry(key).or_default().push(made.at);
+            }
         }
         self.results = observations.results_made.len();
     }
@@ -163,8 +171,12 @@ impl Indices {
                 let key = (reply.host.clone(), job.clone());
                 self.acked.entry(key).or_insert(reply.at);
                 if *verdict == Verdict::Accepted {
-                    self.accept(job, reply, found);
+                    self.accept(observations, job, reply, found);
                 }
+            }
+            for start in &reply.starts {
+                let sent = self.sent_under.entry(start.job.clone()).or_default();
+                sent.insert(start.allocation);
             }
             for start in reply.starts.iter().filter(|start| !start.refused) {
                 let key = (reply.host.clone(), start.job.clone());
@@ -178,13 +190,35 @@ impl Indices {
         self.replies = observations.job_replies.len();
     }
 
-    /// `ResultKeptUntilAcknowledged` (b): no job's result is accepted twice.
-    fn accept(&mut self, job: &JobId, reply: &JobReply, found: &mut Found) {
+    /// `ResultKeptUntilAcknowledged` (b): no job's result is accepted twice. An earlier
+    /// accepted result is not the job's when its host had refused a start of the job because
+    /// it is held (`host-held`) and launched nothing of the job by then, and the job was sent a
+    /// start under more than one allocation: the server sent the job back to the queue; the
+    /// later one takes its place.
+    fn accept(
+        &mut self,
+        observations: &Observations,
+        job: &JobId,
+        reply: &JobReply,
+        found: &mut Found,
+    ) {
+        let first = (reply.host.clone(), reply.at);
         let Some((host, at)) = self.accepted.get(job) else {
-            let first = (reply.host.clone(), reply.at);
             self.accepted.insert(job.clone(), first);
             return;
         };
+        let prefix = format!("{job}/");
+        let launched = observations.ledger.iter().any(|launch| {
+            (launch.host == *host) & (launch.at <= *at) & launch.run.as_str().starts_with(&prefix)
+        });
+        let placed_again = self.sent_under.get(job).is_some_and(|sent| sent.len() > 1);
+        let key = (host.clone(), job.clone());
+        let mut refusals = self.held_refused.get(&key).into_iter().flatten();
+        let held = refusals.any(|refused| *refused <= *at);
+        if placed_again & held & !launched {
+            self.accepted.insert(job.clone(), first);
+            return;
+        }
         let detail = format!(
             "the result of job {job} was accepted twice: on host {} at {} and on host {} at {}",
             text::host(host),
@@ -330,7 +364,11 @@ impl Indices {
     /// verdict on the job's result (when it read one); or the
     /// server's listing read with the tables does not name the host (the provider reads it
     /// absent); or a whole-host prepare failed before any container of the placement was
-    /// launched. A heartbeat sent before the agent knew of the job, or while it still held
+    /// launched; or no container of the allocation was launched and the host refused a start
+    /// of the job because it is held (`host-held`) after the allocation was committed and by
+    /// `at` (its own word that it made nothing, on which the server requeues the job),
+    /// when the allocation ended refused or its end is not known (a row a new placement took
+    /// before a read showed it freed). A heartbeat sent before the agent knew of the job, or while it still held
     /// its result, is not the host's word that the container is gone.
     fn freed(
         &self,
@@ -361,7 +399,11 @@ impl Indices {
             .iter()
             .any(|l| l.run.as_str() == launched);
         let failed_prepare = (row.end_reason == Some(EndReason::FailedPrepare)) & never_ran;
-        if gone | absent | failed_prepare {
+        let mut held = self.held_refused.get(&key).into_iter().flatten();
+        let answered = held.any(|made| (*made >= row.created_at) & (*made <= at));
+        let ended = matches!(row.end_reason, Some(EndReason::Refused) | None);
+        let refused = ended & never_ran & answered;
+        if gone | absent | failed_prepare | refused {
             return;
         }
         let detail = format!(

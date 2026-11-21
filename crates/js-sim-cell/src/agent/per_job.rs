@@ -447,7 +447,7 @@ impl PerJob {
         if self.fake.observed().running.contains(job.as_str()) {
             self.fake.complete(job.as_str());
             self.killed.insert(job.clone());
-            made(job, io);
+            made(job, false, io);
         } else if !self.fake.unacked().contains(job.as_str()) {
             self.fake.cancel(job.as_str());
             self.retired.insert(job);
@@ -462,18 +462,21 @@ impl PerJob {
         };
         if self.fake.observed().running.contains(job.as_str()) {
             self.fake.complete(job.as_str());
-            made(job, io);
+            made(job, false, io);
         }
         true
     }
 }
 
 /// Writes into the ledger that the agent made the result of `job`, now.
-pub(super) fn made(job: JobId, io: &mut Io) {
+/// Writes into the ledger that the agent made the result of `job` now; `held`: it is a start
+/// the agent refused because its host is held.
+pub(super) fn made(job: JobId, held: bool, io: &mut Io) {
     io.ledger.result_made(ResultMade {
         host: io.host.clone(),
         job,
         at: io.now,
+        held,
     });
 }
 

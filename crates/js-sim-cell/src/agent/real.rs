@@ -32,7 +32,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, Config, Lifecycle, MountRoots, NoChecks, ScratchRoot, StateRoot,
+    Capacity, Config, Lifecycle, MountRoots, NoChecks, ScratchRoot, StateRoot, hold,
 };
 use js_agent_wire::{HeartbeatReply, HeldJob, HeldRun, RunResult};
 use js_conformance::agent::memory::{Memory, Time};
@@ -53,7 +53,7 @@ pub(crate) struct RealAgent {
     runtime: Memory,
     time: Time,
     /// The scratch and state roots, removed after the lifecycle that uses them is gone.
-    _dirs: (TestDir, TestDir),
+    dirs: (TestDir, TestDir),
 }
 
 impl RealAgent {
@@ -109,8 +109,16 @@ impl RealAgent {
             life,
             runtime,
             time,
-            _dirs: dirs,
+            dirs,
         })
+    }
+
+    /// Writes the hold file into the lifecycle's state root, as the drain of an update does
+    /// ([`hold::write`]): from its next start on, the lifecycle refuses every start with the
+    /// code `host-held` and makes nothing. Returns whether the file was written.
+    pub(crate) fn hold(&self) -> bool {
+        let root = StateRoot::open(self.dirs.1.path());
+        root.is_ok_and(|root| hold::write(&root).is_ok())
     }
 
     /// The lifecycle's clock reads `now` from here on.

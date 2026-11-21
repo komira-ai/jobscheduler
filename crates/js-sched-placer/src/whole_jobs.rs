@@ -16,8 +16,9 @@
 //! 3. Cancels the operation of every job that is no longer a queued whole-host job, and of
 //!    one the scheduler finished.
 //! 4. Queues each queued whole-host job the engine does not queue yet, as a whole-machine
-//!    request held to the time the job was submitted, with the bars its failed prepares set
-//!    and the mark the table holds for it. A mark is taken back only after its host said
+//!    request held to the time the job was submitted, with the bars its row holds (its failed
+//!    prepares, and the hosts that refused its start as held) and the mark the table holds
+//!    for it. A mark is taken back only after its host said
 //!    hello to this server; one whose host has not said hello waits for it until `claim_by`
 //!    (the server's start plus `regain_grace`), its row standing meanwhile and the job not
 //!    queued; after `claim_by` the mark is deleted and the job is queued without it, to be
@@ -217,7 +218,7 @@ impl Engine {
 
     /// Queues `job`, a whole-host job that requires `needs` of its host, at the back of the
     /// scheduler's queue as a whole-machine request held to the time it was submitted, with
-    /// the bars its failed prepares set and those of `mark`, and `mark` itself: its operation.
+    /// the bars its row holds and those of `mark`, and `mark` itself: its operation.
     fn submit_job(
         &mut self,
         (job, needs): (&JobRecord, js_caps::Request),
@@ -401,8 +402,9 @@ fn bars_of_exclusions(exclusions: &BTreeMap<HostId, Exclusion>) -> BTreeMap<Work
     bars
 }
 
-/// The hosts `job` is kept off, as bars: those its failed prepares set and those of `mark`,
-/// the stronger of two bars on one host.
+/// The hosts `job` is kept off, as bars: those of its row ([`JobRecord::prepare_bars`]: its
+/// failed prepares and the hosts that refused its start as held) and those of `mark`, the
+/// stronger of two bars on one host.
 fn bars_of(job: &JobRecord, mark: Option<&MarkRecord>) -> BTreeMap<WorkerId, Bar> {
     let marked = mark.into_iter().flat_map(|mark| mark.exclusions.iter());
     let mut bars = BTreeMap::new();
@@ -412,6 +414,19 @@ fn bars_of(job: &JobRecord, mark: Option<&MarkRecord>) -> BTreeMap<WorkerId, Bar
         bars.insert(worker, stronger(kept, bar_of_exclusion(*exclusion)));
     }
     bars
+}
+
+/// The hosts the bars of `job` ([`JobRecord::prepare_bars`]) keep it off at `now` when it books
+/// a share of a host: each one barred until after `now`, and each one barred for life. A
+/// back-off, which only a failed whole-host prepare sets, keeps a whole-host job off its host
+/// only while another host could run it, and keeps a job of a share off no host.
+pub(super) fn barred_hosts(job: &JobRecord, now: FarmTime) -> BTreeSet<HostId> {
+    let barred = job.prepare_bars.iter().filter(|(_, bar)| match bar {
+        Exclusion::Until(end) => farm_of(*end) > now,
+        Exclusion::ForLife => true,
+        Exclusion::Backoff(_) => false,
+    });
+    barred.map(|(host, _)| host.clone()).collect()
 }
 
 /// The bar of `exclusion`: the kinds are the scheduler's, with the ends on the store's clock.

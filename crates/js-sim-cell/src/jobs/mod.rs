@@ -140,6 +140,9 @@ pub struct ResultMade {
     pub job: JobId,
     /// When.
     pub at: FarmTime,
+    /// Whether it is a start the agent refused because its host is held (the code
+    /// `host-held`): the agent made nothing of the job.
+    pub held: bool,
 }
 
 impl Observations {
@@ -179,7 +182,27 @@ impl Observations {
     /// `at`, after the results before.
     #[must_use]
     pub fn with_result_made(mut self, host: HostId, job: JobId, at: FarmTime) -> Self {
-        self.results_made.push(ResultMade { host, job, at });
+        let held = false;
+        self.results_made.push(ResultMade {
+            host,
+            job,
+            at,
+            held,
+        });
+        self
+    }
+
+    /// These observations with the agent of `host` having refused a start of `job` at `at`
+    /// because its host is held, after the results before.
+    #[must_use]
+    pub fn with_held_refusal(mut self, host: HostId, job: JobId, at: FarmTime) -> Self {
+        let held = true;
+        self.results_made.push(ResultMade {
+            host,
+            job,
+            at,
+            held,
+        });
         self
     }
 }
