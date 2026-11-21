@@ -225,9 +225,14 @@ pub struct Daemon {
 
 impl Daemon {
     /// The daemon of a Mac ordered to install `pkg` as `version`.
-    pub fn new(pkg: &Path, version: &str) -> Daemon {
-        let bytes = fs::read(pkg).unwrap_or_else(|e| panic!("read {}: {e}", pkg.display()));
+    pub fn new(given: &Path, version: &str) -> Daemon {
+        let bytes = fs::read(given).unwrap_or_else(|e| panic!("read {}: {e}", given.display()));
         fs::create_dir_all(PACKAGES).expect("the packages directory");
+        // The daemon stages its own root-owned download of the package (its package store), never
+        // a file another user owns: the installer hard-links the version's `artifact` to it, and
+        // the check before every step refuses an entry of the tree owned by another user.
+        let pkg = own_copy(given, &bytes);
+        let pkg = pkg.as_path();
         Daemon {
             host: Host::mac(),
             tools: Signed {
@@ -423,4 +428,20 @@ pub fn service_dir() -> PathBuf {
 /// The package's `current` link, which the params name as `release_link`.
 pub fn current_link() -> PathBuf {
     service_dir().join("current")
+}
+
+/// Where the daemon keeps the package it fetched, root's alone, as its package store does.
+const DOWNLOADS: &str = "/var/lib/hostkeeper/downloads";
+
+/// A root-owned copy of the package at `given` (its bytes `bytes`), read-only, in a directory
+/// private to root.
+fn own_copy(given: &Path, bytes: &[u8]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::create_dir_all(DOWNLOADS).expect("the download directory");
+    fs::set_permissions(DOWNLOADS, fs::Permissions::from_mode(0o700))
+        .expect("the download directory private");
+    let copy = Path::new(DOWNLOADS).join(given.file_name().expect("the package's file name"));
+    fs::write(&copy, bytes).expect("the copy of the package");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o444)).expect("the copy read-only");
+    copy
 }
