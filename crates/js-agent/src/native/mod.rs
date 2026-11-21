@@ -5,12 +5,9 @@
 //! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
 //! journal's paragraph below):
 //!
-//! 1. `user-create` lends the run a user from the helper's pool, for the run's lease id
-//!    (`<term>.<sequence>`: the term is drawn when the runtime is made and the sequence
-//!    counts up, so a lease id is never used twice, which the helper's ledger also
-//!    demands). The reply is the user's uid; `pool-status` then names the slot the lease
-//!    holds, and so the user (`kbf-lease-pool-<slot>`) and its home below the homes
-//!    directory. A lease the status does not name fails the start, and its user is ended.
+//! 1. `user-create` lends the run's lease (`<term>.<sequence>`, never used twice) a user of
+//!    the helper's pool, and answers its uid; `pool-status` then names the lease's slot,
+//!    and so its user and home (`native/pool_user.rs`).
 //! 2. The agent, as root and before any process of that user exists, makes the run
 //!    directory below the user's home (`exec/`, the working directory, and `tmp/`) and
 //!    gives it to the user. It makes the job's three standard streams as files in the
@@ -37,13 +34,12 @@
 //!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
-//!    none of its per-user agents; `user-delete` returns the user to the pool, reset: its
-//!    home emptied and its entry under `/var/folders` swept (`js-mac-session`'s
-//!    `helper/pool.rs`). A step that fails leaves the user in the helper's
-//!    ledger, its uid held, and the lease in the journal for the next start to end. Between
-//!    the two, a removal copies the run's declared outputs out of `exec/` into the run's
-//!    scratch directory (`native/outputs.rs`); one that cannot be copied does not stop the
-//!    removal, which then fails as [`RuntimeError`] of its outputs only.
+//!    none of its per-user agents; `user-delete` resets the user and returns it to the
+//!    pool. A step that fails leaves the user in the helper's ledger, its uid held, and
+//!    the lease in the journal for the next start to end. Between the two, a removal
+//!    copies the run's declared outputs out of `exec/` into the run's scratch directory
+//!    (`native/outputs.rs`); one that cannot be copied does not stop the removal, which
+//!    then fails as [`RuntimeError`] of its outputs only.
 //!
 //! A run whose start carried a sink, on a runtime given [`LiveLogs`]
 //! ([`NativeRuntime::with_live_logs`]), has its two log files uploaded while it runs and
@@ -151,6 +147,7 @@ mod mounts;
 mod network;
 mod outputs;
 mod pf;
+mod pool_user;
 mod profile;
 mod settings;
 mod xcode;
@@ -174,7 +171,7 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
-use js_mac_session::lease::{Dotted, Slot, pool_user_name, user_name};
+use js_mac_session::lease::Dotted;
 use js_mac_session::proto::Limits;
 use js_types::LeaseId;
 
@@ -468,7 +465,8 @@ impl NativeRuntime {
         (id, lease, uid): (LeaseId, &str, u32),
         (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
-        let home = self.config.homes.join(self.user_of(id, lease)?);
+        let user = pool_user::user_of(&self.helper, id, lease)?;
+        let home = self.config.homes.join(user);
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
         for dir in [&exec, &tmp] {
             make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
@@ -623,29 +621,6 @@ impl NativeRuntime {
                 ),
             )
         })
-    }
-
-    /// The name of the user the helper lent `lease` (whose id is `id`), whose home is the
-    /// run's: the pool user of the slot `pool-status` names for the lease
-    /// (`kbf-lease-pool-<slot>`); the uid alone does not name it, and `user-create`
-    /// answers with the uid only. A helper from before the pool, which does not know
-    /// `pool-status`, made a user of the lease's own (`kbf-lease-<term>-<seq>`).
-    fn user_of(&self, id: LeaseId, lease: &str) -> Result<String, RuntimeError> {
-        let state = match self.helper.pool_status() {
-            Ok(state) => state,
-            Err(why) if why.unknown_to_helper() => return Ok(user_name(id)),
-            Err(why) => return Err(fail(&"pool-status", &why)),
-        };
-        state
-            .leased
-            .iter()
-            .find(|(_, held)| held == lease)
-            .map(|(slot, _)| pool_user_name(Slot::new(*slot)))
-            .ok_or_else(|| {
-                RuntimeError::new(format!(
-                    "pool-status: the helper names no pool user for lease {lease}"
-                ))
-            })
     }
 
     /// Ends the user of `lease` after a start that failed, so none is left behind, and says

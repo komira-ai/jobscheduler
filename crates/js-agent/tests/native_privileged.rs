@@ -2,7 +2,8 @@
 //! from this process, with its real macOS host) makes lease users, the runtime starts
 //! programs as them under the Seatbelt profile, and the tests look at what the machine
 //! shows: the uid a program runs as, the files it can reach, the processes a kill leaves,
-//! the user a removal deletes. What a hosted runner cannot do (change users) is done here.
+//! the pool user a removal resets. What a hosted runner cannot do (change users) is done
+//! here.
 //!
 //! Every test is `#[ignore]`: each needs root and creates users on the machine it runs
 //! on. Build the binary on a Mac as an ordinary user (`cargo test -p js-agent --test
