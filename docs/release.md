@@ -17,7 +17,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests`, which starts beside `plan`, still runs).
    Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
-   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests), and
+   runs with `cargo nextest run --workspace`; not its `--ignored` live steps and not doctests), and
    with them the four longest test binaries of `js-sim-cell` (`faults`, `smoke`, `replay` and
    `whole_host_prepare`, built with `--features js-sim-cell/slow-families`) that `test` leaves out,
    under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
