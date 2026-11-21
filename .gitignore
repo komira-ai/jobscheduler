@@ -6,3 +6,5 @@
 
 # LLVM coverage output
 *.profraw
+.buckconfig.local
+buck-out/

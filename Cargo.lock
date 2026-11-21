@@ -4106,6 +4106,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-native-certs",
+ "ruzstd",
  "saphyr-parser",
  "serde",
  "serde_json",

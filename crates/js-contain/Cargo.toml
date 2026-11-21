@@ -50,3 +50,12 @@ tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of this package but does not build it:
+# its build compiles `js-init` (crates/js-contain/build.rs), which must be a static executable, and
+# buildrules' linker links it dynamically and succeeds (komira-ai/buildrules#173), which `build.rs`
+# refuses. So the farm checks this package's format only; it is built, linted and tested in ci.yml.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt"]
