@@ -10,9 +10,9 @@
 //! agent really cannot see is still without a control group a moment later. So two judgements
 //! wait this long:
 //!
-//! - a process or mount the baseline did not have is a job's leftover only when it is still
-//!   there after the wait (`daemonised-child`, `process-as-job-user`, `new-mount`; see
-//!   [`crate::integrity`]);
+//! - a process of a job's user is a job's leftover (`process-as-job-user`) only when it is
+//!   still there after the wait (see [`crate::integrity`]); the processes and mounts the
+//!   host adds of its own are only noted, never judged;
 //! - a running run with no control group the runtime can name taints the host as unchecked
 //!   only when it is still running without one this long after it was first seen so.
 
@@ -22,7 +22,7 @@ use std::time::Duration;
 pub const DEFAULT_SETTLE: Duration = Duration::from_millis(1000);
 
 /// The most milliseconds `--settle-ms` takes (a minute: the agent's worker waits this long
-/// for each job whose check sees a new process or mount).
+/// for each job whose check sees a process of a job's user).
 pub const MAX_SETTLE_MS: u64 = 60_000;
 
 /// The wait `--settle-ms` gave, or [`DEFAULT_SETTLE`].

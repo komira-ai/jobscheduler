@@ -7,9 +7,11 @@
 //!
 //! Run as root on a Linux host whose agent runs with the crun runtime (the defaults are the
 //! paths and the unit of the packaged `js-agent-crun.service`; give the unit's own when they
-//! differ). A taint the agent does not clear itself (see [`taint`](crate::lifecycle::taint))
-//! ends only when the host is reimaged or an operator moves the marker aside; this is that move,
-//! made the one way:
+//! differ). A taint whose cause is gone clears itself (a process of a job's user that ended, a
+//! check input that can be read again, a marker an older agent wrote for a change that the checks
+//! now only note) and needs none of this. A taint the agent does not clear itself (see
+//! [`taint`](crate::lifecycle::taint)) ends only when the host is reimaged or an operator moves
+//! the marker aside; this is that move, made the one way:
 //!
 //! 1. The state root is opened as the agent opens it, and a lock in it
 //!    ([`LOCK_FILE`]) is taken, so two clears never run at once.
@@ -43,10 +45,13 @@
 //! 7. The unit is started and waited for (at most [`START_WAIT_SECS`]): the agent starts with no
 //!    taint, and from a new baseline of the host.
 //!
-//! The taint the lease server keeps is the server's: the restarted agent says hello without
-//! one, and the operator ends the server's with its own clear (`ClearHostTaint`), which is why
-//! the agent's files go first. That call is the operator's, with the operator's credential; the
-//! verb, which runs with the host's, does not make it.
+//! The taint the lease server keeps for an agent-made taint ends with the agent's own word: the
+//! restarted agent holds no marker, so its first heartbeat says `tainted: false`, and a server
+//! that knows the field forgets the taint the agent made (which is why the agent's files go
+//! first). A taint the server made itself (`host-job`, `host-unsafe`) and any taint on a server
+//! or an agent from before the field end only with the operator's own clear (`ClearHostTaint`).
+//! That call is the operator's, with the operator's credential; the verb, which runs with the
+//! host's, does not make it.
 //!
 //! The verb speaks the host updater's hook contract, so hostkeeper can run it as it runs an
 //! update step: the exit status (0 success, 1 failure, 75 deferred: nothing was changed, try

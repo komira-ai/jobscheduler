@@ -332,3 +332,114 @@ async fn the_taint_survives_a_server_restart_and_a_hello() {
     restarted_after_placing_a_host_job("taint_restart", true).await;
     restarted_after_placing_a_host_job("taint_restart_crash", false).await;
 }
+
+/// Asserts that a host job's taint outlives a clean agent: after the placement taints the host
+/// `host-job` and the binding holds it, a heartbeat that says `tainted` false (the agent holds
+/// no marker, since the server made this taint) leaves the taint in the registry, in the
+/// binding and in the reply's `host_taint`, and commits nothing; only the operator's clear
+/// ends it. It catches an agent's word that ends a taint the agent never held, which would put
+/// a machine a host job left in an unknown state back into service.
+#[tokio::test]
+async fn a_host_job_taint_survives_a_beat_that_says_the_agent_holds_none() {
+    let kept = kept_store();
+    let mut rig = placing_rig("taint_clean_agent").with_kept(kept.clone());
+    rig.register_host_jobs("host-a", "true");
+    let mut agent = FakeAgent::new("host-a");
+    queue_spec(&rig.jobs, "job-h", on_the_machine(1), 0);
+    let tainted = rig.agents.place_jobs();
+    rig.agents.keep_taints(tainted).await;
+    let taint = host_job_taint("job-h");
+    assert_eq!(bound_taint(&kept, "host-a"), Some(taint.clone()));
+
+    agent.tainted = Some(false);
+    let commits = kept.commit_stats().txns;
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(reply.host_taint, Some(taint.clone()));
+    assert_eq!(registry_taint(&rig.agents, "host-a"), Some(taint.clone()));
+    assert_eq!(bound_taint(&kept, "host-a"), Some(taint.clone()));
+    assert_eq!(kept.commit_stats().txns, commits);
+
+    let cleared = rig.agents.clear_taint(&host("host-a")).await.unwrap();
+    assert_eq!(cleared, Some(taint));
+    assert_eq!(registry_taint(&rig.agents, "host-a"), None);
+}
+
+/// Asserts that a live host that holds a taint is logged once by the pass over the queued
+/// jobs, as a warning with the host and the taint's reason and run id, however many passes
+/// run; that a clean live host is not logged; that the host is logged again when it is
+/// tainted again after its taint ended. It catches a line per pass, and a tainted host whose
+/// queued jobs stay queued with nothing in the journal to say why.
+#[tokio::test]
+async fn a_live_tainted_host_is_logged_once_across_passes_with_its_reason() {
+    let lines = Lines::default();
+    process_sink();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut rig = placing_rig("taint_skip_log");
+    rig.register_host_jobs("host-a", "true");
+    rig.register_host_jobs("host-b", "true");
+    let message = "a live host is skipped by placement for the taint the server holds";
+    let said = |lines: &Lines| -> Vec<String> {
+        let text = lines.take();
+        let found = text.lines().filter_map(|line| line.split_once(message));
+        found.map(|(_, fields)| fields.to_owned()).collect()
+    };
+    let registry = &rig.agents.registry;
+
+    assert!(registry.taint_host(&host("host-a"), host_job_taint("job-x")));
+    rig.agents.place_jobs();
+    rig.agents.place_jobs();
+    let fields = " host=host-a reason=\"host-job\" run_id=\"job-x\"";
+    assert_eq!(said(&lines), [fields]);
+    rig.agents.place_jobs();
+    assert!(said(&lines).is_empty());
+
+    registry.clear_taint(&host("host-a")).unwrap();
+    rig.agents.place_jobs();
+    assert!(said(&lines).is_empty());
+    assert!(registry.taint_host(&host("host-a"), host_job_taint("job-x")));
+    rig.agents.place_jobs();
+    assert_eq!(said(&lines), [fields]);
+}
+
+/// Asserts that a host put back tainted after a restart, which has not said hello yet
+/// (awaiting), is not logged by the pass as skipped, and that it is, once, after its hello
+/// makes it live. It catches a line for a host that is not live, whose silence the pass has no
+/// word to say about.
+#[tokio::test]
+async fn an_awaiting_tainted_host_is_logged_only_once_it_is_live() {
+    let lines = Lines::default();
+    process_sink();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let dir = scratch("taint_skip_awaiting");
+    let cred = Credential::of_token(JOIN);
+    let hello = host_jobs_hello("h1");
+    let first = boot(dir.path());
+    first.registry.hello(&hello, &cred).unwrap();
+    assert!(
+        first
+            .registry
+            .taint_host(&host("h1"), host_job_taint("job-x"))
+    );
+    assert!(first.save_bindings().await);
+    drop(first);
+
+    let second = boot(dir.path());
+    assert_eq!(registry_taint(&second, "h1"), Some(host_job_taint("job-x")));
+    let message = "a live host is skipped by placement for the taint the server holds";
+    second.place_jobs();
+    assert!(!lines.take().contains(message));
+    second.registry.hello(&hello, &cred).unwrap();
+    second.place_jobs();
+    second.place_jobs();
+    let text = lines.take();
+    assert_eq!(text.matches(message).count(), 1, "{text}");
+    assert!(text.contains("host=h1"), "{text}");
+}

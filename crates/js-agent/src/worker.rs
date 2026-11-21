@@ -15,8 +15,9 @@
 //!   the acknowledgement of every heartbeat that carries the taint.
 //! - **State comes out as a snapshot.** After every order and every step the worker
 //!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
-//!   and the retired job ids, and the taint to report ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
-//!   swap it, never across a runtime call.
+//!   and the retired job ids, the taint to report and whether the host is tainted at all
+//!   ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to swap it,
+//!   never across a runtime call.
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
 //!   exited is found whether or not the server said anything; and at once when work its
@@ -369,6 +370,15 @@ pub struct Snapshot {
     pub taint: Option<Taint>,
     /// The taint to report cleared, until the server acknowledges that.
     pub taint_cleared: Option<Taint>,
+    /// Whether the host is tainted, acknowledged or not: until the clear of a taint that
+    /// clears itself has been acknowledged it is. `None` only in the default snapshot of a
+    /// session with no worker, which says nothing about it.
+    pub tainted: Option<bool>,
+    /// What changed, in one line, as the check that found the taint said it
+    /// ([`Lifecycle::taint_detail`]); none when the host is not tainted, for a taint no check
+    /// found and for one read from the marker at start. Kept for the health route: the
+    /// heartbeat does not carry it.
+    pub taint_detail: Option<String>,
     /// Every job a job start began, with its result until acknowledged.
     pub jobs: Vec<HeldJob>,
     /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
@@ -384,6 +394,8 @@ impl Snapshot {
             results: life.results(),
             taint: life.pending_taint(),
             taint_cleared: life.pending_taint_clear(),
+            tainted: Some(life.is_tainted()),
+            taint_detail: life.taint_detail(),
             jobs: life.held_jobs(),
             retired_jobs: life.retired_jobs(),
             blocked: life.blocked(),

@@ -1,6 +1,9 @@
 //! The taint of a host job on the host's binding: written after the pass that placed the job
 //! ([`Agents::keep_taints`]) and put back at start from the job store's taint rows
-//! ([`restore_job_taints`]); and the operator's clear of a host's taint ([`Agents::clear_taint`]).
+//! ([`restore_job_taints`]); the operator's clear of a host's taint ([`Agents::clear_taint`]);
+//! and the log lines of a host's taint: stored from a heartbeat, cleared by the agent's report
+//! of the clear (`by="agent"`), by its saying it holds none (`by="agent-holds-none"`, which
+//! names the taint the registry held before the beat) or by the operator, and put back.
 //!
 //! The placement commit writes `taint/<host>` in the job store, and the host's binding lives
 //! in another store (the `--store` state store, or the `.agents` file), so the two cannot be
@@ -61,6 +64,44 @@ impl Agents {
         }
     }
 
+    /// Takes the taint the store holds for `host` into the registry
+    /// ([`Registry::take_stored_taint`]) after [`Agents::keep_taint`] failed for a beat's taint:
+    /// the commit is conditional on the taint the registry holds, which another server's change
+    /// can leave behind the store's, and a registry that stays behind fails every beat of that
+    /// agent that reaches this server the same way. The failure does not say whether the store
+    /// was out or held another taint, so this runs after either: for an outage the read fails
+    /// too and the registry is left as it was, and when the store was back or only the commit
+    /// failed the store holds what the registry does and nothing changes. A host with no
+    /// binding row in the store (or in file mode) is left as it is, as is a taint the server
+    /// made itself. Logs one line when the registry took a taint or ended one. The caller holds
+    /// [`Agents::host_writes`] and answers the beat with the error it got.
+    pub(super) async fn resync_taint(self: &Arc<Self>, host: &HostId) {
+        let this = Arc::clone(self);
+        let named = host.clone();
+        let Ok(Some(binding)) = blocking(move || this.store.stored(&named)).await else {
+            return;
+        };
+        let stored = binding.taint().cloned();
+        let reason = stored.as_ref().map(|taint| taint.reason.clone());
+        if self.registry.take_stored_taint(host, stored) {
+            info!(
+                %host,
+                reason,
+                "the taint another server stored is taken into the registry after a refused commit"
+            );
+        }
+    }
+
+    /// Logs that a heartbeat of `host` ended the taint the registry holds for it by saying the
+    /// agent holds none (`tainted` false), with the reason of the taint held, before the
+    /// registry records the beat. The caller has committed the clear; nothing is logged for a
+    /// host the registry does not hold.
+    pub(super) fn log_agent_holds_none(&self, host: &HostId) {
+        let held = self.registry.own_host(host).and_then(|own| own.host.taint);
+        held.iter()
+            .for_each(|taint| log_cleared(host, taint, "agent-holds-none"));
+    }
+
     /// Clears the taint the registry holds for `host`, as the operator's `ClearHostTaint`
     /// asks, and returns the taint it cleared; `None`, with nothing written, for a host that
     /// has none (in file mode the file is still saved, which writes nothing when it is current,
@@ -116,7 +157,8 @@ pub(super) fn log_stored(host: &HostId, taint: &Taint) {
     );
 }
 
-/// Logs that the taint `taint` of `host` is cleared, `by` the `agent` or the `operator`.
+/// Logs that the taint `taint` of `host` is cleared, `by` the `agent` (its report of the
+/// clear), the `agent-holds-none` (its saying it holds no taint) or the `operator`.
 pub(super) fn log_cleared(host: &HostId, taint: &Taint, by: &'static str) {
     info!(%host, reason = taint.reason.as_str(), by, "a host's taint is cleared");
 }
