@@ -274,7 +274,14 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
     let next = Arc::new(daemon.another(&AGENT, &versions.update_pkg, &versions.update_version));
     let (staged, fresh) = next.stage();
     assert!(fresh, "the next version is staged");
-    assert_eq!(staged.dir(), service_dir().join(&versions.update_version));
+    assert_eq!(
+        staged.dir(),
+        Path::new("/private")
+            .join(PACKAGES.trim_start_matches('/'))
+            .join(SERVICE)
+            .join(&versions.update_version),
+        "hostkeeper names the staged release by its real path"
+    );
     let order = next.order_over(&staged, 3, (&versions.version, installed));
     let done = next.run(&order, next.switch(true), &store(SERVICE, 3));
     assert_succeeded(&done);
