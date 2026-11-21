@@ -34,7 +34,7 @@
 
 use std::path::Path;
 
-use js_update_hook::{PortError, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, resolved, same_dir};
+use js_update_hook::{PortError, ROLLBACK_MARGIN_SECS, START_WAIT_SECS, leads_to};
 
 use crate::update_hook::ports::Writer;
 use crate::update_hook::{Done, LOCK_WAIT_SECS, Params, Reason, Record, SERVE_WAIT_SECS};
@@ -108,7 +108,7 @@ fn restore(
     let target = env.ports.link.target(link).map_err(unreadable)?;
     // Where the link leads, by real path, against one release.
     let leads_to = |release: &Path| match &target {
-        Some(target) => same_dir(env.ports.link, &resolved(link, target), release),
+        Some(target) => leads_to(env.ports.link, link, target, release),
         None => Ok(false),
     };
     let at_previous = leads_to(previous).map_err(unreadable)?;

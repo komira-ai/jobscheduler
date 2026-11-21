@@ -11,7 +11,8 @@ use std::time::Duration;
 use js_testkit::dir::TestDir;
 use js_update_hook::{
     Clock, CommandRunner, Gate, Link, NoGate, PortError, SYSTEMCTL, SystemClock, SystemLink,
-    SystemUnits, UnitState, Units, points_at, read_link, real_path, resolved, same_dir, swap_link,
+    SystemUnits, UnitState, Units, leads_to, points_at, read_link, real_path, resolved, same_dir,
+    swap_link,
 };
 
 const UNIT: &str = "js-agent-crun.service";
@@ -476,6 +477,80 @@ fn a_link_target_is_resolved_by_name_from_the_links_directory() {
     }
     // A link with no parent resolves from itself.
     assert_eq!(resolved(Path::new("/"), Path::new("x")), Path::new("/x"));
+}
+
+/// A link reached through a symlinked directory whose relative target climbs with `..` climbs
+/// out of the real directory: `<tmp>/var/current -> ../y` with `<tmp>/var -> private/var` is on
+/// `<tmp>/private/y`, and not on a `<tmp>/y` that the name `<tmp>/var/..` would give.
+///
+/// Catches a `..` taken out of the link's spelling of its directory (the kernel climbs out of
+/// the real one), which sends every such link to the wrong release.
+#[test]
+fn a_target_that_climbs_is_read_from_the_real_directory_of_the_link() {
+    let tmp = dir("ports-points-at-climb");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("private/y")).unwrap();
+    fs::create_dir_all(root.join("private/var")).unwrap();
+    fs::create_dir_all(root.join("y")).unwrap();
+    symlink("private/var", root.join("var")).unwrap();
+    symlink("../y", root.join("var/current")).unwrap();
+    let link = root.join("var/current");
+    assert_eq!(
+        points_at(&SystemLink, &link, &root.join("private/y")),
+        Ok(true)
+    );
+    assert_eq!(points_at(&SystemLink, &link, &root.join("y")), Ok(false));
+}
+
+/// A link whose directory is not there is read by name: an absolute target is the place it
+/// names, a relative one is read from the spelt directory with `..` taken away, and a place that
+/// is not there is on nothing.
+///
+/// Catches a missing directory reported as a failure, or one that loses the relative target.
+#[test]
+fn a_link_in_a_missing_directory_leads_where_its_name_says() {
+    let tmp = dir("ports-leads-to-missing-dir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("y")).unwrap();
+    let link = root.join("nodir/current");
+    let y = root.join("y");
+    assert_eq!(leads_to(&SystemLink, &link, &y, &y), Ok(true));
+    assert_eq!(
+        leads_to(&SystemLink, &link, Path::new("../y"), &y),
+        Ok(true)
+    );
+    assert_eq!(leads_to(&SystemLink, &link, Path::new("y"), &y), Ok(false));
+}
+
+/// An absolute target is the place it names whatever the link's directory is; a symlinked
+/// directory of the link changes nothing.
+///
+/// Catches an absolute target joined to the link's directory.
+#[test]
+fn an_absolute_target_leads_to_its_own_directory() {
+    let tmp = mac_tree("ports-leads-to-absolute");
+    let root = tmp.path();
+    let link = root.join("var/lib/pk/svc/current");
+    let release = root.join("private/var/lib/pk/svc/1.3.0");
+    assert_eq!(leads_to(&SystemLink, &link, &release, &release), Ok(true));
+    assert_eq!(
+        leads_to(
+            &SystemLink,
+            &link,
+            &release,
+            &root.join("var/lib/pk/svc/1.3.0")
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        leads_to(
+            &SystemLink,
+            &link,
+            &release,
+            &root.join("private/var/lib/pk/svc/1.4.0")
+        ),
+        Ok(false)
+    );
 }
 
 /// Relink makes the link, repoints it, and leaves no .relink name behind.

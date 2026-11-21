@@ -115,7 +115,7 @@ impl Ca {
             .push(DnType::CommonName, format!("host:{host}"));
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         params.serial_number = Some(SerialNumber::from(1u64));
-        params.not_before = date_time_ymd(2020, 1, 1);
+        params.not_before = date_time_ymd(2026, 9, 1);
         params.not_after = date_time_ymd(3000, 1, 1);
         let cert = params
             .signed_by(&key, &self.0)

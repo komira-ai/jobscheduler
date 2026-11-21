@@ -142,11 +142,10 @@ fn problems(text: &str) -> Vec<String> {
     let step_text = |at: usize| all.get(at).map_or(String::new(), |s| s.join("\n"));
     let position = |needle: &str| all.iter().position(|s| s.join("\n").contains(needle));
     want(
-        step_text(0).contains("Check the version")
-            && step_text(0).contains(
-                r#"[[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]"#,
-            ),
-        "the version is not checked first",
+        !body
+            .iter()
+            .any(|l| l.trim_end().ends_with("run: |") || l.trim_end().ends_with("run: >")),
+        "a run step holds more than one command line",
     );
     let download = position("actions/download-artifact");
     want(
@@ -295,9 +294,9 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "not pinned to a commit",
         ),
         (
-            "      - name: Check the version\n",
-            "      - name: Look at the number\n",
-            "the version is not checked first",
+            "        run: /usr/bin/shasum -a 256 --check SHA256SUMS\n",
+            "        run: |\n          set -e\n          /usr/bin/shasum -a 256 --check SHA256SUMS\n",
+            "a run step holds more than one command line",
         ),
         (
             "name: js-agent-macos-pkg-unsigned",

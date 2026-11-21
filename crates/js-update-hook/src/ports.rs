@@ -188,7 +188,12 @@ pub trait Link {
 /// relative one from the link's directory, with `.` and `..` taken away (nothing is looked up).
 #[must_use]
 pub fn resolved(link: &Path, target: &Path) -> PathBuf {
-    let mut path = link.parent().unwrap_or(link).to_path_buf();
+    resolved_in(link.parent().unwrap_or(link), target)
+}
+
+/// `target` read from the directory `dir`, by name.
+fn resolved_in(dir: &Path, target: &Path) -> PathBuf {
+    let mut path = dir.to_path_buf();
     for part in target.components() {
         match part {
             Component::RootDir => path = PathBuf::from("/"),
@@ -202,8 +207,26 @@ pub fn resolved(link: &Path, target: &Path) -> PathBuf {
     path
 }
 
+/// Whether a link at `link` that holds `target` leads to the directory `dir`: a relative
+/// target is read from the real path of the link's directory (so a `..` climbs out of the
+/// directory the kernel would climb out of, not out of the link's spelling of it), and the
+/// place it names and `dir` are one directory ([`same_dir`]).
+///
+/// # Errors
+/// One of the paths cannot be resolved.
+pub fn leads_to(
+    port: &dyn Link,
+    link: &Path,
+    target: &Path,
+    dir: &Path,
+) -> Result<bool, PortError> {
+    let parent = link.parent().unwrap_or(link);
+    let from = port.real(parent)?.unwrap_or_else(|| parent.to_path_buf());
+    same_dir(port, &resolved_in(&from, target), dir)
+}
+
 /// Whether the link at `link` points at the directory `dir`: the place its target names (a
-/// relative target read from the link's directory, see [`resolved`]) and `dir` have the same
+/// relative target read from the link's directory, see [`leads_to`]) and `dir` have the same
 /// real path ([`Link::real`]). Two names of one directory are the same directory: on macOS
 /// `/var` is a link to `/private/var`, and hostkeeper names a staged release by its real path
 /// while the link sits under `/var`. A missing link, or a link or `dir` that leads to nothing,
@@ -213,7 +236,7 @@ pub fn resolved(link: &Path, target: &Path) -> PathBuf {
 /// The link cannot be read, or one of the two paths cannot be resolved.
 pub fn points_at(port: &dyn Link, link: &Path, dir: &Path) -> Result<bool, PortError> {
     match port.target(link)? {
-        Some(target) => same_dir(port, &resolved(link, &target), dir),
+        Some(target) => leads_to(port, link, &target, dir),
         None => Ok(false),
     }
 }
