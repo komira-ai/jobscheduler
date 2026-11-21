@@ -184,6 +184,7 @@ fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
         [
             "boot-reset",
             "user-create 7.0",
+            "pool-status",
             "kill-uid 7.0",
             "user-delete 7.0"
         ]

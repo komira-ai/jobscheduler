@@ -51,6 +51,12 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
+//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>]` ([`mac_root`]): on a Mac
+//!   with no lease users, the root tests of `js-mac-provision`, `js-treestore`, `js-mac-pool` and
+//!   `js-agent` (every one `#[ignore]`d under a plain `cargo test`), built as this user and run as
+//!   root through `sudo -n` from the new directory `--work`, the users the `js-agent` ones make
+//!   deleted after each, and a table of every test's result printed and written to
+//!   `target/mac-root-tests/table.tsv`.
 //! - `unit-result --unit <name> --count-file <path> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
 //!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result, and
 //!   ran at least one test, by the `--count-file` its `count-run` wrote.
@@ -124,6 +130,7 @@ pub mod fetch;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
+pub mod mac_root;
 pub mod macpkg;
 pub mod merge_profiles;
 pub mod postgres_for_tests;
@@ -183,7 +190,7 @@ pub enum Error {
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
-    /// The real-crun tests, or the build of their targets, failed.
+    /// The real-crun tests or the Mac root tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
     /// The machine image recipes could not be made.
@@ -267,6 +274,21 @@ enum Verb {
         /// range).
         #[arg(long)]
         job_user: Option<String>,
+    },
+    /// Run the Mac root tests of js-mac-provision, js-treestore, js-mac-pool and js-agent as
+    /// root on this Mac (one with no lease users), from a new work directory, and print a
+    /// table of every test's result.
+    MacRootTests {
+        /// The work directory, made root-owned with mode 0755; it must not exist, and its
+        /// parent must (`/Users/Shared/<name>` suits).
+        #[arg(long)]
+        work: PathBuf,
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The repository root, where cargo builds the test targets.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
     /// Fail unless the system unit a step ran with `systemd-run --wait` (without
     /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
@@ -436,6 +458,22 @@ fn run(cli: Cli) -> Result<String, Error> {
                 sudo: &crun_tests::SudoProgram(&sudo),
                 root: &root,
                 job_user: job_user.as_deref(),
+            })?)
+        }
+        Verb::MacRootTests { work, sudo, root } => {
+            // `cargo xtask` runs this program under cargo, which sets `CARGO`.
+            let cargo = std::env::var_os("CARGO").unwrap_or_default();
+            let machine = mac_root::RealMachine {
+                cargo: &cargo,
+                root: &root,
+                sudo: &sudo,
+            };
+            Ok(mac_root::run(&mac_root::MacRootTests {
+                os: std::env::consts::OS,
+                machine: &machine,
+                root: &root,
+                work: &work,
+                owner_uid: rustix::process::getuid().as_raw(),
             })?)
         }
         Verb::UnitResult {

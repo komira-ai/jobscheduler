@@ -1,11 +1,11 @@
 //! The two-run isolation test of the Mac pool users, for real, as root, on a Mac.
 //!
 //! Question: does what a run leaves behind survive into the next run that gets the same
-//! uid? Today every run gets a user the helper makes and deletes; the helper reuses uids,
-//! and a fixed pool of reused users would too. Deleting a user may not remove what it left.
+//! uid? Every run is lent a user from the helper's pool of reused users, and the user is
+//! reset when the run ends. A reset may not remove what the user left.
 //!
-//! The test serves the real `js-mac-session` helper from this process with a range of ONE
-//! uid, so the second run gets the uid of the first. Then:
+//! The test serves the real `js-mac-session` helper from this process with a pool of ONE
+//! user (a range of one uid), so the second run gets the user of the first. Then:
 //!
 //! 1. Run A (a native run through the agent's own `NativeRuntime`, under the product's
 //!    Seatbelt profile, as the pool user) leaves one item of every kind behind, each with a
@@ -31,8 +31,8 @@
 //!    it covers nothing, and the run cannot pass. Root's every attempt is a `PROBE
 //!    agent-attempt` line.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
-//!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`), and
-//!    the next start makes the user again (`user-create`).
+//!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`, which
+//!    resets the pool user), and the next start is lent that user again (`user-create`).
 //! 3. Run B (the same program, another role, the same uid) looks for every token. The test
 //!    also reads the system-wide views: `ipcs` for objects owned by the uid, `ps` for
 //!    processes of the uid, `launchctl print` of `user/<uid>` and `gui/<uid>`, and `find -uid`
@@ -226,6 +226,10 @@ fn serve(fixture: &Fixture) {
         path(&fixture.state),
         "--uid-range".to_owned(),
         format!("{0}-{0}", fixture.uid),
+        // The pool is the one user of the one uid: a pool larger than the range is
+        // refused at the helper's start.
+        "--pool-size".to_owned(),
+        "1".to_owned(),
         "--homes".to_owned(),
         path(&fixture.homes),
         // The boot reset clears the auto-login of the Mac the helper serves; the files it
@@ -337,9 +341,10 @@ fn settle(rt: &mut NativeRuntime, id: &RunHandle) -> Result<Status, String> {
     Err("the run did not end".to_owned())
 }
 
-/// The home of the user of `id`: the lease `T.S` is the user `kbf-lease-T-S`.
-fn user_of(id: &RunHandle) -> String {
-    format!("kbf-lease-{}", id.0.replace('.', "-"))
+/// The user of `id`: the pool holds one user, in slot 0, so every run is lent
+/// `kbf-lease-pool-0`, and its home is that name below the homes directory.
+fn user_of(_: &RunHandle) -> String {
+    js_mac_session::lease::pool_user_name(js_mac_session::lease::Slot::new(0))
 }
 
 fn tool_output(program: &str, args: &[&str]) -> Result<(bool, String), String> {
