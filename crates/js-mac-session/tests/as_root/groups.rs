@@ -13,10 +13,10 @@ use super::*;
 fn a_run_holds_the_lease_user_s_groups_and_cannot_read_what_only_wheel_may() {
     let (_serial, mac) = mac();
     let dir = scratch_dir("lease-groups", 0o755);
-    let secret = format!("{dir}/wheel-only");
-    write_root(&secret, "secret\n");
-    std::os::unix::fs::chown(&secret, Some(0), Some(0)).expect("root:wheel");
-    set_mode(&secret, 0o440);
+    let wheel_only = format!("{dir}/wheel-only");
+    write_root(&wheel_only, "only wheel may read this\n");
+    std::os::unix::fs::chown(&wheel_only, Some(0), Some(0)).expect("root:wheel");
+    set_mode(&wheel_only, 0o440);
     let lease = mac.create("19.1", None);
     let name = lease.name();
     let client = path_str(&mac.client);
@@ -42,7 +42,7 @@ fn a_run_holds_the_lease_user_s_groups_and_cannot_read_what_only_wheel_may() {
     assert_eq!(got, want, "the run's groups are not the user's: {said}");
     // One process reads the file: the last step, so a refused read ends it with exit 1,
     // and a read prints the file and exits 0.
-    let read = lease.run(&dir, &mac.act(&["cat", &secret]));
+    let read = lease.run(&dir, &mac.act(&["cat", &wheel_only]));
     assert_eq!(read.said().trim_end(), "exit 1", "{}", read.all());
     lease.end();
 }

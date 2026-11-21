@@ -446,7 +446,7 @@ impl Mac {
                 "kbf-lease-9-9",
             ],
         );
-        write_root(&kcpassword(), "x\n");
+        write_root(&autologin_cipher_path(), "x\n");
         mac.start_helper();
         mac.first = mac.first_contact();
         mac
@@ -472,7 +472,7 @@ impl Mac {
             "--daemon-requirement".to_owned(),
             format!("cdhash H\"{}\"", self.genuine),
             "--kcpassword".to_owned(),
-            kcpassword(),
+            autologin_cipher_path(),
             "--loginwindow".to_owned(),
             loginwindow(),
             "--grant-keys".to_owned(),
@@ -588,7 +588,7 @@ impl Mac {
             "/usr/bin/defaults",
             &["read", &loginwindow(), "autoLoginUser"],
         );
-        let survived = [kcpassword(), intent()]
+        let survived = [autologin_cipher_path(), intent()]
             .into_iter()
             .filter(|path| exists(path))
             .collect();
@@ -679,8 +679,9 @@ fn window() -> String {
     format!("{STATE}/baseline-window")
 }
 
-fn kcpassword() -> String {
-    format!("{SCRATCH}/kcpassword")
+/// Where the tests have the helper keep the auto-login cipher (its `--kcpassword`).
+fn autologin_cipher_path() -> String {
+    format!("{SCRATCH}/autologin-cipher")
 }
 
 /// The session switch's files are the tests' own, never the runner's login window: the
@@ -764,7 +765,7 @@ impl<F: FnMut()> Drop for OnPanic<F> {
 /// Removes the session switch's files: a failing test must not leave a lease held.
 fn clear_session() {
     let _ = fs::remove_file(intent());
-    let _ = fs::remove_file(kcpassword());
+    let _ = fs::remove_file(autologin_cipher_path());
     root(
         "/usr/bin/defaults",
         &["delete", &loginwindow(), "autoLoginUser"],

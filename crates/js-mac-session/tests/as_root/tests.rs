@@ -675,7 +675,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
             &held.name(),
         ],
     );
-    write_root(&kcpassword(), "x\n");
+    write_root(&autologin_cipher_path(), "x\n");
     assert_eq!(
         mac.restart(&["15.1"]),
         "kept 15.1 deleted 15.2",
@@ -698,7 +698,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         &held.name(),
         "auto-login",
     );
-    assert!(exists(&kcpassword()), "kcpassword was not kept");
+    assert!(exists(&autologin_cipher_path()), "kcpassword was not kept");
     refused(
         &held.call("delete"),
         "holds the GUI session",
@@ -723,7 +723,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "auto-login survived the reset: {}",
         auto_login.all()
     );
-    for gone in [kcpassword(), intent()] {
+    for gone in [autologin_cipher_path(), intent()] {
         assert!(!exists(&gone), "{gone} survived the reset");
     }
 }
