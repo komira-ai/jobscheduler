@@ -53,6 +53,9 @@ hyper-util = { version = "0.1.21", default-features = false }
 libc = "0.2.190"
 # Dev-dependency of js-provider-lambdalabs: a sink for the HTTP client's own log lines.
 log = "0.4.34"
+# xtask's `fetch --extract tar.xz`: the xz decoder, in Rust (the pinned zig and cargo-zigbuild
+# archives are xz tars).
+lzma-rs = "0.3.0"
 # js-contain: `unshare(CLONE_FILES)` as a safe call, for the thread that writes an installed
 # program (its `sched` feature). rustix has the call only as `unshare_unsafe`.
 nix = { version = "0.31.3", default-features = false }
