@@ -202,6 +202,7 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
         [
             "boot-reset",
             "user-create 7.0",
+            "pool-status",
             "run 7.0",
             "kill-uid 7.0",
             "user-delete 7.0"
@@ -231,7 +232,7 @@ fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     let result = &h.life.results()[0];
     assert_eq!((result.outcome, result.exit_code), (Outcome::Killed, None));
     assert_eq!(
-        h.fake.verbs()[3..],
+        h.fake.verbs()[4..],
         ["stop 7.0", "kill-uid 7.0", "user-delete 7.0"]
     );
 }
@@ -246,7 +247,7 @@ fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
     h.until(|life| !life.results().is_empty());
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
-    assert_eq!(h.fake.verbs()[3], "stop 7.0");
+    assert_eq!(h.fake.verbs()[4], "stop 7.0");
 }
 
 /// Asserts that a start named by its image, an image alone and an image with a `run`,

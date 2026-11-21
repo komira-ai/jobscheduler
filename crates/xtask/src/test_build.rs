@@ -1,6 +1,6 @@
 //! Building integration test targets as the runner's user and finding their binaries,
 //! for the verbs that run a target's `#[ignore]` tests somewhere other than under
-//! `cargo test` ([`crate::crun_tests`]).
+//! `cargo test` ([`crate::crun_tests`], [`crate::mac_root`]).
 //!
 //! Cargo builds the targets with `cargo test --locked --no-run --message-format=json -p
 //! <package> --test <name>...` in the repository root, so nothing is compiled as root and
@@ -97,6 +97,46 @@ pub fn find(messages: &str, test: &str) -> Result<Built, Error> {
     }
 }
 
+/// The program of the binary target `bin` in `messages`, cargo's `--message-format=json`
+/// output of a `cargo build`: the one `compiler-artifact` whose target is of kind `bin`, is
+/// named `bin`, and was not built with the test profile.
+///
+/// # Errors
+/// A line is not JSON, or there is not exactly one such artifact, or it names no
+/// executable.
+pub fn find_bin(messages: &str, bin: &str) -> Result<PathBuf, Error> {
+    let mut found = Vec::new();
+    for line in messages.lines() {
+        let m: Value = serde_json::from_str(line).map_err(|e| {
+            Error::Failed(format!(
+                "cargo printed a line that is not JSON ({e}): {line}"
+            ))
+        })?;
+        // `&`, not `&&`, as in [`find`]: each comparison is tested both ways.
+        let wanted = (m["reason"] == "compiler-artifact")
+            & (m["target"]["kind"] == serde_json::json!(["bin"]))
+            & (m["target"]["name"] == bin)
+            & (m["profile"]["test"] == false);
+        if wanted {
+            found.push(m);
+        }
+    }
+    let [one] = found.as_slice() else {
+        return Err(Error::Failed(format!(
+            "cargo built {} programs for the bin target `{bin}`, not 1",
+            found.len()
+        )));
+    };
+    one["executable"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Error::Failed(format!(
+                "cargo's artifact for the bin target `{bin}` names no executable: {one}"
+            ))
+        })
+}
+
 /// `-p <package> --test <name>...`: the targets of a build, as messages name them.
 fn targets(package: &str, tests: &[&str]) -> String {
     let mut what = format!("-p {package}");
@@ -131,6 +171,29 @@ pub fn build(cargo: &OsStr, root: &Path, package: &str, tests: &[&str]) -> Resul
         return Err(Error::Failed(format!(
             "cargo test --no-run {} failed: {}",
             targets(package, tests),
+            out.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Builds the binary target `bin` of `package` as this user, with `cargo build --locked
+/// --message-format=json` in `root`: cargo's JSON messages, which [`find_bin`] reads the
+/// program from. The build's progress goes to this process's stderr.
+///
+/// # Errors
+/// Cargo could not be started, or the build failed.
+pub fn build_bin(cargo: &OsStr, root: &Path, package: &str, bin: &str) -> Result<String, Error> {
+    let out = Command::new(cargo)
+        .current_dir(root)
+        .args(["build", "--locked", "--message-format=json"])
+        .args(["-p", package, "--bin", bin])
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(Error::spawn("cargo".to_owned()))?;
+    if !out.status.success() {
+        return Err(Error::Failed(format!(
+            "cargo build -p {package} --bin {bin} failed: {}",
             out.status
         )));
     }
@@ -217,6 +280,48 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    /// Catches the wrong program taken for a bin target: the test-profile build of the same
+    /// name, a test target of that name, another bin, or a message rather than an artifact;
+    /// and a guess where there is none or two.
+    #[test]
+    fn the_bin_target_s_program_is_found_among_the_decoys() {
+        let messages = r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"p"},"profile":{"test":true},"executable":"/w/deps/p-test","manifest_path":"/w/Cargo.toml"}
+{"reason":"compiler-artifact","target":{"kind":["test"],"name":"p"},"profile":{"test":false},"executable":"/w/deps/p-t","manifest_path":"/w/Cargo.toml"}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"q"},"profile":{"test":false},"executable":"/w/debug/q","manifest_path":"/w/Cargo.toml"}
+{"reason":"compiler-message","target":{"kind":["bin"],"name":"p"},"profile":{"test":false},"manifest_path":"/w/Cargo.toml"}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"p"},"profile":{"test":false},"executable":"/w/debug/p","manifest_path":"/w/Cargo.toml"}
+"#;
+        assert_eq!(find_bin(messages, "p"), Ok(PathBuf::from("/w/debug/p")));
+        assert_eq!(
+            find_bin(messages, "r").map_err(|e| e.to_string()),
+            Err("cargo built 0 programs for the bin target `r`, not 1".to_owned())
+        );
+        let last = messages.lines().nth(4).expect("the target's line");
+        assert_eq!(
+            find_bin(&format!("{messages}{last}\n"), "p").map_err(|e| e.to_string()),
+            Err("cargo built 2 programs for the bin target `p`, not 1".to_owned())
+        );
+    }
+
+    /// Catches a bin artifact with no executable run as an empty path, and cargo output
+    /// that is not its JSON messages read as "no program".
+    #[test]
+    fn a_bin_artifact_without_executable_or_a_line_not_json_is_refused() {
+        let no_exe = r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"p"},"profile":{"test":false},"executable":null}"#;
+        let e = find_bin(no_exe, "p").expect_err("no executable");
+        assert!(
+            e.to_string()
+                .starts_with("cargo's artifact for the bin target `p` names no executable: {"),
+            "{e}"
+        );
+        let e = find_bin("   Compiling p\n", "p").expect_err("not JSON");
+        assert!(
+            e.to_string()
+                .starts_with("cargo printed a line that is not JSON ("),
+            "{e}"
+        );
     }
 
     /// Catches the three errors reading wrongly: the failure as its text, the program

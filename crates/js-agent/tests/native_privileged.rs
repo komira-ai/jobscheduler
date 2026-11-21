@@ -2,16 +2,20 @@
 //! from this process, with its real macOS host) makes lease users, the runtime starts
 //! programs as them under the Seatbelt profile, and the tests look at what the machine
 //! shows: the uid a program runs as, the files it can reach, the processes a kill leaves,
-//! the user a removal deletes. What a hosted runner cannot do (change users) is done here.
+//! the pool user a removal resets. What a hosted runner cannot do (change users) is done
+//! here.
 //!
 //! Every test is `#[ignore]`: each needs root and creates users on the machine it runs
 //! on. Build the binary on a Mac as an ordinary user (`cargo test -p js-agent --test
 //! native_privileged --no-run`), or take it from the `js-agent-native-privileged-tests`
 //! workflow, and run it as root with `JS_NATIVE_PRIV_ROOT` naming a new directory, owned
 //! by root and mode 0755, that every user can search down to (a home directory is 0700 and
-//! does not qualify), and `--ignored --test-threads=1 --nocapture`. The helper's users get
-//! the uids 680 to 689, which must be free; the helper's state, its socket and the users'
-//! homes are made below the directory. Never run it on a production host.
+//! does not qualify), and `--ignored --test-threads=1 --nocapture`. The helper's pool is
+//! ten users, `kbf-lease-pool-0` to `kbf-lease-pool-9` with the uids 4300 to 4309, which
+//! must be free, as must the names: the uids are outside the range a farm helper uses (600
+//! to 699), but the names are the ones it uses, so the users must be deleted before such a
+//! helper starts (`cargo xtask mac-root-tests` does). The helper's state, its socket and
+//! the users' homes are made below the directory. Never run it on a production host.
 //!
 //! The file builds on every platform, so clippy reads it on Linux; run anywhere but macOS,
 //! each test stops at its first line.
@@ -47,9 +51,15 @@ const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
 #[cfg(target_os = "macos")]
 #[path = "native_privileged/vm.rs"]
 mod vm;
-/// The uids the helper gives its users: free on the machine (the helper checks).
+/// The uids of the helper's pool users: free on the machine (the helper checks), and
+/// outside the farm's range (600 to 699).
 #[cfg(target_os = "macos")]
-const UIDS: &str = "680-689";
+const UIDS: &str = "4300-4309";
+/// How many users the pool holds: one per uid of [`UIDS`].
+#[cfg(target_os = "macos")]
+const POOL_SIZE: &str = "10";
+/// The uids of [`UIDS`], for the assertions.
+const POOL_UIDS: std::ops::RangeInclusive<u32> = 4300..=4309;
 const NEEDS_ROOT: &str =
     "needs root: run the test binary as root (see the header of tests/native_privileged.rs)";
 /// The most polls a test makes for a run to end.
@@ -133,6 +143,8 @@ fn serve(fixture: &Fixture) {
         path(&fixture.state),
         "--uid-range".to_owned(),
         UIDS.to_owned(),
+        "--pool-size".to_owned(),
+        POOL_SIZE.to_owned(),
         "--homes".to_owned(),
         path(&fixture.homes),
         // The boot reset clears the auto-login of the Mac the helper serves; the files it
@@ -248,10 +260,24 @@ fn exited(code: i32) -> Status {
     })
 }
 
-/// The home of the user of `id`: the lease `T.S` is the user `kbf-lease-T-S`.
+/// The home of the pool user lent to the live run `id`: the slot `pool-status` names for
+/// its lease is the user `kbf-lease-pool-<slot>`.
 fn home_of(fixture: &Fixture, id: &RunHandle) -> PathBuf {
-    let name = format!("kbf-lease-{}", id.0.replace('.', "-"));
-    fs::canonicalize(&fixture.homes).unwrap().join(name)
+    let pool = Client::new(&fixture.socket).pool_status().unwrap();
+    let (slot, _) = pool
+        .leased
+        .iter()
+        .find(|(_, lease)| *lease == id.0)
+        .unwrap_or_else(|| panic!("the pool names no user for lease {}: {pool:?}", id.0));
+    fs::canonicalize(&fixture.homes)
+        .unwrap()
+        .join(format!("kbf-lease-pool-{slot}"))
+}
+
+/// Whether the directory `home` is empty: a pool user's home after the reset that ends a
+/// lease.
+fn is_empty(home: &Path) -> bool {
+    fs::read_dir(home).unwrap().next().is_none()
 }
 
 /// The uids of every process on the machine.
@@ -282,7 +308,7 @@ fn a_program_runs_as_a_lease_user_under_the_profile() {
     assert_eq!(settle(&mut rt, &id), exited(0));
     let printed = rt.log_tail(&id).unwrap().unwrap().stdout;
     let uid: u32 = printed.trim().parse().unwrap();
-    assert!((680..=689).contains(&uid), "ran as uid {uid}");
+    assert!(POOL_UIDS.contains(&uid), "ran as uid {uid}");
     assert_eq!(fs::metadata(home_of(fixture, &id)).unwrap().uid(), uid);
     rt.remove(&id).unwrap();
 
@@ -296,7 +322,7 @@ fn a_program_runs_as_a_lease_user_under_the_profile() {
         .unwrap();
     assert_eq!(settle(&mut rt, &id), exited(0));
     let made = fs::metadata(home_of(fixture, &id).join("exec").join("made")).unwrap();
-    assert!((680..=689).contains(&made.uid()));
+    assert!(POOL_UIDS.contains(&made.uid()));
     rt.remove(&id).unwrap();
 
     let outside = format!("/private/tmp/js-native-priv-{}", std::process::id());
@@ -313,12 +339,13 @@ fn a_program_runs_as_a_lease_user_under_the_profile() {
 }
 
 /// Asserts that a stop ends every process of the user, not only the one started (a shell
-/// that backgrounds two sleeps leaves three), that the removal deletes the user and its
-/// home, and that the machine has no such user afterwards. It catches a kill that leaves
-/// children running as a lease uid and a user left behind.
+/// that backgrounds two sleeps leaves three), and that the removal returns the user to the
+/// pool reset: its home is there and empty, the user still exists with its uid, and its
+/// slot is free again. It catches a kill that leaves children running as a lease uid, a
+/// home that keeps what the run left, and a slot that is never lent again.
 #[test]
 #[ignore = "needs root and creates users"]
-fn a_stop_ends_every_process_of_the_user_and_a_removal_deletes_it() {
+fn a_stop_ends_every_process_of_the_user_and_a_removal_resets_it() {
     let fixture = fixture();
     let mut rt = runtime(fixture);
     let script = "/bin/sleep 600 & /bin/sleep 600 & wait";
@@ -348,13 +375,23 @@ fn a_stop_ends_every_process_of_the_user_and_a_removal_deletes_it() {
         "a process of the user is left"
     );
     rt.remove(&id).unwrap();
-    assert!(!home.exists());
+    assert!(is_empty(&home), "the home keeps what the run left");
     let user = home.file_name().unwrap().to_str().unwrap().to_owned();
     let known = Command::new("/usr/bin/id")
         .args(["-u", &user])
         .output()
         .unwrap();
-    assert!(!known.status.success(), "the user {user} still exists");
+    assert_eq!(
+        String::from_utf8_lossy(&known.stdout).trim(),
+        uid.to_string(),
+        "the pool user {user} is gone or has another uid"
+    );
+    let pool = Client::new(&fixture.socket).pool_status().unwrap();
+    let slot: u32 = user.trim_start_matches("kbf-lease-pool-").parse().unwrap();
+    assert!(
+        pool.free.contains(&slot),
+        "slot {slot} is not free: {pool:?}"
+    );
 }
 
 /// Asserts that one run cannot read another run's files: the first writes a file in its
@@ -421,14 +458,16 @@ fn a_read_deny_is_refused_to_a_real_user_the_modes_would_let_in() {
     rt.remove(&id).unwrap();
 }
 
-/// Whether anything below `dir` (links not followed) belongs to `uid`.
-fn owned_by(uid: u32, dir: &Path) -> bool {
+/// Whether anything below `dir` (links not followed) belongs to `uid`, but the directory
+/// `home` itself, which a pool user keeps (what is in it counts).
+fn owned_by(uid: u32, dir: &Path, home: &Path) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
     };
     entries.flatten().any(|entry| {
         let meta = fs::symlink_metadata(entry.path()).unwrap();
-        meta.uid() == uid || (meta.is_dir() && owned_by(uid, &entry.path()))
+        (meta.uid() == uid && entry.path() != home)
+            || (meta.is_dir() && owned_by(uid, &entry.path(), home))
     })
 }
 
@@ -436,11 +475,12 @@ fn owned_by(uid: u32, dir: &Path) -> bool {
 const SYSV_SHM: &str =
     r#"my $id = shmget(0, 64, 0600 | 01000); print defined $id ? "created\n" : "denied\n""#;
 
-/// Asserts what a reused uid finds. The helper's uids are reused (ten runs on ten uids, so
-/// the eleventh runs as the first did). The first run makes a System V shared memory segment
-/// and leaves it: the profile does not deny System V IPC, so the segment is made, and the test
-/// requires that once the user is deleted no IPC object belongs to its uid and no file on
-/// the work volume does either. It fails, and says so, when the helper's removal leaves the
+/// Asserts what a reused uid finds. The helper lends the free pool user with the lowest
+/// slot, so runs one after another all run as the first user, and the eleventh runs as the
+/// first did. The first run makes a System V shared memory segment and leaves it: the
+/// profile does not deny System V IPC, so the segment is made, and the test requires that once the
+/// user is reset no IPC object belongs to its uid and no file on the work volume does
+/// either, but its own home, which is empty. It fails, and says so, when the helper's removal leaves the
 /// segment: that is the open risk, measured here. It catches a run that finds what an
 /// earlier run on its uid left.
 #[test]
@@ -449,6 +489,7 @@ fn a_reused_uid_sees_nothing_of_the_previous_run() {
     let fixture = fixture();
     let mut rt = runtime(fixture);
     let mut uids = Vec::new();
+    let mut homes = Vec::new();
     for n in 0..11 {
         let (program, args): (&str, Vec<&str>) = match n {
             0 => ("/usr/bin/perl", vec!["-e", SYSV_SHM]),
@@ -462,7 +503,9 @@ fn a_reused_uid_sees_nothing_of_the_previous_run() {
         if n == 0 {
             println!("PROBE the first run's shmget printed {printed:?}");
         }
-        uids.push(fs::metadata(home_of(fixture, &id)).unwrap().uid());
+        let home = home_of(fixture, &id);
+        uids.push(fs::metadata(&home).unwrap().uid());
+        homes.push(home);
         rt.remove(&id).unwrap();
         let ipcs = Command::new("/usr/bin/ipcs").arg("-a").output().unwrap();
         let listing = String::from_utf8_lossy(&ipcs.stdout);
@@ -477,15 +520,16 @@ fn a_reused_uid_sees_nothing_of_the_previous_run() {
         uids[0], uids[10],
         "the eleventh run did not reuse the first uid: {uids:?}"
     );
+    assert!(is_empty(&homes[0]), "the first user's home is not empty");
     assert!(
-        !owned_by(uids[0], &fixture.root),
+        !owned_by(uids[0], &fixture.root, &homes[0]),
         "files of the first user are left"
     );
 }
 
 /// Asserts that a fork bomb is held at the process limit and that the stop still works: a
 /// shell that starts sleeps without end reaches a limit of 64 processes of its user, the
-/// helper's kill (which forks as root) ends every one, and the removal deletes the user.
+/// helper's kill (which forks as root) ends every one, and the removal resets the user.
 /// It catches a stop that fails because the user has filled the process table.
 #[test]
 #[ignore = "needs root and creates users"]
@@ -637,10 +681,10 @@ fn two_platform_index(linux: &Digest, bundle: &Artifact) -> Vec<u8> {
 /// reference by the index digest and takes the darwin/arm64 manifest from it, with no request
 /// for the Linux entry; the start names the reference as its bundle and `@bundle/show` as
 /// its program; the program runs from the store's tree as the lease user (the uid it records
-/// is the uid of the user's home, in the helper's range, not root); and the removal deletes
-/// the user and the run directory. It catches an index digest that cannot be pulled, a pull
-/// that takes the wrong platform's manifest, an entrypoint that runs as root or unconfined,
-/// and a run directory left after the removal.
+/// is the uid of the user's home, in the helper's range, not root); and the removal resets
+/// the user, which empties its home. It catches an index digest that cannot be pulled, a
+/// pull that takes the wrong platform's manifest, an entrypoint that runs as root or
+/// unconfined, and a run directory left after the removal.
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_mac_runs_a_job_from_an_image_reference_by_digest() {
@@ -683,7 +727,7 @@ fn a_mac_runs_a_job_from_an_image_reference_by_digest() {
     assert_eq!(settle(&mut rt, &id), exited(0));
     let home = home_of(fixture, &id);
     let uid = fs::metadata(&home).unwrap().uid();
-    assert!((680..=689).contains(&uid), "ran as uid {uid}");
+    assert!(POOL_UIDS.contains(&uid), "ran as uid {uid}");
     let exec = home.join("exec");
     let recorded: u32 = fs::read_to_string(exec.join("uid"))
         .unwrap()
@@ -700,5 +744,5 @@ fn a_mac_runs_a_job_from_an_image_reference_by_digest() {
         "the entrypoint did not start from the store: {started_from}"
     );
     rt.remove(&id).unwrap();
-    assert!(!home.exists(), "the run directory is left");
+    assert!(is_empty(&home), "the run directory is left");
 }

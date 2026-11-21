@@ -463,6 +463,7 @@ fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
         [
             "boot-reset",
             "user-create 7.0",
+            "pool-status",
             "kill-uid 7.0",
             "user-delete 7.0"
         ]
