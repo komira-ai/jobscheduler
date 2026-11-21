@@ -199,6 +199,55 @@ fn the_auto_login_user_reads_as_set_unset_or_unreadable() {
     assert!(error.contains("running /usr/bin/defaults"), "{error}");
 }
 
+/// Asserts that an unset `autoLoginUser` reads as unset in the words of each macOS the
+/// pool runs on (the texts are what `defaults read` printed on macOS 26.4, 26.6 and
+/// 27.0.1), and that a failure naming neither form, even one about another key's domain,
+/// stays an error. Catches a read that knows only macOS 26's wording, which on macOS 27
+/// fails the VM user's resting check on every Mac with no auto-login set.
+#[test]
+fn an_unset_auto_login_user_reads_as_unset_on_macos_26_and_27() {
+    let dir = scratch("read-auto-login-versions");
+    let paths = SessionPaths::under(&dir);
+    let read = format!("{DEFAULTS} read {} autoLoginUser", paths.loginwindow);
+    let host = FakeHost::default();
+    let unset = [
+        "2026-11-20 21:29:13.385 defaults[84941:2779365] \nThe domain/default pair of \
+         (/Library/Preferences/com.apple.loginwindow, autoLoginUser) does not exist\n",
+        "Error: Could not find key 'autoLoginUser' in domain 'com.apple.loginwindow'.\n",
+    ];
+    for stderr in unset {
+        host.state().answers.insert(
+            read.clone(),
+            CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: stderr.to_owned(),
+            },
+        );
+        assert_eq!(read_auto_login(&host, &paths), Ok(None), "{stderr}");
+    }
+    let other = "Error: Could not read domain 'com.apple.loginwindow': not permitted.\n";
+    host.state().answers.insert(
+        read.clone(),
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: other.to_owned(),
+        },
+    );
+    assert_eq!(
+        read_auto_login(&host, &paths),
+        Err(failed(
+            &format!("defaults read {} autoLoginUser", paths.loginwindow),
+            &CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: other.to_owned(),
+            },
+        ))
+    );
+}
+
 /// Catches: a session switch on a Mac with FileVault on (it would restart to the
 /// unlock screen and never log in), or an unreadable answer taken as off.
 #[test]
