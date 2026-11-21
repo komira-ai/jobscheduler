@@ -255,7 +255,8 @@ placement, the periodic duties and the cordon under the rule:
 - **A placement claims its job and books its host in one transaction** (#877, #879).
 - **A pass re-reads the tables after any instance's commit** (#880), judged by the store's head revision.
 - **The job pass and the feed trim are duties claimed per period** (#881).
-- **A start that loses a race at the open retries** (#923).
+- **A start opens the job store in one pass while another instance writes** (#923): a row the
+  other instance changed between the open's read and its commit is read again alone; the open never starts over or waits.
 - **A second server keeps the first's bindings, taints and tokens, and the drain moves agents at once** (#935): the bindings save
   deletes only what this server's registry held (`js-lease-server/src/agent_state.rs:358`, `:369`), a hello of a host the registry does not
   know reads its binding row (`js-lease-server/src/agents.rs:572`), a token not held is read by key
@@ -282,7 +283,7 @@ and decides nothing shared). Paths are under `crates/`.
 | A claimed row is decided by one transaction | `js-state/src/postgres/claim.rs:98`, `js-state/src/postgres/session.rs:155-157` | the commit head taken first (`hold_head`), then the claimed row `FOR UPDATE SKIP LOCKED` (a held row is skipped, never waited for); the decision's reads are what its commit finds. This serializes the decisions of every instance on the head; their bodies are short (one job, one host's rows) | Built |
 | A schema migration is applied once by racing installers | `js-state/src/postgres/schema.rs:80` | `pg_advisory_xact_lock` inside the applying transaction, version re-read under it; the server itself only judges the schema | Built |
 | The job store's schema row is written once | `js-jobs/src/store.rs:227-235` | `Cond::Absent`; a conflict re-reads the row | Built |
-| The index backfill and the boot raise of deadlines at open | `js-lease-server/src/job_store.rs:195` (`booted_until_won`), `js-jobs/src/store/ending.rs:286`, `:336` | each write at `Cond::Version`; a beaten open retries (#923); a raise is a max, so a second start only delays deadlines | Built |
+| The index backfill and the boot raise of deadlines at open | `js-lease-server/src/job_store.rs` (`booted`), `js-jobs/src/store/index.rs` (`backfill_indexes`), `js-jobs/src/store/ending.rs` (`raise_at_boot`) | each row in a transaction of its own at `Cond::Version`, many to a store batch; a row another instance beat is read again and decided again alone, so the open is one pass whatever the other instance writes; a raise is a max, so a second start only delays deadlines | Built |
 | The first start imports the files beside the state file once | `js-lease-server/src/store/import.rs:99-100` | marker and rows `Cond::Absent` in one transaction, so one import wins; the loser's `Conflict` refuses its start (exit 2) instead of reading the marker | Built (correctness); Designed (G11: the loser starts) |
 | Row expiry (TTL) | `js-state/src/postgres/tx.rs:146`, `:289` | judged on the database clock inside each transaction | Built |
 | Feed trim | `js-lease-server/src/job_pass.rs:242`, `js-lease-server/src/job_store/feed_trim.rs:44` | a duty claimed per period; a trim by absolute revision is idempotent | Built |
@@ -482,9 +483,13 @@ one store are `js-lease-server/src/sched/jobs_two_servers_tests.rs::two_servers_
 `js-lease-server/src/job_pass_tests.rs::a_pass_another_server_claimed_is_left_to_it_until_the_period_is_out`,
 `js-jobs/src/suite/duties.rs::a_duty_is_claimed_by_one_server_for_each_period`,
 `js-jobs/src/suite/idempotency.rs::minted_ids_do_not_repeat_across_instances` and
-`js-state/tests/claim_decide.rs::writers_racing_for_one_row_place_it_once`. The whole update is
+`js-state/tests/claim_decide.rs::writers_racing_for_one_row_place_it_once`; a start beside an instance that changes a job
+before every call of the open is
+`js-lease-server/src/job_store_busy_tests.rs::a_server_opens_its_job_store_while_another_changes_jobs_without_a_pause`. The whole update is
 `js-lease-server/tests/server/live_update_load.rs`: `a_rolling_update_of_two_servers_under_load_fails_no_job` (two
-start-first rolls under load, each old server signalled inside a placement it pulled and inside a dispatch claim) and
+start-first rolls under load, each old server signalled inside a placement it pulled and inside a dispatch claim),
+`a_server_turns_ready_while_the_serving_server_changes_jobs_without_a_pause` (the new server starts and answers `/readyz`
+while the old one changes a job before every store call the new one makes) and
 `a_server_killed_mid_dispatch_leaves_the_start_to_the_other_after_the_lease` (the crash case of section 0.1).
 
 ## 9. The gaps, one pull request each

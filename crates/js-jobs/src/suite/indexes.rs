@@ -15,7 +15,7 @@ use crate::codec::{LATER_FORMAT, decode_allocation, decode_job, encode_allocatio
 use crate::store::queue_order;
 use crate::{
     AllocationRecord, AllocationStep, Backfill, Booked, EndReason, HostBooking, JobId, JobRecord,
-    JobState, JobStore, JobStoreError, NewJob, RandomIds, Retention,
+    JobState, JobStore, NewJob, RandomIds, Retention,
 };
 
 /// The hosts the random walk places on.
@@ -546,36 +546,19 @@ pub fn an_indexed_read_reads_every_page_of_entries<B: Backend>(backend: &B) {
     );
 }
 
-/// A backfill that loses a row to another writer between its read and its commit is stale,
-/// naming the job; one on a row whose key names no valid job id is that row's corrupt key. The
-/// next backfill finishes the work.
-pub fn a_backfill_that_loses_its_row_is_stale<B: Backend>(backend: &B)
+/// A backfill whose commit of a row's entries another writer beats (the row rewritten between
+/// the backfill's read and its commit) reads that row again and indexes it in the same
+/// backfill, for a job row, an allocation row and a row whose key names no valid job id alike:
+/// the backfill answers the entry it put, the row's other writer is not undone, and the next
+/// backfill finds nothing to do. Catches a backfill that gives up, refuses, or starts over when
+/// one row changes under it (on a busy store that never ends).
+pub fn a_backfill_that_loses_a_row_reads_it_again_and_indexes_it<B: Backend>(backend: &B)
 where
     B::Store: 'static,
 {
-    let name = "a_backfill_that_loses_its_row_is_stale";
+    let name = "a_backfill_that_loses_a_row_reads_it_again_and_indexes_it";
     let rig = rig(backend);
-    for (key, error) in [
-        (
-            "job/bs-raced",
-            JobStoreError::Stale {
-                id: job_id("bs-raced"),
-            },
-        ),
-        (
-            "alloc/bs-raced",
-            JobStoreError::Stale {
-                id: job_id("bs-raced"),
-            },
-        ),
-        (
-            "job/bs*bad",
-            JobStoreError::Corrupt {
-                key: "job/bs*bad".to_owned(),
-                why: crate::DecodeError::WrongKey,
-            },
-        ),
-    ] {
+    for key in ["job/bs-raced", "alloc/bs-raced", "job/bs*bad"] {
         let value = vec![LATER_FORMAT];
         rig.store
             .inner()
@@ -590,15 +573,83 @@ where
                 .expect("reachable")
                 .expect("the other writer commits");
         });
+        let version = rig.raw(key).map(|row| row.version);
         assert_eq!(
             rig.jobs.backfill_indexes(),
-            Err(error),
-            "{name}: a backfill over a changed {key} was not refused by name"
+            Ok(Backfill {
+                added: 1,
+                removed: 0
+            }),
+            "{name}: a backfill over a changed {key} did not index it"
+        );
+        assert_ne!(
+            rig.raw(key).map(|row| row.version),
+            version,
+            "{name}: the other writer's rewrite of {key} did not land"
         );
         assert_eq!(
-            rig.jobs.backfill_indexes().map(|done| done.added),
-            Ok(1),
-            "{name}: the next backfill did not index {key}"
+            rig.jobs.backfill_indexes(),
+            Ok(Backfill::default()),
+            "{name}: the backfill left work on {key} for the next one"
         );
     }
+}
+
+/// A backfill whose commit of a row's entries another writer beats by deleting the row (as an
+/// earlier build or a hand would, leaving its entries behind) reads the row again, finds it
+/// gone and deletes every entry of it the backfill knew of, at the row's absence: no entry of
+/// the row is left, and the next backfill finds nothing to do. Catches a backfill that puts the
+/// entries of a row deleted since it read it, or leaves that row's entries pointing at nothing.
+pub fn a_backfill_whose_row_is_deleted_before_its_commit_deletes_its_entries<B: Backend>(
+    backend: &B,
+) where
+    B::Store: 'static,
+{
+    let name = "a_backfill_whose_row_is_deleted_before_its_commit_deletes_its_entries";
+    let rig = rig(backend);
+    let id = rig.queue("bd-deleted");
+    let entries = |rig: &Rig<B::Store>| -> BTreeSet<String> {
+        rig.jobs
+            .index_entries()
+            .expect("reads")
+            .into_iter()
+            .filter(|entry| entry.ends_with("bd-deleted"))
+            .collect()
+    };
+    let queued_entry = crate::keys::queued(&id);
+    assert_eq!(
+        entries(&rig),
+        BTreeSet::from([crate::keys::active(&id), queued_entry.clone()]),
+        "{name}: a queued job is not under its two entries"
+    );
+    let inner = rig.store.inner();
+    inner
+        .txn(Txn::new().delete(queued_entry, Cond::Any))
+        .expect("reachable")
+        .expect("the queued entry is lost, as a hand would lose it");
+    let row = crate::keys::job(&id);
+    rig.store.before_next(move || {
+        inner
+            .txn(Txn::new().delete(row, Cond::Any))
+            .expect("reachable")
+            .expect("the other writer deletes the row");
+    });
+    assert_eq!(
+        rig.jobs.backfill_indexes(),
+        Ok(Backfill {
+            added: 0,
+            removed: 2
+        }),
+        "{name}: the backfill did not delete both entries it knew of the deleted row"
+    );
+    assert_eq!(
+        entries(&rig),
+        BTreeSet::new(),
+        "{name}: an entry of the deleted row is left"
+    );
+    assert_eq!(
+        rig.jobs.backfill_indexes(),
+        Ok(Backfill::default()),
+        "{name}: the backfill left work for the next one"
+    );
 }
