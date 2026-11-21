@@ -98,8 +98,9 @@ pub struct Env<'a> {
     /// needs no join token (see `prepare`).
     pub host_identity: Option<&'a HostIdentity>,
     /// The host's flags file sets an egress ceiling (`--egress allow-list` or `open`), or
-    /// cannot be read: the agent's next process would remove the runs it was to adopt, so an
-    /// update drains the host instead of handing the runs over (see `prepare`).
+    /// cannot be read: the runs have network wiring, so an update hands them over only between
+    /// agents that both list `egress-handover` on their `stops:` line, and drains the host
+    /// otherwise (see `prepare`).
     pub egress: bool,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).

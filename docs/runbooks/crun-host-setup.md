@@ -131,10 +131,25 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **A job's wall limit** counts the time the job ran with no agent, but only a running agent stops
   a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
   its result says it timed out.
-- **An agent with an allow-list `--egress`** takes over no container that may still run: its
-  start removes every network wiring an earlier process made, so it removes those containers
-  instead, and their jobs are lost. A container that ended while no agent ran has no network
-  left: it is taken over and its result reported, as above.
+- **An agent with an `--egress` ceiling** (`allow-list` or `open`) takes over a container's
+  network wiring with the container. The agent keeps one record per wired run in the egress
+  store, the directory `egress` of its state root (`/var/lib/js-agent/state/egress`), written
+  when it wires the run and removed when it takes the wiring down: the run's address block, its
+  level and its declared ports. The stopping agent leaves each run's veth pair, set member and
+  port forwards in place, and the records with them, so the kernel's rules enforce with no agent
+  running. The next agent's start reads the records, loads the firewall in one transaction that
+  puts each recorded run's member and forwards back (so the job's egress holds before, during
+  and after the restart), and then takes over each run from its record after comparing the
+  level and ports in it with those the container's labels (`jobscheduler.dev/network`,
+  `jobscheduler.dev/network-ports`) give. It removes the wiring and the record of every run no
+  one took over, any record it cannot read or use, and any `jsv`/`jsp` interface no record
+  names. A container that does not fit (no network label, no record or a record that differs, a
+  level above the agent's ceiling, a port the ceiling does not list, or an agent with no ceiling
+  and a container wired at a level above none) is removed and its job lost, as any container the
+  agent cannot take over. A container that ended while no agent ran has no network left: it is
+  taken over and its result reported, as above. What is not handed over: the host-port relay
+  connections (`--host-port`) the agent process itself carries end with it, and the next agent
+  offers them again.
 
 ## Agent updates while jobs run
 
@@ -166,12 +181,14 @@ for no lease, stop):
 - the runtime is crun and the unit manager systemd;
 - the new release's unit is the same as the installed one (a changed unit must start from an
   empty cgroup, which a running job keeps busy);
-- the flags file sets no `--egress allow-list` or `open` (such an agent removes the jobs it would
-  take over at its start). An `--egress` given only on the unit's command line is not seen by
-  the hook, and such an agent does not read the file: it drains, and its jobs are stopped once
-  `--drain-wait` has passed;
-- the running agent can hand over: `js-agent --version` prints `stops: drain handover`. The
-  first update from a release without that line still drains.
+- on a host whose flags file sets `--egress allow-list` or `open`, both the running agent (which
+  leaves the wiring in place) and the new release's agent (which adopts it) list
+  `egress-handover` on the `stops:` line of `js-agent --version`; a host whose flags file cannot be
+  read is treated as having a ceiling. An `--egress` given only on the unit's command line is not
+  seen by the hook, and such an agent does not read the file: it drains, and its jobs are
+  stopped once `--drain-wait` has passed;
+- the running agent can hand over: `js-agent --version` prints `stops: drain handover` (and
+  `egress-handover`, as above). The first update from a release without that line still drains.
 
 What does not survive the restart's few seconds: a job's `--host-port` listeners, and the
 connections open through them, are the agent's and end with it; they are down until the new
