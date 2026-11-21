@@ -45,6 +45,8 @@ pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
 
+// The suite asserts the size of a store batch; nothing else outside `written` reads it.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use written::GROUP;
 pub use written::{Step, Written};
 
