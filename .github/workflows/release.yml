@@ -202,10 +202,11 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
 
   # The unit tests of the deploy path: the workspace's tests, those `ci`'s `test` job runs with
-  # `cargo test --workspace`, and with them the four js-sim-cell binaries behind its feature
-  # `slow-families` that `test` leaves out (not its `--ignored` live steps, and not the privileged, live and
-  # coverage jobs of `ci`, which do not gate the release), under cargo-nextest in four shards on
-  # four runners, beside the build. It starts at the push, without waiting for `plan`, so it is
+  # `cargo nextest run --workspace`, and with them the four js-sim-cell binaries behind its
+  # feature `slow-families` that `test` leaves out (not its `--ignored` live steps, and not the
+  # privileged, live and coverage jobs of `ci`, which do not gate the release), under
+  # cargo-nextest in four shards on four runners, beside the build. It starts at the push,
+  # without waiting for `plan`, so it is
   # not after anything on the clock; `turn`, and so `publish`, needs every shard to pass. Like
   # `test` it has a Postgres service (js-state's tests fail without it) and restores the Cargo
   # cache that `test` saves on main, read-only (the js-sim-cell binaries behind `slow-families` it
