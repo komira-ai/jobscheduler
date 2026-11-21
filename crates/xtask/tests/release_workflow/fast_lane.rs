@@ -138,16 +138,20 @@ fn the_release_has_no_concurrency_group() {
     assert_eq!(concurrency_problems(&job_level).len(), 1);
 }
 
-/// What is wrong with the jobs that need `ci-passed` and with `plan`'s needs.
-fn ci_passed_problems(text: &str) -> Vec<String> {
+/// What is wrong with the release's wait for `ci`: a job named `ci-passed`, a job that needs it,
+/// or a `plan` with needs.
+fn ci_wait_problems(text: &str) -> Vec<String> {
     let all = jobs(text);
     let mut problems = Vec::new();
+    if all.iter().any(|(name, _)| name == "ci-passed") {
+        problems.push("a job ci-passed waits for ci".to_owned());
+    }
     let waiting: Vec<&str> = all
         .iter()
         .filter(|(_, lines)| needs(lines).iter().any(|n| n == "ci-passed"))
         .map(|(name, _)| name.as_str())
         .collect();
-    if waiting != ["release-red", "release-green"] && waiting != ["release-green", "release-red"] {
+    if !waiting.is_empty() {
         problems.push(format!("jobs that need ci-passed: {waiting:?}"));
     }
     if !needs(job(&all, "plan")).is_empty() {
@@ -156,32 +160,49 @@ fn ci_passed_problems(text: &str) -> Vec<String> {
     problems
 }
 
-/// Asserts that no job but `release-red` and `release-green` needs `ci-passed` and that `plan`
-/// has no needs, so the release does not wait for `ci`; a job that needs `ci-passed` and a plan
-/// that waits are refused.
+/// Asserts that release.yml has no `ci-passed` job, that no job needs one, and that `plan` has no
+/// needs, so nothing in the release waits for `ci`; a restored `ci-passed` job, a report that
+/// needs it, a job that needs it and a plan that waits are refused.
 #[test]
-fn only_the_release_reports_need_ci_passed_and_plan_waits_for_nothing() {
+fn nothing_in_the_release_waits_for_ci() {
     let text = workflow();
     refused(
-        ci_passed_problems,
+        ci_wait_problems,
         &text,
         "plan",
         "    if: ${{ github.event_name == 'pull_request'",
         "    needs: [ci-passed]\n    if: ${{ github.event_name == 'pull_request'",
     );
     refused(
-        ci_passed_problems,
+        ci_wait_problems,
         &text,
         "publish",
         "    needs: [plan, artifacts, unit-tests, turn]",
         "    needs: [plan, artifacts, unit-tests, turn, ci-passed]",
     );
     refused(
-        ci_passed_problems,
+        ci_wait_problems,
         &text,
         "release-green",
-        "needs: [plan, ci-passed, ",
         "needs: [plan, ",
+        "needs: [plan, ci-passed, ",
+    );
+    refused(
+        ci_wait_problems,
+        &text,
+        "release-red",
+        "needs: [unit-tests, ",
+        "needs: [ci-passed, unit-tests, ",
+    );
+    let with_job = text.replacen(
+        "\njobs:\n",
+        "\njobs:\n  ci-passed:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n\n",
+        1,
+    );
+    assert_ne!(with_job, text);
+    assert_eq!(
+        ci_wait_problems(&with_job),
+        vec!["a job ci-passed waits for ci".to_owned()]
     );
 }
 
