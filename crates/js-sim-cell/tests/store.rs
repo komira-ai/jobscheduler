@@ -105,7 +105,7 @@ fn the_sqlite_and_postgres_stores_give_the_same_trace_hash() {
     let golden = GoldenFile::new(
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/trace-hashes.txt"),
         world::FAMILY,
-        "cargo test -p js-sim-cell --test replay -- --ignored regenerate_golden_hashes",
+        "cargo test -p js-sim-cell --features slow-families --test replay -- --ignored regenerate_golden_hashes",
     );
     let runs = world::restart(Store::Postgres)
         .run_seeds(world::GOLDEN_SEEDS)
