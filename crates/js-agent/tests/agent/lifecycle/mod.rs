@@ -40,6 +40,7 @@ mod provider_flags;
 mod providers;
 mod providers_end;
 mod providers_restart;
+mod providers_stop;
 pub mod quota;
 mod quota_health;
 mod reach;

@@ -8,7 +8,7 @@
 //! applied as ever ([`crate::agent_api`]).
 //!
 //! What the server already committed stays: a job it placed before the drain is in the job
-//! tables, and whichever server the host says hello to next sends its start. The job pass
+//! tables, and whichever server the host's next request reaches sends its start. The job pass
 //! (expiries, retention, loss) keeps running in the tick until the process exits, under its
 //! claim as before.
 

@@ -234,6 +234,8 @@ pub use gpu::{
 };
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
+#[cfg(test)]
+pub(crate) use rootfs::warn_unreadable;
 pub use settings::{CgroupSettings, CrunError, CrunSettings, Hooks, HostPorts};
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, MountSeam, PULL_THREADS, Seams, WireError,
