@@ -393,7 +393,7 @@ fn the_package_workflow_started_by_a_pull_request_is_refused() {
         "on:\n  pull_request:\n  workflow_call:\n",
     );
     let (_, problems) = lint(&workflows);
-    for job in ["build", "sign"] {
+    for job in ["build", "build-update", "sign"] {
         let want =
             format!("js-agent-macos-pkg.yml/{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)");
         assert!(problems.contains(&want), "{problems:?}");

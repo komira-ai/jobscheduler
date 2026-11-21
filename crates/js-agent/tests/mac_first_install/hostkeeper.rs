@@ -1,4 +1,5 @@
-//! hostkeeper's daemon for the one package, as its order path runs on a Mac: hostkeeper's own
+//! hostkeeper's daemon for a package (the agent's, or the host group's config package: a
+//! [`Service`] each), as its order path runs on a Mac: hostkeeper's own
 //! installer (`MacosPkg`), version directory (`stage_filled`), seal (`Staged::seal`), switch of
 //! `current` (`Placer::switch_current`), launchd step launcher (`LaunchdLauncher::system`) and
 //! step runner (`StepRunner`), at the revision the workspace pins. What the daemon keeps in its
@@ -7,12 +8,15 @@
 //! installer's `activate`, then the switch of `current`) and `back` for a first install (the
 //! `run` jobs stopped, the installer's `remove`, then `current` removed when it names the target),
 //! and `update_order` (the hook's program mapped into the sealed tree, its arguments, bounds and
-//! params from the manifest the release writes for the Mac).
+//! params from the manifest the release writes for the Mac, and for an update the release it
+//! replaces and its hook). A daemon rolls an update back by nothing here: `Back` of an update is
+//! an error, since the test that runs one expects it to succeed.
 //!
 //! Not reproduced: the fetch of the package by its pin (the test hands the installer the file),
 //! the `target.json` the daemon writes beside the tree (nothing of the steps reads it), the
 //! daemon's quarantine and code-signature check of the staged tree, `placed.json` (the
-//! installer's records are kept in memory, as hostkeeper's own installer test keeps them) and
+//! installer's records are kept in memory, as hostkeeper's own installer test keeps them, one
+//! set for every package of the host) and
 //! the signature of the package: the runner cannot sign one, so `pkgutil --check-signature` of
 //! this package is answered as signed by a leaf the signers list names ([`Signed`]), as
 //! hostkeeper's own installer test answers it. Every other tool call is the Mac's.
@@ -39,25 +43,71 @@ use hostkeeper_launchd::{
 };
 use hostkeeper_placed::{Placer, RealFs, Roots, UnitControl};
 use hostkeeper_steps::{
-    Bounds, Captured, Finished, RecordStore, Staged, StepLog, StepRunner, Switch, SwitchError,
-    SystemClock, Toward, UpdateOrder,
+    Bounds, Captured, Finished, PreviousHook, RecordStore, Staged, StepLog, StepRunner, Switch,
+    SwitchError, SystemClock, Toward, UpdateOrder,
 };
 use sha2::{Digest as _, Sha256};
 
-/// The service, as the Mac's hostgroup names it.
+/// The agent's service, as the Mac's hostgroup names it.
 pub const SERVICE: &str = "js-agent";
 
-/// The package's identifier (the manifest's `package`).
-const IDENTIFIER: &str = "com.komira.js-agent";
-
-/// The manifest's `run`: the agent, its root helper and the pf anchor's job.
+/// The manifest's `run` of the agent: the agent, its root helper and the pf anchor's job.
 pub const RUN: [&str; 3] = ["js-agent", "js-agent.session", "js-agent.pf-pool"];
 
-/// The program of the manifest's hook command, an absolute path the package installs.
-const HOOK_PROGRAM: &str = "/Library/Application Support/js-agent/bin/js-agent";
+/// The config package's service, as the Mac's hostgroup names it: `js-agent-config-<group>`.
+pub const CONFIG_SERVICE: &str = "js-agent-config-mac-build";
 
-/// The same program in the sealed tree, which is where the daemon runs it from.
-const HOOK_BINARY: &str = "tree/Library/Application Support/js-agent/bin/js-agent";
+/// The launcher the config package carries, at the path it installs it at.
+pub const CONFIG_HOOK: &str = "/private/etc/js-agent/config-hook";
+
+/// What differs between the packages the daemon installs: the names of the manifest, the hook
+/// with its bounds, and the params.
+pub struct Service {
+    /// The service's name.
+    pub name: &'static str,
+    /// The package's identifier (the manifest's `package`).
+    identifier: &'static str,
+    /// The manifest's `run`.
+    run: &'static [&'static str],
+    /// The program of the manifest's hook command, an absolute path the package installs.
+    hook_program: &'static str,
+    /// The same program in the sealed tree, which is where the daemon runs it from.
+    hook_binary: &'static str,
+    /// The hook command's arguments after its program.
+    hook_args: &'static [&'static str],
+    /// The manifest's hook bounds.
+    bounds: Bounds,
+    /// The manifest's `params`.
+    params: &'static str,
+}
+
+/// The agent's package.
+pub const AGENT: Service = Service {
+    name: SERVICE,
+    identifier: "com.komira.js-agent",
+    run: &RUN,
+    hook_program: "/Library/Application Support/js-agent/bin/js-agent",
+    hook_binary: "tree/Library/Application Support/js-agent/bin/js-agent",
+    hook_args: &["update-hook"],
+    bounds: BOUNDS,
+    params: MAC_PARAMS,
+};
+
+/// The host group's config package. Its manifest (packaging/js-agent-macos/README.md) names the
+/// installed agent as its hook program, but hostkeeper at the pinned revision runs a hook from
+/// the package's sealed tree alone and refuses one the package does not install, so the
+/// test's package carries [`CONFIG_HOOK`], a launcher that runs the installed
+/// `js-agent config-hook` with the arguments it is given.
+pub const CONFIG: Service = Service {
+    name: CONFIG_SERVICE,
+    identifier: CONFIG_SERVICE,
+    run: &[],
+    hook_program: CONFIG_HOOK,
+    hook_binary: "tree/private/etc/js-agent/config-hook",
+    hook_args: &["config-hook"],
+    bounds: CONFIG_BOUNDS,
+    params: CONFIG_PARAMS,
+};
 
 /// hostkeeper's state directory on a Mac (`placed.json`, `facts.json`, `identity/`).
 pub const STATE_DIR: &str = "/var/lib/hostkeeper";
@@ -117,6 +167,29 @@ verify_timeout_secs   = 615
 rollback_timeout_secs = 8220
 cleanup_timeout_secs  = 120
 verify_deadline_secs  = 9000
+"#;
+
+/// The config package's hook bounds (the `timeoutSecs` of its manifest).
+const CONFIG_BOUNDS: Bounds = Bounds {
+    prepare_secs: 60,
+    cutover_secs: 420,
+    verify_secs: 300,
+    rollback_secs: 420,
+    cleanup_secs: 60,
+    verify_deadline_secs: 600,
+    promotion_ceiling_secs: u64::MAX,
+    cleanup_retries: 3,
+};
+
+/// The config package's `params`, as packaging/js-agent-macos/README.md gives them.
+const CONFIG_PARAMS: &str = r#"unit                  = "js-agent"
+flags_file            = "/etc/js-agent/flags"
+token_file            = "/etc/js-agent/token"
+state_root            = "/var/db/js-agent/state"
+state_dir             = "/var/db/js-agent-config"
+cutover_timeout_secs  = 420
+verify_timeout_secs   = 300
+rollback_timeout_secs = 420
 "#;
 
 /// `pkgutil --check-signature`'s answer for a package signed by [`LEAF`] whose chain the Mac
@@ -208,11 +281,12 @@ pub struct Ran {
     pub stderr: String,
 }
 
-/// The daemon's ports for the package: its installer over the Mac's tools, and the package.
+/// The daemon's ports for a package: its installer over the Mac's tools, and the package.
 pub struct Daemon {
+    spec: &'static Service,
     host: Host,
     tools: Signed,
-    records: Memory,
+    records: Arc<Memory>,
     lock: InstallerLock,
     signers: Signers,
     order: Order,
@@ -224,8 +298,26 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// The daemon of a Mac ordered to install `pkg` as `version`.
-    pub fn new(given: &Path, version: &str) -> Daemon {
+    /// The daemon of a Mac ordered to install the package `given` of `spec` as `version`.
+    pub fn new(spec: &'static Service, given: &Path, version: &str) -> Daemon {
+        Daemon::build(spec, given, version, Arc::default(), Arc::default())
+    }
+
+    /// The same daemon, ordered to install another package, of `spec` (the same service at
+    /// another version, or another service): the installer's records and the log of the steps
+    /// are the ones this daemon keeps, as one daemon keeps them for the host.
+    pub fn another(&self, spec: &'static Service, given: &Path, version: &str) -> Daemon {
+        let records = Arc::clone(&self.records);
+        Daemon::build(spec, given, version, records, Arc::clone(&self.ran))
+    }
+
+    fn build(
+        spec: &'static Service,
+        given: &Path,
+        version: &str,
+        records: Arc<Memory>,
+        ran: Arc<Mutex<Vec<Ran>>>,
+    ) -> Daemon {
         let bytes = fs::read(given).unwrap_or_else(|e| panic!("read {}: {e}", given.display()));
         fs::create_dir_all(PACKAGES).expect("the packages directory");
         // The daemon stages its own root-owned download of the package (its package store), never
@@ -234,28 +326,30 @@ impl Daemon {
         let pkg = own_copy(given, &bytes);
         let pkg = pkg.as_path();
         Daemon {
+            spec,
             host: Host::mac(),
             tools: Signed {
                 package: pkg.to_str().expect("a UTF-8 path").to_owned(),
             },
-            records: Memory::default(),
+            records,
             lock: InstallerLock::new(&Path::new(STATE_DIR).join("installer.lock")),
             signers: Signers::new(vec![Fingerprint::parse(LEAF).expect("64 hex")])
                 .expect("one signer"),
             order: Order {
-                service: ServiceName::new(SERVICE).expect("a service name"),
+                service: ServiceName::new(spec.name).expect("a service name"),
                 version: Version::new(version).expect("a version"),
-                identifier: IDENTIFIER.to_owned(),
-                run: RUN
+                identifier: spec.identifier.to_owned(),
+                run: spec
+                    .run
                     .iter()
                     .map(|label| Label::parse(label).expect("a label"))
                     .collect(),
                 bounds: INSTALLER_BOUNDS,
-                hook: Some(HOOK_PROGRAM.to_owned()),
+                hook: Some(spec.hook_program.to_owned()),
             },
             digest: hex::encode(Sha256::digest(&bytes)),
             pkg: pkg.to_owned(),
-            ran: Arc::default(),
+            ran,
         }
     }
 
@@ -263,7 +357,7 @@ impl Daemon {
         MacosPkg {
             tools: &self.tools,
             host: &self.host,
-            records: &self.records,
+            records: &*self.records,
             lock: &self.lock,
             signers: &self.signers,
         }
@@ -300,38 +394,70 @@ impl Daemon {
     /// The order the daemon runs the hook's steps for: `update_order` of a first install.
     pub fn order(&self, staged: &Staged, order_try: u64) -> UpdateOrder {
         UpdateOrder {
-            service: SERVICE.to_owned(),
+            service: self.spec.name.to_owned(),
             target_version: self.version().to_owned(),
             previous_version: None,
             artifact_digest: self.digest.clone(),
             staged: staged.clone(),
             previous: None,
-            hook_binary: PathBuf::from(HOOK_BINARY),
-            hook_args: vec!["update-hook".to_owned()],
+            hook_binary: PathBuf::from(self.spec.hook_binary),
+            hook_args: self
+                .spec
+                .hook_args
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect(),
             previous_hook: None,
-            bounds: BOUNDS,
-            declared_params: Params::parse_declared(MAC_PARAMS).expect("the Mac params"),
+            bounds: self.spec.bounds.clone(),
+            declared_params: Params::parse_declared(self.spec.params).expect("the Mac params"),
             min_updater_protocol: None,
             order_try: Some(order_try),
             builtin_steps: false,
         }
     }
 
+    /// `update_order` of an update from the release `replaced` (its version and its sealed
+    /// directory), whose hook is the same program of that release's tree.
+    pub fn order_over(
+        &self,
+        staged: &Staged,
+        order_try: u64,
+        replaced: (&str, &Staged),
+    ) -> UpdateOrder {
+        let (version, previous) = replaced;
+        UpdateOrder {
+            previous_version: Some(version.to_owned()),
+            previous: Some(previous.clone()),
+            previous_hook: Some(PreviousHook {
+                binary: PathBuf::from(self.spec.hook_binary),
+                args: self
+                    .spec
+                    .hook_args
+                    .iter()
+                    .map(|a| (*a).to_owned())
+                    .collect(),
+            }),
+            ..self.order(staged, order_try)
+        }
+    }
+
     /// The daemon's switch around the steps. `Target` is `activate_pkg`: the installer's
-    /// `activate`, then `current` switched to the target, or, unless `moves_current`, left as it
-    /// is. `Back` is `back` of a first install. `Confirmed` does nothing, as the daemon's does.
+    /// `activate` (from the release the order replaces, if it has one), then `current` switched to
+    /// the target, or, unless `moves_current`, left as it is. `Back` is `back` of a first install.
+    /// `Confirmed` does nothing, as the daemon's does.
     pub fn switch(self: &Arc<Self>, moves_current: bool) -> Switch {
         let daemon = Arc::clone(self);
         Arc::new(move |toward, order: &UpdateOrder| match toward {
-            Toward::Target => daemon.activate(order.staged.dir(), moves_current),
-            Toward::Back => daemon.back(order.staged.dir()),
+            Toward::Target => daemon.activate(order, moves_current),
+            Toward::Back => daemon.back(order),
             Toward::Confirmed => Ok(()),
         })
     }
 
-    fn activate(&self, dir: &Path, moves_current: bool) -> Result<(), SwitchError> {
+    fn activate(&self, order: &UpdateOrder, moves_current: bool) -> Result<(), SwitchError> {
+        let from = order.previous.as_ref().map(Staged::dir);
         self.installer()
-            .activate(&self.order, dir, None)
+            .activate(&self.order, order.staged.dir(), from)
             .map_err(|e| SwitchError::Failed(format!("activate: {e:?}")))?;
         if moves_current {
             let units = units()?;
@@ -343,8 +469,14 @@ impl Daemon {
         Ok(())
     }
 
-    fn back(&self, dir: &Path) -> Result<(), SwitchError> {
+    fn back(&self, order: &UpdateOrder) -> Result<(), SwitchError> {
         let failed = |what: &str, why: String| SwitchError::Failed(format!("{what}: {why}"));
+        if order.previous.is_some() {
+            return Err(failed(
+                "back",
+                "this test does not roll an update back to its previous release".to_owned(),
+            ));
+        }
         let units = units()?;
         for label in &self.order.run {
             units
@@ -352,19 +484,19 @@ impl Daemon {
                 .map_err(|e| failed("stop", format!("{e:?}")))?;
         }
         self.installer()
-            .remove(&self.order, &[dir])
+            .remove(&self.order, &[order.staged.dir()])
             .map_err(|e| failed("remove", format!("{e:?}")))?;
         let fs = RealFs::new(Path::new("/"));
         let placer = Placer::new(roots(), &fs, &units);
         let named = placer
-            .current(SERVICE)
+            .current(self.spec.name)
             .map_err(|e| failed("current", format!("{e:?}")))?;
         if named.as_deref() != Some(self.version()) {
             return Ok(());
         }
-        let current = current_link();
-        fs::remove_file(&current)
-            .and_then(|()| fs::File::open(service_dir())?.sync_all())
+        let dir = service_dir_of(self.spec.name);
+        fs::remove_file(dir.join("current"))
+            .and_then(|()| fs::File::open(&dir)?.sync_all())
             .map_err(|e| failed("remove current", e.to_string()))
     }
 
@@ -420,9 +552,14 @@ fn roots() -> Roots {
     )
 }
 
-/// The package's directory in the packages directory.
+/// The agent's directory in the packages directory.
 pub fn service_dir() -> PathBuf {
-    Path::new(PACKAGES).join(SERVICE)
+    service_dir_of(SERVICE)
+}
+
+/// The directory of `service` in the packages directory.
+pub fn service_dir_of(service: &str) -> PathBuf {
+    Path::new(PACKAGES).join(service)
 }
 
 /// The package's `current` link, which the params name as `release_link`.

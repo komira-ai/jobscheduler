@@ -112,13 +112,18 @@ come back. Nothing in the package does any of this at install time.
 
 ## Signing
 
-The workflow has three jobs. `build` runs in the beta stage of the release (`release.yml` calls
+The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
-unsigned, checks it and uploads it, and names no secret: no code of a branch can see a signing
-key. `first-install` runs on a manual run alone, on any branch, and calls
+unsigned (the steps are the local action `.github/actions/js-agent-macos-pkg`), checks it and
+uploads it, and names no secret: no code of a branch can see a signing key. `build-update` runs
+beside it and builds a second package with the same action, of the next patch version
+(`.github/actions/js-agent-next-version`), as the artifact `js-agent-macos-pkg-update-unsigned`
+for a day: the first install updates the agent to it, and nothing signs it or releases it.
+`first-install` runs on a manual run alone, on any branch, and calls
 `js-agent-macos-first-install.yml` with the version typed: it installs the unsigned package
-`build` made on the runner, the way hostkeeper does, and runs the update hook's prepare,
-cutover, verify and cleanup as root with launchd loading the jobs (the release runs it as its own
+`build` made on the runner, the way hostkeeper does, runs the update hook's prepare,
+cutover, verify and cleanup as root with launchd loading the jobs, rolls a config package over
+the agent and updates the agent to the package `build-update` made (the release runs it as its own
 beta job, `beta-macos-first-install`). `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
 from `build`, imports the installer certificate into a temporary keychain, finds the
 "Developer ID Installer" identity there by its SHA-1, signs with `productsign --timestamp`,
@@ -234,10 +239,14 @@ Known limits:
 - The update hook's unit tests run its `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`,
   `print`) against a fake of `launchctl`; the real launchd is reached by the first-install
   test (`mac_first_install`, run by `js-agent-macos-first-install.yml` on a hosted runner), which
-  covers a first install only (a failed attempt and the next order), not an update of a running
-  agent: what `launchctl print` prints of a daemon that crashed (its `last exit code`) and
-  `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and from what the
-  fake says. `kickstart -k` runs a daemon whatever its `KeepAlive`
+  covers a first install (a failed attempt and the next order), a config package rolled over the
+  running agent (its `config-hook`, with its state directory under `/var`, a link) and an update
+  of the running agent to the next version, each to `Succeeded`. It covers no rollback: what
+  `launchctl print` prints of a daemon that crashed (its `last exit code`) and `bootout` waiting
+  out the agent's `ExitTimeOut` are read from the manual and from what the fake says. In that test
+  the config package carries a launcher at `/etc/js-agent/config-hook` that runs the installed
+  `js-agent config-hook`, because hostkeeper at the pinned revision runs a hook from the
+  package's own sealed tree only; the manifest above names the installed agent instead. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
 - The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake

@@ -11,7 +11,9 @@
 //! The lease server is the one the agent's end-to-end tests start in their process (js-lease-server
 //! `start`), over TLS with the certificate the flags file's `--ca-cert` names, trusting the test's
 //! CA for agents (`--agent-client-ca`), with a pool `mac-build` that asks `os=macos` and
-//! `arch=arm64`. Its clock stands at a fixed instant inside the certificates' validity.
+//! `arch=arm64`. Its clock stands at a fixed instant inside the certificates' validity, and moves
+//! only when the test moves it ([`LeaseServer::advance`]): a session of a host is told from the
+//! one before it by the instant it began, so the test moves the clock before an agent restarts.
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -129,6 +131,7 @@ pub struct LeaseServer {
     running: Option<Running>,
     runtime: Runtime,
     _ticks: TickHandle,
+    clock: ManualClock,
     url: String,
     /// The server's own certificate, which the agent and the test trust.
     server_cert: PathBuf,
@@ -179,13 +182,14 @@ impl LeaseServer {
         let (ticks, ticker) = channel_ticker();
         let runtime = Runtime::new().expect("a runtime");
         let running = runtime
-            .block_on(start(config, SharedClock::new(clock), ticker))
+            .block_on(start(config, SharedClock::new(clock.clone()), ticker))
             .expect("the lease server starts");
         let url = format!("https://{}", running.addr());
         LeaseServer {
             running: Some(running),
             runtime,
             _ticks: ticks,
+            clock,
             url,
             server_cert,
             client_token,
@@ -195,6 +199,12 @@ impl LeaseServer {
     /// The address the flags file's `--server` names.
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Moves the server's clock forward by `by`, so that the next session a host opens begins at
+    /// another instant than the one it has now.
+    pub fn advance(&self, by: Duration) {
+        self.clock.advance(by);
     }
 
     /// The entry of `host` in `GET /v1/hosts`, read with the client token, as JSON
@@ -239,6 +249,14 @@ impl LeaseServer {
             .expect("the server answers");
         assert_eq!(reply.status, 200, "{}", reply.body);
         reply.body
+    }
+}
+
+impl LeaseServer {
+    /// The instant the session `host` is in began (`session_started_ms` of the agent's reading of
+    /// itself), `None` when the server shows it in no session.
+    pub fn session_started(&self, host: &str) -> Option<u64> {
+        self.host_as_itself(host)["session_started_ms"].as_u64()
     }
 }
 

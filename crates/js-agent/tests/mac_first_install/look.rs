@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::hostkeeper::{RUN, Ran, service_dir};
+use crate::hostkeeper::{CONFIG_SERVICE, RUN, Ran, service_dir, service_dir_of};
 
 /// The agent's log directory, which the package installs.
 const LOG_DIR: &str = "/Library/Application Support/js-agent/log";
@@ -56,6 +56,15 @@ pub fn launchd_state(label: &str) -> Option<String> {
     Some(state.unwrap_or_else(|| format!("no state in: {text}")))
 }
 
+/// The process id `launchctl print` gives the job `label` of the system domain; `None` when
+/// launchd has no such job or it has no process.
+pub fn launchd_pid(label: &str) -> Option<u32> {
+    let out = output("/bin/launchctl", &["print", &format!("system/{label}")]);
+    out.lines()
+        .filter_map(|line| line.trim().strip_prefix("pid = "))
+        .find_map(|pid| pid.trim().parse().ok())
+}
+
 /// The last [`TAIL_LINES`] lines of `path`.
 fn tail(path: &Path) -> String {
     let text = fs::read_to_string(path).unwrap_or_else(|e| format!("({e})"));
@@ -94,7 +103,11 @@ impl Diagnose {
                 eprintln!("== {}\n{}", entry.path().display(), tail(&entry.path()));
             }
         }
-        let dirs = self.stores.iter().cloned().chain([service_dir()]);
+        let dirs = self
+            .stores
+            .iter()
+            .cloned()
+            .chain([service_dir(), service_dir_of(CONFIG_SERVICE)]);
         for dir in dirs {
             eprintln!(
                 "== {}\n{}",
@@ -128,6 +141,10 @@ impl Diagnose {
                 "/bin/ls",
                 &["-la", "/Library/Application Support/js-agent/update"]
             )
+        );
+        eprintln!(
+            "== the record directory of the config hook\n{}",
+            output("/bin/ls", &["-la", "/private/var/db/js-agent-config"])
         );
         eprintln!(
             "== diskutil apfs list\n{}",

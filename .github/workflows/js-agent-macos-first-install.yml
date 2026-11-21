@@ -1,9 +1,11 @@
-# The first install of the js-agent installer package on a Mac, run end to end on a hosted Apple
-# silicon runner: the integration test `mac_first_install` of crates/js-agent (macOS only,
-# `#[ignore]`d, run as root) installs the unsigned package this run's package workflow built,
-# the way hostkeeper does, through hostkeeper's own installer and step runner, and then runs the
-# update hook's prepare, cutover, verify and cleanup as root with launchd loading the jobs. The
-# first install of the package was never run end to end before it reached a Mac; this is that run.
+# The js-agent installer package on a Mac, run end to end on a hosted Apple silicon runner: the
+# integration test `mac_first_install` of crates/js-agent (macOS only, `#[ignore]`d, run as root)
+# installs the unsigned package this run's package workflow built, the way hostkeeper does,
+# through hostkeeper's own installer and step runner, and runs the update hook's prepare,
+# cutover, verify and cleanup as root with launchd loading the jobs. On the host that leaves it
+# rolls a config package over the running agent (the config hook) and updates the agent to a
+# second package, the next patch version, which the package workflow built beside the first. The
+# install of the package was never run end to end before it reached a Mac; this is that run.
 #
 # What it stands in for: the lease server runs in the test process, the host certificate is
 # minted by a test CA, the package is unsigned and the answer to the signature check is the
@@ -20,7 +22,9 @@
 # is one command, and no command expands an expression: a command reads its environment. The
 # version names the package file only, read quoted from the environment; the package workflow's
 # `build`, which every caller runs before this and whose artifact this installs, checks it as
-# MAJOR.MINOR.PATCH.
+# MAJOR.MINOR.PATCH. The version of the second package is the one the local action
+# .github/actions/js-agent-next-version gives, which the package workflow's `build-update` built
+# it at, and the artifact of that job is checked against its sums as the first is.
 # crates/xtask/tests/macos_first_install_workflow.rs pins these rules.
 name: js-agent-macos-first-install
 
@@ -57,13 +61,26 @@ jobs:
         with:
           name: js-agent-macos-pkg-unsigned
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: js-agent-macos-pkg-update-unsigned
+          path: dist-update
       - name: The package is the one that was summed
         working-directory: dist
         run: /usr/bin/shasum -a 256 --check SHA256SUMS
+      - name: The update package is the one that was summed
+        working-directory: dist-update
+        run: /usr/bin/shasum -a 256 --check SHA256SUMS
+      - name: Name the version the agent is updated to
+        id: next
+        uses: ./.github/actions/js-agent-next-version
+        with:
+          version: ${{ env.VERSION }}
       - run: rustup toolchain install
       - name: Build the test as the runner's user
         run: cargo test --locked -p js-agent --test mac_first_install --no-run
-      - name: Install the package for the first time, as root
+      - name: Install the package, roll the config package over it and update it, as root
         env:
-          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION
-        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_VERSION="$VERSION" cargo test --locked -p js-agent --test mac_first_install -- --ignored --nocapture --test-threads=1
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION,JS_FIRST_INSTALL_UPDATE_PKG,JS_FIRST_INSTALL_UPDATE_VERSION
+          UPDATE_VERSION: ${{ steps.next.outputs.version }}
+        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_VERSION="$VERSION" JS_FIRST_INSTALL_UPDATE_PKG="$PWD/dist-update/js-agent-$UPDATE_VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_UPDATE_VERSION="$UPDATE_VERSION" cargo test --locked -p js-agent --test mac_first_install -- --ignored --nocapture --test-threads=1

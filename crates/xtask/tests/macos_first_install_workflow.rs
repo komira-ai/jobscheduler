@@ -3,8 +3,10 @@
 //! called (by the release's beta stage and by the package workflow's manual run), never started by
 //! an event of its own; it has one job on a hosted Apple silicon runner with `contents: read` and
 //! no secret; it installs the unsigned package its caller's run built after checking the package
-//! against its sums; it builds the test as the runner's user and runs it as root through cargo's
-//! target runner, so nothing is built as root.
+//! against its sums, and the update package the package workflow's `build-update` made at the next
+//! patch version (which the local action js-agent-next-version names, here and there alike); it
+//! builds the test as the runner's user and runs it as root through cargo's target runner, so
+//! nothing is built as root.
 
 use std::path::Path;
 
@@ -127,7 +129,19 @@ fn problems(text: &str) -> Vec<String> {
         !joined.contains("write"),
         "the workflow names a write scope",
     );
-    for line in body.iter().filter(|l| l.contains("uses:")) {
+    let local: Vec<&str> = body
+        .iter()
+        .filter(|l| l.contains("uses: ./"))
+        .map(|l| l.trim())
+        .collect();
+    want(
+        local == ["uses: ./.github/actions/js-agent-next-version"],
+        "the workflow uses a local action other than js-agent-next-version, or does not use it",
+    );
+    for line in body
+        .iter()
+        .filter(|l| l.contains("uses:") && !l.contains("uses: ./"))
+    {
         let pin = line.split('@').nth(1).unwrap_or("");
         want(
             pin.len() >= 40 && pin[..40].chars().all(|c| c.is_ascii_hexdigit()),
@@ -155,7 +169,7 @@ fn problems(text: &str) -> Vec<String> {
         }),
         "the artifact downloaded is not js-agent-macos-pkg-unsigned into dist",
     );
-    let sums = position("shasum -a 256 --check SHA256SUMS");
+    let sums = position("working-directory: dist\n");
     let first_cargo = position("cargo ");
     want(
         sums.is_some_and(|s| {
@@ -165,6 +179,31 @@ fn problems(text: &str) -> Vec<String> {
                 && step_text(s).contains("/usr/bin/shasum -a 256 --check SHA256SUMS")
         }),
         "the download is not checked against its sums before anything is built",
+    );
+    let update_download = position("name: js-agent-macos-pkg-update-unsigned");
+    want(
+        update_download.is_some_and(|d| {
+            let t = step_text(d);
+            t.contains("actions/download-artifact") && t.contains("path: dist-update")
+        }),
+        "the update artifact downloaded is not js-agent-macos-pkg-update-unsigned into dist-update",
+    );
+    let update_sums = position("working-directory: dist-update");
+    want(
+        update_sums.is_some_and(|s| {
+            update_download.is_some_and(|d| d < s)
+                && first_cargo.is_some_and(|c| s < c)
+                && step_text(s).contains("run: /usr/bin/shasum -a 256 --check SHA256SUMS")
+        }),
+        "the update download is not checked against its sums before anything is built",
+    );
+    let next = position("uses: ./.github/actions/js-agent-next-version");
+    want(
+        next.is_some_and(|n| {
+            let t = step_text(n);
+            t.contains("id: next") && t.contains("version: ${{ env.VERSION }}")
+        }),
+        "the version the agent is updated to is not the next-version action's of the release's",
     );
     let build = position("--no-run");
     let run = position("--ignored");
@@ -184,11 +223,20 @@ fn problems(text: &str) -> Vec<String> {
         "the run does not pass --ignored to the mac_first_install test target",
     );
     want(
+        run.is_some_and(|r| {
+            let t = step_text(r);
+            t.contains("UPDATE_VERSION: ${{ steps.next.outputs.version }}")
+                && t.contains("JS_FIRST_INSTALL_UPDATE_PKG=\"$PWD/dist-update/js-agent-$UPDATE_VERSION-macos-arm64.pkg\"")
+                && t.contains("JS_FIRST_INSTALL_UPDATE_VERSION=\"$UPDATE_VERSION\"")
+        }),
+        "the run does not give the test the update package and the version from the next-version step",
+    );
+    want(
         joined.matches("sudo").count() == 1
             && joined.contains(
-                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION",
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION,JS_FIRST_INSTALL_UPDATE_PKG,JS_FIRST_INSTALL_UPDATE_VERSION",
             ),
-        "sudo is used other than as the cargo target runner that keeps the package path and version",
+        "sudo is used other than as the cargo target runner that keeps the packages and their versions",
     );
     for step in &all {
         if let Some(command) = run_of(step) {
@@ -237,7 +285,7 @@ fn the_workflow_takes_the_version_as_its_one_input_and_defaults_it() {
 #[test]
 fn each_way_of_leaving_the_first_install_shape_is_named() {
     let text = read(WORKFLOW);
-    let table: [(&str, &str, &str); 19] = [
+    let table: [(&str, &str, &str); 25] = [
         (
             "on:\n  workflow_call:\n",
             "on:\n  pull_request:\n  workflow_call:\n",
@@ -294,8 +342,8 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "not pinned to a commit",
         ),
         (
-            "        run: /usr/bin/shasum -a 256 --check SHA256SUMS\n",
-            "        run: |\n          set -e\n          /usr/bin/shasum -a 256 --check SHA256SUMS\n",
+            "        working-directory: dist\n        run: /usr/bin/shasum -a 256 --check SHA256SUMS\n",
+            "        working-directory: dist\n        run: |\n          set -e\n          /usr/bin/shasum -a 256 --check SHA256SUMS\n",
             "a run step holds more than one command line",
         ),
         (
@@ -304,9 +352,39 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "the artifact downloaded is not js-agent-macos-pkg-unsigned",
         ),
         (
-            "run: /usr/bin/shasum -a 256 --check SHA256SUMS",
-            "run: /usr/bin/shasum -a 256 SHA256SUMS",
-            "not checked against its sums",
+            "working-directory: dist\n        run: /usr/bin/shasum -a 256 --check SHA256SUMS",
+            "working-directory: dist\n        run: /usr/bin/shasum -a 256 SHA256SUMS",
+            "the download is not checked against its sums",
+        ),
+        (
+            "working-directory: dist-update\n        run: /usr/bin/shasum -a 256 --check SHA256SUMS",
+            "working-directory: dist-update\n        run: /usr/bin/shasum -a 256 SHA256SUMS",
+            "the update download is not checked against its sums",
+        ),
+        (
+            "name: js-agent-macos-pkg-update-unsigned",
+            "name: js-agent-macos-pkg-unsigned",
+            "the update artifact downloaded is not js-agent-macos-pkg-update-unsigned",
+        ),
+        (
+            "          path: dist-update\n",
+            "          path: dist\n",
+            "the update artifact downloaded is not js-agent-macos-pkg-update-unsigned into dist-update",
+        ),
+        (
+            "uses: ./.github/actions/js-agent-next-version",
+            "uses: ./.github/actions/other-version",
+            "a local action other than js-agent-next-version",
+        ),
+        (
+            "          UPDATE_VERSION: ${{ steps.next.outputs.version }}\n",
+            "          UPDATE_VERSION: ${{ env.VERSION }}\n",
+            "does not give the test the update package and the version from the next-version step",
+        ),
+        (
+            ",JS_FIRST_INSTALL_UPDATE_VERSION\n",
+            "\n",
+            "sudo is used other than as the cargo target runner that keeps the packages",
         ),
         (
             "cargo test --locked -p js-agent --test mac_first_install --no-run",
