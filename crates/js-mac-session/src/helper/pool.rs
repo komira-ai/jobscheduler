@@ -20,14 +20,16 @@
 //!   user ([`Helper::reset`]): the uid's processes killed and its launchd domains booted
 //!   out (the teardown of `kill-uid`), its crontab and `at` jobs removed, its System V IPC
 //!   objects removed, its files in the places `user-delete` sweeps removed, its home
-//!   removed whole and made again empty, and its `DARWIN_USER_DIR` entry emptied (its
+//!   emptied (every entry below it removed; the folder itself is kept, as macOS refuses a
+//!   process without Full Disk Access the removal of a folder of `/Users`; its owner,
+//!   group, mode, flags, ACL and extended attributes given back), and its `DARWIN_USER_DIR` entry emptied (its
 //!   `0`, `C` and `T` kept), and last the directory asked that the user is not in
 //!   `admin`. Each step is judged by its outcome, as the teardown's are; only a reset
 //!   with every step clean returns the slot to free.
 //! - A reset that is not clean replaces the user ([`Helper::replace`]): the uid's
 //!   processes killed again, the user deleted as `user-delete` deleted a lease's user
-//!   (its `DARWIN_USER_DIR` entry and its home removed whole), then a new user made in the
-//!   slot, with the same name and uid, and the directory asked that it is not in `admin`
+//!   (its `DARWIN_USER_DIR` entry removed whole, its home emptied and kept), then a new
+//!   user made in the slot over that home, with the same name and uid, and the directory asked that it is not in `admin`
 //!   (a membership the deletion left would make it one). The slot is free only once the
 //!   new user exists and is not.
 //!   A replacement that fails too leaves the slot broken: no lease gets it, `pool-status`
@@ -41,11 +43,12 @@
 use js_types::LeaseId;
 
 use super::Helper;
+use super::teardown::Home;
 use super::teardown::TeardownError;
 use crate::lease::{Dotted, Slot, pool_user_name, user_name};
 use crate::ledger::Ledger;
 use crate::ledger::pool::{SlotEntry, SlotState};
-use crate::sweep::{SweepPlan, empty_keeping, sweep};
+use crate::sweep::{SweepPlan, empty, empty_keeping, sweep};
 
 /// What every [`PoolExhausted`] says first: a caller can tell the refusal by it.
 pub const POOL_EXHAUSTED: &str = "the pool has no free user";
@@ -429,8 +432,8 @@ impl Helper {
         Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
         self.none_left(uid)?;
         self.remove_ipc(name, uid)?;
-        Self::swept(sweep(&self.with_home(), name, uid), name)?;
-        self.make_home(name, uid)?;
+        Self::swept(sweep(&self.settings.sweep, name, uid), name)?;
+        self.empty_home(name, uid)?;
         for entry in &entries {
             Self::swept(empty_keeping(entry, uid, &KEPT_FOLDERS), name)?;
         }
@@ -444,7 +447,7 @@ impl Helper {
     /// same name and uid, an administrator when `admin`.
     pub(super) fn replace(&self, name: &str, uid: u32, admin: bool) -> Result<(), TeardownError> {
         self.kill_pool_user(name, uid)?;
-        self.remove_account(name, uid)?;
+        self.remove_account(name, uid, Home::Keep)?;
         self.create_account(name, uid, admin)?;
         match admin {
             true => Ok(()),
@@ -503,7 +506,16 @@ impl Helper {
         plan
     }
 
-    /// Makes the home folder of `name`, with `uid`.
+    /// Empties the home of the pool user `name`, with `uid`, and gives it back (owner,
+    /// group, mode 0700, no flag, ACL or extended attribute): the folder itself is never
+    /// removed or made again, which macOS refuses for a folder of `/Users`. Fails only
+    /// if an entry below it cannot be removed (named) or the folder cannot be given back.
+    fn empty_home(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        Self::swept(empty(&self.settings.homes.join(name), uid), name)?;
+        self.make_home(name, uid)
+    }
+
+    /// Makes the home folder of `name`, with `uid`, or takes the one that is there.
     fn make_home(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         self.host
             .make_home(&self.settings.homes, name, uid, self.settings.gid)
@@ -537,5 +549,7 @@ impl Helper {
     }
 }
 
+#[cfg(test)]
+mod home_tests;
 #[cfg(test)]
 mod tests;

@@ -21,7 +21,7 @@ fn records(calls: &[String]) -> Vec<String> {
 }
 
 /// The home folder of slot `n`'s user in `rig`.
-fn home(rig: &Rig, n: u32) -> PathBuf {
+pub(super) fn home(rig: &Rig, n: u32) -> PathBuf {
     rig.dir.join(format!("Users/kbf-lease-pool-{n}"))
 }
 
@@ -31,7 +31,7 @@ fn entry(rig: &Rig, uid: u32) -> PathBuf {
 }
 
 /// The slots `slots`.
-fn slots(slots: &[u32]) -> Vec<Slot> {
+pub(super) fn slots(slots: &[u32]) -> Vec<Slot> {
     slots.iter().copied().map(Slot::new).collect()
 }
 
@@ -110,8 +110,15 @@ fn reset_leaves_no_residue() {
     assert_eq!(records(&calls), Vec::<String>::new(), "reset, not replaced");
 
     assert_eq!(rig.helper.user_create("71.2", None), Ok(uid));
-    // The home is removed whole and made again, empty, by the host.
-    assert!(!home.exists());
+    // The home is emptied and kept, and the host gives it back.
+    assert!(home.is_dir());
+    assert_eq!(
+        std::fs::read_dir(&home)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>(),
+        Vec::<PathBuf>::new()
+    );
     let made = format!("make_home {} {uid}:{}", home.display(), my_gid());
     assert!(calls.contains(&made), "{calls:#?}");
     assert!(!rig.dir.join("tabs/kbf-lease-pool-0").exists());

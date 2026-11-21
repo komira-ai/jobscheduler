@@ -38,7 +38,17 @@ use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
 use crate::autologin::{Intent, read_intent};
 use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
-use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
+use crate::sweep::{Swept, empty, owned_entries, remove_owned, sweep};
+
+/// What [`Helper::remove_account`] does with the user's home folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Home {
+    /// Removes it whole, with the rest of the sweep.
+    Remove,
+    /// Empties it and keeps the folder: macOS refuses a process without Full Disk Access
+    /// the removal of a folder of `/Users`.
+    Keep,
+}
 
 /// Why a step of `kill-uid` or `user-delete` failed. Its text is the refusal the caller
 /// reads.
@@ -554,7 +564,7 @@ impl Helper {
         name: &str,
         uid: u32,
     ) -> Result<bool, TeardownError> {
-        let existed = self.remove_account(name, uid)?;
+        let existed = self.remove_account(name, uid, Home::Remove)?;
         ledger
             .record_deleted(lease)
             .map_err(|source| TeardownError::Record {
@@ -567,13 +577,27 @@ impl Helper {
 
     /// Deletes the user `name`, with `uid`, and sweeps what it leaves, in the order of
     /// [`Self::user_delete`]. Returns whether a record was there to delete.
-    pub(super) fn remove_account(&self, name: &str, uid: u32) -> Result<bool, TeardownError> {
+    /// The home is removed whole when `home` is [`Home::Remove`] (a lease from before the
+    /// pool); emptied and kept when it is [`Home::Keep`] (a pool user's, which the
+    /// replacement's new user has again).
+    pub(super) fn remove_account(
+        &self,
+        name: &str,
+        uid: u32,
+        home: Home,
+    ) -> Result<bool, TeardownError> {
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;
         let mut removed = Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
         self.none_left(uid)?;
         self.remove_ipc(name, uid)?;
-        removed += Self::swept(sweep(&self.with_home(), name, uid), name)?;
+        match home {
+            Home::Remove => removed += Self::swept(sweep(&self.with_home(), name, uid), name)?,
+            Home::Keep => {
+                removed += Self::swept(sweep(&self.settings.sweep, name, uid), name)?;
+                removed += Self::swept(empty(&self.settings.homes.join(name), uid), name)?;
+            }
+        }
         for entry in &entries {
             removed += Self::swept(remove_owned(entry, uid), name)?;
         }

@@ -159,10 +159,12 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The directory could not be asked.
     fn uid_taken(&self, uid: u32) -> io::Result<bool>;
-    /// Makes the user's home folder ([`make_home`] on a real host).
+    /// Makes the user's home folder, or takes the one that is there ([`make_home`] on a
+    /// real host): owned by the user, mode 0700, with no flag, ACL or extended attribute
+    /// of what the last user set on it. The caller has emptied it.
     ///
     /// # Errors
-    /// The folder exists or could not be made.
+    /// The folder could not be made, or an existing one could not be given back.
     fn make_home(&self, homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()>;
     /// Creates the user record.
     ///
@@ -733,20 +735,28 @@ fn pool_reply(status: PoolStatus) -> Reply {
     }))
 }
 
-/// Makes the home folder `name` in `homes`: new (an existing one is an error), owned
-/// by the user, mode 0700. Never through a link. `homes` is root's to write, so the
-/// directory just made is still the one opened.
+/// Makes the home folder `name` in `homes` if it is not there, and gives it (made now or
+/// found) to the user: owner `uid`, group `gid`, mode 0700, and the user flags, ACL and
+/// extended attributes a lease set on it taken off (the system's own, which it protects,
+/// stay). An existing home is kept, never removed: macOS refuses the removal of a folder
+/// of `/Users` to a process without Full Disk Access, so the pool's homes are emptied
+/// and kept (the caller empties it first). Never through a link. `homes` is root's to
+/// write, so the directory just made is still the one opened.
 ///
 /// # Errors
-/// `homes` cannot be opened, the folder exists, or it could not be given away.
+/// `homes` cannot be opened, the folder could not be made or is not a directory, or it
+/// could not be given away or scrubbed.
 pub fn make_home(homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let parent = rustix::fs::openat(CWD, homes, flags, Mode::empty())?;
-    rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700))?;
+    match rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(why) => return Err(why.into()),
+    }
     let home = rustix::fs::openat(&parent, name, flags, Mode::empty())?;
     rustix::fs::fchown(&home, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))?;
     rustix::fs::fchmod(&home, Mode::from_raw_mode(0o700))?;
-    Ok(())
+    crate::sweep::scrub_home(&home)
 }
 
 #[cfg(test)]

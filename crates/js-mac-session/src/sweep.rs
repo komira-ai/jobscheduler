@@ -581,6 +581,17 @@ fn scrub_kept(dir: &OwnedFd) -> io::Result<()> {
     strip_xattrs_except(dir, KEEP_XATTR)
 }
 
+/// Gives a home that stays (emptied, never removed) back as the system makes one: its user
+/// flags cleared, its ACL removed and its extended attributes but [`KEEP_XATTR`]
+/// stripped, as for any directory the sweep keeps.
+///
+/// # Errors
+/// A refusal to clear the flags or the ACL, or to list or remove an attribute.
+pub(crate) fn scrub_home(dir: &OwnedFd) -> io::Result<()> {
+    scrub_kept(dir)?;
+    crate::xattr::clear_acl(dir)
+}
+
 /// The names of `names` that [`strip_xattrs_except`] removes: all but `keep`.
 fn xattrs_to_remove<'a>(names: &'a [String], keep: &str) -> Vec<&'a str> {
     names

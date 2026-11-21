@@ -46,12 +46,12 @@ The lease is recorded over (the ledger's `deleted`, then the slot's `resetting`)
 2. The user's record must exist; the entry is taken from its `DARWIN_USER_DIR`, as in the deletion's step 1.
 3. Settle, as in the deletion's step 2. Remove the crontab and `at` jobs; no process may remain.
 4. Remove the uid's System V IPC objects: every object `ipcs -a` lists with the uid (or its name) as owner or creator, removed with `ipcrm` (a failure only logged), then `ipcs` again: an object still listed fails the step. POSIX shared memory and semaphores have no listing on macOS and are not found (see above: a run cannot create shared memory).
-5. Sweep the other places and remove the home whole; make the home again, new, empty and the user's.
+5. Sweep the other places and empty the home: every entry below it is removed (dot files too, user flags cleared first as the sweep does), and the folder itself is kept, never removed or made again, because macOS refuses a process without Full Disk Access the removal of a folder of `/Users` (`/Users` carries the `sunlnk` flag). Then give the home back: its owner and group are set to the pool user's and its mode to 0700, and its user flags, ACL and extended attributes (but the system's own, which it protects) are taken off. The step fails only if an entry below the home cannot be removed (named) or the home cannot be given back.
 6. Empty the entry, keeping its `0`, `C` and `T` (each emptied).
 7. Settle again.
 8. Ask the directory that the user is not in `admin` (`dseditgroup -o checkmember`): only its "no" passes.
 
-A clean reset records the slot free. One that is not replaces the user: the kill again, the deletion below (with step 4 of the reset before its sweep), a new record with the same name, uid and home, and step 8. The slot is free only once that holds. The user of an administrator's lease is always replaced, never reset; its `resetting` record says so, so the recovery after a crash replaces it too.
+A clean reset records the slot free. One that is not replaces the user: the kill again, the deletion below (with step 4 of the reset before its sweep), a new record with the same name, uid and home (the emptied home, kept: the deletion below empties a pool user's home and does not remove it), and step 8. The slot is free only once that holds. The user of an administrator's lease is always replaced, never reset; its `resetting` record says so, so the recovery after a crash replaces it too.
 
 ## The deletion (`user-delete` of a lease from before the pool, and a pool user's replacement)
 
@@ -63,7 +63,7 @@ A clean reset records the slot free. One that is not replaces the user: the kill
    - Boot out `user/<uid>`, and `gui/<uid>` while it is owed, as in `kill-uid` (a failure logged); if one still prints, or `launchctl print` gave no answer, the delete is refused. Otherwise `gui/<uid>` is not asked about: with no process of the uid left there is no login session. After the last settle an owed `gui/<uid>` is discharged.
    - Look for processes again, once, without waiting: a job launchd started before the bootout ended its domain is found here, and any process seen refuses the delete at once. Such a job may have written again what the sweep removed before exiting, so it is never waited out; the repeated delete sweeps everything again.
 3. Remove the crontab and `at` jobs. No process may remain. Remove the uid's System V IPC objects, as in the reset's step 4.
-4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it:
+4. Sweep the home and the other places. Remove the entry whole, and only if the uid owns it (the home of a pool user is the exception: it is emptied and kept, as in step 5 of the reset):
    - nothing is followed;
    - nothing past the entry's filesystem is touched;
    - a subtree too deep to remove in place is moved up *inside* the entry, so a removal cut short leaves everything under the entry, where the next removal finds it.
