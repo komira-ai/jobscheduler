@@ -643,7 +643,16 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
     ) -> Result<Option<TreeHandle>, Error> {
         let diff_id = &want.diff_id;
         let version = self.cfg.extractor_version;
-        match std::fs::rename(stage, self.tree_path(diff_id)) {
+        let target = self.tree_path(diff_id);
+        let moved = match std::fs::rename(stage, &target) {
+            // A sealed directory may refuse to move (macOS refuses to rename an immutable one).
+            Err(_) if stage.exists() & !target.exists() => self.move_unsealed(stage, &target),
+            other => other.map_err(|source| Error::Io {
+                what: "place tree",
+                source,
+            }),
+        };
+        match moved {
             Ok(()) => {
                 placing.unentered = true;
                 match self.record_placed(want, sealed_bytes) {
@@ -680,7 +689,7 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                 run.map(|run| self.pin_locked(&mut state, diff_id, run))
                     .transpose()
             }
-            Err(_) if self.tree_path(diff_id).exists() => {
+            Err(_) if target.exists() => {
                 let mut state = self.lock();
                 let ours = state
                     .trees
@@ -696,11 +705,30 @@ impl<S: Sealer, F: LayerSource> Inner<S, F> {
                 self.discard(stage);
                 pinned
             }
-            Err(source) => Err(Error::Io {
-                what: "place tree",
-                source,
-            }),
+            Err(error) => Err(error),
         }
+    }
+
+    /// Moves a sealed stage that would not move into place `target`: unsealed, moved, and
+    /// sealed again where it now stands, as [`Sealer::seal`] accepts a tree in place. If
+    /// the unsealing or the second move fails, the stage is sealed again where it is (the
+    /// error says so if that fails too); if the seal in place fails, the tree is moved back
+    /// to the stage and that error is returned, so nothing unsealed is ever left in `trees/`.
+    fn move_unsealed(&self, stage: &Path, target: &Path) -> Result<(), Error> {
+        self.sealer
+            .unseal_for_delete(stage)
+            .map_err(Error::Seal)
+            .and_then(|()| {
+                std::fs::rename(stage, target).map_err(|source| Error::Io {
+                    what: "place tree",
+                    source,
+                })
+            })
+            .map_err(|error| self.seal_again(stage, error))?;
+        self.sealer.seal(target).map(drop).map_err(|why| {
+            let _ = std::fs::rename(target, stage);
+            Error::Seal(why)
+        })
     }
 
     fn build(
