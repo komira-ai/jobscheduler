@@ -839,6 +839,8 @@ fn only_a_post_job_check_or_an_unread_input_may_clear() {
         check::WATCH_UNREADABLE,
         check::WATCH_OVER_BOUND,
         code::CGROUP_NOT_FOUND,
+        js_agent::leak_scan::code::SCAN_UNREADABLE,
+        js_agent::leak_scan::code::SCAN_FAILED,
     ] {
         assert!(clearable(&taint(reason::UNCHECKED, Some(what))), "{what}");
     }
@@ -851,6 +853,14 @@ fn only_a_post_job_check_or_an_unread_input_may_clear() {
         taint(reason::RESIDUE, None),
         taint(reason::UNCHECKED, Some(code::HOST_NOT_VISIBLE)),
         taint(reason::UNCHECKED, Some(check::DAEMONISED_CHILD)),
+        taint(
+            reason::RESIDUE,
+            Some(js_agent::leak_scan::code::SCAN_RESIDUE),
+        ),
+        taint(
+            reason::RESIDUE,
+            Some(js_agent::leak_scan::code::SCAN_UNREADABLE),
+        ),
         taint(reason::UNCHECKED, None),
         taint(reason::CLEANUP_FAILED, Some(check::DAEMONISED_CHILD)),
         taint(reason::CHECK_OWED, None),

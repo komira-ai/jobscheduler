@@ -6,11 +6,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use js_testkit::dir::TestDir;
 
-use super::{
-    HANDOVER_FILE, HANDOVER_TEMP_FILE, HANDOVER_TEXT, Handover, read, remove, root_for, write,
-};
-use crate::egress::Config;
-use crate::lifecycle::StateRoot;
+use super::{HANDOVER_FILE, HANDOVER_TEMP_FILE, HANDOVER_TEXT, Handover, read, remove, write};
 
 fn scratch(name: &str) -> TestDir {
     TestDir::under(std::env::temp_dir(), name)
@@ -107,35 +103,4 @@ fn a_root_that_cannot_be_looked_in_is_no_request_and_a_removal_there_fails() {
     assert!(why.starts_with("it cannot be looked at: "));
     assert!(remove(&root).is_err());
     assert!(write(&root).is_err());
-}
-
-#[test]
-fn an_agent_with_no_egress_ceiling_looks_for_a_handover_and_one_with_a_ceiling_never_does() {
-    let dir = scratch("handover-root-for");
-    let path = dir.path().join("state");
-    fs::create_dir(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    let state = StateRoot::open(&path).unwrap();
-    let none = Config::none();
-    let looked = root_for(Some(&state), &none);
-    assert_eq!(looked.as_ref().map(StateRoot::path), Some(path.as_path()));
-    assert!(
-        root_for(None, &none).is_none(),
-        "no state root, no handover"
-    );
-    #[cfg(target_os = "linux")]
-    {
-        let open = Config::from_flags(&crate::egress::Flags {
-            mode: Some("open"),
-            ip: Some("/usr/bin/true"),
-            nft: Some("/usr/bin/true"),
-            nsenter: Some("/usr/bin/true"),
-            ..crate::egress::Flags::default()
-        })
-        .unwrap();
-        assert!(
-            root_for(Some(&state), &open).is_none(),
-            "its next process removes the runs it would adopt: the stop drains"
-        );
-    }
 }

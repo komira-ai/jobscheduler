@@ -637,7 +637,7 @@ agent reports no `tierstore-trees` and receives no tree job.
 At boot root mounts the frontend at `/private/var/tierstore/fs`, before the agent starts. If C9 chooses NFS, the mount
 is made with `nosuid,nodev` given explicitly: tierstore measured that a loopback NFS mount made by root has neither by
 default, which would let a setuid file in a tree take effect (tierstore 8, Measured: macos E14). The profile's floor
-denies `file-mount` to every job (`crates/js-mac-pool/src/seatbelt/profile.rs:50`), so the agent's jobs never mount.
+denies `file-mount` to every job (`FLOOR` in `crates/js-mac-pool/src/seatbelt/profile.rs`), so the agent's jobs never mount.
 
 launchd has no ordering between daemons, and the agent's plist
 (`packaging/js-agent-macos/hostkeeper/units/js-agent.plist`) starts the agent on its token's path only. A Mac whose

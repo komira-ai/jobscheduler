@@ -297,6 +297,8 @@ impl Node {
                 calls: std::sync::Arc::new(Unmounted),
                 ..MountSeam::default()
             },
+            // The node starts its own egress, as a node does.
+            egress: None,
         }
     }
 

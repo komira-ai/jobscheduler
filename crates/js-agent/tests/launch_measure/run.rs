@@ -184,9 +184,9 @@ fn measure(flags: &Flags) -> Result<String, String> {
     })
     .map_err(|why| format!("the allow-list: {why}"))?;
     // As the agent starts its egress: once, before any run. Mode none starts nothing.
-    let none_egress = start_egress(&Config::none(), Egress::start)
+    let none_egress = start_egress(&Config::none(), |config| Egress::start(config, None))
         .map_err(|why| format!("egress mode none: {why}"))?;
-    let wired_egress = start_egress(&allow_list, Egress::start)
+    let wired_egress = start_egress(&allow_list, |config| Egress::start(config, None))
         .map_err(|why| format!("start the allow-list's egress: {why}"))?;
     let open = |variant: Variant, egress: Option<&Egress>| -> Result<RuntimeHost, String> {
         let name = variant.name();

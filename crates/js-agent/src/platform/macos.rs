@@ -59,9 +59,10 @@ pub struct Flags {
     /// of an agent whose worker died does; meanwhile the helper ends a run at its own
     /// deadline, its wall limit plus `--stop-grace` (a helper from before that deadline holds
     /// none, and its runs are bounded only while an agent runs).
-    /// The profile does not deny System V or POSIX shared memory, semaphores or message
-    /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
-    /// run that gets the same uid: an open channel between runs on one Mac.
+    /// The profile denies creating POSIX shared memory, but not System V shared memory,
+    /// semaphores or message queues (which the helper's reset removes) nor POSIX named
+    /// semaphores, and the helper reuses uids, so a named semaphore a run leaves can be
+    /// opened by a later run that gets the same uid, until the Mac restarts.
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default
@@ -584,18 +585,20 @@ pub(crate) fn runtime(
 /// is read from (or why there is none).
 pub(crate) type Checks = (Box<dyn CheckHook>, Result<String, &'static str>);
 
-/// The checks after a native job, and why its usage is not read.
+/// The checks after a native job, the helper's leak scan ([`NativeChecks`]) over the
+/// backend's helper socket, and why its usage is not read.
 ///
 /// # Errors
 ///
 /// None; the signature is the Linux build's.
 pub(crate) fn checks(
-    _backend: &Backend,
+    backend: &Backend,
     _machine: &dyn Machine,
     _watch: Vec<PathBuf>,
     _settle: Duration,
 ) -> Result<Checks, String> {
-    Ok((Box::new(NativeChecks), Err(NO_NATIVE_USAGE)))
+    let helper = js_mac_session::client::Client::new(backend.settings().socket());
+    Ok((Box::new(NativeChecks::over(helper)), Err(NO_NATIVE_USAGE)))
 }
 
 /// Why the heartbeat of a native agent carries no load.
@@ -658,7 +661,6 @@ mod tests {
             held: Vec::<HeldRun>::new(),
             accepts_host_credential: false,
             identity: None,
-            agent_process: None,
         }
     }
 

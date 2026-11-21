@@ -6,8 +6,8 @@
 //! (under its own anchor, `com.apple/js-mac-provision-test`, which it flushes at the
 //! end, and holds a pf enable reference for its duration). No pull request job runs it. The
 //! manual workflow `js-mac-provision-privileged-tests` builds it for Apple silicon, with
-//! the program it starts, and uploads both without running them; a farm Mac runs it through
-//! a held script:
+//! the program it starts, and uploads both without running them. On a Mac,
+//! `cargo xtask mac-root-tests` builds and runs it with the other Mac root tests; by hand:
 //!
 //! ```text
 //! cargo test -p js-mac-provision --test pf_as_root --no-run     # as an ordinary user
@@ -281,7 +281,7 @@ fn table(rows: &[Row]) -> String {
 }
 
 #[test]
-#[ignore = "needs root on a Mac: loads pf rules under its own anchor; run through a held script"]
+#[ignore = "needs root on a Mac: loads pf rules under its own anchor; run through cargo xtask mac-root-tests"]
 fn pool_uids_reach_only_the_listed_endpoint_and_other_uids_are_not_affected() {
     if !cfg!(target_os = "macos") {
         return;

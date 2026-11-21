@@ -145,7 +145,9 @@ fn a_check_still_owed_at_the_drain_bound_defers_and_the_rollback_after_it_succee
     assert_eq!(
         done.report.detail,
         Some(format!(
-            "the host still held 0 lease(s) after {DRAIN_WAIT_SECS} s; checks are owed for {RUN}"
+            "the host still held 0 lease(s) after {DRAIN_WAIT_SECS} s; checks are owed for {RUN}; \
+             draining because the previous release's agent does not hand its jobs over \
+             (no `handover` on its `stops:` line, or it could not be run)"
         ))
     );
     assert_eq!(rig.record().unwrap().cordon, Cordon::default());
