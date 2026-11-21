@@ -209,13 +209,66 @@ pub(crate) fn pool_of(range: crate::lease::UidRange) -> crate::lease::PoolSize {
     crate::lease::PoolSize::new(u32::try_from(range.uids().count()).unwrap()).unwrap()
 }
 
-/// `launchctl print`'s answer for a domain launchd has.
+/// `launchctl print`'s answer for a domain launchd has and that holds something: exit 0
+/// and a domain with a service in it.
 pub(crate) fn found() -> PrintAnswer {
     PrintAnswer {
         code: Some(0),
+        stdout: "user/1 = {\n\ttype = user\n\n\tservices = {\n\t\t     0   \
+                 0 \tcom.apple.job\n\t}\n\n\tunmanaged processes = {\n\t}\n}\n"
+            .to_owned(),
         stderr: String::new(),
     }
 }
+
+/// `launchctl print user/<uid>`'s answer for a uid whose user domain holds nothing, as
+/// macOS 27 prints it for an idle pool user, for a uid after its lease, and for a uid
+/// with no account (the print makes the domain): exit 0 and a domain with no service
+/// and no unmanaged process.
+pub(crate) fn empty_domain(uid: u32) -> PrintAnswer {
+    PrintAnswer {
+        code: Some(0),
+        stdout: EMPTY_DOMAIN.replace("799", &uid.to_string()),
+        stderr: String::new(),
+    }
+}
+
+/// What `launchctl print user/799` prints on macOS 27 for a user domain that holds
+/// nothing (tabs as launchctl writes them).
+pub(crate) const EMPTY_DOMAIN: &str = "user/799 = {
+\ttype = user
+\thandle = 799
+\tactive count = 3
+\tcreator = launchctl[21036]
+\tcreator euid = 0
+\tsession = Background
+\texternal activation count = 1
+\tsecurity context = {
+\t\tuid = 799
+\t\tasid = 101432
+\t}
+
+\tdeath port = 0x0
+\tin-progress bootstraps = 1
+
+\tservices = {
+\t}
+
+\tunmanaged processes = {
+\t}
+
+\tendpoints = {
+\t}
+
+\ttask-special ports = {
+\t\t\t 0x9dd93 4       bootstrap  com.apple.xpc.launchd.domain.user.799
+\t\t\t  0x3a03 9          access  (unknown)
+\t}
+
+
+\tproperties = 
+}
+";
 
 /// `launchctl print`'s answer for a domain launchd does not have, as macOS 26 gives it
 /// for `gui/<uid>`: exit 112, "Bad request." and "Could not find domain for user gui:
@@ -224,6 +277,7 @@ pub(crate) fn no_domain(domain: &str) -> PrintAnswer {
     let (kind, uid) = domain.split_once('/').unwrap();
     PrintAnswer {
         code: Some(112),
+        stdout: String::new(),
         stderr: format!("Bad request.\nCould not find domain for user {kind}: {uid}\n"),
     }
 }

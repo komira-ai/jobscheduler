@@ -140,6 +140,8 @@ const NAMED: usize = 8;
 pub struct PrintAnswer {
     /// Its exit code; `None` when a signal ended it.
     pub code: Option<i32>,
+    /// What it wrote to standard output (the domain, as launchd prints it).
+    pub stdout: String,
     /// What it wrote to standard error.
     pub stderr: String,
 }
@@ -169,9 +171,9 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
-    /// How `launchctl print <domain>` ended: its exit code and its standard error. The
-    /// teardown reads exit 0 as a domain launchd has and any other exit status as one it
-    /// does not print; the readiness checks take only launchd's not-found answer as
+    /// How `launchctl print <domain>` ended: its exit code and its standard output
+    /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
+    /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
     /// absence.
     ///
     /// # Errors
@@ -683,7 +685,9 @@ const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
 /// (`session-ready`, `role-session-ready`, `role-run`, the session switch's rest at the
 /// VM user): whether launchd has the domain. A "no" there has effects (the switch logs
 /// the VM user in again), so it is read strictly; the teardown reads `launchctl print`
-/// by whether it printed, in `teardown`. Exit 0 is a domain that exists; only launchd's answer for a missing domain
+/// by whether it printed a domain that holds something, in `teardown`. Exit 0 is a
+/// domain that exists (the readiness checks ask for a `gui/<uid>` domain, which launchd does not make by printing it, so an empty print is
+/// not read there); only launchd's answer for a missing domain
 /// (an exit status in [`NO_DOMAIN_CODES`] together with [`NO_DOMAIN_TEXT`] on standard
 /// error, never the words alone) is absence. Any other failure (refused, another exit,
 /// killed, launchd not answering) is an error, so it is never read as a domain that is

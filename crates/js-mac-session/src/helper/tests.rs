@@ -826,6 +826,7 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
 fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
     launchctl_print_answer(&PrintAnswer {
         code,
+        stdout: String::new(),
         stderr: stderr.to_owned(),
     })
 }

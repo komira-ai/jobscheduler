@@ -9,6 +9,7 @@ use crate::helper::tests::{Rig, add_legacy, log, me, my_gid, rig, rig_with};
 use crate::helper::{DSEDITGROUP, IPCS, NewUser, Outcome};
 use crate::lease::{PoolSize, UidRange};
 use crate::proto::{PoolState, Reply, Request};
+use crate::testing::empty_domain;
 
 /// The calls in `calls` that make or delete a user record.
 fn records(calls: &[String]) -> Vec<String> {
@@ -900,4 +901,22 @@ fn a_lease_whose_slot_cannot_be_recorded_is_not_spent() {
     assert_eq!(rig.helper.pool_status().free, slots(&[0]));
     rig.helper.lock().fail_pool_after(usize::MAX);
     assert_eq!(rig.helper.user_create("86.1", None), Ok(me()));
+}
+
+/// Asserts that a pool user's lease ends and the slot is free again, reset not replaced,
+/// when `launchctl print user/<uid>` exits 0 with the empty user domain macOS 27 prints
+/// after the lease. Catches a reset that read that print as a domain that stays, so
+/// the reset failed, the replacement failed the same way and slot 0 broke.
+#[test]
+fn a_pool_user_whose_empty_user_domain_prints_is_reset_and_free() {
+    let rig = rig("pool-empty-domain", 1);
+    let uid = rig.helper.user_create("74.1", None).unwrap();
+    rig.host.state().absent_print = Some(empty_domain(uid));
+    log(&rig);
+    assert_eq!(rig.helper.user_delete("74.1"), Ok(true));
+    let calls = log(&rig);
+    assert_eq!(records(&calls), Vec::<String>::new(), "{calls:#?}");
+    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
+    assert_eq!(rig.helper.pool_status().broken, slots(&[]));
+    assert_eq!(rig.helper.user_create("74.2", None), Ok(uid));
 }

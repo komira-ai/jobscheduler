@@ -4,10 +4,13 @@
 //! (`super::pool`); `user-delete` of a pool user's lease goes there.
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
-//! process of the uid is left, and the uid's launchd domains no longer print. A
+//! process of the uid is left, and the uid's launchd domains are gone. A
 //! `launchctl bootout` is asked for and its failure only logged; `launchctl print` is
-//! read as printed (exit 0) or not (any other exit status), so no exit status of it is
-//! matched.
+//! read as a domain that is there or not, so no exit status of it is matched. A domain
+//! is gone when the print exits non-zero, or exits 0 and prints a domain that holds
+//! nothing: `launchctl print user/<uid>` exits 0 for any uid (the print makes the user
+//! domain), so for a user domain "gone" is an empty one, with no service and no
+//! unmanaged process ([`holds_nothing`]).
 //!
 //! The order the helper's header describes: `kill-uid` decides whether the uid may have
 //! a GUI login session (the intent record names it, it owns a `loginwindow` process or
@@ -192,17 +195,35 @@ fn session_seen(processes: &[LiveProcess]) -> bool {
         .any(|p| p.command == LOGINWINDOW || p.command == UNREADABLE)
 }
 
-/// Whether `launchctl print` printed the domain (`answer`): exit 0 is a domain launchd
-/// has. Any other exit status is a domain it does not print; no exit status is matched
-/// as "not found", because launchd's answer for a domain it does not have varies
-/// (112, 113 and 125 have each been seen for the `gui/<uid>` of a user that never
-/// logged in).
+/// Whether the text of a successful `launchctl print <domain>` is that of a domain that
+/// holds nothing: its own `services = {` block and its own `unmanaged processes = {`
+/// block, the domain's top-level properties (one tab deep, not an endpoint's or a
+/// nested block's), are both empty. A block with anything in it, or one that cannot be
+/// found, is a domain that stays.
+fn holds_nothing(stdout: &str) -> bool {
+    let lines: Vec<&str> = stdout.lines().map(str::trim_end).collect();
+    ["\tservices = {", "\tunmanaged processes = {"]
+        .iter()
+        .all(|header| {
+            lines
+                .iter()
+                .position(|line| line == header)
+                .is_some_and(|at| lines.get(at + 1) == Some(&"\t}"))
+        })
+}
+
+/// Whether `launchctl print` printed a domain that stays (`answer`): a non-zero exit
+/// status is a domain launchd does not print; no exit status is matched as "not found",
+/// because launchd's answer for a domain it does not have varies (112, 113 and 125 have
+/// each been seen for the `gui/<uid>` of a user that never logged in). Exit 0 is a
+/// domain launchd has, unless what it printed holds nothing ([`holds_nothing`]):
+/// `user/<uid>` prints so, exit 0, for a uid with no domain, because the print makes it.
 ///
 /// # Errors
 /// A signal ended `launchctl`, so it gave no answer.
 fn printed(answer: &PrintAnswer) -> io::Result<bool> {
     match answer.code {
-        Some(code) => Ok(code == 0),
+        Some(code) => Ok(code == 0 && !holds_nothing(&answer.stdout)),
         None => Err(io::Error::other(format!(
             "launchctl print was ended by a signal: {}",
             answer.stderr.trim()
@@ -406,7 +427,7 @@ impl Helper {
 
     /// Whether launchd prints `domain` ([`printed`]), as the teardown judges it: a
     /// domain wrongly read as gone is caught by the look at the processes, so any exit
-    /// status but 0 is gone. The readiness checks read `launchctl print` more strictly
+    /// status but 0 is gone, and so is an empty domain. The readiness checks read `launchctl print` more strictly
     /// ([`Self::domain_exists`]).
     ///
     /// # Errors

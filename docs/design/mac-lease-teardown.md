@@ -9,7 +9,7 @@ How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `
 
 ## `kill-uid`
 
-The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains no longer print.
+The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains are gone (they no longer print, or print as a domain that holds nothing).
 
 1. Before anything is killed, decide whether the uid may have a GUI login session. It may when any of these holds:
    - the session switch's intent record names the account (the login window logs in only the user it names, so a login may be on its way);
@@ -32,7 +32,7 @@ The verdict is the outcome, never what a `launchctl` call answered: no process o
    The loop runs at most `KILL_ROUNDS` (10) attempts. The bound is a count, never a time. If the outcome still does not hold after the last attempt, `kill-uid` fails naming what remains (the processes, the domains, and why each domain was not told gone), and the uid is quarantined (see below). For the VM user (`role-kill-uid`), which is no lease, the refusal says the verb can be repeated instead. A process table that cannot be read stops the teardown at once (not retried); the uid stays held and the caller repeats it.
 5. Remove the crontab and `at` jobs, then run 2–4 again.
 
-A domain prints when `launchctl print` exits 0. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
+A domain prints when `launchctl print` exits 0, except a domain that holds nothing: `launchctl print user/<uid>` exits 0 for any uid, even one with no account, because the print makes the user domain (measured on macOS 27.0.1: an idle pool user, a uid after its lease and uid 799 with no account all print the same domain), so a print whose own top-level `services = {` and `unmanaged processes = {` blocks (one tab deep, not an endpoint's) are both empty is a domain that is gone. A print with anything in either block, or without either block, is a domain that stays. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
 
 This reading is the teardown's only. A domain wrongly read as gone there is caught by the look at the processes. The readiness checks (`session-ready`, `role-session-ready`, `role-run`, and the session switch's rest at the VM user) act on a "not up": the switch logs the VM user in again. So they keep the strict reading: exit 0 is up, exit 112 or 113 with "Could not find domain" is not up, and any other answer (125 included) is an error that changes nothing.
 
