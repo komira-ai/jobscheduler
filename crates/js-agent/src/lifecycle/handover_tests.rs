@@ -104,7 +104,7 @@ fn a_root_that_cannot_be_looked_in_is_no_request_and_a_removal_there_fails() {
     let Handover::Refused(why) = read(&root, me()) else {
         panic!("a root that is a file is read as a request or as none");
     };
-    assert!(why.starts_with("it cannot be looked at: "), "{why}");
+    assert!(why.starts_with("it cannot be looked at: "));
     assert!(remove(&root).is_err());
     assert!(write(&root).is_err());
 }
