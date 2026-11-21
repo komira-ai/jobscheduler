@@ -2,8 +2,9 @@
 //! record's `in_place`, see `prepare`): the unit is not stopped and not started. The hook
 //! writes the handover file, then signals the unit's main process with SIGHUP; an agent that
 //! lists `in-place` on its `stops:` line hands the runs over and runs its own program again as
-//! the same process, so the unit manager places no process and the unit stays active. The program that runs again, the new release's on a cutover and the previous
-//! one's on a rollback, adopts the runs and removes the handover file at its start.
+//! the same process, so the unit manager places no process and the unit stays active. The
+//! program that runs again, the new release's on a cutover and the previous one's on a
+//! rollback, adopts the runs and removes the handover file at its start.
 //!
 //! So the request is taken when the file is gone. The wait here ends then if the unit is still
 //! active. A unit that is not active, because the agent ended instead of running again or the
