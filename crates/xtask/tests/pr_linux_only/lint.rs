@@ -42,24 +42,35 @@ impl Workflow {
         }
     }
 
-    /// Whether the workflow starts on a pull request: `on: pull_request`,
-    /// `on: [..., pull_request]` or an `on:` block with a `pull_request` key.
-    pub(crate) fn on_pull_request(&self) -> bool {
+    /// Whether the workflow starts on an event named `event*`: `on: <event>`,
+    /// `on: [..., <event>]` or an `on:` block with such a key.
+    fn starts_on(&self, event: &str) -> bool {
         let mut in_on = false;
         for line in &self.top {
             if indent(line) == 0 {
                 in_on = line == "on:";
                 if line
                     .strip_prefix("on:")
-                    .is_some_and(|value| value.contains("pull_request"))
+                    .is_some_and(|value| value.contains(event))
                 {
                     return true;
                 }
-            } else if in_on && indent(line) == 2 && line.trim().starts_with("pull_request") {
+            } else if in_on && indent(line) == 2 && line.trim().starts_with(event) {
                 return true;
             }
         }
         false
+    }
+
+    /// Whether the workflow starts on a pull request (`pull_request`, `pull_request_target`) or
+    /// on a merge group of the merge queue, which checks a queued pull request.
+    pub(crate) fn on_pull_request(&self) -> bool {
+        self.starts_on("pull_request") || self.on_merge_group()
+    }
+
+    /// Whether the workflow starts on a merge group of the merge queue.
+    pub(crate) fn on_merge_group(&self) -> bool {
+        self.starts_on("merge_group")
     }
 
     /// The value of the top-level key `key` and the lines under it.
@@ -118,8 +129,9 @@ pub(crate) fn conjuncts(cond: &str) -> Vec<String> {
     parts
 }
 
-/// Whether a job's `if:` keeps it off pull requests.
-pub(crate) fn pins_another_event(job: &[String]) -> bool {
+/// Whether a job's `if:` keeps it off pull requests and merge groups; `merge_group` says whether
+/// its workflow starts on one, where `!= 'pull_request'` keeps nothing off.
+pub(crate) fn pins_another_event(job: &[String], merge_group: bool) -> bool {
     let Some(cond) = block(job, 4, "if") else {
         return false;
     };
@@ -130,8 +142,10 @@ pub(crate) fn pins_another_event(job: &[String]) -> bool {
             .strip_prefix("github.event_name == '")
             .and_then(|rest| rest.strip_suffix('\''))
             .filter(|word| !word.contains(['\'', ' ']));
-        c == "github.event_name != 'pull_request'"
-            || event.is_some_and(|e| e != "pull_request" && e != "pull_request_target")
+        (c == "github.event_name != 'pull_request'" && !merge_group)
+            || event.is_some_and(|e| {
+                !["pull_request", "pull_request_target", "merge_group"].contains(&e)
+            })
     })
 }
 
@@ -256,8 +270,9 @@ pub(crate) fn lint(workflows: &[(String, String)]) -> (Vec<String>, Vec<String>)
     let mut jobs = Vec::new();
     let mut problems = Vec::new();
     for w in parsed.iter().filter(|w| w.on_pull_request()) {
+        let merge_group = w.on_merge_group();
         for (name, lines) in &w.jobs {
-            if pins_another_event(lines) {
+            if pins_another_event(lines, merge_group) {
                 continue;
             }
             let id = format!("{}/{name}", w.file);
@@ -278,7 +293,7 @@ pub(crate) fn lint(workflows: &[(String, String)]) -> (Vec<String>, Vec<String>)
                 continue;
             };
             for (inner, inner_lines) in &called.jobs {
-                if pins_another_event(inner_lines) {
+                if pins_another_event(inner_lines, merge_group) {
                     continue;
                 }
                 let inner_id = format!("{id} -> {}/{inner}", called.file);
