@@ -168,7 +168,10 @@ pub enum Invariant {
     /// it read a verdict on the job's result (each when it read one);
     /// or the server's listing read with the tables does not name the host (the provider
     /// reads it absent); or it ended as a failed whole-host prepare before any container of
-    /// the placement was launched. Never on silence, never on an unknown.
+    /// the placement was launched; or no container of the placement was launched and the host
+    /// refused a start of the job after the placement because it is held (`host-held`, which
+    /// says it made nothing), the placement ending refused or a new one taking its row. Never
+    /// on silence, never on an unknown.
     FreedOnlyWhenConfirmed,
     /// Step check. Every job start a per-job agent read names an allocation of that job on
     /// that host that the server had committed by the time the agent read it, as the first
@@ -178,7 +181,9 @@ pub enum Invariant {
     /// reads an answer that acknowledges it, unless its process was killed in between: by
     /// what it sent ([`Observations::job_beats`]), never dropped before. (b) No job's
     /// result is accepted twice among the verdicts the agents read: the server stores each
-    /// result once.
+    /// result once. A start its host refused because it is held (`host-held`), launching
+    /// nothing of the job, is not the job's result once the job was sent a start under another
+    /// allocation (the server sent it back to the queue).
     ResultKeptUntilAcknowledged,
     /// Step check. At every step, the elastic pool's cloud runs no more of this
     /// scheduler's machines (launched by an acquire, not foreign) than the pool's

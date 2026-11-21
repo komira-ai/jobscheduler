@@ -240,15 +240,17 @@ fn the_hold_survives_an_agent_restart_and_the_host_is_cordoned_again() {
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
-/// Asserts that a start placed before the cordon is in force is refused and does not taint:
-/// with the agent serving, the hold file is written while it waits and a job is queued (the
-/// server places it on the host); the beat that carries the start makes the agent refuse
-/// it, creating nothing, and cordon the host in the same exchange; the next beat carries the
-/// refusal, which the job API shows as a job failed to start with the detail `host-held`,
-/// and the host is not tainted. It catches a hold file that is read only at the hello, a
-/// start run on a held host, and a refusal that taints the host as `host-tainted` does.
+/// Asserts that a start placed before the cordon is in force is refused, goes back to the
+/// queue and does not taint: with the agent serving, the hold file is written while it waits
+/// and a job is queued (the server places it on the host); the beat that carries the start
+/// makes the agent refuse it, creating nothing, and cordon the host in the same exchange; the
+/// next beat carries the refusal, which sends the job back to the queue: the job API shows it
+/// queued, with no start failure detail and a `REQUEUED` event naming the host, and the host is
+/// not tainted. A later beat starts nothing on the held host. It catches a hold file that is
+/// read only at the hello, a start run on a held host, a refusal that fails the job, and one
+/// that taints the host as `host-tainted` does.
 #[test]
-fn a_start_placed_before_the_cordon_is_refused_host_held_without_a_taint() {
+fn a_start_placed_before_the_cordon_is_refused_host_held_and_requeued_without_a_taint() {
     let held = Held::new("hold_e2e_refuses", false);
     let (agent, worker, machine) = held.start();
     assert!(held.cordon().is_null());
@@ -264,9 +266,21 @@ fn a_start_placed_before_the_cordon_is_refused_host_held_without_a_taint() {
     held.beat(&agent, &worker);
     assert!(machine.world.created().is_empty());
     let seen = held.server.job(&job);
-    assert_eq!(seen["state"], "JOB_STATE_FAILED_TO_START", "{seen}");
-    assert_eq!(seen["startFailureDetail"], "host-held", "{seen}");
+    assert_eq!(seen["state"], "JOB_STATE_QUEUED", "{seen}");
+    assert!(seen["startFailureDetail"].is_null(), "{seen}");
+    let events = seen["events"].as_array().cloned().unwrap_or_default();
+    let requeued = events
+        .iter()
+        .find(|event| event["kind"] == "JOB_EVENT_KIND_REQUEUED");
+    assert_eq!(
+        requeued.map(|event| event["hostId"].clone()),
+        Some(json!("h1")),
+        "{seen}"
+    );
     assert!(held.taint().is_null());
+    held.beat(&agent, &worker);
+    assert!(machine.world.created().is_empty());
+    assert_eq!(held.server.job_state(&job), "JOB_STATE_QUEUED");
     let ran = agent.stop();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
