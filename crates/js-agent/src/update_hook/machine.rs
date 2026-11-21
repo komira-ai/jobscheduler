@@ -57,7 +57,7 @@ use crate::own_host::{
 use crate::{CredentialFile, Login};
 
 use super::ports::{Facts, NoGate, Ports, StateView, SystemClock, SystemLink};
-use super::step::{self, Env, FSTAB, LookFn, MaintainEnv, PathFacts, TokenFacts, TokenFn};
+use super::step::{self, Env, FSTAB_LEFTOVER, LookFn, MaintainEnv, PathFacts, TokenFacts, TokenFn};
 use super::{
     ConnectParams, DirStat, Done, DrainParams, FLAGS_FILE_KEY, Invocation, MaintainInvocation,
     MaintenanceStep, Manager, Outcome, Params, PlatformUnits, PortError, Reason, Report,
@@ -85,8 +85,9 @@ pub struct Machine<'a> {
     pub euid: u32,
     /// How the host setup of a Mac looks at the state root and the scratch root.
     pub look: &'a LookFn,
-    /// The file system table the host setup of a Mac names the scratch volume in.
-    pub fstab: &'a Path,
+    /// The copy of the file system table an earlier release's host setup of a Mac left beside
+    /// it, which the host setup removes.
+    pub fstab_leftover: &'a Path,
 }
 
 fn system_stat(_: &Path, fd: BorrowedFd<'_>) -> io::Result<DirStat> {
@@ -144,7 +145,7 @@ impl Machine<'static> {
             flags: &flags_file::read_system,
             euid: rustix::process::geteuid().as_raw(),
             look: &system_look,
-            fstab: Path::new(FSTAB),
+            fstab_leftover: Path::new(FSTAB_LEFTOVER),
         }
     }
 }
@@ -613,7 +614,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
         egress,
         stat: machine.stat,
         look: machine.look,
-        fstab: machine.fstab,
+        fstab_leftover: machine.fstab_leftover,
     };
     match invocation.step {
         Step::Prepare => step::prepare(&env, params),

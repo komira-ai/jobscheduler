@@ -16,7 +16,7 @@ use crate::cli::Cli;
 use crate::cli_runtime::Settings;
 use crate::contract;
 use crate::lifecycle::CheckHook;
-use crate::lifecycle::{Local, NATIVE_JOURNAL, Runtime, StateRoot};
+use crate::lifecycle::{Local, NATIVE_JOURNAL, Runtime, StateRoot, scratch_volume};
 use crate::native::Ceiling;
 use crate::native::{self, NativeChecks, NativeFlags, NativeRuntime, NativeSettings, PfFlags};
 use crate::registry_credentials::RegistryCredentials;
@@ -284,6 +284,12 @@ pub(crate) fn open(
              root helper (give --no-jobs for an agent that runs no job)"
                 .to_owned(),
         ));
+    }
+    // The scratch root's own volume, which nothing mounts after a boot, is mounted before
+    // anything opens the scratch root or the bundle store beside it.
+    if let (Some(state), Some(scratch)) = (&cli.state_root, &cli.scratch_root) {
+        let (commands, files) = (services.commands, services.files);
+        scratch_volume::mount_at_start(commands, files, state, scratch).map_err(usage)?;
     }
     let bundles = match bundle {
         Some(settings) => services

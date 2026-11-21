@@ -43,7 +43,7 @@ pub use cutover::cutover;
 pub(crate) use cutover::{Life, life};
 pub use drain::drain;
 pub use host_setup::{
-    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB, QUOTA_TENTHS, SCRATCH_VOLUME,
+    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB_LEFTOVER, QUOTA_TENTHS, SCRATCH_VOLUME,
 };
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
@@ -106,9 +106,9 @@ pub struct Env<'a> {
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     /// How the host setup of a Mac looks at the state root and the scratch root.
     pub look: &'a LookFn,
-    /// The file system table the host setup names the scratch volume in, so that every boot
-    /// mounts it on the scratch root: [`FSTAB`] on a Mac.
-    pub fstab: &'a Path,
+    /// The copy of the file system table an earlier release's host setup left beside it, which
+    /// the host setup removes: [`FSTAB_LEFTOVER`] on a Mac.
+    pub fstab_leftover: &'a Path,
 }
 
 /// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file

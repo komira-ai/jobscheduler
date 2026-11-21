@@ -515,8 +515,9 @@ pub struct Spy<'a> {
     /// then a look is at the file system as it is.
     mac: Rc<RefCell<Option<Rc<FakeMac>>>>,
     look_fn: Box<LookFn>,
-    /// The file system table the host setup writes: `fstab` in the rig's tree.
-    pub fstab: PathBuf,
+    /// The copy of the file system table an earlier release's host setup left, which the host
+    /// setup removes: `etc/fstab.js-agent` in the rig's tree (no `etc` is made).
+    pub fstab_leftover: PathBuf,
 }
 
 /// The certificate file a flags file names in the tests that give the host an identity.
@@ -571,7 +572,7 @@ impl<'a> Spy<'a> {
                     })
                 }
             }),
-            fstab: rig.tmp.path().join("fstab"),
+            fstab_leftover: rig.tmp.path().join("etc/fstab.js-agent"),
             token,
             host_identity: None,
             egress: Cell::new(false),
@@ -706,7 +707,7 @@ impl<'a> Spy<'a> {
             egress: self.egress.get(),
             stat,
             look: &*self.look_fn,
-            fstab: &self.fstab,
+            fstab_leftover: &self.fstab_leftover,
         }
     }
 

@@ -40,6 +40,7 @@ mod record_lock;
 mod report;
 #[allow(dead_code)]
 mod rollback_entries;
+mod scratch_volume_start;
 #[allow(dead_code)]
 mod step_rig;
 mod steps_cleanup;
@@ -51,6 +52,7 @@ mod steps_handover;
 mod steps_helper;
 mod steps_host_files;
 mod steps_host_setup;
+mod steps_host_setup_adopt;
 mod steps_host_setup_verb;
 mod steps_host_setup_volume;
 mod steps_owed_checks;
