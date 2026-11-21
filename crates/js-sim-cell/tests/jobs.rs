@@ -3,8 +3,9 @@
 //! whose answer the client lost, sent again under the same job id (row 1); a host silent
 //! before it lists a job's start, which the start timeout ends (rows 35 and 43); a job
 //! cancelled before its host lists the start (row 38);
-//! the headline over jobs (no row); and a restart of the server with jobs in flight (rows
-//! 3 and 36). Each runs over sixteen seeds under every invariant of `Invariant::ALL` (the
+//! the headline over jobs (no row); a restart of the server with jobs in flight (rows
+//! 3 and 36); and a start that a host held for maintenance refused between its hello and its
+//! cordon, which sends the job to another host with no failure (no row). Each runs over sixteen seeds under every invariant of `Invariant::ALL` (the
 //! five job invariants among them) and states the rest with [`Expect`]s only.
 //!
 //! Each states what the design promises and the server as built does. Rows 37 and 42
@@ -22,7 +23,9 @@
 //! - the headline: about 670 (`cell/jobs_headline.rs`);
 //! - the restart: [`RESTART_HOSTS`] beating every 5 s for [`RESTART_AT`] plus
 //!   [`RESTART_SETTLE`], 490 s, less the [`RESTART_AT`] minus [`STOP_AT`] the server is
-//!   down, make about 370, with no hello after the restart (the sessions are rows in the store).
+//!   down, make about 370, with no hello after the restart (the sessions are rows in the store);
+//! - the held host: [`HELD_HOSTS`] real agents beating every 5 s for [`HELD_UNCORDON_AT`]
+//!   plus [`HELD_SETTLE`], 360 s, make about 150.
 //!
 //! The headline and the restart are smaller than a farm of hosts: every scenario here runs
 //! in the pull request's `test` and `coverage` jobs, which a slow scenario must not hold
@@ -36,8 +39,8 @@ use std::time::Duration;
 use js_jobs::{AllocationStep, JobState, StartFailure};
 use js_sim::{Chance, Faults};
 use js_sim_cell::actions::{
-    agents, cancel_work, items, lose_submit_answer, partition_agents, restart_server,
-    set_bus_faults, stop_server, submit_work,
+    agents, cancel_work, cordon_host, hold_agents, items, lose_submit_answer, partition_agents,
+    restart_server, set_bus_faults, stop_server, submit_work, uncordon_host,
 };
 use js_sim_cell::{
     Call, CallKind, Cell, Counter, Expect, HowEnded, ItemId, JobFront, LostAnswer, Route, Scenario,
@@ -103,6 +106,24 @@ const RESTART_AT: Duration = Duration::from_secs(90);
 /// When, after the restart, every job is checked to be still queued, placed or running.
 const RESTART_CHECK_AT: Duration = Duration::from_secs(120);
 const RESTART_SETTLE: Duration = Duration::from_secs(400);
+
+/// The held host: two hosts of the real agent, which say hello at the start. The operator
+/// cordons `h001` at [`HELD_OTHER_CORDON_AT`] for an hour, so the job can go only to `h000`;
+/// `h000` is held at [`HELD_AT`] (its hold file written, as an update's drain writes it) and
+/// the job submitted at [`HELD_SUBMIT_AT`], so it is placed on `h000` before `h000` is
+/// cordoned, at [`HELD_CORDON_AT`] (the cordon a held agent's keeper places, for an hour);
+/// `h001` is uncordoned at [`HELD_UNCORDON_AT`]. Between the refusal and the cordon of `h000`
+/// several placement passes run, with `h000` open and serving.
+const HELD_HOSTS: usize = 2;
+const HELD_OTHER_CORDON_AT: Duration = Duration::from_secs(5);
+const HELD_AT: Duration = Duration::from_secs(8);
+const HELD_SUBMIT_AT: Duration = Duration::from_secs(10);
+const HELD_CORDON_AT: Duration = Duration::from_secs(40);
+const HELD_UNCORDON_AT: Duration = Duration::from_secs(60);
+const HELD_OTHER_OPEN_AT: Duration = Duration::from_secs(12);
+const HELD_RUN: Duration = Duration::from_secs(60);
+const HELD_SETTLE: Duration = Duration::from_secs(300);
+const HOUR_SECS: u32 = 3_600;
 
 /// Covers section 8, row 1 (submit answer lost: the job id closes it, section 5.3). Four
 /// hosts; once they have said hello, the client submits one job and loses the answer to
@@ -335,4 +356,86 @@ fn a_server_restart_with_jobs_in_flight_loses_no_job() {
         )
         .settle_within(RESTART_SETTLE)
         .run_seeds(SEEDS);
+}
+
+/// The held host's scenario named `name`, `h001` uncordoned at `uncordon_at` (see
+/// [`HELD_HOSTS`]): the job succeeds, read under two allocations, the first on `h000` and the
+/// last on `h001`, launched once and only on `h001`, never read failed to start, with no host
+/// tainted at the end.
+fn held_host(name: &str, uncordon_at: Duration) -> Scenario {
+    let scratch = format!("{}/held-host", env!("CARGO_TARGET_TMPDIR"));
+    Scenario::new(name)
+        .scratch(&scratch)
+        .server(ServerSpec::registered_pool(
+            "burst",
+            Shape::gpu_host(),
+            HELD_HOSTS,
+        ))
+        .real_hosts("burst", HELD_HOSTS)
+        .at(HELD_OTHER_CORDON_AT, cordon_host(1, HOUR_SECS))
+        .at(HELD_AT, hold_agents(agents(0..1)))
+        .at(HELD_SUBMIT_AT, submit_work(1, Work::run_for(HELD_RUN)))
+        .at(uncordon_at, uncordon_host(1))
+        .at(HELD_CORDON_AT, cordon_host(0, HOUR_SECS))
+        .expect(Expect::job_state(ItemId(0), JobState::Succeeded))
+        .expect(Expect::allocations_of(ItemId(0), 2))
+        .expect(Expect::terminal_count(1, HowEnded::Succeeded))
+        .expect(Expect::each_job_launched_once())
+        .expect(Expect::launched_on(&[1], uncordon_at))
+        .expect(Expect::no_allocation_live())
+        .expect_that("first-on-the-held-host-last-on-the-other", |cell| {
+            let reads = &cell.observations().allocation_reads;
+            let hosts: Vec<String> = reads.iter().map(|read| read.row.host.to_string()).collect();
+            let first = hosts.first().map(String::as_str);
+            let last = hosts.last().map(String::as_str);
+            (first != Some("h000") || last != Some("h001"))
+                .then(|| format!("the job's allocations were read on {hosts:?}"))
+        })
+        .expect_that("never-failed-to-start", |cell| {
+            let reads = &cell.observations().job_reads;
+            let failed = reads
+                .iter()
+                .find(|read| matches!(read.state, JobState::FailedToStart(_)));
+            failed.map(|read| {
+                format!(
+                    "job {} was read {:?} at {:?}",
+                    read.job, read.state, read.at
+                )
+            })
+        })
+        .settle_within(HELD_SETTLE)
+}
+
+/// A host held between its hello and its cordon, with no other host open yet: two hosts of
+/// the real agent, `h001` cordoned by the operator; `h000` is held (its agent refuses every
+/// start `host-held`) and a job is submitted, which is placed on `h000`, its only open host;
+/// `h000` is cordoned 30 s later, as a held agent cordons itself, and `h001` uncordoned after
+/// that, so the job waits queued in between. States that the job succeeded, read under two
+/// allocations, the first on `h000` and the last on `h001`, launched once (only on `h001`),
+/// and was never read failed to start. Red for a server that fails the job on the refusal
+/// (`job-state`, `never-failed-to-start`), one that places it on `h000` again while `h000` is
+/// held and not yet cordoned (the next refusals are freed without a result the cell writes
+/// down, and would use up the job's requeues), and one that frees the refused allocation
+/// without the host's word (`freed-only-when-confirmed`).
+#[test]
+fn a_job_a_held_host_refused_before_its_cordon_waits_and_ends_on_another_host() {
+    held_host(
+        "a_job_a_held_host_refused_before_its_cordon_waits_and_ends_on_another_host",
+        HELD_UNCORDON_AT,
+    )
+    .run_seeds(SEEDS);
+}
+
+/// As the scenario above, with `h001` uncordoned at [`HELD_OTHER_OPEN_AT`], after the job was
+/// placed on `h000` and before `h000`'s refusal reaches the server: the requeue and the
+/// placement on `h001` happen in one heartbeat, so the cell reads the refused allocation's row
+/// taken by the new placement. States the same. Red as above, and for a check that takes the
+/// row a new placement took for a free on silence.
+#[test]
+fn a_job_a_held_host_refused_before_its_cordon_goes_to_an_open_host_at_once() {
+    held_host(
+        "a_job_a_held_host_refused_before_its_cordon_goes_to_an_open_host_at_once",
+        HELD_OTHER_OPEN_AT,
+    )
+    .run_seeds(SEEDS);
 }
