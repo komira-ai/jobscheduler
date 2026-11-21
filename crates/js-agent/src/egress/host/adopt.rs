@@ -236,29 +236,20 @@ impl Egress {
             why,
         };
         let mut left = lock(&inner.kept);
+        let mut held = lock(&inner.forwards);
         let kept = left
             .kept
-            .get(run)
+            .remove(run)
             .ok_or_else(|| unfit("the egress store holds no record of it".to_owned()))?;
-        if kept.level != level {
-            return Err(unfit(format!(
-                "its record names the level {}, its job {level}",
-                kept.level
-            )));
+        // A refusal puts the record's wiring back, for the settle.
+        if let Err(why) = fits(&kept, (level, ports), &held).map_err(|why| match why {
+            Unfit::Record(why) => unfit(why),
+            Unfit::Port(port) => EgressError::PortTaken { port },
+        }) {
+            left.kept.insert(run.to_owned(), kept);
+            return Err(why);
         }
-        if kept.ports != sorted(ports) {
-            return Err(unfit(
-                "its record names other ports than its job declared".to_owned(),
-            ));
-        }
-        let mut held = lock(&inner.forwards);
         let hosts: Vec<u16> = kept.forwards.iter().map(|forward| forward.host).collect();
-        if let Some(port) = hosts.iter().copied().find(|host| held.contains_key(host)) {
-            return Err(EgressError::PortTaken { port });
-        }
-        let Some(kept) = left.kept.remove(run) else {
-            return Err(unfit("the egress store holds no record of it".to_owned()));
-        };
         held.extend(
             kept.forwards
                 .into_iter()
@@ -316,6 +307,39 @@ impl Egress {
             result = result.and(removed);
         }
         result
+    }
+}
+
+/// Why a kept wiring is not a run's.
+enum Unfit {
+    /// The record names another level or other ports than the run's job.
+    Record(String),
+    /// A host port of its forwards is another run's.
+    Port(u16),
+}
+
+/// Whether `kept` is the wiring of a run whose job asked for `level` and declared `ports`,
+/// with none of its host ports in `held` (the forwards of other runs).
+fn fits(
+    kept: &Kept,
+    (level, ports): (JobNetwork, &[PortMap]),
+    held: &BTreeMap<u16, Forward>,
+) -> Result<(), Unfit> {
+    if kept.level != level {
+        return Err(Unfit::Record(format!(
+            "its record names the level {}, its job {level}",
+            kept.level
+        )));
+    }
+    if kept.ports != sorted(ports) {
+        return Err(Unfit::Record(
+            "its record names other ports than its job declared".to_owned(),
+        ));
+    }
+    let mut hosts = kept.forwards.iter().map(|forward| forward.host);
+    match hosts.find(|host| held.contains_key(host)) {
+        Some(port) => Err(Unfit::Port(port)),
+        None => Ok(()),
     }
 }
 

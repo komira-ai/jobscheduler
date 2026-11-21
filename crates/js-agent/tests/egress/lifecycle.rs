@@ -140,7 +140,6 @@ fn a_restart_removes_what_a_crash_left() {
         wired()
     );
     new.settle().expect("settled");
-    let _ = std::fs::remove_dir_all(&state);
     assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
     assert_eq!(
         links("jsp"),
@@ -156,6 +155,8 @@ fn a_restart_removes_what_a_crash_left() {
     assert_eq!(attachment.interface(), Some("jsv0"));
     assert!(tcp(&holder.ns, far::ALLOWED).connected());
     assert_eq!(allowed.accepted(), 1);
+    attachment.release().expect("released");
+    let _ = std::fs::remove_dir_all(&state);
 }
 
 /// Asserts that wiring refuses what it must not touch and leaves nothing behind when it

@@ -183,8 +183,8 @@ fn records_that_cannot_be_kept_are_not_put_back_and_the_settle_removes_their_fil
 }
 
 /// Asserts that a forward that does not read back as kept fails the start: a kept forward the
-/// tables lack after the load, a forward's lone DNAT rule, and a forward's acceptance behind
-/// the `inbound` refusal are each `Rules`. Catches a start that goes on with rules it did not
+/// tables lack after the load, a forward's lone DNAT rule, a forward's acceptance behind
+/// the `inbound` refusal, and one whole forward that is not the recorded one are each `Rules`. Catches a start that goes on with rules it did not
 /// load.
 #[test]
 fn forwards_that_do_not_read_back_as_kept_fail_the_start() {
@@ -223,6 +223,16 @@ fn forwards_that_do_not_read_back_as_kept_fail_the_start() {
         start(&fake),
         Err(EgressError::Rules),
         "an acceptance behind the inbound refusal accepts nothing"
+    );
+
+    let fake = Fake::new();
+    let (inet, nat) = tables(&[(8080, "jsv0", "198.18.0.2", 81)]);
+    fake.answer("list table inet", Ok(inet));
+    fake.answer("list table ip", Ok(nat));
+    assert_eq!(
+        start(&fake),
+        Err(EgressError::Rules),
+        "one whole forward, but to another port than the recorded one"
     );
 }
 
@@ -678,4 +688,33 @@ fn a_left_attachment_removes_nothing_and_keeps_its_record() {
     wired.leave();
     assert_eq!(fake.log().len(), before, "left, not removed");
     assert_eq!(recorded(&store), ["r"]);
+}
+
+/// Asserts that the crun runtime's port takes over, settles and leaves through the host side
+/// itself: through `EgressPort` an adoption claims the run's record and runs nothing, a run with
+/// no record is refused with the host side's exact text, the settle removes what no run took
+/// over, and `Wired::leave` of the adopted wiring runs nothing and keeps its record. Catches a
+/// port that adopts or settles by anything but the host side, or a leave that takes the
+/// wiring down.
+#[test]
+fn the_crun_runtimes_port_takes_over_settles_and_leaves_through_the_host_side() {
+    use crate::crun::{EgressPort, Wired};
+    let (fake, _dir, store, egress) = left_one(allow_list(), JobNetwork::AllowList, &[]);
+    let port: Arc<dyn EgressPort> = crate::crun::port_of(&egress);
+    let before = fake.log().len();
+    let wired = port
+        .adopt("r", JobNetwork::AllowList, &[])
+        .expect("adopted");
+    let refused = port
+        .adopt("nobody", JobNetwork::AllowList, &[])
+        .map(drop)
+        .expect_err("no record");
+    assert_eq!(
+        refused.to_string(),
+        cannot("nobody", "the egress store holds no record of it")
+    );
+    port.settle().expect("settled");
+    Wired::leave(wired);
+    assert_eq!(fake.log().len(), before, "nothing was run");
+    assert_eq!(recorded(&store), ["r"], "the record is the next process's");
 }

@@ -320,8 +320,8 @@ fn note_superseded(mut done: Done, superseded: Option<String>) -> Done {
 /// deferral for the drain bound says why the host was draining. The unit's text stands alone
 /// when the unit is the cause, so that no two notes say the same thing.
 fn note_drain(mut done: Done, record: &Record, cause: Drain) -> Done {
-    match (done.outcome, done.report.reason) {
-        (Outcome::Success, _) => {
+    match done.outcome {
+        Outcome::Success => {
             let drain = cause.note();
             done.report.detail = Some(match (&record.unit_restart, cause) {
                 (Some(restart), Drain::UnitChanges) => unit_note(restart),
@@ -329,11 +329,11 @@ fn note_drain(mut done: Done, record: &Record, cause: Drain) -> Done {
                 (None, _) => drain,
             });
         }
-        (Outcome::Deferred, Some(Reason::DrainBound)) => {
+        // The other ending `wait` gives: the deferral for the drain bound.
+        _ => {
             let detail = done.report.detail.take().unwrap_or_default();
             done.report.detail = Some(format!("{detail}; draining because {}", cause.text()));
         }
-        _ => {}
     }
     done
 }
