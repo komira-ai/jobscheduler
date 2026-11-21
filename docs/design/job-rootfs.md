@@ -554,7 +554,7 @@ New agent refusal codes, added to `refusal.rs` (add-only, `refusal_codes_snapsho
 | `input-not-allowed` | a host path lies under no `--mount-root`/`--mount-root-ro` (after links are followed), a read-write mount lies under a read-only root, a `sub_path` leads out of its source by a link, or a host port is not in `--host-port` |
 | `input-unavailable` | a host path, or its `sub_path`, is missing, not a directory, cannot be read, or its lookup passed its bound (4.7); a mount's source the job cannot reach (4.2) |
 | `rootfs-unsupported-here` | `layers` on an agent whose runtime has no root to replace (macOS) |
-| `mount-target-unsupported-here` | on macOS, a mount target outside `/work`, or a read-only or read-write mount at `/work` itself (5.1) |
+| `mount-target-unsupported-here` | on macOS, a mount target outside `/work`, a read-only or read-write mount at `/work` itself, or a mount nested where a link cannot be made (5.1; `mac-input-trees.md` 3.1) |
 | `host-port-remap-unsupported-here` | on macOS, a host port whose job port differs from its host port (5.1); placement never sends one there (2.6) |
 | `input-unreadable` | as a result's `input_failure`: a host path no longer answers after the job, which did not succeed (section 8) |
 | `host-port-lost` | as a result's `input_failure`: a host port could not be offered again after the agent restarted (4.5) |
@@ -791,7 +791,8 @@ kept off the lifecycle worker, and what the bound means.
 
 Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, mount providers, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once); a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` and a provider's source `input-not-allowed` until they are.
 How a Mac gives a job a copy-on-write mount, and a provider's tree, is decided in `docs/design/mac-input-trees.md` (13, Q1):
-a private copy the agent makes in the run's home, and the link of 5.2 to the provider's directory. This section fixes
+a private copy the agent makes in the run's home, and the link of 5.2 to a directory the provider has written whole on
+the Mac's local disk, since macOS refuses reads of a network volume to the programs a job runs. This section fixes
 what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the three candidates 5.3
 compared. The wire and the server of sections 2 and 3 do not change.
 
@@ -801,7 +802,7 @@ compared. The wire and the server of sections 2 and 3 do not change.
 |---|---|
 | `layers` | refused `rootfs-unsupported-here`; placement never sends them (2.6: they require `exec=container`). A native job runs in its own directory of the host's file system; there is no root for layers to replace, under any of the mechanisms of 5.3. |
 | `mounts`, `COPY_ON_WRITE`, target `/work` or below it | a private copy of the tree in the run's `exec/` (`mac-input-trees.md` section 3); until it is built, refused `rootfs-unsupported-here` |
-| `mounts`, a provider's source | the link of 5.2 to the directory the provider answers, or the copy of the row above (`mac-input-trees.md` sections 3.1 and 4); until it is built, refused `input-not-allowed` |
+| `mounts`, a provider's source | the link of 5.2 to the directory the provider answers, or the copy of the row above (`mac-input-trees.md` 2.1 and section 5); until it is built, refused `input-not-allowed` |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2); built. A target below another mount's target is refused `mount-target-unsupported-here` (its link would be made inside the host directory the first points at), except below a `COPY_ON_WRITE` target, whose copy is a directory of the home (`mac-input-trees.md` 3.1) |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target exactly `/work` | refused `mount-target-unsupported-here`: the run's working directory is a directory of the run's home, which a link cannot replace |
 | `mounts`, any target outside `/work` | refused `mount-target-unsupported-here` |
@@ -819,18 +820,18 @@ and its program's paths relative sends the same spec to both platforms. The allo
 meaning (`--mount-root`, `--mount-root-ro`, `--host-port`), resolved by the same code against `realpath`-canonical roots
 (`/private/var/...`, `AbsPath`, `crates/js-mac-pool/src/seatbelt/path.rs`).
 
-**The preparing stage.** Today the native runtime's lookups (`resolve_fs`) are metadata calls made on the worker and
-answered at once, and it has no assembly. A provider's directory is on a mount that can hang, so `mac-input-trees.md`
-3.1 moves the lookups to a pool off the worker with the 60 s bound of 4.7, and makes the copy of a copy-on-write mount
-in the runtime's `assemble_fs` on the same pool.
+**The preparing stage.** The native runtime's lookups (`resolve_fs`) are metadata calls made on the worker and
+answered at once, and it has no assembly. Every source on a Mac is on a local volume (`mac-input-trees.md` 2.1), so the
+lookups stay there; the copy of a copy-on-write mount is made by the runtime's `assemble_fs` on a pool off the worker
+(`mac-input-trees.md` 3.1).
 
 ### 5.2 Read-only and read-write mounts
 
 Independent of 5.3:
 
 - **`READ_ONLY`**: a symbolic link `exec/<rest>` to the canonical host path, made by the agent before the job's first
-  process (tree-inputs.md 4.3 designed the same for its trees). Reads through it are the provider's own, lazily if it is
-  lazy. The link is in the run's read-only list (`IN_i`), so the job cannot replace it; writes through it land outside
+  process (tree-inputs.md 4.3 designed the same for its trees). Reads through it are the provider's own; a provider's tree
+  on a Mac is written whole on the local disk, not read lazily (`mac-input-trees.md` 2.1). The link is in the run's read-only list (`IN_i`), so the job cannot replace it; writes through it land outside
   the run's home, where the profile's head denies them. A working directory at or below the link is refused
   `cwd-in-tree` (an existing code), since the working-directory check (`crates/js-agent/src/native/cwd.rs`) refuses a
   link out of `exec/`.
@@ -853,7 +854,7 @@ user, removed with the run.
 | What it needs | a file system of ours with overlay semantics; an FSKit extension approved on every Mac (the MDM layer can approve it) or FUSE-T installed; root to mount; an unmount before `user-delete`, which refuses to cross a mount (`docs/design/mac-lease-teardown.md`, the deletion's step 1); a way to end processes blocked in a hung mount | the copy `files.rs` makes of a `Mount` input, changed to give owner-writable modes and to leave the tree out of the read-only list; nothing mounted | a list of the files the job writes, or an acceptance that writes to inputs fail |
 | Seatbelt | a grant of the mount's path (it is in the home, which is writable already) | nothing new: the tree is in the home | read grants on the host path behind the links; the copies are in the home |
 
-**The tests that were set.** Each candidate is run against a lazy provider's real macOS mount, on the same tree, and then:
+**The tests that were set.** They were set before macOS's privacy control was found to refuse reads of a network volume to the programs a job runs (`mac-input-trees.md` 2.1), which closes a lazy provider's macOS mount to jobs. Each candidate is run against a lazy provider's real macOS mount, on the same tree, and then:
 
 1. *Semantics*: a program that opens an input read-write and changes it, truncates and appends to one, renames a file
    and a directory from the lower, deletes both, makes a hard link, changes a mode and `mmap`s a file for writing;
@@ -869,12 +870,12 @@ Candidate (c) fails test 1 by construction unless the client declares its output
 and because it is the cheapest if the measurements show that the jobs only replace files by rename.
 
 **Chosen: (b), made per file** (`docs/design/mac-input-trees.md`). Each file is cloned when the source is on the homes'
-volume, and its bytes are copied otherwise. A provider's tree is always on another file system, and a clone out of it
-is `EXDEV`. (b) passes test 1 by construction. It passes tests 4 and 5 with nothing mounted in the home and nothing
-installed. It gives up laziness for copy-on-write mounts only; read-only mounts stay lazy links. (a) is rejected:
+volume, and its bytes are copied otherwise; a provider's tree is written by the provider on the homes' volume, so it is
+cloned. (b) passes test 1 by construction. It passes tests 4 and 5 with nothing mounted in the home and nothing
+installed. No candidate is lazy on a Mac: macOS refuses reads of a network volume to the programs a job runs. (a) is rejected:
 the OS's `MNT_UNION` is lookup fallthrough only, a second server over the provider measured 1.6 times slower on a cold `stat` and 25 times with eight threads,
 and a hung hard mount leaves job processes unkillable. That doc gives the evidence, the flags, the refusals, the
-measurement still to make (the copy time of test 3 through a real provider's mount), and what result would reopen the
+measurement still to make (the time a provider takes to write a warm tree locally), and what result would reopen the
 choice.
 
 ### 5.4 The Seatbelt view
@@ -1023,7 +1024,7 @@ fetches on first read; jobscheduler neither knows nor needs to.
 | a host path's root lookup | the creating phase | 60 s per path (4.7), then the start timeout |
 | the clones and overlay mounts | the creating phase | the start timeout |
 | reads of a lazy lower while the job runs | the job's wall clock | the job's wall limit |
-| on macOS, the copy of a copy-on-write mount (`mac-input-trees.md` 3.4) | the creating phase | 60 s without progress, then the start timeout |
+| on macOS, the copy of a copy-on-write mount (`mac-input-trees.md` 3.4) | the creating phase | the start timeout |
 
 So on Linux a lazy input is paid for while the job runs, and a client sets the wall limit with that in mind. The time
 a job spent creating is visible already: `Job.times.started_at_ms - Job.times.placed_at_ms` (`JobTimes`, job.proto),
@@ -1338,7 +1339,8 @@ Each is decided here; the owner may overturn any.
   The job port defaults to the host port, which is all macOS can offer (5.4), so a job that gives none runs on both
   platforms; one that gives its own runs only in a container (2.6). The protocol is TCP now; UDP takes the next value.
 - **LR10. On macOS a read-only or read-write mount is a link, whatever its source; a copy-on-write mount is a private
-  copy the agent makes in the run's home** (5.3, `mac-input-trees.md`). Union views and per-file links are rejected.
+  copy the agent makes in the run's home; no source is on a network volume** (5.3, `mac-input-trees.md`). Union views
+  and per-file links are rejected.
   The copy realises the same `COPY_ON_WRITE` mode, so the spec does not change.
 - **LR11. The agent checks a failed job's host paths once after it ends**, and nothing while it runs (section 8).
 - **LR12. The job's lifecycle is a documented guarantee any client may rely on; no new state or watch for "creating".**
@@ -1381,8 +1383,8 @@ Each is decided here; the owner may overturn any.
 ## 13. Open questions
 
 - **Q1. Decided:** a copy-on-write mount on macOS is candidate (b), made per file (`docs/design/mac-input-trees.md`).
-  The copy time through a real provider's mount is still to be measured; it sets which trees are worth sending to a
-  Mac, not the mechanism.
+  A provider's tree on a Mac is written whole on the local disk, not read through a network mount. The time to write
+  a warm tree is still to be measured; it sets which trees are worth sending to a Mac, not the mechanism.
 - **Q2. The forwarder's throughput.** Every byte of an upload through a host port is copied by the agent. If build item
   8 measures it short of what the uploads it is built for need, the next step is `splice(2)` between the two sockets,
   then host sockets (2.4, build item 12) for providers that offer one: the job then connects to the provider's socket,
