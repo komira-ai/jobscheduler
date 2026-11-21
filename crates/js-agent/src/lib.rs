@@ -354,6 +354,8 @@ mod registry_credentials;
 mod run;
 mod session;
 mod signals;
+#[cfg(target_os = "linux")]
+pub mod start_refused;
 mod system;
 pub mod systemd;
 #[cfg(test)]
@@ -550,6 +552,10 @@ pub fn main_with(
             expand: &flags_file::expand,
         };
         return gpu_dropin::run(&args, out, err, &host);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(code) = start_refused::dispatch(&args, out, err) {
+        return code;
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
     // step of another program, and installs no signal handler. hostkeeper runs an update step as

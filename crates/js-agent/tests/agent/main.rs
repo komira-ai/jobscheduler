@@ -28,6 +28,8 @@ mod crun_default;
 mod crun_gpu;
 #[cfg(target_os = "linux")]
 mod crun_host;
+#[cfg(target_os = "linux")]
+mod crun_roots;
 mod disk;
 mod drive;
 mod e2e;
