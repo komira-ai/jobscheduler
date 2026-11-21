@@ -33,7 +33,8 @@ use lint::{Site, jobs, lint};
 use std::path::Path;
 
 /// Every pinned tool fetch of the repository: `<file>/<job>` and its `--cache` path.
-const EXPECTED: [(&str, &str, &str); 6] = [
+const EXPECTED: [(&str, &str, &str); 7] = [
+    ("ci.yml", "test", "$RUNNER_TEMP/pinned/cargo-nextest.tar.gz"),
     ("ci.yml", "deny", "$RUNNER_TEMP/pinned/cargo-deny.tar.gz"),
     (
         "ci.yml",
@@ -438,9 +439,9 @@ fn a_download_outside_fetch_and_a_shared_cache_path_are_refused() {
     );
 }
 
-/// Asserts that the repository's own workflows are refused with one line changed: either
-/// coverage job of ci.yml (`coverage-shard`, `coverage`) without the restore before
-/// cargo-nextest or with its llvm-cov key missing the pin, or the deny job saving
+/// Asserts that the repository's own workflows are refused with one line changed: the `test`
+/// job or either coverage job of ci.yml (`coverage-shard`, `coverage`) without the restore
+/// before cargo-nextest, either coverage job with its llvm-cov key missing the pin, or the deny job saving
 /// cargo-deny's archive on every outcome. A line that occurs in several jobs is changed in
 /// each of them in turn, and each change alone is refused.
 #[test]
@@ -461,7 +462,7 @@ fn the_repository_workflows_with_one_line_changed_are_refused() {
         &ci,
         "        id: nextest-cache\n",
         "        id: nextest-cache\n        if: false\n",
-        2,
+        3,
     );
     each(
         &ci,
