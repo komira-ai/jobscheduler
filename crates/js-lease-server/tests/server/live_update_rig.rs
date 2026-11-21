@@ -15,7 +15,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 
-use js_jobs::{IdSource, MintError, RandomIds};
+use js_jobs::{Booked, IdSource, JobEnd, JobId, JobState, JobStore, MintError, NewJob, RandomIds};
+use js_state::{Clock, ManualClock, Store, StoreTime};
+use js_types::HostId;
 use postgres::{Client, NoTls};
 use serde_json::{Value, json};
 
@@ -52,6 +54,19 @@ pub async fn server_minting(url: &str, name: &str, ids: Arc<dyn IdSource>) -> Ha
     args.push("--store".into());
     args.push(store_file(&scratch, url).into_os_string());
     Harness::with_ids(scratch, args, ids).await
+}
+
+/// A server named `name` over the Postgres store at `url`, with a readiness route on a port
+/// the system chooses, whose stores read `store_clock`: each call a store makes reads it first,
+/// before it takes a connection or a lock.
+pub async fn server_reading(url: &str, name: &str, store_clock: Arc<dyn Clock>) -> Harness {
+    let scratch = Scratch::new(name);
+    let mut args: Vec<OsString> = job_host_args(&scratch);
+    scratch.write("agent-pool.toml", POOL, 0o644);
+    args.push("--store".into());
+    args.push(store_file(&scratch, url).into_os_string());
+    args.extend(["--ready-listen", "127.0.0.1:0"].map(OsString::from));
+    Harness::with_store_clock(scratch, args, store_clock).await
 }
 
 /// A server named `name` over the Postgres store at `url`.
@@ -513,4 +528,140 @@ async fn off_runtime<T: Send + 'static>(wait: impl FnOnce() -> T + Send + 'stati
         let _ = done.send(wait());
     });
     guard(answer).await.expect("the waiting thread answers")
+}
+
+/// The serving server's side of a roll, as it writes to the store: its own job store over the
+/// shared database, and the jobs it holds that have not ended, with their states. The unit test
+/// of the open, `src/job_store_busy_tests.rs`, drives the open with the same kind of writer.
+pub struct Serving {
+    jobs: JobStore<Arc<dyn Store>, RandomIds>,
+    /// The jobs that have not ended, by id.
+    live: BTreeMap<JobId, JobState>,
+    /// A job's body, which every job it queues in place of an ended one repeats.
+    template: NewJob,
+    /// How many changes it may still make.
+    left: usize,
+    /// How many changes it made.
+    made: usize,
+    /// How many jobs it has queued in place of ended ones.
+    queued: usize,
+}
+
+impl Serving {
+    /// The serving server over `store`, holding the jobs `ids` (which must exist, and which it
+    /// may change `steps` times in all).
+    pub fn new(store: Arc<dyn Store>, ids: &[String], steps: usize) -> Self {
+        let jobs = JobStore::new(Arc::new(store), RandomIds).expect("the serving job store");
+        let mut live = BTreeMap::new();
+        let mut template = None;
+        for id in ids {
+            let id = JobId::parse(id).expect("a job id");
+            let job = jobs.get_job(&id).expect("reads").expect("present");
+            template = Some(NewJob {
+                id: None,
+                spec: job.spec,
+                priority: 0,
+                client: None,
+            });
+            live.insert(id, job.state);
+        }
+        Self {
+            jobs,
+            live,
+            template: template.expect("a job to repeat"),
+            left: steps,
+            made: 0,
+            queued: 0,
+        }
+    }
+
+    /// Moves its oldest live job (the lowest id) one step: queued to placed, placed to
+    /// starting, starting to running, running to ended; a job that ends is replaced by a new
+    /// queued one (its id sorts after the first jobs', so the oldest live job is always one the
+    /// open has read), so the farm stays as busy. Each change is one commit, and must hold at its
+    /// first try: a server that opens its job store never makes the serving one lose a write.
+    fn step(&mut self) {
+        let (id, state) = self.live.pop_first().expect("a live job");
+        let host = HostId::new("busy-host").expect("a host id");
+        let booked = Booked::Shape {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            disk_bytes: 0,
+            accelerators: 0,
+        };
+        let (moved, now) = match state {
+            JobState::Queued => (
+                self.jobs.place(&id, host, booked).map(drop),
+                JobState::Placed,
+            ),
+            JobState::Placed => {
+                let to = JobState::Starting;
+                (self.jobs.transition(&id, state, to).map(drop), to)
+            }
+            JobState::Starting => {
+                let to = JobState::Running;
+                (self.jobs.transition(&id, state, to).map(drop), to)
+            }
+            _ => (
+                self.jobs.end_job(&id, JobEnd::Lost).map(drop),
+                JobState::Lost,
+            ),
+        };
+        moved.expect("the serving server's change commits at its first try");
+        self.made += 1;
+        if now.is_ended() {
+            let id = JobId::parse(&format!("zz-busy-{:05}", self.queued)).expect("an id");
+            self.queued += 1;
+            let new = NewJob {
+                id: Some(id.clone()),
+                ..self.template.clone()
+            };
+            self.jobs
+                .insert_queued(new)
+                .expect("the serving server queues a job");
+            self.live.insert(id, JobState::Queued);
+        } else {
+            self.live.insert(id, now);
+        }
+    }
+}
+
+/// A store clock that makes the serving server change one job at every reading, while it has
+/// changes left, and then answers its own clock: a writer that never pauses and is bounded by
+/// a count. A store reads its clock once at the start of every call, so between any two calls
+/// of a server that opens its job store with this clock, a job has changed.
+pub struct Busy {
+    clock: ManualClock,
+    serving: Mutex<Serving>,
+}
+
+impl Busy {
+    /// The clock, reading `clock` once the serving server has no change left.
+    pub fn new(clock: ManualClock, serving: Serving) -> Self {
+        Self {
+            clock,
+            serving: Mutex::new(serving),
+        }
+    }
+
+    /// Stops the writer, and returns how many changes it had left and how many it made (each
+    /// committed at its first try, or the test has failed). Call it before any read through a
+    /// store that reads this clock, which would change a job under the read; and never hold
+    /// the writer's lock across a call that does.
+    pub fn stop(&self) -> (usize, usize) {
+        let mut serving = self.serving.lock().unwrap_or_else(PoisonError::into_inner);
+        let left = std::mem::take(&mut serving.left);
+        (left, serving.made)
+    }
+}
+
+impl Clock for Busy {
+    fn now(&self) -> StoreTime {
+        let mut serving = self.serving.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(left) = serving.left.checked_sub(1) {
+            serving.left = left;
+            serving.step();
+        }
+        self.clock.now()
+    }
 }

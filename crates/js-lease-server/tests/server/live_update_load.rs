@@ -17,16 +17,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_jobs::{JobStore, RandomIds};
-use js_state::StoreTime;
 use js_state::postgres::test_database;
+use js_state::{ManualClock, StoreTime};
 use js_types::HostId;
 use tokio::runtime::Runtime;
 
 use crate::live_update_rig::{
-    Agent, Edge, Gate, HOSTS, HeadLock, PER_HOST, due, job_at, post_at, server, server_minting,
-    signal, state_at, submit_at,
+    Agent, Busy, Edge, Gate, HOSTS, HeadLock, PER_HOST, Serving, due, job_at, post_at, server,
+    server_minting, server_reading, signal, state_at, submit_at,
 };
-use crate::support::{Harness, T0, guard};
+use crate::support::{Harness, T0, guard, request};
 
 /// The hosts, and the jobs submitted so far, in order.
 struct Fleet {
@@ -389,6 +389,67 @@ fn a_server_killed_mid_dispatch_leaves_the_start_to_the_other_after_the_lease() 
         assert_eq!(state_at(b_jobs, "job-1").await, "JOB_STATE_SUCCEEDED");
         assert!(agent.done.contains("job-1"));
         assert_eq!(agent.hellos, 1);
+        b.running.shutdown().await.unwrap();
+    });
+}
+
+/// Asserts that a server starts beside one that changes a job before every call the new
+/// server's job store open makes (a writer that never pauses, bounded by a count, writing
+/// through the serving server's own job store): the new server's start returns and its
+/// readiness route answers 200 `ready` with changes still left to the writer, so it did not
+/// need the serving server to stop; every change of the serving server committed at its first
+/// try; and the roll goes on: the serving server is signalled and exits, and a job submitted
+/// to the new server is admitted and read back. It catches an open that starts over each time
+/// a job changes under it (the new server never turns ready on a busy farm, and the update
+/// never finishes), and an open that makes the serving server lose a write.
+#[test]
+fn a_server_turns_ready_while_the_serving_server_changes_jobs_without_a_pause() {
+    /// The jobs the serving server holds when the new server starts.
+    const JOBS: usize = 40;
+    /// The most changes the serving server makes: far more than the open needs calls.
+    const STEPS: usize = 600;
+    let database = test_database();
+    let url = database.url();
+    Runtime::new().unwrap().block_on(async {
+        let a = server(&url, "busy_a").await;
+        let a_jobs = a.running.job_addr().unwrap();
+        // A host joined, so the jobs are admitted; what it has no room for waits queued.
+        Agent::new("burst-1", true).hello(a.addr()).await;
+        let mut ids = Vec::new();
+        for n in 0..JOBS {
+            let id = format!("seed-{n:03}");
+            let made = submit_at(a_jobs, id.clone()).await;
+            assert_eq!(made.status, 201, "{id}: {}", made.body);
+            ids.push(id);
+        }
+        let store = a.running.store().expect("A has a store");
+        let serving = Serving::new(store, &ids, STEPS);
+        let clock = ManualClock::default();
+        // An hour on from the jobs' times, so the open has deadlines to raise.
+        clock.advance(Duration::from_millis(T0) + Duration::from_secs(3600));
+        let busy = Arc::new(Busy::new(clock, serving));
+
+        // The first roll: B starts while the serving server changes a job at every call.
+        let b = server_reading(&url, "busy_b", busy.clone()).await;
+        let (left, made) = busy.stop();
+        assert!(
+            left > 0,
+            "the open needed the serving server to stop: all {made} changes made"
+        );
+        let ready = b
+            .running
+            .ready_addr()
+            .expect("B serves its readiness route");
+        let reply = request(ready, "GET", "/readyz", None, None).await;
+        assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+
+        // A is signalled and exits; a job submitted to B is admitted.
+        signal(&a).await;
+        a.running.shutdown().await.unwrap();
+        let b_jobs = b.running.job_addr().unwrap();
+        let made = submit_at(b_jobs, "after-roll".to_owned()).await;
+        assert_eq!(made.status, 201, "{}", made.body);
+        assert_eq!(state_at(b_jobs, "after-roll").await, "JOB_STATE_QUEUED");
         b.running.shutdown().await.unwrap();
     });
 }

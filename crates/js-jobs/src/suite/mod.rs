@@ -24,6 +24,7 @@ use crate::{
     Needs, NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
+mod boot;
 mod claimed;
 mod clock;
 mod collect;
@@ -57,6 +58,7 @@ mod taints;
 mod unclean;
 mod whole;
 
+pub use boot::*;
 pub use claimed::*;
 pub use clock::*;
 pub use collect::*;
@@ -175,7 +177,9 @@ where
     restart_keeps_results(backend);
     a_result_survives_the_end_of_its_allocation(backend);
     retention_ends_are_raised_at_boot_after_a_long_outage(backend);
-    a_boot_raises_floors_and_retention_ends_in_one_commit(backend);
+    a_boot_raises_floors_and_retention_ends_a_row_to_a_commit(backend);
+    a_boot_raise_that_other_writers_beat_reads_each_row_again_alone(backend);
+    a_boot_raise_wider_than_a_batch_takes_a_batch_per_group(backend);
     retention_uses_the_injected_clock(backend);
     the_result_and_the_state_change_commit_together(backend);
     an_overlong_tail_is_cut_on_a_character_boundary(backend);
@@ -201,7 +205,8 @@ where
     an_indexed_read_judges_the_row_not_the_entry(backend);
     an_indexed_read_reads_every_page_of_entries(backend);
     an_ended_row_without_a_retention_end_is_due_and_kept(backend);
-    a_backfill_that_loses_its_row_is_stale(backend);
+    a_backfill_that_loses_a_row_reads_it_again_and_indexes_it(backend);
+    a_backfill_whose_row_is_deleted_before_its_commit_deletes_its_entries(backend);
     a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open(backend);
     a_queued_job_stays_under_the_active_space_an_earlier_build_reads(backend);
     every_write_moves_the_written_mark_and_no_read_does(backend);
@@ -370,7 +375,9 @@ macro_rules! job_store_tests {
             restart_keeps_results,
             a_result_survives_the_end_of_its_allocation,
             retention_ends_are_raised_at_boot_after_a_long_outage,
-            a_boot_raises_floors_and_retention_ends_in_one_commit,
+            a_boot_raises_floors_and_retention_ends_a_row_to_a_commit,
+            a_boot_raise_that_other_writers_beat_reads_each_row_again_alone,
+            a_boot_raise_wider_than_a_batch_takes_a_batch_per_group,
             retention_uses_the_injected_clock,
             the_result_and_the_state_change_commit_together,
             an_overlong_tail_is_cut_on_a_character_boundary,
@@ -396,7 +403,8 @@ macro_rules! job_store_tests {
             an_indexed_read_judges_the_row_not_the_entry,
             an_indexed_read_reads_every_page_of_entries,
             an_ended_row_without_a_retention_end_is_due_and_kept,
-            a_backfill_that_loses_its_row_is_stale,
+            a_backfill_that_loses_a_row_reads_it_again_and_indexes_it,
+            a_backfill_whose_row_is_deleted_before_its_commit_deletes_its_entries,
             a_store_an_earlier_build_wrote_reads_its_whole_queue_after_an_open,
             a_queued_job_stays_under_the_active_space_an_earlier_build_reads,
             every_write_moves_the_written_mark_and_no_read_does,

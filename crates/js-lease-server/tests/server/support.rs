@@ -208,6 +208,21 @@ impl Harness {
         Self::with_ids(scratch, args, Arc::new(RandomIds)).await
     }
 
+    /// A server on `args` whose job store and Postgres store read `store_clock`, in place of
+    /// the harness's clock: the times they stamp, and the moment of each call they make, are
+    /// the clock's.
+    pub async fn with_store_clock(
+        scratch: Scratch,
+        args: Vec<OsString>,
+        store_clock: Arc<dyn js_state::Clock>,
+    ) -> Self {
+        let clock = ManualClock::new(Timestamp::from_millis(T0));
+        let config = config(args)
+            .unwrap()
+            .with_job_sources(store_clock, Arc::new(RandomIds));
+        Self::over_at(scratch, config, clock).await
+    }
+
     /// A server on `args` whose job store mints its ids from `ids`.
     pub async fn with_ids(
         scratch: Scratch,
