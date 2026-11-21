@@ -111,7 +111,7 @@ next push that ships code. Nothing runs on a timer.
    `stable` lists the release and `pkg-upload` has ended; that workflow sets the release as
    hostkeeper's desired version of `js-agent` ([Deploying through
    hostkeeper](#deploying-through-hostkeeper)). Then `deployed` ends the run's turn.
-11. When any job of the run failed (the deploy path, the beta stage), `release-red`
+11. When any job of the run failed (the deploy path, the beta stage, the smoke bundle), `release-red`
    opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
    with the label `main-red`, its body a `Run:`, a `Head:` and up to five `Failing:` lines, or
    comments those lines on the RELEASE-RED issue that is open. When a run that released had no job
@@ -119,19 +119,19 @@ next push that ships code. Nothing runs on a timer.
    run. Both hold `issues: write` and `actions: read` and run `gh` alone.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
-verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
+verify, the apt index jobs, `check-apt`, `smoke-bundle-pack` and `smoke-bundle-check` (plus `attestations: read` for verify), `id-token` and
 `attestations` write for `attest`, `actions: read` and
 `contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
 `actions: read` for `release-red` and `release-green`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
 write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`
-and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), nothing for
-`cp-deploy-digest`.
+and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), `packages: write` alone
+for `smoke-bundle-push` (the push of the smoke bundle), nothing for `cp-deploy-digest`.
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
 that holds a write permission or the signing key compiles this repository's code: `gamma`,
-`cp-deploy-digest` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
+`cp-deploy-digest`, `smoke-bundle-push` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
 the build, whose scripts run code from the locked dependency set, never shares a job with the token
 service's address, the cloud role or the key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs,

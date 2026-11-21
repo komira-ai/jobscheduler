@@ -1,6 +1,7 @@
 # The smoke bundle (README.md beside this file): the recipe `cargo xtask release smoke-bundle`
 # packs `tree/` with, the repository and tag the release publishes it under, and the manifest
-# digest it packs to. The release's tests (crates/xtask/tests/smoke_bundle.rs) pack the tree
+# digest it packs to (a function of the tree, this recipe and the workspace version, which
+# `js-bundle pack` writes into the config as the tool that built it). The release's tests (crates/xtask/tests/smoke_bundle.rs) pack the tree
 # with this recipe and fail unless it gives `digest`, so a change to the tree or to a field
 # here comes with the digest it now gives, and with a new `tag`: a published tag is never
 # moved to another manifest, and the release refuses to.
