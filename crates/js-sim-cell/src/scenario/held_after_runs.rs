@@ -94,6 +94,7 @@ mod tests {
                 host: host(on),
                 job: JobId::parse("job-a").expect("a job id"),
                 at: ms(made),
+                held: false,
             };
             let mut seen = Observations::quiet()
                 .with_event(
