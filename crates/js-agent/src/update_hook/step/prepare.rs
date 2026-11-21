@@ -1,8 +1,9 @@
-//! `prepare` (host-updates design, 4.2, 3.6): check that the host can take the update, then
-//! cordon it and wait for it to hold no lease. Nothing a client sees changes, and the agent is
-//! never stopped or signalled here: a drain bound that passes with a lease still running lifts
-//! the cordon this step placed and ends deferred (75); if the lift fails the cordon stays as
-//! recorded and the step still ends deferred.
+//! `prepare` (host-updates design, 4.2, 3.6): check that the host can take the update, then,
+//! unless the update hands the runs over (below), cordon it and wait for it to hold no lease.
+//! Nothing a client sees changes, and the agent is never stopped or signalled here: a drain
+//! bound that passes with a lease still running lifts the cordon this step placed and ends
+//! deferred (75); if the lift fails the cordon stays as recorded and the step still ends
+//! deferred.
 //!
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
@@ -12,8 +13,9 @@
 //!    directory is made, mode 0700, when it is not there, and so is every directory above it
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
-//! 2. a taint the restarted agent will not re-check, or an `owed-*` record, halts (76); a taint
-//!    it will re-check (a residue of a post-job check the pin file does not name, see
+//! 2. a taint the restarted agent will not re-check halts (76), and so does an `owed-*` record,
+//!    looked at after item 3 and only for an update that drains; a taint it will re-check (a
+//!    residue of a post-job check the pin file does not name, see
 //!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
 //!    step goes on as for a clean host;
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
@@ -39,6 +41,13 @@
 //! 7. the wait: poll the host, renewing the cordon we placed after each pause and never
 //!    asking for more than the cap allows.
 //!
+//! An update hands the runs over instead (`hands_over`, decided once, when the record is
+//! written, and kept in it as `handover`) on systemd with the crun runtime, the staged unit the
+//! same as the installed one, no egress ceiling in the host's flags file, and a previous agent
+//! whose `--version` lists `handover` on its `stops:` line. Its record is written with no cordon
+//! and the step ends after 6, saying so in its detail; the owed checks of the running agent are
+//! not looked at (it finishes them before it hands over, see `cutover`).
+//!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
 //! An update compares the unit the staged release carries with the one the previous release
@@ -51,8 +60,8 @@ use std::time::Duration;
 use js_client::{HostIdentity, host_key_problem};
 
 use crate::update_hook::{
-    Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
-    Report, UnitRestart, UpdateInfo, agent_in, plan,
+    Class, Cordon, Done, Held, HostReading, Manager, Outcome, POLL_SECS, Params, PlanError, Reason,
+    Record, Report, UnitRestart, UpdateInfo, agent_in, plan,
 };
 
 use super::host_setup::set_up;
@@ -61,6 +70,15 @@ use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save
 
 /// The agent's name, the first word of its `--version`.
 const AGENT_NAME: &str = "js-agent";
+
+/// The `--version` line that lists the ways the agent's stop can go, and the word of the
+/// handover in it (see [`crate::lifecycle::handover`]).
+const STOPS: &str = "stops:";
+const HANDOVER_WORD: &str = "handover";
+
+/// The detail of a `prepare` that hands the runs over.
+pub(super) const HANDOVER_NOTE: &str =
+    "the cutover hands the running jobs over to the new agent: no cordon and no drain";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
@@ -77,7 +95,7 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     };
     // Before anything else is looked at or written: no version can repair a taint the agent
     // cannot clear itself.
-    refuse_host(env)?;
+    refuse_taint(env)?;
     let (fresh, aside, mut record) = match loaded {
         Some(record) if !stale => (false, None, record),
         aside => {
@@ -88,6 +106,15 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     };
     check_agent(env, params)?;
     let restart = staged_unit(env, params)?;
+    let handover = match fresh {
+        true => hands_over(env, params, restart.as_ref()),
+        false => record.handover,
+    };
+    // The checks owed while the agent hands its runs over are the agent's to finish before it
+    // ends (see `cutover`): only a drain is refused for them.
+    if !handover {
+        refuse_owed(env)?;
+    }
     if params.previous_version.is_none() {
         join_token(env, params)?;
     }
@@ -105,10 +132,52 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     }
     if fresh {
         record.unit_restart = restart;
+        record.handover = handover;
+    }
+    if record.handover {
+        if fresh {
+            save(env, &held, &record)?;
+        }
+        return Ok(Done {
+            report: Report {
+                detail: Some(HANDOVER_NOTE.to_owned()),
+                ..Report::default()
+            },
+            ..success()
+        });
     }
     place(env, &held, &mut record, params, fresh)?;
     let done = wait(env, &held, &mut record, params)?;
     Ok(note_restart(done, &record))
+}
+
+/// Whether this update hands the agent's runs over to the new agent at the cutover, instead of
+/// draining the host: on systemd with the crun runtime, whose runs outlive the agent and are
+/// adopted by its next process; with the same unit (a changed one is started from an empty
+/// cgroup, see `cutover`); with no egress ceiling in the host's flags (an agent with one removes
+/// the runs it would adopt); and with a previous agent that takes the request: the previous
+/// release's agent lists `handover` on its `stops:` line of `--version`. An agent from before the
+/// handover would read the stop as a drain and hold the cutover for its whole drain wait.
+fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> bool {
+    let adoptable = env.manager == Manager::Systemd
+        && params.settings.runtime == "crun"
+        && restart.is_none()
+        && !env.egress;
+    adoptable
+        && params
+            .previous_release
+            .as_deref()
+            .is_some_and(|previous| takes_handover(env, previous))
+}
+
+/// Whether the agent of the release `release` lists the handover among its stops.
+fn takes_handover(env: &Env<'_>, release: &Path) -> bool {
+    let binary = agent_in(env.manager, release);
+    let printed = env.runner.run(&binary.to_string_lossy(), &["--version"]);
+    printed.is_ok_and(|printed| {
+        let mut stops = printed.lines().filter_map(|line| line.strip_prefix(STOPS));
+        stops.any(|list| list.split_whitespace().any(|word| word == HANDOVER_WORD))
+    })
 }
 
 /// The change from the installed unit to the staged one, and the staged unit must be there.
@@ -272,6 +341,24 @@ fn bad_artifact(why: impl ToString) -> Done {
 /// (`*-unreadable`, `watch-over-bound`, `cgroup-not-found`) still halts, because a restart
 /// restores it pinned, as does a residue the pin file names.
 pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
+    refuse_taint(env)?;
+    refuse_owed(env)
+}
+
+/// [`refuse_host`] for an update that hands the runs over (`handover`): only the taint. The
+/// agents on either side of a handover run their jobs' post-job checks while the hook waits
+/// for them, so a record of owed checks is a check under way. The agent the hook stops finishes
+/// its checks before it ends, and a record one leaves anyway taints the next start
+/// (`check-owed`), which then halts here as a taint.
+pub(super) fn refuse_host_in(env: &Env<'_>, handover: bool) -> Result<(), Done> {
+    match handover {
+        true => refuse_taint(env),
+        false => refuse_host(env),
+    }
+}
+
+/// The taint half of [`refuse_host`].
+fn refuse_taint(env: &Env<'_>) -> Result<(), Done> {
     let state = env.ports.state;
     if let Some(taint) = state
         .taint()
@@ -285,6 +372,11 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
             ),
         });
     }
+    Ok(())
+}
+
+/// The owed-check half of [`refuse_host`].
+fn refuse_owed(env: &Env<'_>) -> Result<(), Done> {
     let owed = env
         .ports
         .state

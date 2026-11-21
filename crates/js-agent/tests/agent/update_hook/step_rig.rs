@@ -496,6 +496,8 @@ pub struct Spy<'a> {
     /// The host certificate and key the flags file names ([`HOST_CERT_PATH`] and
     /// [`HOST_KEY_PATH`]); none by default, as when the flags file names neither.
     pub host_identity: Option<HostIdentity>,
+    /// Whether the host's flags set an egress ceiling, as the hook reads them (`Env::egress`).
+    pub egress: Cell<bool>,
     /// What the host certificate file shows. Nothing is there by default.
     pub identity_cert: Rc<Cell<TokenFile>>,
     /// What the host key file shows. Nothing is there by default.
@@ -568,6 +570,7 @@ impl<'a> Spy<'a> {
             fstab: rig.tmp.path().join("fstab"),
             token,
             host_identity: None,
+            egress: Cell::new(false),
             identity_cert,
             identity_key,
             token_fn: Box::new(move |path| {
@@ -695,6 +698,7 @@ impl<'a> Spy<'a> {
             euid: euid(),
             token: &*self.token_fn,
             host_identity: self.host_identity.as_ref(),
+            egress: self.egress.get(),
             stat,
             look: &*self.look_fn,
             fstab: &self.fstab,
@@ -843,6 +847,18 @@ impl StateView for Spy<'_> {
 
     fn has_credential(&self) -> bool {
         StateView::has_credential(&self.state)
+    }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        self.act("handover.request".to_owned());
+        self.port_check("handover")?;
+        StateView::request_handover(&self.state)
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        self.act("handover.withdraw".to_owned());
+        self.port_check("withdraw")?;
+        StateView::withdraw_handover(&self.state)
     }
 }
 
