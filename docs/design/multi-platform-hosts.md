@@ -20,8 +20,9 @@ It is a design only. Section 7 splits the implementation into pull-request-sized
 - "Standing rule R1" is the table at the top of [design.md](../design.md). Other rule ids (T10, B8, B14, B20) are those of
   `AGENTS.md`.
 - Every code reference was read in the tree this file was written against. A line number is approximate; the symbol is the anchor.
-- The design is written against the current server: one registry per instance, holding the hosts that said hello to it
-  ([multi-instance.md](multi-instance.md) designs the move to shared node rows).
+- The design is written against the current server. A hello and a heartbeat are served by any instance from the host's
+  `node/<host>` row, and each instance's registry is a cache of those rows
+  ([multi-instance.md](multi-instance.md), section 0).
 
 **The machines this is written for.**
 
@@ -48,8 +49,8 @@ not a machine provider (5.6), and not the operating system's machine id the agen
   - `shape = { cpu_millis, memory_bytes, gpus, gpu_class }` of a `kind = "joined"` `[[pool]]`, a required key
     (`crates/js-lease-server/src/file/joined.rs`, where `shape` is read and refused as "required" when absent);
   - or the `[shape]` table of the one-pool `--agent-pool-config` file (`crates/js-lease-server/src/agent_pool.rs`).
-- **The shape as a floor.** `Registry::admit` (`crates/js-registry/src/registry.rs`, near line 480) refuses a hello whose claim
-  does not `Shape::satisfies` the shape, with `shape-not-accepted` / `below-floor`.
+- **The shape as a floor.** The hello's judgement (`judge`, `crates/js-registry/src/registry/admit.rs`, near line 122) refuses a
+  hello whose claim does not `Shape::satisfies` the shape, with `shape-not-accepted` / `below-floor`.
 - **The shape as the booking.**
   - `PoolConfig::list_claimed` books every admitted host at `placement_shape(&self.booked, claim, by_hello)` (config.rs, near line
     372). Its resources are always the pool's `booked` resources, the shape cut by `memory_schedulable_percent`, and never the
@@ -59,7 +60,7 @@ not a machine provider (5.6), and not the operating system's machine id the agen
   - `crates/js-registry/tests/mac_pool_shape.rs` pins this rule for the Macs: a pool shaped at the smallest Mac (28 cores) books a
     32-core Mac at 28.
 - **What reads the shape.**
-  - The placer is told the host's booked shape (`Registry::admit` calls `tell_up` with `book.shape_of`).
+  - The placer is told the host's booked shape (admit.rs calls `list_claimed`, then `tell_up` with `book.shape_of`).
   - The pass gives the commit `capacity_of(&view.shape, cpu_slack)` (`crates/js-lease-server/src/sched/jobs_pass.rs`).
   - The server sizes its usage limits from the largest pool shape (`crates/js-lease-server/src/agents.rs`, near line 279).
   - `check_pool` (`crates/js-lease-server/src/config/placement.rs`) requires the shape to name an `arch` unless the pool places by
@@ -305,7 +306,8 @@ CLI code.
   first is live or holds work.
 - **Two instances at once.** The side's hello adds it to the row at the version it read, so two instances admitting two sides at
   once cannot both pass.
-- **Restarts.** The side's binding keeps its machine, so a side put back after a restart (`restore_tainted`) keeps it.
+- **Restarts and other instances.** The side's binding and its `node/<host>` row keep its machine, so a side put back after a
+  restart keeps it, and an instance that serves the side's beats reads it from the row.
 
 **The commit.** `JobStore::place_claimed` gains the machine capacity and the membership. In its transaction it:
 
@@ -646,8 +648,9 @@ The cordon keeps a server with the old file and one with the new from booking on
 
 - **The booking.** `placement_shape` takes its resources from the claim (2.1). `PoolConfig`'s shape becomes `Option<Shape>`, a
   floor when present.
-- **Machine on the record.** `Record` and `Binding` gain `machine: Option<HostId>`.
-- **Admission.** `Registry::admit` adds three checks after the floor check, in this order: `machine-required`, `machine-unknown`,
+- **Machine on the record.** `Record`, `Binding` and the `node/<host>` row (`js-jobs`, `node.rs`) gain `machine: Option<HostId>`,
+  an optional field.
+- **Admission.** The hello's judgement (`registry/admit.rs`) adds three checks after the floor check, in this order: `machine-required`, `machine-unknown`,
   `machine-side-taken`. For a pool with no `side_of`, a named machine is ignored.
 - **The membership row** is written with the binding (2.5).
 - **The view.** `HostView` gains `machine` and `platform` (`os/arch`).
