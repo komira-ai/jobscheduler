@@ -1,4 +1,35 @@
+use std::io::Write;
+
 use super::*;
+
+/// A writer that keeps what is written, for the tests: clones share one buffer.
+#[derive(Clone, Default)]
+struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Sink {
+    fn text(&self) -> String {
+        let bytes = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).expect("utf-8")
+    }
+}
 
 /// The line of each event `emit` makes while the agent's subscriber, writing to a sink, is
 /// this thread's; it is installed while no capture of `test_tracing` is, with the callsites'

@@ -74,38 +74,6 @@ pub(crate) fn install() -> bool {
     install_with(io::stderr)
 }
 
-/// A writer that keeps what is written, for the tests: clones share one buffer.
-#[cfg(test)]
-#[derive(Clone, Default)]
-struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-#[cfg(test)]
-impl io::Write for Sink {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-impl Sink {
-    fn text(&self) -> String {
-        let bytes = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        String::from_utf8(bytes).expect("utf-8")
-    }
-}
-
 #[cfg(test)]
 #[path = "warnings_tests.rs"]
 mod tests;
