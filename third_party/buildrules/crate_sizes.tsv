@@ -37,6 +37,8 @@ const-oid 0.10.2 61449
 core_detect 1.0.0 17758
 cpufeatures 0.2.17 13466
 cpufeatures 0.3.1 14272
+crc 3.4.0 13941
+crc-catalog 2.5.0 18057
 crc32fast 1.5.3 52272
 crypto-common 0.1.7 9619
 crypto-common 0.2.2 15449
@@ -110,6 +112,7 @@ log 0.4.34 53395
 logos 0.16.1 28172
 logos-codegen 0.16.1 51792
 logos-derive 0.16.1 8193
+lzma-rs 0.3.0 29080
 matchit 0.8.4 33986
 md-5 0.11.0 17404
 memchr 2.8.3 99165
