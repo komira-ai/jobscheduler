@@ -5,7 +5,7 @@
 //! Pass 1 (the placement walk over the open hosts) reaches [`Outcome::Waiting`],
 //! [`Outcome::WholeHost`] and [`Outcome::Placed`]; pass 2 (the acquire of a machine, with its
 //! failover) reaches [`Outcome::Refused`] and [`Outcome::Launched`]; a failed whole-host prepare
-//! reaches [`Outcome::Requeued`]. A pass-2 reason outlives pass 1's "nothing is free": a job
+//! reaches [`Outcome::Requeued`], and a start a held host refused [`Outcome::HeldRequeued`]. A pass-2 reason outlives pass 1's "nothing is free": a job
 //! that shows [`QueueCode::QuotaBackoff`], [`QueueCode::FailingOver`] or
 //! [`QueueCode::WaitingForMachine`] keeps it through
 //! [`Outcome::Waiting`], and through an [`Outcome::WholeHost`] with no host being emptied for
@@ -52,6 +52,14 @@ pub enum Outcome {
     Requeued {
         /// The host whose prepare failed.
         host: HostId,
+    },
+    /// `host`, held for maintenance, refused the start of the placed job (the agent's code
+    /// `host-held`), which went back to the queue. `whole_host`: the job books a whole host.
+    HeldRequeued {
+        /// The host that refused the start.
+        host: HostId,
+        /// Whether the job books the whole host.
+        whole_host: bool,
     },
 }
 
@@ -110,6 +118,21 @@ pub fn note(outcome: &Outcome, current: QueueCode) -> Option<QueueNote> {
                 code: QueueCode::WaitingForWholeHost,
                 detail: format!(
                     "the whole-host prepare on host {host} failed; the job is queued again"
+                ),
+                event: Some(Kind::Requeued),
+                host: Some(host.clone()),
+                attempt: false,
+            });
+        }
+        Outcome::HeldRequeued { host, whole_host } => {
+            let code = match whole_host {
+                true => QueueCode::WaitingForWholeHost,
+                false => QueueCode::WaitingForCapacity,
+            };
+            return Some(QueueNote {
+                code,
+                detail: format!(
+                    "host {host} is held for maintenance and refused the start; the job is queued again"
                 ),
                 event: Some(Kind::Requeued),
                 host: Some(host.clone()),

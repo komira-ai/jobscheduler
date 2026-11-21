@@ -133,7 +133,8 @@ fn names(value: &Value) -> Vec<String> {
 /// v0.1.213 holds, field by field (the host's id, pool, shape and GPUs are the host's, and
 /// the recorded host has two), that the first heartbeat of its session has the recorded
 /// heartbeat's fields, and that the current profile's hello differs from it in the agent
-/// version, the credential flag and the capabilities. Catches a profile that drifts from
+/// version, the credential flag, the capabilities and the agent process the previous release
+/// does not send. Catches a profile that drifts from
 /// the recording (a version, a capability or the credential flag changed), and a profile
 /// that changes nothing.
 #[test]
@@ -184,14 +185,26 @@ fn the_previous_release_hello_is_the_recorded_one_field_by_field() {
     let mut current = node(AgentProfile::Current);
     let (calls, _) = feed(&mut current, 0, Event::Start);
     let body = &calls[0].1;
-    let differs: Vec<&str> = ["agent_version", "accepts_host_credential", "capabilities"]
-        .into_iter()
-        .filter(|key| body.get(key) != ours.get(key))
-        .collect();
+    let differs: Vec<&str> = [
+        "agent_version",
+        "accepts_host_credential",
+        "capabilities",
+        "agent_process",
+    ]
+    .into_iter()
+    .filter(|key| body.get(key) != ours.get(key))
+    .collect();
     assert_eq!(
         differs,
-        ["agent_version", "accepts_host_credential", "capabilities"]
+        [
+            "agent_version",
+            "accepts_host_credential",
+            "capabilities",
+            "agent_process"
+        ]
     );
+    assert_eq!(ours.get("agent_process"), None);
+    assert!(body.get("agent_process").is_some_and(Value::is_string));
     assert_eq!(body.get("accepts_host_credential"), None);
 }
 

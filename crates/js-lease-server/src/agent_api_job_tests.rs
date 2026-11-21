@@ -51,27 +51,30 @@ async fn listed_states_commit_with_the_allocation_change() {
     let id = rig.place("job-a", "host-a");
     agent.take(&rig.beat(&agent).await.unwrap());
 
+    // Every beat commits two rows of its own (beat_node, settle_node) besides what its
+    // listing changes: +3 is one listed state, then +2 per beat that changes nothing.
     let before = rig.commits();
     rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 1);
+    // The listed state's commit plus the beat's two row writes (beat_node, settle_node).
+    assert_eq!(rig.commits(), before + 3);
     assert_eq!(
         rig.states(&id),
         (JobState::Starting, AllocationStep::Booked)
     );
     rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 1);
+    assert_eq!(rig.commits(), before + 5);
 
     agent.run("job-a");
     rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(rig.commits(), before + 8);
     assert_eq!(rig.states(&id), (JobState::Running, AllocationStep::Booked));
     assert!(rig.job(&id).started_at.is_some());
     rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 2);
+    assert_eq!(rig.commits(), before + 10);
 
     agent.end("job-a", Outcome::Succeeded, Some(0));
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 3);
+    assert_eq!(rig.commits(), before + 13);
     assert_eq!(
         rig.states(&id),
         (JobState::Succeeded, AllocationStep::Releasing)
@@ -83,7 +86,7 @@ async fn listed_states_commit_with_the_allocation_change() {
     );
     assert_eq!(reply.job_acks[0].ack, Ack::Accepted);
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 3);
+    assert_eq!(rig.commits(), before + 15);
     assert_eq!(reply.job_acks[0].ack, Ack::Duplicate);
 
     // Placed, then listed already ended: starting and running are committed first, each
@@ -94,7 +97,7 @@ async fn listed_states_commit_with_the_allocation_change() {
     agent.end("job-quick", Outcome::Failed, Some(3));
     let before = rig.commits();
     rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 3);
+    assert_eq!(rig.commits(), before + 5);
     let job = rig.job(&quick);
     assert_eq!(job.state, JobState::Failed);
     assert!(job.started_at.is_some());
@@ -268,7 +271,16 @@ async fn a_failed_commit_answers_500_and_sends_nothing() {
     let mut agent = FakeAgent::new("host-a");
     let id = rig.place("job-a", "host-a");
     agent.take(&rig.beat(&agent).await.unwrap());
+    // The beat's own row write fails first: 503, nothing of the job changes.
     rig.store.fail_next();
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+    assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
+    // Let the beat's row write through; the listing's commit fails: 500.
+    rig.store.fail_after(1);
     let refused = rig.beat(&agent).await.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),
@@ -277,7 +289,7 @@ async fn a_failed_commit_answers_500_and_sends_nothing() {
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     let before = rig.commits();
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(rig.commits(), before + 1);
+    assert_eq!(rig.commits(), before + 3);
     assert_eq!(
         rig.states(&id),
         (JobState::Starting, AllocationStep::Booked)
@@ -320,7 +332,16 @@ async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
     let mut agent = FakeAgent::new("host-a");
     let id = rig.place("job-a", "host-a");
     agent.take(&rig.beat(&agent).await.unwrap());
+    // The beat's own row write fails first: 503, nothing of the job changes.
     rig.store.fail_next();
+    let refused = rig.beat(&agent).await.unwrap_err();
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (503, "state-write-failed")
+    );
+    assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
+    // Let the beat's row write through; the listing's commit fails: 500.
+    rig.store.fail_after(1);
     let refused = rig.beat(&agent).await.unwrap_err();
     assert_eq!(
         (refused.status.as_u16(), refused.error),

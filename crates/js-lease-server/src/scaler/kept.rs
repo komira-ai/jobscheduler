@@ -20,7 +20,7 @@ use std::io;
 use std::sync::Arc;
 
 use js_scaler::Records;
-use js_state::Store;
+use js_state::{Cond, Store};
 
 use super::{RecordsFile, UnremovedFile, unremoved};
 use crate::error::StartupError;
@@ -75,7 +75,10 @@ impl ScalerKeeper {
 
 /// Puts `text` at `key` in one transaction.
 fn put(store: &dyn Store, key: &str, text: String) -> io::Result<()> {
-    host_keys::commit(store, vec![(key.to_owned(), Some(text.into_bytes()))])
+    // The scaler's keys are written whole by the one server that runs the scaler, whatever the
+    // row holds (no other server reads and rewrites them), so the put has no condition.
+    let write = (key.to_owned(), Some(text.into_bytes()), Cond::Any);
+    host_keys::commit(store, vec![write]).map(drop)
 }
 
 /// The records and the hosts to remove that `store` holds, read at start. No records key is

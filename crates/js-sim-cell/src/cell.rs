@@ -576,6 +576,15 @@ impl Cell {
         self.replace(index);
     }
 
+    /// Holds agent `index`'s host ([`AgentNode::hold`]), written in the trace when it is
+    /// held. Returns whether it is.
+    pub fn hold(&mut self, index: usize) -> bool {
+        let held = self.agent(index).filter(|agent| agent.hold());
+        let host = held.map(|agent| agent.host().clone());
+        host.inspect(|host| self.record(format!("hold {host}")))
+            .is_some()
+    }
+
     /// Starts a new process on agent `index`'s host, with empty state.
     pub fn replace(&mut self, index: usize) {
         let replaced = self.agent_mut(index).map(|agent| {

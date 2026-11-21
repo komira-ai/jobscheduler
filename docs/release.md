@@ -21,8 +21,10 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests` and `ci-passed`, which start beside `plan`, still run).
    Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
-   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests) under
-   cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
+   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests), and
+   with them the four longest test binaries of `js-sim-cell` (`faults`, `smoke`, `replay` and
+   `whole_host_prepare`, built with `--features js-sim-cell/slow-families`) that `test` leaves out,
+   under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
    from the Cargo cache `ci`'s `test` job saves on main (read only).
 4. The `artifacts` job calls `.github/workflows/artifacts.yml` with that version; its jobs run in
    the same run, at the same commit. Its `build` stamps the version into the CI checkout, builds the binaries for
@@ -610,8 +612,8 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `package` | `com.komira.js-agent` |
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
 | `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
-| `run` | the launchd labels `js-agent` and `js-agent.session` (the agent and its root helper) |
-| `params.unit`, `params.helper_unit` | `js-agent`, `js-agent.session` |
+| `run` | the launchd labels `js-agent`, `js-agent.session` and `js-agent.pf-pool` (the agent, its root helper and the job that keeps the pool's pf anchor loaded) |
+| `params.unit`, `params.helper_unit`, `params.pf_unit` | `js-agent`, `js-agent.session`, `js-agent.pf-pool` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |
 | `params.socket_group` | `_jsagent`, the helper's socket group, which the hook's `prepare` makes when the Mac has none |

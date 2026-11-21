@@ -227,6 +227,8 @@ pub struct AgentSpec {
 pub struct AgentNode {
     spec: AgentSpec,
     process: Option<Process>,
+    /// How many processes the host has had: the next one's agent-process id differs.
+    generation: u64,
     io: Io,
     /// Where the node writes that it took an input, for the cell's run loop.
     applied: Applied,
@@ -250,7 +252,8 @@ impl AgentNode {
             profile: AgentProfile::default(),
         };
         Self {
-            process: Process::new(&spec),
+            process: Process::new(&spec, 0),
+            generation: 0,
             spec,
             io,
             applied: Applied::default(),
@@ -283,7 +286,17 @@ impl AgentNode {
     /// Starts a new agent process on this host with empty state, in place of any process
     /// it has. It says hello at the node's next tick.
     pub fn replace(&mut self) {
-        self.process = Process::new(&self.spec);
+        self.generation += 1;
+        self.process = Process::new(&self.spec, self.generation);
+    }
+
+    /// Holds the host as the drain of an update does: the real agent's process writes the hold
+    /// file into its state root and refuses every start from then on with the code
+    /// `host-held`. The hold is the process's: a process started in its place has new roots
+    /// and is not held, and a fake agent, or a host with no process, is not held. Returns
+    /// whether the host is held.
+    pub fn hold(&self) -> bool {
+        self.process.as_ref().is_some_and(Process::hold)
     }
 
     /// The ground truth of the agent process, or `None` while the host has none.

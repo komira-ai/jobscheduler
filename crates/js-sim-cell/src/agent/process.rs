@@ -185,6 +185,12 @@ impl Behind {
         }
     }
 
+    /// Holds the host when the real agent is behind the wire ([`RealAgent::hold`]); a fake
+    /// has no state root and is not held. Returns whether the host is held.
+    fn hold(&self) -> bool {
+        self.real().is_some_and(RealAgent::hold)
+    }
+
     /// The real agent, when this is it.
     fn real(&self) -> Option<&RealAgent> {
         match self {
@@ -296,6 +302,10 @@ impl Book {
 
 /// One agent process.
 pub(super) struct Process {
+    /// The id the process names in every hello ([`Hello::agent_process`]): the host and
+    /// the count of processes the host has had, so it is the same across the hellos of one
+    /// process, differs between processes, and draws no randomness.
+    id: String,
     agent: Behind,
     session: Option<Session>,
     /// The hellos not yet answered, with when each was sent.
@@ -324,8 +334,9 @@ pub(super) struct Process {
 impl Process {
     /// A fresh process: the agent `spec` names, holding nothing, not welcomed; `None` for
     /// a real agent that could not be made.
-    pub(super) fn new(spec: &AgentSpec) -> Option<Self> {
+    pub(super) fn new(spec: &AgentSpec, generation: u64) -> Option<Self> {
         Behind::of(spec).map(|agent| Self {
+            id: format!("sim-{}-{generation}", spec.host.as_str()),
             agent,
             session: None,
             hellos: BTreeMap::new(),
@@ -339,6 +350,11 @@ impl Process {
             busy_until: FarmTime::default(),
             queued: BTreeMap::new(),
         })
+    }
+
+    /// Holds the host, when the real agent is behind the wire: see [`Behind::hold`].
+    pub(super) fn hold(&self) -> bool {
+        self.agent.hold()
     }
 
     /// The time is `now`: the real lifecycle's clock reads it from here on.
@@ -452,6 +468,7 @@ impl Process {
 
     fn hello(&mut self, spec: &AgentSpec, io: &mut Io) {
         let hello = Hello {
+            agent_process: Some(self.id.clone()),
             protocol: ProtocolRange::THIS,
             host_id: spec.host.as_str().to_owned(),
             pool: spec.pool.clone(),
@@ -506,6 +523,7 @@ impl Process {
             });
         }
         let beat = Heartbeat {
+            seq: Some(session.seq),
             host_id: spec.host.as_str().to_owned(),
             epoch: session.epoch,
             session: session.secret.clone(),
@@ -522,6 +540,7 @@ impl Process {
             retired_jobs: listing.retired.clone(),
             log_grant_state: None,
         };
+        let beat = io.profile.shape_beat(beat);
         if let Some(agent) = self.agent.fake() {
             agent.heartbeat();
         }

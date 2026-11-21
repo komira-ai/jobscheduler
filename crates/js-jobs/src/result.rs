@@ -454,6 +454,7 @@ mod tests {
             client: None,
             failed_prepares: 0,
             prepare_bars: std::collections::BTreeMap::new(),
+            held_refusals: Vec::new(),
             queue: crate::QueueTrail::default(),
             carried: crate::codec::Carried::default(),
             start_failure_detail: None,

@@ -9,15 +9,21 @@
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
 //!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged. A job the agent ran and ended between two heartbeats
-//!    is walked through the steps it skipped first. The same listing twice commits nothing,
-//!    and a report that would move a job backwards or out of an end is ignored.
+//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`) sends
+//!    the job back to the queue and frees its allocation instead ([`crate::job_held`]), and is
+//!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
+//!    through the steps it skipped first. The same listing twice commits nothing, and a
+//!    report that would move a job backwards or out of an end is ignored.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
 //!    and was told to stop is stopped and gone, so a cancelled job ends and its allocation is
 //!    freed in one commit.
 //! 3. **Confirmed containers are freed**: an allocation that is releasing, of a job that has
 //!    ended, whose host no longer lists the job, is freed ([`job_alloc::free_allocation`]). A
-//!    host that is only silent is never served here, so silence frees nothing.
+//!    host that is only silent is never served here, so silence frees nothing. For an agent
+//!    that sends no beat sequence the server cannot tell an old beat from a new one (a beat
+//!    the agent gave up on can still be applied after a newer one), so its container is freed
+//!    only once two applied beats in a row leave it out: the count of each such job is kept in
+//!    the host's row ([`JobReply::missing`]).
 //! 4. **The reply is built** from what the store holds now: a stop for every job of the host
 //!    with a cancel intent that has not ended, every listed job the store has no live
 //!    allocation of on this host, and every listed job that ended without the host reporting
@@ -48,6 +54,7 @@ use js_types::{HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
+use crate::job_held;
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
@@ -72,6 +79,10 @@ pub(crate) struct JobReply {
     /// The allocation id of the whole-host job the host is to be prepared for or to hold,
     /// when it has one ([`exclusive_of`]): the reply's `exclusive`.
     pub(crate) exclusive: Option<String>,
+    /// For an agent that sends no beat sequence: each job whose confirmed container this
+    /// listing left out and did not free, with how many applied beats in a row have left it
+    /// out. Empty for an agent that sends one, whose containers are freed at once.
+    pub(crate) missing: BTreeMap<JobId, u32>,
 }
 
 /// What [`commit_listing`] found.
@@ -122,6 +133,10 @@ pub(crate) struct BeatContext<'a> {
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
 /// `retired`, with room for `room` commands: the listing and the retired ids committed,
 /// confirmed containers freed, then the stops and starts that follow from the store.
+/// `missed` is `None` for an agent that sends a beat sequence, whose confirmed containers are
+/// freed as soon as a listing leaves them out; for one that sends none it is the count the
+/// host's row kept of the applied beats in a row that left out each, and a container is freed
+/// once two have ([`JobReply::missing`]).
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -132,6 +147,7 @@ pub(crate) fn serve(
     listed: &[HeldJob],
     retired: &[String],
     room: usize,
+    missed: Option<&BTreeMap<JobId, u32>>,
 ) -> Result<JobReply, JobStoreError> {
     let host = context.host;
     let reported = commit_listing(jobs, context, listed)?;
@@ -145,11 +161,21 @@ pub(crate) fn serve(
         .map(|job| job.job_id.as_str())
         .chain(retired.iter().map(String::as_str))
         .collect();
+    let mut missing = BTreeMap::new();
     for (allocation, job) in jobs.live_on(host)? {
         let ended = job.as_ref().is_none_or(|job| job.state.is_ended());
         let gone = !held.contains(allocation.job.as_str());
-        if (allocation.step == AllocationStep::Releasing) & ended & gone {
-            job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
+        if (allocation.step != AllocationStep::Releasing) | !ended | !gone {
+            continue;
+        }
+        let before = missed.map(|missed| missed.get(&allocation.job).copied().unwrap_or(0));
+        match before {
+            Some(0) => {
+                missing.insert(allocation.job, 1);
+            }
+            _ => {
+                job_alloc::free_allocation(jobs, &allocation.job, Freed::HostConfirmed)?;
+            }
         }
     }
     let (commands, exclusive) =
@@ -160,6 +186,7 @@ pub(crate) fn serve(
         retired_acks: retired.to_vec(),
         clean: reported.unknown.is_empty(),
         exclusive,
+        missing,
     })
 }
 
@@ -305,9 +332,12 @@ fn report(
 }
 
 /// Commits the result the host of `context` lists for `job`, which it holds, and returns the
-/// verdict on it: the one place a listed result is recorded. The job ends as [`end_of`] reads
-/// the result, in one transaction with its allocation's move to releasing, after the steps it
-/// skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
+/// verdict on it: the one place a listed result is recorded. A start the host refused as held
+/// sends the job back to the queue instead, freeing its allocation, and is answered
+/// [`Ack::Accepted`] ([`job_held::held_or_end`]). Otherwise the job ends as [`end_of`] reads
+/// the result (or, for the refusal of a job held hosts sent back too often, with a detail
+/// naming them), in one transaction with its allocation's move to releasing, after the steps
+/// it skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
 /// unanswered.
@@ -323,6 +353,9 @@ fn commit_result(
     if job.state.is_ended() {
         return Ok(Some(Ack::Duplicate));
     }
+    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
+        return Ok(Some(Ack::Accepted));
+    };
     let ran = matches!(
         end,
         JobEnd::Exited { .. }

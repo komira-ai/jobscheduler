@@ -22,9 +22,11 @@
 //! one-time token that registered the host), whose host the server wrote down at the
 //! hello. The shared pool token names no host and is refused. Every other host id is the
 //! same 403 as a credential that never was the host's, so the answer tells nothing of
-//! which hosts exist. A host id that passes and that the registry does not hold (it has
-//! not said hello since the server started and holds nothing a restart puts back) is
-//! 409 `unknown-host`, as for a heartbeat: the agent says hello again.
+//! which hosts exist. A host id that passes and that the registry does not hold is first
+//! taken from the store's rows, when the server holds the job tables (a session another
+//! server, or this one before a restart, took the hello of: [`Agents::take_from_rows`]); a
+//! host the rows do not hold either is 409 `unknown-host`, as for a heartbeat: the agent says
+//! hello again. A row that cannot be read is 503 `cordon-unsaved`.
 //!
 //! A request whose connection carries a host certificate (see [`super::host_cert`]) is
 //! served with no other credential, and the path's host must be the certificate's, or it is
@@ -286,6 +288,7 @@ pub(super) async fn show(
     match verb {
         Some(_) => Err(not_found()),
         None => {
+            agents.take_from_rows(&host).await.map_err(refused)?;
             let own = agents.registry.own_host(&host);
             let own = own.ok_or(NotHeld).map_err(unknown)?;
             Ok(Json(Reading::of(own, Did::default())).into_response())

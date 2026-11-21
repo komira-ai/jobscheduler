@@ -121,7 +121,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// As [`JobStore::place_with`]; [`JobStoreError::Stale`] also when the job's row is held by
     /// another transaction or its commit's preconditions failed; [`JobStoreError::HostFull`];
-    /// [`JobStoreError::HostCordoned`].
+    /// [`JobStoreError::HostCordoned`]. On a guarded view ([`JobStore::guarded`]) the commit also
+    /// checks the node row, and a row that moved is [`JobStoreError::NodeMoved`].
     pub fn place_claimed(
         &self,
         id: &JobId,
@@ -140,6 +141,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             let decided = self.decide_placement(read, id, (host, booked, placement), capacity, now);
             match decided {
                 Ok((txn, job, allocation)) => {
+                    let txn = self.guard_txn(txn);
                     placed = Some((job, allocation));
                     Some(txn)
                 }
@@ -153,6 +155,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         match (outcome?, placed, failed) {
             (Claim::Committed(_), Some(placed), _) => Ok(placed),
             (_, _, Some(error)) => Err(error),
+            (Claim::Conflict(conflict), _, _) => Err(self
+                .refuse_moved(conflict)
+                .err()
+                .unwrap_or(JobStoreError::Stale { id: id.clone() })),
             _ => Err(JobStoreError::Stale { id: id.clone() }),
         }
     }
@@ -444,7 +450,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// The allocation of the job `id` at the version read, when it is booked.
-    fn booked_allocation(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
+    pub(super) fn booked_allocation(
+        &self,
+        id: &JobId,
+    ) -> Result<(AllocationRecord, Version), JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         ensure(
             allocation.step == AllocationStep::Booked,

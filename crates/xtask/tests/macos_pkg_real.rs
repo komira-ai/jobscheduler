@@ -49,7 +49,7 @@ fn staged(name: &str) -> (TestDir, StageArgs) {
     for program in PROGRAMS {
         std::fs::copy("/usr/bin/true", bin.join(program)).unwrap();
     }
-    for file in ["LICENSE", "agent.plist", "session.plist"] {
+    for file in ["LICENSE", "agent.plist", "session.plist", "pf-pool.plist"] {
         std::fs::write(at.join(file), format!("{file}\n")).unwrap();
     }
     let path = |leaf: &str| at.join(leaf).to_str().unwrap().to_owned();
@@ -65,6 +65,8 @@ fn staged(name: &str) -> (TestDir, StageArgs) {
         &path("agent.plist"),
         "--session-plist",
         &path("session.plist"),
+        "--pf-pool-plist",
+        &path("pf-pool.plist"),
         "--out",
         &path("out"),
     ])

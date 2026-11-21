@@ -158,6 +158,7 @@ impl Agent {
     /// and the lifecycle takes a step. Returns the reply.
     fn beat(&mut self, registry: &Registry) -> HeartbeatReply {
         let message = Heartbeat {
+            seq: None,
             host_id: "a".into(),
             epoch: self.epoch,
             session: self.session.clone(),

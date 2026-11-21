@@ -32,6 +32,8 @@ mod cordons;
 mod dispatch;
 mod duties;
 mod failures;
+mod guarded;
+mod held;
 mod hosts;
 mod idempotency;
 mod indexes;
@@ -49,6 +51,7 @@ mod retention;
 mod rows;
 mod scrub;
 mod taints;
+mod unclean;
 mod whole;
 
 pub use claimed::*;
@@ -59,6 +62,8 @@ pub use cordons::*;
 pub use dispatch::*;
 pub use duties::*;
 pub use failures::*;
+pub use guarded::*;
+pub use held::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use indexes::*;
@@ -76,6 +81,7 @@ pub use retention::*;
 pub use rows::*;
 pub use scrub::*;
 pub use taints::*;
+pub use unclean::*;
 pub use whole::*;
 
 /// Runs every check of the suite against `backend`, one after another.
@@ -105,6 +111,13 @@ where
     live_on_lists_the_live_allocations_of_one_host(backend);
     two_servers_beating_one_host_at_once_apply_each_beat_once(backend);
     a_beat_or_hello_that_loses_its_version_reads_the_row_again(backend);
+    a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved(backend);
+    a_conflict_on_another_row_is_not_the_node_moving(backend);
+    a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving(backend);
+    a_guarded_view_shares_the_write_count_of_its_store(backend);
+    a_guarded_claimed_placement_honours_the_node_guard(backend);
+    settle_node_writes_at_the_version_and_keeps_the_other_fields(backend);
+    the_unclean_hosts_follow_the_rows_between_calls(backend);
     a_beat_of_an_old_epoch_after_a_newer_hello_is_stale(backend);
     a_beat_through_one_server_is_read_by_another(backend);
     heard_at_is_the_store_clock_and_judges_live_nodes(backend);
@@ -219,6 +232,9 @@ where
     a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(backend);
     a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit(backend);
     a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
+    a_held_refusal_requeues_the_job_without_counting_a_failure(backend);
+    a_held_refusal_refuses_what_it_cannot_requeue(backend);
+    a_held_refusal_loses_to_a_change_of_either_row(backend);
     the_last_failed_prepare_ends_the_job_failed_to_start(backend);
     a_failed_prepare_refuses_what_the_requeue_refuses(backend);
     a_failed_prepare_loses_to_a_change_of_either_row(backend);
@@ -275,6 +291,13 @@ macro_rules! job_store_tests {
             live_on_lists_the_live_allocations_of_one_host,
             two_servers_beating_one_host_at_once_apply_each_beat_once,
             a_beat_or_hello_that_loses_its_version_reads_the_row_again,
+            a_guarded_write_commits_at_the_node_version_and_fails_after_it_moved,
+            a_conflict_on_another_row_is_not_the_node_moving,
+            a_conflict_on_a_job_row_when_the_node_moved_too_is_the_node_moving,
+            a_guarded_view_shares_the_write_count_of_its_store,
+            a_guarded_claimed_placement_honours_the_node_guard,
+            settle_node_writes_at_the_version_and_keeps_the_other_fields,
+            the_unclean_hosts_follow_the_rows_between_calls,
             a_beat_of_an_old_epoch_after_a_newer_hello_is_stale,
             a_beat_through_one_server_is_read_by_another,
             heard_at_is_the_store_clock_and_judges_live_nodes,
@@ -389,6 +412,9 @@ macro_rules! job_store_tests {
             a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark,
             a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit,
             a_failed_prepare_requeues_the_job_with_its_count_and_bars,
+            a_held_refusal_requeues_the_job_without_counting_a_failure,
+            a_held_refusal_refuses_what_it_cannot_requeue,
+            a_held_refusal_loses_to_a_change_of_either_row,
             the_last_failed_prepare_ends_the_job_failed_to_start,
             a_failed_prepare_refuses_what_the_requeue_refuses,
             a_failed_prepare_loses_to_a_change_of_either_row,
