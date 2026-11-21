@@ -45,6 +45,7 @@ pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};
 
+pub(crate) use written::GROUP;
 pub use written::{Step, Written};
 
 /// The schema version of the rows this build writes.
@@ -235,8 +236,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// wrote one first, that one is read. A version above this build's is accepted, since rows
     /// change only by adding fields. Then the index backfill runs
     /// ([`JobStore::backfill_indexes`]), so the store opened reads indexes that agree with its
-    /// tables. An error of the schema step means nothing was written; one of the backfill may
-    /// follow committed batches of it, which the next open completes.
+    /// tables, whatever another server writes meanwhile. An error of the schema step means
+    /// nothing was written; one of the backfill may follow committed rows of it, which the
+    /// next open completes.
     ///
     /// # Errors
     /// [`JobStoreError::Store`] when the store fails; [`JobStoreError::Corrupt`] when the

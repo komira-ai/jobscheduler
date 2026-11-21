@@ -224,13 +224,14 @@ pub fn a_result_survives_the_end_of_its_allocation<B: Backend>(backend: &B) {
     );
 }
 
-/// At boot one commit raises the retention end of an ended job and gives each queued, placed
-/// and starting job a deadline floor of the boot plus [`BOOT_GRACE`]; a running job and a row a
-/// later build wrote are left as they are; a second raise at the same boot, or at an earlier
-/// instant, writes nothing; and a boot a minute later raises each floor to that boot plus the
-/// grace, never to the first floor plus it (design section 6.7, step 7; section 8, row 36).
-pub fn a_boot_raises_floors_and_retention_ends_in_one_commit<B: Backend>(backend: &B) {
-    let name = "a_boot_raises_floors_and_retention_ends_in_one_commit";
+/// At boot the retention end of an ended job is raised and each queued, placed and starting job
+/// gets a deadline floor of the boot plus [`BOOT_GRACE`], each row in a transaction of its own,
+/// all four in one store batch (one sync); a running job and a row a later build wrote are
+/// left as they are; a second raise at the same boot, or at an earlier instant, writes nothing;
+/// and a boot a minute later raises each floor to that boot plus the grace, never to the first
+/// floor plus it (design section 6.7, step 7; section 8, row 36).
+pub fn a_boot_raises_floors_and_retention_ends_a_row_to_a_commit<B: Backend>(backend: &B) {
+    let name = "a_boot_raises_floors_and_retention_ends_a_row_to_a_commit";
     let rig = rig(backend);
     let ended = rig.running("b-ended");
     rig.jobs.end_job(&ended, exited(0)).expect("ends");
@@ -247,17 +248,18 @@ pub fn a_boot_raises_floors_and_retention_ends_in_one_commit<B: Backend>(backend
     let floor = boot.saturating_add(BOOT_GRACE);
     let untouched = || (rig.raw("job/b-running"), rig.raw("job/b-zz-later"));
     let before = untouched();
-    let commits = rig.store.commit_stats().txns;
+    let commits = rig.store.commit_stats();
 
     assert_eq!(
         rig.jobs.raise_at_boot(boot),
         Ok(4),
         "{name}: not every waiting or ended job was raised"
     );
+    let after = rig.store.commit_stats();
     assert_eq!(
-        rig.store.commit_stats().txns,
-        commits + 1,
-        "{name}: the boot raise was not one commit"
+        (after.txns, after.syncs),
+        (commits.txns + 4, commits.syncs + 1),
+        "{name}: the boot raise was not a transaction a row in one store batch"
     );
     for id in [&queued, &placed, &starting] {
         assert_eq!(
@@ -291,8 +293,8 @@ pub fn a_boot_raises_floors_and_retention_ends_in_one_commit<B: Backend>(backend
         );
     }
     assert_eq!(
-        rig.store.commit_stats().txns,
-        commits + 1,
+        rig.store.commit_stats(),
+        after,
         "{name}: a raise with nothing to write committed"
     );
 

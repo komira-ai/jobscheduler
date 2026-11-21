@@ -390,11 +390,13 @@ pub fn a_mark_row_this_build_cannot_read_is_refused_or_left<B: Backend>(backend:
     );
 }
 
-/// At boot one commit raises a mark whose deadline is before the boot plus [`BOOT_GRACE`] to
-/// that instant, with the job floors, and leaves a later deadline, the mark's other fields and
-/// its exclusions' ends as they are; a second raise at the same boot writes nothing; a boot
-/// that has only a mark to raise commits it; and a raise that loses to a change of a mark is
-/// stale, naming its job, and writes nothing.
+/// At boot a mark whose deadline is before the boot plus [`BOOT_GRACE`] is raised to that
+/// instant, in a transaction of its own in the store batch of the job floors (one sync), and a
+/// later deadline, the mark's other fields and its exclusions' ends are left as they are; a
+/// second raise at the same boot writes nothing; and a raise whose commit of a mark another
+/// writer beats reads the mark again and raises it in the same call, so a boot that has only
+/// that mark to raise writes it once. Catches a mark raise that refuses the boot, or leaves the
+/// mark lapsed, when another server rewrote the mark.
 pub fn marks_are_raised_at_boot<B: Backend>(backend: &B)
 where
     B::Store: 'static,
@@ -414,17 +416,18 @@ where
     let boot = now(&rig);
     let floor = boot.saturating_add(BOOT_GRACE);
     let late_row = rig.raw(&keys::mark(&late));
-    let commits = rig.store.commit_stats().txns;
+    let commits = rig.store.commit_stats();
 
     assert_eq!(
         rig.jobs.raise_at_boot(boot),
         Ok(3),
         "{name}: the two queued jobs and the early mark were not each written"
     );
+    let after = rig.store.commit_stats();
     assert_eq!(
-        rig.store.commit_stats().txns,
-        commits + 1,
-        "{name}: the boot raise was not one commit"
+        (after.txns, after.syncs),
+        (commits.txns + 3, commits.syncs + 1),
+        "{name}: the boot raise was not a transaction a row in one store batch"
     );
     let raised = MarkRecord {
         deadline: floor,
@@ -446,8 +449,8 @@ where
         "{name}: a second raise wrote"
     );
     assert_eq!(
-        rig.store.commit_stats().txns,
-        commits + 1,
+        rig.store.commit_stats(),
+        after,
         "{name}: a raise with nothing to write committed"
     );
 
@@ -458,23 +461,27 @@ where
     rig.jobs.put_mark(lapsed.clone()).expect("marks");
     let key = keys::mark(&early);
     rig.store.before_next(rewrite(&rig, &key));
-    let row = rig.raw(&key).map(|row| row.value);
-    assert_eq!(
-        rig.jobs.raise_at_boot(boot),
-        Err(JobStoreError::Stale { id: early.clone() }),
-        "{name}: a raise over a changed mark was not stale"
-    );
-    assert_eq!(
-        rig.raw(&key).map(|row| row.value),
-        row,
-        "{name}: the stale raise wrote the mark"
-    );
+    let version = rig.raw(&key).map(|row| row.version);
     assert_eq!(
         rig.jobs.raise_at_boot(boot),
         Ok(1),
-        "{name}: a boot with only a mark to raise did not write it"
+        "{name}: a raise over a mark another writer changed did not read it again and write it"
     );
-    assert_eq!(rig.jobs.get_mark(&early), Ok(Some(raised)));
+    assert_ne!(
+        rig.raw(&key).map(|row| row.version),
+        version,
+        "{name}: the other writer's rewrite of the mark did not land"
+    );
+    assert_eq!(
+        rig.jobs.get_mark(&early),
+        Ok(Some(raised)),
+        "{name}: the mark read again was not raised to the boot plus the grace"
+    );
+    assert_eq!(
+        rig.jobs.raise_at_boot(boot),
+        Ok(0),
+        "{name}: the raise of the mark read again left work for the next boot"
+    );
 }
 
 /// An end with unmark of a marked job ends it and deletes its mark in one commit; a forced
