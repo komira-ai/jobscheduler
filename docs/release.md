@@ -12,7 +12,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. Nothing in the release waits for `ci` or reports its result: a failing job of `ci` is that run's own
-   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
+   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a). What macOS compiles is checked on the pull request all the same, from Linux: `ci`'s `lint` job runs clippy over the workspace's code and tests for `aarch64-apple-darwin`, the crates and features the beta stage tests (`cargo test -p xtask --test macos_clippy` holds the two lists together), so a change that breaks code under `cfg(target_os = "macos")` fails its pull request; nothing is linked and no macOS test runs there.
 3. `plan` (`cargo xtask release plan`) decides at once whether to release and as which version
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests`, which starts beside `plan`, still runs).
