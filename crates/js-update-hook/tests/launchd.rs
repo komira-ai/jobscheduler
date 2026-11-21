@@ -171,6 +171,7 @@ fn the_states_launchd_prints_map_to_the_states_the_steps_know() {
         ("spawn scheduled", "activating", "auto-restart"),
         ("spawning", "activating", "start"),
         ("xpcproxy", "activating", "start"),
+        ("SIGTERMed", "deactivating", "stop-sigterm"),
     ] {
         assert_reads(printed, "", active, sub);
     }
@@ -270,6 +271,19 @@ fn a_spawning_service_reads_as_a_start_however_it_last_ended() {
 fn a_service_launchd_is_executing_reads_as_a_start_however_it_last_ended() {
     for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
         assert_reads("xpcproxy", extra, "activating", "start");
+    }
+}
+
+/// A service launchd has sent SIGTERM and waits for (`state = SIGTERMed`, which a real
+/// `launchctl print` showed for the agent during an update's stop on a Mac) is stopping, however
+/// the last run ended.
+///
+/// Catches a reading of `SIGTERMed` as an unknown state, which failed an update's cutover with
+/// `stop_failed` after its commit.
+#[test]
+fn a_service_launchd_has_sent_sigterm_reads_as_stopping_however_it_last_ended() {
+    for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
+        assert_reads("SIGTERMed", extra, "deactivating", "stop-sigterm");
     }
 }
 

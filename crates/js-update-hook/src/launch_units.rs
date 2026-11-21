@@ -25,6 +25,7 @@
 //! | `spawn scheduled`                        | exit 0                           | `activating`, `start`     |
 //! | `spawn scheduled`                        | anything else                    | `activating`, `auto-restart` |
 //! | `spawning`, `xpcproxy`                   | (any)                            | `activating`, `start`     |
+//! | `SIGTERMed`                              | (any)                            | `deactivating`, `stop-sigterm` |
 //! | not loaded (never loaded, or booted out) | -                                | `inactive`, `dead`        |
 //!
 //! So a Mac agent that crashes ends `failed` (the release's fault) as it does on Linux, and the
@@ -255,6 +256,8 @@ fn unit_state(state: &str, ended: Ended) -> Result<UnitState, PortError> {
         ("spawn scheduled", Ended::Cleanly) | ("spawning" | "xpcproxy", _) => {
             ("activating", "start")
         }
+        // launchd sent the job SIGTERM (a `bootout`, or a stop) and waits for it to exit.
+        ("SIGTERMed", _) => ("deactivating", "stop-sigterm"),
         // Between two starts of a `KeepAlive` daemon that died, the throttle running.
         ("spawn scheduled", _) => ("activating", "auto-restart"),
         (other, _) => {
