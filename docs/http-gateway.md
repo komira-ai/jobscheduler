@@ -237,7 +237,7 @@ at start, like every other key: adding or removing a client, or changing its rol
 restart. The token of `default` is the token of the server's own guarded routes and is read once at start
 along with them.
 
-**Audit.** Each call writes exactly one info line, `job service call`, with these fields:
+**Audit.** Each call writes exactly one line, `job service call`, with these fields:
 
 - `call`: the method.
 - `client` and `role`: the caller, from its token.
@@ -249,7 +249,11 @@ along with them.
 - `code`: the gRPC code.
 
 This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost`,
-`UncordonHost` and `ClearHostTaint`. No line holds a token or its digest. A request whose token is no client's
+`UncordonHost` and `ClearHostTaint`. The line is at info, except for a read call that
+answered: `GetJob`, `ListJobs`, `GetResult`, `GetLogs`, `ListHosts`, `ListPools`,
+`ListProviders` and `GetUsage`, when the outcome is `ok`, write their line at debug, since their
+clients poll them many times a second. A read call that is refused or fails writes its line at
+info like any other. No line holds a token or its digest. A request whose token is no client's
 reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
 the line is the record of who cancelled.
 
