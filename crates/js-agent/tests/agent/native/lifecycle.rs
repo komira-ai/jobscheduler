@@ -124,7 +124,7 @@ impl Native {
         let (life, _) = Lifecycle::adopt(
             config,
             Box::new(runtime),
-            Box::new(NativeChecks),
+            Box::new(NativeChecks::over(fake.client())),
             Box::new(clock.clone()),
         )
         .unwrap();

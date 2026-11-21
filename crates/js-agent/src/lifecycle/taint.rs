@@ -106,7 +106,8 @@
 //!    `daemonised-child`, `new-mount`, `user-changed`, `group-changed`,
 //!    `kernel-module-changed`, `watch-dir-changed` (written by an older agent: what a
 //!    contained job cannot cause is a note now), or reason [`reason::UNCHECKED`] with a
-//!    check that could not read its input (`*-unreadable`, `watch-over-bound`) or
+//!    check that could not read its input (`*-unreadable`, `watch-over-bound`, and the
+//!    native leak scan's `scan-unreadable` and `scan-failed`) or
 //!    `cgroup-not-found` (a crun run whose container group was not found within the settle
 //!    wait while its first process ran in another group; the checks do not depend on that
 //!    group). Never `cleanup-failed`, `check-owed`,
@@ -456,6 +457,8 @@ pub fn clearable(taint: &Taint) -> bool {
             check::WATCH_UNREADABLE,
             check::WATCH_OVER_BOUND,
             super::code::CGROUP_NOT_FOUND,
+            crate::leak_scan::code::SCAN_UNREADABLE,
+            crate::leak_scan::code::SCAN_FAILED,
         ]
         .contains(&code),
         _ => false,
