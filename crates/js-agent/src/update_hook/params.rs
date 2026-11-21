@@ -19,9 +19,9 @@
 //! - `socket_group` (optional, launchd only): the group the root helper gives its socket, which
 //!   `prepare` makes when the host has none (a name of letters, digits, `_`, `-` and `.`);
 //! - `scratch_root` (optional, launchd only): the agent's `--scratch-root`, which `prepare` makes
-//!   and gives a volume of its own when it shares the state root's file system (an absolute
-//!   path of plain components with no white space, the form a file system table takes, that is
-//!   not `state_root`, inside it or above it);
+//!   and gives a volume of its own, mounted on it, when it shares the state root's file system
+//!   (an absolute path of plain components with no white space, that is not `state_root`,
+//!   inside it or above it);
 //! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
 //! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
 //!   the hook finds the lease server, the certificate to trust and the host id;
@@ -219,8 +219,8 @@ pub enum ParamsError {
     /// letter, a digit, `_`, `-` or `.`.
     #[error("params key {0:?} must be a group name: ASCII letters, digits, _, - and .")]
     NotGroupName(String),
-    /// `scratch_root` is not an absolute path of plain components without white space, which a
-    /// line of the file system table can name.
+    /// `scratch_root` is not an absolute path of plain components without white space: the
+    /// form of a mount point the hook accepts.
     #[error("params key {0:?} must be an absolute path of plain components with no white space")]
     NotMountPath(String),
     /// `scratch_root` is `state_root`, inside it or above it: the two must be apart for the
@@ -374,8 +374,8 @@ impl Params {
     }
 }
 
-/// `scratch_root`, when the table names it: a path a file system table line can name, apart
-/// from `state_root`.
+/// `scratch_root`, when the table names it: an absolute path of plain components with no white
+/// space, apart from `state_root`.
 ///
 /// # Errors
 /// [`ParamsError::NotText`], [`ParamsError::Relative`], [`ParamsError::NotMountPath`] or

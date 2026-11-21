@@ -41,12 +41,16 @@
 //! checks are in the read, cancel and submit groups, which are handed the caller.
 //! `SubmitJob` records the caller's name on a new job.
 //!
-//! Each call writes one log line ([`logged`]), `job service call`, at info: the method
-//! (`call`), the client (`client`) and its role (`role`), the job or host the request names
-//! (`target`; `job` holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`,
-//! `refused` or `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line
-//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost` and
-//! `ClearHostTaint`, denied ones among them. No line holds a token or its digest.
+//! Each call writes one log line ([`logged`]), `job service call`: the method (`call`), the
+//! client (`client`) and its role (`role`), the job or host the request names (`target`; `job`
+//! holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`, `refused` or
+//! `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line of the calls
+//! that change state, `SubmitJob`, `CancelJob`, `CordonHost`, `UncordonHost` and
+//! `ClearHostTaint`, denied ones among them. The line is at info, except for a read call
+//! ([`READ_CALLS`]) that answered: that line is at debug, since its clients poll it hundreds
+//! of times a second and an info line each would bury everything else in the log. Every read
+//! call that is refused or fails still writes its line at info. No line holds a token or its
+//! digest.
 //!
 //! # One context per group
 //!
@@ -320,8 +324,22 @@ fn logged<T>(
     line(call, caller, target, answer.as_ref().err());
 }
 
-/// The line of [`logged`], for the status a call failed with (`None`: it answered). Not
-/// generic, so every call writes its line through the same code.
+/// The calls that change nothing: the job reads and the fleet reads. Their line is at debug
+/// when they answered ([`line`]). A call not named here is logged at info.
+const READ_CALLS: [&str; 8] = [
+    "GetJob",
+    "ListJobs",
+    "GetResult",
+    "GetLogs",
+    "ListHosts",
+    "ListPools",
+    "ListProviders",
+    "GetUsage",
+];
+
+/// The line of [`logged`], for the status a call failed with (`None`: it answered): at debug
+/// for a read call that answered, else at info. Not generic, so every call writes its line
+/// through the same code.
 fn line(call: &'static str, caller: Option<&Caller>, target: Target<'_>, failed: Option<&Status>) {
     let code = failed.map_or(Code::Ok, Status::code);
     let client = caller.map_or("", |caller| caller.name.as_str());
@@ -332,7 +350,14 @@ fn line(call: &'static str, caller: Option<&Caller>, target: Target<'_>, failed:
         Target::None => ("", ""),
     };
     let outcome = roles::outcome(failed);
-    tracing::info!(call, client, role, job, target, outcome, code = ?code, "job service call");
+    match failed.is_none() && READ_CALLS.contains(&call) {
+        true => {
+            tracing::debug!(call, client, role, job, target, outcome, code = ?code, "job service call");
+        }
+        false => {
+            tracing::info!(call, client, role, job, target, outcome, code = ?code, "job service call");
+        }
+    }
 }
 
 #[tonic::async_trait]

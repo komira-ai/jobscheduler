@@ -1,7 +1,6 @@
 //! The scratch volume of a Mac's host setup: a volume that is there is found and not made again,
-//! one mounted elsewhere is moved onto the scratch root, the file system table keeps its other
-//! lines, and every way `diskutil`, the table or a root can fail defers `host_setup_missing`
-//! naming the cause.
+//! one mounted elsewhere is moved onto the scratch root, and every way `diskutil` or a root can
+//! fail defers `host_setup_missing` naming the cause.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -26,8 +25,8 @@ fn apfs_list() -> String {
     format!("{DISKUTIL} apfs list -plist {CONTAINER}")
 }
 
-/// Asserts that a scratch volume the container holds already, unmounted, is named in the table
-/// and mounted, not made again; a volume with ownership on is not given it again.
+/// Asserts that a scratch volume the container holds already, unmounted, is mounted, not made
+/// again; a volume with ownership on is not given it again.
 #[test]
 fn a_scratch_volume_that_is_there_is_mounted_and_not_made_again() {
     let rig = mac_rig("hook-setup-volume-there", false);
@@ -41,12 +40,14 @@ fn a_scratch_volume_that_is_there_is_mounted_and_not_made_again() {
     let scratch = scratch_of(&rig).display().to_string();
     assert_eq!(
         mac.changes()[1..],
-        [format!("{DISKUTIL} mount -mountPoint {scratch} {DEVICE}")]
+        [format!(
+            "{DISKUTIL} mount nobrowse -mountPoint {scratch} {DEVICE}"
+        )]
     );
 }
 
-/// Asserts that a scratch volume mounted somewhere else (as a boot without its table line leaves
-/// it) is unmounted and then mounted on the scratch root.
+/// Asserts that a scratch volume mounted somewhere else (in `/Volumes`, where macOS may mount
+/// a volume by itself) is unmounted and then mounted on the scratch root.
 #[test]
 fn a_scratch_volume_mounted_elsewhere_is_moved_onto_the_scratch_root() {
     let rig = mac_rig("hook-setup-volume-elsewhere", false);
@@ -63,87 +64,12 @@ fn a_scratch_volume_mounted_elsewhere_is_moved_onto_the_scratch_root() {
         [
             format!("{DISKUTIL} unmount {DEVICE}"),
             format!(
-                "{DISKUTIL} mount -mountPoint {} {DEVICE}",
+                "{DISKUTIL} mount nobrowse -mountPoint {} {DEVICE}",
                 scratch.display()
             ),
         ]
     );
     assert_eq!(mac.volume.borrow().as_ref().unwrap().mount, Some(scratch));
-}
-
-/// Asserts that a table with lines of its own, the last without a newline, keeps them and gains
-/// the volume's line; a line that names the volume on another mount point is replaced (a boot
-/// would mount it there); a table that holds the volume's line already is left byte for byte.
-#[test]
-fn the_file_system_table_keeps_its_lines_and_gains_the_volumes_line_once() {
-    let rig = mac_rig("hook-setup-fstab-lines", false);
-    let mac = FakeMac::new();
-    let spy = spy_on(&rig, &mac);
-    fs::write(&spy.fstab, "# by hand\nUUID=AAAA /Volumes/x apfs rw").unwrap();
-    assert_eq!(spy.prepare(&rig).outcome, Outcome::Success);
-    let line = format!(
-        "UUID={UUID} {} apfs rw,nobrowse",
-        scratch_of(&rig).display()
-    );
-    let written = format!("# by hand\nUUID=AAAA /Volumes/x apfs rw\n{line}\n");
-    assert_eq!(fs::read_to_string(&spy.fstab).unwrap(), written);
-
-    let named = mac_rig("hook-setup-fstab-named", false);
-    let mac = FakeMac::new();
-    let spy = spy_on(&named, &mac);
-    fs::write(
-        &spy.fstab,
-        format!("# kept\nUUID={UUID}\t/somewhere/else apfs rw\n"),
-    )
-    .unwrap();
-    assert_eq!(spy.prepare(&named).outcome, Outcome::Success);
-    let line = format!(
-        "UUID={UUID} {} apfs rw,nobrowse",
-        scratch_of(&named).display()
-    );
-    let table = format!("# kept\n{line}\n");
-    assert_eq!(fs::read_to_string(&spy.fstab).unwrap(), table);
-
-    let exact = mac_rig("hook-setup-fstab-exact", false);
-    let mac = FakeMac::new();
-    let spy = spy_on(&exact, &mac);
-    let line = format!(
-        "UUID={UUID} {} apfs rw,nobrowse",
-        scratch_of(&exact).display()
-    );
-    let table = format!("{line}\n# after, no newline");
-    fs::write(&spy.fstab, &table).unwrap();
-    assert_eq!(spy.prepare(&exact).outcome, Outcome::Success);
-    assert_eq!(fs::read_to_string(&spy.fstab).unwrap(), table);
-}
-
-/// Asserts that a table that cannot be read (a directory) defers naming it, with the volume made
-/// and not mounted: a boot would not mount it there.
-#[test]
-fn a_file_system_table_that_cannot_be_read_defers_before_the_mount() {
-    let rig = mac_rig("hook-setup-fstab-unreadable", false);
-    let mac = FakeMac::new();
-    let spy = spy_on(&rig, &mac);
-    fs::create_dir(&spy.fstab).unwrap();
-    let why = fs::read_to_string(&spy.fstab).unwrap_err();
-    let done = spy.prepare(&rig);
-    assert_missing(&done, &format!("{}: {why}", spy.fstab.display()));
-    assert_eq!(mac.volume.borrow().as_ref().unwrap().mount, None);
-}
-
-/// Asserts that a table whose new copy cannot be written defers naming the table, and leaves it
-/// absent as it was.
-#[test]
-fn a_file_system_table_that_cannot_be_written_defers() {
-    let rig = mac_rig("hook-setup-fstab-unwritable", false);
-    let mac = FakeMac::new();
-    let spy = spy_on(&rig, &mac);
-    let temp = spy.fstab.with_extension("js-agent");
-    fs::create_dir(&temp).unwrap();
-    let why = fs::File::create(&temp).unwrap_err();
-    let done = spy.prepare(&rig);
-    assert_missing(&done, &format!("{}: {why}", spy.fstab.display()));
-    assert!(!spy.fstab.exists());
 }
 
 /// Asserts that a mount that leaves the scratch root on the state root's file system defers
@@ -167,13 +93,10 @@ fn a_mount_that_does_not_move_the_scratch_root_off_the_state_root_defers() {
 
 /// Asserts each answer of `diskutil` the setup cannot use defers with the detail that names it:
 /// a failed command, output that is no dictionary, a Data volume with no container, a list
-/// without the container or its free space, a scratch volume with no UUID or no device, and a
-/// volume made that the list does not show.
+/// without the container or its free space, a scratch volume with no device, and a volume made
+/// that the list does not show.
 #[test]
 fn every_diskutil_answer_the_setup_cannot_use_defers_naming_it() {
-    let no_uuid = container(&format!(
-        "<dict><key>Name</key><string>{SCRATCH_VOLUME}</string></dict>"
-    ));
     let no_device = container(&format!(
         "<dict><key>APFSVolumeUUID</key><string>{UUID}</string><key>Name</key><string>{SCRATCH_VOLUME}</string></dict>"
     ));
@@ -183,7 +106,7 @@ fn every_diskutil_answer_the_setup_cannot_use_defers_naming_it() {
     let add = format!(
         "{DISKUTIL} apfs addVolume {CONTAINER} APFS {SCRATCH_VOLUME} -quota {QUOTA} -nomount"
     );
-    let cases: [(&str, String, Result<String, &str>, &str); 8] = [
+    let cases: [(&str, String, Result<String, &str>, &str); 7] = [
         (
             "failed",
             data_info(),
@@ -213,12 +136,6 @@ fn every_diskutil_answer_the_setup_cannot_use_defers_naming_it() {
             apfs_list(),
             Ok(no_free),
             "/usr/sbin/diskutil shows the container disk3 with no CapacityFree",
-        ),
-        (
-            "no-uuid",
-            apfs_list(),
-            Ok(no_uuid),
-            "/usr/sbin/diskutil shows js-agent-scratch with no APFSVolumeUUID",
         ),
         (
             "no-device",
@@ -298,7 +215,7 @@ fn every_diskutil_change_that_fails_defers_naming_it() {
         ("unmount", format!("unmount {DEVICE}"), Some(elsewhere())),
         (
             "mount",
-            "mount -mountPoint <scratch> disk3s7".to_owned(),
+            "mount nobrowse -mountPoint <scratch> disk3s7".to_owned(),
             None,
         ),
         ("owners", "enableOwnership <scratch>".to_owned(), None),
@@ -311,9 +228,9 @@ fn every_diskutil_change_that_fails_defers_naming_it() {
         if let Some(volume) = volume {
             mac.with_volume(volume);
         }
-        mac.answer(&line, Err("Operation not permitted"));
+        mac.answer(&line, Err("exit status: 1"));
         let done = spy_on(&rig, &mac).prepare(&rig);
-        assert_missing(&done, &format!("{line}: Operation not permitted"));
+        assert_missing(&done, &format!("{line}: exit status: 1"));
         assert!(rig.record().is_none(), "{name}");
     }
 }
