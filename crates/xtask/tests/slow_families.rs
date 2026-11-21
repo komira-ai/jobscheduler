@@ -93,7 +93,7 @@ fn check(
             }
             if !test.lines().any(|l| {
                 let l = l.trim();
-                l.starts_with("- run: cargo test --workspace --locked --no-fail-fast")
+                l.starts_with("- run: cargo nextest run --workspace --locked --no-fail-fast")
                     && !l.contains("--tests")
             }) {
                 errors.push("ci.yml's test job no longer runs the workspace's tests".to_owned());
@@ -199,11 +199,11 @@ fn the_repository_runs_the_slow_families_everywhere_but_the_test_job() {
 #[test]
 fn the_test_job_turning_the_feature_on_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo test --workspace --locked --no-fail-fast\n";
+    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
     assert!(f.ci.contains(run));
     f.ci = f.ci.replacen(
         run,
-        &format!("      - run: cargo test --workspace --locked --no-fail-fast {FLAG}\n"),
+        &format!("      - run: cargo nextest run --workspace --locked --no-fail-fast {FLAG}\n"),
         1,
     );
     assert_eq!(
@@ -217,7 +217,7 @@ fn the_test_job_turning_the_feature_on_is_refused() {
 #[test]
 fn a_test_job_that_runs_no_workspace_tests_is_refused() {
     let mut f = Files::load();
-    let run = "      - run: cargo test --workspace --locked --no-fail-fast\n";
+    let run = "      - run: cargo nextest run --workspace --locked --no-fail-fast\n";
     f.ci =
         f.ci.replacen(run, "      - run: cargo test -p js-state --locked\n", 1);
     assert_eq!(
