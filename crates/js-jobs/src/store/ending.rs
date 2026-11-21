@@ -8,13 +8,14 @@
 //! `usage/ended` row written beside its free, which no retention here touches; a booked or
 //! releasing row is never deleted.
 
-use js_state::{Cond, ResumeToken, Store, StoreTime, Txn, Version};
+use js_state::{Cond, ResumeToken, Store, StoreTime, Txn, Version, Versioned};
 
 use std::time::Duration;
 
 use super::index::{Span, delete_allocation, delete_job, put_allocation, put_job};
+use super::marks::{mark_at, marked_at_boot};
 use super::{JobStore, allocation_at, ensure, job_at, same_key};
-use crate::codec::{DecodeError, decode_job};
+use crate::codec::{DecodeError, decode_job, encode_mark};
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
@@ -289,31 +290,34 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok(txn)
     }
 
-    /// The boot of a server (design section 6.7, step 7), committed in one transaction before
-    /// the first tick: each stored retention end is raised as
-    /// [`JobStore::raise_deadlines_at_boot`] raises it, and each job that waits to be placed or
-    /// to start (queued, placed or starting) gets a deadline floor of at least `boot` plus
-    /// [`BOOT_GRACE`](crate::BOOT_GRACE), the earliest instant its queue wait or its start
-    /// timeout may end it. A floor is raised to that instant, never by it, so boots in a loop
-    /// do not stretch a wait, and a later floor is kept. An ended job whose row still holds
-    /// its files' contents (one ended by a build that kept them) has them replaced by their
-    /// digests ([`crate::JobFiles`]), in the same put as its raised retention end when it has
-    /// one. Only an ended job has a retention end or contents to replace and only a waiting
-    /// one gets a floor, so no row is put twice. In the same transaction each mark's deadline
-    /// is raised to at least `boot` plus [`BOOT_GRACE`](crate::BOOT_GRACE), at the version read,
-    /// so an outage longer than a hold gives up no hold at the first round; its exclusions keep
-    /// their ends. A row a later build wrote is left as it is. Returns how many rows (jobs and
-    /// marks) it wrote; with none it commits nothing.
+    /// The boot of a server (design section 6.7, step 7), before the first tick: each stored
+    /// retention end is raised as [`JobStore::raise_deadlines_at_boot`] raises it, and each job
+    /// that waits to be placed or to start (queued, placed or starting) gets a deadline floor of
+    /// at least `boot` plus [`BOOT_GRACE`](crate::BOOT_GRACE), the earliest instant its queue
+    /// wait or its start timeout may end it. A floor is raised to that instant, never by it, so
+    /// boots in a loop do not stretch a wait, and a later floor is kept. An ended job whose row
+    /// still holds its files' contents (one ended by a build that kept them) has them replaced
+    /// by their digests ([`crate::JobFiles`]), in the same put as its raised retention end when
+    /// it has one. Only an ended job has a retention end or contents to replace and only a
+    /// waiting one gets a floor, so no row is put twice. Each mark's deadline is raised to at
+    /// least `boot` plus [`BOOT_GRACE`](crate::BOOT_GRACE), so an outage longer than a hold
+    /// gives up no hold at the first round; its exclusions keep their ends. A row a later
+    /// build wrote is left as it is.
+    ///
+    /// Each row is raised in a transaction of its own, at the version read, many rows to a
+    /// store batch: every raise is a maximum of that row alone, and nothing ties one row's to
+    /// another's. A row another writer changed between its read and its commit (the serving
+    /// server of a start-first update) loses alone, and is read again and decided again on
+    /// what it holds now (nothing for a row gone or no longer below the raise), until its
+    /// raise holds or it needs none. Nothing starts over and nothing waits: the rows are read
+    /// once, and a row is read again only as often as another writer changed it in between.
+    /// When rows were read again it logs one line with their count. Returns how many rows
+    /// (jobs and marks) it wrote; with none it commits nothing.
     ///
     /// # Errors
-    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] (naming
-    /// the first job written, or the job of the first mark when no job row is) when a row
-    /// changed between its read and the commit, and nothing is written;
-    /// [`JobStoreError::TooLarge`]; [`JobStoreError::Store`].
+    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::TooLarge`];
+    /// [`JobStoreError::Store`]. The rows raised before the error stay raised.
     pub fn raise_at_boot(&self, boot: StoreTime) -> Result<usize, JobStoreError> {
-        let mut txn = Txn::new();
-        let mut first: Option<JobId> = None;
-        let mut written = 0;
         // Every ended job, not only those whose end is raised: any of them may still hold its
         // files' contents to replace. Every ended job has a retention end, so a due entry.
         let spans = [
@@ -321,29 +325,80 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Span::all(keys::ACTIVE),
             Span::all(keys::UNREAD_JOB),
         ];
-        for (key, row) in self.indexed_rows(&spans)? {
-            let job = match job_at(&key, &row.value) {
-                Ok(job) => job,
-                Err(JobStoreError::UnknownRow { .. }) => continue,
-                Err(error) => return Err(error),
-            };
-            let raised = match raised_at_boot(&job, boot) {
-                Some(raised) => Some(digested_at_boot(&raised).unwrap_or(raised)),
-                None => floored_at_boot(&job, boot).or_else(|| digested_at_boot(&job)),
-            };
-            if let Some(raised) = raised {
-                first.get_or_insert_with(|| raised.id.clone());
-                txn = put_job(txn, Some(&job), &raised, Cond::Version(row.version))?;
-                written += 1;
+        let mut rows = self.indexed_rows(&spans)?;
+        rows.extend(self.store.scan_prefix(keys::MARK)?);
+        let mut due = Vec::new();
+        for (key, row) in rows {
+            due.extend(raised_row(key, &row, boot)?);
+        }
+        let mut written = 0;
+        let mut again: usize = 0;
+        while !due.is_empty() {
+            let (keys, txns): (Vec<String>, Vec<Txn>) = due.into_iter().unzip();
+            let sent = keys.len();
+            let held = self.write_each(txns)?;
+            let lost: Vec<String> = keys
+                .into_iter()
+                .zip(held)
+                .filter_map(|(key, held)| (!held).then_some(key))
+                .collect();
+            written += sent - lost.len();
+            again += lost.len();
+            due = Vec::new();
+            for key in lost {
+                if let Some(row) = self.store.get(&key)? {
+                    due.extend(raised_row(key, &row, boot)?);
+                }
             }
         }
-        let (txn, marks) = self.raise_marks_at_boot(txn, boot)?;
-        written += marks.len();
-        if let Some(first) = first.or_else(|| marks.into_iter().next()) {
-            self.commit(&first, txn)?;
-        }
+        raise_said_again(again);
         Ok(written)
     }
+}
+
+/// Logs, when the boot's raise read `again` rows again, one line saying so with their count.
+pub(super) fn raise_said_again(again: usize) {
+    if again > 0 {
+        tracing::info!(
+            again,
+            "the boot's raise read again the rows another server changed before its commit"
+        );
+    }
+}
+
+/// The transaction that raises the row `row` at `key` for a boot at `boot` (a job's row or a
+/// mark's, by its key), at the version read, with its key; `None` when the row needs no raise
+/// or is one a later build wrote.
+fn raised_row(
+    key: String,
+    row: &Versioned,
+    boot: StoreTime,
+) -> Result<Option<(String, Txn)>, JobStoreError> {
+    let cond = Cond::Version(row.version);
+    if key.starts_with(keys::MARK) {
+        let mark = match mark_at(&key, &row.value) {
+            Ok(mark) => mark,
+            Err(JobStoreError::UnknownRow { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(later) = marked_at_boot(&mark, boot) else {
+            return Ok(None);
+        };
+        let txn = Txn::new().put(key.as_str(), encode_mark(&later)?, cond);
+        return Ok(Some((key, txn)));
+    }
+    let job = match job_at(&key, &row.value) {
+        Ok(job) => job,
+        Err(JobStoreError::UnknownRow { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let raised = match raised_at_boot(&job, boot) {
+        Some(raised) => Some(digested_at_boot(&raised).unwrap_or(raised)),
+        None => floored_at_boot(&job, boot).or_else(|| digested_at_boot(&job)),
+    };
+    raised
+        .map(|raised| Ok((key, put_job(Txn::new(), Some(&job), &raised, cond)?)))
+        .transpose()
 }
 
 #[cfg(test)]

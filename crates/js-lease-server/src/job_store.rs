@@ -26,24 +26,25 @@
 //! # Other servers at the open
 //!
 //! Over a Postgres store other servers may write the tables while this one opens them: the
-//! old instance of a start-first update keeps serving until the new one is up. The open's
-//! commits (the index backfill and the boot's raise) are conditional on the versions they
-//! read, so a write of another server in between makes one lose
-//! ([`JobStoreError::Stale`]). That is a lost race, not a fault: the open reads again,
-//! decides again and commits again, after a pause that doubles from [`FIRST_RETRY`] to at
-//! most [`MOST_RETRY`], for as long as it keeps losing. Every other error refuses the start.
+//! old instance of a start-first update keeps serving until the new one is up, and on a busy
+//! farm it changes a job every few milliseconds. The open is one pass that always finishes:
+//! the index backfill and the boot's raise read the tables once and commit each row in a
+//! transaction of its own at the version read ([`JobStore::backfill_indexes`],
+//! [`JobStore::raise_at_boot`]), so a write of another server in between loses that row
+//! alone, which is read again and decided again; nothing starts over and nothing waits. Its
+//! cost is set by the size of the tables, not by how fast the jobs change, and its writes are
+//! one row each, as the serving server's own are. Any error of the open refuses the start.
 
 use std::fs::{OpenOptions, Permissions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_jobs::{IdSource, JobStore, JobStoreError, MintError, RandomIds, Retention};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Clock, Store, SystemClock};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::agents::state_path;
 use crate::config::FeedRetention;
@@ -85,26 +86,13 @@ impl IdSource for ServerIds {
     }
 }
 
-/// How the open waits before it tries again after losing a commit to another server: the
-/// thread sleeps, unless a test gives a pause that records the wait instead.
-pub(crate) type Pause = Arc<dyn Fn(Duration) + Send + Sync>;
-
-/// The pause before the open's first try again after a lost commit.
-pub(crate) const FIRST_RETRY: Duration = Duration::from_millis(10);
-
-/// The longest pause between the open's tries: each pause doubles the one before, up to this.
-pub(crate) const MOST_RETRY: Duration = Duration::from_secs(1);
-
-/// The clock the job store stamps its rows with, the source it mints ids from, and how its
-/// open waits before trying again: the system's clock, random source and sleep unless the
-/// in-process seam or a test gives others.
+/// The clock the job store stamps its rows with and the source it mints ids from: the
+/// system's clock and random source unless the in-process seam or a test gives others.
 pub(crate) struct JobSources {
     /// The store's clock.
     pub(crate) clock: Arc<dyn Clock>,
     /// The store's ids.
     pub(crate) ids: ServerIds,
-    /// The wait before the open tries again after losing a commit to another server.
-    pub(crate) pause: Pause,
 }
 
 impl Default for JobSources {
@@ -112,7 +100,6 @@ impl Default for JobSources {
         JobSources {
             clock: Arc::new(SystemClock::default()),
             ids: ServerIds::random(),
-            pause: Arc::new(std::thread::sleep),
         }
     }
 }
@@ -152,16 +139,14 @@ pub(crate) const SUFFIX: &str = ".jobs";
 
 /// Opens the job store in the state store `kept` when there is one, else in a file beside
 /// the state file `state_file`, as `setup` says, on the clock and id source of `sources`, and
-/// raises its
-/// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
-/// ticks or serves; the same transaction replaces the file contents a row of an ended job
-/// still holds (one an earlier build ended) by their digests. A commit of the open that
-/// another server's write beat is tried again, from its reads, until it holds (see "Other
-/// servers at the open" above). A file that
-/// cannot be made owner-only or opened as a state store (a directory in its place, another
-/// process holding it, a file that is not a state store), and any other error of the open (a
-/// row that cannot be read, a store that fails), is a refused start naming the flag of the
-/// job service's address.
+/// raises its deadlines for this boot ([`JobStore::raise_at_boot`]) before the server ticks
+/// or serves; the same raise replaces the file contents a row of an ended job still holds
+/// (one an earlier build ended) by their digests. Another server's writes during the open
+/// cost it only the rows they changed, read again (see "Other servers at the open" above),
+/// and it logs one line when it is open. A file that cannot be made owner-only or opened as a
+/// state store (a directory in its place, another process holding it, a file that is not a
+/// state store), and any other error of the open (a row that cannot be read, a store that
+/// fails), is a refused start naming the flag of the job service's address.
 pub(crate) fn open(
     (state_file, kept): (&Path, Option<Arc<dyn Store>>),
     setup: JobStoreSetup,
@@ -176,8 +161,7 @@ pub(crate) fn open(
         }
     };
     let feed = FeedTrim::new(Arc::clone(&store), setup.feed_retention);
-    let (jobs, raised) =
-        booted_until_won(&store, sources).map_err(StartupError::because(setup.flag))?;
+    let (jobs, raised) = booted(&store, sources).map_err(StartupError::because(setup.flag))?;
     info!(home, raised, "the job store is open");
     Ok(Opened {
         jobs: Arc::new(
@@ -189,39 +173,12 @@ pub(crate) fn open(
     })
 }
 
-/// [`booted`] again, after a pause that doubles from [`FIRST_RETRY`] up to [`MOST_RETRY`],
-/// for as long as it answers [`JobStoreError::Stale`]: another server committed between one
-/// of its reads and its commit, and nothing was written. Any other answer is returned.
-fn booted_until_won(
-    store: &Arc<dyn Store>,
-    sources: &JobSources,
-) -> Result<(ServerJobs, usize), JobStoreError> {
-    let mut wait = FIRST_RETRY;
-    let mut lost: u64 = 0;
-    loop {
-        match booted(store, sources) {
-            Err(JobStoreError::Stale { id }) => {
-                lost = lost.saturating_add(1);
-                warn!(
-                    %id,
-                    lost,
-                    wait_ms = wait.as_millis(),
-                    "another server changed a job while the job store opened; trying again"
-                );
-                (sources.pause)(wait);
-                wait = wait.saturating_mul(2).min(MOST_RETRY);
-            }
-            answer => return answer,
-        }
-    }
-}
-
 /// The job store over `store`, with its indexes backfilled ([`JobStore::new`]) and its
 /// deadlines raised for a boot at the store's reading now ([`JobStore::raise_at_boot`]),
 /// with how many rows the raise wrote. Before the first tick: an outage longer than a queue
 /// wait, a start timeout or a retention window fails, ends or deletes nothing at that tick
 /// (design 6.7, step 7). An ended job's row that still holds its files' contents is
-/// digested in the same commit.
+/// digested in the same put as its raise.
 fn booted(
     store: &Arc<dyn Store>,
     sources: &JobSources,
@@ -260,10 +217,14 @@ fn owner_only(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
+#[path = "job_store_busy_tests.rs"]
+mod busy_tests;
 
-    use js_jobs::interfere::{INJECTED, Interfere};
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use js_jobs::interfere::{INJECTED, Interfere, Read};
     use js_state::fake::Fake;
     use js_state::{Cond, Txn};
     use js_testkit::dir::TestDir;
@@ -361,19 +322,6 @@ mod tests {
     /// The index space of the jobs that wait or run, as the job store keys it.
     const ACTIVE_INDEX: &str = "idx/job/active/";
 
-    /// The job sources of a test: the system's clock and ids, and a pause that records each
-    /// wait instead of sleeping, with the record.
-    fn recording() -> (JobSources, Arc<Mutex<Vec<Duration>>>) {
-        let waits = Arc::new(Mutex::new(Vec::new()));
-        let record = Arc::clone(&waits);
-        let pause: Pause = Arc::new(move |wait| record.lock().unwrap().push(wait));
-        let sources = JobSources {
-            pause,
-            ..JobSources::default()
-        };
-        (sources, waits)
-    }
-
     /// Makes another server write the row `key` (its value again, so only its version
     /// moves) just before each of the next `commits` commits of `store`, so each of them,
     /// conditional on the version read before, loses.
@@ -411,30 +359,68 @@ mod tests {
         jobs.get_job(&id).unwrap().unwrap()
     }
 
-    /// Opens the job store over the state store `store`, as a server over Postgres does.
-    fn open_kept(
-        store: &Arc<Interfere<Fake>>,
-        sources: &JobSources,
-    ) -> Result<Opened, StartupError> {
+    /// Opens the job store over the state store `store`, as a server over Postgres does, with
+    /// what it logged (without times, so a line is compared whole).
+    fn open_kept(store: &Arc<Interfere<Fake>>) -> (Result<Opened, StartupError>, String) {
         let state = Path::new("unused/leases.toml");
         let kept: Arc<dyn Store> = store.clone();
-        open((state, Some(kept)), setup(60), sources)
+        process_sink();
+        let lines = Lines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let opened = tracing::subscriber::with_default(subscriber, || {
+            open((state, Some(kept)), setup(60), &JobSources::default())
+        });
+        (opened, lines.take())
     }
 
-    /// Asserts that a boot's raise that another server's writes beat nine times in a row is
-    /// tried again each time and then holds: the open succeeds, the queued job has its floor,
-    /// the store serves a new job, and the waits between the tries doubled from 10 ms and
-    /// stopped growing at one second. It catches a lost race at the open refusing the start
-    /// (a start-first update that rolls back), and a backoff with no ceiling.
+    /// How many times the reads since the last call scanned the whole job table.
+    fn table_scans(store: &Interfere<Fake>) -> usize {
+        let whole = Read::Scan(js_jobs::keys::JOB.to_owned());
+        store
+            .take_reads()
+            .into_iter()
+            .filter(|read| *read == whole)
+            .count()
+    }
+
+    /// The line the open logs when it is open, over a fake state store, having raised `raised`
+    /// rows.
+    fn open_line(raised: usize) -> String {
+        format!(
+            " INFO js_lease_server::job_store: the job store is open home=\"the state store\" \
+             raised={raised}\n"
+        )
+    }
+
+    /// Asserts that a boot raise whose commit another server's writes beat nine times in a row
+    /// reads that row again each time and then holds, in the same open: the open succeeds, the
+    /// queued job has its floor, the store serves a new job, the job table was scanned once,
+    /// and the open logged exactly two lines: one saying the raise read rows again, with the
+    /// count, and the line that it is open. It catches a lost race that refuses the start (a
+    /// start-first update that rolls back), one that starts the open over from its scans (on
+    /// a busy farm that never ends), and one that logs a line per lost race.
     #[test]
-    fn a_boot_raise_that_other_servers_beat_is_tried_again_until_it_holds() {
+    fn a_boot_raise_that_another_server_beats_nine_times_reads_the_row_again_and_holds() {
         let store = with_a_queued_job();
         contend(&store, "job/job-q", 9);
-        let (sources, waits) = recording();
-        let jobs = open_kept(&store, &sources).unwrap().jobs;
-        let ms = Duration::from_millis;
-        let doubled = [10, 20, 40, 80, 160, 320, 640, 1000, 1000].map(ms);
-        assert_eq!(*waits.lock().unwrap(), doubled);
+        store.take_reads();
+        let (opened, said) = open_kept(&store);
+        let jobs = opened.unwrap().jobs;
+        assert_eq!(
+            table_scans(&store),
+            1,
+            "the open read the job table more than once"
+        );
+        let wanted = format!(
+            " INFO js_jobs::store::ending: the boot's raise read again the rows another server \
+             changed before its commit again=9\n{}",
+            open_line(1)
+        );
+        assert_eq!(said, wanted);
         assert!(job(&jobs, "job-q").deadline_floor.is_some());
         let new = js_jobs::NewJob {
             id: Some(js_jobs::JobId::parse("job-after").unwrap()),
@@ -446,12 +432,13 @@ mod tests {
         assert_eq!(job(&jobs, "job-after").state, js_jobs::JobState::Queued);
     }
 
-    /// Asserts that an index backfill whose commit another server's write beat is tried
-    /// again: the open succeeds after one wait of 10 ms, logs one warning naming the job, the
-    /// count of lost tries and the wait, and the index entries the backfill was to write back
-    /// are there. It catches the backfill's lost race refusing the start.
+    /// Asserts that an index backfill whose commit another server's write beat reads the row
+    /// again in the same open: the open succeeds, logs exactly the backfill's line with the
+    /// count of rows read again and the line that it is open, scans the job table once, and
+    /// the index entries the backfill was to write back are there. It catches the backfill's
+    /// lost race refusing the start or starting the open over.
     #[test]
-    fn an_index_backfill_that_another_server_beat_is_tried_again() {
+    fn an_index_backfill_that_another_server_beat_reads_the_row_again() {
         let store = with_a_queued_job();
         // The backfill commits before the raise, so its commit is the one that loses.
         let inner = store.inner();
@@ -462,23 +449,20 @@ mod tests {
         });
         inner.txn(gone).unwrap().unwrap();
         contend(&store, "job/job-q", 1);
-        let (sources, waits) = recording();
-        process_sink();
-        let lines = Lines::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(lines.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || open_kept(&store, &sources)).unwrap();
-        assert_eq!(*waits.lock().unwrap(), [FIRST_RETRY]);
-        let said = lines.take();
-        let retried: Vec<&str> = said
-            .lines()
-            .filter(|line| line.contains("trying again"))
-            .collect();
-        assert_eq!(retried.len(), 1, "{said}");
-        let wanted = "WARN js_lease_server::job_store: another server changed a job while the job store opened; trying again id=job-q lost=1 wait_ms=10";
-        assert!(retried[0].ends_with(wanted), "{said}");
+        store.take_reads();
+        let (opened, said) = open_kept(&store);
+        opened.unwrap();
+        assert_eq!(
+            table_scans(&store),
+            1,
+            "the open read the job table more than once"
+        );
+        let wanted = format!(
+            " INFO js_jobs::store::index: the index backfill read again the rows another server \
+             changed while it ran again=1\n{}",
+            open_line(1)
+        );
+        assert_eq!(said, wanted);
         let back: Vec<String> = inner
             .scan_prefix(ACTIVE_INDEX)
             .unwrap()
@@ -489,46 +473,48 @@ mod tests {
         assert_eq!(back, before);
     }
 
-    /// Asserts that an open nothing races commits at once, with no wait. It catches a pause
-    /// taken before the first try.
+    /// Asserts that an open nothing races raises the queued job, scans the job table once and
+    /// logs one line, that it is open. It catches a read-again line logged with nothing read
+    /// again.
     #[test]
-    fn an_open_no_other_server_races_waits_for_nothing() {
+    fn an_open_no_other_server_races_reads_once_and_logs_one_line() {
         let store = with_a_queued_job();
-        let (sources, waits) = recording();
-        let jobs = open_kept(&store, &sources).unwrap().jobs;
-        assert!(waits.lock().unwrap().is_empty());
+        store.take_reads();
+        let (opened, said) = open_kept(&store);
+        let jobs = opened.unwrap().jobs;
+        assert_eq!(table_scans(&store), 1);
+        assert_eq!(said, open_line(1));
         assert!(job(&jobs, "job-q").deadline_floor.is_some());
     }
 
     /// Asserts that a schema row the open cannot read refuses the start at once, naming the
-    /// flag and the row, with no try again: only a lost race is retried. It catches a retry
-    /// loop that swallows a real fault and never ends.
+    /// flag and the row, and commits nothing. It catches an open that swallows a real fault.
     #[test]
-    fn a_row_the_open_cannot_read_refuses_the_start_without_a_retry() {
+    fn a_row_the_open_cannot_read_refuses_the_start_at_once() {
         let store = with_a_queued_job();
         let garbage = Txn::new().put(js_jobs::keys::SCHEMA, b"not a schema".to_vec(), Cond::Any);
         store.inner().txn(garbage).unwrap().unwrap();
-        let (sources, waits) = recording();
-        let refused = open_kept(&store, &sources).err().unwrap();
+        let commits = store.commit_stats();
+        let refused = open_kept(&store).0.err().unwrap();
         assert_eq!(refused.flag(), "--job-listen");
         assert!(
             refused.reason().contains(js_jobs::keys::SCHEMA),
             "{refused}"
         );
-        assert!(waits.lock().unwrap().is_empty());
+        assert_eq!(store.commit_stats(), commits);
     }
 
     /// Asserts that a store that fails at the open refuses the start at once, naming the
-    /// flag and the store's reason, with no try again.
+    /// flag and the store's reason, and commits nothing.
     #[test]
-    fn a_store_that_fails_at_the_open_refuses_the_start_without_a_retry() {
+    fn a_store_that_fails_at_the_open_refuses_the_start_at_once() {
         let store = with_a_queued_job();
         store.fail_read_after(0);
-        let (sources, waits) = recording();
-        let refused = open_kept(&store, &sources).err().unwrap();
+        let commits = store.commit_stats();
+        let refused = open_kept(&store).0.err().unwrap();
         assert_eq!(refused.flag(), "--job-listen");
         assert!(refused.reason().contains(INJECTED), "{refused}");
-        assert!(waits.lock().unwrap().is_empty());
+        assert_eq!(store.commit_stats(), commits);
     }
 
     /// Asserts that a file that is not a state store is refused naming the flag, and is
