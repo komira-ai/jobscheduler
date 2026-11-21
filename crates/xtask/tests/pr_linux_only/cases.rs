@@ -243,3 +243,73 @@ fn a_called_workflow_that_calls_another_is_refused() {
         ["t.yml/call -> called.yml/again: calls a workflow again, which the lint does not follow"]
     );
 }
+
+#[test]
+fn a_merge_group_job_on_macos_is_refused() {
+    // A workflow the merge queue starts, alone or beside a pull request, in each spelling.
+    for on in [
+        "on: merge_group\n",
+        "on: [push, merge_group]\n",
+        "on:\n  merge_group:\n    types: [checks_requested]\n",
+        "on:\n  pull_request:\n  merge_group:\n",
+    ] {
+        let w = pr_workflow(&job("macos-15", "")).replace("on:\n  pull_request:\n", on);
+        assert_eq!(
+            problems(&w),
+            ["t.yml/j: runs on macos-15, not Linux x86_64 (ubuntu-*)"],
+            "{on}"
+        );
+    }
+}
+
+#[test]
+fn a_condition_that_keeps_a_job_off_pull_requests_alone_does_not_keep_it_off_a_merge_group() {
+    let both = |cond: &str| {
+        pr_workflow(&job("macos-15", &format!("    if: {cond}\n")))
+            .replace("  pull_request:\n", "  pull_request:\n  merge_group:\n")
+    };
+    for cond in [
+        "${{ github.event_name != 'pull_request' }}",
+        "${{ !cancelled() && github.event_name != 'pull_request' }}",
+        "${{ github.event_name == 'merge_group' }}",
+    ] {
+        assert_eq!(
+            problems(&both(cond)),
+            ["t.yml/j: runs on macos-15, not Linux x86_64 (ubuntu-*)"],
+            "{cond}"
+        );
+    }
+    // In a workflow without a merge group, `!= 'pull_request'` still keeps it off; and one that
+    // pins a push keeps it off a merge group too.
+    let pr_only = pr_workflow(&job(
+        "macos-15",
+        "    if: ${{ github.event_name != 'pull_request' }}\n",
+    ));
+    assert_eq!(lint(&one("t.yml", &pr_only)), (vec![], vec![]));
+    assert_eq!(
+        lint(&one("t.yml", &both("${{ github.event_name == 'push' }}"))),
+        (vec![], vec![])
+    );
+}
+
+#[test]
+fn a_workflow_a_merge_group_starts_holds_the_jobs_it_calls_to_its_trigger() {
+    // A called workflow's macOS job that `!= 'pull_request'` keeps off a pull request still
+    // runs for a merge group of the calling workflow.
+    let called = "name: c\non:\n  workflow_call:\njobs:\n  mac:\n    if: ${{ github.event_name != 'pull_request' }}\n    runs-on: macos-15\n    steps:\n      - run: true\n";
+    let workflows = |on: &str| {
+        vec![
+            ("called.yml".to_owned(), called.to_owned()),
+            (
+                "t.yml".to_owned(),
+                pr_workflow("  call:\n    uses: ./.github/workflows/called.yml\n")
+                    .replace("on:\n  pull_request:\n", on),
+            ),
+        ]
+    };
+    assert_eq!(
+        lint(&workflows("on:\n  pull_request:\n  merge_group:\n")).1,
+        ["t.yml/call -> called.yml/mac: runs on macos-15, not Linux x86_64 (ubuntu-*)"]
+    );
+    assert_eq!(lint(&workflows("on:\n  pull_request:\n")), (vec![], vec![]));
+}

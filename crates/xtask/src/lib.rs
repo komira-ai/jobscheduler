@@ -79,9 +79,9 @@
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
 //!   joins, submits a GPU job (refused, since no host could serve it) and lists the jobs.
-//! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
+//! - `site-changed --event <name> --base <ref> [--group-base <commit>] --paths <file> --github-output <file>`
 //!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
-//!   files a pull request changes against the entries of `site/ci-paths`.
+//!   files a pull request or a merge group changes against the entries of `site/ci-paths`.
 //! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
 //!   service's descriptor set into the two checked-in files, and the generated blocks of
