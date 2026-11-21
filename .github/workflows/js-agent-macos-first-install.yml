@@ -70,5 +70,5 @@ jobs:
         run: cargo test --locked -p js-agent --test mac_first_install --no-run
       - name: Install the package for the first time, as root
         env:
-          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG
-        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" cargo test --locked -p js-agent --test mac_first_install -- --ignored --nocapture --test-threads=1
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION
+        run: JS_FIRST_INSTALL_PKG="$PWD/dist/js-agent-$VERSION-macos-arm64.pkg" JS_FIRST_INSTALL_VERSION="$VERSION" cargo test --locked -p js-agent --test mac_first_install -- --ignored --nocapture --test-threads=1

@@ -187,9 +187,9 @@ fn problems(text: &str) -> Vec<String> {
     want(
         joined.matches("sudo").count() == 1
             && joined.contains(
-                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG",
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: sudo --preserve-env=JS_FIRST_INSTALL_PKG,JS_FIRST_INSTALL_VERSION",
             ),
-        "sudo is used other than as the cargo target runner that keeps the package path",
+        "sudo is used other than as the cargo target runner that keeps the package path and version",
     );
     for step in &all {
         if let Some(command) = run_of(step) {
@@ -330,8 +330,8 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "a run command starts with sudo",
         ),
         (
-            "dist/js-agent-$VERSION-macos-arm64.pkg\" cargo",
-            "dist/js-agent-${{ inputs.version }}-macos-arm64.pkg\" cargo",
+            "dist/js-agent-$VERSION-macos-arm64.pkg\" JS_FIRST",
+            "dist/js-agent-${{ inputs.version }}-macos-arm64.pkg\" JS_FIRST",
             "a run expands an expression",
         ),
     ];
