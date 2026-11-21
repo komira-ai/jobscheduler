@@ -123,8 +123,9 @@ jobs:
           fi
           target/release/js-mac-provision agent-plist > inputs/agent.plist
           target/release/js-mac-provision session-plist --daemon-requirement "cdhash H\"$cdhash\"" > inputs/session.plist
-          plutil -lint inputs/agent.plist inputs/session.plist
-          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --out stage
+          target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist
+          plutil -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist
+          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage
           staged="$(/usr/bin/codesign --display --verbose=4 "stage/root/Library/Application Support/js-agent/bin/js-agent" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
           if [ "$staged" != "$cdhash" ]; then
             echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"

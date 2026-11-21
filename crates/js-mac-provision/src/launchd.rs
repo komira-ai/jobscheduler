@@ -1,13 +1,16 @@
-//! The LaunchDaemon that keeps the anchor loaded: the property list the host step puts in
+//! The LaunchDaemon that keeps the anchor loaded: the property list in
 //! `/Library/LaunchDaemons`. It runs `install` at boot and again every `interval`
 //! seconds, so a rule set that something reloaded (an OS update replaces `/etc/pf.conf`),
 //! or an install that ran before the system's own pf start-up, is put back. `install` is
-//! safe to repeat.
+//! safe to repeat. The js-agent package ships one with fixed arguments
+//! ([`crate::daemon::pf_pool_plist`]); `launchd-plist` prints one for any policy.
 
 use std::fmt::Write as _;
 
-/// The daemon's label, and the name of its plist file without `.plist`.
-pub const LABEL: &str = "com.komira.js.pf-pool";
+/// The daemon's label, and the name of its plist file without `.plist`: a label of the js-agent
+/// package's service (`js-agent.` and more), as hostkeeper requires of every label a package
+/// runs.
+pub const LABEL: &str = "js-agent.pf-pool";
 /// Where the daemon's output goes.
 pub const LOG_PATH: &str = "/var/log/js-mac-provision.log";
 
@@ -61,7 +64,7 @@ mod tests {
 <plist version=\"1.0\">
 <dict>
 \t<key>Label</key>
-\t<string>com.komira.js.pf-pool</string>
+\t<string>js-agent.pf-pool</string>
 \t<key>ProgramArguments</key>
 \t<array>
 \t\t<string>/usr/local/bin/js-mac-provision</string>
