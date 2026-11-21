@@ -43,7 +43,7 @@ pub use cutover::cutover;
 pub(crate) use cutover::{Life, life};
 pub use drain::drain;
 pub use host_setup::{
-    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB, QUOTA_TENTHS, SCRATCH_VOLUME,
+    DATA_VOLUME, DISKUTIL, DSCL, DSEDITGROUP, FSTAB_LEFTOVER, QUOTA_TENTHS, SCRATCH_VOLUME,
 };
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
@@ -97,14 +97,18 @@ pub struct Env<'a> {
     /// both; `None` when it names neither or cannot be read. A first install that has them
     /// needs no join token (see `prepare`).
     pub host_identity: Option<&'a HostIdentity>,
+    /// The host's flags file sets an egress ceiling (`--egress allow-list` or `open`), or
+    /// cannot be read: the agent's next process would remove the runs it was to adopt, so an
+    /// update drains the host instead of handing the runs over (see `prepare`).
+    pub egress: bool,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
     /// How the host setup of a Mac looks at the state root and the scratch root.
     pub look: &'a LookFn,
-    /// The file system table the host setup names the scratch volume in, so that every boot
-    /// mounts it on the scratch root: [`FSTAB`] on a Mac.
-    pub fstab: &'a Path,
+    /// The copy of the file system table an earlier release's host setup left beside it, which
+    /// the host setup removes: [`FSTAB_LEFTOVER`] on a Mac.
+    pub fstab_leftover: &'a Path,
 }
 
 /// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file

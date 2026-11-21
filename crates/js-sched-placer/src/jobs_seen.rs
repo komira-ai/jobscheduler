@@ -15,7 +15,8 @@
 //!   [`js_registry::Placer`] calls only. The placer counts each call that changed it
 //!   ([`SchedPlacer::engine_changes`]): a hello, a heartbeat that brought a load reading or
 //!   gave up an allocation, and a host forgotten; a heartbeat with no reading that gives up
-//!   nothing is not counted;
+//!   nothing is not counted, unless it found the engine held and was kept for it, which
+//!   counts whatever it changes;
 //! - the hosts it is offered ([`super::jobs::JobHosts`]): the hosts open to jobs, each with
 //!   its ceiling, whether it runs host jobs and its machine provider (so a host whose provider
 //!   rank changed makes the next pass run), the hosts that said hello, and the pool's

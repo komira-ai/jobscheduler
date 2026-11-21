@@ -368,7 +368,13 @@ fn marks(record: &Record) -> Result<(), Invalid> {
             record.start_issued,
         ),
         ("rb.drained", rb.drained, "stop_begun", record.stop_begun),
-        ("rb.stop_begun", rb.stop_begun, "rb.drained", rb.drained),
+        (
+            "rb.stop_begun",
+            rb.stop_begun,
+            "rb.drained",
+            // An update that hands the runs over stops the new agent without a drain.
+            rb.drained || record.handover,
+        ),
         (
             "rb.link_restored",
             rb.link_restored,

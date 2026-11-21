@@ -200,18 +200,30 @@ install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs
 - a file system of its own for the scratch root (the agent refuses a state root on the scratch root's device): while
   the two share a device, the hook gives the scratch root the APFS volume `js-agent-scratch` in the Data volume's
   container, with a quota of nine tenths of the container so that jobs that fill it leave room for the system and
-  the state root. The volume is made unmounted (`diskutil apfs addVolume <container> APFS js-agent-scratch -quota
-  <N>G -nomount`), named in `/etc/fstab` by its UUID (`UUID=<uuid> /var/db/js-agent/scratch apfs rw,nobrowse`) so
-  that every boot mounts it there, and then mounted on the scratch root (unmounted first if it is mounted elsewhere);
-  a volume root that ignores ownership is given it (`diskutil enableOwnership`). A volume rather than a disk image
-  or a second partition: it needs no space set aside, shares the container's free space up to its quota, and a boot
-  mounts it with no daemon of ours.
+  the state root. A volume of that name that is there already is used. The volume is made unmounted (`diskutil apfs
+  addVolume <container> APFS js-agent-scratch -quota <N>G -nomount`) and mounted on the scratch root (`diskutil mount
+  nobrowse -mountPoint /var/db/js-agent/scratch <device>`, unmounted first if it is mounted elsewhere); a volume root
+  that ignores ownership is given it (`diskutil enableOwnership`, which macOS keeps for the volume across mounts and
+  boots). A volume rather than a disk image or a second partition: it needs no space set aside and shares the
+  container's free space up to its quota.
+- no file system table line. Since macOS 26.6 the system's sandbox lets only a process with Full Disk Access (a TCC
+  grant, which root does not imply) write `/etc/fstab`, and answers any other process with `EPERM`; hostkeeper's
+  daemon has no such grant and a Mac without device management has no way to give it one. So the agent mounts the
+  volume itself, at each start, before it opens either root (`crates/js-agent/src/lifecycle/scratch_volume.rs`,
+  `mount_at_start`): while the scratch root is on the state root's file system (as after every boot), it finds
+  `js-agent-scratch` in the Data volume's container and mounts it as above, and a start that cannot ends with the
+  reason and is started again by launchd. A boot thus needs nothing that macOS refuses, and `verify` sees the mount:
+  an agent whose roots share a file system refuses to start, so it says no hello. An earlier release's copy of the
+  table beside it (`/etc/fstab.js-agent`) is removed by the setup.
 
 Each part is looked at before it is changed and only what is not as required is made (the scratch root's owner and
 mode are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
 again ends as an uninterrupted one. A part that cannot be read or made defers the step
 (exit 75, `host_setup_missing`, the part and the cause in the detail) with no record written and no cordon placed;
-hostkeeper orders the host again later. No step undoes the setup: it belongs to the host, not to a release.
+hostkeeper orders the host again later. A system call the system refuses (`EPERM`), which no retry changes, fails the
+step instead (exit 1, `host_setup_refused`, class environment, the path and the error in the detail), with no record
+written and no cordon placed, so that the order fails where an operator sees it. No step undoes the setup: it belongs
+to the host, not to a release.
 
 Not made by the hook:
 
@@ -260,10 +272,15 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
   defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
   later. A later order installs it once the host setup is done.
-- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume, its `/etc/fstab` line
-  or its mount): `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon
-  placed, and hostkeeper runs the hook's `rollback` (a first install) and retries later. `cutover` never starts an
-  agent whose roots share a device or a helper whose socket group is missing.
+- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume or its mount):
+  `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon placed, and
+  hostkeeper runs the hook's `rollback` (a first install) and retries later. A system call of the setup that macOS
+  refuses (`EPERM`) fails `prepare` instead (`host_setup_refused`, exit 1), naming the path and the error, and is not
+  retried as if it could pass. `cutover` never starts an agent whose roots share a device or a helper whose socket
+  group is missing.
+- The agent cannot mount the scratch volume at a start (no `js-agent-scratch` in the Data volume's container, or
+  `diskutil` fails): the agent exits naming `--scratch-root` and the cause, and launchd starts it again after its
+  throttle interval; during an update `verify` sees no hello and the release is rolled back.
 - No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for

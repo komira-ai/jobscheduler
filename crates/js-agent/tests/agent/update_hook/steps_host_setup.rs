@@ -1,9 +1,11 @@
 //! The host setup of a Mac in `prepare` (`socket_group`, `scratch_root`): the helper's socket
 //! group is made before the helper is bootstrapped, the state root and the scratch root are made
-//! and the scratch root gets a volume of its own; a part that cannot be made defers
-//! `host_setup_missing` with nothing written and nothing cordoned; a rerun after a kill at any
-//! point ends as an uninterrupted run; a systemd host that names a part is refused.
-//! The error paths of the volume are in steps_host_setup_volume.rs.
+//! and the scratch root gets a volume of its own, mounted on it with no file system table
+//! written; a part that cannot be made defers `host_setup_missing` with nothing written and
+//! nothing cordoned; a rerun after a kill at any point ends as an uninterrupted run; a systemd
+//! host that names a part is refused. The error paths of the volume are in
+//! steps_host_setup_volume.rs; a Mac an earlier release's setup left half done, and a call the
+//! system refuses, are in steps_host_setup_adopt.rs.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -25,12 +27,19 @@ fn mode(path: &Path) -> u32 {
     meta.permissions().mode() & 0o7777
 }
 
-/// The line the setup writes to the file system table for the scratch volume.
-pub(super) fn fstab_line(rig: &Rig) -> String {
-    format!(
-        "UUID={UUID} {} apfs rw,nobrowse\n",
-        scratch_of(rig).display()
-    )
+/// Asserts that no file of the rig's tree is named `fstab`: the setup wrote no file system
+/// table, which macOS refuses to the hook.
+pub(super) fn assert_no_table(rig: &Rig) {
+    let mut dirs = vec![rig.tmp.path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            assert_ne!(entry.file_name(), "fstab", "{}", dir.display());
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
 }
 
 /// What a first install on an empty Mac changes, in order.
@@ -39,7 +48,7 @@ pub(super) fn first_changes(rig: &Rig) -> Vec<String> {
     vec![
         format!("{DSEDITGROUP} -o create {GROUP}"),
         format!("{DISKUTIL} apfs addVolume disk3 APFS {SCRATCH_VOLUME} -quota {QUOTA} -nomount"),
-        format!("{DISKUTIL} mount -mountPoint {scratch} {DEVICE}"),
+        format!("{DISKUTIL} mount nobrowse -mountPoint {scratch} {DEVICE}"),
         format!("{DISKUTIL} enableOwnership {scratch}"),
     ]
 }
@@ -94,9 +103,9 @@ fn a_socket_group_that_is_there_is_not_made_again() {
 
 /// Asserts that a first install on an empty Mac makes the state root and the scratch root
 /// (0700, their parent 0755), makes the scratch volume with nine tenths of the container as its
-/// quota, names it in the file system table, mounts it on the scratch root and gives it
-/// ownership, in that order, and writes its record. Catches an agent that refuses to start
-/// because its two roots share a file system.
+/// quota, mounts it on the scratch root (`nobrowse`) and gives it ownership, in that order,
+/// writes no file system table, and writes its record. Catches an agent that refuses to start
+/// because its two roots share a file system, and a setup that needs a table macOS refuses.
 #[test]
 fn a_first_install_makes_the_roots_and_gives_the_scratch_root_its_own_volume() {
     let rig = mac_rig("hook-setup-roots", false);
@@ -109,7 +118,7 @@ fn a_first_install_makes_the_roots_and_gives_the_scratch_root_its_own_volume() {
     assert_eq!(mode(&scratch), 0o700);
     assert_eq!(mode(scratch.parent().unwrap()), 0o755);
     assert_eq!(mac.changes(), first_changes(&rig));
-    assert_eq!(fs::read_to_string(&spy.fstab).unwrap(), fstab_line(&rig));
+    assert_no_table(&rig);
     assert_eq!(
         *mac.volume.borrow(),
         Some(Volume {
@@ -120,24 +129,17 @@ fn a_first_install_makes_the_roots_and_gives_the_scratch_root_its_own_volume() {
     assert!(rig.record().is_some());
 }
 
-/// Asserts that a `prepare` on a Mac set up already changes nothing: no group, volume, table line
-/// or mount is made again.
+/// Asserts that a `prepare` on a Mac set up already changes nothing: no group, volume or mount is
+/// made again.
 #[test]
 fn a_prepare_on_a_set_up_mac_changes_nothing() {
     let rig = mac_rig("hook-setup-rerun", false);
     let mac = FakeMac::new();
     assert_eq!(spy_on(&rig, &mac).prepare(&rig).outcome, Outcome::Success);
-    let before = (
-        mac.changes(),
-        fs::read_to_string(rig.tmp.path().join("fstab")).unwrap(),
-    );
+    let before = mac.changes();
     let done = spy_on(&rig, &mac).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let after = (
-        mac.changes(),
-        fs::read_to_string(rig.tmp.path().join("fstab")).unwrap(),
-    );
-    assert_eq!(after, before);
+    assert_eq!(mac.changes(), before);
 }
 
 /// Asserts that an update of a Mac the previous release did not set up sets it up before the
@@ -154,7 +156,7 @@ fn an_update_sets_up_the_mac_before_it_cordons() {
     let log = spy.log();
     let mount = log
         .iter()
-        .position(|call| call.contains(" mount -mountPoint "));
+        .position(|call| call.contains(" mount nobrowse -mountPoint "));
     let cordon = log.iter().position(|call| call.starts_with("cordon("));
     assert!(mount.unwrap() < cordon.expect("cordoned"), "{log:?}");
 }
@@ -265,15 +267,16 @@ fn a_scratch_root_alone_is_set_up_without_a_group() {
     assert_eq!(mac.changes(), first_changes(&rig)[1..].to_vec());
 }
 
-/// Everything a host setup leaves behind, with the rig's tree written `<root>`: the record, the
-/// file system table, the modes of the roots, the groups and the volume.
+/// Everything a host setup leaves behind, with the rig's tree written `<root>`: the record,
+/// whether the leftover copy of the file system table is there, the modes of the roots, the
+/// groups and the volume.
 fn ends(rig: &Rig, spy: &Spy<'_>, mac: &FakeMac) -> String {
     let record = rig
         .record()
         .map(|record| serde_json::to_string(&record).unwrap());
     let state = format!(
         "{record:?} {:?} {:o} {:o} {:?} {:?}",
-        fs::read_to_string(&spy.fstab).ok(),
+        spy.fstab_leftover.exists(),
         mode(&rig.params.state_root),
         mode(&scratch_of(rig)),
         mac.groups.borrow(),
@@ -282,20 +285,24 @@ fn ends(rig: &Rig, spy: &Spy<'_>, mac: &FakeMac) -> String {
     state.replace(&rig.tmp.path().display().to_string(), "<root>")
 }
 
-/// Asserts that a first install's `prepare` killed at any point of the host setup and run again
-/// ends as one that was never killed, with the group, the volume and the table line made once.
+/// Asserts that a first install's `prepare` on a Mac with the leftover copy of the file system
+/// table, killed at any point of the host setup and run again, ends as one that was never
+/// killed, with the group and the volume made once and the leftover gone.
 #[test]
 fn a_setup_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
     let baseline = mac_rig("hook-setup-sweep-base", false);
     let base_mac = FakeMac::new();
     let base_spy = spy_on(&baseline, &base_mac);
+    leave_leftover(&base_spy);
     assert_eq!(base_spy.prepare(&baseline).outcome, Outcome::Success);
     let points = baseline.kill.points();
     let end = ends(&baseline, &base_spy, &base_mac);
+    assert!(!base_spy.fstab_leftover.exists());
     assert!(points > first_changes(&baseline).len() as u32);
     for k in 1..=points {
         let rig = mac_rig(&format!("hook-setup-sweep-{k}"), false);
         let mac = FakeMac::new();
+        leave_leftover(&spy_on(&rig, &mac));
         rig.kill.arm(k);
         assert!(
             killable(|| spy_on(&rig, &mac).prepare(&rig)).is_none(),
@@ -318,6 +325,13 @@ fn a_setup_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
             "killed at point {k}: {changes:?}"
         );
     }
+}
+
+/// Writes the copy of the file system table that an earlier release's setup left beside it.
+pub(super) fn leave_leftover(spy: &Spy<'_>) {
+    fs::create_dir_all(spy.fstab_leftover.parent().unwrap()).unwrap();
+    let line = format!("UUID={UUID} /var/db/js-agent/scratch apfs rw,nobrowse\n");
+    fs::write(&spy.fstab_leftover, line).unwrap();
 }
 
 /// Asserts that a systemd host whose params name a socket group or a scratch root is refused by
