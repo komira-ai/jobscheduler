@@ -116,7 +116,7 @@ use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId,
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
 use tracing::warn;
 
-use super::whole_jobs::{WholeJobStep, WholeJobs};
+use super::whole_jobs::{self, WholeJobStep, WholeJobs};
 use super::{Engine, Placed, TablesFrom, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
@@ -195,6 +195,8 @@ struct Walker {
     job: JobId,
     /// Whether the job runs on the machine itself (host isolation).
     host_isolation: bool,
+    /// The hosts its bars keep it off at the walk's time ([`whole_jobs::barred_hosts`]).
+    barred: BTreeSet<HostId>,
     request: Request,
     booked: Booked,
     /// The network level the job asks for.
@@ -339,7 +341,8 @@ impl Engine {
     /// walk leaves open to it (the same load placement, CPU slack and memory percent as a lease),
     /// and a job placed nowhere closes to the jobs behind it every host it could run on with room
     /// (its capabilities match and it fits the host's capacity, and the host's ceiling covers the
-    /// job's network level and each of its host ports). A host that holds a port a job declares is
+    /// job's network level and each of its host ports, and no bar of the job keeps it off the host:
+    /// [`whole_jobs::barred_hosts`]). A host that holds a port a job declares is
     /// capable of it but has no room for it until that allocation is freed: the job waits, and
     /// closes the host to the jobs behind it as a job waiting for room does. A job with host
     /// isolation is capable only of a host that runs host jobs, and the host it is placed on is
@@ -395,7 +398,7 @@ impl Engine {
         self.sizes.set_bounds(bounds_of(self.capacities()));
         let day = day_of(now);
         let sized = queued.iter().map(|job| self.sizes.sized(job, day));
-        let walkers: Vec<Walker> = sized.filter_map(|job| walker(&job)).collect();
+        let walkers: Vec<Walker> = sized.filter_map(|job| walker(&job, now)).collect();
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
@@ -403,7 +406,8 @@ impl Engine {
                     let capacity = self.sched.capacity(&map::worker(host));
                     let ports = &walker.host_ports;
                     let covered = within_ceiling(&offer.ceiling, walker.network, ports);
-                    let allowed = !walker.host_isolation | offer.host_jobs;
+                    let allowed =
+                        (!walker.host_isolation | offer.host_jobs) & !walker.barred.contains(*host);
                     capacity.is_some_and(|capacity| {
                         walker.request.runnable_on(caps, &capacity) & covered.is_ok() & allowed
                     })
@@ -510,10 +514,10 @@ impl Engine {
     }
 }
 
-/// The queued `job` as a pass offers it to the engine; `None` for a job that books the whole
-/// host (the pass queues it with [`Engine::whole_jobs`]), and for one whose constraints are no
-/// platform requirements (logged).
-fn walker(job: &JobRecord) -> Option<Walker> {
+/// The queued `job` as a pass offers it to the engine at `now`; `None` for a job that books the
+/// whole host (the pass queues it with [`Engine::whole_jobs`]), and for one whose constraints
+/// are no platform requirements (logged).
+fn walker(job: &JobRecord, now: FarmTime) -> Option<Walker> {
     let Needs::Shape(resources) = &job.spec.needs else {
         return None;
     };
@@ -530,6 +534,7 @@ fn walker(job: &JobRecord) -> Option<Walker> {
     Some(Walker {
         job: job.id.clone(),
         host_isolation: job.spec.constraints.isolation == Isolation::Host,
+        barred: whole_jobs::barred_hosts(job, now),
         request,
         booked: Booked::Shape {
             cpu_millis: resources.cpu_millis(),
@@ -973,20 +978,6 @@ impl SchedPlacer {
 }
 
 #[cfg(test)]
-impl Engine {
-    /// [`Engine::walk_jobs`] as it was before the scheduler held its matches over a walk:
-    /// each round matches every open host again.
-    pub(crate) fn walk_jobs_matching_each_round(
-        &mut self,
-        queued: &[JobRecord],
-        open: &BTreeMap<HostId, OpenHost>,
-        now: FarmTime,
-    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
-        self.walk_holding(queued, open, now, false)
-    }
-}
-
-#[cfg(test)]
 #[path = "jobs_tests.rs"]
 mod tests;
 
@@ -997,3 +988,7 @@ mod matches_tests;
 #[cfg(test)]
 #[path = "jobs_rank_tests.rs"]
 mod rank_tests;
+
+#[cfg(test)]
+#[path = "jobs_bars_tests.rs"]
+mod bars_tests;

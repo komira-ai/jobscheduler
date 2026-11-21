@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_agent_wire::{Command, HeldState};
+use js_agent_wire::{Command, HeldState, Outcome, refusal};
 use js_jobs::JobId;
 use js_types::Resources;
 
@@ -228,14 +228,21 @@ impl RealJobs {
     }
 
     /// Writes into the ledger, once for each job, that the agent made its result, now:
-    /// the first time the lifecycle lists the job with one.
+    /// the first time the lifecycle lists the job with one, noting whether it is a start the
+    /// lifecycle refused because its host is held.
     pub(super) fn settle(&mut self, real: &RealAgent, io: &mut Io) {
         let held = real.held_jobs();
-        let done = held.iter().filter(|job| job.result.is_some());
-        let done = done.filter_map(|job| JobId::parse(&job.job_id).ok());
-        for job in done {
+        let done = held
+            .iter()
+            .filter_map(|job| job.result.as_ref().map(|result| (job, result)));
+        let done = done.filter_map(|(job, result)| {
+            let refused = (result.outcome == Outcome::FailedToStart)
+                & (result.detail.as_deref() == Some(refusal::HOST_HELD));
+            JobId::parse(&job.job_id).ok().map(|job| (job, refused))
+        });
+        for (job, refused) in done {
             if self.made.insert(job.clone()) {
-                made(job, io);
+                made(job, refused, io);
             }
         }
     }

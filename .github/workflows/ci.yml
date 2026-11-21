@@ -90,7 +90,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The feature `slow-families` of js-sim-cell is on: cargo skips a test target whose required
+      # feature is off, even under --all-targets, and clippy must lint those four binaries too.
+      - run: cargo clippy --workspace --all-targets --locked --features js-sim-cell/slow-families -- -D warnings
       # This builds the live conformance targets of the three machine providers, which no other
       # job builds and nothing in CI runs; they spend money only when a person runs them.
       - run: cargo clippy --locked -p js-provider-ec2 -p js-provider-gce -p js-provider-lambdalabs --features js-provider-ec2/live,js-provider-gce/live,js-provider-lambdalabs/live --all-targets -- -D warnings
@@ -217,6 +219,11 @@ jobs:
       - run: cargo fetch --locked
       # --no-fail-fast: a red run names every failing test in every crate, not only the
       # first, so the tests commit of a pull request shows each of its reds.
+      # The workspace without the feature `slow-families` of js-sim-cell: that crate's four
+      # longest test binaries (faults, smoke, replay, whole_host_prepare; its Cargo.toml) are not
+      # built here. A pull request still runs them, in the `coverage-shard` jobs, and every push
+      # to main runs them in the release's `unit-tests`, whose red `release-red` reports
+      # (crates/xtask/tests/slow_families.rs holds each of these to it).
       - run: cargo nextest run --workspace --locked --no-fail-fast
       - name: Doctests
         if: ${{ !cancelled() }}
@@ -252,7 +259,7 @@ jobs:
   # tail counter scenarios and history store on it (tests/postgres_tail.rs,
   # tests/postgres_history.rs), the simulation cell's store family and store tests over it
   # (js-sim-cell's tests/store.rs and tests/server.rs; the cell's other families run in the
-  # `test` job), and clippy with the features on. The server is a service container
+  # coverage shards, the release's `unit-tests`, and, bar four, the `test` job), and clippy with the features on. The server is a service container
   # pinned by digest; its password is a throwaway for this container, which lives only for
   # this job. The tests read the server's URL from KBF_TEST_POSTGRES_URL (the name the code
   # has; a rename is a later change to the code). The in-memory fake and its deliberately
@@ -751,7 +758,7 @@ jobs:
       # cargo-llvm-cov names and places the raw profiles itself: one per test process,
       # `<workspace>-%p-%<n>m.profraw` at the top of target/llvm-cov-target.
       - name: Run this shard's tests under coverage
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --cargo-profile coverage --branch --no-report --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --cargo-profile coverage --branch --no-report --partition "slice:${{ matrix.shard }}/${{ strategy.job-total }}"
       # One indexed profile from every raw one, merged by the toolchain's llvm-profdata as
       # `llvm-cov report` merges them (`cargo xtask merge-profiles`, crates/xtask/src/
       # merge_profiles.rs: the inputs go in a list file, so thousands of names never go on
@@ -830,7 +837,7 @@ jobs:
       # The shards' build command, running no test (`none()`): the same binaries, built
       # the same way, so the shards' profiles match them function for function.
       - name: Build the instrumented test binaries the shards ran
-        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --cargo-profile coverage --branch --no-report --filterset 'none()' --no-tests=pass
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --features js-sim-cell/slow-families --cargo-profile coverage --branch --no-report --filterset 'none()' --no-tests=pass
       # One step per shard of `coverage-shard`'s matrix (crates/xtask/tests/coverage_shards.rs
       # holds the two to each other), each into the directory `llvm-cov report` reads
       # profiles from.
