@@ -62,7 +62,7 @@ not a machine provider (5.6), and not the operating system's machine id the agen
 - **What reads the shape.**
   - The placer is told the host's booked shape (admit.rs calls `list_claimed`, then `tell_up` with `book.shape_of`).
   - The pass gives the commit `capacity_of(&view.shape, cpu_slack)` (`crates/js-lease-server/src/sched/jobs_pass.rs`).
-  - The server sizes its usage limits from the largest pool shape (`crates/js-lease-server/src/agents.rs`, near line 279).
+  - The server sizes its usage limits from the largest pool shape (`crates/js-lease-server/src/agents.rs`, near line 268).
   - `check_pool` (`crates/js-lease-server/src/config/placement.rs`) requires the shape to name an `arch` unless the pool places by
     hello.
 - **Pools beside each other.**
