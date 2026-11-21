@@ -25,3 +25,11 @@ js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: src/child.rs's tests expect an absolute PATH, and a farm test's PATH
+# names buildrules' busybox directory alone. They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

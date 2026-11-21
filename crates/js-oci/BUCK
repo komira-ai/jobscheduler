@@ -1,0 +1,19 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond what buildrules gives each of its units (a library src/ and
+# build.rs, a test target tests/), which a Buck2 action sees only when declared: tests/live_pull.rs
+# takes its probe from examples/live_pull (`#[path]`).
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "examples/live_pull",
+    ],
+)
+
+# Read by other members (their extra_srcs); exported by reference, so each stays at its path.
+export_file(
+    name = "tests/support",
+    src = "tests/support",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)

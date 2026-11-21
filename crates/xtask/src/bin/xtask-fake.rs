@@ -27,6 +27,13 @@
 //! - Run as `js`, it is the client of `site-demo`: `job submit` prints the refusal the real client
 //!   prints when no host could serve the job and exits 3, and `job list` prints nothing.
 //!
+//! - Run as `buck2`, it is the buck2 of `farm-build`: it appends its arguments, joined by spaces, as
+//!   one line to `buck2.calls` of its working directory. `kill` then exits 0. Any other verb (`audit`,
+//!   `build`) prints the file `buck2-<verb>.stdout` of the working directory (for `audit`, `{}` when
+//!   there is none: buck2's answer for a key that is not set; for any other, nothing), prints
+//!   `buck2-<verb>.stderr` on stderr, and exits with the number in `buck2-<verb>.status` (0 when
+//!   there is none). It answers from files, not from the environment.
+//!
 //! `XTASK_FAKE_DEFECT`, or the first line of a file named `defect` next to the program, asks for one
 //! failure of the real programs: `build-fails` (every build
 //! exits 101) or `fails:<a>,<b>,...` (sudo exits 101, as a failed test binary does, when one
@@ -207,6 +214,25 @@ fn server(args: &[String]) -> ExitCode {
     }
 }
 
+/// The fake `buck2`: records the call and answers from the files of the working directory.
+fn buck2(args: &[String]) -> ExitCode {
+    append(Path::new("buck2.calls"), &args.join(" "));
+    let verb = args.first().map_or("", String::as_str);
+    if verb == "kill" {
+        return ExitCode::SUCCESS;
+    }
+    let read = |suffix: &str, default: &str| {
+        std::fs::read_to_string(format!("buck2-{verb}.{suffix}"))
+            .unwrap_or_else(|_| default.to_owned())
+    };
+    print!(
+        "{}",
+        read("stdout", if verb == "audit" { "{}" } else { "" })
+    );
+    eprint!("{}", read("stderr", ""));
+    ExitCode::from(read("status", "0").trim().parse().unwrap_or(2))
+}
+
 /// The fake client: `job submit` is refused for want of a host, `job list` is empty.
 fn job_client(args: &[String]) -> ExitCode {
     if defect() == "js-fails" {
@@ -244,6 +270,8 @@ fn main() -> ExitCode {
         server(&args)
     } else if name == "js" {
         job_client(&args)
+    } else if name == "buck2" {
+        buck2(&args)
     } else if name == "testbin" {
         testbin()
     } else {
