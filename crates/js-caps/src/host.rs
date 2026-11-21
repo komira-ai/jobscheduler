@@ -20,7 +20,7 @@
 //! | [`FUSE_JOBS`] | [`FLAG_SET`] | the agent runs contained jobs that ask for FUSE (`--allow-fuse-jobs`), its kernel is at least 6.14, and `/dev/fuse` is the kernel's FUSE device (char 10:229) |
 //! | [`FUSE_URING`] | [`FLAG_SET`] | as [`FUSE_JOBS`], and the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0, so FUSE over io_uring is usable; reported only together with [`FUSE_JOBS`] |
 //! | [`OS_VERSION`] | the major version of the host's operating system, a decimal number such as `26` | the agent runs on macOS and could read the version |
-//! | [`XCODE`] | the builds of the Xcodes installed in `/Applications`, ascending, comma-separated | the agent runs on macOS and found at least one Xcode |
+//! | [`XCODE`] | the builds of the Xcodes installed in `/Applications` that answered the agent's survey, ascending, comma-separated | the agent runs on macOS and at least one Xcode is ready |
 //! | `mount-provider.<name>` ([`mount_provider_key`]) | [`FLAG_SET`] | the agent reports layered rootfs and was given the node-local provider `<name>` (`--mount-provider`) |
 //!
 //! A job request may require [`EXEC`] (the same mode), [`DISK_GIB`] (at least that
@@ -52,8 +52,9 @@ pub const EXEC: &str = js_types::EXEC_KEY;
 /// that major version or a later one.
 pub const OS_VERSION: &str = js_types::OS_VERSION_KEY;
 
-/// The capability key of the Xcodes a Mac's agent found: their builds (`16C5032a`, the
-/// `ProductBuildVersion` of each `Xcode*.app`), ascending and comma-separated in the one
+/// The capability key of the ready Xcodes a Mac's agent found: their builds (`16C5032a`, the
+/// `ProductBuildVersion` of each `Xcode*.app` that answered the agent's survey), ascending
+/// and comma-separated in the one
 /// value a hello holds per key. A job names one build under it, and a host is capable when
 /// that build is among its builds (membership, not equality).
 pub const XCODE: &str = "xcode";
