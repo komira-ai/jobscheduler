@@ -16,7 +16,7 @@ In short:
 | a restart of an idle Mac (planned, a power cut, a panic) | none |
 | a planned restart of a Mac that runs jobs | cordon it first and lift the cordon after (below) |
 | a macOS update through hostkeeper's maintenance run | none while the run succeeds; a halted run is put back in hostkeeper |
-| a restart while a job's post-job checks run | the host is tainted `check-owed`; clear it (below) |
+| a restart while a job is being cleaned up | the host is tainted `check-owed`; clear it (below) |
 | a background item macOS has switched off | allow it at the Mac's console (below) |
 
 ## What comes back by itself, and in what order
@@ -66,17 +66,19 @@ retry policy says.
 - **FileVault off.** With FileVault on, every restart stops at the pre-boot unlock screen until
   someone types a password at the Mac, and no daemon runs until then; a restart nobody planned (a
   power cut, a panic) cannot be unlocked from afar. `fdesetup status` says `FileVault is Off.`
-- **No sleep, and restart after a power cut.** hostkeeper sets this at every start of its daemon
-  (`pmset -a`: `sleep 0`, `disksleep 0`, `autorestart 1`, `womp 1`, and the rest of its list). `pmset
-  -g` shows it.
+- **No sleep, and restart after a power cut.** hostkeeper's daemon, at each of its starts, sets
+  whichever of its keep-awake settings differ (`sleep 0`, `disksleep 0`, `autorestart 1`, `womp 1`
+  and the rest of its list, with `pmset -a`), unless its configuration turns that off. `pmset -g`
+  shows the result.
 - **No auto-login, and no console session needed.** Pool mode runs every job as a pool user that
   the root helper makes and spawns; nothing of it needs a user logged in at the console or a GUI
-  session, and the daemons run as root from boot. The helper clears auto-login at each of its
-  starts (`defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser` and the
-  removal of `/etc/kcpassword`, `crates/js-mac-session/src/autologin.rs`, `clear_auto_login`),
-  because the session-switching modes it carries use them. Do not set auto-login on a Mac of the
-  pool: the helper removes it at its next start. A user who is logged in at the console does no
-  harm.
+  session, and the daemons run as root from boot. The helper clears auto-login in its boot reset
+  (`defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser` and the removal of
+  `/etc/kcpassword`, `crates/js-mac-session/src/helper/switch.rs`, `boot_reset`), because the
+  session-switching modes it carries use them; the agent asks for that reset when it starts
+  against a helper that has not made it yet, so once after every start of the helper. Do not set
+  auto-login on a Mac of the pool: it is removed after the next restart. A user who is logged in
+  at the console does no harm.
 - **The host setup.** The update hook's `prepare` makes the group `_jsagent`, the state root
   `/var/db/js-agent/state` and the volume `js-agent-scratch` (see the design's host setup). A
   restart keeps all three. Without one of them the agent or the helper ends at every start, and
@@ -88,14 +90,20 @@ retry policy says.
 
 ## Checking a Mac after a restart
 
-On the Mac, as any administrator (none of these needs root):
+On the Mac, as an administrator (`launchctl print` of a system daemon needs no root; read the
+logs with `sudo` if their mode does not let you):
 
 ```text
 launchctl print system/js-agent | grep -E 'state =|runs =|last exit code'
 launchctl print system/js-agent.session | grep -E 'state =|runs =|last exit code'
 launchctl print system/js-agent.pf-pool | grep -E 'state =|runs =|last exit code'
 tail -n 20 '/Library/Application Support/js-agent/log/js-agent.err.log'
+tail -n 20 '/Library/Application Support/js-agent/log/js-mac-session.err.log'
+tail -n 20 /var/log/js-mac-provision.log
 ```
+
+The agent's reasons for ending are in its `err.log`, the helper's in `js-mac-session.err.log`, and
+the pf job's in `js-mac-provision.log`.
 
 `js-agent` and `js-agent.session` are `state = running`; `js-agent.pf-pool` is `not running`
 between its runs with `last exit code = 0`. A `runs` count above 1 for the agent with a running
@@ -120,13 +128,16 @@ the host (`check-owed`, below). To restart without either, keep new jobs off the
 for the ones it runs to end:
 
 ```text
-js host cordon --server https://<job service> --token-file <operator token> --host-id <id> --cordon-secs 4h
+js host cordon --server https://<job service> --token-file <operator token> --host-id <id> --cordon-secs 12h
 js host list --server https://<job service> --token-file <operator token>
 ```
 
-The cordon is the server's and holds through the restart ([cordon-a-node.md](cordon-a-node.md)).
-Wait until the host's `booked` list is empty, restart the Mac, check it as above, then put it
-back:
+The host's id and the operator's token are as in [cordon-a-node.md](cordon-a-node.md). Ask for
+longer than the longest job on the host plus the restart (at most seven days per call; repeat the
+call to extend it). The cordon is the server's and holds through the restart. Wait until the
+host's `booked` list is empty, restart the Mac, check it as above, check that
+`cordon_expires_at_ms` is still in the future (a cordon that lapsed lets jobs land before the
+check), then put it back:
 
 ```text
 js host uncordon --server https://<job service> --token-file <operator token> --host-id <id>
@@ -164,25 +175,31 @@ What an update can change, and what puts it right:
   again within 30 seconds.
 - The major version the agent reports (`os_version`) changes with a major upgrade; a pool or a
   job that names a least `os_version` places by the new one at the next hello.
-- An update has been reported to reset the background item settings of third-party daemons; see
-  [Background items](#background-items) and check after every update.
+- Mac administrators have reported updates that reset the background item settings of
+  third-party daemons (Apple's developer forums); see [Background items](#background-items) and
+  check after every update.
 
-## A restart while a job's checks run (`check-owed`)
+## A restart while a job is being cleaned up (`check-owed`)
 
-The agent writes `owed-<run>` in its state root before a job's cleanup and removes it once the
-job's post-job checks have run. A restart between the two leaves the record, and the next start
+The agent writes `owed-<run>` in its state root before the first step of a job's cleanup (the
+removal of its pool user's lease and its run directories) and removes it once the job's post-job
+checks have run (they check nothing on a Mac). A restart between the two leaves the record, and the next start
 taints the host `check-owed`, which the agent never clears itself
 (`crates/js-agent/src/lifecycle/taint.rs`): the host is listed with that `taint_reason` and runs no
 job. An idle Mac has no such record. `js-agent clear-taint`
 ([clear-a-taint.md](clear-a-taint.md)) clears a Linux host's taint and does not run on a Mac (it
 reads the crun runtime's ledger and stops a systemd unit). On a Mac, once the cause is understood
-and the host is known to be clean, the same clear is done by hand, as root, in the verb's order:
+and the host is known to be clean, the renames the verb makes are done by hand, as root, in its
+order. They are not for a `host-job` taint (that machine is reimaged), and the host must run no
+job: a native run outlives the agent's stop, so check first that its `booked` list is empty
+(`js host list`).
 
 1. `launchctl bootout system/js-agent` (it returns when the agent has exited).
 2. In `/var/db/js-agent/state`, rename each `owed-<run>` to `owed.<run>.cleared-<unix seconds>-by-<you>`,
    then `taint.pinned` (if there) to `taint.pinned.cleared-<unix seconds>-by-<you>`, then
-   `taint.json` to `taint.json.cleared-<unix seconds>-by-<you>`. Remove nothing: the renamed files
-   are the record of the clear.
+   `taint.json` to `taint.json.cleared-<unix seconds>-by-<you>`. Remove nothing. The verb also
+   writes a record of the clear (`taint.cleared-<unix seconds>-by-<you>.json`); by hand, the
+   renamed files are the record, and the reason goes where the operator records the clear.
 3. `launchctl bootstrap system /Library/LaunchDaemons/js-agent.plist`.
 
 The agent starts with no marker and ends the server's taint at its first heartbeat.
@@ -191,10 +208,11 @@ The agent starts with no marker and ends the server's taint at its first heartbe
 
 macOS 13 and later record each LaunchDaemon a package installs as a background item, and an item
 switched off ("Allow in the Background" off) is not loaded at boot. On a Mac without device
-management a newly installed item is allowed; only a person at the Mac's console can switch
-it back on (System Settings, General, Login Items & Extensions), and only a device management
-profile (the Managed Login Items payload) can allow it in advance. The package's programs are
-ad-hoc signed (the package itself is signed), as hostkeeper's own daemon is.
+management a newly installed item is expected to be allowed (the drill below confirms it for
+this package); only a person at the Mac's console can switch it back on (System Settings, General,
+Login Items & Extensions), and only a device management profile (Apple's Managed Login Items
+payload) can allow it in advance. The package is signed; its programs are signed ad hoc by the
+linker ([packaging/js-agent-macos/README.md](../../packaging/js-agent-macos/README.md)).
 
 Read the state as root:
 
