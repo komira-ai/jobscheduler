@@ -79,6 +79,8 @@ pub const DEVICE: &str = "disk3s7";
 pub const FIRST_GID: u32 = 501;
 /// The owner a volume that ignores ownership shows.
 pub const UNKNOWN_UID: u32 = 99;
+/// The error number of a call the system refuses (`EPERM`).
+pub const EPERM: i32 = 1;
 
 /// The scratch volume.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +108,9 @@ pub struct FakeMac {
     pub look_fails: RefCell<BTreeSet<PathBuf>>,
     /// The paths a look at fails once a mount has run.
     pub look_fails_after_mount: RefCell<BTreeSet<PathBuf>>,
+    /// The paths a look at is refused by the system (`EPERM`), as macOS refuses a protected
+    /// file to a process without the grant it needs.
+    pub look_refused: RefCell<BTreeSet<PathBuf>>,
 }
 
 impl FakeMac {
@@ -123,6 +128,7 @@ impl FakeMac {
             mount_takes: Cell::new(true),
             look_fails: RefCell::new(BTreeSet::new()),
             look_fails_after_mount: RefCell::new(BTreeSet::new()),
+            look_refused: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -220,7 +226,7 @@ impl FakeMac {
                 self.alter(|volume| volume.mount = None);
                 Ok(String::new())
             }
-            (DISKUTIL, ["mount", "-mountPoint", point, DEVICE]) => {
+            (DISKUTIL, ["mount", "nobrowse", "-mountPoint", point, DEVICE]) => {
                 self.change(&line);
                 let after = std::mem::take(&mut *self.look_fails_after_mount.borrow_mut());
                 self.look_fails.borrow_mut().extend(after);
@@ -270,6 +276,9 @@ impl FakeMac {
     pub fn look(&self, path: &Path) -> io::Result<PathFacts> {
         if self.look_fails.borrow().contains(path) {
             return Err(io::Error::other("the disk does not answer"));
+        }
+        if self.look_refused.borrow().contains(path) {
+            return Err(io::Error::from_raw_os_error(EPERM));
         }
         let meta = fs::metadata(path)?;
         let volume = self

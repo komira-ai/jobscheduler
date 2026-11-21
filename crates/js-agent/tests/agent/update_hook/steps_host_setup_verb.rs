@@ -14,7 +14,7 @@ use js_agent::update_hook::{
 
 use super::fake_mac::{FIRST_GID, FakeMac, GROUP, mac_rig, spy_on};
 use super::step_rig::{RETRY_AFTER_SECS, Rig, Spy, as_root};
-use super::steps_host_setup::{first_changes, fstab_line};
+use super::steps_host_setup::{assert_no_table, first_changes};
 
 /// How the hook ended: its exit status, its last line and what it told a person.
 struct Ran {
@@ -60,8 +60,8 @@ fn prepare_by_verb(rig: &Rig, spy: &Spy<'_>) -> Ran {
 }
 
 /// Asserts that a first install run by the verb on a params file naming the socket group and
-/// the scratch root makes the group, the scratch volume, its table line, its mount and its
-/// ownership, writes the record, and exits 0 with a last line that names no reason.
+/// the scratch root makes the group, the scratch volume, its mount and its ownership, writes no
+/// file system table, writes the record, and exits 0 with a last line that names no reason.
 #[test]
 fn prepare_by_the_verb_sets_up_the_mac_its_params_file_names() {
     let rig = mac_rig("hook-setup-verb", false);
@@ -79,7 +79,7 @@ fn prepare_by_the_verb_sets_up_the_mac_its_params_file_names() {
     assert!(!ran.err.contains("deferred"), "{}", ran.err);
     assert_eq!(mac.groups.borrow().get(GROUP), Some(&FIRST_GID));
     assert_eq!(mac.changes(), first_changes(&rig));
-    assert_eq!(fs::read_to_string(&spy.fstab).unwrap(), fstab_line(&rig));
+    assert_no_table(&rig);
     assert!(rig.params.state_root.is_dir());
     assert!(rig.record().is_some());
 }
@@ -117,4 +117,37 @@ fn prepare_by_the_verb_defers_host_setup_missing_when_the_group_cannot_be_made()
     );
     assert!(rig.record().is_none());
     assert!(mac.changes().is_empty());
+}
+
+/// Asserts that a setup call the system refuses under the verb exits 1 (failed, so the order
+/// fails and an operator is told) rather than 75, prints a last line with `host_setup_refused`,
+/// the environment class, no retry hint and the path and error, tells a person the same, and
+/// writes no record.
+#[test]
+fn prepare_by_the_verb_fails_host_setup_refused_when_the_system_refuses_a_call() {
+    let rig = mac_rig("hook-setup-verb-refused", false);
+    let mac = FakeMac::new();
+    let state = rig.params.state_root.clone();
+    mac.look_refused.borrow_mut().insert(state.clone());
+    let spy = spy_on(&rig, &mac);
+    let ran = prepare_by_verb(&rig, &spy);
+    let detail = format!("{}: Operation not permitted (os error 1)", state.display());
+    let report = Report {
+        class: Class::Environment,
+        ..Report::failure(Reason::HostSetupRefused, detail.clone())
+    };
+    assert_eq!(Outcome::Failure.code(), 1);
+    assert_eq!(
+        ran.status,
+        format!("{:?}", ExitCode::from(Outcome::Failure.code()))
+    );
+    assert_eq!(ran.out, format!("{}\n", report.to_line()));
+    let line: serde_json::Value = serde_json::from_str(ran.out.trim_end()).unwrap();
+    assert_eq!(line["reason"], "host_setup_refused");
+    assert!(line.get("retry_after_secs").is_none(), "{}", ran.out);
+    assert_eq!(
+        ran.err,
+        format!("js-agent update-hook: prepare failed: host_setup_refused: {detail}\n")
+    );
+    assert!(rig.record().is_none());
 }

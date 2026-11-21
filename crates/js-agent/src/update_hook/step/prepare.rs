@@ -34,7 +34,9 @@
 //!    a scratch root on a volume of its own are made when they are not there. A part that cannot
 //!    be read or made defers (75, `host_setup_missing`), naming it, before the record is
 //!    written or the host cordoned: the agent cannot start without it, so the step defers here
-//!    rather than letting `cutover` fail after its commit;
+//!    rather than letting `cutover` fail after its commit. A system call the system refuses
+//!    (`EPERM`) fails the step there instead (1, `host_setup_refused`), since no retry changes
+//!    it;
 //! 6. the record is written, with the cordon marked as ours *before* it is placed unless the
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;

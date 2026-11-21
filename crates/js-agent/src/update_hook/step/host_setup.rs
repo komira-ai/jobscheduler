@@ -16,34 +16,43 @@
 //!   in the container of the Data volume ([`DATA_VOLUME`]), with a quota of [`QUOTA_TENTHS`]
 //!   tenths of the container's free space when it is made. The quota is a ceiling, not a
 //!   reservation: jobs that fill the volume leave the rest of that free space to the system and
-//!   the state root, as long as they do not grow into it themselves. The volume is made
-//!   unmounted (`diskutil apfs addVolume ... -nomount`), named in the file system table by its
-//!   UUID (`UUID=<uuid> <scratch root> apfs rw,nobrowse`, so that every boot mounts it there; a
-//!   line that names the volume with anything else is replaced), and only then mounted on the
-//!   scratch root; one that is mounted elsewhere is unmounted first. A scratch root its user does
-//!   not own (a volume that ignores ownership) is given ownership (`diskutil enableOwnership`)
-//!   before it is made the hook's user's again.
+//!   the state root, as long as they do not grow into it themselves. A volume that is there
+//!   already is used, not made again. The volume is made unmounted (`diskutil apfs addVolume
+//!   ... -nomount`) and then mounted on the scratch root (`diskutil mount nobrowse -mountPoint`);
+//!   one that is mounted elsewhere is unmounted first (see
+//!   [`scratch_volume`](crate::lifecycle::scratch_volume)). Nothing names it in the file system
+//!   table, which macOS does not let the hook write: the agent mounts it again at each of its
+//!   starts, which is what makes a boot find it on the scratch root. A scratch root its user does not own (a volume that ignores ownership) is given
+//!   ownership (`diskutil enableOwnership`) before it is made the hook's user's again. Last, the
+//!   copy of the file system table that an earlier release's setup wrote beside it and could
+//!   not rename over it ([`FSTAB_LEFTOVER`]) is removed: nothing reads it.
 //!
 //! Each part looks before it changes anything and makes only what is not as required (the
 //! owner and mode of the two roots are set on every run), so a run killed at any point and run
 //! again ends as an uninterrupted one; every change passes a kill point first. A part that
-//! cannot be read or made ends the step deferred (75,
-//! `host_setup_missing`) with the part and the cause named: no record is written for it and the
-//! host is not cordoned, and hostkeeper orders the host again later. The setup belongs to the
-//! host, not to a release: no step undoes it.
+//! cannot be read or made ends the step deferred (75, `host_setup_missing`) with the part and
+//! the cause named: no record is written for it and the host is not cordoned, and hostkeeper
+//! orders the host again later. A system call that the system refuses (`EPERM`, which no retry
+//! changes) ends the step failed instead (1, `host_setup_refused`, class environment), naming
+//! the path and the error, so that the order fails and someone looks. A command (`dscl`,
+//! `dseditgroup`, `diskutil`) is not told apart in that way: the runner reports how it exited,
+//! not what it printed. The setup belongs to the host, not to a release: no step undoes it.
 
-use std::fs::{self, DirBuilder, OpenOptions, Permissions};
-use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, chown};
+use std::fs::{self, DirBuilder, Permissions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, chown};
 use std::path::Path;
 
 use js_mac_session::start::STAFF_GID;
-use plist::{Dictionary, Value};
+use rustix::io::Errno;
 
-use crate::update_hook::{Done, Params, Reason};
+use crate::lifecycle::scratch_volume::{self, VolumeError};
+use crate::update_hook::{Class, Done, Params, Reason};
+
+pub use crate::lifecycle::scratch_volume::{DATA_VOLUME, DISKUTIL, SCRATCH_VOLUME};
 
 use super::prepare::deferred;
-use super::{Env, PathFacts};
+use super::{Env, PathFacts, failure};
 
 /// The directory service's command line tool.
 pub const DSCL: &str = "/usr/bin/dscl";
@@ -51,32 +60,14 @@ pub const DSCL: &str = "/usr/bin/dscl";
 /// The tool that makes a group.
 pub const DSEDITGROUP: &str = "/usr/sbin/dseditgroup";
 
-/// The tool that reads, makes and mounts volumes.
-pub const DISKUTIL: &str = "/usr/sbin/diskutil";
-
-/// The mount point of the Data volume, which holds `/var/db` and so the state root: the scratch
-/// volume is made in its container.
-pub const DATA_VOLUME: &str = "/System/Volumes/Data";
-
-/// The name of the scratch root's own APFS volume.
-pub const SCRATCH_VOLUME: &str = "js-agent-scratch";
-
 /// The scratch volume's quota, in tenths of its container's free space when it is made: a
 /// ceiling on what jobs write there, so that the rest of that space stays for the system and the
 /// state root unless they fill it themselves.
 pub const QUOTA_TENTHS: u64 = 9;
 
-/// The file system table of a Mac, where the scratch volume is named so that every boot mounts
-/// it on the scratch root.
-pub const FSTAB: &str = "/etc/fstab";
-
-/// The scratch volume as `diskutil apfs list` shows it.
-struct Volume {
-    /// `APFSVolumeUUID`: the name the file system table gives it.
-    uuid: String,
-    /// `DeviceIdentifier` (`disk3s7`): the name `diskutil` is given to mount it.
-    device: String,
-}
+/// The copy of the file system table that an earlier release's host setup wrote beside
+/// `/etc/fstab` and then could not rename over it: the setup removes it.
+pub const FSTAB_LEFTOVER: &str = "/etc/fstab.js-agent";
 
 /// Makes each part of the host setup the params name: the socket group, then the roots.
 pub(super) fn set_up(env: &Env<'_>, params: &Params) -> Result<(), Done> {
@@ -95,9 +86,21 @@ fn missing(params: &Params, detail: String) -> Done {
     deferred(params, Reason::HostSetupMissing, detail)
 }
 
-/// The deferral for a path that cannot be read or made.
-fn io_missing(params: &Params, path: &Path, why: &io::Error) -> Done {
-    missing(params, format!("{}: {why}", path.display()))
+/// The ending for a path that cannot be read or made: failed when the system refuses the call
+/// (`EPERM`), deferred otherwise.
+fn io_ending(params: &Params, path: &Path, why: &io::Error) -> Done {
+    let detail = format!("{}: {why}", path.display());
+    if why.raw_os_error() == Some(Errno::PERM.raw_os_error()) {
+        let mut done = failure(Reason::HostSetupRefused, detail);
+        done.report.class = Class::Environment;
+        return done;
+    }
+    missing(params, detail)
+}
+
+/// The deferral for an answer of `diskutil` the setup cannot use.
+fn volume_missing(params: &Params) -> impl Fn(VolumeError) -> Done + '_ {
+    move |why| missing(params, why.to_string())
 }
 
 /// Runs `program` with `args`: what it printed, or the deferral naming the command.
@@ -105,30 +108,6 @@ fn command(env: &Env<'_>, params: &Params, program: &str, args: &[&str]) -> Resu
     env.runner
         .run(program, args)
         .map_err(|why| missing(params, format!("{program} {}: {why}", args.join(" "))))
-}
-
-/// Runs `diskutil` with `args` (a `-plist` form): the dictionary it printed.
-fn plist_of(env: &Env<'_>, params: &Params, args: &[&str]) -> Result<Dictionary, Done> {
-    let text = command(env, params, DISKUTIL, args)?;
-    Value::from_reader_xml(text.as_bytes())
-        .ok()
-        .and_then(Value::into_dictionary)
-        .ok_or_else(|| {
-            missing(
-                params,
-                format!(
-                    "{DISKUTIL} {} printed no property list dictionary",
-                    args.join(" ")
-                ),
-            )
-        })
-}
-
-/// The text `key` of `dict`, which describes `what`.
-fn text<'d>(params: &Params, dict: &'d Dictionary, key: &str, what: &str) -> Result<&'d str, Done> {
-    dict.get(key)
-        .and_then(Value::as_string)
-        .ok_or_else(|| missing(params, format!("{DISKUTIL} shows {what} with no {key}")))
 }
 
 /// The socket group is there, made if it was not, and not staff's.
@@ -185,7 +164,7 @@ fn gid_of(env: &Env<'_>, params: &Params, group: &str) -> Result<Option<u32>, Do
 }
 
 /// The state root and the scratch root are there, on file systems of their own, and both are the
-/// hook's user's, mode 0700.
+/// hook's user's, mode 0700; the leftover copy of the file system table is gone.
 fn roots(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
     make_dir(env, params, &params.state_root)?;
     own(env, params, &params.state_root)?;
@@ -208,7 +187,8 @@ fn roots(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
         env.ports.point();
         command(env, params, DISKUTIL, &["enableOwnership", &scratch_arg])?;
     }
-    own(env, params, scratch)
+    own(env, params, scratch)?;
+    clear_leftover(env, params)
 }
 
 /// Makes `dir` the hook's user's, mode 0700 (a link followed).
@@ -216,7 +196,7 @@ fn own(env: &Env<'_>, params: &Params, dir: &Path) -> Result<(), Done> {
     env.ports.point();
     chown(dir, Some(env.euid), None)
         .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(0o700)))
-        .map_err(|why| io_missing(params, dir, &why))
+        .map_err(|why| io_ending(params, dir, &why))
 }
 
 /// Makes `dir`, mode 0700, and each missing directory above it, mode 0755; a `dir` that is there
@@ -231,12 +211,12 @@ fn make_dir(env: &Env<'_>, params: &Params, dir: &Path) -> Result<(), Done> {
             Err(why) if why.kind() == io::ErrorKind::AlreadyExists => Ok(()),
             made => made,
         })
-        .map_err(|why| io_missing(params, dir, &why))
+        .map_err(|why| io_ending(params, dir, &why))
 }
 
 /// What the look at `path` shows.
 fn look(env: &Env<'_>, params: &Params, path: &Path) -> Result<PathFacts, Done> {
-    (env.look)(path).map_err(|why| io_missing(params, path, &why))
+    (env.look)(path).map_err(|why| io_ending(params, path, &why))
 }
 
 /// Whether the scratch root is on the state root's file system.
@@ -244,19 +224,19 @@ fn shared(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<bool, Done> 
     Ok(look(env, params, scratch)?.device == look(env, params, &params.state_root)?.device)
 }
 
-/// Gives the scratch root its volume: found in the Data volume's container or made there, named
-/// in the file system table, and mounted on the scratch root.
+/// Gives the scratch root its volume: found in the Data volume's container or made there, and
+/// mounted on the scratch root.
 fn volume(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
-    let data = plist_of(env, params, &["info", "-plist", DATA_VOLUME])?;
-    let container = text(params, &data, "APFSContainerReference", DATA_VOLUME)?.to_owned();
-    let found = match listed(env, params, &container)? {
-        (_, Some(found)) => found,
-        (free, None) => {
-            let quota = format!("{}G", free / 10 * QUOTA_TENTHS / 1_000_000_000);
+    let found = scratch_volume::find(env.runner).map_err(volume_missing(params))?;
+    let volume = match found.volume {
+        Some(volume) => volume,
+        None => {
+            let quota = format!("{}G", found.free / 10 * QUOTA_TENTHS / 1_000_000_000);
+            let container = found.reference.as_str();
             let add: [&str; 8] = [
                 "apfs",
                 "addVolume",
-                &container,
+                container,
                 "APFS",
                 SCRATCH_VOLUME,
                 "-quota",
@@ -265,7 +245,8 @@ fn volume(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
             ];
             env.ports.point();
             command(env, params, DISKUTIL, &add)?;
-            listed(env, params, &container)?.1.ok_or_else(|| {
+            let listed = scratch_volume::listed(env.runner, container);
+            listed.map_err(volume_missing(params))?.volume.ok_or_else(|| {
                 missing(
                     params,
                     format!(
@@ -275,104 +256,17 @@ fn volume(env: &Env<'_>, params: &Params, scratch: &Path) -> Result<(), Done> {
             })?
         }
     };
-    persist(env, params, &found.uuid, scratch)?;
-    let info = plist_of(env, params, &["info", "-plist", &found.device])?;
-    if info
-        .get("MountPoint")
-        .and_then(Value::as_string)
-        .is_some_and(|point| !point.is_empty())
-    {
-        env.ports.point();
-        command(env, params, DISKUTIL, &["unmount", &found.device])?;
-    }
-    env.ports.point();
-    let point = scratch.to_string_lossy();
-    command(
-        env,
-        params,
-        DISKUTIL,
-        &["mount", "-mountPoint", &point, &found.device],
-    )?;
-    Ok(())
+    scratch_volume::mount_on(env.runner, &|| env.ports.point(), &volume, scratch)
+        .map_err(volume_missing(params))
 }
 
-/// The free space of the APFS container `container` and the scratch volume in it, if it has one.
-fn listed(env: &Env<'_>, params: &Params, container: &str) -> Result<(u64, Option<Volume>), Done> {
-    let list = plist_of(env, params, &["apfs", "list", "-plist", container])?;
-    let entry = list
-        .get("Containers")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_dictionary)
-        .find(|entry| entry.get("ContainerReference").and_then(Value::as_string) == Some(container))
-        .ok_or_else(|| {
-            missing(
-                params,
-                format!("{DISKUTIL} apfs list does not list the container {container}"),
-            )
-        })?;
-    let free = entry
-        .get("CapacityFree")
-        .and_then(Value::as_unsigned_integer)
-        .ok_or_else(|| {
-            missing(
-                params,
-                format!("{DISKUTIL} shows the container {container} with no CapacityFree"),
-            )
-        })?;
-    let volume = entry
-        .get("Volumes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_dictionary)
-        .find(|volume| volume.get("Name").and_then(Value::as_string) == Some(SCRATCH_VOLUME))
-        .map(|volume| -> Result<Volume, Done> {
-            Ok(Volume {
-                uuid: text(params, volume, "APFSVolumeUUID", SCRATCH_VOLUME)?.to_owned(),
-                device: text(params, volume, "DeviceIdentifier", SCRATCH_VOLUME)?.to_owned(),
-            })
-        })
-        .transpose()?;
-    Ok((free, volume))
-}
-
-/// Names the volume `uuid` in the file system table, on the scratch root, unless the table holds
-/// that line already. Any other line that names the volume (another mount point, other options)
-/// is dropped, and the other lines are kept. The table is written whole, to a file beside it that
-/// is then renamed over it.
-fn persist(env: &Env<'_>, params: &Params, uuid: &str, scratch: &Path) -> Result<(), Done> {
-    let table = match fs::read_to_string(env.fstab) {
-        Err(why) if why.kind() == io::ErrorKind::NotFound => String::new(),
-        read => read.map_err(|why| io_missing(params, env.fstab, &why))?,
+/// Removes [`FSTAB_LEFTOVER`] (the path the machine names) when it is there.
+fn clear_leftover(env: &Env<'_>, params: &Params) -> Result<(), Done> {
+    let leftover = env.fstab_leftover;
+    match fs::symlink_metadata(leftover) {
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(()),
+        looked => looked.map_err(|why| io_ending(params, leftover, &why))?,
     };
-    let name = format!("UUID={uuid}");
-    let entry = format!("{name} {} apfs rw,nobrowse", scratch.display());
-    if table.lines().any(|line| line == entry) {
-        return Ok(());
-    }
-    let mut lines: Vec<&str> = table
-        .lines()
-        .filter(|line| line.split_whitespace().next() != Some(name.as_str()))
-        .collect();
-    lines.push(&entry);
-    let text = format!("{}\n", lines.join("\n"));
-    let temp = env.fstab.with_extension("js-agent");
     env.ports.point();
-    write_file(&temp, &text)
-        .and_then(|()| fs::rename(&temp, env.fstab))
-        .map_err(|why| io_missing(params, env.fstab, &why))
-}
-
-/// Writes `text` to `path`, mode 0644, and syncs it.
-fn write_file(path: &Path, text: &str) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o644)
-        .open(path)?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
+    fs::remove_file(leftover).map_err(|why| io_ending(params, leftover, &why))
 }
