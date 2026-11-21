@@ -532,6 +532,7 @@ impl Process {
             results,
             taint: None,
             taint_cleared: None,
+            tainted: None,
             exclusive_ready: ready,
             exclusive_refused: refused,
             load: None,

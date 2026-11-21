@@ -91,8 +91,8 @@ pub enum Exit {
 }
 
 /// Runs `session` until the server refuses the host for good or `sleeper` reports a stop.
-/// Every note, and every line the session's worker wants printed, goes to `log` as one
-/// line.
+/// Every note, and every line the session's worker wants printed (and the changes of its
+/// health verdict, with `--health-listen`), goes to `log` as one line.
 pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn Write) -> Exit {
     drive_holding(session, sleeper, log, None)
 }
@@ -154,7 +154,7 @@ fn failed(session: &Session<'_>, why: String, log: &mut dyn Write) -> Exit {
     Exit::Failed(why)
 }
 
-/// The lines the session's worker wants printed.
+/// The lines the session wants printed: its worker's, and the changes of the health verdict.
 fn print(session: &Session<'_>, log: &mut dyn Write) {
     session.job_lines().iter().for_each(|line| {
         let _ = writeln!(log, "js-agent: {line}");

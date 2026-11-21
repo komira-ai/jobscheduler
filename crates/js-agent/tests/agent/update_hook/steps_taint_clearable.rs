@@ -1,5 +1,6 @@
-//! A taint the restarted agent re-checks (a residue of a process the pin file does not name)
-//! does not halt `prepare`, `cutover`, `verify` or `rollback`: the step goes on as for a clean
+//! A taint the restarted agent re-checks (a residue of a post-job check, the process of a job's
+//! user or a marker an older agent wrote for a check that no longer taints, that the pin file
+//! does not name) does not halt `prepare`, `cutover`, `verify` or `rollback`: the step goes on as for a clean
 //! host and the restarted agent's own re-checks clear the taint. Any other taint, an unchecked
 //! one included, a residue the pin file names, and an owed check, still halt (76).
 
@@ -10,17 +11,24 @@ use js_agent::update_hook::{Clock, Done, Outcome, Reason};
 use super::rollback_entries::{assert_restored, link_moved, start};
 use super::step_rig::{Rig, Spy, running};
 
-/// Taints the restarted agent re-checks and clears itself: (reason, check).
-const CLEARABLE: [(&str, &str); 2] = [
-    ("residue", "daemonised-child"),
+/// Taints the restarted agent re-checks and clears itself: (reason, check). The first is the
+/// residue the checks still make; the rest are the markers an older agent wrote for what the
+/// checks now only note, which a package install while jobs run used to leave on a host.
+const CLEARABLE: [(&str, &str); 7] = [
     ("residue", "process-as-job-user"),
+    ("residue", "daemonised-child"),
+    ("residue", "new-mount"),
+    ("residue", "user-changed"),
+    ("residue", "group-changed"),
+    ("residue", "kernel-module-changed"),
+    ("residue", "watch-dir-changed"),
 ];
 
 /// Taints the restarted agent does not re-check: (reason, check). The unchecked ones are
 /// restored pinned, so a halt-free hook would leave the host tainted for good.
 const NOT_CLEARABLE: [(&str, Option<&str>); 8] = [
     ("cleanup-failed", None),
-    ("residue", Some("new-mount")),
+    ("residue", Some("processes-unreadable")),
     ("unchecked", Some("host-not-visible")),
     ("unchecked", Some("processes-unreadable")),
     ("unchecked", Some("watch-over-bound")),

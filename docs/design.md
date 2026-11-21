@@ -150,7 +150,7 @@ Non-goals:
 - **Shape.** What one host offers: a resource vector plus capabilities (and GPU facts). A pool has one shape.
 - **Pool.** Declared in configuration: an ordered list of providers, a shape, a `max_machines` count of hosts, and labels (5.7). The scheduler books hosts from pools.
 - **Isolation.** What a job declares in `StartSpec`: `contained` (a container with the message's limits; the default) or `host` (it may
-  change the machine). **Tainted:** a host that ran a host job or failed a post-job check; it takes no new work and is replaced (5.12).
+  change the machine). **Tainted:** a host that ran a host job or failed a post-job check that taints (a job user's process left, a failed cleanup; what only the host can do is noted, not tainted, 5.12); it takes no new work and is replaced (5.12).
   **Idle time:** how long a host holds no lease and no job before it is released (`idle_timeout`, 5.10).
 - **Consumer.** A client that leases capacity and places work in it: kbf, the scheduler's own run service for ucdk, or a person using
   `js-cli`.
@@ -272,7 +272,7 @@ until its first hello, and takes none.
 | memory-pressure | only while the node holds a lease | no |
 | draining | announced by the agent (SIGTERM): leases run to their end, nothing is requeued | no |
 | quarantined | held out | no |
-| tainted | the scheduler granted a `host_jobs` lease or sent a host `Start`, or a post-job check found something (5.12); sticky until the provider replaces the host or an operator clears it; a taint of a process or of an unread input clears itself after two clean re-checks of an idle host (`docs/design/taint-self-clearing.md`) | no |
+| tainted | the scheduler granted a `host_jobs` lease or sent a host `Start`, or a post-job check found something a contained job could have left (5.12); sticky until the provider replaces the host or an operator clears it; a taint of a job user's process or of an unread process table clears itself after two clean re-checks of an idle host (`docs/design/taint-self-clearing.md`) | no |
 
 An unknown phase value is read as quarantined (fail closed), the one deliberate exception to "skip what you do not know", since skipping a
 phase could place work on a node that is not serving. Agent-announced draining is distinct from operator cordon and drain (4.1).
@@ -856,7 +856,7 @@ launch failure, slow boot, an `acquire` accepted but answered Unknown, a `releas
 with a wrong proof; and a fake `default` provider whose hosts register, go lost, deregister and taint on script (the fake aws is elastic, the
 fake default is not; a hierarchy test runs both). A fake agent (in `js-sim`) models the agent
 side: loss, fence, out-of-memory kill, node pressure, phase changes, unknown observations and slow starts, and the taint paths: a host
-job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. A fake
+job (also one that reports no taint), each post-job check that taints finding something, a cleanup failure, and a taint report lost and resent. A fake
 VM runtime (in memory, scripted: clone failure, a boot that never says ready, hostile guest frames, an unannounced exit, a failed destroy,
 a leaked clone, a changed image) and the fake agent's whole-node sequence are described in
 [design/vm-backend.md](design/vm-backend.md). Starting points:
@@ -874,7 +874,7 @@ busy host could, fall-through, the booting machine kept) are in [design/invarian
 
 *Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
 results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
-taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check, sticky and
+taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check that taints and each that is only noted, sticky and
 resent taint, no `Start` on a tainted host), the per-session rules, and the VM cases (no VM serves two runs, destroy before the slot frees,
 one VM per run, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
 **constraint suite** of [design/capabilities.md](design/capabilities.md), runs the evaluator over every op, kind and refusal code and the
@@ -1014,8 +1014,7 @@ D66 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 - **K15. Two-level leasing.** A consumer can double-book inside its lease, and the level-2 invariants are no longer the scheduler's. The
   agent bounds each run by its limits, so work cannot exceed the host; the consumer owns the rest, and its tests prove it.
 - **K16. Reuse leaks state between jobs.** A file, process, mount or user left by one job is seen by the next, perhaps another
-  consumer's. Mitigated by removing the container and scratch before the slot is freed, the post-job checks, taint on any finding or
-  failed check (a check that cannot run is a finding), and a clean baseline (5.10, 5.12). The checks are a minimum and cheap: a host job
+  consumer's. Mitigated by removing the container and scratch before the slot is freed, the post-job checks, taint on a finding of what a contained job can leave (the process check that cannot run is a finding; what only the host can do, such as a package install, is noted and not tainted), and a clean baseline (5.10, 5.12). The checks are a minimum and cheap: a host job
   or a determined escape can defeat them, which is why a host job taints unconditionally and host jobs are off by default.
 - **K17. A compromised or wrong agent hides a taint.** The agent reports its own host's checks. Mitigated by the scheduler tainting a host job's machine itself, at grant, whatever the agent reports (5.12), and the agent persisting
   the taint before reporting, the scheduler never clearing on its word, replacement by the provider, and host jobs needing the pool's

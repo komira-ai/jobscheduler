@@ -152,8 +152,9 @@ pub(super) fn told(
     kept: &[Kept],
 ) -> String {
     format!(
-        "cleared the taint ({}) at {} by {}: {}; reason: {reason}; the lease server keeps its \
-         own record of the taint until the operator's ClearHostTaint",
+        "cleared the taint ({}) at {} by {}: {}; reason: {reason}; the lease server ends its \
+         record of the taint at the restarted agent's first heartbeat, except a host-job or \
+         host-unsafe taint, which stays until the operator's ClearHostTaint",
         taint_said(taint),
         stamp.0,
         who.0,

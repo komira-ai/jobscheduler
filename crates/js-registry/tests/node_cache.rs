@@ -348,3 +348,31 @@ fn a_pool_keeps_a_silent_host_for_its_grace_and_retention() {
     );
     assert_eq!(fx.registry.kept_for("elsewhere"), None);
 }
+
+/// Asserts that a session adopted from another server's row starts its beat numbering over:
+/// after beat 5 of the first session, the adopted newer session's beat 1 ends the taint the
+/// record kept. It catches an adopted record that carries the old session's count and holds
+/// the new session's first beats late.
+#[test]
+fn an_adopted_session_starts_the_beat_numbering_over() {
+    let fx = fixture(2);
+    let a = host("a");
+    assert_eq!(fx.registry.adopt(&a, node(1, "s1")), Adopted::Installed);
+    let beat = |secret: &str, epoch: u64, seq: u64, tainted: bool| js_agent_wire::Heartbeat {
+        seq: Some(seq),
+        tainted: Some(tainted),
+        session: secret.into(),
+        ..heartbeat("a", epoch)
+    };
+    fx.registry
+        .heartbeat(&beat("s1", 1, 5, true), &cred("t"))
+        .unwrap();
+    assert!(view(&fx, "a").taint.is_some());
+
+    assert_eq!(fx.registry.adopt(&a, node(2, "s2")), Adopted::Installed);
+    assert!(view(&fx, "a").taint.is_some());
+    fx.registry
+        .heartbeat(&beat("s2", 2, 1, false), &cred("t"))
+        .unwrap();
+    assert_eq!(view(&fx, "a").taint, None);
+}
