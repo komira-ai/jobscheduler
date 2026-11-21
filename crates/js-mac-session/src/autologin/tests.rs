@@ -201,7 +201,7 @@ fn the_auto_login_user_reads_as_set_unset_or_unreadable() {
 
 /// Asserts that an unset `autoLoginUser` reads as unset in the words of each macOS the
 /// pool runs on (the texts are what `defaults read` printed on macOS 26.4, 26.6 and
-/// 27.0.1), and that a failure naming neither form, even one about another key's domain,
+/// 27.0.1), and that a failure in neither form
 /// stays an error. Catches a read that knows only macOS 26's wording, which on macOS 27
 /// fails the VM user's resting check on every Mac with no auto-login set.
 #[test]

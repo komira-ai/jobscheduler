@@ -119,6 +119,37 @@ fn a_clean_tree_gives_an_empty_diff() {
     assert!(empty.helper.scan().unwrap().clean());
 }
 
+/// Asserts that a Mac with no auto-login set records a baseline and scans clean, with no
+/// error, whichever words its `defaults read` uses for the missing key (the texts are
+/// what macOS 26.4, 26.6 and 27.0.1 printed). Catches a scan that knows only macOS 26's
+/// wording: on macOS 27 the baseline would be refused as incomplete and every scan would
+/// report an error.
+#[test]
+fn an_unset_auto_login_scans_clean_in_the_words_of_macos_26_and_27() {
+    let unset = [
+        "2026-11-20 21:29:13.385 defaults[84941:2779365] \nThe domain/default pair of \
+         (/Library/Preferences/com.apple.loginwindow, autoLoginUser) does not exist\n",
+        "Error: Could not find key 'autoLoginUser' in domain 'com.apple.loginwindow'.\n",
+    ];
+    for (n, stderr) in unset.into_iter().enumerate() {
+        let rig = furnished(&format!("leak-unset-auto-login-{n}"));
+        let domain = rig.dir.join("loginwindow").display().to_string();
+        let read = format!("/usr/bin/defaults read {domain} autoLoginUser");
+        answer(&rig, &read, false, "", stderr);
+        open_window(&rig);
+        let counts = rig.helper.baseline().unwrap();
+        assert!(
+            counts.contains(&("auto-login".to_owned(), 0)),
+            "{stderr}: {counts:?}"
+        );
+        assert_eq!(
+            rig.helper.scan().unwrap(),
+            ScanReport::default(),
+            "{stderr}"
+        );
+    }
+}
+
 /// One planted leak per item class: what it plants, and the start of the line the scan
 /// must add.
 type Plant = fn(&Rig);

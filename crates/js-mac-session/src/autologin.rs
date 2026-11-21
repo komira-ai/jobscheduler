@@ -380,7 +380,7 @@ pub fn read_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<Option<S
 /// `The domain/default pair of (<domain>, <key>) does not exist`; macOS 27 says
 /// `Error: Could not find key '<key>' in domain '<domain>'.`. Both exit 1, as every
 /// other failure of `defaults read` does, so only the text tells them apart.
-fn key_absent(stderr: &str) -> bool {
+pub(crate) fn key_absent(stderr: &str) -> bool {
     stderr.contains(") does not exist") || stderr.contains("Could not find key '")
 }
 
