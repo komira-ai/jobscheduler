@@ -333,6 +333,7 @@ pub mod host_ports;
 mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
+mod in_place;
 pub mod integrity;
 mod jobs;
 pub mod leak_scan;
@@ -369,7 +370,7 @@ pub mod xcode;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -567,7 +568,7 @@ pub fn main_with(
     {
         return cordon::run_system(install, &args, out, err);
     }
-    match install() {
+    match install().and_then(|sleeper| sleeper.replace_on_hangup().map(|()| sleeper)) {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {
             let services = &mut Services {
@@ -593,64 +594,46 @@ pub fn main_with(
     }
 }
 
-/// How the transport first proves who it is: the host's certificate and key when
-/// `--host-cert` and `--host-key` are given (then no `--token-file` is needed, the token file
-/// and the host credential file are not read, and no bearer is sent), and otherwise
-/// [`bearer_file`].
-///
-/// # Errors
-///
-/// Whatever [`bearer_file`] refuses, when no host certificate is given.
-fn login(cli: &Cli) -> Result<Login, Failure> {
-    match Login::host_certificate(cli.host_cert.as_deref(), cli.host_key.as_deref()) {
-        Some(login) => Ok(login),
-        None => bearer_file(cli).map(Login::Token),
-    }
-}
-
-/// The file the transport first reads its bearer from: `--token-file` when given, and
-/// otherwise the host credential file of `--state-root`, which has the same form (one run
-/// of printable ASCII, owner-only). The agent adopts the credential from the same file
-/// again below, so a file that is there and not a credential stops it either way.
-///
-/// # Errors
-///
-/// [`Failure::Usage`] naming `--token-file` when there is neither, and the path of the
-/// credential file when it is there and cannot be used.
-fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
-    if let Some(token_file) = &cli.token_file {
-        return Ok(token_file.clone());
-    }
-    let kept = match &cli.state_root {
-        Some(root) => {
-            let file = CredentialFile::in_dir(root);
-            file.load().map_err(Failure::Usage)?.map(|_| file.path())
-        }
-        None => None,
-    };
-    kept.ok_or_else(|| {
-        Failure::Usage(
-            "--token-file: required unless --state-root holds a host credential".to_owned(),
-        )
-    })
-}
-
-/// Runs the agent on `args` (the program name first) until it is stopped or refused.
+/// Runs the agent on `args` (the program name first) until it is stopped or refused. After a
+/// handover in place (see `in_place`) it runs `args[0]` again over this process.
 pub fn run_with(
     args: Vec<OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> ExitCode {
-    let result = execute(args, err, services);
-    finish(result, out, err)
+    run_with_exec(args, out, err, services, &in_place::exec)
+}
+
+/// [`run_with`], with the program that runs the command line again after a handover in place
+/// given (it returns only when it failed), so a test can end the run in that way.
+pub fn run_with_exec(
+    args: Vec<OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: &mut Services<'_>,
+    exec: &dyn Fn(&[OsString]) -> std::io::Error,
+) -> ExitCode {
+    let original = args.clone();
+    match execute(args, err, services) {
+        Ok(Ended::Replaced) => in_place::run_again(&original, exec, err),
+        result => finish(result.map(|_| ()), out, err),
+    }
+}
+
+/// How the agent ended without a failure.
+enum Ended {
+    /// A stop request: the host announced it, or drained.
+    Stopped,
+    /// A replace request handed the runs over: the command line runs again over this process.
+    Replaced,
 }
 
 fn execute(
     args: Vec<OsString>,
     err: &mut dyn Write,
     services: &mut Services<'_>,
-) -> Result<(), Failure> {
+) -> Result<Ended, Failure> {
     // `--flags-file PATH` is replaced by the file's words before anything else reads the
     // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
     let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
@@ -672,7 +655,7 @@ fn execute(
     let image_allow =
         platform::image_allow(&cli, &credentials).map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
-    let login = login(&cli)?;
+    let login = login::login(&cli)?;
     let mut transport = services
         .connector
         .connect(&cli.server, &login, ca_cert)
@@ -978,7 +961,8 @@ fn execute(
         exit
     });
     match exit {
-        Exit::Stopped => Ok(()),
+        Exit::Stopped => Ok(Ended::Stopped),
+        Exit::Replaced => Ok(Ended::Replaced),
         Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         Exit::Failed(why) => Err(Failure::Worker(why)),
     }

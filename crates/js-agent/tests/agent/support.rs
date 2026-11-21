@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use js_agent::{
     Answer, CommandRunner, Connector, Dialer, FileReader, Handle, Jitter, Login, Machine, Platform,
-    Services, Sleeper, Streams, Transport, Wake, run_with,
+    Services, Sleeper, Streams, Transport, Wake, run_with_exec,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
@@ -859,7 +859,33 @@ fn run_exactly(
         (connector, dispatch),
         (sleeper, jitter),
         jobs,
-        store,
+        (store, &|_| {
+            std::io::Error::other("these tests run nothing again")
+        }),
+    )
+}
+
+/// What runs the command line again in a test: it is given the arguments and returns the
+/// error that says it did not.
+pub type Again<'a> = &'a dyn Fn(&[std::ffi::OsString]) -> std::io::Error;
+
+/// [`run_on`] with the program that runs the command line again after a handover in place
+/// given, and the arguments exactly as given.
+pub fn run_in_place(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jobs: Jobs<'_>,
+    again: Again<'_>,
+) -> Ran {
+    run_polling(
+        args,
+        host,
+        (connector, &Dialer),
+        (sleeper, &mut Lowest),
+        jobs,
+        (FakeHost::new(), again),
     )
 }
 
@@ -879,7 +905,9 @@ pub fn run_on_polling(
         connectors,
         (sleeper, &mut Lowest),
         jobs,
-        FakeHost::new(),
+        (FakeHost::new(), &|_| {
+            std::io::Error::other("these tests run nothing again")
+        }),
     )
 }
 
@@ -889,7 +917,7 @@ fn run_polling(
     connectors: (&dyn Connector, &(dyn Connector + Sync)),
     waiting: (&mut dyn Sleeper, &mut dyn Jitter),
     jobs: Jobs<'_>,
-    store: Arc<FakeHost>,
+    (store, again): (Arc<FakeHost>, Again<'_>),
 ) -> Ran {
     let ((connector, dispatch), (sleeper, jitter)) = (connectors, waiting);
     let (mut out, mut err) = (Capped::new(), Capped::new());
@@ -914,7 +942,7 @@ fn run_polling(
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();
-    let status = run_with(argv, &mut out, &mut err, &mut services);
+    let status = run_with_exec(argv, &mut out, &mut err, &mut services, again);
     Ran {
         status,
         out: out.text(),
