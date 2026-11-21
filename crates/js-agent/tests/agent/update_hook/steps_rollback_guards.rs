@@ -1,6 +1,7 @@
 //! `rollback` (host-updates design, 4.2): whose cordon it lifts, what it does on a first install
-//! whose agent never came up (steps_rollback_first.rs has the rest of a first install), that a taint or an owed check halts it before any act, and
-//! what it does when the lease server does not answer.
+//! whose agent never came up (steps_rollback_first.rs has the rest of a first install), that a
+//! taint (and, after the stop, an owed check) halts it before any act, and what it does when the
+//! lease server does not answer.
 
 use js_agent::update_hook::{Class, Clock, Outcome, Reason};
 use serde_json::json;
@@ -173,7 +174,7 @@ fn a_first_install_that_has_not_moved_the_link_has_nothing_to_undo_and_is_revers
     assert_eq!(link_target(&rig), None);
 }
 
-// A taint or an owed check halts before any act.
+// A taint halts before any act; an owed check does once the agent was stopped.
 
 fn entries() -> Vec<(&'static str, Rig, bool)> {
     vec![
@@ -213,17 +214,36 @@ fn a_taint_halts_the_rollback_at_every_entry_before_any_act() {
     }
 }
 
+/// After the stop an owed check halts at every entry; before it (the `prepared` entry: the agent
+/// that owes it runs and was never signalled) the rollback goes on and lifts its cordon.
 #[test]
-fn an_owed_check_halts_the_rollback_at_every_entry_before_any_act() {
-    for (label, rig, _) in entries() {
+fn an_owed_check_halts_the_rollback_at_every_entry_after_the_stop_before_any_act() {
+    for (label, rig, reversible) in entries() {
         rig.state_root().owe("run-7").unwrap();
         let spy = Spy::new(&rig);
         let done = spy.rollback(&rig);
+        if reversible {
+            assert_eq!(done.outcome, Outcome::Success, "{label}: {done:?}");
+            assert_eq!(spy.act_names(), Vec::<String>::new(), "{label}");
+            assert_eq!(uncordons(&spy), 1, "{label}");
+            assert_eq!(rig.record(), None, "{label}");
+            continue;
+        }
         assert_eq!(done.outcome, Outcome::Halt, "{label}: {done:?}");
         assert_eq!(done.report.reason, Some(Reason::OwedCheck), "{label}");
         assert_eq!(spy.act_names(), Vec::<String>::new(), "{label}");
         assert_eq!(cordon_calls(&spy), 0, "{label}");
     }
+}
+
+/// Catches a rollback with no record (a `prepare` that ended before it wrote one) that halts on
+/// the record of a check the running agent still owes.
+#[test]
+fn an_owed_check_does_not_halt_a_rollback_that_has_no_record() {
+    let rig = Rig::new("hook-rollback-owed-no-record");
+    rig.state_root().owe("run-7").unwrap();
+    let done = Spy::new(&rig).rollback(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
 }
 
 #[test]
