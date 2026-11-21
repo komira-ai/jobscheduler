@@ -4,7 +4,7 @@
 //! `cfg(target_os = "macos")`, which no Linux build compiles, fails the pull request that
 //! breaks it rather than the release's beta stage after the merge. The check covers what the
 //! beta stage builds only when it compiles the same crates with the same features: these
-//! tests hold the one `cargo zigbuild clippy` of the `lint` job to the one `cargo test
+//! tests hold the one `cargo-zigbuild clippy` of the `lint` job to the one `cargo test
 //! --workspace` of beta.yml's `macos` job (the same `--exclude`s and `--features`), and to
 //! `--workspace --all-targets --locked --target aarch64-apple-darwin ... -- -D warnings`, so
 //! the tests of every crate are compiled and a warning fails it as on Linux.
@@ -60,7 +60,7 @@ fn values(words: &[String], flag: &str) -> BTreeSet<String> {
 
 /// Checks ci.yml's macOS clippy against beta.yml's macOS tests: every reason it fails.
 fn check(ci: &str, beta: &str) -> Result<(), Vec<String>> {
-    let clippy = the_run(ci, "lint", "cargo zigbuild clippy").map_err(|e| vec![e])?;
+    let clippy = the_run(ci, "lint", "cargo-zigbuild clippy").map_err(|e| vec![e])?;
     let tests = the_run(beta, "macos", "cargo test --workspace").map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     for flag in ["--workspace", "--all-targets", "--locked"] {
@@ -97,7 +97,7 @@ const CI: &str = "jobs:
       # The macOS clippy.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - run: cargo zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features f/x --exclude a --exclude b -- -D warnings
+      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features f/x --exclude a --exclude b -- -D warnings
   test:
     runs-on: ubuntu-latest
     steps:
@@ -134,8 +134,8 @@ fn the_shape_passes() {
 /// sits in another job, or appears twice.
 #[test]
 fn a_missing_misplaced_or_doubled_clippy_is_refused() {
-    let line = "      - run: cargo zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features f/x --exclude a --exclude b -- -D warnings\n";
-    let none = "job `lint` has 0 `run:` steps with `cargo zigbuild clippy`; it needs exactly one";
+    let line = "      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features f/x --exclude a --exclude b -- -D warnings\n";
+    let none = "job `lint` has 0 `run:` steps with `cargo-zigbuild clippy`; it needs exactly one";
     assert_eq!(check(&with(CI, line, ""), BETA), Err(vec![none.to_owned()]));
     let moved = format!("{}{line}", with(CI, line, ""));
     assert_eq!(check(&moved, BETA), Err(vec![none.to_owned()]));
@@ -143,7 +143,7 @@ fn a_missing_misplaced_or_doubled_clippy_is_refused() {
     assert_eq!(
         check(&twice, BETA),
         Err(vec![
-            "job `lint` has 2 `run:` steps with `cargo zigbuild clippy`; it needs exactly one"
+            "job `lint` has 2 `run:` steps with `cargo-zigbuild clippy`; it needs exactly one"
                 .to_owned()
         ])
     );
