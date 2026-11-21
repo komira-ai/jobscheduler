@@ -1,13 +1,14 @@
-//! The property lists of the package's two LaunchDaemons, against golden files, and the
+//! The property lists of the package's three LaunchDaemons, against golden files, and the
 //! rules every one of them keeps.
 
 use js_mac_provision::daemon::{
-    AGENT_LABEL, BIN_DIR, Daemon, FLAGS_FILE, GATE, LOG_DIR, SESSION_LABEL, THROTTLE_SECS,
-    TOKEN_FILE,
+    AGENT_LABEL, BIN_DIR, Daemon, FLAGS_FILE, GATE, LOG_DIR, PF_POOL_INTERVAL_SECS, PF_POOL_LABEL,
+    SESSION_LABEL, THROTTLE_SECS, TOKEN_FILE, pf_pool_plist,
 };
 
 const AGENT_GOLDEN: &str = include_str!("golden/agent.plist");
 const SESSION_GOLDEN: &str = include_str!("golden/session.plist");
+const PF_POOL_GOLDEN: &str = include_str!("golden/pf-pool.plist");
 
 fn agent() -> Daemon {
     Daemon::agent()
@@ -25,6 +26,38 @@ fn the_agents_plist_is_the_golden_file() {
 #[test]
 fn the_helpers_plist_is_the_golden_file_with_xml_characters_escaped() {
     assert_eq!(session().render(), SESSION_GOLDEN);
+}
+
+#[test]
+fn the_pf_daemons_plist_is_the_golden_file() {
+    assert_eq!(pf_pool_plist(), PF_POOL_GOLDEN);
+}
+
+/// The pf daemon runs `install --flags-file` with the agent's own flags file, at load and every 30
+/// seconds, and its label is one of the js-agent service's (`js-agent.` and more), which hostkeeper
+/// requires of a label a package runs. Catches a plist that writes a policy of its own, so that the
+/// anchor loaded and the anchor the agent checks could differ, or a label hostkeeper refuses.
+#[test]
+fn the_pf_daemon_reads_the_agents_flags_file_at_load_and_every_interval() {
+    let text = pf_pool_plist();
+    assert_eq!(PF_POOL_LABEL, "js-agent.pf-pool");
+    assert!(PF_POOL_LABEL.starts_with(&format!("{AGENT_LABEL}.")));
+    assert!(text.contains(&format!("<string>{PF_POOL_LABEL}</string>")));
+    assert!(text.contains(&format!(
+        "<string>{BIN_DIR}/js-mac-provision</string>\n\t\t<string>install</string>\n\t\t\
+         <string>--flags-file</string>\n\t\t<string>{FLAGS_FILE}</string>\n\t</array>"
+    )));
+    assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
+    assert_eq!(PF_POOL_INTERVAL_SECS, 30);
+    assert!(text.contains("<key>StartInterval</key>\n\t<integer>30</integer>"));
+    for word in [
+        "--uid-start",
+        "--endpoint",
+        "EnvironmentVariables",
+        "UserName",
+    ] {
+        assert!(!text.contains(word), "{word}");
+    }
 }
 
 #[test]

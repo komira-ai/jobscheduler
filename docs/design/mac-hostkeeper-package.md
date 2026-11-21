@@ -69,23 +69,25 @@ group wheel; directories are 0755 unless noted.
 |---|---|---|
 | `/Library/Application Support/js-agent/bin/js-agent` | 0755 | the agent |
 | `/Library/Application Support/js-agent/bin/js-mac-session` | 0755 | the root helper |
-| `/Library/Application Support/js-agent/bin/js-mac-provision` | 0755 | the plist generator |
+| `/Library/Application Support/js-agent/bin/js-mac-provision` | 0755 | the plist generator and the pf anchor's loader |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 | |
 | `/Library/Application Support/js-agent/log/` | dir | empty; the daemons' logs |
 | `/Library/Application Support/js-agent/update/` | dir 0700 | empty; the update hook's `state_dir` |
 | `/Library/LaunchDaemons/js-agent.plist` | 0644 | label `js-agent`: the agent |
 | `/Library/LaunchDaemons/js-agent.session.plist` | 0644 | label `js-agent.session`: the root helper |
+| `/Library/LaunchDaemons/js-agent.pf-pool.plist` | 0644 | label `js-agent.pf-pool`: keeps the pool's pf anchor loaded |
 
 The parent directories `Library`, `Library/Application Support`, `Library/LaunchDaemons`,
 `Library/Application Support/js-agent` and its `bin` are entries of the payload too. `cargo xtask pkg stage-macos
---version V --bin-dir D --license L --agent-plist A --session-plist S --out O` writes `O/root/...` and no
+--version V --bin-dir D --license L --agent-plist A --session-plist S --pf-pool-plist P --out O` writes `O/root/...` and no
 `O/scripts`; `cargo xtask pkg check-macos --pkg P --version V` refuses anything but exactly this payload (modes, root
 as owner), any script, and another identifier or version.
 
-- The labels are `js-agent` and `js-agent.session` (`crates/js-mac-provision/src/daemon.rs`: `AGENT_LABEL`,
-  `SESSION_LABEL`; the plist goldens; the update hook's launchd tests). The two `js-mac-provision` verbs
-  of this package are `agent-plist`, which takes no flag and prints the fixed agent plist, and
-  `session-plist --daemon-requirement <REQ>`; its pf anchor verbs are unchanged.
+- The labels are `js-agent`, `js-agent.session` and `js-agent.pf-pool` (`crates/js-mac-provision/src/daemon.rs`:
+  `AGENT_LABEL`, `SESSION_LABEL`, `PF_POOL_LABEL`; the plist goldens; the update hook's launchd tests). The three `js-mac-provision` verbs
+  of this package are `agent-plist`, which takes no flag and prints the fixed agent plist,
+  `session-plist --daemon-requirement <REQ>`, and `pf-pool-plist`, which takes no flag and prints the fixed pf job's
+  plist; of its pf anchor verbs, `install` also takes `--flags-file`.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
@@ -111,10 +113,18 @@ as owner), any script, and another identifier or version.
   it takes no `--flags-file`.
 - The package's version directory is hostkeeper's, so the package has no versioned directories and no `current` link of
   its own.
-- The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session"]` (the agent first, so the
-  observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
-  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started without the flag). The hook's `params` are
-  `unit` `js-agent`, `helper_unit` `js-agent.session`, `state_dir` `/Library/Application Support/js-agent/update`,
+- The pf job's plist is fixed text (`js-mac-provision pf-pool-plist`): as root, at load and every 30 seconds, it runs
+  `/Library/Application Support/js-agent/bin/js-mac-provision install --flags-file /etc/js-agent/flags`, which loads the
+  anchor the agent's own `--native-network` and `--native-pf-*` flags name unless it is in force already, and does
+  nothing while the flags file is absent or sets no `--native-network=on` (`crates/js-mac-provision/README.md`). Its
+  label is a label of the service (`js-agent.` and more), as hostkeeper requires of a `run` label.
+- The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session", "js-agent.pf-pool"]` (the
+  agent first, so the observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
+  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the
+  Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started
+  without it). The hook's `params` are
+  `unit` `js-agent`, `helper_unit` `js-agent.session`, `pf_unit` `js-agent.pf-pool`, `state_dir`
+  `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
   `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
   `/var/db/js-agent/scratch`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
@@ -124,6 +134,11 @@ as owner), any script, and another identifier or version.
   launchd cutover, and the rollback, boot out and bootstrap the helper's plist from the release tree as well as the
   agent's, the helper before the agent, while the agent is stopped. When it is absent the hook does what it did before.
   `prepare` drains the agent before hostkeeper swaps the files, as on Linux.
+- `pf_unit` is a launchd-only parameter of the hook too. When it is present the launchd cutover, after the helper and
+  before the agent starts, boots the pf job out, runs the staged release's `js-mac-provision install --flags-file
+  <flags_file>` to its end, and bootstraps the job's plist from the staged release's tree: the agent checks the anchor
+  at its start, and the job's own first run would race that check. The rollback leaves the pf job as it is. An older
+  hook ignores the key.
 
 ## Release and desired version
 
