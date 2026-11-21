@@ -359,6 +359,7 @@ mod trusted_file;
 pub mod update_hook;
 pub mod usage;
 pub mod vm;
+mod warnings;
 mod worker;
 pub mod xcode;
 
@@ -484,13 +485,11 @@ enum Failure {
     Worker(String),
 }
 
-/// The program, with the machine's own services.
-///
-/// A helper container of the OCI runner runs this binary as `<binary> <mode> <arguments>`
-/// (descriptor-relative ownership changes, and the unpack of an image's layers). Such a
-/// start is answered before anything else, so the flags are never parsed and no signal
-/// handler is installed: the mode words are the runner's default
-/// `HelperModes`, the value the runner is configured with (`js_contain::oci::helper`). Only Linux runs containers.
+/// The program, with the machine's own services. A helper container of the OCI runner runs
+/// this binary as `<binary> <mode> <arguments>` (ownership changes, the unpack of an image's
+/// layers), answered first: no flag is parsed, no signal handler installed (the mode words are
+/// the runner's default `HelperModes`, `js_contain::oci::helper`; only Linux runs containers).
+/// Every other start writes the agent's warnings to standard error (the module `warnings`).
 pub fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if let Some(code) =
@@ -498,6 +497,7 @@ pub fn main() -> ExitCode {
     {
         return ExitCode::from(code);
     }
+    warnings::install();
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     main_with(
         &SystemSleeper::install,
