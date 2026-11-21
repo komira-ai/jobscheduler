@@ -234,9 +234,10 @@ Known limits:
 - The update hook's unit tests run its `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`,
   `print`) against a fake of `launchctl`; the real launchd is reached by the first-install
   test (`mac_first_install`, run by `js-agent-macos-first-install.yml` on a hosted runner), which
-  covers the install and the first update only: what `launchctl print` prints of a daemon that
-  crashed (its `last exit code`) and `bootout` waiting out the agent's `ExitTimeOut` are read
-  from the manual and from what the fake says unless that run meets them. `kickstart -k` runs a daemon whatever its `KeepAlive`
+  covers a first install only (a failed attempt and the next order), not an update of a running
+  agent: what `launchctl print` prints of a daemon that crashed (its `last exit code`) and
+  `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and from what the
+  fake says. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
 - The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake
