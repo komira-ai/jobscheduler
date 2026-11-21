@@ -30,7 +30,7 @@ workspace = true
 
 [package.metadata.buildrules]
 # The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
-# does not run its tests: five of its test targets holds `#[ignore]`d tests, and buildrules' test
+# does not run its tests: five of its test targets hold `#[ignore]`d tests, and buildrules' test
 # gate refuses a test target with an ignored test (golden regeneration, seed replay, long runs).
 # They run in ci.yml alone.
 

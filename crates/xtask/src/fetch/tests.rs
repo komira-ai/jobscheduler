@@ -53,9 +53,18 @@ fn zst(bytes: &[u8]) -> Vec<u8> {
     ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
 }
 
-/// The first half of a zstd frame of 4 KiB that does not repeat, so the cut falls inside a block.
+/// The first half of a zstd frame of 4 KiB of xorshift output (which does not compress), so the
+/// frame header is whole and the cut falls inside the block's data.
 fn cut_zst() -> Vec<u8> {
-    let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+    let mut state = 0x9e37_79b9u32;
+    let data: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state.to_le_bytes()[0]
+        })
+        .collect();
     let full = zst(&data);
     full[..full.len() / 2].to_vec()
 }
@@ -195,6 +204,12 @@ fn an_archive_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
         assert!(!out.exists(), "{name}");
         assert!(!part_path(&out).exists(), "{name}");
     }
+    // A cut frame has a whole header: it is refused while its data is read, not as a frame
+    // that is not zstd.
+    let (result, _) = install_own("undecodable-zst-cut-why", &cut_zst(), &Unpack::Zst);
+    let why = format!("{result:?}");
+    assert!(why.starts_with("Err(Unpack("), "{why}");
+    assert!(!why.contains("not a zstd frame"), "{why}");
 }
 
 /// Asserts that a member the archive lacks, and a member that is a symlink or a

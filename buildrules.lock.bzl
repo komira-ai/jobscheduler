@@ -48,7 +48,7 @@ MANIFEST_SHA256 = {
     "crates/js-registry/Cargo.toml": "251ed467c6c5a203bc302e4f50dc8d25a0558f282bc7b759c17902b03a247826",
     "crates/js-scaler/Cargo.toml": "8bc6f10b4645e28849148b3f72266d33b8b19f916b2e052ec59cabaaa70ff66e",
     "crates/js-sched-placer/Cargo.toml": "5e16ce36ccb86d93dcb70dfd699d20018285e47a82481fee30e83a691716c587",
-    "crates/js-sched/Cargo.toml": "41cf394fa3858644f1c02a451a5c38db91af66e3981cfed349d9586f54785903",
+    "crates/js-sched/Cargo.toml": "b7c660570ed597d93347d7a3798d8f52dfa45075be882966bdc525f6d7d2f229",
     "crates/js-sim-cell/Cargo.toml": "bc95e22d268be558d5030fa37f2d15a45285030b3fe6647bf5794121ba2e8b02",
     "crates/js-sim/Cargo.toml": "e27f6a7e4ef3e6d36390cac4a00a1e5bc1122e0ec7385fc63b259364f81c223a",
     "crates/js-sizing/Cargo.toml": "f8da27f2479fccb1e7e76bff7884e69e5fed3a402d0ec6a1d9445407fb0216ae",
@@ -63,7 +63,7 @@ MANIFEST_SHA256 = {
     "crates/js-vmm/Cargo.toml": "f349cdad265ff666b2031d37ca4921f608b7b9121192f634f6682e912a0d7ece",
     "crates/js-watch/Cargo.toml": "f139f50c867f59d99b9fc0ed7b6db62787d401b8c2fd6a5b47b169f31d754f98",
     "crates/js-whole/Cargo.toml": "67f70d45b8312c682d13a1f53c64d1dbdc4683e4ee45021afbb00904ede777b3",
-    "crates/xtask/Cargo.toml": "7bded4cc19b98c93636a1c3ba846939326aad7f1166c877d4486004b9a6ecc8b",
+    "crates/xtask/Cargo.toml": "7758971f55fd8cec6aefe330b87d0ee5ed1743a80d2f7688c8a23ccbfdbc257e",
     "rust-toolchain.toml": "e3a213e0d222e94d213cafbc20932eb3f76c643b4dd63756acf95192df2aa310",
 }
 

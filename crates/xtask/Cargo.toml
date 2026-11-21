@@ -44,10 +44,10 @@ js-testkit = { path = "../js-testkit" }
 md-5.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
-# The zstd file `fetch --extract zst` installs (buck2).
-ruzstd.workspace = true
 # The runner user's uid and gid, and `uname -m`, for `crun-tests`.
 rustix = { workspace = true, features = ["process", "system"] }
+# The zstd file `fetch --extract zst` installs (buck2).
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
