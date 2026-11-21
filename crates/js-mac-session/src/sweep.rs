@@ -394,7 +394,33 @@ pub fn path_is_protected(path: &Path) -> bool {
 /// root, and it cannot open the entry `name` of `dir`. Not short-circuited: the three are
 /// read together.
 fn skippable(why: &io::Error, dir: &OwnedFd, name: &OsStr) -> bool {
-    refused(why) & !rustix::process::geteuid().is_root() & cannot_open(dir, name)
+    refused(why) & !euid_is_root() & cannot_open(dir, name)
+}
+
+/// Whether this process is root. Off macOS a test may say it is
+/// ([`pretend_root`]), to see what the sweep does as the root helper does.
+#[cfg(any(not(test), target_os = "macos"))]
+fn euid_is_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// Whether this process is root, or a test on this thread said it is.
+#[cfg(all(test, not(target_os = "macos")))]
+fn euid_is_root() -> bool {
+    PRETEND_ROOT.get() || rustix::process::geteuid().is_root()
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+thread_local! {
+    /// Whether a test on this thread says the process is root.
+    static PRETEND_ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// For tests off macOS: from now on this thread's sweeps behave as root's (or, with
+/// `false`, as they are).
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn pretend_root(root: bool) {
+    PRETEND_ROOT.set(root);
 }
 
 /// `result`, with a refusal of the system taken as a success for the entry `name` of `dir`
@@ -551,8 +577,9 @@ fn remove_present(
         return Ok(());
     }
     match rmdir_at(dir, name) {
-        // The system refuses the pool user the removal of this directory (a folder it keeps
-        // in the home, such as `Library/Preferences`): kept while it is empty, which it is
+        // The system refuses the removal of this directory, to the pool user and to root
+        // alike (a folder it guards in the home, such as `Library/Preferences`, which root
+        // without Full Disk Access is refused too): kept while it is empty, which it is
         // here, unless something was made in it since.
         Err(Errno::PERM) if keepable(&child)? => {
             warn_once(here);
@@ -624,11 +651,12 @@ fn strip_named(
     Ok(())
 }
 
-/// Whether a directory the system refused to remove is kept: the process is not root, and
-/// the directory is empty (nothing was made in it since).
+/// Whether a directory the system refused to remove is kept: it is empty (nothing was made
+/// in it since). Whoever runs the sweep, root included: macOS refuses root the removal of
+/// an account's `~/Library/Preferences`, which only a process with Full Disk Access may
+/// remove, and a directory with something in it that stays is still an error.
 fn keepable(child: &OwnedFd) -> io::Result<bool> {
-    let not_root = !rustix::process::geteuid().is_root();
-    Ok(not_root & listed(child)?.is_empty())
+    Ok(listed(child)?.is_empty())
 }
 
 /// Removes the empty directory `name` of `dir`.

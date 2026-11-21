@@ -608,6 +608,8 @@ impl Helper {
     /// group, mode 0700, no flag, ACL or extended attribute): the folder itself is never
     /// removed or made again, which macOS refuses for a folder of `/Users`. Fails only
     /// if an entry below it cannot be removed (named) or the folder cannot be given back.
+    /// An empty folder below it that the system refuses root the removal of (an account's
+    /// `Library/Preferences`) is kept, not a failure.
     fn empty_home(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         Self::swept(empty(&self.settings.homes.join(name), uid), name)?;
         self.make_home(name, uid)

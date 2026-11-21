@@ -119,6 +119,20 @@ own (its name, uid, hidden flag and home `/Users/kbf-lease-pool-<n>` match), res
 makes the slot free; a record on a pool uid that is not the pool's is refused and the slot is
 left unmade, which the helper's log and `pool-status` name. Removing the package leaves the users.
 
+A job writes only in its run directory, `<home>/exec`: the profile grants nothing else in the
+account's home, and the job's `HOME` and `CFFIXED_USER_HOME` are `<home>/exec/.home` and its `TMPDIR`
+is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there and the account's
+real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
+whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
+inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
+home even against root without Full Disk Access (which the helper does not have and is not given):
+a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
+system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
+it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
+`~/Library/Preferences` is what a job of an agent before this change left in a slot's home. Only a
+process with Full Disk Access (a person at a Terminal that was granted it, as an act on that Mac)
+could remove it, or nothing; the pool tolerates it as it is, and a job can no longer make one.
+
 ## Signing
 
 The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls

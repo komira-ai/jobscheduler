@@ -171,3 +171,32 @@ fn a_reset_that_fails_keeps_the_emptied_home_and_the_next_one_frees_the_slot() {
         "{calls:#?}"
     );
 }
+
+/// Catches a reset that fails the slot over an empty `~/Library/Preferences` that a job
+/// made and that macOS refuses root the removal of (the helper has no Full Disk Access):
+/// the reset, run as root, ends clean, the slot is free, no replacement is made, and the
+/// folder stays, empty, with what a job put in it gone.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_reset_whose_home_holds_an_empty_folder_the_system_refuses_root_frees_the_slot() {
+    let rig = rig("home-refused-folder", 1);
+    let home = plant(&rig);
+    std::fs::create_dir_all(home.join("Library/Preferences")).unwrap();
+    std::fs::write(home.join("Library/Preferences/com.example.plist"), "x").unwrap();
+    log(&rig);
+    crate::sweep::pretend_root(true);
+    crate::sweep::pretend_unremovable(&["Preferences"]);
+    let ended = rig.helper.user_delete("80.1");
+    crate::sweep::pretend_unremovable(&[]);
+    crate::sweep::pretend_root(false);
+    assert_eq!(ended, Ok(true));
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("delete_user")),
+        "reset, not replaced: {calls:#?}"
+    );
+    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
+    assert_eq!(names(&home), ["Library"]);
+    assert_eq!(names(&home.join("Library")), ["Preferences"]);
+    assert!(names(&home.join("Library/Preferences")).is_empty());
+}
