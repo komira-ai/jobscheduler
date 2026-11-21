@@ -197,7 +197,8 @@ impl LeaseServer {
         &self.url
     }
 
-    /// `GET /v1/hosts/<host>` with the client token, as JSON.
+    /// The entry of `host` in `GET /v1/hosts`, read with the client token, as JSON
+    /// (`/v1/hosts/<host>` is the agent's read of itself, by its own credential).
     pub fn host(&self, host: &str) -> Value {
         let client = Client::connect(
             &self.url,
@@ -206,11 +207,15 @@ impl LeaseServer {
             Duration::from_secs(10),
         )
         .expect("a client of the server");
-        let reply = client
-            .get(&format!("/v1/hosts/{host}"))
-            .expect("the server answers");
+        let reply = client.get("/v1/hosts").expect("the server answers");
         assert_eq!(reply.status, 200, "{}", reply.body);
-        reply.body
+        let listing = reply.body;
+        let found = listing["hosts"]
+            .as_array()
+            .and_then(|hosts| hosts.iter().find(|entry| entry["id"] == host));
+        found
+            .unwrap_or_else(|| panic!("{host} is not listed: {listing}"))
+            .clone()
     }
 }
 
