@@ -16,7 +16,9 @@
 //! drain it: `prepare` records the handover and neither cordons nor waits, and `cutover` and
 //! `rollback` write the handover file in the agent's state root before they stop the unit, so the
 //! stopping agent leaves its runs to the one started next (see `prepare` for when, and
-//! [`crate::lifecycle::handover`]). Every other host is cordoned and drained first.
+//! [`crate::lifecycle::handover`]); on a host with an egress ceiling, only when both agents keep
+//! the runs' egress wiring. Every other host is cordoned and drained first, and the detail of a
+//! successful `prepare` says why.
 //!
 //! `drain` and `resume` are the steps of a maintenance run (hostkeeper's maintenance-updates
 //! design, 5.2): the package manifest names them (`hook.drain`, `hook.resume`), and hostkeeper

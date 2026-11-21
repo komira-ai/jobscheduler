@@ -1,9 +1,10 @@
 //! An update that hands the agent's runs over to the new agent instead of draining the host:
-//! `prepare` decides it once (a crun host on systemd, the unit unchanged, no egress ceiling in
-//! the flags, and a previous agent whose `--version` lists the handover) and records it;
+//! `prepare` decides it once (a crun host on systemd, the unit unchanged, a previous agent whose
+//! `--version` lists the handover, and, on a host with an egress ceiling in the flags, one
+//! that lists `egress-handover` too) and records it;
 //! `prepare` then places no cordon and waits for nothing; `cutover` and `rollback` write the
 //! handover file before they stop the unit, remove it once the unit is down, and never wait for
-//! the host to be idle. Every other host drains as before.
+//! the host to be idle. Every other host drains as before, and the outcome names the cause.
 
 use std::path::PathBuf;
 
@@ -11,7 +12,7 @@ use js_agent::lifecycle::handover::{HANDOVER_FILE, HANDOVER_TEXT};
 use js_agent::update_hook::{Class, Lease, Outcome, Reason, Units};
 use serde_json::json;
 
-use super::step_rig::{Rig, Spy, UNIT, end_state, killable, line, marks};
+use super::step_rig::{DRAIN_WAIT_SECS, Rig, Spy, UNIT, end_state, killable, line, marks};
 
 /// What an agent that takes the handover prints to `--version`.
 const TAKES: &str = "js-agent 1.4.0\nruntimes: docker crun\nstops: drain handover\n";
@@ -41,10 +42,27 @@ fn file(rig: &Rig) -> PathBuf {
 
 /// A busy host (two leases) as `prepare` leaves it for an update that hands over.
 fn handing(name: &str) -> Rig {
+    handing_on(name, false)
+}
+
+/// A spy that reads the host's flags as `egress` says, with agents that keep egress wiring.
+fn spy_on(rig: &Rig, egress: bool) -> Spy<'_> {
+    let spy = spy(rig);
+    spy.egress.set(egress);
+    if egress {
+        *spy.version.borrow_mut() = Ok(KEEPS_EGRESS.to_owned());
+    }
+    spy
+}
+
+/// [`handing`] on a host whose flags set an egress ceiling when `egress` is true: both agents
+/// list `egress-handover`, so the update hands over all the same.
+fn handing_on(name: &str, egress: bool) -> Rig {
     let rig = Rig::new(name);
     rig.world.seed_unit(&rig.unit, "active", "running");
     rig.set_leases(2);
-    let done = spy(&rig).prepare(&rig);
+    let done = spy_on(&rig, egress).prepare(&rig);
+    assert!(rig.record().unwrap().handover);
     assert_eq!(
         done.outcome,
         Outcome::Success,
@@ -88,30 +106,90 @@ fn prepare_of_a_busy_host_whose_agent_hands_over_places_no_cordon_and_waits_for_
     assert_eq!(rig.record().unwrap(), record);
 }
 
+const DRAINS: &str = "the cutover drains the host first: ";
+const NO_HANDOVER: &str = "the previous release's agent does not hand its jobs over \
+     (no `handover` on its `stops:` line, or it could not be run)";
+const NO_KEEP: &str = "the host has an egress ceiling (or its flags file cannot be read) and the \
+     previous release's agent does not keep the jobs' egress wiring \
+     (no `egress-handover` on its `stops:` line)";
+const NO_ADOPT: &str = "the host has an egress ceiling (or its flags file cannot be read) and the \
+     staged release's agent does not adopt the jobs' egress wiring \
+     (no `egress-handover` on its `stops:` line)";
+
+/// What an agent that keeps and adopts egress wiring prints to `--version`.
+const KEEPS_EGRESS: &str =
+    "js-agent 1.4.0\nruntimes: docker crun\nstops: drain handover egress-handover\n";
+
 /// Asserts that every host that cannot hand over drains as before (the record says no
-/// handover, and the cordon is placed): a previous agent from before the handover (its
-/// `--version` has no `stops:` line, or one without the handover), flags with an egress
-/// ceiling, a staged unit that differs, the container engine's runtime, and a Mac. Catches a
-/// handover asked of an agent that would drain on it, or of a host whose next agent removes the
-/// runs it was to adopt.
+/// handover, and the cordon is placed) and that the detail of the success names the one
+/// condition that made it drain, in full: a previous agent from before the handover (its
+/// `--version` has no `stops:` line, or one without the handover, or cannot be run), a staged
+/// unit that differs, the container engine's runtime, and a Mac; and that a host that can hand
+/// over says nothing of a drain. Catches a handover asked of an agent that would drain on it,
+/// and a drain whose journal line leaves the operator guessing why.
 #[test]
-fn every_host_that_cannot_hand_over_drains_as_before() {
+fn every_host_that_cannot_hand_over_drains_and_says_why() {
     type Setup = fn(&Rig, &Spy<'_>);
-    type Case = (&'static str, fn(&str) -> Rig, Setup);
-    let cases: [Case; 7] = [
-        ("old-agent", Rig::new, |_, spy| {
-            *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nruntimes: docker crun\n".to_owned());
-        }),
-        ("drain-only", Rig::new, |_, spy| {
-            *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nstops: drain\n".to_owned());
-        }),
-        ("egress", Rig::new, |_, spy| spy.egress.set(true)),
-        ("unit-changed", Rig::new, |rig, _| rig.stage_changed_unit()),
-        ("docker", Rig::new, |_, _| {}),
-        ("mac", Rig::mac, |_, _| {}),
-        ("handover", Rig::new, |_, _| {}),
+    type Case = (&'static str, fn(&str) -> Rig, Setup, Option<String>);
+    let unit = "the unit changes (Service.DelegateSubgroup, Service.ExecStart): cutover starts the agent on the new unit";
+    let cases: [Case; 8] = [
+        (
+            "old-agent",
+            Rig::new,
+            |_, spy| {
+                *spy.version.borrow_mut() =
+                    Ok("js-agent 1.4.0\nruntimes: docker crun\n".to_owned());
+            },
+            Some(format!("{DRAINS}{NO_HANDOVER}")),
+        ),
+        (
+            "drain-only",
+            Rig::new,
+            |_, spy| {
+                *spy.version.borrow_mut() = Ok("js-agent 1.4.0\nstops: drain\n".to_owned());
+            },
+            Some(format!("{DRAINS}{NO_HANDOVER}")),
+        ),
+        (
+            "previous-agent-fails",
+            Rig::new,
+            |_, spy| {
+                *spy.previous_version.borrow_mut() = Some(Err("exec failed".to_owned()));
+            },
+            Some(format!("{DRAINS}{NO_HANDOVER}")),
+        ),
+        (
+            "unit-changed",
+            Rig::new,
+            |rig, _| rig.stage_changed_unit(),
+            Some(unit.to_owned()),
+        ),
+        (
+            "docker",
+            Rig::new,
+            |_, _| {},
+            Some(format!("{DRAINS}the jobs do not run on the crun runtime")),
+        ),
+        (
+            "mac",
+            Rig::mac,
+            |_, _| {},
+            Some(format!(
+                "{DRAINS}the host does not run the agent under systemd"
+            )),
+        ),
+        ("handover", Rig::new, |_, _| {}, Some(HANDOVER.to_owned())),
+        (
+            "egress-agents",
+            Rig::new,
+            |_, spy| {
+                spy.egress.set(true);
+                *spy.version.borrow_mut() = Ok(KEEPS_EGRESS.to_owned());
+            },
+            Some(HANDOVER.to_owned()),
+        ),
     ];
-    for (name, build, setup) in cases {
+    for (name, build, setup, detail) in cases {
         let mut rig = build(&format!("hook-handover-not-{name}"));
         if name == "docker" {
             rig.params.settings.runtime = "docker".to_owned();
@@ -125,11 +203,186 @@ fn every_host_that_cannot_hand_over_drains_as_before() {
         setup(&rig, &spy);
         let done = spy.prepare(&rig);
         assert_eq!(done.outcome, Outcome::Success, "{name}: {done:?}");
+        assert_eq!(done.report.detail, detail, "{name}");
         let record = rig.record().unwrap();
-        let hands_over = name == "handover";
+        let hands_over = name.ends_with("handover") || name == "egress-agents";
         assert_eq!(record.handover, hands_over, "{name}");
         assert_eq!(record.cordon.placed, !hands_over, "{name}");
     }
+}
+
+const HANDOVER: &str =
+    "the cutover hands the running jobs over to the new agent: no cordon and no drain";
+
+/// Asserts the egress rule: a host whose flags set an egress ceiling (or cannot be read) hands
+/// over, with no cordon and the handover note, when both the previous agent and the staged
+/// agent list `egress-handover`; drains naming the previous agent when only it lacks the word
+/// (a stopped agent that does not leave the wiring would cut the jobs' network); and drains
+/// naming the staged agent when only it lacks the word (the new agent would remove the jobs it
+/// cannot adopt). A host without a ceiling still hands over between agents with only
+/// `handover`. Catches an egress host handed over to or from an agent that does not keep its
+/// wiring, and an egress host that drains although both agents keep it.
+#[test]
+fn an_egress_host_hands_over_only_between_agents_that_both_keep_egress_wiring() {
+    let cases = [
+        (
+            "both",
+            Some(KEEPS_EGRESS),
+            Some(KEEPS_EGRESS),
+            true,
+            HANDOVER.to_owned(),
+        ),
+        (
+            "previous-only-handover",
+            Some(TAKES),
+            Some(KEEPS_EGRESS),
+            false,
+            format!("{DRAINS}{NO_KEEP}"),
+        ),
+        (
+            "staged-lacks",
+            Some(KEEPS_EGRESS),
+            Some(TAKES),
+            false,
+            format!("{DRAINS}{NO_ADOPT}"),
+        ),
+        (
+            "previous-fails",
+            None,
+            Some(KEEPS_EGRESS),
+            false,
+            format!("{DRAINS}{NO_HANDOVER}"),
+        ),
+        (
+            "neither",
+            Some(TAKES),
+            Some(TAKES),
+            false,
+            format!("{DRAINS}{NO_KEEP}"),
+        ),
+    ];
+    for (name, previous, staged, hands_over, detail) in cases {
+        let rig = Rig::new(&format!("hook-handover-egress-{name}"));
+        rig.world.seed_unit(&rig.unit, "active", "running");
+        rig.set_leases(2);
+        let spy = Spy::new(&rig);
+        spy.egress.set(true);
+        *spy.version.borrow_mut() = Ok(staged.unwrap().to_owned());
+        *spy.previous_version.borrow_mut() =
+            Some(previous.map_or(Err("exec failed".to_owned()), |text| Ok(text.to_owned())));
+        let done = spy.prepare(&rig);
+        // A host that drains waits out its two leases and defers; the cause is in that detail.
+        let ended = match hands_over {
+            true => done.report.detail.clone(),
+            false => {
+                assert_eq!(done.outcome, Outcome::Deferred, "{name}: {done:?}");
+                let text = done.report.detail.clone().unwrap();
+                text.split_once("; draining because ")
+                    .map(|(_, why)| format!("{DRAINS}{why}"))
+            }
+        };
+        assert_eq!(ended, Some(detail), "{name}: {done:?}");
+        let record = rig.record().unwrap();
+        assert_eq!(record.handover, hands_over, "{name}");
+        assert!(!record.cordon.placed, "{name}: the deferral lifted it");
+    }
+    // Without a ceiling, an agent that lists only `handover` is enough.
+    let rig = Rig::new("hook-handover-egress-none");
+    rig.world.seed_unit(&rig.unit, "active", "running");
+    let spy = spy(&rig);
+    assert_eq!(spy.prepare(&rig).report.detail.as_deref(), Some(HANDOVER));
+    assert!(rig.record().unwrap().handover);
+}
+
+/// Asserts that a drained prepare, run through the hook's entry as hostkeeper runs it, writes
+/// a journal line `js-agent update-hook: prepare succeeded: ...` that names the cause, and
+/// that the hand-over writes its own note. Catches a drain an operator reading the journal
+/// cannot tell from a hand-over.
+#[test]
+fn the_journal_line_of_a_drained_prepare_names_the_cause() {
+    use js_agent::update_hook::{Host, VERB, run};
+    let rig = Rig::new("hook-handover-journal");
+    rig.world.seed_unit(&rig.unit, "active", "running");
+    let spy = Spy::new(&rig);
+    let file = rig.tmp.path().join("params-for-the-verb.toml");
+    std::fs::write(&file, &rig.params_text).unwrap();
+    let staged = rig.params.staged_release.clone();
+    let step = |_: &js_agent::update_hook::Invocation, _: &js_agent::update_hook::Params| {
+        spy.prepare(&rig)
+    };
+    let maintain = |_: &js_agent::update_hook::MaintainInvocation,
+                    _: &js_agent::update_hook::DrainParams| {
+        unreachable!("an update step ran a maintenance step")
+    };
+    let args: Vec<std::ffi::OsString> = [
+        "js-agent".as_ref(),
+        VERB.as_ref(),
+        "prepare".as_ref(),
+        staged.as_os_str(),
+        "--params".as_ref(),
+        file.as_os_str(),
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    run(
+        &args,
+        &mut out,
+        &mut err,
+        &Host {
+            step: &step,
+            maintain: &maintain,
+        },
+    );
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        format!("js-agent update-hook: prepare succeeded: {DRAINS}{NO_HANDOVER}\n")
+    );
+}
+
+/// Asserts that a drain that passes its bound with a lease still running defers with the cause
+/// of the drain after the lease count: here a previous agent that does not hand over. Catches a
+/// deferral that leaves the operator unable to tell why the host was draining at all.
+#[test]
+fn the_deferral_of_a_drain_names_why_the_host_was_draining() {
+    let rig = Rig::new("hook-handover-drain-bound");
+    rig.world.seed_unit(&rig.unit, "active", "running");
+    rig.set_leases(1);
+    let spy = Spy::new(&rig);
+    let done = spy.prepare(&rig);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "the host still held 1 lease(s) after {DRAIN_WAIT_SECS} s; draining because {NO_HANDOVER}"
+        ))
+    );
+}
+
+/// Asserts that a prepare run again on the record of a drain says why again, and that when the
+/// conditions now allow a hand-over it keeps the drain it began with and says it was decided
+/// then. Catches a rerun that goes silent, and one that flips the decision or tells the
+/// operator the update hands over while the record drains.
+#[test]
+fn a_rerun_of_a_drained_prepare_says_why_and_keeps_the_decision() {
+    let rig = Rig::new("hook-handover-rerun");
+    rig.world.seed_unit(&rig.unit, "active", "running");
+    let first = Spy::new(&rig);
+    assert_eq!(first.prepare(&rig).outcome, Outcome::Success);
+    assert!(!rig.record().unwrap().handover);
+    let second = Spy::new(&rig);
+    assert_eq!(
+        second.prepare(&rig).report.detail,
+        Some(format!("{DRAINS}{NO_HANDOVER}"))
+    );
+    let third = spy(&rig);
+    let done = third.prepare(&rig);
+    assert_eq!(
+        done.report.detail,
+        Some(format!("{DRAINS}decided when the update began"))
+    );
+    assert!(!rig.record().unwrap().handover);
 }
 
 /// Asserts the cutover of a busy host that hands over: the stop is marked with the session
@@ -199,9 +452,20 @@ fn the_request_is_on_disk_when_the_stop_reaches_the_agent() {
 /// before a stop it issues again, or that leaves the file for the new agent's next stop.
 #[test]
 fn a_handover_cutover_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
-    let baseline = handing("hook-handover-sweep-base");
+    cutover_sweep(false);
+}
+
+/// The sweep of the cutover above on a host with an egress ceiling whose agents both keep
+/// egress wiring: the hand-over, and so every kill point, is the same.
+#[test]
+fn an_egress_handover_cutover_killed_at_any_point_and_run_again_ends_as_an_uninterrupted_one() {
+    cutover_sweep(true);
+}
+
+fn cutover_sweep(egress: bool) {
+    let baseline = handing_on("hook-handover-sweep-base", egress);
     assert_eq!(
-        Spy::new(&baseline).cutover(&baseline).outcome,
+        spy_on(&baseline, egress).cutover(&baseline).outcome,
         Outcome::Success
     );
     let points = baseline.kill.points();
@@ -211,14 +475,14 @@ fn a_handover_cutover_killed_at_any_point_and_run_again_ends_as_an_uninterrupted
     );
     let end = end_state(&baseline);
     for k in 1..=points {
-        let rig = handing(&format!("hook-handover-sweep-{k}"));
+        let rig = handing_on(&format!("hook-handover-sweep-{k}"), egress);
         rig.kill.arm(k);
         assert!(
-            killable(|| Spy::new(&rig).cutover(&rig)).is_none(),
+            killable(|| spy_on(&rig, egress).cutover(&rig)).is_none(),
             "kill point {k} of {points} is reached"
         );
         rig.kill.disarm();
-        let rerun = Spy::new(&rig);
+        let rerun = spy_on(&rig, egress);
         let done = rerun.cutover(&rig);
         assert_eq!(done.outcome, Outcome::Success, "killed at point {k}");
         assert_eq!(end_state(&rig), end, "killed at point {k}");
@@ -320,16 +584,27 @@ fn the_rollback_of_a_handover_hands_the_runs_back_without_a_drain() {
 /// Catches a rerun that stops the new agent without the request.
 #[test]
 fn a_handover_rollback_killed_at_any_point_and_run_again_ends_with_the_previous_agent() {
+    rollback_sweep(false);
+}
+
+/// The sweep of the rollback above on a host with an egress ceiling whose agents both keep
+/// egress wiring: the roles swap, and the rollback hands the runs back all the same.
+#[test]
+fn an_egress_handover_rollback_killed_at_any_point_and_run_again_ends_with_the_previous_agent() {
+    rollback_sweep(true);
+}
+
+fn rollback_sweep(egress: bool) {
     let setup = |name: &str| {
-        let rig = handing(name);
-        assert_eq!(Spy::new(&rig).cutover(&rig).outcome, Outcome::Success);
+        let rig = handing_on(name, egress);
+        assert_eq!(spy_on(&rig, egress).cutover(&rig).outcome, Outcome::Success);
         rig.kill.disarm();
         rig
     };
     let baseline = setup("hook-handover-rb-sweep-base");
     let before = baseline.kill.points();
     assert_eq!(
-        Spy::new(&baseline).rollback(&baseline).outcome,
+        spy_on(&baseline, egress).rollback(&baseline).outcome,
         Outcome::Success
     );
     let points = baseline.kill.points() - before;
@@ -338,11 +613,11 @@ fn a_handover_rollback_killed_at_any_point_and_run_again_ends_with_the_previous_
         let rig = setup(&format!("hook-handover-rb-sweep-{k}"));
         rig.kill.arm(rig.kill.points() + k);
         assert!(
-            killable(|| Spy::new(&rig).rollback(&rig)).is_none(),
+            killable(|| spy_on(&rig, egress).rollback(&rig)).is_none(),
             "point {k}"
         );
         rig.kill.disarm();
-        let rerun = Spy::new(&rig);
+        let rerun = spy_on(&rig, egress);
         // An agent started by the killed run says hello once it runs, as a real one would.
         rerun.on_pause(|spy, _| {
             let host = spy.world.host().unwrap();

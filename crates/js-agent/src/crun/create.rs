@@ -283,6 +283,13 @@ impl CrunRuntime {
         if let Some(host_ports) = net::host_ports_label(&spec.host_ports) {
             labels.insert(label::HOST_PORTS.to_owned(), host_ports);
         }
+        // And takes its wiring over from these. A run on the host's network is wired by
+        // nothing.
+        let (level, ports) = match host {
+            true => (js_types::JobNetwork::None, &[][..]),
+            false => (spec.network, &spec.ports[..]),
+        };
+        labels.extend(net::network_labels(level, ports));
         let entry = self.entry_for(spec, &name, (&labels, &image.digest));
         Ok(Head {
             name,

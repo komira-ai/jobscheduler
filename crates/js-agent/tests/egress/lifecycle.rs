@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use js_agent::egress::store::Store;
 use js_agent::egress::{Config, Egress, EgressError, Flags};
 use js_agent::lifecycle::{Exit, RunHandle, Runtime, Status};
 use js_agent_wire::LogTail;
@@ -30,7 +31,7 @@ fn releasing_a_run_removes_its_veth_and_its_set_member() {
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let named = named_namespaces();
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     assert!(links("jsv").is_empty() && wired().is_empty());
     let holder = Holder::new();
     let attachment = egress
@@ -60,7 +61,7 @@ fn releasing_a_run_removes_its_veth_and_its_set_member() {
 fn a_run_that_ends_leaves_only_a_set_member_and_release_removes_it() {
     let _serial = serial();
     let _far = Far::new();
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let holder = Holder::new();
     let attachment = egress
         .attach("ended", holder.pid(), JobNetwork::AllowList, &[])
@@ -79,18 +80,26 @@ fn a_run_that_ends_leaves_only_a_set_member_and_release_removes_it() {
     assert!(wired().is_empty());
 }
 
-/// Asserts the restart sweep: a run that was wired when the agent died (its attachment never
-/// released, nothing of the old process left) and a pair that was made but never moved are
-/// removed by the next start, along with the set's members, while the process that was in
-/// the old namespace is untouched; the new agent then wires the same namespace again from the
-/// first block.
+/// Asserts the restart: a run that was wired when the agent died without a record in the
+/// egress store (its attachment never released, nothing of the old process left) and a pair that
+/// was made but never moved are strays to the next start: it leaves the interfaces in place and
+/// does not put the crash's interface in the firewall's set; the settle that follows removes
+/// them, while the process that was in the old namespace is untouched, and the names that only
+/// look like the agent's are left alone; the new agent then wires the same namespace again from
+/// the first block. Catches a restart that keeps what no record names, a settle that leaves a
+/// stray behind, and one that removes what it does not own.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]
 fn a_restart_removes_what_a_crash_left() {
     let _serial = serial();
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
-    let old = Egress::start(config()).expect("start");
+    let state = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("crash-leftover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).expect("make the state root");
+    let store = || Store::open(&state).expect("open the store");
+    let old = Egress::start(config(), Some(store())).expect("start");
     let holder = Holder::new();
     // What a run wired when its agent died: the host end, the job end in the run's
     // namespace and the set member. A crash leaves nothing of the process, its hold on the
@@ -119,7 +128,19 @@ fn a_restart_removes_what_a_crash_left() {
     assert_eq!(links("jsv"), ["jsv0", "jsv7"]);
     assert_eq!(links("jsp"), ["jsp7", "jspare0", "jspare1"]);
 
-    let new = Egress::start(config()).expect("a restart");
+    let new = Egress::start(config(), Some(store())).expect("a restart");
+    assert_eq!(
+        links("jsv"),
+        ["jsv0", "jsv7"],
+        "a start leaves the interfaces no record names for the settle"
+    );
+    assert!(
+        wired().is_empty(),
+        "no record names the crash's interface, so a start does not make it a member: {:?}",
+        wired()
+    );
+    new.settle().expect("settled");
+    let _ = std::fs::remove_dir_all(&state);
     assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
     assert_eq!(
         links("jsp"),
@@ -147,7 +168,7 @@ fn a_restart_removes_what_a_crash_left() {
 fn wiring_refuses_the_hosts_own_namespace_and_a_missing_process() {
     let _serial = serial();
     let _far = Far::new();
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let own = egress.attach("own", std::process::id(), JobNetwork::AllowList, &[]);
     assert!(matches!(own, Err(EgressError::Container { .. })), "{own:?}");
     let missing = egress.attach("missing", u32::MAX, JobNetwork::AllowList, &[]);
@@ -178,7 +199,7 @@ fn two_runs_at_once_cannot_reach_each_other() {
     let _serial = serial();
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let (a, b) = (Holder::new(), Holder::new());
     let first = egress
         .attach("a", a.pid(), JobNetwork::AllowList, &[])
@@ -237,7 +258,7 @@ fn two_runs_at_once_cannot_reach_each_other() {
 /// root, is refused as `Held` and removes nothing (the first run's veth and set member stay,
 /// and it still reaches the allowed endpoint). The hold lasts while the run is wired even
 /// after the egress itself is dropped (the second start is still `Held`), and ends with the
-/// run's release, after which a start succeeds. Catches a second agent that sweeps the first
+/// run's release, after which a start succeeds. Catches a second agent that removes the first
 /// one's live wiring, and a hold that ends before the last run's release.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]
@@ -245,19 +266,19 @@ fn a_second_agent_cannot_start_while_one_holds_the_hosts_egress() {
     let _serial = serial();
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
-    let first = Egress::start(config()).expect("start");
+    let first = Egress::start(config(), None).expect("start");
     let holder = Holder::new();
     let attachment = first
         .attach("first", holder.pid(), JobNetwork::AllowList, &[])
         .expect("attach");
-    let second = Egress::start(config()).map(drop);
+    let second = Egress::start(config(), None).map(drop);
     assert_eq!(second, Err(EgressError::Held));
     assert_eq!(links("jsv"), ["jsv0"]);
     assert_eq!(wired(), ["jsv0"]);
     assert!(tcp(&holder.ns, far::ALLOWED).connected());
     assert_eq!(allowed.accepted(), 1);
     drop(first);
-    let still = Egress::start(config()).map(drop);
+    let still = Egress::start(config(), None).map(drop);
     assert_eq!(
         still,
         Err(EgressError::Held),
@@ -265,7 +286,7 @@ fn a_second_agent_cannot_start_while_one_holds_the_hosts_egress() {
     );
     assert_eq!(links("jsv"), ["jsv0"]);
     attachment.release().expect("release");
-    let next = Egress::start(config()).expect("free once the last run is released");
+    let next = Egress::start(config(), None).expect("free once the last run is released");
     next.check().expect("loaded");
 }
 
@@ -307,7 +328,7 @@ fn a_crun_job_through_the_runtime_reaches_an_allowed_endpoint_and_not_a_denied_o
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let mut host = RuntimeHost::new("reach", &egress);
     host.runtime
         .check_egress()
@@ -350,7 +371,7 @@ fn a_crun_job_through_the_runtime_reaches_an_allowed_endpoint_and_not_a_denied_o
 fn a_crun_runtime_job_leaves_no_veth_and_no_set_member_after_removal() {
     let _serial = serial();
     let _far = Far::new();
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let mut host = RuntimeHost::new("clean", &egress);
     let spec = host.spec("ends", "echo ran > /scratch/marker");
     let id = host
@@ -398,7 +419,7 @@ fn a_failed_wiring_never_starts_the_job() {
         ..Flags::default()
     })
     .expect("a sound configuration");
-    let egress = Egress::start(config).expect("start");
+    let egress = Egress::start(config, None).expect("start");
     let mut host = RuntimeHost::new("unwired", &egress);
     let spec = host.spec("unwired", "echo ran > /scratch/marker");
     let why = host
@@ -422,7 +443,7 @@ fn a_failed_wiring_never_starts_the_job() {
 fn runtime_jobs_at_once_keep_their_own_wiring() {
     let _serial = serial();
     let _far = Far::new();
-    let egress = Egress::start(config()).expect("start");
+    let egress = Egress::start(config(), None).expect("start");
     let mut host = RuntimeHost::new("overlap", &egress);
     let start = |host: &mut RuntimeHost, run: &str| {
         let spec = host.spec(run, "sleep 600");

@@ -12,8 +12,8 @@ use js_agent::update_hook::{
 use serde_json::json;
 
 use super::step_rig::{
-    RETRY_AFTER_SECS, Rig, Spy, TokenFile, UNIT, end_state, euid, good_token, killable, line,
-    marks, running,
+    DRAINS_NO_HANDOVER, RETRY_AFTER_SECS, Rig, Spy, TokenFile, UNIT, end_state, euid, good_token,
+    killable, line, marks, running,
 };
 
 const SHOW: &str = "/usr/bin/systemctl show --property=TasksCurrent --value js-agent-crun.service";
@@ -42,7 +42,7 @@ fn an_identical_staged_unit_records_no_restart_and_cutover_makes_no_cgroup_read(
     let spy = Spy::new(&rig);
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(done.report.detail, None);
+    assert_eq!(done.report.detail.as_deref(), Some(DRAINS_NO_HANDOVER));
     assert_eq!(rig.record().unwrap().unit_restart, None);
     assert_eq!(cgroup_reads(&spy), 0);
     rig.kill.disarm();
@@ -198,7 +198,11 @@ fn a_record_written_without_a_plan_is_read_and_stays_without_one() {
     rig.put_record(&record);
     let done = Spy::new(&rig).prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(done.report.detail, None);
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("the cutover drains the host first: the unit changes"),
+        "the staged unit differs from the installed one now, which the old record never planned"
+    );
     assert_eq!(rig.record().unwrap().unit_restart, None);
 }
 
@@ -372,7 +376,10 @@ fn on_a_mac_a_changed_plist_is_recorded_and_reported_and_cutover_reads_no_cgroup
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(
         done.report.detail.as_deref(),
-        Some("the unit changes (js-agent.plist): cutover starts the agent on the new unit")
+        Some(
+            "the unit changes (js-agent.plist): cutover starts the agent on the new unit; \
+             the cutover drains the host first: the host does not run the agent under systemd"
+        )
     );
     assert_eq!(
         changed(rig.record().unwrap().unit_restart),

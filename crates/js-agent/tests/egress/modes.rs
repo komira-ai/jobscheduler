@@ -26,7 +26,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
     clear_tables();
-    let egress = Egress::start(Config::none()).expect("start");
+    let egress = Egress::start(Config::none(), None).expect("start");
     egress.check().expect("mode none has nothing to check");
     let script = format!(
         "sleep 2; {PROBE}echo '--dev'; cat /proc/net/dev; echo '--route'; cat /proc/net/route; \
@@ -86,7 +86,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
 fn a_job_waits_for_its_network_and_never_starts_without_it() {
     let _serial = serial();
     let config = crate::sys::allow_list(&["192.0.2.10:9300"], &[]);
-    let _egress = Egress::start(config.clone()).expect("start");
+    let _egress = Egress::start(config.clone(), None).expect("start");
     let outcome = block_on(async {
         let network = Network {
             resolv_conf: config.resolv_conf(),
