@@ -5,12 +5,12 @@
 //! target's.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent::crun::{CrunRuntime, EgressPort, Hooks, Wired, start_egress};
+use js_agent::crun::{CrunRuntime, EgressPort, Hooks, start_egress};
 use js_agent::egress::{Config as EgressConfig, EgressError, Flags};
 use js_agent::lifecycle::RunSpec;
 use js_agent::lifecycle::{
@@ -20,110 +20,11 @@ use js_agent::lifecycle::{
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, NetworkCeiling};
 use js_types::{JobNetwork, PortMap};
 
+use crate::egress_port::{Seen, port};
 use crate::node::{LONG, NoImages, Node, PID, Ringing};
 
-/// What the port was asked, and how it answers.
-#[derive(Debug, Default)]
-struct Seen {
-    /// `check <sidecars>` (the leases the ledger held when the check was asked),
-    /// `attach <run> <pid>` and `release <run>`, in order.
-    calls: Mutex<Vec<String>>,
-    /// The directory of the runtime's sidecars.
-    ledger: PathBuf,
-    /// The level of each attach, in order.
-    levels: Mutex<Vec<JobNetwork>>,
-    /// The declared ports of each attach, in order.
-    ports: Mutex<Vec<Vec<PortMap>>>,
-    check_fails: AtomicBool,
-    attach_fails: AtomicBool,
-    release_fails: AtomicBool,
-}
-
-impl Seen {
-    fn new(node: &Node) -> Arc<Self> {
-        Arc::new(Self {
-            ledger: node.scratch.join("oci-labels"),
-            ..Self::default()
-        })
-    }
-
-    fn note(&self, call: String) {
-        self.calls.lock().expect("calls").push(call);
-    }
-
-    /// The calls so far, and empties the record.
-    fn taken(&self) -> Vec<String> {
-        std::mem::take(&mut *self.calls.lock().expect("calls"))
-    }
-}
-
-/// A port that records in `seen`.
-fn port(seen: &Arc<Seen>) -> Option<Arc<dyn EgressPort>> {
-    Some(Arc::new(Port(Arc::clone(seen))))
-}
-
-/// The fake port.
-#[derive(Debug)]
-struct Port(Arc<Seen>);
-
-impl EgressPort for Port {
-    fn ceiling(&self) -> NetworkCeiling {
-        NetworkCeiling {
-            level: JobNetwork::AllowList,
-            ports: Vec::new(),
-        }
-    }
-
-    fn check(&self) -> Result<(), EgressError> {
-        let sidecars = std::fs::read_dir(&self.0.ledger).map_or(0, Iterator::count);
-        self.0.note(format!("check {sidecars}"));
-        match self.0.check_fails.load(Ordering::SeqCst) {
-            true => Err(EgressError::Rules),
-            false => Ok(()),
-        }
-    }
-
-    fn attach(
-        &self,
-        run: &str,
-        pid: u32,
-        level: JobNetwork,
-        ports: &[PortMap],
-    ) -> Result<Box<dyn Wired>, EgressError> {
-        self.0.levels.lock().expect("levels").push(level);
-        self.0.ports.lock().expect("ports").push(ports.to_vec());
-        self.0.note(format!("attach {run} {pid}"));
-        match self.0.attach_fails.load(Ordering::SeqCst) {
-            true => Err(EgressError::Exhausted),
-            false => Ok(Box::new(Wire {
-                seen: Arc::clone(&self.0),
-                run: run.to_owned(),
-            })),
-        }
-    }
-}
-
-/// One run's fake wiring.
-struct Wire {
-    seen: Arc<Seen>,
-    run: String,
-}
-
-impl Wired for Wire {
-    fn release(self: Box<Self>) -> Result<(), EgressError> {
-        self.seen.note(format!("release {}", self.run));
-        match self.seen.release_fails.load(Ordering::SeqCst) {
-            true => Err(EgressError::Command {
-                what: "deleting the veth".to_owned(),
-                why: "Operation not permitted".to_owned(),
-            }),
-            false => Ok(()),
-        }
-    }
-}
-
 /// The run `run_id` of the node's image, asking for the allow-list: the run the port wires.
-fn wired(node: &Node, run_id: &str) -> RunSpec {
+pub(crate) fn wired(node: &Node, run_id: &str) -> RunSpec {
     RunSpec {
         network: JobNetwork::AllowList,
         ..node.spec(run_id)
@@ -131,7 +32,7 @@ fn wired(node: &Node, run_id: &str) -> RunSpec {
 }
 
 /// A runtime on `node` with the port `egress` and `hooks`.
-fn open(node: &Node, egress: Option<Arc<dyn EgressPort>>, hooks: Hooks) -> CrunRuntime {
+pub(crate) fn open(node: &Node, egress: Option<Arc<dyn EgressPort>>, hooks: Hooks) -> CrunRuntime {
     let mut settings = node.settings("/root");
     settings.egress = egress;
     CrunRuntime::open_with(settings, Arc::new(NoImages), hooks).expect("opens")
@@ -139,13 +40,13 @@ fn open(node: &Node, egress: Option<Arc<dyn EgressPort>>, hooks: Hooks) -> CrunR
 
 /// Hooks whose wait after a kill is spent at once: a removal ends a container that ignores
 /// SIGTERM by force.
-fn impatient() -> Hooks {
+pub(crate) fn impatient() -> Hooks {
     Node::hooks(Duration::ZERO, LONG)
 }
 
 /// Whether nothing of the lease of the run `run_id` is left on `node`: no sidecar, no lease
 /// directory and no lease cgroup (each is named for the lease, `js-<tag>-<run id>`).
-fn nothing_left(node: &Node, run_id: &str) -> bool {
+pub(crate) fn nothing_left(node: &Node, run_id: &str) -> bool {
     let suffix = format!("-{run_id}");
     let held = |dir: &Path| {
         std::fs::read_dir(dir).is_ok_and(|entries| {

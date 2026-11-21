@@ -107,7 +107,7 @@ fn delete_nat_rule(comment: &str) {
 fn a_declared_port_reaches_the_job_through_the_host_address() {
     let _serial = serial();
     let far_host = Far::new();
-    let egress = Egress::start(forwarding()).expect("start");
+    let egress = Egress::start(forwarding(), None).expect("start");
     let holder = Holder::new();
     let listener = Server::tcp(&holder.ns, any(80));
     let attachment = egress
@@ -143,7 +143,7 @@ fn an_undeclared_port_is_refused() {
     let _serial = serial();
     let far_host = Far::new();
     far_host.ip(&["route", "add", "198.18.0.0/16", "via", "192.0.2.1"]);
-    let egress = Egress::start(forwarding()).expect("start");
+    let egress = Egress::start(forwarding(), None).expect("start");
     let holder = Holder::new();
     let declared = Server::tcp(&holder.ns, any(80));
     let other = Server::tcp(&holder.ns, any(81));
@@ -189,7 +189,7 @@ fn a_job_with_no_ports_has_no_inbound_path() {
     let _serial = serial();
     let far_host = Far::new();
     far_host.ip(&["route", "add", "198.18.0.0/16", "via", "192.0.2.1"]);
-    let egress = Egress::start(forwarding()).expect("start");
+    let egress = Egress::start(forwarding(), None).expect("start");
     let (open, closed) = (Holder::new(), Holder::new());
     let servers: Vec<Server> = [&open, &closed]
         .iter()
@@ -251,7 +251,7 @@ fn a_job_with_no_ports_has_no_inbound_path() {
 fn two_jobs_cannot_hold_the_same_host_port() {
     let _serial = serial();
     let far_host = Far::new();
-    let egress = Egress::start(forwarding()).expect("start");
+    let egress = Egress::start(forwarding(), None).expect("start");
     let (a, b) = (Holder::new(), Holder::new());
     let (on_a, on_b) = (Server::tcp(&a.ns, any(80)), Server::tcp(&b.ns, any(80)));
     let first = egress
@@ -284,7 +284,7 @@ fn two_jobs_cannot_hold_the_same_host_port() {
 fn a_changed_or_deleted_forward_is_seen_by_the_check_and_a_released_one_is_gone() {
     let _serial = serial();
     let _far = Far::new();
-    let egress = Egress::start(forwarding()).expect("start");
+    let egress = Egress::start(forwarding(), None).expect("start");
     let holder = Holder::new();
     let attachment = egress
         .attach("seen", holder.pid(), JobNetwork::AllowList, &port(8080, 80))

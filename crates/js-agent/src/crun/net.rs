@@ -63,9 +63,32 @@ pub trait EgressPort: std::fmt::Debug + Send + Sync {
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError>;
+
+    /// Takes over the wiring an earlier process of the agent made for the container `run`,
+    /// for a job that asked for `level` and declared `ports`, as the run's record names it;
+    /// the wiring is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Egress::adopt`]; nothing is taken.
+    fn adopt(
+        &self,
+        run: &str,
+        level: JobNetwork,
+        ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError>;
+
+    /// Removes what an earlier process left and no run took over; called once, after the
+    /// runs are adopted.
+    ///
+    /// # Errors
+    ///
+    /// As [`Egress::settle`].
+    fn settle(&self) -> Result<(), EgressError>;
 }
 
-/// One run's wiring, which [`Wired::release`] takes down.
+/// One run's wiring, which [`Wired::release`] takes down and [`Wired::leave`] leaves to the
+/// next process of the agent.
 pub trait Wired: Send {
     /// Takes the run's wiring down.
     ///
@@ -73,6 +96,10 @@ pub trait Wired: Send {
     ///
     /// As [`Attachment::release`].
     fn release(self: Box<Self>) -> Result<(), EgressError>;
+
+    /// Leaves the run's wiring as it is, for the next process of the agent to take over: the
+    /// run goes on after this process ends.
+    fn leave(self: Box<Self>);
 }
 
 impl EgressPort for Egress {
@@ -94,11 +121,29 @@ impl EgressPort for Egress {
         let attachment = Egress::attach(self, run, pid, level, ports)?;
         Ok(Box::new(attachment))
     }
+
+    fn adopt(
+        &self,
+        run: &str,
+        level: JobNetwork,
+        ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        let attachment = Egress::adopt(self, run, level, ports)?;
+        Ok(Box::new(attachment))
+    }
+
+    fn settle(&self) -> Result<(), EgressError> {
+        Egress::settle(self)
+    }
 }
 
 impl Wired for Attachment {
     fn release(self: Box<Self>) -> Result<(), EgressError> {
         Attachment::release(*self)
+    }
+
+    fn leave(self: Box<Self>) {
+        Attachment::leave(*self);
     }
 }
 
@@ -202,6 +247,28 @@ impl Net {
         Ok(())
     }
 
+    /// Takes over, by `egress`, the wiring an earlier process made for the adopted run's
+    /// container `name`, as the run's record in the egress store names it, for a run whose job
+    /// was wired (the caller asks for no `none` run). A run that ended meanwhile is taken over
+    /// too: its record is released with it.
+    ///
+    /// # Errors
+    ///
+    /// The run has no record that fits it ([`Egress::adopt`]).
+    pub(super) fn adopt(&mut self, egress: &dyn EgressPort, name: &str) -> Result<(), String> {
+        let wired = egress.adopt(name, self.level, &self.ports);
+        self.wired = Some(wired.map_err(|why| why.to_string())?);
+        Ok(())
+    }
+
+    /// Leaves the run's wiring as it is ([`Wired::leave`]): for a run that goes on after
+    /// this process ends.
+    pub(super) fn leave(&mut self) {
+        if let Some(wired) = self.wired.take() {
+            wired.leave();
+        }
+    }
+
     /// Offers the run, adopted from an earlier process, its host ports again, in the
     /// network namespace of `pid` (its container's first process, as `crun state` named it): a
     /// run that cannot be offered them is marked lost ([`Net::lost`]), `crun state` failing
@@ -283,6 +350,51 @@ pub(super) fn recorded_host_ports(
             label::HOST_PORTS
         )
     })
+}
+
+/// The labels that record the network of a run admitted at `level` with the declared
+/// `ports`, so a restarted agent takes its wiring over: [`label::NETWORK`] always, and
+/// [`label::NETWORK_PORTS`] when it declared ports.
+pub(super) fn network_labels(level: JobNetwork, ports: &[PortMap]) -> Vec<(String, String)> {
+    let mut labels = vec![(label::NETWORK.to_owned(), level.name().to_owned())];
+    if !ports.is_empty() {
+        let each: Vec<String> = ports
+            .iter()
+            .map(|port| format!("{}:{}", port.host, port.container))
+            .collect();
+        labels.push((label::NETWORK_PORTS.to_owned(), each.join(",")));
+    }
+    labels
+}
+
+/// The network the labels [`label::NETWORK`] and [`label::NETWORK_PORTS`] of `labels` record:
+/// none without the first (a run an agent that did not record it started).
+///
+/// # Errors
+///
+/// A label is there and is not what [`network_labels`] writes.
+pub(super) fn recorded_network(
+    labels: &BTreeMap<String, String>,
+) -> Result<Option<(JobNetwork, Vec<PortMap>)>, String> {
+    let Some(level) = labels.get(label::NETWORK) else {
+        return Ok(None);
+    };
+    let unreadable = |key: &str| format!("the label {key} is not what the agent writes");
+    let level: JobNetwork = level.parse().map_err(|_| unreadable(label::NETWORK))?;
+    let Some(text) = labels.get(label::NETWORK_PORTS) else {
+        return Ok(Some((level, Vec::new())));
+    };
+    let number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
+    let port = |entry: &str| {
+        let (host, container) = entry.split_once(':')?;
+        Some(PortMap {
+            host: number(host)?,
+            container: number(container)?,
+        })
+    };
+    let ports: Option<Vec<PortMap>> = text.split(',').map(port).collect();
+    let ports = ports.ok_or_else(|| unreadable(label::NETWORK_PORTS))?;
+    Ok(Some((level, ports)))
 }
 
 /// The port a run admitted at `level` is wired through: none for a `none` run, `egress` for a
@@ -406,7 +518,8 @@ fn answered(why: &str) -> bool {
 /// Takes the wiring of the container `name` down, once: it is taken out of `wired`, so a
 /// second call does nothing. A failure is logged and does not stop the caller (a removal
 /// goes on, an end is still read): the job end of the pair goes with the container's
-/// namespace, and what is left on the host is removed by the next start of the egress.
+/// namespace, and what is left on the host is removed by `Egress::settle` of the next process,
+/// once its runs are adopted.
 pub(super) fn release(name: &str, wired: &mut Option<Box<dyn Wired>>) {
     if let Some(wired) = wired.take()
         && let Err(why) = wired.release()
