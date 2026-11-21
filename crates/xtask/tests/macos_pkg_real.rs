@@ -32,7 +32,7 @@ fn staged(name: &str) -> (TestDir, StageArgs) {
     for program in ["js-agent", "js-mac-session", "js-mac-provision"] {
         std::fs::write(bin.join(program), format!("#!/bin/sh\n# {program}\n")).unwrap();
     }
-    for file in ["LICENSE", "agent.plist", "session.plist"] {
+    for file in ["LICENSE", "agent.plist", "session.plist", "pf-pool.plist"] {
         std::fs::write(at.join(file), format!("{file}\n")).unwrap();
     }
     let path = |leaf: &str| at.join(leaf).to_str().unwrap().to_owned();
@@ -48,6 +48,8 @@ fn staged(name: &str) -> (TestDir, StageArgs) {
         &path("agent.plist"),
         "--session-plist",
         &path("session.plist"),
+        "--pf-pool-plist",
+        &path("pf-pool.plist"),
         "--out",
         &path("out"),
     ])
