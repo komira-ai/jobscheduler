@@ -18,16 +18,22 @@
 //!
 //! # Persistence
 //!
-//! The marks are held in memory only. A restart forgets them: a host that was draining is a
+//! The marks are held in memory. A server with a job store keeps each mark in the row
+//! `hostmark/<host>` as well, written by whoever marks, and the registry's marks are the
+//! cache of those rows: each tick sets them from the rows ([`Registry::mirror_marks`]), so a
+//! mark put through another server is seen here, and one the rows no longer hold is let go.
+//! A server without a job store loses its marks over a restart: a host that was draining is a
 //! plain idle host again, and the scaler that owns the decision drains it again. A host
 //! whose release was already under way is the exception that cannot wait for the scaler's
 //! next step: the scaler's own records say which hosts those are, and it marks them with
 //! [`Registry::mark_ending`] before any hello is admitted, so such a host that says hello
 //! again is admitted already `Releasing`.
 //!
-//! So after a restart a host the scaler had retired ([`Registry::retire`]) is bookable again
+//! So after a restart of a server without the store a host the scaler had retired ([`Registry::retire`]) is bookable again
 //! until the scaler's next tick retires it again: a job may be placed on it in that gap,
 //! bounded by one tick plus the margin of the cloud lifetime.
+
+use std::collections::BTreeMap;
 
 use js_types::HostId;
 
@@ -191,15 +197,36 @@ impl Registry {
     /// marked. For a caller that has decided the machine is being given back and must not
     /// take work, however the registry came to hold it: a scaler that restarts with a
     /// release in flight calls this for every such machine before the server admits a
-    /// hello, because the marks are held in memory and a host whose release was under way
-    /// would otherwise say hello again unmarked and be given work before its machine is
-    /// gone. Work the host already has is not cut; the mark only stops new work.
+    /// hello, because the marks are the cache of the `hostmark/<host>` rows when the server
+    /// has a job store (set from them at a tick, after that hello) and memory only without
+    /// one, so a host whose release was under way would otherwise say hello again unmarked
+    /// and be given work before its machine is gone. Work the host already has is not cut; the mark only stops new work.
     /// Marking a releasing host again changes nothing. [`Registry::remove`] ends it.
     pub fn mark_ending(&self, host: &HostId) {
         let mut guard = self.lock();
         guard.ending.insert(host.clone());
         if let Some(record) = guard.records.get_mut(host) {
             record.leaving = Some(Leaving::Releasing);
+        }
+    }
+}
+
+impl Registry {
+    /// Sets the marks of the held hosts from `marks`, the job store's `hostmark` rows by host,
+    /// which are the marks' record when the server holds a job store: a host named
+    /// [`HostMark::Draining`] or [`HostMark::Releasing`] gets that mark, and a held host the
+    /// map does not name loses its mark. A host the registry does not hold is ignored, and so
+    /// is any other [`HostMark`] in the map (the host is left unmarked). The hosts
+    /// [`Registry::mark_ending`] marked ahead of their first hello stay marked for it. Called
+    /// at each tick, so a mark put or lifted through another server is seen by this registry.
+    pub fn mirror_marks(&self, marks: &BTreeMap<HostId, HostMark>) {
+        let mut guard = self.lock();
+        for (host, record) in &mut guard.records {
+            record.leaving = match marks.get(host) {
+                Some(HostMark::Draining) => Some(Leaving::Draining),
+                Some(HostMark::Releasing) => Some(Leaving::Releasing),
+                Some(HostMark::Reserved | HostMark::Held) | None => None,
+            };
         }
     }
 }
