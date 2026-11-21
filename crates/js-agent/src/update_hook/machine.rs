@@ -341,8 +341,8 @@ fn read_flags(flags_file: &Path, machine: &Machine<'_>) -> Result<Cli, String> {
 }
 
 /// Whether the flags set an egress ceiling above `none` (`--egress allow-list` or `open`): an
-/// agent started with one removes, at its start, every run of an earlier process that may still
-/// run (their network wiring cannot be taken over), so an update cannot hand them over.
+/// agent started with one wires each run's network, so an update hands the runs over only
+/// between agents that both list `egress-handover` (see `prepare`).
 #[cfg(target_os = "linux")]
 fn egress_of(cli: &Cli) -> bool {
     egress_set(cli.os.egress.as_deref())
@@ -355,8 +355,8 @@ fn egress_set(mode: Option<&str>) -> bool {
     mode.is_some_and(|mode| mode != "none")
 }
 
-/// Off Linux there is no `--egress`: the macOS build's network ceiling keeps no wiring that a
-/// start removes.
+/// Off Linux there is no `--egress`: the macOS build's network ceiling keeps no wiring that
+/// needs an agent to keep it.
 #[cfg(not(target_os = "linux"))]
 fn egress_of(_cli: &Cli) -> bool {
     false
@@ -584,7 +584,7 @@ pub fn run_step(invocation: &Invocation, params: &Params, machine: &Machine<'_>)
     let flags = read_flags(&params.flags_file, machine);
     let host_identity = flags.as_ref().ok().and_then(identity_of);
     // A flags file that cannot be read says nothing of the egress: it counts as one, and the
-    // update drains as before.
+    // update hands over only between agents that both keep egress wiring.
     let egress = flags.as_ref().map_or(true, egress_of);
     let connect =
         flags.and_then(|cli| connect_from(cli, &params.state_root, &params.token_file, machine));
@@ -857,13 +857,13 @@ mod tests {
         assert_eq!(root.owed().unwrap(), Vec::<String>::new());
     }
 
-    /// Asserts which `--egress` values of the flags file keep an update from handing the runs
-    /// over: `allow-list`, `open` and anything else but `none`; not the flag left out, nor
-    /// `none`. It catches an agent with a ceiling asked to hand over, whose next process would
-    /// remove the runs it was to adopt.
+    /// Asserts which `--egress` values of the flags file need the stricter agents of an update
+    /// that hands the runs over: `allow-list`, `open` and anything else but `none`; not the flag
+    /// left out, nor `none`. Catches a host with egress wiring handed over between agents that do
+    /// not both keep it, and one without any asked for them.
     #[cfg(target_os = "linux")]
     #[test]
-    fn every_egress_but_none_keeps_an_update_from_handing_over() {
+    fn every_egress_but_none_asks_the_agents_to_keep_egress_wiring() {
         use super::egress_set;
         assert!(!egress_set(None));
         assert!(!egress_set(Some("none")));

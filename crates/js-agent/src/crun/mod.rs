@@ -135,9 +135,12 @@
 //! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
 //! firewall ([`EgressPort`]) before every wired create and wires a job that asked for a network
 //! after `Oci::start_supervised` (its init holds it until the route), with a forward from the host
-//! for each port it declared, releasing it when the run ends or goes. A runtime with such an
-//! egress adopts no run that may still run: the egress removes the wiring of a previous process
-//! when it starts, so such a lease an earlier agent left is removed. A run that ended while no
+//! for each port it declared, releasing it when the run ends or goes. The wiring is the kernel's
+//! and outlives the process: a runtime that is dropped leaves the wiring of every run it still
+//! holds as it is ([`Wired::leave`]), as it leaves the runs, and the next process's runtime
+//! takes over the wiring of each run it adopts from the run's record in the egress store
+//! (the directory `egress` of the state root; [`EgressPort::adopt`], see the module `adopt`)
+//! and has the egress remove the rest, records included ([`EgressPort::settle`]). A run that ended while no
 //! agent ran has no network left, and is taken over so that its result is reported.
 //!
 //! A run's host ports ([`RunSpec::host_ports`], allowed by [`CrunSettings::host_ports`]) are
@@ -207,6 +210,8 @@ mod ledger;
 mod ledger_tests;
 mod make;
 mod net;
+#[cfg(test)]
+mod net_tests;
 mod pull;
 mod remove;
 mod rootfs;
@@ -318,7 +323,8 @@ struct Run {
     marks: make::Marks,
 }
 
-/// A container runtime over `crun`.
+/// A container runtime over `crun`. Dropping it leaves its runs as they are, their network
+/// wiring included, for the next process of the agent to adopt.
 pub struct CrunRuntime {
     oci: Arc<Oci>,
     /// The image store as the pulls and the leases use it, within the image budget.
@@ -362,6 +368,17 @@ impl std::fmt::Debug for CrunRuntime {
             .field("host_id", &self.host_id)
             .field("containers", &self.runs.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CrunRuntime {
+    fn drop(&mut self) {
+        // The runs outlive the runtime (their supervisors and containers are not this
+        // process's), and so does their wiring: an `Attachment` dropped would take it down
+        // and cut a run the next process adopts.
+        for run in self.runs.values_mut() {
+            run.net.leave();
+        }
     }
 }
 

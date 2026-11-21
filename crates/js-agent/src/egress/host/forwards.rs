@@ -18,18 +18,8 @@ pub(super) fn add(inner: &Inner, index: u32, ports: &[PortMap]) -> Result<Vec<u1
         return Ok(Vec::new());
     }
     let (sys, config) = (&*inner.sys, &inner.config);
-    let (_, job) = config.pool().block(index).ok_or(EgressError::Exhausted)?;
     let iface = format!("{IF_PREFIX}{index}");
-    let mut wanted: Vec<Forward> = ports
-        .iter()
-        .map(|port| Forward {
-            host: port.host,
-            job,
-            container: port.container,
-            iface: iface.clone(),
-        })
-        .collect();
-    wanted.sort();
+    let wanted = self::wanted(config, index, ports)?;
     let hosts: Vec<u16> = wanted.iter().map(|forward| forward.host).collect();
     // Held from the look at the ports in use to their record (or the removal of what was
     // loaded): no other run takes one of them meanwhile.
@@ -66,6 +56,31 @@ pub(super) fn add(inner: &Inner, index: u32, ports: &[PortMap]) -> Result<Vec<u1
     }
     held.extend(wanted.into_iter().map(|forward| (forward.host, forward)));
     Ok(hosts)
+}
+
+/// The forwards of `ports` to the job of block `index`, sorted, as [`add`] loads them.
+///
+/// # Errors
+///
+/// [`EgressError::Exhausted`] for a block outside the pool.
+pub(super) fn wanted(
+    config: &Config,
+    index: u32,
+    ports: &[PortMap],
+) -> Result<Vec<Forward>, EgressError> {
+    let (_, job) = config.pool().block(index).ok_or(EgressError::Exhausted)?;
+    let iface = format!("{IF_PREFIX}{index}");
+    let mut wanted: Vec<Forward> = ports
+        .iter()
+        .map(|port| Forward {
+            host: port.host,
+            job,
+            container: port.container,
+            iface: iface.clone(),
+        })
+        .collect();
+    wanted.sort();
+    Ok(wanted)
 }
 
 /// Removes the forwards of the host ports `hosts` (a released run's): their rules, and their

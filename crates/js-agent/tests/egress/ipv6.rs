@@ -84,7 +84,7 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
             JobNetwork::Open,
         ),
     ] {
-        let egress = Egress::start(config).expect("start");
+        let egress = Egress::start(config, None).expect("start");
         let holder = Holder::new();
         let attachment = egress
             .attach("v6", holder.pid(), level, &[])

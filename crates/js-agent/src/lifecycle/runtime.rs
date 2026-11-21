@@ -63,6 +63,14 @@ pub mod label {
     /// separated in the start's order, so a restarted agent offers them again; absent on a
     /// run with none and on a container an earlier agent made.
     pub const HOST_PORTS: &str = "jobscheduler.dev/host-ports";
+    /// The network level a `crun` run was admitted at (`none`, `allow-list` or `open`;
+    /// `none` for a run on the host's network), so a restarted agent takes over the wiring of
+    /// a wired run; absent on a container an earlier agent made.
+    pub const NETWORK: &str = "jobscheduler.dev/network";
+    /// The ports a wired `crun` run declared, each `HOST:CONTAINER`, comma separated in the
+    /// start's order, so a restarted agent takes over their forwards; absent on a run with
+    /// none.
+    pub const NETWORK_PORTS: &str = "jobscheduler.dev/network-ports";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
