@@ -228,7 +228,11 @@ to the host, not to a release.
 Not made by the hook:
 
 - the pool's users, which `js-mac-session` makes in the uid range of its plist (600-699) when it starts;
-- for `--native-network on`, the pool's pf anchor (`js-mac-provision install`), which nothing installs yet.
+- for `--native-network on`, the pool's pf anchor, which the package's daemon `js-agent.pf-pool` loads at boot and
+  every 30 seconds (`js-mac-provision install --flags-file /etc/js-agent/flags`).
+
+What a restart or a macOS update of a Mac needs, and how to check a Mac after one, is
+[docs/runbooks/mac-restart-and-update.md](../runbooks/mac-restart-and-update.md).
 
 Once, for the repository of packages: the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
 write access to the prefix `pkg/jobscheduler/`.
