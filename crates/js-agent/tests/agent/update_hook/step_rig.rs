@@ -34,6 +34,8 @@ pub const UNIT: &str = "js-agent-crun.service";
 pub const MAC_UNIT: &str = "js-agent";
 /// The launchd label of the agent's root helper on a Mac.
 pub const MAC_HELPER: &str = "js-agent.session";
+/// The launchd label of the job that keeps the pool's pf anchor loaded on a Mac.
+pub const MAC_PF: &str = "js-agent.pf-pool";
 pub const HOST: &str = "burst-1";
 pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
@@ -141,28 +143,79 @@ impl Rig {
     /// The same update on a Mac: the launchd label for the unit, the params naming the
     /// `native` runtime, and an agent whose hello says `sandbox-exec`.
     pub fn mac(name: &str) -> Rig {
-        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), false)
+        Rig::build_for(
+            name,
+            true,
+            LEASE_SECS,
+            MAX_SECS,
+            Some(MAC_UNIT),
+            false,
+            false,
+        )
     }
 
     /// The same update on a Mac whose package carries a root helper job: the releases are
     /// native package trees (`tree/`), each with the plists of the agent and of the helper, and
     /// the params name the helper.
     pub fn mac_with_helper(name: &str) -> Rig {
-        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true)
+        Rig::build_for(
+            name,
+            true,
+            LEASE_SECS,
+            MAX_SECS,
+            Some(MAC_UNIT),
+            true,
+            false,
+        )
+    }
+
+    /// The same update on a Mac whose package carries the helper and the job that keeps the pool's
+    /// pf anchor loaded, as the macOS package does: the params name both.
+    pub fn mac_with_helper_and_pf(name: &str) -> Rig {
+        Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true, true)
     }
 
     /// The first install on a Mac whose package carries a helper job.
     pub fn mac_first_install_with_helper(name: &str) -> Rig {
-        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true)
+        Rig::build_for(
+            name,
+            false,
+            LEASE_SECS,
+            MAX_SECS,
+            Some(MAC_UNIT),
+            true,
+            false,
+        )
+    }
+
+    /// The first install on a Mac whose package carries the helper and the pf job.
+    pub fn mac_first_install_with_helper_and_pf(name: &str) -> Rig {
+        Rig::build_for(
+            name,
+            false,
+            LEASE_SECS,
+            MAX_SECS,
+            Some(MAC_UNIT),
+            true,
+            true,
+        )
     }
 
     /// The first install on a Mac.
     pub fn mac_first_install(name: &str) -> Rig {
-        Rig::build_for(name, false, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), false)
+        Rig::build_for(
+            name,
+            false,
+            LEASE_SECS,
+            MAX_SECS,
+            Some(MAC_UNIT),
+            false,
+            false,
+        )
     }
 
     fn build(name: &str, previous: bool, lease_secs: u64, max_secs: u64) -> Rig {
-        Rig::build_for(name, previous, lease_secs, max_secs, None, false)
+        Rig::build_for(name, previous, lease_secs, max_secs, None, false, false)
     }
 
     fn build_for(
@@ -172,6 +225,7 @@ impl Rig {
         max_secs: u64,
         mac: Option<&str>,
         helper: bool,
+        pf: bool,
     ) -> Rig {
         let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let root = tmp.path().to_owned();
@@ -184,11 +238,16 @@ impl Rig {
         let unit = mac.unwrap_or(UNIT);
         let text = if mac.is_some() { PLIST_TEXT } else { UNIT_TEXT };
         for release in [&staged, &old] {
-            if helper {
+            if helper || pf {
                 let jobs = release.join("tree/Library/LaunchDaemons");
                 fs::create_dir_all(&jobs).unwrap();
                 fs::write(jobs.join(manager.file_name(unit)), text).unwrap();
-                fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
+                if helper {
+                    fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
+                }
+                if pf {
+                    fs::write(jobs.join(manager.file_name(MAC_PF)), text).unwrap();
+                }
             } else {
                 fs::create_dir_all(release.join("bin")).unwrap();
                 fs::create_dir_all(release.join("units")).unwrap();
@@ -202,11 +261,14 @@ impl Rig {
         let runtime = if mac.is_some() { "native" } else { "crun" };
         let token = root.join("token");
         fs::write(&token, "tok-0123456789\n").unwrap();
-        let helper_line = if helper {
+        let mut helper_line = if helper {
             format!("helper_unit = \"{MAC_HELPER}\"\n")
         } else {
             String::new()
         };
+        if pf {
+            helper_line.push_str(&format!("pf_unit = \"{MAC_PF}\"\n"));
+        }
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -689,10 +751,10 @@ impl Units for Spy<'_> {
 
     fn stop_no_block(&self, unit: &str) -> Result<(), PortError> {
         self.act(format!("units.stop({unit})"));
-        self.port_check(if unit == MAC_HELPER {
-            "stop-helper"
-        } else {
-            "stop"
+        self.port_check(match unit {
+            MAC_HELPER => "stop-helper",
+            MAC_PF => "stop-pf",
+            _ => "stop",
         })?;
         match *self.stop_leaves.borrow() {
             Some((active, sub)) => {
@@ -824,14 +886,28 @@ impl CommandRunner for Spy<'_> {
             return answer;
         }
         if program == LAUNCHCTL {
-            // Only the helper's bootstrap is run through the runner: the plist is the file the
-            // release carries, and the job is loaded (not yet running) when it is bootstrapped.
+            // Only the bootstraps of the helper and the pf job are run through the runner: the
+            // plist is the file the release carries, and the job is loaded (not yet running) when
+            // it is bootstrapped.
             let plist = args.last().copied().unwrap_or("");
             self.act(format!("launchctl.bootstrap({plist})"));
-            if self.fail.borrow().contains("bootstrap") {
-                return Err("bootstrap is down".to_owned());
+            let call = if plist.ends_with(&format!("/{MAC_PF}.plist")) {
+                "bootstrap-pf"
+            } else {
+                "bootstrap"
+            };
+            if self.fail.borrow().contains(call) {
+                return Err(format!("{call} is down"));
             }
             return Ok(String::new());
+        }
+        if program.ends_with("/bin/js-mac-provision") {
+            // The staged release's `js-mac-provision`, which loads the pool's pf anchor.
+            self.act(format!("pf.{} {}", args.join(" "), program));
+            if self.fail.borrow().contains("pf-install") {
+                return Err("pf-install is down".to_owned());
+            }
+            return Ok("installed com.apple/com.komira.js.pool for uids 600-699\n".to_owned());
         }
         if program == SYSTEMCTL {
             return self

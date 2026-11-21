@@ -36,7 +36,10 @@
 //!    this is the mark that the start is next, and for a first install the commit); then, with a
 //!    `helper_unit` in the params (a Mac package's root helper, see `helper`) and the start not
 //!    issued yet, the helper is booted out and bootstrapped from the staged release's tree and
-//!    started; then the record gets `start_issued`, and the unit is started and waited for. A start that fails is the
+//!    started, and then, with a `pf_unit` (the job that keeps the pool's pf anchor loaded, see
+//!    `pf`), that job is booted out, the anchor of the host's flags file is loaded by the staged
+//!    release's `js-mac-provision`, and the job is bootstrapped from the staged release's tree;
+//!    then the record gets `start_issued`, and the unit is started and waited for. A start that fails is the
 //!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
 //!    at any look); a unit still waiting in `start` is not.
 //!
@@ -59,9 +62,9 @@ use crate::update_hook::{
     Params, Reason, Record, Report, START_WAIT_SECS, SYSTEMCTL, UnitState,
 };
 
-use super::helper;
 use super::prepare::{ask_secs, busy_detail, idle, owed, place, refuse_host, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
+use super::{helper, pf};
 
 /// Runs `cutover`.
 pub fn cutover(env: &Env<'_>, params: &Params) -> Done {
@@ -146,11 +149,13 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         }
     }
     mark_link_moved(env, held, record)?;
-    // The helper starts before the agent, which dials it; a rerun that finds the start issued
-    // has done this already.
+    // The helper starts before the agent, which dials it, and the pf anchor is loaded before the
+    // agent, which checks it at its start; a rerun that finds the start issued has done this
+    // already.
     if !record.start_issued {
         let staged = record.update.staged.clone();
         helper::replace(env, held, record, params, &staged)?;
+        pf::replace(env, params, &staged)?;
     }
     start(env, held, record, params)?;
     Ok(success())

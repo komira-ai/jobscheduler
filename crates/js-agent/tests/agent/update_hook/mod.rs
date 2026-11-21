@@ -53,6 +53,7 @@ mod steps_host_setup;
 mod steps_host_setup_verb;
 mod steps_host_setup_volume;
 mod steps_owed_checks;
+mod steps_pf;
 mod steps_prepare;
 mod steps_prepare_cordon;
 mod steps_prepare_first_dirs;
