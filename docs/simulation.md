@@ -117,22 +117,27 @@ length; the kernel itself is described in the crate doc of `js-sim`, and
 
 ## Run one
 
-CI runs every test binary of the cell on each pull request, in the `test` job
-(`cargo test --workspace --locked --no-fail-fast`) and again under coverage, every store
-scenario over SQLite. The Postgres cases are built only with the crate's `postgres`
+CI runs every test binary of the cell on each pull request, under coverage in the
+`coverage-shard` jobs, every store scenario over SQLite. The `test` job
+(`cargo test --workspace --locked --no-fail-fast`) leaves out the four longest binaries
+(`faults`, `smoke`, `replay` and `whole_host_prepare`), which
+`required-features = ["slow-families"]` in the crate's `Cargo.toml` gates; the runs that start
+after a merge to main (the release's `unit-tests`, and the beta stage) and the coverage jobs
+build them with `--features js-sim-cell/slow-families`, so a red result there fails the
+release run and `release-red` reports it. The Postgres cases are built only with the crate's `postgres`
 feature, and the `state-postgres` job runs them against its Postgres service
 (`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);
 they need the server `KBF_TEST_POSTGRES_URL` names and fail, never skip, without it. Where
 you build, one family runs with:
 
 ```sh
-cargo test -p js-sim-cell --test smoke
+cargo test -p js-sim-cell --features slow-families --test smoke
 ```
 
 and one scenario of it by its test name:
 
 ```sh
-cargo test -p js-sim-cell --test smoke -- a_partition_of_ten_agents_that_heals_settles_every_run --exact
+cargo test -p js-sim-cell --features slow-families --test smoke -- a_partition_of_ten_agents_that_heals_settles_every_run --exact
 ```
 
 A run is a function of (scenario, seed). A scenario runs seeds `0..n` in order
@@ -635,7 +640,7 @@ hash and print the command
 that regenerates the lines:
 
 ```sh
-cargo test -p js-sim-cell --test replay -- --ignored regenerate_golden_hashes
+cargo test -p js-sim-cell --features slow-families --test replay -- --ignored regenerate_golden_hashes
 ```
 
 It rewrites the lines of every family and leaves the rest of the file alone. Regenerate
