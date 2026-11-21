@@ -363,6 +363,68 @@ fn an_allocation_freed_on_silence_is_flagged() {
     assert_eq!(flagged(&ran).len(), 1);
 }
 
+/// Asserts that an allocation freed refused, or read freed with no end because a new placement
+/// took its row, of which no container was launched, after its host refused a start of the job
+/// because it is held (`host-held`) once the allocation was committed (the requeue frees it at
+/// once) is not flagged as `FreedOnlyWhenConfirmed`; and that it is, while the server lists the
+/// host, when the host refused nothing, made a result that is no held refusal, refused before
+/// the allocation was committed or only after the free was read, refused on another host, or
+/// launched a container of the placement, and when the allocation ended another way. Catches a
+/// server that frees a refused job's allocation before its host said anything, and a check that
+/// takes any refused end, any result, or an earlier placement's refusal for the host's word.
+#[test]
+fn an_allocation_freed_on_the_hosts_own_refusal_is_not_flagged() {
+    let flagged = |o: &Observations| of(Invariant::FreedOnlyWhenConfirmed, o);
+    let freed = |reason| {
+        let mut row = row(0, 1, 0, AllocationStep::Freed);
+        row.end_reason = reason;
+        Observations::quiet()
+            .at(ms(6_000))
+            .with_lost(host(0), false)
+            .with_allocation_read(row, ms(5_000))
+    };
+    let refused = || freed(Some(EndReason::Refused));
+    clear(flagged(&refused().with_held_refusal(
+        host(0),
+        job(0),
+        ms(3_000),
+    )));
+    clear(flagged(&refused().with_held_refusal(
+        host(0),
+        job(0),
+        ms(5_000),
+    )));
+    clear(flagged(&freed(None).with_held_refusal(
+        host(0),
+        job(0),
+        ms(100),
+    )));
+    let other = refused().with_result_made(host(0), job(0), ms(3_000));
+    assert_eq!(flagged(&other).len(), 1, "a result that is no held refusal");
+    let earlier = refused().with_held_refusal(host(0), job(0), ms(50));
+    assert_eq!(
+        flagged(&earlier).len(),
+        1,
+        "a result made before the placement"
+    );
+    assert_eq!(flagged(&refused()).len(), 1, "no result made");
+    let late = refused().with_held_refusal(host(0), job(0), ms(5_500));
+    assert_eq!(flagged(&late).len(), 1, "a result made after the free");
+    let elsewhere = refused().with_held_refusal(host(1), job(0), ms(3_000));
+    assert_eq!(
+        flagged(&elsewhere).len(),
+        1,
+        "a result made on another host"
+    );
+    let launched = format!("sim-job-0/{}", allocation(1));
+    let ran = refused()
+        .with_held_refusal(host(0), job(0), ms(3_000))
+        .with_launch(RunId::new(launched), host(0), ms(150));
+    assert_eq!(flagged(&ran).len(), 1, "a container of the placement ran");
+    let exited = freed(Some(EndReason::Exited)).with_held_refusal(host(0), job(0), ms(3_000));
+    assert_eq!(flagged(&exited).len(), 1, "an end that is no refusal");
+}
+
 /// Asserts that a start an agent read is flagged as `NoStartWithoutAllocation` when the
 /// tables read after it hold no allocation of that id, or hold it for another host or
 /// another job, or committed after the start was read; that it is not flagged when the
@@ -451,6 +513,56 @@ fn a_result_accepted_twice_is_flagged() {
         .with_job_reply(first)
         .with_job_reply(again);
     none(&step_all(&once));
+}
+
+/// Asserts that a start host 0 refused because it is held (`host-held`, launching nothing of
+/// the job), whose result was accepted, after which the job was sent a start under another
+/// allocation, on host 1, whose result was accepted too, is not flagged as
+/// `ResultKeptUntilAcknowledged`: the server sent the job back to the queue on the refusal.
+/// And that the two are flagged when host 0's result was no held refusal (another code), when
+/// host 0 had launched the job by its verdict, and when every start named one allocation.
+/// Catches a check that flags a held host's requeue, and one that lets a job's result be
+/// stored twice because a second host or another refusal was involved.
+#[test]
+fn a_refused_start_accepted_before_the_job_went_to_another_allocation_is_not_its_result() {
+    let start = |h: u64, at: u64, a: u8| {
+        let mut sent = reply(h, at, at - 10, &[]);
+        sent.starts.push(JobStartSeen {
+            job: job(0),
+            allocation: allocation(a),
+            refused: false,
+        });
+        sent
+    };
+    let accepted = |h: u64, at: u64| {
+        let mut answer = reply(h, at, at - 10, &[]);
+        answer.acks.push((job(0), Verdict::Accepted));
+        answer
+    };
+    let moved = |second: u8| {
+        Observations::quiet()
+            .at(ms(500))
+            .with_job_reply(start(0, 100, 1))
+            .with_held_refusal(host(0), job(0), ms(200))
+            .with_job_reply(accepted(0, 300))
+            .with_job_reply(start(1, 350, second))
+            .with_job_reply(accepted(1, 400))
+    };
+    let flagged = |o: &Observations| of(Invariant::ResultKeptUntilAcknowledged, o);
+    clear(flagged(&moved(2)));
+    let twice = "result-kept-until-acknowledged at 500: the result of job sim-job-0 was accepted twice: on host host-0 at 300 and on host host-1 at 400";
+    assert_eq!(flagged(&moved(1)), [twice], "one allocation");
+    let launched = format!("sim-job-0/{}", allocation(1));
+    let ran = moved(2).with_launch(RunId::new(launched), host(0), ms(150));
+    assert_eq!(flagged(&ran), [twice], "host 0 ran the job");
+    let other_code = Observations::quiet()
+        .at(ms(500))
+        .with_job_reply(start(0, 100, 1))
+        .with_result_made(host(0), job(0), ms(200))
+        .with_job_reply(accepted(0, 300))
+        .with_job_reply(start(1, 350, 2))
+        .with_job_reply(accepted(1, 400));
+    assert_eq!(flagged(&other_code), [twice], "a refusal of another code");
 }
 
 /// Asserts that a job's resources count in its host's capacity beside its runs: a run and a

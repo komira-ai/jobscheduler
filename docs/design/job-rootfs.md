@@ -959,10 +959,12 @@ moment the program runs. `times.started_at_ms - times.placed_at_ms` is how long 
 ### 7.2 What a client can rely on
 
 1. **States move forward**: from `QUEUED` to `PLACED` by the placement's commit, then along `STARTING` and `RUNNING`
-   (the server's `may_move`, `crates/js-jobs/src/record.rs`), then one end, which never changes. The one way back, an
-   operation of the store's own outside `may_move` (`requeue_failed_prepare`, `crates/js-jobs/src/store.rs`): a
-   whole-host job whose host's prepare failed returns from `PLACED` to `QUEUED`, its `host_id` cleared, with an event
-   `REQUEUED` naming the host it left; it may then be placed on another host.
+   (the server's `may_move`, `crates/js-jobs/src/record.rs`), then one end, which never changes. The two ways back
+   are operations of the store's own outside `may_move`: a whole-host job whose host's prepare failed returns from
+   `PLACED` to `QUEUED` (`requeue_failed_prepare` and `fail_prepare_with`, `crates/js-jobs/src/store.rs` and
+   `store/whole.rs`), and a job whose start a host held for maintenance refused returns from `PLACED` or `STARTING` to
+   `QUEUED` (`requeue_held`, `crates/js-jobs/src/store/held.rs`). Either way its `host_id` is cleared and an event
+   `REQUEUED` names the host it left; it may then be placed on another host.
 2. **A read may miss a state.** Every state the job passes is recorded, one commit each, but a read sees only the
    state of its moment: a job may go from `PLACED` to `RUNNING`, or to an end, between two reads, and from `QUEUED` to
    an end without being placed (no capacity, a cancel). A client acts on the first read that shows a state at or past
@@ -1331,7 +1333,7 @@ Each is decided here; the owner may overturn any.
 - **LR12. The job's lifecycle is a documented guarantee any client may rely on; no new state or watch for "creating".**
   `PLACED` with a host and `STARTING` are the moments a client can use, and `JobTimes` already gives the time spent
   preparing. Section 7 states, as rules a client can rely on, what the existing states promise: forward only (with the
-  whole-host requeue as the one way back), a read may miss a state, the host is known from `PLACED`, inputs are first
+  whole-host requeue and the requeue after a held host's refusal as the ways back), a read may miss a state, the host is known from `PLACED`, inputs are first
   touched on that host while creating.
 - **LR13. The tree wire is retired additively; only the never-reported capability key is removed** (section 6).
 - **LR14. `input-unavailable` is a public start failure code of its own; a refused allow-list is not.** The first is

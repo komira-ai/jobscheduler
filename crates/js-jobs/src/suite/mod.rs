@@ -33,6 +33,7 @@ mod dispatch;
 mod duties;
 mod failures;
 mod guarded;
+mod held;
 mod host_rows;
 mod hosts;
 mod idempotency;
@@ -65,6 +66,7 @@ pub use dispatch::*;
 pub use duties::*;
 pub use failures::*;
 pub use guarded::*;
+pub use held::*;
 pub use host_rows::*;
 pub use hosts::*;
 pub use idempotency::*;
@@ -236,6 +238,9 @@ where
     a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(backend);
     a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit(backend);
     a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
+    a_held_refusal_requeues_the_job_without_counting_a_failure(backend);
+    a_held_refusal_refuses_what_it_cannot_requeue(backend);
+    a_held_refusal_loses_to_a_change_of_either_row(backend);
     the_last_failed_prepare_ends_the_job_failed_to_start(backend);
     a_failed_prepare_refuses_what_the_requeue_refuses(backend);
     a_failed_prepare_loses_to_a_change_of_either_row(backend);
@@ -428,6 +433,9 @@ macro_rules! job_store_tests {
             a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark,
             a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit,
             a_failed_prepare_requeues_the_job_with_its_count_and_bars,
+            a_held_refusal_requeues_the_job_without_counting_a_failure,
+            a_held_refusal_refuses_what_it_cannot_requeue,
+            a_held_refusal_loses_to_a_change_of_either_row,
             the_last_failed_prepare_ends_the_job_failed_to_start,
             a_failed_prepare_refuses_what_the_requeue_refuses,
             a_failed_prepare_loses_to_a_change_of_either_row,

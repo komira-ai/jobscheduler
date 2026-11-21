@@ -346,8 +346,9 @@ impl JobState {
 
 /// Whether a job may move from `from` to `to`: [`crate::JobStore::transition`] makes the
 /// moves to a state that has not ended, [`crate::JobStore::end_job`] the moves to an end.
-/// Placement (queued to placed) and the requeue after a failed whole-host prepare (placed to
-/// queued) have operations of their own and are not moves here.
+/// Placement (queued to placed), the requeue after a failed whole-host prepare (placed to
+/// queued) and the requeue after a start a held host refused (placed or starting to queued)
+/// have operations of their own and are not moves here.
 pub(crate) fn may_move(from: JobState, to: JobState) -> bool {
     use JobState::{Cancelled, FailedToStart, Lost, Placed, Queued, Running, Starting};
     use StartFailure::{
@@ -415,10 +416,15 @@ pub struct JobRecord {
     /// [`crate::JobStore::fail_prepare_with`], and kept when the job goes back to queued, so
     /// the count survives a restart. `0` on a row that never had one.
     pub failed_prepares: u32,
-    /// The hosts the job's failed prepares keep it off, each with until when: written with the
-    /// count by [`crate::JobStore::fail_prepare_with`], and kept while the job is queued, so the
-    /// bars survive the deletion of its mark. Empty on a row that never had any.
+    /// The hosts the job is kept off, each with until when: those its failed prepares bar,
+    /// written with the count by [`crate::JobStore::fail_prepare_with`], and those that refused
+    /// its start as held, written by [`crate::JobStore::requeue_held`]. Kept while the job is
+    /// queued, so the bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
+    /// The host of each start of the job that a held host refused (the agent's code
+    /// `host-held`) and that sent the job back to the queue, in order: appended by
+    /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
+    pub held_refusals: Vec<HostId>,
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,
