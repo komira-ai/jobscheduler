@@ -66,6 +66,12 @@
 #   ExecStart=/usr/bin/js-agent
 #                         the program the package installs. The server and the pool come from
 #                         --flags-file, not from this file: the unit is the same on every host
+#   --health-listen 127.0.0.1:7311
+#                         the route hostkeeper probes as the package's healthUrl
+#                         (http://127.0.0.1:7311/healthz, in the release manifest): 200 while the
+#                         agent is admitted and neither it nor the lease server holds a taint on
+#                         the host, 503 and the reason otherwise, so a tainted host is reported
+#                         unhealthy. Loopback only; the farm unit has no such route
 #   ExecStartPre=+systemd-tmpfiles
 #                         reads /usr/lib/tmpfiles.d/js-agent-crun.conf, the package's tmpfiles file
 #                         (without the /opt/js-agent release layout of the setup script's file,
@@ -97,7 +103,7 @@ DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent-crun.conf
-ExecStart=/usr/bin/js-agent --flags-file /etc/js-agent/flags --token-file /etc/js-agent/token --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+ExecStart=/usr/bin/js-agent --flags-file /etc/js-agent/flags --health-listen 127.0.0.1:7311 --token-file /etc/js-agent/token --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
 KillMode=process
 TimeoutStopSec=3900
 Restart=always

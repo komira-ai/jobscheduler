@@ -4,7 +4,8 @@
 //!
 //! [`FileReader`] reads a file; [`DirLister`] lists a directory (the `/proc` directory is
 //! how the process table is found). Nothing is skipped: an input that cannot be read or
-//! understood is an error, and the check that needed it is a finding. The one thing that is
+//! understood is an error, which the check reports as an unchecked finding for the process table and as a
+//! note for every other input. The one thing that is
 //! not an error is a process that ends while the table is read: its files are gone and so
 //! is its entry in `/proc`, which the table confirms by listing `/proc` again before it
 //! lets the process go.
@@ -22,7 +23,7 @@ use super::view::{HostView, Mount, Process, Watched};
 use crate::facts::{FileReader, SystemFiles};
 
 /// The most entries of a watched directory that are read. A directory with more cannot be
-/// digested and is a finding.
+/// digested and is a `watch-over-bound` note.
 pub const WATCH_ENTRY_CAP: usize = 4096;
 
 /// The most processes read. A host with more cannot be checked and is a finding.
@@ -249,8 +250,41 @@ impl HostView for ProcHost {
         self.files.read(path)
     }
 
+    /// The text of `/proc/<pid>/cmdline` with its control characters (the NULs between the
+    /// arguments) as spaces, trimmed, cut to 80 bytes at a character boundary and ended with
+    /// `...` when cut; empty when the file cannot be read.
+    fn cmdline(&self, pid: u32) -> String {
+        self.files
+            .read(&format!("/proc/{pid}/cmdline"))
+            .map(|text| shortened(&text))
+            .unwrap_or_default()
+    }
+
     fn settle(&self, wait: Duration) {
         std::thread::sleep(wait);
+    }
+}
+
+/// The most bytes of a command line a finding or a note names.
+const CMDLINE_MAX: usize = 80;
+
+/// `text` with every control character a space, trimmed, and cut to [`CMDLINE_MAX`] bytes at a
+/// character boundary with `...` after it when it was longer.
+fn shortened(text: &str) -> String {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let spaced = spaced.trim();
+    match spaced.len() > CMDLINE_MAX {
+        false => spaced.to_owned(),
+        true => {
+            let end = (0..=CMDLINE_MAX)
+                .rev()
+                .find(|&at| spaced.is_char_boundary(at))
+                .unwrap_or(0);
+            format!("{}...", &spaced[..end])
+        }
     }
 }
 

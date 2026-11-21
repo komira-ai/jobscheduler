@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use js_agent_wire::{
-    Command, DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult,
-    JobStartSpec, LogGrant, LogGrantState, LogTail, Outcome, Phase, RefusalReason, Taint,
+    DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult, LogGrant,
+    LogGrantState, LogTail, Outcome, Phase, RefusalReason, Taint,
 };
 use js_jobs::interfere::Interfere;
 use js_jobs::{
@@ -39,6 +39,10 @@ use super::*;
 use crate::clock::SharedClock;
 use crate::job_expiry::JobLimits;
 use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
+
+#[path = "agent_api_job_rig_replies.rs"]
+mod replies;
+pub(crate) use replies::{starts, stops};
 
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
@@ -675,6 +679,7 @@ impl Rig {
             results: Vec::new(),
             taint,
             taint_cleared: None,
+            tainted: agent.tainted,
             exclusive_ready: agent.ready.clone(),
             exclusive_refused: agent.refused.clone(),
             load: None,
@@ -765,6 +770,8 @@ pub(crate) struct FakeAgent {
     pub(crate) stale: bool,
     /// The phase its heartbeats report.
     pub(crate) phase: Phase,
+    /// Whether its beats say it holds a taint (`None`: nothing).
+    pub(crate) tainted: Option<bool>,
     /// The allocation the last reply named for it to prepare for or keep.
     pub(crate) exclusive: Option<String>,
     /// The allocation it reports ready.
@@ -786,6 +793,7 @@ impl FakeAgent {
             grant: None,
             stale: false,
             phase: Phase::Serving,
+            tainted: None,
             exclusive: None,
             ready: None,
             refused: None,
@@ -981,22 +989,4 @@ pub(crate) fn result(
         input_failure: None,
         usage: None,
     }
-}
-
-/// The job starts of `reply`.
-pub(crate) fn starts(reply: &HeartbeatReply) -> Vec<JobStartSpec> {
-    let each = reply.commands.iter().filter_map(|command| match command {
-        Command::JobStart(spec) => Some(spec.as_ref().clone()),
-        _ => None,
-    });
-    each.collect()
-}
-
-/// The job ids `reply` says to stop.
-pub(crate) fn stops(reply: &HeartbeatReply) -> Vec<String> {
-    let each = reply.commands.iter().filter_map(|command| match command {
-        Command::JobStop { job_id } => Some(job_id.clone()),
-        _ => None,
-    });
-    each.collect()
 }

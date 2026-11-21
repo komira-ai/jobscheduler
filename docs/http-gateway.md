@@ -514,11 +514,14 @@ generated paragraph above.
   server's newer report) refuses the clear, `UNAVAILABLE` `taint-unsaved`, and nothing
   changes; in file mode, when the bindings file cannot be written, the clear holds on this
   server all the same. A host the registry does not hold is `NOT_FOUND` `unknown-host`. The
-  call does not reach the agent: an agent whose marker still holds the taint refuses the next
-  start `host-tainted`, which the server takes as the host's taint again, so the operator
-  moves the agent's `taint.json`, `taint.pinned` and its `owed-*` records aside first
-  (`js-agent clear-taint`, [runbooks/clear-a-taint.md](runbooks/clear-a-taint.md)), or lets the
-  agent clear the taint itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)).
+  call does not reach the agent: an agent whose marker still holds the taint says at its next
+  heartbeat that it is tainted (or refuses the next start `host-tainted`), which the server takes
+  as the host's taint again, so the operator moves the agent's `taint.json`, `taint.pinned` and
+  its `owed-*` records aside first (`js-agent clear-taint`,
+  [runbooks/clear-a-taint.md](runbooks/clear-a-taint.md)), or lets the agent clear the taint
+  itself ([design/taint-self-clearing.md](design/taint-self-clearing.md)). The call is for the
+  taints the agent's word does not end: a host job's and a refused whole-host prepare's, and
+  one held for an agent too old to send `tainted`.
 - `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the

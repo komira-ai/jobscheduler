@@ -1,10 +1,12 @@
 //! What a host does on its own while jobs run: the services its timers start, the logins of
 //! its operators, Podman's monitors and network namespaces. None of it is a job's, and none
-//! of it may taint the host; anything in a container's own control group still does.
+//! of it is even noted; a process or mount that may be a job's, whatever its group, is a note
+//! (never a taint: only a process of the job users' range taints).
 
 use js_agent::integrity::{FakeHost, Integrity, Mount, code};
+use js_agent::lifecycle::CheckHook as _;
 
-use super::{after, beside, process, started};
+use super::{JOB_UID, after, codes, noted_after, process, quiet, quiet_beside, started};
 
 /// A mount of `fstype` at `point`, of `root` from `source`.
 fn mounted(fstype: &str, point: &str, root: &str, source: &str) -> Mount {
@@ -17,10 +19,11 @@ fn mounted(fstype: &str, point: &str, root: &str, source: &str) -> Mount {
 }
 
 /// Asserts that processes whose parent is `init`, started after the baseline in the host's
-/// own control groups, are not findings: a timer's service in the system slice, an
-/// operator's login session and `systemd --user` in the user slice, and a Podman monitor
-/// that outlives its container. Each is a `daemonised-child` on a host that judges a
-/// process by its parent alone, which taints a node within a minute of its first job.
+/// own control groups, are neither findings nor notes, whoever owns them (one of the job
+/// user's uid included): a timer's service in the system slice, an operator's login session
+/// and `systemd --user` in the user slice, and a Podman monitor that outlives its container.
+/// Each is a `daemonised-child` note on a host that judges a process by its parent alone,
+/// which logs a line on a node within a minute of its first job.
 #[test]
 fn the_hosts_own_services_logins_and_monitors_are_not_a_jobs() {
     for cgroup in [
@@ -36,19 +39,19 @@ fn the_hosts_own_services_logins_and_monitors_are_not_a_jobs() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, cgroup));
-        host.start_process(process(301, 1, super::JOB_UID, 901, cgroup));
-        assert!(after(&mut checks, "r1").is_ok(), "{cgroup}");
+        host.start_process(process(301, 1, JOB_UID, 901, cgroup));
+        assert!(quiet(&mut checks, "r1"), "{cgroup}");
     }
 }
 
-/// Asserts that a process whose parent is `init` still counts when its control group names
-/// a container, wherever the container's group is (Podman's and Docker's scopes, cgroupfs
+/// Asserts that a process whose parent is `init` is still a `daemonised-child` note when its
+/// control group names a container, wherever the container's group is (Podman's and Docker's scopes, cgroupfs
 /// groups, a rootless container in the user slice, a container under a system service),
 /// when it is in a scope under the agent's own service, or has no unified-hierarchy line.
 /// It catches an exemption by prefix alone, which would let a job's leftover process pass
 /// because its container sat under a host slice.
 #[test]
-fn a_process_in_a_containers_group_counts_wherever_it_is() {
+fn a_process_in_a_containers_group_is_noted_wherever_it_is() {
     for cgroup in [
         "0::/machine.slice/libpod-4f3a9c.scope",
         "0::/machine.slice/libpod-4f3a9c.scope/container",
@@ -68,16 +71,19 @@ fn a_process_in_a_containers_group_counts_wherever_it_is() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, cgroup));
-        let found = after(&mut checks, "r1").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup}"
+        );
     }
 }
 
-/// Asserts that the mounts a host makes while jobs run are not findings: a network
+/// Asserts that the mounts a host makes while jobs run are no note: a network
 /// namespace Podman pins for a container (its own or a neighbour's: the name holds no
 /// container id), the bind of `/run/netns` onto itself the first container after a boot
-/// makes, and the run directory of a user who logs in. Each is a `new-mount` on a host that
-/// counts every new mount, which taints a node at its first job after a boot, at an
+/// makes, and the run directory of a user who logs in. Each is a `new-mount` note on a host
+/// that counts every new mount, which logs a line at the first job after a boot, at an
 /// operator's login, or when two jobs overlap.
 #[test]
 fn podmans_namespaces_and_a_logins_run_directory_are_not_a_jobs() {
@@ -95,18 +101,18 @@ fn podmans_namespaces_and_a_logins_run_directory_are_not_a_jobs() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.mount(mount.clone());
-        assert!(after(&mut checks, "r1").is_ok(), "{mount:?}");
+        assert!(quiet(&mut checks, "r1"), "{mount:?}");
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.mount(mount.clone());
-        assert!(beside(&mut checks, "r1", &["c2"]).is_ok(), "{mount:?}");
+        assert!(quiet_beside(&mut checks, "r1", &["c2"]), "{mount:?}");
     }
 }
 
-/// Asserts that a mount near the exempt ones still counts: a namespace mounted elsewhere or
+/// Asserts that a mount near the exempt ones is still a `new-mount` note: a namespace mounted elsewhere or
 /// deeper under `/run/netns`, another file system there, a tmpfs mounted over `/run/netns`
 /// (not its bind onto itself), and a mount inside or beside a user's run directory. It
-/// catches an exemption by mount point alone, which would let a job's mount pass.
+/// catches an exemption by mount point alone, which would leave a mount unnamed in the log.
 #[test]
 fn a_mount_near_the_hosts_own_still_counts() {
     for mount in [
@@ -123,13 +129,16 @@ fn a_mount_near_the_hosts_own_still_counts() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.mount(mount.clone());
-        let found = after(&mut checks, "r1").unwrap_err();
-        assert_eq!(found.code(), code::NEW_MOUNT, "{mount:?}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::NEW_MOUNT],
+            "{mount:?}"
+        );
     }
 }
 
 /// Asserts that a process left in the agent's own control group, or in a group below it,
-/// still counts, though the agent's group is a service of the system slice, while one in
+/// is still noted, though the agent's group is a service of the system slice, while one in
 /// another service, and a Podman monitor's scope below the agent's group (containers
 /// parented under the agent), do not: a child of the agent that outlives it is judged like
 /// any other process. It catches an exemption of every service, the agent's included, and
@@ -143,8 +152,11 @@ fn the_agents_own_service_is_not_the_hosts() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, cgroup));
-        let found = after(&mut checks, "r1").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup}"
+        );
     }
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
@@ -156,7 +168,7 @@ fn the_agents_own_service_is_not_the_hosts() {
         "0::/system.slice/agent.service/libpod-conmon-4f3a9c.scope",
     ));
     assert!(
-        after(&mut checks, "r0").is_ok(),
+        quiet(&mut checks, "r0"),
         "a Podman monitor under the agent's group"
     );
     let host = FakeHost::quiet();
@@ -168,7 +180,7 @@ fn the_agents_own_service_is_not_the_hosts() {
         900,
         "0::/system.slice/agent.service-two.service",
     ));
-    assert!(after(&mut checks, "r1").is_ok(), "another service");
+    assert!(quiet(&mut checks, "r1"), "another service");
 }
 
 /// Asserts that an agent that cannot read its own control group does not start, saying
@@ -189,7 +201,7 @@ fn an_agent_that_cannot_read_its_own_control_group_does_not_start() {
 /// Asserts that an agent whose own control group names no unified path, or the root, starts
 /// and exempts no group for being its own: a service of the system slice is the host's as
 /// it is for any agent, a process in the root group is not a job's, and one with no unified
-/// path still counts. It catches a root path taken as the agent's group, which would make
+/// path is still noted. It catches a root path taken as the agent's group, which would make
 /// every process one a job can be.
 #[test]
 fn an_agent_in_the_root_group_or_on_cgroup_v1_has_no_group_of_its_own() {
@@ -198,24 +210,27 @@ fn an_agent_in_the_root_group_or_on_cgroup_v1_has_no_group_of_its_own() {
         host.set_file("/proc/self/cgroup", own);
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, "0::/system.slice/agent.service"));
-        assert!(after(&mut checks, "r1").is_ok(), "{own:?}");
+        assert!(quiet(&mut checks, "r1"), "{own:?}");
         host.start_process(process(301, 1, 0, 901, "0::/"));
         assert!(
-            after(&mut checks, "r2").is_ok(),
+            quiet(&mut checks, "r2"),
             "{own:?}: the root group is not a job's"
         );
         host.start_process(process(302, 1, 0, 902, ""));
-        let found = after(&mut checks, "r3").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{own:?}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r3")),
+            [code::DAEMONISED_CHILD],
+            "{own:?}"
+        );
     }
 }
 
-/// Asserts that a process whose parent is `init` is not a `daemonised-child` when its control
+/// Asserts that a process whose parent is `init` is not a `daemonised-child` note when its control
 /// group is one no job can be in: a scope under the system slice, the root group,
 /// `init.scope`, another slice, a service of another slice's unit. A contained job cannot
 /// place a process outside its own group, so such a process is the host's, however long it
 /// lives. Catches a host process of a timer or a login, forked by `init` and moved into a
-/// scope of its own, that taints a node.
+/// scope of its own, that fills the log.
 #[test]
 fn a_process_with_parent_init_outside_every_group_a_job_can_be_in_is_the_hosts() {
     for cgroup in [
@@ -230,14 +245,14 @@ fn a_process_with_parent_init_outside_every_group_a_job_can_be_in_is_the_hosts()
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, cgroup));
-        assert!(after(&mut checks, "r1").is_ok(), "{cgroup}");
+        assert!(quiet(&mut checks, "r1"), "{cgroup}");
     }
 }
 
-/// Asserts that the same process still counts as a `daemonised-child` where a job can be: in
+/// Asserts that the same process is still a `daemonised-child` note where a job can be: in
 /// the agent's own group and below it, under the runner's `actions/<lease>/ctr`, in an
-/// engine's scope, and with no unified path at all. Catches a narrowing that lets a job's
-/// leftover pass.
+/// engine's scope, and with no unified path at all. Catches a narrowing that leaves a job's
+/// leftover out of the log.
 #[test]
 fn a_process_with_parent_init_where_a_job_can_be_still_counts() {
     for cgroup in [
@@ -250,24 +265,27 @@ fn a_process_with_parent_init_where_a_job_can_be_still_counts() {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
         host.start_process(process(300, 1, 0, 900, cgroup));
-        let found = after(&mut checks, "r1").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+        assert_eq!(
+            codes(&noted_after(&mut checks, "r1")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup}"
+        );
     }
 }
 
 /// Asserts that the narrowing is of `daemonised-child` only: a process of the job users'
-/// range with parent `init` in the root group is still a `process-as-job-user`, since a uid
-/// of that range is a job's wherever the process is. Catches a rule that exempts a process
-/// of the job user for sitting in a host group.
+/// range with parent `init` in the root group is still a `process-as-job-user` finding, and
+/// no `daemonised-child` note, since a uid of that range is a job's wherever the process is.
+/// Catches a rule that exempts a process of the job user for sitting in a host group.
 #[test]
 fn a_process_of_the_job_user_outside_the_job_groups_is_still_found() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(300, 1, super::JOB_UID, 900, "0::/init.scope"));
+    host.start_process(process(300, 1, JOB_UID, 900, "0::/init.scope"));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(found.code(), code::PROCESS_AS_JOB_USER);
     assert!(
-        !found.detail().contains("daemonised-child"),
-        "the group is not a job's: {found:?}"
+        checks.notes().is_empty(),
+        "the group is not a job's, so no daemonised child"
     );
 }

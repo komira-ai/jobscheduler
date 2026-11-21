@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
@@ -233,6 +234,15 @@ pub struct Cli {
     /// agent and one state root.
     #[arg(long, value_name = "PATH")]
     pub state_root: Option<PathBuf>,
+    /// A loopback socket address (`127.0.0.1:7311`; port 0 takes a free port, which the agent
+    /// prints at start) on which the agent answers `GET /healthz`: `200` and `placeable` while
+    /// the session holds a welcome and neither the agent nor the lease server holds a taint
+    /// on the host, `503` and `not placeable: <reason>` otherwise, `404` for any other request
+    /// (see [`crate::health`]). It is for the host's own supervisor, which reads it as a
+    /// package's `healthUrl`. An address that is not a loopback one, or that cannot be bound,
+    /// ends the agent with status 2. Without it the agent binds nothing.
+    #[arg(long, value_name = "ADDR")]
+    pub health_listen: Option<SocketAddr>,
     /// Start an agent that runs no job: it registers, says hello and heartbeats, and reports
     /// none of the runtime capabilities. It takes no flag of the runtime this build runs
     /// (Linux: crun, or the container engine; macOS: the native runtime).

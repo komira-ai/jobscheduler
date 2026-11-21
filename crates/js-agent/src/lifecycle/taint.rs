@@ -13,7 +13,8 @@
 //!   marker the agent reports is a marker that survives a power cut.
 //! - **The agent deletes it in one case only: a taint that cleared itself.** A taint whose
 //!   reason is [`reason::RESIDUE`] or [`reason::UNCHECKED`] and whose check is one of a
-//!   process or of a check that could not read its input (see [`clearable`]) is re-checked
+//!   process, one an older agent wrote for a check that no longer taints, or of a check that
+//!   could not read its input (see [`clearable`]) is re-checked
 //!   while the host is idle, and clears after two clean re-checks `--taint-recheck-ms`
 //!   apart and the server's acknowledgement of the clear (see "A taint that clears itself").
 //!   The marker is then renamed to `taint.json.cleared-<unix seconds>`, never removed: the
@@ -78,40 +79,47 @@
 //!
 //! # A taint that clears itself
 //!
-//! A host that is tainted for what a check *judged* (a process that was not there at the
-//! baseline and that outlived the job's container and the settle wait, or a check that
-//! could not read its input) may have been tainted for a moment of the host's own: on
+//! A host that is tainted for what a check *judged* (a process of a job's user that outlived
+//! the job's container and the settle wait, or a check that could not read its input) may
+//! have been tainted for a moment of the host's own: on
 //! 2026-11-15 every build node was out of service for processes that were gone seconds
 //! after they were seen. So such a taint clears itself, by the rules of
 //! `docs/design/taint-self-clearing.md`:
 //!
-//! 0. A taint found in the marker at start clears only when it is a residue of a process
-//!    (`process-as-job-user`, `daemonised-child`). It was judged against another process's
+//! 0. A taint found in the marker at start clears only when it is a residue of a post-job
+//!    check ([`restorable`]): `process-as-job-user`, or one of the codes an older agent
+//!    wrote for what the checks now only note. It was judged against another process's
 //!    baseline, and this process's baseline already holds what the job left, so its
-//!    re-checks also apply two rules that need no baseline: a process whose uid is in the job
-//!    users' range, and one whose parent is `init` in a control group a job can be in, are
-//!    findings even when the baseline holds them (the agent's own process aside). A residue
-//!    the pin file names is pinned too (see "The pin file"). Every other
+//!    re-checks also apply a rule that needs no baseline: a process whose uid is in the job
+//!    users' range is a finding even when the baseline holds it (the agent's own process
+//!    aside); one whose parent is `init` in a control group a job can be in is only named in
+//!    a `daemonised-child` note. The checks
+//!    no longer find a mount, user, group, module or watched-directory change, so a re-check
+//!    of an old marker of one passes unless a job's process is left, and the marker clears.
+//!    A residue the pin file names is pinned too (see "The pin file"). Every other
 //!    restored taint (`unchecked` of any kind, `cleanup-failed`, `check-owed`, `host-job`,
-//!    `marker-unreadable`, a mount, user, group, module or watched-directory change) stays
-//!    until an operator moves the marker aside, as does a restored taint beside which a
-//!    non-clearable one was sealed at start (owed records, a host job taken over).
+//!    `marker-unreadable`) stays until an operator moves the marker aside, as does a
+//!    restored taint beside which a non-clearable one was sealed at start (owed records, a
+//!    host job taken over).
 //! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
-//!    `process-as-job-user` or `daemonised-child`, or reason [`reason::UNCHECKED`] with a
+//!    `process-as-job-user` (the one residue the checks still make) or one of
+//!    `daemonised-child`, `new-mount`, `user-changed`, `group-changed`,
+//!    `kernel-module-changed`, `watch-dir-changed` (written by an older agent: what a
+//!    contained job cannot cause is a note now), or reason [`reason::UNCHECKED`] with a
 //!    check that could not read its input (`*-unreadable`, `watch-over-bound`) or
 //!    `cgroup-not-found` (a crun run whose container group was not found within the settle
 //!    wait while its first process ran in another group; the checks do not depend on that
 //!    group). Never `cleanup-failed`, `check-owed`,
 //!    `host-job`, `marker-unreadable`, `host-not-visible`
-//!    (a re-check does not show that the agent now sees the host), nor a mount, user, group,
-//!    module or watched-directory change: state the host really holds. A non-clearable taint
+//!    (a re-check does not show that the agent now sees the host). A non-clearable taint
 //!    sealed *after* a clearable one (the first stays in the marker) keeps the host from
 //!    clearing for the life of the process, and, by the pin file, for every process after.
 //! 2. The host is idle: no run is held but `Blocked` or `Freed` ones (their container and
 //!    scratch are gone), and no container the agent could not remove.
 //! 3. A full check (every check of the table, with the settle wait, against the baseline
 //!    taken before the tainting job) passes, and passes again at least `--taint-recheck-ms`
-//!    after. The first re-check is due one interval after the agent first sees the taint
+//!    after. What the check notes (see [`CheckNote`](super::CheckNote)) does not fail it. The
+//!    first re-check is due one interval after the agent first sees the taint
 //!    clearable and idle; a re-check that finds anything, or a host that is not idle, starts
 //!    the count again. A process still present at a re-check keeps the host tainted.
 //! 4. The agent then reports the cleared taint (`taint_cleared` in the heartbeat) until the
@@ -122,6 +130,11 @@
 //!    logs the clear as a finding (`taint-cleared`) naming the taint and the two checks.
 //!
 //! # What the lifecycle does with it
+//!
+//! The first taint's detail, the one line that says what changed, is kept in memory beside
+//! it ([`Lifecycle::taint_detail`](super::Lifecycle::taint_detail)) and not in the marker, so
+//! a taint read from the marker at start has none. The worker prints it with the taint and the
+//! health route names it.
 //!
 //! A tainted agent starts no job (every `Start` is answered `failed_to_start` with the code
 //! `host-tainted`, final for that `Start`) and lets the jobs it runs finish.
@@ -274,7 +287,7 @@ impl StateRoot {
     }
 
     /// Whether a taint read from the marker is one a restarted agent re-checks: a residue of
-    /// a process ([`restorable`]) that the pin file does not name. A pin file that names
+    /// a post-job check ([`restorable`]) that the pin file does not name. A pin file that names
     /// another taint is a stale one (of a taint an operator cleared) and says nothing; one
     /// that cannot be read, or is not a taint, pins, as a marker that cannot be read taints.
     /// This is the one decision the agent's start (`TaintState::load`) and the update hook share.
@@ -410,15 +423,30 @@ fn unreadable() -> Taint {
     }
 }
 
+/// The checks whose residue the agent re-checks and clears: `process-as-job-user`, which the
+/// checks still make, and the codes an older agent wrote for what the checks now only note
+/// (an orphan, a mount, a user, a group, a kernel module, a watched directory). A re-check of
+/// one of the latter passes unless a job's process is left.
+const RESIDUE_CHECKS: [&str; 7] = [
+    check::PROCESS_AS_JOB_USER,
+    check::DAEMONISED_CHILD,
+    check::NEW_MOUNT,
+    check::USER_CHANGED,
+    check::GROUP_CHANGED,
+    check::MODULE_CHANGED,
+    check::WATCH_DIR_CHANGED,
+];
+
 /// Whether `taint` is one the agent may clear itself (see "A taint that clears itself"): a
-/// residue of a process, a check that could not read its input, or a run whose container
+/// residue of a post-job check ([`RESIDUE_CHECKS`]: a process of a job's user, or what an
+/// older agent tainted for), a check that could not read its input, or a run whose container
 /// group was not found (`cgroup-not-found`: the checks do not depend on that group, so a
 /// re-check speaks for the host). Anything else is state the host really holds, or a taint a
 /// re-check cannot speak for.
 pub fn clearable(taint: &Taint) -> bool {
     let code = taint.check.as_deref().unwrap_or_default();
     match taint.reason.as_str() {
-        reason::RESIDUE => [check::PROCESS_AS_JOB_USER, check::DAEMONISED_CHILD].contains(&code),
+        reason::RESIDUE => RESIDUE_CHECKS.contains(&code),
         reason::UNCHECKED => [
             check::PROCESSES_UNREADABLE,
             check::MOUNTS_UNREADABLE,
@@ -434,10 +462,11 @@ pub fn clearable(taint: &Taint) -> bool {
     }
 }
 
-/// Whether a taint read from the marker at start may be re-checked: a residue of a process
-/// (`process-as-job-user`, `daemonised-child`), which a re-check judges without the baseline
-/// (see [`CheckHook::run_restored`](super::CheckHook::run_restored)). Every other restored
-/// taint stays pinned: a re-check of the restart baseline cannot speak for it.
+/// Whether a taint read from the marker at start may be re-checked: a residue of a post-job
+/// check ([`RESIDUE_CHECKS`]), which a re-check judges without the baseline (see
+/// [`CheckHook::run_restored`](super::CheckHook::run_restored)): it finds only a job's
+/// process, so it passes when none is left, whichever of the codes the marker names. Every
+/// other restored taint stays pinned: a re-check of the restart baseline cannot speak for it.
 ///
 /// The pin file ([`PIN_FILE`]) can still pin it: see [`StateRoot::restored_rechecks`].
 pub fn restorable(taint: &Taint) -> bool {
@@ -465,6 +494,10 @@ pub fn recheck_every(given: Option<u64>) -> Result<Duration, String> {
 pub(super) struct TaintState {
     root: StateRoot,
     taint: Option<Taint>,
+    /// The line that says what changed, of the first taint, when a check's finding gave one;
+    /// none for a taint read from the marker at start, and for one with no finding. In memory
+    /// only: the marker holds the [`Taint`].
+    detail: Option<String>,
     persisted: bool,
     acked: bool,
     /// A taint the agent never clears: one sealed beside the first, or one read from the
@@ -488,7 +521,7 @@ pub(super) struct TaintState {
 
 impl TaintState {
     /// The state on record in `root`: tainted when a marker is there. A taint read from the
-    /// marker is pinned, unless it is a residue of a process ([`restorable`]) that the pin
+    /// marker is pinned, unless it is a residue of a post-job check ([`restorable`]) that the pin
     /// file does not name ([`StateRoot::restored_rechecks`]): that one is re-checked, with
     /// the re-check that needs no baseline, because the baseline this process took already
     /// holds what the job left.
@@ -503,6 +536,7 @@ impl TaintState {
             pin_recorded: true,
             restored,
             taint,
+            detail: None,
             root,
             acked: false,
             clean: 0,
@@ -518,6 +552,11 @@ impl TaintState {
     /// The reason the host was tainted for, when it is.
     pub(super) fn reason(&self) -> Option<&str> {
         self.taint.as_ref().map(|taint| taint.reason.as_str())
+    }
+
+    /// The line that says what changed, of the taint the host holds, when it is known.
+    pub(super) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// What the next heartbeat reports: the taint, once the marker holds it and until it is
@@ -580,6 +619,7 @@ impl TaintState {
     pub(super) fn clear(&mut self, stamp: u64) -> io::Result<()> {
         self.root.keep_cleared(stamp)?;
         self.taint = None;
+        self.detail = None;
         self.persisted = false;
         self.acked = false;
         self.pinned = false;
@@ -597,17 +637,24 @@ impl TaintState {
     }
 
     /// Taints the host with `taint`, unless it is tainted already (the first stays), and
-    /// writes the marker if it is not written. [`Event::Tainted`] is pushed when this call
-    /// is what tainted the host, after the marker was tried and before any finding that
-    /// follows from the same cause.
+    /// writes the marker if it is not written. `detail` is the line that says what changed,
+    /// when there is one; the first taint keeps it. [`Event::Tainted`] is pushed, with the
+    /// detail, when this call is what tainted the host, after the marker was tried and before
+    /// any finding that follows from the same cause.
     ///
     /// # Errors
     ///
     /// The marker could not be written. The host stays tainted in memory.
-    pub(super) fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) -> io::Result<()> {
+    pub(super) fn seal(
+        &mut self,
+        taint: Taint,
+        detail: Option<String>,
+        events: &mut Vec<Event>,
+    ) -> io::Result<()> {
         let first = self.taint.is_none();
         if first {
             self.taint = Some(taint.clone());
+            self.detail.clone_from(&detail);
         } else if !clearable(&taint) {
             // The marker keeps the first taint, and the host now has more than it says: it
             // is not cleared by a re-check, and a clear that waits for the server stops.
@@ -617,7 +664,7 @@ impl TaintState {
         }
         let written = self.persist();
         if first {
-            events.push(Event::Tainted(taint));
+            events.push(Event::Tainted { taint, detail });
         }
         written
     }

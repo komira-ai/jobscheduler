@@ -34,6 +34,15 @@ pub const HOOK_RESUME: &str = "resume";
 /// The unit hostkeeper starts, stops and observes.
 pub const RUN_UNIT: &str = "js-agent-crun.service";
 
+/// The manifest's `healthUrl` of the Linux entries: the route the agent answers on at the
+/// address the packaged unit gives its `--health-listen`
+/// (`packaging/js-agent/deb/js-agent-crun.service`; a test holds the two equal). hostkeeper
+/// probes it once per round, plain HTTP to the loopback, and reports the service unhealthy
+/// unless it answers `2xx`: a host the agent or the lease server holds a taint on answers
+/// `503`, so it is shown as unhealthy and holds a rollout's bake. The Mac package's agent is
+/// started without the flag, so its entry names none.
+pub const HEALTH_URL: &str = "http://127.0.0.1:7311/healthz";
+
 /// The bound of `prepare`, in seconds: staging and checking the new release, with the wait for
 /// the agent's running jobs to be cordoned and drained (up to 3600 s) and a margin.
 pub const PREPARE_SECS: u64 = 3900;
@@ -184,19 +193,35 @@ pub fn params() -> Value {
 /// The hook manifest of the Mac package.
 #[must_use]
 pub fn mac_manifest() -> Value {
-    manifest_of(MAC_PACKAGE, &MAC_HOOK_COMMAND, &MAC_RUN, table(&MAC_PARAMS))
+    manifest_of(
+        MAC_PACKAGE,
+        &MAC_HOOK_COMMAND,
+        &MAC_RUN,
+        (table(&MAC_PARAMS), None),
+    )
 }
 
 /// The hook manifest of js-agent.
 #[must_use]
 pub fn manifest() -> Value {
-    manifest_of("js-agent", &HOOK_COMMAND, &[RUN_UNIT], params())
+    manifest_of(
+        "js-agent",
+        &HOOK_COMMAND,
+        &[RUN_UNIT],
+        (params(), Some(HEALTH_URL)),
+    )
 }
 
 /// A hook manifest of js-agent: its package, the hook's command, the units to run and the
-/// `params`. Everything else is the same on every platform.
-fn manifest_of(package: &str, command: &[&str], run: &[&str], params: Value) -> Value {
-    json!({
+/// `params` with the `healthUrl` (none when the platform's agent has no health route).
+/// Everything else is the same on every platform.
+fn manifest_of(
+    package: &str,
+    command: &[&str],
+    run: &[&str],
+    (params, health_url): (Value, Option<&str>),
+) -> Value {
+    let mut manifest = json!({
         "package": package,
         "hook": {
             "command": command,
@@ -219,7 +244,11 @@ fn manifest_of(package: &str, command: &[&str], run: &[&str], params: Value) -> 
             .iter()
             .map(|(name, secs)| ((*name).to_owned(), int64(*secs)))
             .collect::<Map<String, Value>>(),
-    })
+    });
+    if let Some(url) = health_url {
+        manifest["healthUrl"] = json!(url);
+    }
+    manifest
 }
 
 /// The entry of the installer `apt` for the `.deb` of `version` whose SHA-256 is `digest`.

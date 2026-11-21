@@ -16,7 +16,7 @@ use super::{Harness, Options, job, names, reply_json};
 const EVERY: u64 = 60_000;
 
 fn residue() -> CheckFinding {
-    CheckFinding::residue(check::DAEMONISED_CHILD, "pid 41")
+    CheckFinding::residue(check::PROCESS_AS_JOB_USER, "pid 41")
 }
 
 /// The server acknowledges the report of the taint.
@@ -49,17 +49,14 @@ fn pin_path(h: &Harness) -> std::path::PathBuf {
     h.marker().with_file_name(PIN_FILE)
 }
 
-/// An agent whose `r1` left a residue of a process (the marker's taint) and whose `r2` left a
-/// new mount (a taint no re-check clears, sealed beside it), both over: the host is tainted,
-/// pinned in memory, and the report acknowledged.
+/// An agent whose `r1` left a residue of a process (the marker's taint) and whose `r2`'s
+/// container could not be removed (`cleanup-failed`, a taint no re-check clears, sealed beside
+/// it), both over: the host is tainted, pinned in memory, and the report acknowledged.
 fn pinned_in_process(name: &str) -> Harness {
     let mut h = Harness::with(
         name,
         Options {
-            findings: vec![
-                ("r1", residue()),
-                ("r2", CheckFinding::residue(check::NEW_MOUNT, "/mnt/x")),
-            ],
+            findings: vec![("r1", residue())],
             ..Options::default()
         },
     );
@@ -68,6 +65,7 @@ fn pinned_in_process(name: &str) -> Harness {
     h.fake.exit("r1", 0);
     h.life.step();
     ack(&mut h);
+    h.fake.fail("remove", 1);
     h.fake.exit("r2", 0);
     h.life.step();
     h.life.step();
@@ -98,11 +96,12 @@ fn stays_tainted(h: &mut Harness, intervals: u32) {
 }
 
 /// Asserts that a pin made in memory survives a restart: a residue of a process first, then a
-/// new mount sealed beside it, writes `taint.pinned` holding the marker's taint, byte for byte
+/// container that cannot be removed sealed beside it, writes `taint.pinned` holding the marker's taint, byte for byte
 /// as the marker holds it; the agent that starts over the same state root restores the
 /// residue pinned, re-checks nothing across any number of waits and clear
 /// acknowledgements, and stays tainted. Catches a restart that reads only the marker, takes a
-/// baseline that already holds the new mount, and clears a host that holds a real change.
+/// baseline that already holds the second taint's state, and clears a host that holds a real
+/// change.
 #[test]
 fn a_pin_made_in_memory_survives_a_restart() {
     let mut h = pinned_in_process("pin-restart");
@@ -126,7 +125,7 @@ fn a_pin_made_in_memory_survives_a_restart() {
 
 /// Asserts that a pin file that cannot be written is a finding like a marker that cannot be
 /// written, and that the pin stands: the host stays tainted, the failed write is noted
-/// (`taint-write-failed`) and the slot of the job whose checks passed is held for it; once the
+/// (`taint-write-failed`) and the slot of the job whose container could not be removed is held for it; once the
 /// file can be written the next step writes it, and a restart then finds the taint pinned.
 /// Catches a pin that is lost when its write fails once, and a failure that nobody hears of.
 #[test]
@@ -134,10 +133,7 @@ fn a_pin_file_that_cannot_be_written_is_a_finding_and_is_tried_again() {
     let mut h = Harness::with(
         "pin-write-fails",
         Options {
-            findings: vec![
-                ("r1", residue()),
-                ("r2", CheckFinding::residue(check::NEW_MOUNT, "/mnt/x")),
-            ],
+            findings: vec![("r1", residue())],
             ..Options::default()
         },
     );
@@ -147,6 +143,7 @@ fn a_pin_file_that_cannot_be_written_is_a_finding_and_is_tried_again() {
     h.fake.exit("r1", 0);
     h.life.step();
     ack(&mut h);
+    h.fake.fail("remove", 1);
     h.fake.exit("r2", 0);
     let events = names(&h.life.step());
     assert!(
