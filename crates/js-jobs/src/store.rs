@@ -25,6 +25,7 @@ mod duties;
 mod ending;
 mod guard;
 mod held;
+mod host_rows;
 mod hosts;
 mod index;
 mod marks;
@@ -40,7 +41,6 @@ pub use cordons::{CordonWrite, UncordonWrite};
 pub use held::HeldRequeue;
 
 pub use index::Backfill;
-
 pub use queue::queue_order;
 
 pub use whole::{FailedPrepare, Placement};

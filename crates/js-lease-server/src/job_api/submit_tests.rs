@@ -379,7 +379,11 @@ async fn a_failed_commit_answers_500_and_changes_nothing() {
 async fn submit_does_not_wait_for_placement() {
     let mut rig = clocked_rig("submit_no_wait", true, NEVER);
     rig.register("host-a", true);
-    let admission = JobAdmission::new(Admit::default(), rig.agents.registry.clone());
+    let admission = JobAdmission::new(
+        Admit::default(),
+        rig.agents.registry.clone(),
+        Arc::clone(&rig.jobs),
+    );
     let ctx = Ctx::served(CEILING, Arc::new(admission));
     let api = JobApi::new(Arc::clone(&rig.jobs), rig.shared.clone()).with_submit(ctx);
     let request = Request::new(SubmitJobRequest {

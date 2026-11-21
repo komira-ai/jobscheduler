@@ -18,7 +18,7 @@ use crate::admit::Admit;
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
-use crate::hosts::listing;
+use crate::hosts::listing_with_rows;
 use crate::join_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
@@ -346,9 +346,10 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// Every host the server lists: the registered ones, with the state of their session.
+/// Every host the server lists: the registered ones, with the state of their session, and
+/// the hosts only the job store's rows know.
 async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
-    json(StatusCode::OK, &listing(&shared))
+    json(StatusCode::OK, &listing_with_rows(&shared).await)
 }
 
 #[cfg(test)]

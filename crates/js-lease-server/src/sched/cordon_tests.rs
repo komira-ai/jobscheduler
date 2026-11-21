@@ -27,7 +27,7 @@ use crate::util::blocking;
 const FLAG: &str = "--job-listen";
 
 /// The one host of every rig.
-fn h1() -> HostId {
+pub(crate) fn h1() -> HostId {
     HostId::new("h1").unwrap()
 }
 
@@ -36,7 +36,7 @@ fn holder(name: &str) -> CordonHolder {
 }
 
 /// A store that can fail, on a clock the test moves.
-fn store_on(clock: &Arc<StoreClock>) -> Arc<Interfere<Fake>> {
+pub(crate) fn store_on(clock: &Arc<StoreClock>) -> Arc<Interfere<Fake>> {
     Arc::new(Interfere::new(Fake::with_flaw(
         Arc::clone(clock),
         Flaw::None,
@@ -52,7 +52,10 @@ fn tables_over(store: &Arc<Interfere<Fake>>) -> ServerJobs {
 /// The agent side of a server under `--placement js-sched` with `h1` registered (8 cores and
 /// 16 GiB booked), holding job tables over `store` when there is one; its directory, and the
 /// registry's clock.
-fn server(name: &str, store: Option<&Arc<Interfere<Fake>>>) -> (Arc<Agents>, TestDir, ManualClock) {
+pub(crate) fn server(
+    name: &str,
+    store: Option<&Arc<Interfere<Fake>>>,
+) -> (Arc<Agents>, TestDir, ManualClock) {
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let clock = ManualClock::new(Timestamp::from_millis(T0));
@@ -84,12 +87,12 @@ async fn now_on(agents: &Arc<Agents>, host: &HostId, lease: Duration) -> Result<
 }
 
 /// The job tables a rig holds.
-fn jobs_of(agents: &Agents) -> &ServerJobs {
+pub(crate) fn jobs_of(agents: &Agents) -> &ServerJobs {
     agents.jobs.as_deref().unwrap()
 }
 
 /// Queues `id`, one core and one GiB.
-fn queue(jobs: &ServerJobs, id: &str) {
+pub(crate) fn queue(jobs: &ServerJobs, id: &str) {
     let spec = JobSpec {
         needs: Needs::Shape(Resources::new(1000, GIB, 0, None).unwrap()),
         ..spec()
@@ -104,7 +107,7 @@ fn queue(jobs: &ServerJobs, id: &str) {
 }
 
 /// The state of the job `id`.
-fn state(jobs: &ServerJobs, id: &str) -> JobState {
+pub(crate) fn state(jobs: &ServerJobs, id: &str) -> JobState {
     let id = JobId::parse(id).unwrap();
     jobs.get_job(&id).unwrap().unwrap().state
 }

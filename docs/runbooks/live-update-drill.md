@@ -66,9 +66,11 @@ Every reading is kept in the out-dir: `hosts-before.txt`, `hosts-during-<n>.txt`
 
 ## What it does not cover
 
-A job submitted to the new server before any host has said hello to it is refused
-`no-capable-host`: admission reads the hosts of the server that is asked, and the new server
-knows no host until the agents move (the old one closes their listener at its SIGTERM, before it
-stops the job service). A build client that keeps its connection to the old server submits there
-until the old one's `--drain-hold` ends, and by then the hosts are on the new one. Admission over
-every server's hosts is gap G5 of the multi-instance design, and is not built yet.
+Admission and placement read the `node/` rows of the job store as well as the asked server's
+registry, so a job submitted to the new server before any host has said hello to it is admitted
+and placed for every host whose row a server of this release wrote: it is not refused
+`no-capable-host` for lack of a hello. One caveat: a host that said hello only to a release
+before this one has no row until it says hello to this release, and until then a submit to the new
+server that only that host could serve is refused `no-capable-host`. A build client that keeps its
+connection to the old server submits there until the old one's `--drain-hold` ends, and by then
+the hosts are on the new one.

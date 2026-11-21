@@ -18,7 +18,7 @@ use js_types::{CordonHolder, ExecMode};
 
 use super::{Carried, DecodeError, Fields, Writer, byte_of, job_id_of, text_of};
 use crate::error::JobStoreError;
-use crate::record::{HostTaint, Isolation};
+use crate::record::{HostTaint, Isolation, ScaleMark};
 
 /// The tag isolation adds to a job row, after the ones of `job_tag` and `job_whole_tag`.
 pub(crate) mod job_host_tag {
@@ -36,6 +36,12 @@ pub(crate) mod taint_tag {
 pub(crate) mod cordon_tag {
     /// The holder of the cordon (text); absent when the request that placed it named none.
     pub const HOLDER: u16 = 1;
+}
+
+/// The tags of a scale-down mark row (`hostmark/<host>`).
+pub(crate) mod hostmark_tag {
+    /// The mark (one byte: 1 draining, 2 releasing).
+    pub const MARK: u16 = 1;
 }
 
 /// The value of [`job_host_tag::ISOLATION`] for a job that runs on the host.
@@ -104,6 +110,36 @@ pub(crate) fn decode_taint(row: &[u8]) -> Result<HostTaint, DecodeError> {
     let mut fields = Fields::of(row)?;
     let job = fields.need(taint_tag::JOB, job_id_of)?;
     Ok(HostTaint { job })
+}
+
+/// The row of the scale-down mark `mark`.
+///
+/// # Errors
+/// [`JobStoreError::TooLarge`] when a field is over 4 GiB.
+pub(crate) fn encode_hostmark(mark: ScaleMark) -> Result<Vec<u8>, JobStoreError> {
+    let byte = match mark {
+        ScaleMark::Draining => 1,
+        ScaleMark::Releasing => 2,
+    };
+    let mut row = Writer::default();
+    row.put(hostmark_tag::MARK, vec![byte]);
+    row.finish(&Carried::default())
+}
+
+/// The scale-down mark a row holds. A tag this build does not know is skipped.
+///
+/// # Errors
+/// [`DecodeError::Newer`] for a row a later build wrote or a mark this build does not know;
+/// another [`DecodeError`] for one that does not parse.
+pub(crate) fn decode_hostmark(row: &[u8]) -> Result<ScaleMark, DecodeError> {
+    let mut fields = Fields::of(row)?;
+    fields.need(hostmark_tag::MARK, |tag, value| {
+        match byte_of(tag, &value)? {
+            1 => Ok(ScaleMark::Draining),
+            2 => Ok(ScaleMark::Releasing),
+            _ => Err(DecodeError::Newer),
+        }
+    })
 }
 
 /// The row of a cordon held by `holder` (none: a cordon no holder named). The time the

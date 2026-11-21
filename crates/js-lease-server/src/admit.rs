@@ -4,25 +4,30 @@
 //! it before anything is recorded.
 //!
 //! The hosts are read from the registry (drain, cordon and silence; a taint is not read:
-//! a tainted host is capable). A launching
+//! a tainted host is capable) and from the `node/` rows of the job store ([`crate::node_rows`]),
+//! so a submit to a server that did not take a host's hello still sees the host. A launching
 //! provider's catalog is read from the server's cache ([`Catalogs::view`]), which the tick
 //! fills: the read calls no provider and answers at once. A catalog the cache has never
 //! fetched is [`CatalogView::Unread`], which counts as "may offer".
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use js_agent_wire::{DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, is_mount_provider_key};
 use js_elastic::CapacityProvider;
-use js_jobs::Isolation;
+use js_jobs::{Isolation, ScaleMark};
 use js_registry::{HostMark, HostState as RegistryState, HostView as RegistryView, Registry};
 use js_sched::admission_ever::{
     Admission, CatalogView, HostState, HostView, PoolLimits, ProviderView, can_ever_serve,
 };
-use js_types::{Requirements, Shape};
+use js_types::{HostId, Requirements, Shape};
+use tracing::warn;
 
 use crate::catalogs::{Cached, Catalogs};
+use crate::job_store::ServerJobs;
+use crate::node_rows::{self, Seen};
+use crate::util::blocking;
 
 /// A machine provider that launches for the pool, with what the pool lets it launch.
 #[derive(Clone)]
@@ -74,18 +79,29 @@ impl Admit {
 /// A job with host isolation is offered only the registered hosts whose hello reported
 /// `host-jobs`, and no provider: a machine not launched yet has reported nothing.
 ///
-/// The hosts are read from the registry alone, whose lock the read takes and lets go at once. The launching providers' catalogs are read from the
+/// The hosts are the registry's (its lock is taken and let go at once) and every host whose
+/// `node/` row the job store holds, a host in both counted once as the registry sees it. The
+/// rows are read on the pool for blocking calls. When they cannot be read the job is admitted
+/// and the failure logged: a refusal is never taken on less than the rows, and a job admitted
+/// that no host can take waits in the queue until its limits end it, as one for a host that has
+/// not said hello yet does. The launching providers' catalogs are read from the
 /// server's cache, as a lease's are ([`Admit::decide`]): the read calls no provider and answers
 /// at once. A catalog the cache has never fetched may offer.
 pub(crate) struct JobAdmission {
     admit: Admit,
     registry: Registry,
+    jobs: Arc<ServerJobs>,
 }
 
 impl JobAdmission {
-    /// Admission over the hosts of `registry` and the launching providers of `admit`.
-    pub(crate) fn new(admit: Admit, registry: Registry) -> Self {
-        Self { admit, registry }
+    /// Admission over the hosts of `registry` and the `node/` rows of `jobs`, and the
+    /// launching providers of `admit`.
+    pub(crate) fn new(admit: Admit, registry: Registry, jobs: Arc<ServerJobs>) -> Self {
+        Self {
+            admit,
+            registry,
+            jobs,
+        }
     }
 }
 
@@ -93,12 +109,27 @@ impl JobAdmission {
 impl crate::job_api::submit::Admission for JobAdmission {
     async fn can_ever_serve(&self, wanted: &Requirements, isolation: Isolation) -> bool {
         let on_the_machine = isolation == Isolation::Host;
-        let hosts: Vec<HostView> = self
-            .registry
-            .hosts()
+        let (registry, jobs) = (self.registry.clone(), Arc::clone(&self.jobs));
+        let rows = blocking(move || node_rows::read(&registry, &jobs)).await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "the hosts' rows could not be read: the job is admitted unjudged");
+                return true;
+            }
+        };
+        let held = self.registry.hosts();
+        let held_here: BTreeSet<&HostId> = held.iter().map(|host| &host.id).collect();
+        let by_row = rows
+            .iter()
+            .filter(|seen| !held_here.contains(seen.host()))
+            .filter(|seen| !on_the_machine | seen.reports_host_jobs())
+            .map(row_host);
+        let hosts: Vec<HostView> = held
             .iter()
             .filter(|host| !on_the_machine | host.claim.as_ref().is_some_and(reports))
             .map(registered)
+            .chain(by_row)
             .collect();
         let providers = match on_the_machine {
             true => Vec::new(),
@@ -208,6 +239,21 @@ pub(crate) fn registered(host: &RegistryView) -> HostView {
         draining: host.mark == Some(HostMark::Releasing),
         total: placed.resources().clone(),
         facts: placed.capabilities().clone(),
+    }
+}
+
+/// A host known only by its row as admission sees it: lost when it was last heard longer ago
+/// than the registry's longest grace, serving otherwise; draining when its row carries the mark
+/// of a release ([`ScaleMark::Releasing`], which nothing ends); on the shape the registry would
+/// place it on. A draining mark ([`ScaleMark::Draining`]) and a taint are not leaving, as for a
+/// host the registry holds.
+fn row_host(seen: &Seen) -> HostView {
+    HostView {
+        id: seen.host().clone(),
+        state: state_of(seen.lost, false, false),
+        draining: seen.mark == Some(ScaleMark::Releasing),
+        total: seen.placed.resources().clone(),
+        facts: seen.placed.capabilities().clone(),
     }
 }
 
@@ -337,3 +383,7 @@ mod tests {
         assert!(reported_xcodes(&BTreeMap::new()).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "admit_rows_tests.rs"]
+mod rows_tests;
