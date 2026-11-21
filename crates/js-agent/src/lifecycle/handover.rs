@@ -15,6 +15,15 @@
 //! process offers the ports again. The next process adopts the runs, lists them in its
 //! first heartbeat and reports their results.
 //!
+//! Under an egress ceiling (`--egress allow-list` or `open`) the runs keep their network as it
+//! is: the wiring (each run's veth pair, its member of the firewall's set and its forwards) is
+//! the kernel's and goes on enforcing the same rules with no agent running; the process that
+//! hands over leaves it, together with the run's record in the egress store (the directory
+//! `egress` of the state root, written when the run was wired). The next process reads the
+//! records at its start and loads its firewall in one transaction that puts back each recorded
+//! run's member and forwards, takes over each adopted run's wiring from its record, and
+//! removes the wiring and records no run claimed (see the crate's `egress` module).
+//!
 //! The file is looked at once, when the stop request is taken; one written later changes
 //! nothing for that stop. The agent removes one it finds at its start, after the adoption: a
 //! request is for the process that is running when it is made, never for a later one.
@@ -31,8 +40,6 @@ use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-
-use super::taint::StateRoot;
 
 /// The name of the handover file in the state root.
 pub const HANDOVER_FILE: &str = "handover";
@@ -121,16 +128,6 @@ pub fn remove(root: &Path) -> io::Result<bool> {
         Err(why) => Err(why),
         Ok(()) => sync(root).map(|()| true),
     }
-}
-
-/// The state root a stop request looks in for a handover: `state`, unless the agent has an
-/// egress ceiling (`egress` above mode none). Such an agent's next process removes, at its
-/// start, every run of an earlier process that may still run (the network wiring of an earlier
-/// process cannot be taken over), so its stop always drains.
-#[must_use]
-pub fn root_for(state: Option<&StateRoot>, egress: &crate::egress::Config) -> Option<StateRoot> {
-    let adoptable = egress.mode() == crate::egress::Mode::None;
-    state.filter(|_| adoptable).cloned()
 }
 
 /// Syncs the directory `root`, so a rename or a removal in it survives a power cut.

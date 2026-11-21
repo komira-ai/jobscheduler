@@ -59,6 +59,9 @@ after every later job.
 | `watch-dir-changed` | no: a `--watch-dir` may not hold or lie in a mount root, the scratch root or the state root, so no contained job can write it; a package install changes `/etc` | note |
 | `processes-unreadable` | the process check cannot run | **taint** (unchecked); clears itself |
 | `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable`, `watch-over-bound` | the input of a check that no longer taints | note; the input's value is taken as unchanged (the baseline's) |
+| `scan-residue` (Mac) | yes: a run as a pool user can make its own login item or Background Task Management entry, which the reset does not remove (mac-lease-teardown.md, "After the run: the leak scan") | **taint** (residue); stays until an operator clears it |
+| `scan-unreadable`, `scan-failed` (Mac) | the helper's leak scan could not read an item, or could not be asked | **taint** (unchecked); clears itself |
+| `scan-host-changed`, `scan-no-baseline` (Mac) | no: a root-owned item changed, or the node has no leak-scan baseline | note |
 
 A host job taints `host-job` whatever the checks say (the agent and the server both do it), so nothing is lost for it: it runs as the
 host's root and can change anything the notes look at. `cleanup-failed` and `check-owed` are the lifecycle's and are unchanged.

@@ -631,6 +631,19 @@ impl EgressPort for Unused {
     ) -> Result<Box<dyn Wired>, EgressError> {
         Err(EgressError::Exhausted)
     }
+
+    fn adopt(
+        &self,
+        _run: &str,
+        _level: JobNetwork,
+        _ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        Err(EgressError::Exhausted)
+    }
+
+    fn settle(&self) -> Result<(), EgressError> {
+        Ok(())
+    }
 }
 
 /// Proves a lease nothing records that cannot be removed is reported and kept for the next
@@ -745,11 +758,13 @@ fn a_starting_lease_that_names_a_live_supervisor_is_removed_and_the_supervisor_e
     assert_gone(&node, &id.0);
 }
 
-/// Proves a runtime opened with an egress adopts nothing: a job that runs is removed, saying
-/// its network wiring cannot be taken over, and its supervisor is ended, because the egress
-/// removes the wiring of an earlier process. Catches an adopted run left with no network.
+/// Proves a runtime opened with an egress adopts a run that stands and was admitted with no
+/// network: its labels record `none`, so there is no wiring to take over, the egress is not
+/// asked to adopt it (the one given refuses every adoption), the run polls as running, and
+/// its removal ends its supervisor. Catches a run with no network refused for the egress the
+/// runtime has, and an adoption of a `none` run that asks the egress for wiring.
 #[test]
-fn a_runtime_with_an_egress_removes_the_runs_it_would_adopt() {
+fn a_runtime_with_an_egress_adopts_a_run_that_has_no_network() {
     let node = Node::new("adopt-egress");
     let mut first = node.open();
     let id = held(&node, &mut first, "r1-hold");
@@ -758,19 +773,18 @@ fn a_runtime_with_an_egress_removes_the_runs_it_would_adopt() {
 
     let mut settings = node.settings("/root");
     settings.egress = Some(Arc::new(Unused));
-    let second = CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG))
-        .expect("opens");
+    let mut second = CrunRuntime::open_with(
+        settings,
+        Arc::new(NoImages),
+        Node::hooks(Duration::ZERO, LONG),
+    )
+    .expect("opens");
     let report = second.swept();
-    assert!(report.adopted.is_empty(), "{report:?}");
-    assert_eq!(report.removed.len(), 1, "{report:?}");
-    assert!(
-        says(
-            &report.removed[0].reason,
-            "network wiring cannot be taken over"
-        ),
-        "{report:?}"
-    );
-    wait_gone(supervisor);
+    assert_eq!(report.adopted, ["r1-hold"], "{report:?}");
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert!(supervisor.alive());
+    assert_eq!(second.poll(&id), Ok(Status::Running));
+    second.remove(&id).expect("removed");
     assert_gone(&node, &id.0);
 }
 

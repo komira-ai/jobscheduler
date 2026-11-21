@@ -19,6 +19,7 @@
 (allow process-info* (target self) (target same-sandbox))
 (deny mach-register)
 (deny file-mount)
+(deny ipc-posix-shm-write-create)
 (deny job-creation)
 (deny lsopen)
 (deny file-read* file-write* (subpath "/private/var/protected/sfanalytics") (subpath "/private/var/protected/trustd/private"))

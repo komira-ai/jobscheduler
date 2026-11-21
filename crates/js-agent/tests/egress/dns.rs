@@ -24,7 +24,7 @@ fn only_the_configured_resolver_is_reachable() {
         config.resolv_conf().as_deref(),
         Some("nameserver 192.0.2.53\noptions timeout:1 attempts:1\n")
     );
-    let egress = Egress::start(config).expect("start");
+    let egress = Egress::start(config, None).expect("start");
     let holder = Holder::new();
     let attachment = egress
         .attach("dns", holder.pid(), JobNetwork::AllowList, &[])
@@ -64,7 +64,7 @@ fn only_the_configured_resolver_is_reachable() {
     // A restart: the agent that held the host's egress has ended.
     drop(egress);
 
-    let none = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("restart");
+    let none = Egress::start(allow_list(&["192.0.2.10:9300"], &[]), None).expect("restart");
     assert_eq!(none.config().resolv_conf(), None);
     let holder = Holder::new();
     let attachment = none

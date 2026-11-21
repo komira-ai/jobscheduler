@@ -481,9 +481,12 @@ SHA-256 as the pin, and the manifest:
 
 The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
 running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
-and no `--egress` in its flags file): `prepare` neither cordons nor waits, and `cutover` and
+and, where the flags file sets an `--egress` ceiling, `egress-handover` on the `stops:` line of
+both the running and the staged agent): `prepare` neither cordons nor waits, and `cutover` and
 `rollback` write the handover file in the agent's state root before they stop the unit, so the
 stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
+(under an egress ceiling each job's wiring stays in the kernel and its record in the state root's
+`egress` directory, from which the new agent takes the wiring over)
 (docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
 drain of any other host.
 

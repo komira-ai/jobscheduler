@@ -2,7 +2,8 @@
 //! that tells whether what the kernel holds is still what the agent loaded.
 //!
 //! Two tables, both the agent's alone, both loaded in one `nft -f` transaction that first
-//! removes any earlier copy:
+//! removes any earlier copy and, in the same transaction, puts back the set members and the
+//! forwards of the runs whose interfaces are still there (see [`super::host`]):
 //!
 //! - `inet js_crun_egress`: the `forward` chain (a filter hook at priority -10, ahead of the
 //!   distribution's own forward rules at 0) holds, in order, the acceptance of replies to a

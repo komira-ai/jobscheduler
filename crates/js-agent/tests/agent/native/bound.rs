@@ -158,7 +158,9 @@ fn a_helper_without_deadlines_runs_the_job_and_the_agent_bounds_it() {
         .collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].millis, None);
-    assert_eq!(unreadable(&rig.fake), 1);
+    // The helper is from before the pool too: its `pool-status` is the other request it
+    // cannot read.
+    assert_eq!(unreadable(&rig.fake), 2);
     let journal = js_agent::native::Journal::new(&rig.dir.path("native-leases"));
     assert_eq!(journal.runs().unwrap()["7.0"].deadline_ms, None);
     rig.fake.advance(3_600_000);
@@ -175,9 +177,11 @@ fn a_helper_without_deadlines_runs_the_job_and_the_agent_bounds_it() {
         .filter(|one| one.verb == "run")
         .count();
     assert_eq!(runs, 2);
+    // Each start asks `pool-status` (refused twice); the `run` with the deadline was
+    // refused once only.
     assert_eq!(
         unreadable(&rig.fake),
-        1,
+        3,
         "the deadline is not offered again"
     );
     rig.rt.stop(&id, Duration::ZERO).unwrap();
