@@ -174,10 +174,10 @@ fn a_helper_container_is_the_runners() {
         // Services whose names start like a lease's group but are not one.
         "0::/js-agent.slice/js-short-x.service/js-zzzzzzzzzzzzzzzz-r1/js-0123456789abcdef-/actions/helpers/x",
     ] {
-        for uid in [0, JOB_UID] {
+        for user in [0, JOB_UID] {
             let (host, mut checks) = host_and_checks();
-            host.start_process(process(300, 1, uid, 900, cgroup));
-            assert!(quiet(&mut checks, "r1"), "{cgroup} uid {uid}");
+            host.start_process(process(300, 1, user, 900, cgroup));
+            assert!(quiet(&mut checks, "r1"), "{cgroup} as user {user}");
         }
     }
     for cgroup in [
