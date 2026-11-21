@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use js_agent::System;
 use js_agent::crun::{EgressPort, Seams, Wired};
 use js_agent::egress::EgressError;
+use js_agent::{Snapshot, System};
 use js_agent_wire::NetworkCeiling;
 use js_contain::oci::recorded_supervisor;
 use js_types::{JobNetwork, PortMap};
@@ -414,8 +414,11 @@ fn an_update_under_an_egress_ceiling_leaves_the_wiring_and_the_next_agent_adopts
 /// Asserts that a run whose wiring the next agent cannot take over is not left running
 /// unwired and not hidden: the egress refuses the adoption, the agent removes the run (tears
 /// it down) and reports it, and the server shows its job as it shows a run the agent
-/// lost, never as still running. It catches an agent that adopts a run with no network, or
-/// drops it without saying so.
+/// lost, never as still running. The server's stop of each lost job reaches the agent by its
+/// dispatch poll, and the agent retires both; stopped then, it drains at the pool's interval
+/// until the server has acknowledged them and exits 0 with nothing left. It catches an agent
+/// that adopts a run with no network, or drops it without saying so, and a drain that ends
+/// with the stops of lost jobs unanswered.
 #[test]
 fn a_run_whose_wiring_the_next_agent_cannot_take_over_is_removed_and_reported() {
     let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
@@ -437,6 +440,33 @@ fn a_run_whose_wiring_the_next_agent_cannot_take_over_is_removed_and_reported() 
         "a wiring that was never taken over is nothing to release: {:?}",
         port.calls()
     );
-    let ran = rig.agent.stop();
+    // The server decided each loss, so it queued a stop of each job; the agent's dispatch poll
+    // brings both on a thread of its own, beside the heartbeats, and the agent, which holds
+    // neither job, retires each and lists it until the server acknowledges it. Both jobs were
+    // lost by one listing, the last heartbeat above, and no heartbeat runs while the test waits
+    // for that event, so nothing acknowledges them first and the stop below always finds both
+    // owed.
+    let lost: Vec<&str> = jobs.iter().map(|(job, _)| job.as_str()).collect();
+    let owed = |now: &Snapshot| {
+        lost.iter()
+            .all(|job| now.retired_jobs.iter().any(|id| id == job))
+    };
+    assert!(
+        rig.worker.wait_until(&owed, GUARD),
+        "the stops of the lost jobs never reached the agent: {:?}",
+        rig.worker.snapshot()
+    );
+    // The stop's drain beats while the ids are owed: it hands them over and ends once the
+    // server has acknowledged them, whatever number of heartbeats that takes.
+    let (ran, waits) = rig.agent.stop_draining();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(
+        !waits.is_empty() && waits.iter().all(|wait| *wait == QUICK_INTERVAL),
+        "the drain beats again, at the pool's interval, while the stops are owed: {waits:?}"
+    );
+    assert!(
+        !ran.err.contains("draining: a run or a result is left"),
+        "the drain ended with nothing owed: {}",
+        ran.err
+    );
 }
