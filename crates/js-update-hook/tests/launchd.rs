@@ -497,6 +497,22 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
     assert_eq!(stopper.calls().len(), 1);
 }
 
+/// A start of a service launchd runs or has begun to start (`spawning`, `xpcproxy`: a real Mac
+/// showed the session helper spawned at once by its bootstrap during an update) asks launchd for
+/// nothing more: only the print is made.
+///
+/// Catches a `kickstart -k` of a service launchd had just spawned, which killed the new instance
+/// 7 ms after its start, made launchd hold the next one for its 30 s throttle, and failed the
+/// update's cutover with start_failed.
+#[test]
+fn a_start_of_a_service_launchd_has_begun_issues_no_kickstart() {
+    for state in ["running", "spawning", "xpcproxy"] {
+        let tool = Script::default().prints(&[&print_with(state, "")]);
+        assert_eq!(LaunchUnits::new(&tool).start(LABEL), Ok(()), "{state}");
+        assert_eq!(tool.calls(), [print_line(LABEL)], "{state}");
+    }
+}
+
 /// A kickstart goes to the stop runner, which allows launchd's throttle: a service launchd has
 /// scheduled (`spawn scheduled`, as a real Mac showed for the session helper bootstrapped again
 /// within its throttle during an update) is kicked there, and the main runner only reads.

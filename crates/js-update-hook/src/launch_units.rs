@@ -6,7 +6,7 @@
 //! |------------------|---------------------------------------------------------------------|
 //! | `show`           | `print system/<label>`: its `state`, `last exit code` and `last terminating signal` |
 //! | `stop_no_block`  | `bootout system/<label>`, when `print` finds the service loaded      |
-//! | `start`          | `bootstrap system <plist>` when nothing is loaded; `kickstart -k` when loaded and not running; then reads `print` until the service has begun |
+//! | `start`          | `bootstrap system <plist>` when nothing is loaded; nothing when it is `running`, `spawning` or `xpcproxy`; `kickstart -k` otherwise; then reads `print` until the service has begun |
 //! | `is_active`      | `print system/<label>`: loaded and `state = running`                |
 //!
 //! # What `show` says
@@ -237,6 +237,11 @@ enum Ended {
     Unknown,
 }
 
+/// Whether launchd runs the service or has begun to: `running`, `spawning` or `xpcproxy`.
+fn is_begun(state: &str) -> bool {
+    matches!(state, "running" | "spawning" | "xpcproxy")
+}
+
 fn ended(text: &str) -> Ended {
     let code = property(text, "last exit code")
         .and_then(|code| code.split(':').next())
@@ -345,7 +350,10 @@ impl Units for LaunchUnits<'_> {
                 let plist = format!("{LAUNCH_DAEMONS_DIR}/{unit}.plist");
                 (self.launchctl(&["bootstrap", "system", &plist]), 0)
             }
-            Some(text) if printed_state(&text)? == "running" => return Ok(()),
+            // Running, or launchd has begun its start (a bootstrap of a daemon whose launch
+            // condition holds spawns it at once): a `kickstart -k` now would kill the instance
+            // launchd just started, and launchd would then hold the next start for its throttle.
+            Some(text) if is_begun(printed_state(&text)?) => return Ok(()),
             Some(text) => {
                 self.allow_kick(unit)?;
                 let target = format!("system/{unit}");
