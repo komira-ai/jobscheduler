@@ -375,7 +375,7 @@ fn auto_login(host: &dyn Host, settings: &Settings) -> Result<Vec<String>, Strin
         .map_err(|why| format!("{AUTO_LOGIN}: running {DEFAULTS}: {why}"))?;
     if read.success {
         items.push(format!("{AUTO_LOGIN} user {:?}", read.stdout.trim()));
-    } else if !read.stderr.contains("does not exist") {
+    } else if !crate::autologin::key_absent(&read.stderr) {
         return Err(format!(
             "{AUTO_LOGIN}: defaults read {domain} {AUTO_LOGIN_USER} failed: {}",
             read.stderr.trim()
