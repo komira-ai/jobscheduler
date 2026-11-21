@@ -20,8 +20,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use js_mac_session::client::Client;
-use js_mac_session::lease::{parse_lease, user_name};
-use js_mac_session::proto::{self, Call, Limits, RUN_FDS, Reply, Request};
+use js_mac_session::lease::{Slot, parse_lease, pool_user_name, user_name};
+use js_mac_session::proto::{self, Call, Limits, PoolState, RUN_FDS, Reply, Request};
 
 use crate::support::Scratch;
 
@@ -73,6 +73,13 @@ struct State {
     killed: BTreeSet<String>,
     /// Whether `user-create` leaves out the home directory the real helper makes.
     skip_homes: bool,
+    /// Whether the fake lends users of a pool, as the real helper does: `user-create` takes
+    /// the lowest free slot, whose user `kbf-lease-pool-<slot>` has its home made, and
+    /// `pool-status` lists the slot leased to the lease. Without it the fake makes a user
+    /// named for the lease, as a helper before the pool did, and its pool is empty.
+    pool: bool,
+    /// The slots leased, each with its lease, in pool mode.
+    leased: Vec<(u32, String)>,
     /// Whether a `run` starts its program for real.
     real: bool,
     /// The journal to look in when a `user-create` arrives.
@@ -117,6 +124,35 @@ impl Shared {
         let path = self.lock().journal.clone();
         let text = path.and_then(|path| fs::read_to_string(path).ok());
         text.is_some_and(|text| text.lines().any(|line| line == format!("+ {lease}")))
+    }
+
+    /// Gives `lease` its user, as `user-create` does: in pool mode the lowest free slot,
+    /// recorded leased; returns the name of the user's home.
+    fn lease_user(&self, lease: &str) -> String {
+        let mut state = self.lock();
+        if !state.pool {
+            drop(state);
+            return self.home_name(lease);
+        }
+        let slot = (0..)
+            .find(|n| state.leased.iter().all(|(slot, _)| slot != n))
+            .unwrap();
+        state.leased.push((slot, lease.to_owned()));
+        pool_user_name(Slot::new(slot))
+    }
+
+    /// The name of the home of the user of `lease`: its pool user's, or its own.
+    fn home_name(&self, lease: &str) -> String {
+        let slot = self
+            .lock()
+            .leased
+            .iter()
+            .find(|(_, held)| held == lease)
+            .map(|(slot, _)| *slot);
+        match slot {
+            Some(slot) => pool_user_name(Slot::new(slot)),
+            None => user_name(parse_lease(lease).unwrap()),
+        }
     }
 
     /// Notes a request and returns the reason it is refused, when it is.
@@ -204,10 +240,15 @@ impl FakeHelper {
         js_agent::Backend::Native(settings.unwrap().unwrap())
     }
 
-    /// The home of the user of `lease`.
+    /// The home of the user of `lease`: its pool user's while it holds a slot, or its own.
     pub fn home_of(&self, lease: &str) -> PathBuf {
-        let id = parse_lease(lease).unwrap();
-        self.shared.homes.join(user_name(id))
+        self.shared.homes.join(self.shared.home_name(lease))
+    }
+
+    /// From now on `user-create` lends users of a pool, `kbf-lease-pool-<slot>`, and
+    /// `pool-status` names the slot of each lease, as the real helper does.
+    pub fn lend_pool_users(&self) {
+        self.shared.lock().pool = true;
     }
 
     /// From now on a `user-create` notes whether the journal at `path` names its lease.
@@ -355,6 +396,16 @@ fn serve(stream: &UnixStream, shared: &Shared) {
     else {
         return;
     };
+    let pool_status = serde_json::from_value::<Call>(value.clone())
+        .is_ok_and(|call| matches!(call.request, Request::PoolStatus));
+    if pool_status && shared.lock().old {
+        // A helper from before the pool cannot read `pool-status`; not noted among the
+        // verbs, as `pool-status` never is (the agent asks it at every start).
+        return refused(
+            stream,
+            "bad request: unknown variant `pool-status`".to_owned(),
+        );
+    }
     if shared.lock().old {
         // As a helper from before the new verbs and fields reads a request: the old shape,
         // unknown fields refused, the refusal the real server gives a request it cannot read.
@@ -390,14 +441,26 @@ fn serve(stream: &UnixStream, shared: &Shared) {
         }) {
             Some(reason) => refused(stream, reason),
             None => {
+                let home = shared.lease_user(&lease);
                 if !shared.lock().skip_homes {
-                    let id = parse_lease(&lease).unwrap();
-                    fs::create_dir(shared.homes.join(user_name(id))).unwrap();
+                    fs::create_dir(shared.homes.join(home)).unwrap();
                 }
                 let uid = rustix::process::getuid().as_raw();
                 reply(stream, &Reply::Created { uid });
             }
         },
+        // Not noted among the verbs: the agent asks it at every start, beside `user-create`.
+        Request::PoolStatus => {
+            let state = shared.lock();
+            let size = u32::try_from(state.leased.len()).unwrap();
+            let pool = PoolState {
+                size,
+                leased: state.leased.clone(),
+                ..PoolState::default()
+            };
+            drop(state);
+            reply(stream, &Reply::Pool(Box::new(pool)));
+        }
         Request::Run {
             lease,
             argv,
@@ -422,8 +485,9 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 if let Some((path, read)) = shared.lock().read_at_delete.as_mut() {
                     *read = Some(fs::read(&*path).ok());
                 }
-                let id = parse_lease(&lease).unwrap();
-                let existed = fs::remove_dir_all(shared.homes.join(user_name(id))).is_ok();
+                let home = shared.home_name(&lease);
+                shared.lock().leased.retain(|(_, held)| *held != lease);
+                let existed = fs::remove_dir_all(shared.homes.join(home)).is_ok();
                 reply(stream, &Reply::Deleted { existed });
             }
         },

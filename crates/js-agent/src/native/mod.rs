@@ -5,10 +5,14 @@
 //! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
 //! journal's paragraph below):
 //!
-//! 1. `user-create` makes the run's user, a fresh one named for the run's lease id
-//!    (`<term>.<sequence>`: the term is drawn when the runtime is made and the sequence
-//!    counts up, so a name is never used twice, which the helper's ledger also demands).
-//!    The reply is the user's uid, taken from the helper's range.
+//! 1. `user-create` gives the run's lease id (`<term>.<sequence>`: the term is drawn when
+//!    the runtime is made and the sequence counts up, so a lease id is never used twice,
+//!    which the helper's ledger also demands) a user: a free user of the helper's pool,
+//!    `kbf-lease-pool-<slot>`, or, from a helper before the pool, a fresh user named for
+//!    the lease, `kbf-lease-<term>-<sequence>`. The reply is the user's uid alone; the
+//!    agent reads the slot the lease got from `pool-status`, and the run's home is that
+//!    user's own (`<homes>/kbf-lease-pool-<slot>`, or `<homes>/kbf-lease-<term>-<sequence>`
+//!    for a lease the pool does not hold).
 //! 2. The agent, as root and before any process of that user exists, makes the run
 //!    directory below the user's home (`exec/`, the working directory, and `tmp/`) and
 //!    gives it to the user. It makes the job's three standard streams as files in the
@@ -35,7 +39,7 @@
 //!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
-//!    none of its per-user agents; `user-delete` removes the user and sweeps its home and
+//!    none of its per-user agents; `user-delete` removes the user (resets a pool user) and sweeps its home and
 //!    its entry under `/var/folders`. A step that fails leaves the user in the helper's
 //!    ledger, its uid held, and the lease in the journal for the next start to end. Between
 //!    the two, a removal copies the run's declared outputs out of `exec/` into the run's
@@ -171,7 +175,7 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
-use js_mac_session::lease::{Dotted, user_name};
+use js_mac_session::lease::{Dotted, Slot, pool_user_name, user_name};
 use js_mac_session::proto::Limits;
 use js_types::LeaseId;
 
@@ -456,6 +460,24 @@ impl NativeRuntime {
         }
     }
 
+    /// The home of the user the helper lent `lease` (`<term>.<seq>`, as `user-create` was
+    /// asked): a pool user's own, `<homes>/kbf-lease-pool-<slot>`, when the helper's pool
+    /// holds the lease in a slot; otherwise the lease's own `<homes>/kbf-lease-<term>-<seq>`,
+    /// which is the user a helper before the pool made for the lease. `user-create` answers
+    /// the uid alone, so the slot is read from `pool-status`; a helper that cannot answer it
+    /// (one before the pool refuses the verb) is taken as one before the pool.
+    fn lease_home(&self, id: LeaseId, lease: &str) -> PathBuf {
+        let slot = self.helper.pool_status().ok().and_then(|pool| {
+            pool.leased
+                .into_iter()
+                .find(|(_, held)| held == lease)
+                .map(|(slot, _)| pool_user_name(Slot::new(slot)))
+        });
+        self.config
+            .homes
+            .join(slot.unwrap_or_else(|| user_name(id)))
+    }
+
     /// Everything after the user exists: the run directory, the log files, the profile and
     /// the `run` verb.
     fn launch(
@@ -465,7 +487,7 @@ impl NativeRuntime {
         (id, lease, uid): (LeaseId, &str, u32),
         (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
-        let home = self.config.homes.join(user_name(id));
+        let home = self.lease_home(id, lease);
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
         for dir in [&exec, &tmp] {
             make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;

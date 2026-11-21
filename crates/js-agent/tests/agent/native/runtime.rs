@@ -105,6 +105,60 @@ fn each_start_gets_a_user_of_its_own() {
     assert!(rig.fake.home_of("7.1").join("exec").is_dir());
 }
 
+/// Asserts that a lease the helper lends a pool user (`kbf-lease-pool-<slot>`, as the real
+/// helper does) gets its run directory in that user's own home, which the profile grants as
+/// the run's (`RUN`): two leases, slots 0 and 1, two homes of the pool and no other. It
+/// catches a run directory made in a home named for the lease (`kbf-lease-<term>-<seq>`),
+/// which no pool user has: on a Mac every native job then ended `start-failed:
+/// /Users/kbf-lease-<term>-<seq>/exec: No such file or directory`.
+#[test]
+fn a_pool_user_runs_in_its_own_home_named_for_its_slot() {
+    let mut rig = Rig::new("pool-home");
+    rig.fake.lend_pool_users();
+    let first = rig.start("r1", "/bin/true", &[]);
+    let second = rig.start("r2", "/bin/true", &[]);
+    assert_eq!((first, second), (handle("7.0"), handle("7.1")));
+    let homes = rig.fake.homes().to_path_buf();
+    assert_eq!(rig.fake.home_of("7.0"), homes.join("kbf-lease-pool-0"));
+    assert_eq!(rig.fake.home_of("7.1"), homes.join("kbf-lease-pool-1"));
+    let mut made: Vec<String> = fs::read_dir(&homes)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    made.sort();
+    assert_eq!(made, ["kbf-lease-pool-0", "kbf-lease-pool-1"]);
+    for home in &made {
+        assert!(homes.join(home).join("exec").is_dir(), "{home}");
+        assert!(homes.join(home).join("tmp").is_dir(), "{home}");
+    }
+    let parsed = parse(&rig.fake.run_of("7.1").argv);
+    assert_eq!(
+        parsed.params[0],
+        (
+            "RUN".to_owned(),
+            homes.join("kbf-lease-pool-1").display().to_string()
+        )
+    );
+}
+
+/// Asserts that a helper from before the pool, which refuses `pool-status` as a request it
+/// cannot read and makes a user named for the lease, still gets runs in that user's home
+/// (`kbf-lease-<term>-<seq>`). It catches a start that fails, or looks in a pool user's home,
+/// when the helper has no pool to ask.
+#[test]
+fn a_helper_before_the_pool_runs_in_the_home_named_for_the_lease() {
+    let mut rig = Rig::new("pre-pool-home");
+    rig.fake.be_old();
+    rig.start("r1", "/bin/true", &[]);
+    let home = rig.fake.home_of("7.0");
+    let id = js_mac_session::lease::parse_lease("7.0").unwrap();
+    assert_eq!(
+        home,
+        rig.fake.homes().join(js_mac_session::lease::user_name(id))
+    );
+    assert!(home.join("exec").is_dir());
+}
+
 /// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
 /// and an open network has no network rule at all; a request above the ceiling, given to the
 /// runtime directly, is still held at the ceiling. An agent refuses such a start before it
