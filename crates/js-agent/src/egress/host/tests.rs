@@ -21,7 +21,7 @@ const INET_CHANGED: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"ta
 const NAT: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"ip","name":"js_crun_egress_nat","handle":1}}]}"#;
 
 /// Stand-ins for the three programs: executable files in a directory of their own.
-fn programs() -> &'static PathBuf {
+pub(super) fn programs() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         use std::os::unix::fs::PermissionsExt as _;
@@ -36,12 +36,12 @@ fn programs() -> &'static PathBuf {
     })
 }
 
-fn program(name: &str) -> String {
+pub(super) fn program(name: &str) -> String {
     programs().join(name).to_string_lossy().into_owned()
 }
 
 /// A configuration whose programs are the stand-ins: the default pool, or `pool` if given.
-fn config_with(mode: &str, pool: Option<&str>) -> Config {
+pub(super) fn config_with(mode: &str, pool: Option<&str>) -> Config {
     let (ip, nft, nsenter) = (program("ip"), program("nft"), program("nsenter"));
     let allow = vec!["192.0.2.10:9300".to_owned()];
     let given = Flags {
@@ -61,13 +61,13 @@ fn config_with(mode: &str, pool: Option<&str>) -> Config {
     Config::from_flags(&flags).expect("a sound configuration")
 }
 
-fn allow_list() -> Config {
+pub(super) fn allow_list() -> Config {
     config_with("allow-list", None)
 }
 
 /// The links `ip -j link show` prints for the interfaces `names`, each with the interface
 /// index 10 plus its place in the list.
-fn links(names: &[&str]) -> String {
+pub(super) fn links(names: &[&str]) -> String {
     let items: Vec<serde_json::Value> = (10u64..)
         .zip(names)
         .map(|(ifindex, name)| serde_json::json!({"ifname": name, "ifindex": ifindex}))
@@ -76,7 +76,7 @@ fn links(names: &[&str]) -> String {
 }
 
 /// The standard input of the first `nft -f -` the start made: the ruleset and what it keeps.
-fn loaded(fake: &Fake) -> String {
+pub(super) fn loaded(fake: &Fake) -> String {
     let state = fake.state();
     let at = state
         .log
@@ -97,7 +97,7 @@ type Seen = Vec<(u64, u64)>;
 
 /// What the scripted machine keeps.
 #[derive(Debug, Default)]
-struct State {
+pub(super) struct State {
     log: Vec<String>,
     stdins: Vec<String>,
     calls: usize,
@@ -120,14 +120,14 @@ struct State {
 
 /// A machine that records every call and answers as scripted.
 #[derive(Debug, Default)]
-struct Fake {
+pub(super) struct Fake {
     state: Mutex<State>,
 }
 
 impl Fake {
     /// A machine with no interfaces, both tables as `INET` and `NAT`, forwarding on, and a
     /// container in a namespace of its own.
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         let fake = Arc::new(Self::default());
         fake.answer("link show", Ok("[]".to_owned()));
         fake.answer("list table inet", Ok(INET.to_owned()));
@@ -140,7 +140,7 @@ impl Fake {
         fake
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+    pub(super) fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("the script lock")
     }
 
@@ -148,7 +148,7 @@ impl Fake {
     /// script wins).
     /// Makes the program of the calls whose logged line contains `needle` impossible to
     /// start (as a missing program is), until [`Fake::run_again`].
-    fn not_run(&self, needle: &str) {
+    pub(super) fn not_run(&self, needle: &str) {
         self.state().not_run.push(needle.to_owned());
     }
 
@@ -157,29 +157,23 @@ impl Fake {
         self.state().not_run.clear();
     }
 
-    fn answer(&self, needle: &str, result: Result<String, String>) {
+    pub(super) fn answer(&self, needle: &str, result: Result<String, String>) {
         self.state().answers.insert(0, (needle.to_owned(), result));
     }
 
-    /// Answers the next call whose logged line contains `needle` with `result`, once; the
-    /// ones after it get the standing answer.
-    fn answer_once(&self, needle: &str, result: Result<String, String>) {
-        self.state().once.push((needle.to_owned(), result));
-    }
-
-    fn identity(&self, path: &str, seen: Seen) {
+    pub(super) fn identity(&self, path: &str, seen: Seen) {
         self.state().identities.insert(path.to_owned(), (seen, 0));
     }
 
-    fn fail_call(&self, n: usize) {
+    pub(super) fn fail_call(&self, n: usize) {
         self.state().fail = Some(n);
     }
 
-    fn log(&self) -> Vec<String> {
+    pub(super) fn log(&self) -> Vec<String> {
         self.state().log.clone()
     }
 
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.state().calls
     }
 
@@ -289,12 +283,12 @@ impl Sys for Fake {
     }
 }
 
-fn started(fake: &Arc<Fake>, config: Config) -> Egress {
-    Egress::start_on(config, fake.clone()).expect("starts")
+pub(super) fn started(fake: &Arc<Fake>, config: Config) -> Egress {
+    Egress::start_on(config, None, fake.clone()).expect("starts")
 }
 
 /// The expected calls of the first attach (block 0) to the container `PID`.
-fn attach_calls() -> Vec<String> {
+pub(super) fn attach_calls() -> Vec<String> {
     let ip = program("ip");
     vec![
         "ip link add jsv0 type veth peer name jsp0".to_owned(),
@@ -307,7 +301,7 @@ fn attach_calls() -> Vec<String> {
     ]
 }
 
-fn release_calls(n: u32) -> Vec<String> {
+pub(super) fn release_calls(n: u32) -> Vec<String> {
     vec![
         format!("nft delete element inet js_crun_egress jobifs {{ \"jsv{n}\" }}"),
         format!("ip link del jsv{n}"),
@@ -332,14 +326,15 @@ fn mode_none_does_nothing() {
     assert_eq!(fake.calls(), 0, "no call for a mode that wires nothing");
 }
 
-/// Asserts that a start keeps the interfaces of an earlier process and never deletes them,
-/// and that `settle` removes exactly `jsv0` and `jsp3` (a name already gone with its pair is not
-/// an error): `jspare0`, `jsvx`, `jsv`, `eth0`, `lo` and an entry with no name are not the
-/// agent's and are not touched, and the blocks 0 and 3 are out of use until the settle gave
-/// them back. Catches a start that deletes at start what a hand-over must keep, and
-/// a settle that removes what is not the agent's or leaves what is.
+/// Asserts that a start with no store keeps the interfaces of an earlier process and never
+/// deletes them, and that `settle` removes both ends of blocks 0 and 3 (`jsv0` and `jsp0`,
+/// `jsv3` and `jsp3`; a name already gone with its pair is not an error): `jspare0`, `jsvx`,
+/// `jsv`, `eth0`, `lo` and an entry with no name are not the agent's and are not touched, and
+/// the blocks 0 and 3 are out of use until the settle gave them back. Catches a start that
+/// deletes at start what a hand-over must keep, and a settle that removes what is not the
+/// agent's or leaves what is.
 #[test]
-fn a_start_keeps_the_agents_numbered_interfaces_and_settle_removes_exactly_those() {
+fn a_start_with_no_store_keeps_every_numbered_interface_and_settle_removes_exactly_those() {
     let fake = Fake::new();
     fake.answer(
         "link show",
@@ -374,7 +369,12 @@ fn a_start_keeps_the_agents_numbered_interfaces_and_settle_removes_exactly_those
     egress.settle().expect("settled");
     assert_eq!(
         fake.log()[before..],
-        ["ip link del jsv0", "ip link del jsp3"]
+        [
+            "ip link del jsv0",
+            "ip link del jsp0",
+            "ip link del jsv3",
+            "ip link del jsp3"
+        ]
     );
     let fourth = egress
         .attach("d", PID, JobNetwork::AllowList, &[])
@@ -390,10 +390,10 @@ fn a_start_keeps_the_agents_numbered_interfaces_and_settle_removes_exactly_those
     drop((first, second, third, fourth, fifth));
 }
 
-/// Asserts that a job end beside its host end is not a leftover of its own (it goes with
-/// the host end) and one alone is: `jsv5` with `jsp5` and `jsp7` alone, settled, delete `jsv5`
-/// and `jsp7` and never `jsp5`. Catches a settle that deletes a job end twice or leaves a
-/// stray pair half.
+/// Asserts that a stray block is deleted at both its ends whichever end is on the host: `jsp5`
+/// with `jsv5` and `jsp7` alone, settled, delete `jsv5`, `jsp5`, `jsv7` and `jsp7` in block
+/// order, each block once. Catches a settle that leaves a stray pair half or deletes a block
+/// twice.
 #[test]
 fn a_job_end_beside_its_host_end_is_not_a_stray_of_its_own() {
     let fake = Fake::new();
@@ -406,14 +406,19 @@ fn a_job_end_beside_its_host_end_is_not_a_stray_of_its_own() {
     egress.settle().expect("settled");
     assert_eq!(
         fake.log()[before..],
-        ["ip link del jsv5", "ip link del jsp7"]
+        [
+            "ip link del jsv5",
+            "ip link del jsp5",
+            "ip link del jsv7",
+            "ip link del jsp7"
+        ]
     );
 }
 
-/// Asserts the whole start: it reads the interfaces and both old tables, switches IPv4
-/// forwarding on, loads the ruleset the module renders in one transaction (the stdin of
-/// `nft -f -`, with nothing after it when nothing was kept) and reads both tables back for
-/// the baseline the check compares with. Catches an allow-list that starts without the
+/// Asserts the whole start: it reads the interfaces, switches IPv4 forwarding on, loads the
+/// ruleset the module renders in one transaction (the stdin of `nft -f -`, with nothing after
+/// it when nothing was kept) and reads both tables back for the baseline the check compares
+/// with. Catches an allow-list that starts without the
 /// firewall, or one that deletes the old tables in a call of its own.
 #[test]
 fn an_allow_list_loads_the_firewall_and_reads_it_back() {
@@ -423,8 +428,6 @@ fn an_allow_list_loads_the_firewall_and_reads_it_back() {
         fake.log(),
         [
             "ip -j link show",
-            "nft -j list table inet js_crun_egress",
-            "nft -j list table ip js_crun_egress_nat",
             "write /proc/sys/net/ipv4/ip_forward 1",
             "nft -f - << add table inet js_crun_egress",
             "nft -j list table inet js_crun_egress",
@@ -438,9 +441,8 @@ fn an_allow_list_loads_the_firewall_and_reads_it_back() {
 
 /// Catches a start that goes on past a failure: each of its calls, failing in turn, ends
 /// the start with an error that says what failed; and so does a list of interfaces that is
-/// not JSON, and a listing of the old tables that is not what `nft -j` prints (its text now
-/// names the reading of what an earlier process left; the deletion of a leftover is
-/// the settle's, tested with it).
+/// not JSON, and a read back of the tables that is not what `nft -j` prints (the deletion of
+/// a leftover is the settle's, tested with it).
 #[test]
 fn every_failure_of_the_start_is_an_error_that_names_it() {
     let calls = {
@@ -448,14 +450,15 @@ fn every_failure_of_the_start_is_an_error_that_names_it() {
         let _ = started(&fake, allow_list());
         fake.calls()
     };
-    assert_eq!(calls, 7);
+    assert_eq!(calls, 5);
     for n in 0..calls {
         let fake = Fake::new();
         fake.fail_call(n);
-        let error = Egress::start_on(allow_list(), fake.clone()).expect_err("fails");
+        let error = Egress::start_on(allow_list(), None, fake.clone()).expect_err("fails");
         assert!(error.to_string().contains("injected"), "{n}: {error}");
     }
-    let start = |fake: &Arc<Fake>| Egress::start_on(allow_list(), fake.clone()).expect_err("fails");
+    let start =
+        |fake: &Arc<Fake>| Egress::start_on(allow_list(), None, fake.clone()).expect_err("fails");
     let fake = Fake::new();
     fake.answer("link show", Ok("nope".to_owned()));
     assert!(start(&fake).to_string().contains("listing the interfaces"));
@@ -464,7 +467,7 @@ fn every_failure_of_the_start_is_an_error_that_names_it() {
     assert!(
         start(&fake)
             .to_string()
-            .contains("reading the firewall an earlier process left")
+            .contains("reading the firewall back")
     );
 }
 
@@ -653,7 +656,8 @@ fn a_missing_ipv6_switch_is_tolerated_and_nothing_else_is() {
     fake.state()
         .write_errors
         .insert(FORWARD.to_owned(), ErrorKind::NotFound);
-    let error = Egress::start_on(allow_list(), fake.clone()).expect_err("no forwarding switch");
+    let error =
+        Egress::start_on(allow_list(), None, fake.clone()).expect_err("no forwarding switch");
     assert!(error.to_string().contains("ip_forward"), "{error}");
 }
 
@@ -759,10 +763,10 @@ fn each_error_reads_as_what_it_is() {
         ),
         (
             EgressError::Unadoptable {
-                pid: 4,
-                why: "no jsv1 was left on the host".to_owned(),
+                run: "js-x-r1".to_owned(),
+                why: "the egress store holds no record of it".to_owned(),
             },
-            "egress: the wiring of container 4 cannot be taken over: no jsv1 was left on the host",
+            "egress: the wiring of run js-x-r1 cannot be taken over: the egress store holds no record of it",
         ),
     ];
     for (error, text) in kinds {
@@ -845,7 +849,8 @@ fn the_real_machine_runs_programs_and_reads_files() {
         ..Flags::default()
     };
     let config = Config::from_flags(&flags).expect("sound");
-    let error = Egress::start_holding(config, Arc::new(System), &name).expect_err("not JSON");
+    let error =
+        Egress::start_holding(config, (None, Arc::new(System)), &name).expect_err("not JSON");
     assert!(
         error.to_string().contains("listing the interfaces"),
         "{error}"
@@ -890,7 +895,7 @@ fn the_crun_runtimes_port_is_the_host_side() {
 fn a_held_host_refuses_an_allow_list_and_touches_nothing() {
     let fake = Fake::new();
     fake.state().held = true;
-    let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    let refused = Egress::start_on(allow_list(), None, fake.clone()).map(drop);
     assert_eq!(refused, Err(EgressError::Held));
     assert_eq!(fake.log(), Vec::<String>::new(), "nothing touched");
     assert!(
@@ -900,7 +905,7 @@ fn a_held_host_refuses_an_allow_list_and_touches_nothing() {
     );
     let broken = Fake::new();
     broken.state().lock_fails = true;
-    let failed = Egress::start_on(allow_list(), broken.clone()).map(drop);
+    let failed = Egress::start_on(allow_list(), None, broken.clone()).map(drop);
     assert_eq!(
         failed,
         Err(EgressError::Command {
@@ -968,7 +973,7 @@ fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
         .expect("attach");
     drop(egress);
     let logged = fake.log().len();
-    let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    let refused = Egress::start_on(allow_list(), None, fake.clone()).map(drop);
     assert_eq!(refused, Err(EgressError::Held));
     assert_eq!(fake.log().len(), logged, "nothing touched");
     attachment.release().expect("release");
@@ -977,4 +982,5 @@ fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
 
 mod levels;
 mod ports;
+pub(super) mod records;
 mod takeover;

@@ -132,17 +132,24 @@ process, on a stop and after a crash, so the supervisors and the containers outl
   a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
   its result says it timed out.
 - **An agent with an `--egress` ceiling** (`allow-list` or `open`) takes over a container's
-  network wiring with the container. The stopping agent leaves each run's veth pair, set member
-  and port forwards in place, and the next agent's start keeps them and loads the firewall in
-  one transaction that puts them back, so the job's egress holds before, during and after the
-  restart. The new agent then checks each wiring against the container's labels
-  (`jobscheduler.dev/network`, `jobscheduler.dev/network-ports`) and the container's `eth0`
-  (the peer's interface index, the /30 address, the set, the forwards) before it takes it over,
-  and removes every wiring no run took over. A container that does not fit (no network label, a
-  wiring that is gone or changed, a level above the agent's ceiling, a port the ceiling does not
-  list, or an agent with no ceiling and a container wired at a level above none) is removed and
-  its job lost, as any container the agent cannot take over. A container that ended while no
-  agent ran has no network left: it is taken over and its result reported, as above.
+  network wiring with the container. The agent keeps one record per wired run in the egress
+  store, the directory `egress` of its state root (`/var/lib/js-agent/state/egress`), written
+  when it wires the run and removed when it takes the wiring down: the run's address block, its
+  level and its declared ports. The stopping agent leaves each run's veth pair, set member and
+  port forwards in place, and the records with them, so the kernel's rules enforce with no agent
+  running. The next agent's start reads the records, loads the firewall in one transaction that
+  puts each recorded run's member and forwards back (so the job's egress holds before, during
+  and after the restart), and then takes over each run from its record after comparing the
+  level and ports in it with those the container's labels (`jobscheduler.dev/network`,
+  `jobscheduler.dev/network-ports`) give. It removes the wiring and the record of every run no
+  one took over, any record it cannot read or use, and any `jsv`/`jsp` interface no record
+  names. A container that does not fit (no network label, no record or a record that differs, a
+  level above the agent's ceiling, a port the ceiling does not list, or an agent with no ceiling
+  and a container wired at a level above none) is removed and its job lost, as any container the
+  agent cannot take over. A container that ended while no agent ran has no network left: it is
+  taken over and its result reported, as above. What is not handed over: the host-port relay
+  connections (`--host-port`) the agent process itself carries end with it, and the next agent
+  offers them again.
 
 ## Agent updates while jobs run
 

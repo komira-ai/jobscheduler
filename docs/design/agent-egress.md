@@ -35,9 +35,12 @@ outside, while the container's init holds the job:
    `eth0` no IPv6 link-local address, addresses and raises it, and adds the default route last.
 3. For a job that declares ports, after the default route, `attach` adds the forwards
    (below, "Declared ports"): a host port another run forwards is refused
-   (`EgressError::PortTaken`) and the whole attach undone.
+   (`EgressError::PortTaken`) and the whole attach undone. When the wiring and the forwards stand
+   and the agent has a state root, `attach` writes the run's record in the egress store
+   (below, "The egress store"); a failed write is an error and takes the wiring down.
 4. When the run ends the agent calls `release`: the forwards' rules, the set member and the
-   host end go; the namespace is the kernel's to free with the container's last process.
+   host end go, and then the run's record; the namespace is the kernel's to free with the
+   container's last process.
 
 The privileged part is `egress::host` in the agent process: root, in the host's initial
 network namespace, running only the `ip`, `nft` and `nsenter` programs the operator configured. It is never
@@ -151,18 +154,24 @@ first binds the abstract socket `@js-agent-egress` (`egress::HOST_LOCK`) and hol
 agent's egress or any run it wired lives; the kernel frees it when the process ends, however it ends. The names it
 makes and removes are the host's, not an agent's, so a second agent with a wired ceiling is
 refused at start (`EgressError::Held`) instead of taking or removing the first one's live wiring.
-Then it reads what a previous process left: the interfaces named `jsv<digits>` (with their
-ifindex) and `jsp<digits>` (exactly), the members of the sets `jobifs` and `openifs`, and the
-forwards of both tables. It loads the firewall in one `nft -f` transaction that replaces both
-tables and, in the same transaction, puts back each member whose `jsv` interface is still there
-(in its set, when the ceiling still has that set) and each whole forward whose interface is
-still there, reads both tables back and requires them to hold exactly the firewall and those
-forwards (otherwise the start fails, `EgressError::Rules`), and switches IPv4 forwarding on.
+Then it reads what a previous process left: the records of the egress store (below) and the
+interfaces named `jsv<digits>` and `jsp<digits>` (exactly). It reads nothing of the old tables'
+members or forwards: the records are the source. A record is usable when its level is one the
+ceiling allows (`allow-list` always, `open` only under the ceiling `open`), every host port of
+its ports is one the ceiling forwards, and its block lies in the pool and is not another usable
+record's; an unreadable or unusable record is logged and set aside for `settle`. Every `jsv` or
+`jsp` interface whose block no usable record names is a stray. It loads the firewall in one
+`nft -f` transaction that replaces both tables and, in the same transaction, puts back the
+member of each usable record (in the set of its level) and its forwards, reads both tables back
+and requires them to hold exactly the firewall and those forwards (otherwise the start fails,
+`EgressError::Rules`), and switches IPv4 forwarding on.
 nftables applies a batch whole, so a packet of a running job meets the old tables or the new
 ones, never none: a job is not left unfiltered or without its forward. The address blocks of every
-interface found are kept out of use until the runtime has settled. The wiring is the kernel's, so
-a process that ends leaves it: the crun runtime leaves every run's wiring when it is dropped
-(`Attachment::leave`) and the jobs go on under the same rules. That switch is host-wide and is never switched back: other users of the host
+interface found, kept or stray, are kept out of use until the runtime has settled. The wiring is
+the kernel's, so a process that ends leaves it, and its records with it: the crun runtime leaves
+every run's wiring when it is dropped (`Attachment::leave`) and the jobs go on under the same
+rules. The host-port relay connections (`--host-port`) the agent process itself carries are not
+the kernel's: they end with the process, and the next one offers them again. That switch is host-wide and is never switched back: other users of the host
 may rely on it by then, and the agent cannot know. A start does not kill or remove a standing run (the unit's `KillMode=process` leaves the
 containers alive), and an update's hand-over keeps a job's egress before, during and after the
 restart. The tables are named `js_crun_egress` and
@@ -172,6 +181,21 @@ own reverse-path filter is not relied on; the firewall's `spoof` rule is, becaus
 DNS: a configured ceiling names its resolvers; the backend writes a `resolv.conf` with those and
 no other (`OciConfig::resolv_conf`) for a wired job, and the firewall accepts port 53 to those
 addresses only for an `allow-list` job (an `open` job reaches them through its own rule).
+
+## The egress store
+
+What the kernel holds says which rules exist, not which run they belong to or at what level, so
+the agent keeps one record per wired run in the directory `egress` of its state root
+(`--state-root`; mode 0700): `<run>.json`, the run being the container's name, a JSON object
+`{version, index, level, ports}` with the run's block index, its level (`allow-list` or `open`)
+and its declared ports (host and container). A record is written (to a temporary file, synced,
+renamed, the directory synced, mode 0600) by `Egress::attach` once the wiring and forwards
+stand, and removed by `release` once the wiring is down. A process that ends, or a hand-over,
+removes nothing: the records, like the veth pairs, the set members and the forwards, stay, and
+the kernel's rules keep enforcing throughout. An agent with no state root has no store and
+hands nothing over. Not in the store, and not handed over: the host-port relay connections
+(`--host-port`) the agent process carries, which end with it and are offered again by the
+next process.
 
 ## What is and is not wired
 
@@ -185,21 +209,21 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   (its interface goes in `jobifs` for `allow-list`, `openifs` for `open`), and
   `Attachment::release` when the runtime reads the run's end or removes the run, whichever
   comes first. A process that ends while a run stands drops its runtime, which leaves each run's
-  wiring (`Attachment::leave`) instead of releasing it. The next process adopts it:
-  `Egress::adopt` for each run of the ledger that still stands, after the runtime has read the
-  run's labels (`jobscheduler.dev/network`, and `jobscheduler.dev/network-ports` as `H:C,H:C`
-  when ports are declared, written at stage) and the container's pid. It opens the container's
-  network namespace and reads `eth0` there (`nsenter --net=<path> -- ip -j addr show dev eth0`),
-  and requires its peer's ifindex to be that of a `jsv` interface the start kept, one address of
-  prefix length 30 that is the block of that interface, the set member of the run's level, and
-  exactly the forwards of the run's declared ports; a level above the ceiling, a host port the
-  ceiling does not list, or a host port already held is refused (`EgressError::AboveCeiling`,
-  `Unadoptable`, `PortTaken`). A run that does not fit, or a run of an agent with a ceiling whose
-  container carries no network label, is removed and reported removed, like any run the agent cannot take
-  over. Once every run is adopted `Egress::settle` removes the kept interfaces,
-  members and forwards no run took over (a run removed, one that ended while no agent ran, a pair
-  a killed start left) and every stray `jsp<digits>`; a block is given out again only when its
-  removal succeeded, and the first error fails the open. A container whose pid or wiring fails is removed with its lease, and its job never
+  wiring and its record (`Attachment::leave`) instead of releasing them. The next process adopts
+  the wiring: `Egress::adopt(run, level, ports)` for each run of the ledger that still stands,
+  after the runtime has read the run's labels (`jobscheduler.dev/network`, and
+  `jobscheduler.dev/network-ports` as `H:C,H:C` when ports are declared, written at stage). It
+  takes the run's record the start kept and requires it to name the level and (compared as a
+  set) the ports the run's job declared; a level above the ceiling, a record that is not there
+  or differs, or a host port already held is refused (`EgressError::AboveCeiling`,
+  `Unadoptable`, `PortTaken`). It enters no namespace and reads nothing of the container. A run
+  that does not fit, or a run of an agent with a ceiling whose container carries no network
+  label, is removed and reported removed, like any run the agent cannot take over. Once every run
+  is adopted `Egress::settle` takes down the wiring of each kept record no run took over (a run
+  removed, one that ended while no agent ran) and removes the record, removes the files of
+  unusable records, and deletes every stray `jsv<digits>` and `jsp<digits>` (a pair a killed
+  start left); a block is given out again only when its removal succeeded, and the first error
+  fails the open. A container whose pid or wiring fails is removed with its lease, and its job never
   ran (the init still waits for the route). A release that fails is logged and the removal goes
   on, and its /30 block is not given out again until the next start settles the host: the sets
   hold interface names, so a member left in `openifs` would otherwise let the next run that
@@ -208,8 +232,8 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   the container's `resolv.conf` and starts the init with `--wait-route`; a `none` job, and every
   job in mode none, gets neither and is not attached.
 - The flags are parsed and checked at start. The agent starts the egress once, after it holds
-  the claims of its scratch root and host id (the start keeps what an earlier agent left for
-  the runtime to adopt or settle);
+  the claims of its scratch root and host id (the start keeps what an earlier agent left, as the store's records say, for
+  the runtime to adopt or settle); `--state-root` also holds the store;
   an allow-list that cannot be set up ends the agent with status 2. The wiring of the
   leases an earlier process left is adopted or removed by the runtime when it opens, as above;
   no `Attachment` of that process exists. Only

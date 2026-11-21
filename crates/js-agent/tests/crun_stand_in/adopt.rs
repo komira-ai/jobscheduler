@@ -635,7 +635,6 @@ impl EgressPort for Unused {
     fn adopt(
         &self,
         _run: &str,
-        _pid: u32,
         _level: JobNetwork,
         _ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {

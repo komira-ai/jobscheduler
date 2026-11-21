@@ -64,8 +64,8 @@ pub trait EgressPort: std::fmt::Debug + Send + Sync {
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError>;
 
-    /// Takes over the wiring an earlier process of the agent made for the container `run`
-    /// whose first process is `pid`, for a job that asked for `level` and declared `ports`;
+    /// Takes over the wiring an earlier process of the agent made for the container `run`,
+    /// for a job that asked for `level` and declared `ports`, as the run's record names it;
     /// the wiring is left as it is.
     ///
     /// # Errors
@@ -74,7 +74,6 @@ pub trait EgressPort: std::fmt::Debug + Send + Sync {
     fn adopt(
         &self,
         run: &str,
-        pid: u32,
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError>;
@@ -126,11 +125,10 @@ impl EgressPort for Egress {
     fn adopt(
         &self,
         run: &str,
-        pid: u32,
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
-        let attachment = Egress::adopt(self, run, pid, level, ports)?;
+        let attachment = Egress::adopt(self, run, level, ports)?;
         Ok(Box::new(attachment))
     }
 
@@ -250,36 +248,15 @@ impl Net {
     }
 
     /// Takes over, by `egress`, the wiring an earlier process made for the adopted run's
-    /// container `name`, whose first process is `pid` as `crun state` named it, for a run whose job
-    /// was wired (the caller asks for no `none` run). A container whose state `crun` read
-    /// and that names no usable pid is ending: its network ends with its namespace, and
-    /// nothing is taken over (what is left on the host goes with the egress's settle). When
-    /// `crun state` failed, the container may have ended and been deleted (its result then
-    /// comes from its supervisor's record) or may still run: nothing is taken over and the run
-    /// is marked lost ([`Net::lost`]), so the lifecycle stops it and reports its end, rather
-    /// than leave a job running whose wiring the settle removes, or drop the result of one
-    /// that ended.
+    /// container `name`, as the run's record in the egress store names it, for a run whose job
+    /// was wired (the caller asks for no `none` run). A run that ended meanwhile is taken over
+    /// too: its record is released with it.
     ///
     /// # Errors
     ///
-    /// The wiring is not the run's ([`Egress::adopt`]).
-    pub(super) fn adopt(
-        &mut self,
-        egress: &dyn EgressPort,
-        name: &str,
-        pid: &Result<u32, String>,
-    ) -> Result<(), String> {
-        let pid = match pid {
-            Err(why) if answered(why) => return Ok(()),
-            Err(why) => {
-                self.lost = Some(format!(
-                    "its network cannot be taken over: find the container's pid: {why}"
-                ));
-                return Ok(());
-            }
-            Ok(pid) => *pid,
-        };
-        let wired = egress.adopt(name, pid, self.level, &self.ports);
+    /// The run has no record that fits it ([`Egress::adopt`]).
+    pub(super) fn adopt(&mut self, egress: &dyn EgressPort, name: &str) -> Result<(), String> {
+        let wired = egress.adopt(name, self.level, &self.ports);
         self.wired = Some(wired.map_err(|why| why.to_string())?);
         Ok(())
     }
@@ -309,8 +286,8 @@ impl Net {
         };
     }
 
-    /// Why the run's network could not be taken over, or its host ports offered again, after a
-    /// restart; `None` when they were, or it has none.
+    /// Why the run's host ports could not be offered again after a restart; `None` when they
+    /// were, or it has none.
     pub(super) fn lost(&self) -> Option<String> {
         self.lost.clone()
     }
@@ -534,7 +511,7 @@ fn said(oci: &Oci, spec: &ContainerSpec) -> String {
 /// Whether `why`, an error of `Oci::container_pid`, is `crun`'s answer that the container is
 /// there and names no usable pid (its state was read): asking again does not change that. Any
 /// other error (`crun state` failed: the container is not made yet) is asked again.
-pub(super) fn answered(why: &str) -> bool {
+fn answered(why: &str) -> bool {
     why.starts_with("crun state: no pid in") || why.ends_with("is not a pid")
 }
 

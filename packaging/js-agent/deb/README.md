@@ -185,7 +185,9 @@ the package: `cargo xtask release desired` writes it into the `targets` that
   handover`, the unit unchanged, and with an `--egress` in the flags file `egress-handover` on the
   `stops:` line of both the running and the staged agent) is neither cordoned nor drained:
   `prepare` returns at once, and `cutover` writes the handover file in the state root and stops
-  the unit, which takes seconds, the agent leaving its jobs running for the new agent to adopt
+  the unit, which takes seconds, the agent leaving its jobs running, and under an `--egress`
+  ceiling their network wiring and their records in the state root's `egress` directory, for the
+  new agent to adopt
   (docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). `rollback` hands them back
   the same way.
 - There is no `uninstall` bound: hostkeeper refuses an uninstall order for this package.

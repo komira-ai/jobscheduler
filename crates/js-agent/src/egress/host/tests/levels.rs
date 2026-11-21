@@ -240,7 +240,10 @@ fn a_removal_that_could_not_run_is_not_taken_for_gone() {
     let error = egress
         .settle()
         .expect_err("the leftover could not be deleted");
-    assert!(error.to_string().contains("deleting the veth"), "{error}");
+    assert!(
+        error.to_string().contains("deleting a leftover veth"),
+        "{error}"
+    );
     fake.run_again();
     let held: Vec<Attachment> = (0..5)
         .map(|n| {

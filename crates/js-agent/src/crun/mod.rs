@@ -138,8 +138,9 @@
 //! for each port it declared, releasing it when the run ends or goes. The wiring is the kernel's
 //! and outlives the process: a runtime that is dropped leaves the wiring of every run it still
 //! holds as it is ([`Wired::leave`]), as it leaves the runs, and the next process's runtime
-//! takes over the wiring of each run it adopts ([`EgressPort::adopt`], see the module `adopt`)
-//! and has the egress remove the rest ([`EgressPort::settle`]). A run that ended while no
+//! takes over the wiring of each run it adopts from the run's record in the egress store
+//! (the directory `egress` of the state root; [`EgressPort::adopt`], see the module `adopt`)
+//! and has the egress remove the rest, records included ([`EgressPort::settle`]). A run that ended while no
 //! agent ran has no network left, and is taken over so that its result is reported.
 //!
 //! A run's host ports ([`RunSpec::host_ports`], allowed by [`CrunSettings::host_ports`]) are

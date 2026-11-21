@@ -1,98 +1,18 @@
-//! Taking over the wiring an earlier process left, against the scripted machine: what a start
-//! finds and keeps, the one transaction that puts it back, the claim a run makes on its own
-//! wiring, and the settle that removes what no run claimed.
+//! Taking over the wiring an earlier process left, against the scripted machine and real
+//! records in a scratch directory: what a start keeps from the records of the egress store,
+//! the one transaction that puts it back, the claim a run makes on its own wiring, and the
+//! settle that removes what no run claimed. The pure parts are in `adopt_tests.rs`.
 
 use std::net::Ipv4Addr;
 
-use serde_json::{Value, json};
+use js_testkit::dir::TestDir;
+use serde_json::Value;
 
+use super::records::{
+    forwarding, maps, put, recorded, scratch, show, started_with, store_in, tables,
+};
 use super::*;
-use crate::egress::forward::fixture::{filter_rule, inbound, nat_rule};
-
-/// The text of both tables as an earlier process left them: `jobifs` and `openifs` with the
-/// given members, and the forwards `forwards` (host port, interface, job address, container
-/// port), each acceptance with the handle `100 + n` and its DNAT rule `200 + n`.
-fn tables(
-    jobifs: &[&str],
-    openifs: &[&str],
-    forwards: &[(u16, &str, &str, u16)],
-) -> (String, String) {
-    let (mut filters, mut nats) = (Vec::new(), Vec::new());
-    for (n, &(host, iface, job, container)) in (0u64..).zip(forwards) {
-        filters.push(filter_rule(host, iface, job, container, 100 + n));
-        nats.push(nat_rule(host, job, container, 200 + n));
-    }
-    let mut inet = vec![
-        json!({"metainfo": {"version": "1.0.9"}}),
-        json!({"table": {"family": "inet", "name": "js_crun_egress", "handle": 1}}),
-        json!({"set": {"name": "jobifs", "type": "ifname", "handle": 2, "elem": jobifs}}),
-        json!({"set": {"name": "openifs", "type": "ifname", "handle": 3, "elem": openifs}}),
-    ];
-    inet.extend(filters);
-    inet.push(
-        json!({"rule": {"chain": "forward", "handle": 3, "comment": "reply",
-        "expr": [{"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}),
-    );
-    let mut nat = vec![
-        json!({"metainfo": {"version": "1.0.9"}}),
-        json!({"table": {"family": "ip", "name": "js_crun_egress_nat", "handle": 1}}),
-    ];
-    nat.extend(nats);
-    (
-        json!({ "nftables": inet }).to_string(),
-        json!({ "nftables": nat }).to_string(),
-    )
-}
-
-/// Makes the machine hold what an earlier process left: the interfaces `names` (the
-/// interface index of each is 10 plus its place in the list), and `tables`.
-fn leave(
-    fake: &Fake,
-    names: &[&str],
-    jobifs: &[&str],
-    openifs: &[&str],
-    forwards: &[(u16, &str, &str, u16)],
-) {
-    let (inet, nat) = tables(jobifs, openifs, forwards);
-    fake.answer("link show", Ok(links(names)));
-    fake.answer("list table inet", Ok(inet));
-    fake.answer("list table ip", Ok(nat));
-}
-
-/// Makes the `eth0` of the container read as the job end of the pair whose host end has the
-/// interface index `peer`, with the addresses `(family, address, prefix length)`.
-fn job_end(fake: &Fake, peer: u64, addresses: &[(&str, &str, u64)]) {
-    let info: Vec<Value> = addresses
-        .iter()
-        .map(|(family, local, len)| json!({"family": family, "local": local, "prefixlen": len}))
-        .collect();
-    let end = json!([{"ifname": "eth0", "link_index": peer, "addr_info": info}]);
-    fake.answer("addr show dev eth0", Ok(end.to_string()));
-}
-
-/// A configuration with forward ports `9000-9100` and `8080`.
-fn forwarding(mode: &str) -> Config {
-    let (ip, nft, nsenter) = (program("ip"), program("nft"), program("nsenter"));
-    let allow = vec!["192.0.2.10:9300".to_owned()];
-    let ports = vec!["9000-9100".to_owned(), "8080".to_owned()];
-    Config::from_flags(&Flags {
-        mode: Some(mode),
-        allow: &allow,
-        forward_ports: &ports,
-        ip: Some(&ip),
-        nft: Some(&nft),
-        nsenter: Some(&nsenter),
-        ..Flags::default()
-    })
-    .expect("a sound configuration")
-}
-
-fn maps(pairs: &[(u16, u16)]) -> Vec<PortMap> {
-    pairs
-        .iter()
-        .map(|&(host, container)| PortMap { host, container })
-        .collect()
-}
+use crate::egress::forward::fixture::{filter_rule, inbound};
 
 fn forward_of(host: u16, last: u8, container: u16, iface: &str) -> Forward {
     Forward {
@@ -103,37 +23,44 @@ fn forward_of(host: u16, last: u8, container: u16, iface: &str) -> Forward {
     }
 }
 
-/// The text of the refusal of an adoption of container `PID`.
-fn cannot(why: &str) -> String {
-    format!("egress: the wiring of container {PID} cannot be taken over: {why}")
+/// The text of the refusal of an adoption of the run `run`.
+fn cannot(run: &str, why: &str) -> String {
+    format!("egress: the wiring of run {run} cannot be taken over: {why}")
 }
 
-/// The machine of an earlier process that left `jsv0` (interface index 10, in `jobifs`, with
-/// `forwards`) and whose container reads as its job end, started.
-fn left_one(config: Config, forwards: &[(u16, &str, &str, u16)]) -> (Arc<Fake>, Egress) {
+/// The machine of an earlier process that left the interface `jsv0` and the record of the run
+/// `r` for block 0 at `level` with `ports` (their forwards in the tables), started under
+/// `config` with its store.
+fn left_one(
+    config: Config,
+    level: JobNetwork,
+    ports: &[(u16, u16)],
+) -> (Arc<Fake>, TestDir, Store, Egress) {
+    let dir = scratch("left-one");
+    let store = store_in(&dir);
+    put(&store, "r", (0, level), ports);
     let fake = Fake::new();
-    leave(&fake, &["jsv0"], &["jsv0"], &[], forwards);
-    job_end(&fake, 10, &[("inet", "198.18.0.2", 30)]);
-    let egress = started(&fake, config);
-    (fake, egress)
+    fake.answer("link show", Ok(links(&["jsv0"])));
+    let rules: Vec<(u16, &str, &str, u16)> = ports
+        .iter()
+        .map(|&(host, container)| (host, "jsv0", "198.18.0.2", container))
+        .collect();
+    show(&fake, &rules);
+    let egress = started_with(&fake, config, &store);
+    (fake, dir, store, egress)
 }
 
-/// A way to spoil the machine for an adoption.
-type Spoil = Box<dyn Fn(&Fake)>;
-
-/// What an adoption that `setup` spoils is refused with, and that the refusal took nothing:
-/// the block `jsv0` is still the settle's to remove.
+/// What an adoption of `run` at `level` with `ports` is refused with, when the record of `r` is
+/// for block 0 at `kept_level` with `kept_ports`, under `config`; and that the refusal took
+/// nothing: the wiring and the record are still there for the settle, which then removes both.
 fn refusal(
     config: Config,
-    forwards: &[(u16, &str, &str, u16)],
-    setup: &dyn Fn(&Fake),
-    (level, ports): (JobNetwork, &[(u16, u16)]),
+    (kept_level, kept_ports): (JobNetwork, &[(u16, u16)]),
+    (run, level, ports): (&str, JobNetwork, &[(u16, u16)]),
 ) -> String {
-    let (fake, egress) = left_one(config, forwards);
-    setup(&fake);
-    let error = egress
-        .adopt("r", PID, level, &maps(ports))
-        .expect_err("refused");
+    let (fake, _dir, store, egress) = left_one(config, kept_level, kept_ports);
+    let error = egress.adopt(run, level, &maps(ports)).expect_err("refused");
+    assert_eq!(recorded(&store), ["r"], "the record stays");
     let before = fake.log().len();
     egress.settle().expect("settled");
     assert!(
@@ -141,32 +68,39 @@ fn refusal(
         "{:?}",
         fake.log()
     );
+    assert_eq!(recorded(&store), Vec::<String>::new());
     error.to_string()
 }
 
-/// Asserts the start's one load, in full: the ruleset, then each kept member back in its set
-/// (jsv0 and jsv3 in `jobifs`; jsv1, in both sets, and jsv2, in `openifs` that an allow-list
-/// does not have, in none), then the whole forwards of the interfaces still there (a member
-/// and a forward of `jsv9`, which is not on the host, are dropped), sorted; and that the read
-/// back accepts it. Catches a start that loses a wired run's rules, keeps those of a run that
-/// is gone, or widens a member's access.
+/// Asserts the start's one load, in full: the ruleset, then each kept record's interface back
+/// in the set of its level in the order of the runs' names (`a` in `jobifs`, `b` in `openifs`,
+/// `c` in `jobifs`), then the forwards of every kept record, sorted by host port; one `nft -f`
+/// only; that the read back accepts it; and that the three blocks are out of use (the next
+/// run gets block 2). Catches a start that loses a wired run's rules, or gives out a block an
+/// earlier process still wires.
 #[test]
-fn the_start_loads_the_ruleset_and_what_it_keeps_in_one_transaction() {
+fn the_start_loads_the_ruleset_and_the_kept_records_in_one_transaction() {
+    let dir = scratch("load");
+    let store = store_in(&dir);
+    put(&store, "a", (0, JobNetwork::AllowList), &[(8080, 80)]);
+    put(&store, "b", (3, JobNetwork::Open), &[(9000, 90)]);
+    put(&store, "c", (1, JobNetwork::AllowList), &[]);
     let fake = Fake::new();
-    let kept = [
-        (9000, "jsv3", "198.18.0.14", 90),
-        (8080, "jsv0", "198.18.0.2", 80),
-    ];
-    leave(&fake, &["jsv0", "jsv1", "jsv2", "jsv3"], &[], &[], &kept);
-    let stale = [&kept[..], &[(7000, "jsv9", "198.18.0.38", 70)]].concat();
-    let (inet, nat) = tables(&["jsv0", "jsv1", "jsv3", "jsv9"], &["jsv1", "jsv2"], &stale);
-    fake.answer_once("list table inet", Ok(inet));
-    fake.answer_once("list table ip", Ok(nat));
-    let egress = started(&fake, allow_list());
+    fake.answer("link show", Ok(links(&["jsv0", "jsv1", "jsv3", "jsp3"])));
+    show(
+        &fake,
+        &[
+            (8080, "jsv0", "198.18.0.2", 80),
+            (9000, "jsv3", "198.18.0.14", 90),
+        ],
+    );
+    let config = forwarding("open");
+    let egress = started_with(&fake, config.clone(), &store);
     let expected = format!(
         "{}add element inet js_crun_egress jobifs {{ \"jsv0\" }}\n\
-         add element inet js_crun_egress jobifs {{ \"jsv3\" }}\n{}",
-        ruleset::render(&allow_list()),
+         add element inet js_crun_egress openifs {{ \"jsv3\" }}\n\
+         add element inet js_crun_egress jobifs {{ \"jsv1\" }}\n{}",
+        ruleset::render(&config),
         forward::transaction(&[
             forward_of(8080, 2, 80, "jsv0"),
             forward_of(9000, 14, 90, "jsv3")
@@ -182,176 +116,172 @@ fn the_start_loads_the_ruleset_and_what_it_keeps_in_one_transaction() {
     assert_eq!(
         egress.check(),
         Err(EgressError::Rules),
-        "no run holds them yet"
+        "no run holds the forwards yet"
     );
+    let next = egress
+        .attach("d", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    assert_eq!(next.interface(), Some("jsv2"), "blocks 0, 1 and 3 are kept");
 }
 
-/// Asserts that a table that is gone keeps nothing of it: with the filter table gone at the
-/// start's listing (`nft`'s "No such file or directory"), and with only the NAT table gone, the
-/// interface is kept with no member and no forward, the load is the ruleset alone, and the
-/// settle deletes the host end and nothing else. Catches a start that fails on a host where an
-/// earlier process's tables are not there, or that keeps members of tables it cannot read.
+/// Asserts that records the ceiling, the ports or the pool cannot keep, a block another record
+/// has and a file that is not a record are not put back: only the usable records' members are in
+/// the load; their interfaces, with an unrecorded `jsv7`, are found as strays; and the settle
+/// removes the two kept runs' wiring and records, then the strays' (`jsv2` and `jsp2` of the
+/// refused `open` record, which names no kept block, and block 7), and every file of the store:
+/// the unusable records' too. Catches a start that keeps wiring it was not asked to keep, or
+/// leaves a record file that is no run's.
 #[test]
-fn a_table_that_is_gone_keeps_no_member_and_no_forward() {
-    for gone in ["list table inet", "list table ip"] {
-        let fake = Fake::new();
-        fake.answer("link show", Ok(links(&["jsv0"])));
-        let (inet, _) = tables(&["jsv0"], &[], &[(8080, "jsv0", "198.18.0.2", 80)]);
-        if gone.ends_with("ip") {
-            fake.answer_once("list table inet", Ok(inet));
-        }
-        fake.answer_once(
-            gone,
-            Err("Error: No such file or directory; did you mean table?".to_owned()),
-        );
-        let egress = started(&fake, allow_list());
-        assert_eq!(loaded(&fake), ruleset::render(&allow_list()), "{gone}");
-        let before = fake.log().len();
-        egress.settle().expect("settled");
-        assert_eq!(fake.log()[before..], ["ip link del jsv0"], "{gone}");
-    }
+fn records_that_cannot_be_kept_are_not_put_back_and_the_settle_removes_their_files() {
+    let dir = scratch("unusable");
+    let store = store_in(&dir);
+    put(&store, "above", (2, JobNetwork::Open), &[]);
+    put(&store, "outside", (3, JobNetwork::AllowList), &[(9101, 80)]);
+    put(&store, "pool", (99999, JobNetwork::AllowList), &[]);
+    put(&store, "dup-a", (5, JobNetwork::AllowList), &[]);
+    put(&store, "dup-b", (5, JobNetwork::AllowList), &[]);
+    put(&store, "ok", (1, JobNetwork::AllowList), &[]);
+    std::fs::write(store.dir().join("broken.json"), "nope").expect("a file");
+    let fake = Fake::new();
+    fake.answer(
+        "link show",
+        Ok(links(&["jsv1", "jsv2", "jsv3", "jsv5", "jsv7"])),
+    );
+    let config = forwarding("allow-list");
+    let egress = started_with(&fake, config.clone(), &store);
+    let expected = format!(
+        "{}add element inet js_crun_egress jobifs {{ \"jsv5\" }}\n\
+         add element inet js_crun_egress jobifs {{ \"jsv1\" }}\n",
+        ruleset::render(&config),
+    );
+    assert_eq!(loaded(&fake), expected);
+    assert_eq!(
+        recorded(&store).len(),
+        7,
+        "every file is there until the settle"
+    );
+    let before = fake.log().len();
+    egress.settle().expect("settled");
+    let delete =
+        |name: &str| format!("nft delete element inet js_crun_egress jobifs {{ \"{name}\" }}");
+    assert_eq!(
+        fake.log()[before..],
+        [
+            delete("jsv5"),
+            "ip link del jsv5".to_owned(),
+            delete("jsv1"),
+            "ip link del jsv1".to_owned(),
+            "ip link del jsv2".to_owned(),
+            "ip link del jsp2".to_owned(),
+            "ip link del jsv3".to_owned(),
+            "ip link del jsp3".to_owned(),
+            "ip link del jsv7".to_owned(),
+            "ip link del jsp7".to_owned(),
+        ]
+    );
+    assert_eq!(recorded(&store), Vec::<String>::new());
 }
 
-/// Asserts that a forward that does not read back as kept fails the start: a kept forward
-/// the tables lack after the load, a forward's lone DNAT rule, and a forward's acceptance
-/// behind the `inbound` refusal are each `Rules`, and the start holds nothing then. Catches a
-/// start that goes on with rules it did not load.
+/// Asserts that a forward that does not read back as kept fails the start: a kept forward the
+/// tables lack after the load, a forward's lone DNAT rule, and a forward's acceptance behind
+/// the `inbound` refusal are each `Rules`. Catches a start that goes on with rules it did not
+/// load.
 #[test]
 fn forwards_that_do_not_read_back_as_kept_fail_the_start() {
+    let dir = scratch("read-back");
+    let store = store_in(&dir);
+    put(&store, "r", (0, JobNetwork::AllowList), &[(8080, 80)]);
     let kept = [(8080, "jsv0", "198.18.0.2", 80)];
+    let start = |fake: &Arc<Fake>| {
+        Egress::start_on(forwarding("allow-list"), Some(store.clone()), fake.clone()).map(drop)
+    };
     let fake = Fake::new();
-    let (inet, nat) = tables(&["jsv0"], &[], &kept);
-    fake.answer("link show", Ok(links(&["jsv0"])));
-    fake.answer_once("list table inet", Ok(inet));
-    fake.answer_once("list table ip", Ok(nat));
     assert_eq!(
-        Egress::start_on(allow_list(), fake.clone()).map(drop),
+        start(&fake),
         Err(EgressError::Rules),
         "the forward is not there after the load"
     );
 
     let fake = Fake::new();
-    let (inet, _) = tables(&[], &[], &[]);
-    let (_, nat) = tables(&[], &[], &kept);
-    fake.answer("list table inet", Ok(inet));
+    let (_, nat) = tables(&kept);
     fake.answer("list table ip", Ok(nat));
     assert_eq!(
-        Egress::start_on(allow_list(), fake.clone()).map(drop),
+        start(&fake),
         Err(EgressError::Rules),
         "a half of a forward is not a forward"
     );
 
     let fake = Fake::new();
-    let mut late: Value = serde_json::from_str(&tables(&[], &[], &[]).0).expect("json");
+    let mut late: Value = serde_json::from_str(&tables(&[]).0).expect("json");
     let items = late["nftables"].as_array_mut().expect("items");
     items.push(inbound(7));
     items.push(filter_rule(8080, "jsv0", "198.18.0.2", 80, 8));
     fake.answer("list table inet", Ok(late.to_string()));
+    let (_, nat) = tables(&kept);
+    fake.answer("list table ip", Ok(nat));
     assert_eq!(
-        Egress::start_on(allow_list(), fake.clone()).map(drop),
+        start(&fake),
         Err(EgressError::Rules),
         "an acceptance behind the inbound refusal accepts nothing"
     );
 }
 
-/// Asserts the reading of the interfaces: one with no interface index is an error that names
-/// it (`jsv0 has no ifindex`), a listing that is not JSON names the listing, and the reading
-/// of the old tables names itself when `nft` fails for a reason other than the table being
-/// gone, when it cannot be started, and when either table is not JSON. Catches a start that
-/// guesses what it cannot read.
+/// Asserts the reading a start makes of the host, with exact texts: the list of interfaces that
+/// is not JSON or not a list, or that `ip` refuses, names the listing; a store whose directory is
+/// gone fails the start with the reading of the store and its reason, before `ip` is run.
+/// Catches a start that guesses what it cannot read.
 #[test]
-fn what_cannot_be_read_of_the_old_wiring_fails_the_start_with_its_name() {
+fn what_cannot_be_read_at_the_start_fails_it_with_its_name() {
+    let ip = program("ip");
+    let start = |fake: &Arc<Fake>| Egress::start_on(allow_list(), None, fake.clone()).map(drop);
     let fake = Fake::new();
-    fake.answer("link show", Ok(r#"[{"ifname":"jsv0"}]"#.to_owned()));
-    let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    fake.answer("link show", Err("Operation not permitted".to_owned()));
     assert_eq!(
-        error.expect_err("no ifindex").to_string(),
-        "egress: listing the interfaces: jsv0 has no ifindex"
-    );
-
-    let fake = Fake::new();
-    fake.answer("link show", Ok("{}".to_owned()));
-    let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
-    let text = error.expect_err("not a list").to_string();
-    assert!(
-        text.starts_with("egress: listing the interfaces: "),
-        "{text}"
-    );
-
-    let nft = program("nft");
-    let args = |table: &str| format!("[\"-j\", \"list\", \"table\", {table}]");
-    let fake = Fake::new();
-    fake.answer(
-        "list table inet",
-        Err("Error: Operation not permitted".to_owned()),
-    );
-    let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
-    assert_eq!(
-        error.expect_err("refused").to_string(),
+        start(&fake).expect_err("refused").to_string(),
         format!(
-            "egress: reading the firewall an earlier process left: {nft} {}: Error: Operation not permitted",
-            args("\"inet\", \"js_crun_egress\"")
+            "egress: listing the interfaces: {ip} [\"-j\", \"link\", \"show\"]: Operation not permitted"
         )
     );
-
-    let fake = Fake::new();
-    fake.not_run("list table ip");
-    let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
-    let text = error.expect_err("not run").to_string();
-    assert!(
-        text.starts_with("egress: reading the firewall an earlier process left: ")
-            && text.contains("not run: "),
-        "{text}"
-    );
-
-    for table in ["list table inet", "list table ip"] {
+    for text in ["nope", "{}"] {
         let fake = Fake::new();
-        fake.answer(table, Ok("nope".to_owned()));
-        let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
-        let text = error.expect_err("not JSON").to_string();
+        fake.answer("link show", Ok(text.to_owned()));
+        let error = start(&fake).expect_err("not a list");
         assert!(
-            text.starts_with("egress: reading the firewall an earlier process left: "),
-            "{table}: {text}"
+            error
+                .to_string()
+                .starts_with("egress: listing the interfaces: "),
+            "{text}: {error}"
         );
     }
+
+    let dir = scratch("no-store-dir");
+    let store = store_in(&dir);
+    std::fs::remove_dir_all(store.dir()).expect("removed");
     let fake = Fake::new();
-    fake.answer("list table ip", Ok(r#"{"other":1}"#.to_owned()));
-    let error = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    let error = Egress::start_on(allow_list(), Some(store), fake.clone()).map(drop);
     assert_eq!(
-        error.expect_err("not nft output").to_string(),
-        "egress: reading the firewall an earlier process left: nft output has no nftables list"
+        error.expect_err("no store").to_string(),
+        "egress: reading the egress store: No such file or directory (os error 2)"
     );
+    assert_eq!(fake.log(), Vec::<String>::new(), "nothing else was run");
 }
 
-/// Asserts the claim of an allow-list run on its own wiring: the container's `eth0` is read
-/// once through `nsenter` (and an IPv6 address beside the one /30 address is no matter), no
-/// other program runs, the block is the run's and not given to a new attach, a settle finds
-/// nothing of it, and its release removes the member and the host end and frees the block.
-/// Catches an adoption that changes the wiring it takes, or leaves the block free to be
-/// given twice.
+/// Asserts the claim of an allow-list run on its own wiring: nothing is run for it (no call
+/// is made, and the settle finds nothing of it to do), its record stays, the block is the
+/// run's and not given to a new attach, and its release removes the member, the host end and
+/// the record and frees the block. Catches an adoption that changes the wiring it takes, or
+/// leaves the block free to be given twice.
 #[test]
-fn adopting_an_allow_list_run_reads_its_end_and_changes_nothing() {
-    let (fake, egress) = left_one(allow_list(), &[]);
-    job_end(
-        &fake,
-        10,
-        &[("inet6", "fe80::1", 64), ("inet", "198.18.0.2", 30)],
-    );
+fn adopting_an_allow_list_run_changes_nothing_and_its_release_removes_it_all() {
+    let (fake, _dir, store, egress) = left_one(allow_list(), JobNetwork::AllowList, &[]);
     let before = fake.log().len();
     let adopted = egress
-        .adopt("r", PID, JobNetwork::AllowList, &[])
+        .adopt("r", JobNetwork::AllowList, &[])
         .expect("adopted");
     assert_eq!(adopted.interface(), Some("jsv0"));
-    assert_eq!(
-        fake.log()[before..],
-        [format!(
-            "nsenter --net={NETFD} -- {} -j addr show dev eth0",
-            program("ip")
-        )]
-    );
-    let after = fake.log().len();
     egress.settle().expect("settled");
-    assert_eq!(fake.log().len(), after, "nothing of it is left to remove");
+    assert_eq!(fake.log().len(), before, "no call for the run's own wiring");
+    assert_eq!(recorded(&store), ["r"]);
     let other = egress
         .attach("other", PID, JobNetwork::AllowList, &[])
         .expect("attach");
@@ -359,6 +289,11 @@ fn adopting_an_allow_list_run_reads_its_end_and_changes_nothing() {
     let released = fake.log().len();
     adopted.release().expect("release");
     assert_eq!(fake.log()[released..], release_calls(0)[..]);
+    assert_eq!(
+        recorded(&store),
+        ["other"],
+        "the record goes with the wiring"
+    );
     let again = egress
         .attach("again", PID, JobNetwork::AllowList, &[])
         .expect("attach");
@@ -366,26 +301,20 @@ fn adopting_an_allow_list_run_reads_its_end_and_changes_nothing() {
     drop(other);
 }
 
-/// Asserts the claim of a run with ports: its forwards are the run's (the check passes with
-/// them, as it does for a run attached in this process), and its release removes their rules
-/// (found by comment, deleted by handle in one transaction), then the member and the host end.
-/// Catches an adoption that leaves its forwards out of the record of the runs, so the check
-/// refuses them, or a release that leaves their rules.
+/// Asserts the claim of a run with ports: its forwards are the run's (the check refuses them
+/// before the claim and the settle and passes after, as it does for a run attached in this
+/// process; the ports given in another order are the same ports), and its release removes their
+/// rules (found by comment, deleted by handle in one transaction), then the member, the host
+/// end and the record. Catches an adoption that leaves its forwards out of the record of the
+/// runs, so the check refuses them, or a release that leaves their rules.
 #[test]
 fn adopting_a_run_with_ports_takes_its_forwards_and_releases_them() {
-    let kept = [
-        (8080, "jsv0", "198.18.0.2", 80),
-        (9001, "jsv0", "198.18.0.2", 90),
-    ];
-    let (fake, egress) = left_one(forwarding("allow-list"), &kept);
+    let ports = [(8080, 80), (9001, 90)];
+    let (fake, _dir, store, egress) =
+        left_one(forwarding("allow-list"), JobNetwork::AllowList, &ports);
     assert_eq!(egress.check(), Err(EgressError::Rules));
     let adopted = egress
-        .adopt(
-            "r",
-            PID,
-            JobNetwork::AllowList,
-            &maps(&[(9001, 90), (8080, 80)]),
-        )
+        .adopt("r", JobNetwork::AllowList, &maps(&[(9001, 90), (8080, 80)]))
         .expect("adopted");
     egress.settle().expect("nothing is left");
     egress.check().expect("the forwards are a run's now");
@@ -416,19 +345,16 @@ fn adopting_a_run_with_ports_takes_its_forwards_and_releases_them() {
          delete rule ip js_crun_egress_nat prerouting handle 200\n\
          delete rule ip js_crun_egress_nat prerouting handle 201\n"
     );
+    assert_eq!(recorded(&store), Vec::<String>::new());
 }
 
-/// Asserts the claim of an `open` run: the host end must be in `openifs`, and its release
-/// removes it from there. Catches an `open` run taken over into the other set's rules.
+/// Asserts the claim of an `open` run: its record names `open`, the ceiling is `open`, and its
+/// release removes its host end from `openifs`. Catches an `open` run taken over into the
+/// other set's rules.
 #[test]
-fn adopting_an_open_run_needs_its_member_in_the_open_set() {
-    let fake = Fake::new();
-    leave(&fake, &["jsv0"], &[], &["jsv0"], &[]);
-    job_end(&fake, 10, &[("inet", "198.18.0.2", 30)]);
-    let egress = started(&fake, open_config());
-    let adopted = egress
-        .adopt("r", PID, JobNetwork::Open, &[])
-        .expect("adopted");
+fn adopting_an_open_run_takes_its_member_of_the_open_set() {
+    let (fake, _dir, _store, egress) = left_one(open_config(), JobNetwork::Open, &[]);
+    let adopted = egress.adopt("r", JobNetwork::Open, &[]).expect("adopted");
     let before = fake.log().len();
     adopted.release().expect("release");
     assert_eq!(
@@ -445,10 +371,10 @@ fn open_config() -> Config {
 }
 
 /// Asserts that a run with no network has nothing to take over and a level above the ceiling
-/// is refused before anything is read: a `none` job gets an attachment with no interface and
-/// no call is made, under every ceiling; an `open` job under `allow-list` is `AboveCeiling`;
-/// mode none refuses an `allow-list` job the same way and settles to nothing. Catches an
-/// adoption that wires or reads a run that has no wiring.
+/// is refused before anything is looked up: a `none` job gets an attachment with no interface
+/// and no call is made, under every ceiling; an `open` job under `allow-list` is
+/// `AboveCeiling`; mode none refuses an `allow-list` job the same way and settles to nothing.
+/// Catches an adoption that wires a run that has no wiring.
 #[test]
 fn a_none_job_has_nothing_to_take_over_and_a_level_above_the_ceiling_is_refused() {
     for config in [allow_list(), open_config(), config_with("none", None)] {
@@ -456,7 +382,7 @@ fn a_none_job_has_nothing_to_take_over_and_a_level_above_the_ceiling_is_refused(
         let egress = started(&fake, config);
         let before = fake.calls();
         let attachment = egress
-            .adopt("r", PID, JobNetwork::None, &[])
+            .adopt("r", JobNetwork::None, &[])
             .expect("nothing to take over");
         assert_eq!(attachment.interface(), None);
         drop(attachment);
@@ -466,7 +392,7 @@ fn a_none_job_has_nothing_to_take_over_and_a_level_above_the_ceiling_is_refused(
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
     let before = fake.log().len();
-    let above = egress.adopt("r", PID, JobNetwork::Open, &[]).map(drop);
+    let above = egress.adopt("r", JobNetwork::Open, &[]).map(drop);
     assert_eq!(
         above,
         Err(EgressError::AboveCeiling {
@@ -476,7 +402,7 @@ fn a_none_job_has_nothing_to_take_over_and_a_level_above_the_ceiling_is_refused(
     );
     let fake_none = Fake::new();
     let none = started(&fake_none, config_with("none", None));
-    let above = none.adopt("r", PID, JobNetwork::AllowList, &[]).map(drop);
+    let above = none.adopt("r", JobNetwork::AllowList, &[]).map(drop);
     assert_eq!(
         above,
         Err(EgressError::AboveCeiling {
@@ -488,222 +414,63 @@ fn a_none_job_has_nothing_to_take_over_and_a_level_above_the_ceiling_is_refused(
     assert_eq!(fake_none.log(), Vec::<String>::new());
 }
 
-/// Asserts each refusal of an adoption with its exact text, and that each leaves the kept
-/// block for the settle: a host port outside the forward ports, a container that is gone, the
-/// host's own namespace, `nsenter` failing, an `eth0` that is not JSON, one with no link
-/// index, no address list, no address, two addresses, an address that is not /30 or not an
-/// address, an address outside the pool or not a job end, a block no start kept, another
-/// interface index, a member in another set or in none, and forwards that are not the run's
-/// ports. Catches an adoption that takes a wiring that is not the run's.
+/// Asserts each refusal of an adoption with its exact text, and that each leaves the record
+/// and the wiring for the settle: a run the store has no record of (no store at all gives the
+/// same), a record of another level either way (an `open` ceiling allows both), and a record of
+/// other ports (none declared, another container port, one more). Catches an adoption that
+/// takes a wiring that is not the run's.
 #[test]
-fn an_adoption_that_does_not_fit_is_refused_and_leaves_the_block_to_the_settle() {
-    let same = (JobNetwork::AllowList, &[][..]);
-    let nothing = |_: &Fake| {};
-    let outside = refusal(
-        forwarding("allow-list"),
-        &[],
-        &nothing,
-        (JobNetwork::AllowList, &[(8080, 80), (9101, 80)]),
+fn an_adoption_that_does_not_fit_is_refused_and_leaves_the_record_to_the_settle() {
+    let allow = (JobNetwork::AllowList, &[(8080, 80)][..]);
+    let same = ("r", JobNetwork::AllowList, &[(8080, 80)][..]);
+    let no_record = cannot("other", "the egress store holds no record of it");
+    let other = ("other", JobNetwork::AllowList, &[(8080, 80)][..]);
+    assert_eq!(refusal(forwarding("allow-list"), allow, other), no_record);
+
+    let level = |kept: JobNetwork, job: JobNetwork| {
+        refusal(forwarding("open"), (kept, &[]), ("r", job, &[]))
+    };
+    assert_eq!(
+        level(JobNetwork::AllowList, JobNetwork::Open),
+        cannot("r", "its record names the level allow-list, its job open")
     );
     assert_eq!(
-        outside,
-        cannot("run r: host port 9101 is not among the ports this agent forwards")
-    );
-    let none_forwarded = refusal(
-        allow_list(),
-        &[],
-        &nothing,
-        (JobNetwork::AllowList, &[(80, 80)]),
-    );
-    assert_eq!(
-        none_forwarded,
-        cannot("run r: host port 80 is not among the ports this agent forwards")
+        level(JobNetwork::Open, JobNetwork::AllowList),
+        cannot("r", "its record names the level open, its job allow-list")
     );
 
-    let gone = refusal(
-        allow_list(),
-        &[],
-        &|fake| {
-            fake.state().identities.remove(NET);
-        },
-        same,
-    );
-    assert_eq!(
-        gone,
-        format!("egress: container {PID}: /proc/{PID}/ns/net: entity not found")
-    );
-    let own = refusal(
-        allow_list(),
-        &[],
-        &|fake| fake.identity(NET, vec![(1, 1)]),
-        same,
-    );
-    assert_eq!(
-        own,
-        format!("egress: container {PID}: it shares the host's network namespace")
-    );
-
-    let (ip, nsenter) = (program("ip"), program("nsenter"));
-    let failed = refusal(
-        allow_list(),
-        &[],
-        &|fake| {
-            fake.answer(
-                "addr show dev eth0",
-                Err("Cannot open network namespace".to_owned()),
-            )
-        },
-        same,
-    );
-    let args = format!(
-        "[\"--net={NETFD}\", \"--\", \"{ip}\", \"-j\", \"addr\", \"show\", \"dev\", \"eth0\"]"
-    );
-    assert_eq!(
-        failed,
-        cannot(&format!(
-            "egress: reading the job end: {nsenter} {args}: Cannot open network namespace"
-        ))
-    );
-    let not_json = refusal(
-        allow_list(),
-        &[],
-        &|fake| fake.answer("addr show dev eth0", Ok("nope".to_owned())),
-        same,
-    );
-    assert!(
-        not_json.starts_with(&cannot("reading the job end: ")),
-        "{not_json}"
-    );
-
-    let not_a_pair = cannot("its eth0 is not the end of a pair with one /30 address");
-    let ends: [Spoil; 8] = [
-        Box::new(|fake| fake.answer("addr show dev eth0", Ok("[]".to_owned()))),
-        Box::new(|fake| {
-            let end = json!([{"ifname": "eth0", "addr_info": [
-                {"family": "inet", "local": "198.18.0.2", "prefixlen": 30}]}]);
-            fake.answer("addr show dev eth0", Ok(end.to_string()));
-        }),
-        Box::new(|fake| {
-            let end = json!([{"ifname": "eth0", "link_index": 10}]);
-            fake.answer("addr show dev eth0", Ok(end.to_string()));
-        }),
-        Box::new(|fake| job_end(fake, 10, &[])),
-        Box::new(|fake| {
-            job_end(
-                fake,
-                10,
-                &[("inet", "198.18.0.2", 30), ("inet", "198.18.0.3", 30)],
-            );
-        }),
-        Box::new(|fake| job_end(fake, 10, &[("inet", "198.18.0.2", 24)])),
-        Box::new(|fake| job_end(fake, 10, &[("inet", "not an address", 30)])),
-        Box::new(|fake| {
-            let end = json!([{"link_index": 10, "addr_info": [
-                {"family": "inet", "local": "198.18.0.2"}]}]);
-            fake.answer("addr show dev eth0", Ok(end.to_string()));
-        }),
-    ];
-    for (n, setup) in ends.iter().enumerate() {
-        assert_eq!(
-            refusal(allow_list(), &[], setup, same),
-            not_a_pair,
-            "end {n}"
-        );
-    }
-
-    let outside_pool = refusal(
-        allow_list(),
-        &[],
-        &|fake| job_end(fake, 10, &[("inet", "10.0.0.2", 30)]),
-        same,
-    );
-    assert_eq!(
-        outside_pool,
-        cannot("run r: its address 10.0.0.2 is not the job end of a block of the pool")
-    );
-    let not_a_job_end = refusal(
-        allow_list(),
-        &[],
-        &|fake| job_end(fake, 10, &[("inet", "198.18.0.1", 30)]),
-        same,
-    );
-    assert_eq!(
-        not_a_job_end,
-        cannot("run r: its address 198.18.0.1 is not the job end of a block of the pool")
-    );
-    let unkept = refusal(
-        allow_list(),
-        &[],
-        &|fake| job_end(fake, 10, &[("inet", "198.18.0.6", 30)]),
-        same,
-    );
-    assert_eq!(unkept, cannot("run r: no jsv1 was left on the host"));
-    let index = refusal(
-        allow_list(),
-        &[],
-        &|fake| job_end(fake, 99, &[("inet", "198.18.0.2", 30)]),
-        same,
-    );
-    assert_eq!(index, cannot("run r: its eth0 is not the job end of jsv0"));
-
-    let set = cannot("run r: the set of its level does not hold jsv0");
-    let wrong_set = refusal(open_config(), &[], &nothing, (JobNetwork::Open, &[]));
-    assert_eq!(wrong_set, set);
-
-    let kept = [(8080, "jsv0", "198.18.0.2", 80)];
-    let forwards = cannot("run r: its declared ports are not the forwards of jsv0");
+    let other_ports = cannot("r", "its record names other ports than its job declared");
     for ports in [&[][..], &[(8080, 81)], &[(8080, 80), (9000, 90)]] {
-        let wrong = refusal(
-            forwarding("allow-list"),
-            &kept,
-            &nothing,
-            (JobNetwork::AllowList, ports),
-        );
-        assert_eq!(wrong, forwards, "{ports:?}");
+        let wrong = refusal(forwarding("allow-list"), allow, ("r", same.1, ports));
+        assert_eq!(wrong, other_ports, "{ports:?}");
     }
-    let unplanned = refusal(
-        forwarding("allow-list"),
-        &[],
-        &nothing,
-        (JobNetwork::AllowList, &[(8080, 80)]),
-    );
-    assert_eq!(unplanned, forwards);
-}
 
-/// Asserts that a member in no set is not a level's wiring: a host end the old tables held in
-/// no set is refused for an `allow-list` run with the set's text. Catches an adoption that
-/// reads "no set" as "any set".
-#[test]
-fn a_host_end_in_no_set_is_not_adopted() {
     let fake = Fake::new();
-    leave(&fake, &["jsv0"], &[], &[], &[]);
-    job_end(&fake, 10, &[("inet", "198.18.0.2", 30)]);
     let egress = started(&fake, allow_list());
-    let error = egress.adopt("r", PID, JobNetwork::AllowList, &[]).map(drop);
+    let error = egress.adopt("r", JobNetwork::AllowList, &[]).map(drop);
     assert_eq!(
-        error.expect_err("refused").to_string(),
-        cannot("run r: the set of its level does not hold jsv0")
+        error.expect_err("no store").to_string(),
+        cannot("r", "the egress store holds no record of it")
     );
 }
 
 /// Asserts that a host port another run of this agent forwards refuses the adoption with
-/// `PortTaken` and its text, and that the block stays for the settle. Catches an adoption that
-/// forwards one host port to two runs.
+/// `PortTaken` and its text, and that the record and the block stay for the settle. Catches an
+/// adoption that forwards one host port to two runs.
 #[test]
 fn a_host_port_another_run_forwards_refuses_the_adoption() {
-    let (fake, egress) = left_one(
+    let (fake, _dir, store, egress) = left_one(
         forwarding("allow-list"),
-        &[(8080, "jsv0", "198.18.0.2", 80)],
+        JobNetwork::AllowList,
+        &[(8080, 80)],
     );
-    let (inet, nat) = tables(&[], &[], &[(8080, "jsv1", "198.18.0.6", 80)]);
-    fake.answer("list table inet", Ok(inet));
-    fake.answer("list table ip", Ok(nat));
+    show(&fake, &[(8080, "jsv1", "198.18.0.6", 80)]);
     let other = egress
         .attach("other", PID, JobNetwork::AllowList, &maps(&[(8080, 80)]))
         .expect("attach");
     assert_eq!(other.interface(), Some("jsv1"));
     let error = egress
-        .adopt("r", PID, JobNetwork::AllowList, &maps(&[(8080, 80)]))
+        .adopt("r", JobNetwork::AllowList, &maps(&[(8080, 80)]))
         .map(drop);
     let error = error.expect_err("taken");
     assert_eq!(error, EgressError::PortTaken { port: 8080 });
@@ -711,28 +478,29 @@ fn a_host_port_another_run_forwards_refuses_the_adoption() {
         error.to_string(),
         "egress: host port 8080 is forwarded to another run already"
     );
+    assert_eq!(recorded(&store), ["other", "r"], "the record stays");
     let before = fake.log().len();
     drop(egress);
     assert_eq!(fake.log().len(), before);
     drop(other);
 }
 
-/// Asserts what a settle removes and in what order: for each block no run took over its
-/// forwards' rules (listed, then deleted by handle), its member (only a block that has one) and
-/// its host end, in block order, then each stray job end; the blocks are free afterwards, a
-/// second settle makes no call, and the check, which refused the kept forwards, passes once
-/// they are gone. Catches a settle that leaves wiring behind or removes more than was left.
+/// Asserts what a settle removes and in what order: for each record no run took over its
+/// forwards' rules (listed, then deleted by handle), its member and its host end, in the order
+/// of the runs' names, and then its record; then each stray block's two ends; the blocks are
+/// free afterwards, a second settle makes no call, and the check, which refused the kept
+/// forwards, passes once they are gone. Catches a settle that leaves wiring or a record behind
+/// or removes more than was left.
 #[test]
 fn settle_removes_what_no_run_took_over_once() {
+    let dir = scratch("settle");
+    let store = store_in(&dir);
+    put(&store, "a", (0, JobNetwork::AllowList), &[(8080, 80)]);
+    put(&store, "b", (1, JobNetwork::AllowList), &[]);
     let fake = Fake::new();
-    leave(
-        &fake,
-        &["jsv0", "jsv1", "jsp4"],
-        &["jsv0", "jsv1"],
-        &[],
-        &[(8080, "jsv0", "198.18.0.2", 80)],
-    );
-    let egress = started(&fake, forwarding("allow-list"));
+    fake.answer("link show", Ok(links(&["jsv0", "jsv1", "jsp4"])));
+    show(&fake, &[(8080, "jsv0", "198.18.0.2", 80)]);
+    let egress = started_with(&fake, forwarding("allow-list"), &store);
     assert_eq!(egress.check(), Err(EgressError::Rules));
     let before = fake.log().len();
     egress.settle().expect("settled");
@@ -746,17 +514,17 @@ fn settle_removes_what_no_run_took_over_once() {
             "ip link del jsv0",
             "nft delete element inet js_crun_egress jobifs { \"jsv1\" }",
             "ip link del jsv1",
+            "ip link del jsv4",
             "ip link del jsp4",
         ]
     );
-    let (inet, nat) = tables(&[], &[], &[]);
-    fake.answer("list table inet", Ok(inet));
-    fake.answer("list table ip", Ok(nat));
+    assert_eq!(recorded(&store), Vec::<String>::new());
+    show(&fake, &[]);
     egress.check().expect("no forward is left");
     let after = fake.log().len();
     egress.settle().expect("a second settle");
     assert_eq!(fake.log().len(), after, "nothing is left to do");
-    let attached: Vec<Attachment> = (0..3)
+    let attached: Vec<Attachment> = (0..5)
         .map(|n| {
             egress
                 .attach(&format!("r{n}"), PID, JobNetwork::AllowList, &[])
@@ -764,19 +532,34 @@ fn settle_removes_what_no_run_took_over_once() {
         })
         .collect();
     let names: Vec<_> = attached.iter().map(Attachment::interface).collect();
-    assert_eq!(names, [Some("jsv0"), Some("jsv1"), Some("jsv2")]);
+    assert_eq!(
+        names,
+        [
+            Some("jsv0"),
+            Some("jsv1"),
+            Some("jsv2"),
+            Some("jsv3"),
+            Some("jsv4")
+        ]
+    );
 }
 
-/// Asserts that a removal that fails keeps its block out of use and does not stop the rest: with
-/// the deletion of `jsv0` refused and that of the job end `jsp4` refused, `jsv1` and `jsp6` are
-/// still removed, the first error is the one reported (the veth of `jsv0`), and blocks 0 and 4
-/// are not given to a new run while 1, 2, 3, 5 and 6 are. Catches a settle that gives out a
-/// name a firewall set may still hold, or stops at its first failure.
+/// Asserts that a removal that fails keeps its block out of use and its record in the store,
+/// and does not stop the rest: with the deletion of `jsv0` (a kept record's wiring) and of the
+/// job end `jsp4` refused, `jsv1` and the stray block 6 are still removed, the first error is
+/// the one reported (the veth of `jsv0`), the record of `jsv0`'s run stays and the other is
+/// gone, and blocks 0 and 4 are not given to a new run while 1, 2, 3, 5 and 6 are. Catches a
+/// settle that gives out a name a firewall set may still hold, forgets a run whose wiring is
+/// still there, or stops at its first failure.
 #[test]
-fn a_settle_that_cannot_remove_a_block_keeps_it_out_of_use_and_reports_the_first_error() {
+fn a_settle_that_cannot_remove_a_block_keeps_it_and_its_record_and_reports_the_first_error() {
+    let dir = scratch("settle-fails");
+    let store = store_in(&dir);
+    put(&store, "a", (0, JobNetwork::AllowList), &[]);
+    put(&store, "b", (1, JobNetwork::AllowList), &[]);
     let fake = Fake::new();
-    leave(&fake, &["jsv0", "jsv1", "jsp4", "jsp6"], &[], &[], &[]);
-    let egress = started(&fake, allow_list());
+    fake.answer("link show", Ok(links(&["jsv0", "jsv1", "jsp4", "jsp6"])));
+    let egress = started_with(&fake, allow_list(), &store);
     fake.answer("link del jsv0", Err("Operation not permitted".to_owned()));
     fake.answer("link del jsp4", Err("Device busy".to_owned()));
     let before = fake.log().len();
@@ -789,12 +572,17 @@ fn a_settle_that_cannot_remove_a_block_keeps_it_out_of_use_and_reports_the_first
     assert_eq!(
         fake.log()[before..],
         [
+            "nft delete element inet js_crun_egress jobifs { \"jsv0\" }",
             "ip link del jsv0",
+            "nft delete element inet js_crun_egress jobifs { \"jsv1\" }",
             "ip link del jsv1",
+            "ip link del jsv4",
             "ip link del jsp4",
+            "ip link del jsv6",
             "ip link del jsp6",
         ]
     );
+    assert_eq!(recorded(&store), ["a"]);
     let attached: Vec<Attachment> = (0..5)
         .map(|n| {
             egress
@@ -815,13 +603,13 @@ fn a_settle_that_cannot_remove_a_block_keeps_it_out_of_use_and_reports_the_first
     );
 }
 
-/// Asserts that a stray job end alone is deleted with the text of what was being done:
-/// `jsp4` failing is "deleting a leftover veth" and is reported when it is the only failure.
-/// Catches a settle that hides the failure of a job end left alone.
+/// Asserts that a stray job end alone is deleted with the text of what was being done: `jsp4`
+/// failing is "deleting a leftover veth" and is reported when it is the only failure. Catches a
+/// settle that hides the failure of a job end left alone.
 #[test]
 fn a_stray_job_end_that_cannot_be_deleted_is_reported() {
     let fake = Fake::new();
-    leave(&fake, &["jsp4"], &[], &[], &[]);
+    fake.answer("link show", Ok(links(&["jsp4"])));
     let egress = started(&fake, allow_list());
     fake.answer("link del jsp4", Err("Device busy".to_owned()));
     let error = egress.settle().expect_err("fails");
@@ -834,18 +622,54 @@ fn a_stray_job_end_that_cannot_be_deleted_is_reported() {
     );
 }
 
-/// Asserts that leaving an attachment removes nothing, now or when it is dropped, and that the
-/// wiring is the next process's: the log does not grow, with the forwards of a run that has
-/// ports, the host stays held by the egress
-/// that is still alive. Catches a hand-over
-/// that takes down the wiring of a run that goes on.
+/// Asserts that a record that cannot be removed is the settle's error with its text, whether
+/// the run's wiring was kept (`x`, whose record file became a directory after the start) or the
+/// record was unusable (`y.json`, a directory at the start), that the wiring of `x` is removed
+/// all the same while its block stays out of use (its record still names it), and that the
+/// first error is `x`'s. Catches a settle that reports success while a record stays, and one
+/// that gives back a block a record still names.
 #[test]
-fn a_left_attachment_removes_nothing_now_or_at_drop() {
+fn a_record_that_cannot_be_removed_is_the_settles_error() {
+    let dir = scratch("settle-record");
+    let store = store_in(&dir);
+    put(&store, "x", (0, JobNetwork::AllowList), &[]);
+    std::fs::create_dir(store.dir().join("y.json")).expect("a directory");
     let fake = Fake::new();
-    let egress = started(&fake, forwarding("allow-list"));
-    let (inet, nat) = tables(&[], &[], &[(8080, "jsv0", "198.18.0.2", 80)]);
-    fake.answer("list table inet", Ok(inet));
-    fake.answer("list table ip", Ok(nat));
+    fake.answer("link show", Ok(links(&["jsv0"])));
+    let egress = started_with(&fake, allow_list(), &store);
+    let path = store.dir().join("x.json");
+    std::fs::remove_file(&path).expect("removed");
+    std::fs::create_dir_all(path.join("inside")).expect("a directory");
+    std::fs::create_dir_all(store.dir().join("y.json").join("inside")).expect("a directory");
+    let before = fake.log().len();
+    let error = egress.settle().expect_err("records stay");
+    assert_eq!(
+        error.to_string(),
+        "egress: removing the egress record of x: Is a directory (os error 21)"
+    );
+    assert_eq!(fake.log()[before..], release_calls(0)[..]);
+    assert_eq!(recorded(&store), ["x", "y"]);
+    let next = egress
+        .attach("n", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    assert_eq!(
+        next.interface(),
+        Some("jsv1"),
+        "block 0 stays out of use while its record stays"
+    );
+}
+
+/// Asserts that leaving an attachment removes nothing, now or when it is dropped, and that the
+/// wiring and its record are the next process's: the log does not grow, with the forwards of a
+/// run that has ports, the record is still in the store, and the host stays held by the egress
+/// that is still alive. Catches a hand-over that takes down the wiring of a run that goes on.
+#[test]
+fn a_left_attachment_removes_nothing_and_keeps_its_record() {
+    let dir = scratch("leave");
+    let store = store_in(&dir);
+    let fake = Fake::new();
+    let egress = started_with(&fake, forwarding("allow-list"), &store);
+    show(&fake, &[(8080, "jsv0", "198.18.0.2", 80)]);
     let wired = egress
         .attach("r", PID, JobNetwork::AllowList, &maps(&[(8080, 80)]))
         .expect("attach");
@@ -853,4 +677,5 @@ fn a_left_attachment_removes_nothing_now_or_at_drop() {
     let before = fake.log().len();
     wired.leave();
     assert_eq!(fake.log().len(), before, "left, not removed");
+    assert_eq!(recorded(&store), ["r"]);
 }

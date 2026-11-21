@@ -107,15 +107,14 @@ impl EgressPort for Port {
     fn adopt(
         &self,
         run: &str,
-        pid: u32,
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
         self.0.note(format!("adopt {run} {level} {}", ports.len()));
         if self.0.refuse_adopt.load(Ordering::SeqCst) {
             return Err(EgressError::Unadoptable {
-                pid,
-                why: "the interface is not the one kept".to_owned(),
+                run: run.to_owned(),
+                why: "the record is not the one kept".to_owned(),
             });
         }
         Ok(Box::new(Wiring {

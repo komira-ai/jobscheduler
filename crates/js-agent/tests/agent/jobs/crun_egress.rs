@@ -2,12 +2,14 @@
 //! allow-list the host cannot set up ends the agent before it registers. The node and the
 //! stand-in `crun` are `crun_e2e`'s.
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Arc;
 
 use js_agent::Machine;
 use js_agent::crun_host::flags;
 
-use super::crun_e2e::{NODE_IN_USE, crun_flags, host};
+use super::crun_e2e::{NODE_IN_USE, crun_flags, host, node};
 use super::crun_machine::CrunMachine;
 use crate::crun_host::{Fixture, cli};
 use crate::support::{
@@ -81,4 +83,88 @@ fn an_allow_list_that_cannot_be_set_up_ends_the_crun_agent_with_status_2() {
         ran.err
     );
     assert!(sent.borrow().is_empty(), "something was sent: {sent:?}");
+}
+
+/// The allow-list flags of an agent whose egress tools all fail.
+const FAILING_TOOLS: [&str; 10] = [
+    "--egress",
+    "allow-list",
+    "--egress-allow",
+    "192.0.2.10:443",
+    "--egress-ip",
+    "/bin/false",
+    "--egress-nft",
+    "/bin/false",
+    "--egress-nsenter",
+    "/bin/false",
+];
+
+/// Runs a crun agent with `given` as its flags against a scripted transport; its end and what
+/// it sent.
+fn run_crun_agent(given: &[String]) -> (crate::support::Ran, usize) {
+    let given: Vec<&str> = given.iter().map(String::as_str).collect();
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let machine: Arc<dyn Machine> = CrunMachine::new();
+    let ran = run_on_defaulted(
+        &agent_flags(&given),
+        &host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+        (machine, None),
+    );
+    let sent = sent.borrow().len();
+    (ran, sent)
+}
+
+/// Asserts that an agent with an allow-list opens the egress store in its state root before
+/// it starts the egress: the directory `egress` is there afterwards, mode 0700, though the
+/// start failed. It catches an agent that keeps no record of its wiring for the next process
+/// to take over.
+#[test]
+fn an_allow_list_agent_opens_its_egress_store_in_the_state_root() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let given = crun_flags("h-egress-store", &FAILING_TOOLS);
+    let (ran, sent) = run_crun_agent(&given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert_eq!(sent, 0, "something was sent");
+    let dir = node().state.join("egress");
+    let mode = fs::metadata(&dir)
+        .expect("the store directory")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o700, "{mode:o}");
+}
+
+/// Asserts that an agent with an allow-list whose state root holds a regular file named
+/// `egress` ends with status 2 and the usage error naming the egress store and why it cannot
+/// be opened, and sends nothing. It catches an agent that starts its egress with no store
+/// when the store cannot be had, and so wires runs it cannot hand over.
+#[test]
+fn an_egress_store_that_cannot_be_opened_ends_the_crun_agent_with_status_2() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = node()
+        .state
+        .parent()
+        .expect("a parent")
+        .join("state-blocked");
+    fs::create_dir_all(&state).expect("state root");
+    // A state root is the agent's alone, as the start check requires.
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("mode");
+    fs::write(state.join("egress"), b"not a directory").expect("file");
+    let mut given = crun_flags("h-egress-blocked", &FAILING_TOOLS);
+    let at = given
+        .iter()
+        .position(|flag| flag == "--state-root")
+        .expect("flag");
+    given[at + 1] = state.display().to_string();
+    let (ran, sent) = run_crun_agent(&given);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let want = format!(
+        "--egress allow-list: the egress store: {}/egress is not a directory",
+        state.display()
+    );
+    assert!(ran.err.contains(&want), "{}", ran.err);
+    assert_eq!(sent, 0, "something was sent");
 }

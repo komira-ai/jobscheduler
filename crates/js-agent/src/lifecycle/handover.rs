@@ -18,9 +18,11 @@
 //! Under an egress ceiling (`--egress allow-list` or `open`) the runs keep their network as it
 //! is: the wiring (each run's veth pair, its member of the firewall's set and its forwards) is
 //! the kernel's and goes on enforcing the same rules with no agent running; the process that
-//! hands over leaves it, and the next one takes over each adopted run's wiring and loads its
-//! firewall in one transaction that keeps every member and forward (see the crate's
-//! `egress` module).
+//! hands over leaves it, together with the run's record in the egress store (the directory
+//! `egress` of the state root, written when the run was wired). The next process reads the
+//! records at its start and loads its firewall in one transaction that puts back each recorded
+//! run's member and forwards, takes over each adopted run's wiring from its record, and
+//! removes the wiring and records no run claimed (see the crate's `egress` module).
 //!
 //! The file is looked at once, when the stop request is taken; one written later changes
 //! nothing for that stop. The agent removes one it finds at its start, after the adoption: a

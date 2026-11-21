@@ -19,6 +19,11 @@
 //!   loaded, and releases the run when told to and says `released`;
 //! - `settle-only`: starts the egress, takes nothing over, settles and says `settled`.
 //!
+//! Both agents use the same egress store, the directory `state/egress` of the test's directory:
+//! the first agent's attach writes the record `job.json` there, the second agent's start keeps
+//! the wiring that record names, and the record is removed with the wiring (the run's release,
+//! or the settle of a run nobody adopted).
+//!
 //! No clock is read. The test and the probe talk through named pipes in a directory of the
 //! test, each side waiting for the other's word: the probe's `up`, `adopted`, `settled` and
 //! `released`, and the test's `settle` and `release`. A probe that fails says `failed: <why>` on
@@ -45,6 +50,7 @@ use std::sync::{Arc, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use js_agent::egress::store::Store;
 use js_agent::egress::{Config, Egress, Flags};
 use js_types::{JobNetwork, PortMap};
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
@@ -91,6 +97,21 @@ fn ports() -> Vec<PortMap> {
 /// The host's address on the link to the far host, at the declared host port.
 fn host_port() -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(far::HOST, HOST_PORT))
+}
+
+/// The name of the record the run `job` has in the store.
+const RECORD: &str = "job.json";
+
+/// The state root the probes share, in the test's directory `dir`.
+fn state_root(dir: &Path) -> PathBuf {
+    dir.join("state")
+}
+
+/// The store the probe opens: in the state root of the test's directory.
+fn open_store(dir: &Path) -> Result<Store, String> {
+    let root = state_root(dir);
+    fs::create_dir_all(&root).map_err(|why| failed("state root", &why))?;
+    Store::open(&root).map_err(|why| failed("store", &why))
 }
 
 /// The packaged unit's value of `key` in its `[Service]` section.
@@ -181,10 +202,11 @@ fn failed(step: &str, why: &dyn std::fmt::Display) -> String {
     format!("{step}: {why}")
 }
 
-/// What the probe does as `role`, for the holder `pid`. `next` names the pipe the test waits on
+/// What the probe does as `role`; the first agent wires the holder `pid`. `next` names the pipe the test waits on
 /// at each step: a failure is said there.
 fn play(role: Role, pid: u32, wire: &Wire, next: &Cell<&'static str>) -> Result<(), String> {
-    let egress = Egress::start(config()).map_err(|why| failed("start", &why))?;
+    let store = open_store(&wire.dir)?;
+    let egress = Egress::start(config(), Some(store)).map_err(|why| failed("start", &why))?;
     match role {
         Role::FirstLeave | Role::FirstDrop => {
             let attachment = egress
@@ -214,7 +236,7 @@ fn play(role: Role, pid: u32, wire: &Wire, next: &Cell<&'static str>) -> Result<
         }
         Role::Second => {
             let attachment = egress
-                .adopt("job", pid, JobNetwork::AllowList, &ports())
+                .adopt("job", JobNetwork::AllowList, &ports())
                 .map_err(|why| failed("adopt", &why))?;
             next.set("settled");
             wire.say("adopted", "adopted");
@@ -610,6 +632,37 @@ impl Rig {
         );
     }
 
+    /// The names of the records in the store.
+    fn records(&self) -> Vec<String> {
+        let dir = state_root(&self.wire.dir).join("egress");
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("list {}: {e}", dir.display()))
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Asserts that the store holds the run's record and nothing else, in `phase`.
+    fn assert_recorded(&self, phase: &str) {
+        assert_eq!(self.records(), [RECORD], "{phase}: the store's records");
+    }
+
+    /// Asserts that the store holds no record, in `phase`.
+    fn assert_unrecorded(&self, phase: &str) {
+        assert_eq!(
+            self.records(),
+            Vec::<String>::new(),
+            "{phase}: the store's records"
+        );
+    }
+
     /// Asserts that the job has lost its network, in `phase`: no interface or member on the
     /// host, none in the holder, no connection to the allowed endpoint and no declared port; the
     /// holder's process is still there. The old connection is not read: that would wait for a
@@ -649,14 +702,15 @@ impl Rig {
 
 /// Asserts that a job's egress survives a hand-over, phase by phase, in a real unit. The first
 /// agent wires the holder with a declared port and leaves it on `SIGTERM`; the unit's stop
-/// returns, no agent runs; the second agent, in a unit of its own, adopts the wiring and
-/// settles. In each phase (before the stop, with no agent, after the adopt, after the settle)
+/// returns, no agent runs; the second agent, in a unit of its own, adopts the wiring
+/// from its record in the store (no pid) and settles. In each phase (before the stop, with no agent, after the adopt, after the settle)
 /// the allowed endpoint answers from the holder and another host, another port and the
 /// metadata address do not, the declared port reaches the holder, a connection opened before
 /// the stop still echoes (the same veth, conntrack entry and masquerade binding), the host has
-/// the same interface index and set member, and no forbidden listener counted a connection.
+/// the same interface index and set member, the store holds the run's record, and no forbidden
+/// listener counted a connection.
 /// The second agent's firewall checks as loaded after its settle, and releasing the run takes
-/// the interface and member down and the holder loses its network. Catches a stop that takes
+/// the interface and member down, removes the record, and the holder loses its network. Catches a stop that takes
 /// the wiring down, a start that removes or reloads it unfiltered, an adoption that rewires the
 /// job (another interface index), and a settle that removes a run's wiring.
 #[test]
@@ -665,47 +719,56 @@ fn a_job_keeps_its_egress_across_a_hand_over() {
     let rig = Rig::new("keep");
     let (first, mut conn, index) = rig.first_agent(Role::FirstLeave);
     rig.assert_wired(&mut conn, index, "before-the-stop");
+    rig.assert_recorded("before-the-stop");
 
     first.stop();
     assert!(!first.running(), "an agent still runs");
     rig.assert_wired(&mut conn, index, "no-agent");
+    rig.assert_recorded("no-agent");
 
     let second = rig.unit(Role::Second);
     assert_eq!(rig.wire.heard("adopted"), "adopted");
     rig.assert_wired(&mut conn, index, "after-the-adopt");
+    rig.assert_recorded("after-the-adopt");
 
     rig.wire.say("settle", "settle");
     assert_eq!(rig.wire.heard("settled"), "settled");
     rig.assert_wired(&mut conn, index, "after-the-settle");
+    rig.assert_recorded("after-the-settle");
 
     rig.wire.say("release", "release");
     assert_eq!(rig.wire.heard("released"), "released");
     rig.assert_cut("after-the-release");
+    rig.assert_unrecorded("after-the-release");
     drop(second);
 }
 
 /// Asserts that the test can see a cut: the first agent releases the wiring on `SIGTERM`
 /// instead of leaving it (what the agent did before a hand-over could carry an egress
-/// ceiling). After the stop the host has no interface and no set member, the holder has no
-/// `eth0`, the allowed endpoint and the declared port do not answer. Catches a test whose phases would pass on a cut wiring.
+/// ceiling). After the stop the host has no interface and no set member, the store has no
+/// record, the holder has no `eth0`, the allowed endpoint and the declared port do not answer.
+/// Catches a test whose phases would pass on a cut wiring, and a release that leaves its record.
 #[test]
 #[ignore = "needs root, ip, nft, unshare, systemd: see the module docs"]
 fn a_job_loses_its_egress_when_the_first_agent_releases_it_at_the_stop() {
     let rig = Rig::new("cut");
     let (first, mut conn, index) = rig.first_agent(Role::FirstDrop);
     rig.assert_wired(&mut conn, index, "before-the-stop");
+    rig.assert_recorded("before-the-stop");
     first.stop();
     assert!(!first.running(), "an agent still runs");
     rig.assert_cut("after-the-release-at-the-stop");
+    rig.assert_unrecorded("after-the-release-at-the-stop");
 }
 
 /// Asserts that wiring no run takes over is removed by the settle: the first agent leaves the
-/// wiring, and the second agent starts (which keeps it), adopts nothing and settles. Before the
-/// second start the wiring answers as it did; after the settle the host has no interface, no
-/// set member and no declared-port rule, the holder has lost `eth0` and its network, its
-/// process is untouched, and the second agent's firewall
-/// checks as loaded. Catches a settle that leaves a kept interface, member or forward behind,
-/// and a start that removes what it keeps before a run can take it over.
+/// wiring and its record, and the second agent starts (which keeps what the record names),
+/// adopts nothing and settles. Before the second start the wiring answers as it did and the
+/// record is there; after the settle the host has no interface, no set member and no
+/// declared-port rule, the record file is gone, the holder has lost `eth0` and its network, its
+/// process is untouched, and the second agent's firewall checks as loaded. Catches a settle
+/// that leaves a kept interface, member, forward or record behind, and a start that removes
+/// what it keeps before a run can take it over.
 #[test]
 #[ignore = "needs root, ip, nft, unshare, systemd: see the module docs"]
 fn a_leftover_no_run_takes_over_is_removed_by_the_settle() {
@@ -714,9 +777,11 @@ fn a_leftover_no_run_takes_over_is_removed_by_the_settle() {
     first.stop();
     assert!(!first.running(), "an agent still runs");
     rig.assert_wired(&mut conn, index, "no-agent");
+    rig.assert_recorded("no-agent");
 
     let second = rig.unit(Role::SettleOnly);
     assert_eq!(rig.wire.heard("settled"), "settled");
     rig.assert_cut("after-the-settle");
+    rig.assert_unrecorded("after-the-settle");
     drop(second);
 }

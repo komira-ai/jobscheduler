@@ -96,11 +96,10 @@ impl EgressPort for Adopting {
     fn adopt(
         &self,
         run: &str,
-        pid: u32,
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
-        let call = format!("adopt {run} {pid} {} {}", level.name(), ports.len());
+        let call = format!("adopt {run} {} {}", level.name(), ports.len());
         self.calls.lock().expect("calls").push(call);
         match self.refuses {
             true => Err(EgressError::Exhausted),
@@ -132,38 +131,20 @@ impl Wired for Left {
     }
 }
 
-/// Asserts what a run's network takes over from the pid `crun state` named: a container whose
-/// state `crun` read and that names no pid is taken over unwired; one whose state could not
-/// be read is taken over unwired and marked lost, naming why; a pid is handed to the egress with the
-/// run's name, level and ports; a refusal is the egress's own text and wires nothing. A
-/// wiring that was taken over is left once. Catches an ending container failed for want of a
-/// pid, and a failed state read taken for an ending container or refused outright.
+/// Asserts what a run's network takes over: the run's name, level and ports are handed to
+/// the egress, whatever `crun state` said of the container; a refusal is the egress's own
+/// text and wires nothing. A wiring that was taken over is left once. Catches a take-over that
+/// asks for a pid, and a refusal that is swallowed or reworded.
 #[test]
-fn a_runs_network_takes_over_what_the_pid_names_and_leaves_it_once() {
+fn a_runs_network_takes_over_what_its_record_names_and_leaves_it_once() {
     let port = PortMap {
         host: 8080,
         container: 80,
     };
     let egress = Adopting::default();
     let mut open = Net::asked(JobNetwork::Open, vec![port], Vec::new());
-    let ending = Err("crun state: no pid in {\"status\":\"running\"}".to_owned());
-    assert_eq!(open.adopt(&egress, "js-x-r2", &ending), Ok(()));
-    let ending = Err("crun state: pid 99999999999 is not a pid".to_owned());
-    assert_eq!(open.adopt(&egress, "js-x-r2", &ending), Ok(()));
-    let unread = Err("crun state: exit status: 1: no container".to_owned());
-    assert_eq!(open.lost(), None, "an ending container is not lost");
-    assert_eq!(open.adopt(&egress, "js-x-r2", &unread), Ok(()));
-    assert_eq!(
-        open.lost().as_deref(),
-        Some(
-            "its network cannot be taken over: find the container's pid: crun state: exit status: 1: no container"
-        )
-    );
-    open.leave();
-    assert_eq!(egress.taken(), Vec::<String>::new());
-
-    assert_eq!(open.adopt(&egress, "js-x-r2", &Ok(PID)), Ok(()));
-    assert_eq!(egress.taken(), [format!("adopt js-x-r2 {PID} open 1")]);
+    assert_eq!(open.adopt(&egress, "js-x-r2"), Ok(()));
+    assert_eq!(egress.taken(), ["adopt js-x-r2 open 1"]);
     open.leave();
     open.leave();
     assert_eq!(egress.taken(), ["leave"], "left once");
@@ -174,15 +155,9 @@ fn a_runs_network_takes_over_what_the_pid_names_and_leaves_it_once() {
     };
     let mut allow = Net::asked(JobNetwork::AllowList, Vec::new(), Vec::new());
     assert_eq!(
-        allow.adopt(&refusing, "js-x-r3", &Ok(PID)),
+        allow.adopt(&refusing, "js-x-r3"),
         Err(EgressError::Exhausted.to_string())
     );
     allow.leave();
-    assert_eq!(
-        refusing.taken(),
-        [format!("adopt js-x-r3 {PID} allow-list 0")]
-    );
+    assert_eq!(refusing.taken(), ["adopt js-x-r3 allow-list 0"]);
 }
-
-/// The pid the tests of the network name.
-const PID: u32 = 4321;

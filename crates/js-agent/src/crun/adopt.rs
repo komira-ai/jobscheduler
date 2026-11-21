@@ -24,11 +24,14 @@
 //!   record it ([`label::NETWORK`], [`label::NETWORK_PORTS`]): a `none` run has nothing to take
 //!   over; a wired one (`allow-list` or `open`) needs the runtime's egress to take over the
 //!   wiring the earlier process made for its container, unchanged ([`crate::crun::EgressPort::adopt`]:
-//!   the container's interface, its set and its forwards are what its level and ports make).
+//!   the egress store's record of the run, written when the wiring was made, must name the
+//!   level and the ports the job declared; the kernel's rules stayed in place meanwhile, and
+//!   the next process's start put the run's set member and forwards back from that record).
 //!   A runtime with an egress removes a run whose sidecar records no network (an agent that
 //!   did not record it started it, so its wiring cannot be told), and a runtime without one
-//!   removes a wired run (its ceiling is none now). A container that is ending (`crun state`
-//!   read it and names no init) has no wiring left to take over and is adopted without.
+//!   removes a wired run (its ceiling is none now). A run whose record the store does not hold,
+//!   or holds with another level or ports, cannot be taken over and is removed; a run whose
+//!   `crun state` fails is taken over from its record like any other.
 //!
 //! Once the runs are adopted the egress removes what an earlier process left and no run took
 //! over ([`crate::crun::EgressPort::settle`]); a failure there fails the open.
@@ -371,7 +374,7 @@ impl CrunRuntime {
                 let (state, pid) = self
                     .standing(&run, fields, alive)
                     .map_err(Reason::Inconsistent)?;
-                self.take_over(&mut run, network.as_ref(), &pid)
+                self.take_over(&mut run, network.as_ref())
                     .map_err(|why| Reason::Inconsistent(format!("its network: {why}")))?;
                 run.net.offer_again(&self.host_ports.1, pid);
                 state
@@ -382,7 +385,7 @@ impl CrunRuntime {
 
     /// Takes over the network of the adopted `run`, which may still run and whose labels
     /// record `network` (see the module documentation): by the runtime's egress for a wired
-    /// run, in the namespace of `pid` as `crun state` named it.
+    /// run, from the run's record in the egress store.
     ///
     /// # Errors
     /// The run cannot keep its network under this runtime, or its wiring cannot be taken over.
@@ -390,7 +393,6 @@ impl CrunRuntime {
         &self,
         run: &mut Run,
         network: Option<&(JobNetwork, Vec<PortMap>)>,
-        pid: &Result<u32, String>,
     ) -> Result<(), String> {
         let level = network.map(|(level, _)| *level);
         match (self.egress.as_deref(), level) {
@@ -402,7 +404,7 @@ impl CrunRuntime {
             (None, Some(level)) => Err(format!(
                 "it was wired at {level} and this agent's ceiling is none"
             )),
-            (Some(egress), Some(_)) => run.net.adopt(egress, &run.spec.name, pid),
+            (Some(egress), Some(_)) => run.net.adopt(egress, &run.spec.name),
         }
     }
 

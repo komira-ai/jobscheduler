@@ -165,8 +165,8 @@ fn a_wired_run_is_adopted_with_its_recorded_network_then_the_port_settles_once()
     assert_eq!(
         seen.taken(),
         [
-            format!("adopt {one} {PID} allow-list "),
-            format!("adopt {two} {PID} open 8080:80"),
+            format!("adopt {one} allow-list "),
+            format!("adopt {two} open 8080:80"),
             "settle".to_owned(),
         ]
     );
@@ -180,8 +180,8 @@ fn a_wired_run_is_adopted_with_its_recorded_network_then_the_port_settles_once()
     assert_eq!(
         adopted,
         [
-            (PID, JobNetwork::AllowList, Vec::new()),
-            (PID, JobNetwork::Open, ports)
+            (JobNetwork::AllowList, Vec::new()),
+            (JobNetwork::Open, ports)
         ]
     );
     runtime.remove(&ids[0]).expect("removed");
@@ -317,15 +317,12 @@ fn a_run_whose_wiring_the_port_refuses_is_removed_with_its_reason() {
     seen.adopt_fails.store(true, Ordering::SeqCst);
     let second = reopened(&node, &seen);
     let why = format!(
-        "its network: egress: the wiring of container {PID} cannot be taken over: its interface is not wired"
+        "its network: egress: the wiring of run {name} cannot be taken over: its record is not wired"
     );
     removed_saying(&node, &second, &name, &why);
     assert_eq!(
         seen.taken(),
-        [
-            format!("adopt {name} {PID} allow-list "),
-            "settle".to_owned()
-        ]
+        [format!("adopt {name} allow-list "), "settle".to_owned()]
     );
 }
 
@@ -358,13 +355,13 @@ fn a_run_with_a_network_label_the_agent_does_not_write_is_removed() {
     }
 }
 
-/// Asserts a wired run whose container `crun state` reads with no pid is adopted without
-/// wiring and not lost (it is ending), and one whose state `crun` cannot read is adopted too,
-/// with no wiring taken over and marked lost saying it could not find the pid, so that the
-/// lifecycle stops it. Catches an ending run removed for want of a pid, and a run whose state
-/// could not be read removed (its result dropped) or left running with no wiring and no mark.
+/// Asserts a wired run whose container `crun state` reads with no pid, and one whose state
+/// `crun` cannot read, are both adopted through the port like any wired run, asked with the
+/// recorded level and ports, and neither is marked lost. Catches a run adopted from the
+/// kernel's view of its container instead of its record, and a run whose state could not be
+/// read marked lost or removed (its result dropped).
 #[test]
-fn a_wired_run_whose_pid_is_not_named_is_adopted_and_one_whose_state_is_unread_is_marked_lost() {
+fn a_wired_run_whose_state_is_not_read_is_adopted_through_the_port_like_any_other() {
     let node = Node::new("egress-adopt-pid");
     let seen = Seen::new(&node);
     let ending = left_running(&node, None, &node.job("r1-badpid", 600_000));
@@ -376,12 +373,16 @@ fn a_wired_run_whose_pid_is_not_named_is_adopted_and_one_whose_state_is_unread_i
     let report = second.swept();
     assert_eq!(report.adopted, ["r1-badpid", "r2-deaf"], "{report:?}");
     assert!(report.removed.is_empty(), "{report:?}");
-    assert_eq!(seen.taken(), ["settle"], "nothing taken over");
-    assert_eq!(second.host_port_lost(&RunHandle(ending)), None);
-    let want = format!(
-        "its network cannot be taken over: find the container's pid: crun state: exit status: 1: no container {deaf}"
+    assert_eq!(
+        seen.taken(),
+        [
+            format!("adopt {ending} allow-list "),
+            format!("adopt {deaf} allow-list "),
+            "settle".to_owned(),
+        ]
     );
-    assert_eq!(second.host_port_lost(&RunHandle(deaf)), Some(want));
+    assert_eq!(second.host_port_lost(&RunHandle(ending)), None);
+    assert_eq!(second.host_port_lost(&RunHandle(deaf)), None);
 }
 
 /// Asserts a port whose settle fails fails the open with the port's error. Catches an open that carries on with leftovers of an earlier process.

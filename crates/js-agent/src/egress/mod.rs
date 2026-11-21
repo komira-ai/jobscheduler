@@ -20,6 +20,11 @@
 //!   route, the firewall and its read-back. It never runs in the job's container and never
 //!   as the job user. The design and what each step defends against are in
 //!   `docs/design/agent-egress.md`.
+//! - [`store`] (Linux): the egress store, one record per wired run (its block, level and
+//!   ports) in the directory `egress` of the state root. [`Egress`] writes a record when it
+//!   wires a run and removes it when the wiring is taken down, and the next process of the
+//!   agent takes over the wiring from the records, the kernel's rules staying in place
+//!   between the two.
 //!
 //! The runtime that starts the containers calls, in this order: [`Egress::check`] before
 //! every create of a wired job (a failure is `egress-unchecked` and creates nothing; a `none`
@@ -41,6 +46,8 @@ mod host;
 pub mod ruleset;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod stand_in;
+#[cfg(target_os = "linux")]
+pub mod store;
 
 pub use admit::{NetworkRefusal, admit};
 pub use allow::{ALLOW_MAX, Allow};

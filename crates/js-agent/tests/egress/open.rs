@@ -62,7 +62,7 @@ fn open_job_reaches_an_address_outside_the_list_but_not_metadata_or_a_neighbour(
     let far_host = Far::new();
     let unlisted = Server::tcp(&far_host.ns, far::OTHER_HOST);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
-    let egress = Egress::start(open()).expect("start");
+    let egress = Egress::start(open(), None).expect("start");
     egress.check().expect("the firewall reads back as loaded");
     let neighbour = Holder::new();
     let wired_neighbour = egress
@@ -161,7 +161,8 @@ fn a_none_job_has_loopback_only() {
     let _serial = serial();
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
-    let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &["192.0.2.53"])).expect("start");
+    let egress =
+        Egress::start(allow_list(&["192.0.2.10:9300"], &["192.0.2.53"]), None).expect("start");
     let mut host = RuntimeHost::new("quiet", &egress);
     let script = format!(
         "{PROBE}echo '--dev'; cat /proc/net/dev; echo '--route'; cat /proc/net/route; \
@@ -226,7 +227,7 @@ fn an_allow_list_job_under_an_open_ceiling_keeps_its_list() {
         (&["192.0.2.10:9300"][..], &[][..]),
         (&[][..], &["192.0.2.53"][..]),
     ] {
-        let egress = Egress::start(crate::sys::open(allow, dns)).expect("start");
+        let egress = Egress::start(crate::sys::open(allow, dns), None).expect("start");
         let (narrow, wide) = (Holder::new(), Holder::new());
         let _narrow = egress
             .attach("narrow", narrow.pid(), JobNetwork::AllowList, &[])

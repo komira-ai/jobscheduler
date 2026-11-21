@@ -39,7 +39,7 @@ fn an_allowed_endpoint_answers_and_everything_else_is_refused_by_its_rule() {
     let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
     let metadata = Server::tcp(&far_host.ns, far::METADATA);
     let config = allow_list(&["192.0.2.10:9300"], &["192.0.2.53"]);
-    let egress = Egress::start(config.clone()).expect("start");
+    let egress = Egress::start(config.clone(), None).expect("start");
     egress.check().expect("the firewall reads back as loaded");
     let script = format!(
         "{PROBE}echo started; echo '--dev'; cat /proc/net/dev; echo '--route'; cat /proc/net/route; \
@@ -135,7 +135,7 @@ fn the_far_host_answers_only_through_the_masquerade() {
     let _serial = serial();
     let far_host = Far::new();
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
-    let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
+    let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[]), None).expect("start");
     let holder = Holder::new();
     let attachment = egress
         .attach("masq", holder.pid(), JobNetwork::AllowList, &[])

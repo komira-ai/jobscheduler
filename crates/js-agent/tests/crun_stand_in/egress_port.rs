@@ -16,7 +16,7 @@ use crate::node::Node;
 #[derive(Debug, Default)]
 pub(crate) struct Seen {
     /// `check <sidecars>` (the leases the ledger held when the check was asked),
-    /// `attach <run> <pid>`, `adopt <run> <pid> <level> <ports>`, `settle`, `release <run>`
+    /// `attach <run> <pid>`, `adopt <run> <level> <ports>`, `settle`, `release <run>`
     /// and `leave <run>`, in order.
     pub(crate) calls: Mutex<Vec<String>>,
     /// The directory of the runtime's sidecars.
@@ -25,8 +25,8 @@ pub(crate) struct Seen {
     pub(crate) levels: Mutex<Vec<JobNetwork>>,
     /// The declared ports of each attach, in order.
     pub(crate) ports: Mutex<Vec<Vec<PortMap>>>,
-    /// The pid, level and ports of each adopt, in order.
-    pub(crate) adopted: Mutex<Vec<(u32, JobNetwork, Vec<PortMap>)>>,
+    /// The level and ports of each adopt, in order.
+    pub(crate) adopted: Mutex<Vec<(JobNetwork, Vec<PortMap>)>>,
     pub(crate) check_fails: AtomicBool,
     /// How often the port was asked to settle.
     pub(crate) settles: AtomicUsize,
@@ -108,7 +108,6 @@ impl EgressPort for Port {
     fn adopt(
         &self,
         run: &str,
-        pid: u32,
         level: JobNetwork,
         ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
@@ -117,17 +116,17 @@ impl EgressPort for Port {
             .map(|port| format!("{}:{}", port.host, port.container))
             .collect();
         let each = each.join(",");
-        let call = format!("adopt {run} {pid} {} {each}", level.name());
+        let call = format!("adopt {run} {} {each}", level.name());
         self.0
             .adopted
             .lock()
             .expect("adopted")
-            .push((pid, level, ports.to_vec()));
+            .push((level, ports.to_vec()));
         self.0.note(call);
         match self.0.adopt_fails.load(Ordering::SeqCst) {
             true => Err(EgressError::Unadoptable {
-                pid,
-                why: "its interface is not wired".to_owned(),
+                run: run.to_owned(),
+                why: "its record is not wired".to_owned(),
             }),
             false => Ok(Box::new(Wire {
                 seen: Arc::clone(&self.0),

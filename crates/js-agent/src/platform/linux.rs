@@ -834,7 +834,10 @@ pub(crate) fn claim(
         None => None,
     };
     let Local {
-        backend, egress, ..
+        backend,
+        egress,
+        state,
+        ..
     } = local;
     let plan = backend
         .as_mut()
@@ -842,9 +845,18 @@ pub(crate) fn claim(
     // A machine that supplies the egress (a test's) has the runtime use that, and the agent
     // starts none.
     if let Some(plan) = plan.filter(|_| services.machine.egress_port().is_none()) {
-        let started = crun::start_egress(egress, crate::egress::Egress::start);
         let mode = egress.mode();
-        plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;
+        let usage = |why: String| Failure::Usage(format!("--egress {mode}: {why}"));
+        // Each run's record of what its wiring is goes in the state root, where the next
+        // process of the agent reads it.
+        let wired = state.as_ref().filter(|_| mode != crate::egress::Mode::None);
+        let store = wired.map(|state| crate::egress::store::Store::open(state.path()));
+        let store = store
+            .transpose()
+            .map_err(|why| usage(format!("the egress store: {why}")))?;
+        let started =
+            crun::start_egress(egress, |config| crate::egress::Egress::start(config, store));
+        plan.egress = started.map_err(|why| usage(why.to_string()))?;
     }
     Ok(claims)
 }
