@@ -112,13 +112,24 @@ fn a_root_that_cannot_be_looked_in_is_no_request_and_a_removal_there_fails() {
 #[test]
 fn an_agent_with_no_egress_ceiling_looks_for_a_handover_and_one_with_a_ceiling_never_does() {
     let dir = scratch("handover-root-for");
-    let path = dir.path().join("state");
+    // The state root is named through a linked parent, as macOS names every temporary
+    // directory (`/var` is a link to `/private/var`): the root looked in is the canonical
+    // directory the state root opened, not the name it was given.
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let linked = dir.path().join("linked");
+    symlink(&real, &linked).unwrap();
+    let path = linked.join("state");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     let state = StateRoot::open(&path).unwrap();
+    let canonical = fs::canonicalize(real.join("state")).unwrap();
     let none = Config::none();
     let looked = root_for(Some(&state), &none);
-    assert_eq!(looked.as_ref().map(StateRoot::path), Some(path.as_path()));
+    assert_eq!(
+        looked.as_ref().map(StateRoot::path),
+        Some(canonical.as_path())
+    );
     assert!(
         root_for(None, &none).is_none(),
         "no state root, no handover"
