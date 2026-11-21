@@ -109,14 +109,6 @@ impl Host for MacHost {
             // A random password nobody is told: the account cannot be logged into with
             // a password, and macOS gives it no secure token.
             random_password(&record)?;
-            if user.admin {
-                let admin = group(&node, ADMIN_GROUP)?;
-                let mut error = None;
-                // SAFETY: both are records of the local node.
-                if !unsafe { admin.addMemberRecord_error(Some(&record), Some(&mut error)) } {
-                    return Err(od_error("adding to the admin group", error));
-                }
-            }
             Ok(())
         })
     }
@@ -157,27 +149,6 @@ impl Host for MacHost {
                 ("dsAttrTypeNative:IsHidden", "1".to_owned()),
             ] {
                 set(&record, attribute, &value)?;
-            }
-            Ok(())
-        })
-    }
-
-    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()> {
-        autoreleasepool(|_| {
-            let node = local_node()?;
-            let record = find(&node, name)?
-                .ok_or_else(|| io::Error::other(format!("no user record {name}")))?;
-            let group = group(&node, ADMIN_GROUP)?;
-            let mut error = None;
-            if admin {
-                // SAFETY: both are records of the local node.
-                if !unsafe { group.addMemberRecord_error(Some(&record), Some(&mut error)) } {
-                    return Err(od_error("adding to the admin group", error));
-                }
-            } else {
-                // SAFETY: both are records of the local node. Not a member is an error
-                // that changes nothing; the helper asks the directory afterwards.
-                unsafe { group.removeMemberRecord_error(Some(&record), Some(&mut error)) };
             }
             Ok(())
         })

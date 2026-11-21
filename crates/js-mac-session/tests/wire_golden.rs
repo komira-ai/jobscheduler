@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 
 use js_mac_session::lease::{Dotted, Slot, parse_lease, pool_user_name, user_name};
 use js_mac_session::ledger::Ledger;
+use js_mac_session::ledger::pool::SlotState;
 use js_mac_session::proto::{self, Call, Limits, PoolState, Reply, Request, Session};
 use js_testkit::dir::TestDir;
 use js_types::LeaseId;
@@ -351,9 +352,10 @@ fn a_ledger_written_before_the_move_is_read() {
     assert_eq!(ledger.held_uids(), std::collections::BTreeSet::from([651]));
 }
 
-/// Catches: a pool file line that is not one of its records (an administrator's lease
-/// ends in `resetting <slot> replace`), in the order a lease's
-/// life writes them, which a later release would then fail to read.
+/// Catches: a pool file line that is not one of its records, in the order a lease's life
+/// writes them, which a later release would then fail to read; and a pool file of a
+/// release that made administrators (`leased <slot> <lease> admin`, ended by `resetting
+/// <slot> replace`) that this one cannot read.
 #[test]
 fn the_pool_file_is_one_line_per_slot_record() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "wire-golden-pool");
@@ -362,14 +364,14 @@ fn the_pool_file_is_one_line_per_slot_record() {
     let lease = LeaseId::new(3, 7);
     ledger.record_slot(Slot::new(0), 650).unwrap();
     ledger.record_free(Slot::new(0)).unwrap();
-    ledger.record_leased(Slot::new(0), lease, true).unwrap();
+    ledger.record_leased(Slot::new(0), lease).unwrap();
     ledger.record_released(Slot::new(0), lease).unwrap();
     ledger.record_broken(Slot::new(0)).unwrap();
     ledger.record_free(Slot::new(0)).unwrap();
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(dir.join("pool")).unwrap(),
-        "made 0 650\nfree 0\nleased 0 3.7 admin\nresetting 0 replace\nbroken 0\nfree 0\n"
+        "made 0 650\nfree 0\nleased 0 3.7\nresetting 0\nbroken 0\nfree 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -377,9 +379,10 @@ fn the_pool_file_is_one_line_per_slot_record() {
     );
     std::fs::write(
         dir.join("pool"),
-        "made 0 650\nfree 0\nleased 0 3.8\nresetting 0\nfree 0\n",
+        "made 0 650\nfree 0\nleased 0 3.7 admin\nresetting 0 replace\nfree 0\n",
     )
     .unwrap();
     let again = Ledger::open(&path).unwrap();
     assert_eq!(again.slots().len(), 1);
+    assert_eq!(again.slots()[0].1.state, SlotState::Free);
 }

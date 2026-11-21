@@ -382,10 +382,7 @@ fn a_delete_repeated_after_the_record_went_completes_without_the_darwin_user_dir
     assert_eq!(rig.helper.user_delete("30.1"), Ok(false));
     assert!(!log(&rig).iter().any(|c| c.starts_with("user_dir")));
     assert!(rig.helper.pool_create().errors.is_empty());
-    assert!(
-        rig.helper.user_create("30.2", None).is_ok(),
-        "uid {uid} is free"
-    );
+    assert!(rig.helper.user_create("30.2").is_ok(), "uid {uid} is free");
 
     let (rig, uid) = one("teardown-account", "31.1");
     rig.host.state().fail.insert("account");

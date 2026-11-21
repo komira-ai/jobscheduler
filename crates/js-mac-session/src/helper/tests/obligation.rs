@@ -80,7 +80,7 @@ fn a_failed_gui_teardown_stays_owed_across_a_retry_and_a_direct_delete() {
     assert!(!owed(&rig, uid));
     assert!(rig.host.state().domains.is_empty());
     assert!(rig.helper.pool_create().errors.is_empty());
-    assert_eq!(rig.helper.user_create("61.2", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("61.2"), Ok(uid));
 }
 
 /// Catches a GUI teardown obligation kept only in memory: after the failed `kill-uid`

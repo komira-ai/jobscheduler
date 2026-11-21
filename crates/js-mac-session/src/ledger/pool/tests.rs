@@ -17,10 +17,11 @@ fn state(ledger: &Ledger, n: u32) -> Option<SlotState> {
 }
 
 /// Catches: a slot's state kept only in memory, under which a restart forgets which
-/// user is lent to which lease, that it was broken, or that its user (an
-/// administrator's) must be replaced rather than reset; and a lease and its slot written
-/// in the wrong order (a crash between the two must never leave a live lease without
-/// its slot).
+/// user is lent to which lease, that it was broken, or that a release that made
+/// administrators leased it to one (its `leased <slot> <lease> admin` must still be read,
+/// and its end still written `resetting <slot> replace`); this release writing `admin`;
+/// and a lease and its slot written in the wrong order (a crash between the two must
+/// never leave a live lease without its slot).
 #[test]
 fn every_slot_state_survives_reopening() {
     let dir = dir("reopen");
@@ -38,21 +39,31 @@ fn every_slot_state_survives_reopening() {
         ledger.record_free(slot(n)).unwrap();
     }
     ledger.record_broken(slot(3)).unwrap();
-    ledger.record_leased(slot(0), a, false).unwrap();
-    ledger.record_leased(slot(1), b, true).unwrap();
-    ledger.record_leased(slot(2), c, true).unwrap();
+    ledger.record_leased(slot(0), a).unwrap();
     ledger.record_released(slot(0), a).unwrap();
+    drop(ledger);
+    // What a release that made administrators wrote for two leases.
+    let append = |path: &Path, text: &str| {
+        let was = std::fs::read_to_string(path).unwrap();
+        std::fs::write(path, was + text).unwrap();
+    };
+    append(
+        &dir.join("pool"),
+        "leased 1 9.2 admin\nleased 2 9.3 admin\n",
+    );
+    append(&path, "created 9.2 601\ncreated 9.3 602\n");
+    let mut ledger = Ledger::open(&path).unwrap();
     ledger.record_released(slot(2), c).unwrap();
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(dir.join("pool")).unwrap(),
         "made 0 600\nmade 1 601\nmade 2 602\nmade 3 603\nfree 0\nfree 1\nfree 2\n\
-         broken 3\nleased 0 9.1\nleased 1 9.2 admin\nleased 2 9.3 admin\nresetting 0\n\
+         broken 3\nleased 0 9.1\nresetting 0\nleased 1 9.2 admin\nleased 2 9.3 admin\n\
          resetting 2 replace\n"
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "created 9.1 600\ncreated 9.2 601\ncreated 9.3 602\ndeleted 9.1\ndeleted 9.3\n"
+        "created 9.1 600\ndeleted 9.1\ncreated 9.2 601\ncreated 9.3 602\ndeleted 9.3\n"
     );
     let ledger = Ledger::open(&path).unwrap();
     assert_eq!(
@@ -120,7 +131,7 @@ fn a_record_must_follow_from_its_slot_s_state() {
         "slot 1's uid 600 is slot 0's"
     );
     assert_eq!(
-        refused(ledger.record_leased(slot(0), a, false)),
+        refused(ledger.record_leased(slot(0), a)),
         "slot 0 is not free"
     );
     assert_eq!(
@@ -138,9 +149,9 @@ fn a_record_must_follow_from_its_slot_s_state() {
     );
     ledger.record_slot(slot(1), 601).unwrap();
     ledger.record_free(slot(1)).unwrap();
-    ledger.record_leased(slot(0), a, false).unwrap();
+    ledger.record_leased(slot(0), a).unwrap();
     assert_eq!(
-        refused(ledger.record_leased(slot(1), a, false)),
+        refused(ledger.record_leased(slot(1), a)),
         "lease 8.1 created twice"
     );
     assert_eq!(
@@ -155,7 +166,7 @@ fn a_record_must_follow_from_its_slot_s_state() {
         refused(ledger.record_released(slot(0), b)),
         "lease 8.2 deleted but not live"
     );
-    ledger.record_leased(slot(1), b, false).unwrap();
+    ledger.record_leased(slot(1), b).unwrap();
     assert_eq!(
         refused(ledger.record_released(slot(0), b)),
         "slot 0 is leased to lease 8.1, not 8.2"

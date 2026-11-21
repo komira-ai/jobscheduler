@@ -14,9 +14,11 @@
 //!   `kbf-lease-<term>-<seq>`, deleted when it ends (which macOS 27 refuses root).
 //! - The uid comes from the ledger, never from a lookup, and must be in the lease
 //!   range; a uid outside it is never touched.
-//! - `user-create` is refused for a lease id used before (so a grant is single-use),
-//!   takes only a free pool user (never making one: a full pool is
-//!   [`LeaseError::Exhausted`]) and makes an administrator only with a valid grant.
+//! - `user-create` is refused for a lease id used before, takes only a free pool user
+//!   (never making one: a full pool is [`LeaseError::Exhausted`]) and never makes an
+//!   administrator: a job that needs administrator rights runs in a VM, not as a pool
+//!   user. A request that carries a grant (a field of the protocol from when a gate's
+//!   signed grant could make one) is refused, and no user is taken.
 //! - `run`, `kill-uid`, `stop` and `user-delete` act only on a lease the ledger holds;
 //!   `run`, `kill-uid` and `stop` refuse one that is over (its uid may be another
 //!   lease's now). `stop` kills only as `kill-uid` does, after a `SIGTERM` to the run's
@@ -43,9 +45,9 @@
 //!   fails, naming what remains, and the lease stays live: its uid is quarantined.
 //! - `user-delete` of a pool user's lease records the lease over and resets the user in
 //!   place (its home and per-user folder emptied and kept, its record's pool-owned
-//!   attributes set back, its membership of `admin` removed); a reset that is not clean
-//!   breaks the slot, naming what blocked it ([`pool`]). Nothing of a pool user is
-//!   deleted. The deletion of a lease's user from before the pool refuses while any
+//!   attributes set back, and the directory asked that it is not in `admin`, a member
+//!   being a broken slot); a reset that is not clean breaks the slot, naming what
+//!   blocked it ([`pool`]). Nothing of a pool user is deleted. The deletion of a lease's user from before the pool refuses while any
 //!   process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
@@ -90,7 +92,6 @@ use js_types::LeaseId;
 use rustix::fs::{CWD, Gid, Mode, OFlags, Uid};
 
 use crate::autologin::{CommandOutput, Intent, SessionPaths, read_intent};
-use crate::grant::{self, Expect, GrantKeys};
 use crate::lease::{Dotted, PoolSize, Slot, UidRange, VmUser, parse_lease};
 use crate::ledger::{Entry, Ledger};
 use crate::proto::{Limits, PoolState, Reply, Request, Session};
@@ -135,6 +136,11 @@ pub const RESET_NEEDED: &str = "the boot reset has not run since the helper star
 /// a caller can tell that the scan has nothing to compare with from a scan that failed.
 pub const NO_BASELINE: &str = "no baseline was recorded; baseline first";
 
+/// What a `user-create` that carries a grant is refused with: no lease user is ever an
+/// administrator, whatever the request holds.
+pub const NO_ADMINISTRATOR: &str =
+    "no lease user is ever an administrator: a job that needs administrator rights runs in a VM";
+
 /// The refusal of a second `boot-reset` since the helper started: a daemon that
 /// restarted on its own (the helper did not) finds the reset done.
 pub const RESET_ALREADY: &str = "the boot reset ran already; it runs once per start";
@@ -155,7 +161,7 @@ pub struct PrintAnswer {
 
 /// What the OS does for the helper. The macOS implementation is in `crate::macos`.
 pub trait Host: Send + Sync {
-    /// The wall clock, for grant expiry.
+    /// The wall clock, for the runs' deadlines.
     fn now(&self) -> SystemTime;
     /// Whether any user record has `uid`.
     ///
@@ -191,19 +197,13 @@ pub trait Host: Send + Sync {
     /// Sets the pool-owned attributes of the existing record `user.name` that macOS lets
     /// root write on an existing account to what [`Host::create_user`] gives a new one:
     /// its primary group, shell and hidden flag. Its uid, home path, real name, password
-    /// and membership of `admin` are left alone (macOS 27 refuses root a write of an
-    /// existing account's home attribute; the caller compares the uid and home first).
+    /// and group memberships are left alone (macOS 27 refuses root a write of an existing
+    /// account's home attribute; the caller compares the uid and home first, and asks the
+    /// directory that the user is not in `admin`).
     ///
     /// # Errors
     /// The record could not be found or an attribute could not be set.
     fn restore_user(&self, user: &NewUser) -> io::Result<()>;
-    /// Puts the user `name` in the `admin` group (`admin`) or takes it out. Taking out a
-    /// user that is not a member is not an error; whether it worked is read back from
-    /// the directory.
-    ///
-    /// # Errors
-    /// The user could not be found or added (or, on a host that can tell, removed).
-    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()>;
     /// How `launchctl print <domain>` ended: its exit code and its standard output
     /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
     /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
@@ -366,8 +366,6 @@ pub struct NewUser {
     pub gid: u32,
     /// The home folder.
     pub home: PathBuf,
-    /// Whether the user is in the `admin` group.
-    pub admin: bool,
 }
 
 /// The helper's fixed configuration.
@@ -393,10 +391,6 @@ pub struct Settings {
     /// user's reset) or, for a lease from before the pool, removed whole by `user-delete`
     /// (emptied and kept where the system placed it, `sunlnk`).
     pub user_folders: PathBuf,
-    /// The gate's grant keys; without them no administrator is ever made.
-    pub grant_keys: Option<GrantKeys>,
-    /// This Mac's serial number, which a grant must name.
-    pub serial: String,
     /// Where the session switch keeps its state.
     pub session: SessionPaths,
     /// The standing VM user, when this Mac is provisioned for VMs: the Mac rests at it
@@ -491,8 +485,9 @@ impl Helper {
                     .map_or_else(refused, Outcome::Running);
             }
             _ if !fds.is_empty() => Err("only run and role-run take descriptors".to_owned()),
-            Request::UserCreate { lease, grant } => self
-                .user_create(&lease, grant.as_deref())
+            Request::UserCreate { grant: Some(_), .. } => Err(NO_ADMINISTRATOR.to_owned()),
+            Request::UserCreate { lease, grant: None } => self
+                .user_create(&lease)
                 .map(|uid| Reply::Created { uid })
                 .map_err(|why| why.to_string()),
             Request::PoolCreate => Ok(pool_reply(self.pool_create())),
@@ -540,30 +535,14 @@ impl Helper {
         result.map_or_else(refused, Outcome::Reply)
     }
 
-    /// `user-create <lease> [grant]`: the lease takes a free pool user (an administrator,
-    /// added to `admin` for the lease, with a valid grant), whose home folder is empty and only it
-    /// can enter. Returns its uid.
+    /// `user-create <lease>`: the lease takes a free pool user, never an administrator,
+    /// whose home folder is empty and only it can enter. Returns its uid.
     ///
     /// # Errors
     /// [`LeaseError::Exhausted`] when no pool user is free (retry once a lease ends);
     /// otherwise why it was refused or failed.
-    pub fn user_create(&self, lease: &str, grant: Option<&str>) -> Result<u32, LeaseError> {
+    pub fn user_create(&self, lease: &str) -> Result<u32, LeaseError> {
         let lease = parse_lease(lease)?;
-        let admin = match grant {
-            None => false,
-            Some(grant) => {
-                let keys = self.settings.grant_keys.as_ref().ok_or(
-                    "this Mac holds no gate key, so no lease user is ever an administrator",
-                )?;
-                let expect = Expect {
-                    serial: &self.settings.serial,
-                    lease: &Dotted(lease).to_string(),
-                    now: self.host.now(),
-                };
-                grant::verify(grant, keys, expect)?;
-                true
-            }
-        };
         let mut ledger = self.lock();
         if ledger.get(lease).is_some() {
             return Err(format!(
@@ -572,7 +551,7 @@ impl Helper {
             )
             .into());
         }
-        self.take_slot(&mut ledger, lease, admin)
+        self.take_slot(&mut ledger, lease)
     }
 
     fn live(&self, uid: u32) -> Result<Vec<LiveProcess>, String> {

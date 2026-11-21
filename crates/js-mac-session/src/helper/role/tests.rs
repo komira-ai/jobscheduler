@@ -31,7 +31,6 @@ fn add_account(rig: &Rig, uid: u32, gid: u32) {
             uid,
             gid,
             home: rig.dir.join("Users").join(VM),
-            admin: false,
         },
     );
 }
@@ -188,7 +187,7 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
     gui_up(&rig);
     assert_eq!(rig.helper.role_session_ready(), Ok(true));
     // A lease user's gui domain is not the VM user's.
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     rig.host.state().domains.insert(format!("gui/{}", me()));
     rig.helper.session_login("1.1").unwrap();
     log(&rig);
@@ -267,7 +266,7 @@ fn a_role_run_waits_for_the_vm_user_s_session() {
     assert_eq!(log(&rig), Vec::<String>::new());
 
     // A lease holds the session.
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     rig.helper.session_login("1.1").unwrap();
     gui_up(&rig);
     let error = refused(&rig);
@@ -374,7 +373,7 @@ fn a_role_run_starts_the_vm_user_s_process_in_its_gui_session_and_returns_the_ch
 fn role_kill_uid_ends_the_vm_user_s_processes_and_no_one_else_s() {
     let rig = vm_rig("role-kill");
     let uid = vm_uid();
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     {
         let mut state = rig.host.state();
         state.procs.insert(uid, 5);
@@ -492,8 +491,8 @@ fn session_idle_rests_at_the_vm_user_in_the_order_of_session_login() {
 #[test]
 fn whole_machine_leases_still_switch_through_the_vm_user() {
     let rig = vm_rig("lane");
-    rig.helper.user_create("1.1", None).unwrap();
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.helper.session_idle().unwrap();
     assert_eq!(intent(&rig), Some(Intent::Vm));
     // The VM user's session gives way to a lease.
@@ -536,7 +535,7 @@ fn whole_machine_leases_still_switch_through_the_vm_user() {
 #[test]
 fn session_idle_at_the_vm_user_stops_at_the_first_step_that_fails() {
     let rig = vm_rig("idle-vm-fail");
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     rig.helper.session_login("1.1").unwrap();
     let lease = Some(Intent::Lease(LeaseId::new(1, 1)));
     let kc = std::fs::read(rig.dir.join("kcpassword")).unwrap();
@@ -625,8 +624,8 @@ fn session_idle_at_the_vm_user_stops_at_the_first_step_that_fails() {
 #[test]
 fn the_boot_reset_ends_the_leases_and_never_touches_the_vm_user() {
     let rig = vm_rig("reset-vm");
-    rig.helper.user_create("1.1", None).unwrap();
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.helper.session_idle().unwrap();
     let before = std::fs::read(rig.dir.join("kcpassword")).unwrap();
     auto_login_is(&rig, VM);
