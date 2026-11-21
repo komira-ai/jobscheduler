@@ -9,9 +9,11 @@
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
 //!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged. A job the agent ran and ended between two heartbeats
-//!    is walked through the steps it skipped first. The same listing twice commits nothing,
-//!    and a report that would move a job backwards or out of an end is ignored.
+//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`) sends
+//!    the job back to the queue and frees its allocation instead ([`crate::job_held`]), and is
+//!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
+//!    through the steps it skipped first. The same listing twice commits nothing, and a
+//!    report that would move a job backwards or out of an end is ignored.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
 //!    and was told to stop is stopped and gone, so a cancelled job ends and its allocation is
 //!    freed in one commit.
@@ -52,6 +54,7 @@ use js_types::{HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
+use crate::job_held;
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
 use crate::logs::LogGrants;
@@ -329,9 +332,12 @@ fn report(
 }
 
 /// Commits the result the host of `context` lists for `job`, which it holds, and returns the
-/// verdict on it: the one place a listed result is recorded. The job ends as [`end_of`] reads
-/// the result, in one transaction with its allocation's move to releasing, after the steps it
-/// skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
+/// verdict on it: the one place a listed result is recorded. A start the host refused as held
+/// sends the job back to the queue instead, freeing its allocation, and is answered
+/// [`Ack::Accepted`] ([`job_held::held_or_end`]). Otherwise the job ends as [`end_of`] reads
+/// the result (or, for the refusal of a job held hosts sent back too often, with a detail
+/// naming them), in one transaction with its allocation's move to releasing, after the steps
+/// it skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
 /// unanswered.
@@ -347,6 +353,9 @@ fn commit_result(
     if job.state.is_ended() {
         return Ok(Some(Ack::Duplicate));
     }
+    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
+        return Ok(Some(Ack::Accepted));
+    };
     let ran = matches!(
         end,
         JobEnd::Exited { .. }
