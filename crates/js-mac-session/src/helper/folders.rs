@@ -35,22 +35,24 @@ pub(crate) struct NotAnEntry {
 pub(crate) const GETCONF: (&str, &str) = ("/usr/bin/getconf", "DARWIN_USER_DIR");
 
 /// Runs `program` with `args` as `uid` and `gid`, out of any session: an empty
-/// environment, `/` as its working directory, standard input empty, and waits for it. The
-/// ids are std's (`CommandExt::uid`, `gid`): when the caller is root std calls
-/// `setgroups(0)` first, which leaves group 0 on macOS (`crate::groups`), unlike a run
-/// (`crate::spawn`), which sets the user's own groups. The program is `getconf`, which
-/// only prints a path. Its answer is [`answer`] of what it printed.
+/// environment, `/` as its working directory, standard input empty, and waits for it. Its
+/// only group is `gid` (`crate::spawn::primary_group_only`: `setgroups([gid])`, `setgid`,
+/// `setuid`), never the group 0 that std's `setgroups(0)` leaves on macOS. The program is
+/// `getconf`, which only prints a path. Its answer is [`answer`] of what it printed.
 ///
 /// # Errors
 /// The program could not be started or waited for, or [`answer`] refused its output.
 // Only `MacHost` runs the resolver; off macOS the tests do.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn ask(program: &str, args: &[&str], uid: u32, gid: u32) -> io::Result<PathBuf> {
-    let output = Program::new(program, args)
+    // SAFETY: the step runs in the child between fork and exec; it is
+    // `spawn::primary_group_only`, which calls only async-signal-safe functions and
+    // allocates nothing.
+    let mut program =
+        unsafe { Program::with_steps(program, args, crate::spawn::primary_group_only(uid, gid)) };
+    let output = program
         .env_clear()
         .current_dir("/")
-        .uid(uid)
-        .gid(gid)
         .stdin(Stdio::null())
         .output()?;
     answer(output.status.code(), &output.stdout, &output.stderr)

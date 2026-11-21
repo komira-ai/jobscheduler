@@ -352,11 +352,7 @@ fn run_steps(
     limits: Option<Limits>,
 ) -> io::Result<()> {
     if let Some(ids) = ids {
-        if os.is_root() {
-            os.set_groups(&ids.groups)?;
-        }
-        os.set_gid(ids.gid)?;
-        os.set_uid(ids.uid)?;
+        set_ids(os, ids)?;
     }
     os.fchdir(cwd)?;
     os.close_on_exec_from(3);
@@ -365,6 +361,26 @@ fn run_steps(
         os.set_limit(Resource::Processes, libc::rlim_t::from(limits.processes))?;
     }
     Ok(())
+}
+
+/// Sets `ids` in this order: the groups (when root; another process cannot change them),
+/// then the gid, then the uid. Async-signal-safe (with [`Os`]).
+fn set_ids(os: &mut impl ChildOs, ids: &Ids) -> io::Result<()> {
+    if os.is_root() {
+        os.set_groups(&ids.groups)?;
+    }
+    os.set_gid(ids.gid)?;
+    os.set_uid(ids.uid)
+}
+
+/// The step that makes a child of root `uid` and `gid` with `[gid]` its only group, for a
+/// lookup run as a user (`crate::helper::folders`): [`set_ids`], never `setgroups(0)`.
+pub(crate) fn primary_group_only(
+    uid: u32,
+    gid: u32,
+) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
+    let ids = Ids::new(uid, gid, vec![gid]);
+    move || set_ids(&mut Os, &ids)
 }
 
 /// Marks every descriptor from `first` up to the descriptor limit (at most
@@ -864,6 +880,18 @@ mod tests {
         let mut staying = Recorder::default();
         run_steps(&mut staying, None, 9, None).unwrap();
         assert_eq!(staying.asked, [Asked::Chdir(9), Asked::CloseOnExec(3)]);
+    }
+
+    /// The lookup run as a user (`getconf DARWIN_USER_DIR`) holds its primary group alone.
+    /// Catches ids left to std, whose `setgroups(0)` macOS turns into group 0 (`wheel`).
+    #[test]
+    fn a_lookup_as_the_user_holds_its_primary_group_alone() {
+        let mut os = Recorder::default();
+        set_ids(&mut os, &Ids::new(604, 20, vec![20])).unwrap();
+        assert_eq!(
+            os.asked,
+            [Asked::Groups(vec![20]), Asked::Gid(20), Asked::Uid(604)]
+        );
     }
 
     /// A user with no groups at all holds its primary group alone: the child never asks for
