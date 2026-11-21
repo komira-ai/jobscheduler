@@ -12,6 +12,7 @@
 //! - [`ledger`]: lease ids used and the state of each pool slot (free, leased,
 //!   resetting, broken), kept across reboots, so grants are used once and a user is lent
 //!   to one lease at a time.
+//! - [`groups`]: the group list a process started as a lease user holds.
 //! - [`limits`]: the file-size and process limits a `run` asks the helper to set.
 //! - [`helper`]: the verbs' rules, over a [`helper::Host`] that does the OS's part.
 //! - [`autologin`]: the session switch's intent record, `/etc/kcpassword`, the login
@@ -48,6 +49,7 @@ pub mod autologin;
 pub mod client;
 pub mod disclaim;
 pub mod grant;
+pub mod groups;
 pub mod helper;
 pub mod lease;
 pub mod ledger;

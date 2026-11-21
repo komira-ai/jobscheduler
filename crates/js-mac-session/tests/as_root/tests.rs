@@ -901,13 +901,14 @@ fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
     assert_eq!(gui, want, "the GUI spawn");
 }
 
-/// Catches: a GUI run that keeps root's supplementary groups. Under sudo, root holds
-/// its whole group list (initgroups), which this process passes on; the GUI run's
-/// process must hold the user's primary group alone (the kernel's list, `getgroups`,
-/// not `id -G`, which asks the directory).
+/// Catches: a GUI run that keeps root's supplementary groups, or loses the user's own.
+/// Under sudo, root holds its whole group list (initgroups), which this process passes
+/// on; the GUI run's process must hold the user's groups as the directory lists them, and
+/// none of root's that the user is not in (the kernel's list, `getgroups`, not `id -G`,
+/// which asks the directory).
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_gui_run_holds_no_group_but_its_own() {
+fn a_gui_run_holds_the_user_s_groups_and_no_other() {
     let (_serial, mac) = mac();
     let client = path_str(&mac.client);
     let root_groups = succeeds(client, &["groups"]);
@@ -924,12 +925,22 @@ fn a_gui_run_holds_no_group_but_its_own() {
         &["spawn", "gui", &me, &gid, name, &dir, client, "groups"],
     );
     let lines: Vec<&str> = held.lines().collect();
-    // Its own primary group, or none at all, as the kernel keeps an empty list.
-    assert!(
-        matches!(lines.first(), Some(&first) if first == gid || first.is_empty()),
-        "the GUI run kept groups: {held:?}"
-    );
     assert_eq!(lines.last(), Some(&"exit 0"), "{held:?}");
+    let sorted = |text: &str| {
+        let mut ids: Vec<u32> = text
+            .split_whitespace()
+            .map(|g| g.parse().expect("a group id"))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let want = sorted(&succeeds("/usr/bin/id", &["-G", name]));
+    assert_eq!(
+        sorted(lines.first().copied().unwrap_or_default()),
+        want,
+        "the GUI run's groups are not the user's: {held:?}"
+    );
 }
 
 /// Catches: the macOS host's account lookup (the VM user's uid and gid come from it, and

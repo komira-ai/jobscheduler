@@ -781,5 +781,7 @@ fn mac() -> (MutexGuard<'static, ()>, &'static Mac) {
     (serial, MAC.get_or_init(Mac::prepare))
 }
 
+#[path = "as_root/groups.rs"]
+mod groups;
 #[path = "as_root/tests.rs"]
 mod tests;

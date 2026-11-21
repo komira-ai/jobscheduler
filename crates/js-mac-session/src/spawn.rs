@@ -1,17 +1,23 @@
 //! Starting an action's process as the lease user (`run`).
 //!
 //! The daemon passes the argument vector and environment, the three standard streams
-//! and the lease directory as descriptors. The child gets the lease user's uid and the
-//! lease group's gid, no supplementary groups (the standard library drops them when
-//! root sets a uid), its own process group, a clean environment with `HOME`, `USER`
-//! and `LOGNAME` set by the helper, and the lease directory as its working directory
-//! (`fchdir` after the uid change, so the lease user must be able to search it).
+//! and the lease directory as descriptors. The child gets exactly the lease user's ids:
+//! its uid, the lease group's gid and the supplementary groups the directory lists for it
+//! (`crate::groups`), never the helper's, and never `wheel` (group 0) unless the user is
+//! in it. The standard library's `uid` and `gid` are not used: it would call
+//! `setgroups(0, NULL)` when root sets a uid, and on macOS that leaves the list `[0]`.
+//! The parent resolves the list; the child calls `setgroups` with it, then `setgid`, then
+//! `setuid` (an id change after the groups, which need root). The child also gets its own
+//! process group, a clean environment with `HOME`, `USER` and `LOGNAME` set by the
+//! helper, and the lease directory as its working directory (`fchdir` after the uid
+//! change, so the lease user must be able to search it). A process that is not root
+//! cannot change its groups, and keeps its own.
 //!
 //! In the lease user's GUI session (`Session::Gui`, macOS only) the helper starts
 //! `launchctl asuser <uid>` as root instead, which runs the helper's own `as-user` mode
-//! in the user's `gui/<uid>` bootstrap namespace; that mode drops to the lease user's
-//! uid and gid, with no supplementary groups, and executes the argument vector, in the
-//! working directory and environment above (`crate::macos::gui`). A process started so
+//! in the user's `gui/<uid>` bootstrap namespace; that mode sets the same groups (the
+//! parent's list, on its argument vector), gid and uid, and executes the argument
+//! vector, in the working directory and environment above (`crate::macos::gui`). A process started so
 //! reaches the user's Aqua services (the window server, Launch Services), as a process
 //! the user started at the login window does.
 //!
@@ -126,16 +132,22 @@ pub fn spawn(spawn: Spawn) -> io::Result<Child> {
         .argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argument vector"))?;
+    // Resolved here, in the parent: the lookup is not async-signal-safe.
+    let groups = crate::groups::of_user(&spawn.user, spawn.gid)
+        .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
+    let ids = Ids::new(spawn.uid, spawn.gid, groups);
     // `cwd` stays open in the parent until `spawn` returns, so the child's copy is the
-    // lease directory.
-    let steps = child_steps(spawn.cwd.as_raw_fd(), spawn.limits);
+    // lease directory. In the GUI session the child is the root `launchctl`, which does
+    // not change ids: `as-user` does, after `launchctl asuser`.
     let mut command = match spawn.session {
         Session::Background => {
-            let mut command = start(OsStr::new(program), args, steps);
-            command.uid(spawn.uid).gid(spawn.gid);
-            command
+            let steps = child_steps(Some(ids), spawn.cwd.as_raw_fd(), spawn.limits);
+            start(OsStr::new(program), args, steps)
         }
-        Session::Gui => gui(spawn.uid, spawn.gid, program, args, steps)?,
+        Session::Gui => {
+            let steps = child_steps(None, spawn.cwd.as_raw_fd(), spawn.limits);
+            gui(&ids, program, args, steps)?
+        }
     };
     command
         .env_clear()
@@ -174,21 +186,19 @@ fn start(
 /// documentation), after the child's `steps`.
 #[cfg(target_os = "macos")]
 fn gui(
-    uid: u32,
-    gid: u32,
+    ids: &Ids,
     program: &str,
     args: &[String],
     steps: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
 ) -> io::Result<Program> {
-    let (launcher, args) = crate::macos::gui::argv(uid, gid, program, args)?;
+    let (launcher, args) = crate::macos::gui::argv(ids.uid, ids.gid, &ids.groups, program, args)?;
     Ok(start(OsStr::new(launcher), &args, steps))
 }
 
 /// There is no GUI session to start a process in off macOS.
 #[cfg(not(target_os = "macos"))]
 fn gui(
-    _: u32,
-    _: u32,
+    _: &Ids,
     _: &str,
     _: &[String],
     _: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
@@ -208,9 +218,39 @@ enum Resource {
     Processes,
 }
 
+/// The ids a process runs as: the user's uid and primary gid, and exactly its groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ids {
+    /// The uid.
+    uid: u32,
+    /// The primary gid.
+    gid: u32,
+    /// The supplementary groups, never empty: `setgroups` with none would leave group 0
+    /// on macOS (see the module documentation), so a user in none holds `[gid]`.
+    groups: Vec<u32>,
+}
+
+impl Ids {
+    /// `groups` as the list to set, `[gid]` when there are none.
+    fn new(uid: u32, gid: u32, mut groups: Vec<u32>) -> Self {
+        if groups.is_empty() {
+            groups.push(gid);
+        }
+        Self { uid, gid, groups }
+    }
+}
+
 /// What the child asks of the operating system between fork and exec: the seam through
 /// which [`run_steps`]'s order is tested. Every method is async-signal-safe in [`Os`].
 trait ChildOs {
+    /// Whether the process is root, the only one that may set its groups.
+    fn is_root(&mut self) -> bool;
+    /// Sets the supplementary groups to exactly `groups`, which is not empty.
+    fn set_groups(&mut self, groups: &[u32]) -> io::Result<()>;
+    /// Sets the real, effective and saved group id.
+    fn set_gid(&mut self, gid: u32) -> io::Result<()>;
+    /// Sets the real, effective and saved user id.
+    fn set_uid(&mut self, uid: u32) -> io::Result<()>;
     /// Makes the directory `fd` the working directory.
     fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()>;
     /// Marks every descriptor from `first` close-on-exec.
@@ -223,6 +263,41 @@ trait ChildOs {
 struct Os;
 
 impl ChildOs for Os {
+    fn is_root(&mut self) -> bool {
+        // SAFETY: geteuid reads the process's own id.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    fn set_groups(&mut self, groups: &[u32]) -> io::Result<()> {
+        // An empty list is what XNU turns into `[0]`: never ask for it.
+        if groups.is_empty() {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        // SAFETY: `groups` is a readable list of `groups.len()` ids for the call to copy;
+        // the length is at most `MAX_GROUPS` ([`Ids`] come from `crate::groups`), which
+        // the count's type (`int` on macOS, `size_t` elsewhere) holds.
+        match unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    fn set_gid(&mut self, gid: u32) -> io::Result<()> {
+        // SAFETY: setgid takes a plain id.
+        match unsafe { libc::setgid(gid) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    fn set_uid(&mut self, uid: u32) -> io::Result<()> {
+        // SAFETY: setuid takes a plain id.
+        match unsafe { libc::setuid(uid) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()> {
         // SAFETY: fchdir takes any number; one that is not a directory fails.
         match unsafe { libc::fchdir(fd) } {
@@ -251,21 +326,38 @@ impl ChildOs for Os {
 }
 
 /// The steps the child runs before the program executes ([`Program::with_steps`]):
-/// [`run_steps`] on the operating system, with the lease directory and the limits.
+/// [`run_steps`] on the operating system, with the ids (none in the GUI session), the
+/// lease directory and the limits.
 fn child_steps(
+    ids: Option<Ids>,
     cwd: libc::c_int,
     limits: Option<Limits>,
 ) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
-    move || run_steps(&mut Os, cwd, limits)
+    move || run_steps(&mut Os, ids.as_ref(), cwd, limits)
 }
 
-/// The child's last steps before `exec`, after the uid change, in this order: enter the
-/// lease directory, mark every descriptor above the standard streams close-on-exec, then
-/// set the largest file and the most processes. A step that fails ends the rest, so the
-/// program is never executed with a limit missing. The process limit is last: from then
-/// on the lease user may be unable to start another process. Async-signal-safe (with
-/// [`Os`]): it allocates nothing.
-fn run_steps(os: &mut impl ChildOs, cwd: libc::c_int, limits: Option<Limits>) -> io::Result<()> {
+/// The child's steps before `exec`, in this order: with `ids`, set the groups (when root;
+/// another process cannot change them), then the gid, then the uid; enter the lease
+/// directory (after the uid change, so the lease user must be able to search it); mark
+/// every descriptor above the standard streams close-on-exec; then set the largest file
+/// and the most processes. The groups come first, as they need root, which the gid and
+/// uid changes take away. A step that fails ends the rest, so the program is never
+/// executed with an id or a limit missing. The process limit is last: from then on the
+/// lease user may be unable to start another process. Async-signal-safe (with [`Os`]): it
+/// allocates nothing.
+fn run_steps(
+    os: &mut impl ChildOs,
+    ids: Option<&Ids>,
+    cwd: libc::c_int,
+    limits: Option<Limits>,
+) -> io::Result<()> {
+    if let Some(ids) = ids {
+        if os.is_root() {
+            os.set_groups(&ids.groups)?;
+        }
+        os.set_gid(ids.gid)?;
+        os.set_uid(ids.uid)?;
+    }
     os.fchdir(cwd)?;
     os.close_on_exec_from(3);
     if let Some(limits) = limits {
@@ -489,6 +581,9 @@ mod tests {
     /// What the child asked of the operating system, in order.
     #[derive(Debug, PartialEq, Eq)]
     enum Asked {
+        Groups(Vec<u32>),
+        Gid(u32),
+        Uid(u32),
         Chdir(libc::c_int),
         CloseOnExec(libc::c_int),
         Limit(Resource, libc::rlim_t),
@@ -496,10 +591,20 @@ mod tests {
 
     /// A stand-in for the operating system that records what the child asks and fails
     /// the `fail_at`th request (counting from 0) with `EPERM`.
-    #[derive(Default)]
     struct Recorder {
         asked: Vec<Asked>,
         fail_at: Option<usize>,
+        root: bool,
+    }
+
+    impl Default for Recorder {
+        fn default() -> Self {
+            Self {
+                asked: Vec::new(),
+                fail_at: None,
+                root: true,
+            }
+        }
     }
 
     impl Recorder {
@@ -514,6 +619,22 @@ mod tests {
     }
 
     impl ChildOs for Recorder {
+        fn is_root(&mut self) -> bool {
+            self.root
+        }
+
+        fn set_groups(&mut self, groups: &[u32]) -> io::Result<()> {
+            self.ask(Asked::Groups(groups.to_vec()))
+        }
+
+        fn set_gid(&mut self, gid: u32) -> io::Result<()> {
+            self.ask(Asked::Gid(gid))
+        }
+
+        fn set_uid(&mut self, uid: u32) -> io::Result<()> {
+            self.ask(Asked::Uid(uid))
+        }
+
         fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()> {
             self.ask(Asked::Chdir(fd))
         }
@@ -534,7 +655,7 @@ mod tests {
     #[test]
     fn the_child_enters_the_directory_then_sets_the_limits() {
         let mut os = Recorder::default();
-        run_steps(&mut os, 9, Some(Limits::new(4096, 8).unwrap())).unwrap();
+        run_steps(&mut os, None, 9, Some(Limits::new(4096, 8).unwrap())).unwrap();
         assert_eq!(
             os.asked,
             [
@@ -545,7 +666,7 @@ mod tests {
             ]
         );
         let mut unlimited = Recorder::default();
-        run_steps(&mut unlimited, 9, None).unwrap();
+        run_steps(&mut unlimited, None, 9, None).unwrap();
         assert_eq!(
             unlimited.asked,
             [Asked::Chdir(9), Asked::CloseOnExec(3)],
@@ -558,14 +679,15 @@ mod tests {
     #[test]
     fn a_step_that_fails_ends_the_steps_with_its_error() {
         let limits = Some(Limits::new(4096, 8).unwrap());
-        // The requests are numbered from 0: the directory, the descriptors, the file size,
-        // the process count.
-        for (fail_at, ran) in [(0, 1), (2, 3), (3, 4)] {
+        let ids = Ids::new(604, 20, vec![20, 12, 61]);
+        // The requests are numbered from 0: the groups, the gid, the uid, the directory,
+        // the descriptors, the file size, the process count.
+        for (fail_at, ran) in [(0, 1), (1, 2), (2, 3), (3, 4), (5, 6), (6, 7)] {
             let mut os = Recorder {
                 fail_at: Some(fail_at),
                 ..Recorder::default()
             };
-            let error = run_steps(&mut os, 9, limits).unwrap_err();
+            let error = run_steps(&mut os, Some(&ids), 9, limits).unwrap_err();
             assert_eq!(error.raw_os_error(), Some(libc::EPERM), "{fail_at}");
             assert_eq!(os.asked.len(), ran, "{fail_at}: {:?}", os.asked);
         }
@@ -706,13 +828,143 @@ mod tests {
     #[test]
     fn the_child_steps_enter_the_directory_or_fail() {
         let here = std::fs::File::open(".").unwrap();
-        child_steps(here.as_raw_fd(), None)().unwrap();
+        let (uid, gid) = me();
+        let ids = Ids::new(uid, gid, vec![gid]);
+        child_steps(Some(ids.clone()), here.as_raw_fd(), None)().unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(
-            run_steps(&mut Os, file.as_raw_fd(), None)
+            run_steps(&mut Os, Some(&ids), file.as_raw_fd(), None)
                 .unwrap_err()
                 .raw_os_error(),
             Some(libc::ENOTDIR)
         );
+    }
+
+    /// The child sets exactly the groups it is given, then the gid, then the uid, and only
+    /// then enters the lease directory; with no ids (the GUI session's `launchctl`, which
+    /// stays root) it sets none. Catches an id change before the groups (the groups need
+    /// root, which the uid change takes away), a gid or uid set after the directory is
+    /// entered, a list cut or reordered on its way to the kernel, and ids set for a child
+    /// that must stay root.
+    #[test]
+    fn the_child_sets_the_groups_then_the_gid_then_the_uid_before_the_directory() {
+        let ids = Ids::new(604, 20, vec![20, 12, 61, 701, 100]);
+        let mut os = Recorder::default();
+        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        assert_eq!(
+            os.asked,
+            [
+                Asked::Groups(vec![20, 12, 61, 701, 100]),
+                Asked::Gid(20),
+                Asked::Uid(604),
+                Asked::Chdir(9),
+                Asked::CloseOnExec(3),
+            ]
+        );
+        let mut staying = Recorder::default();
+        run_steps(&mut staying, None, 9, None).unwrap();
+        assert_eq!(staying.asked, [Asked::Chdir(9), Asked::CloseOnExec(3)]);
+    }
+
+    /// A user with no groups at all holds its primary group alone: the child never asks for
+    /// an empty list, which macOS turns into group 0 (`wheel`). Catches an empty list
+    /// passed on to `setgroups`.
+    #[test]
+    fn a_user_in_no_group_holds_its_primary_group_alone() {
+        let ids = Ids::new(604, 20, Vec::new());
+        assert_eq!(ids.groups, [20]);
+        let mut os = Recorder::default();
+        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        assert_eq!(os.asked[0], Asked::Groups(vec![20]));
+        // The operating system's own step refuses an empty list outright.
+        assert_eq!(
+            Os.set_groups(&[]).unwrap_err().raw_os_error(),
+            Some(libc::EINVAL)
+        );
+    }
+
+    /// A child that is not root leaves its groups alone (it cannot change them) and still
+    /// sets its ids. Catches a `setgroups` that an unprivileged child asks for and fails.
+    #[test]
+    fn a_child_that_is_not_root_does_not_ask_to_change_its_groups() {
+        let ids = Ids::new(604, 20, vec![20, 12]);
+        let mut os = Recorder {
+            root: false,
+            ..Recorder::default()
+        };
+        run_steps(&mut os, Some(&ids), 9, None).unwrap();
+        assert_eq!(
+            os.asked[..2],
+            [Asked::Gid(20), Asked::Uid(604)],
+            "{:?}",
+            os.asked
+        );
+    }
+
+    /// A user whose group list cannot be resolved is refused before anything starts, and
+    /// nothing is started with another list in its place (a list too long for the kernel is
+    /// refused by `crate::groups` the same way, and by name). Catches a start that goes on
+    /// with no list, or an emptied one, when the lookup fails.
+    #[test]
+    fn a_user_whose_groups_cannot_be_resolved_is_refused_before_anything_starts() {
+        let (mut spawn, _out) = base(&["/usr/bin/true"], &std::env::temp_dir());
+        spawn.user = "a\0b".to_owned();
+        let error = super::spawn(spawn).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("NUL"), "{error}");
+    }
+
+    /// The operating system's own id steps, as a user: setting one's own gid and uid
+    /// succeeds, and changing the groups needs root (`EPERM`), which is why the child skips
+    /// it when it is not root. Catches a step that sets another id than it is given.
+    #[test]
+    fn the_operating_systems_ids_are_the_callers_own_when_not_root() {
+        assert!(
+            !rustix::process::geteuid().is_root(),
+            "run this test as a user"
+        );
+        let (uid, gid) = me();
+        assert!(!Os.is_root());
+        Os.set_gid(gid).unwrap();
+        Os.set_uid(uid).unwrap();
+        // Another group needs root.
+        assert_eq!(
+            Os.set_groups(&[gid]).unwrap_err().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
+    /// A process started through the real path as the caller's own user holds the
+    /// caller's groups and no other: `id -G` of the child is the caller's list. Catches a
+    /// child started with an emptied or invented list, or with the primary group alone.
+    #[test]
+    fn the_process_holds_the_callers_own_groups() {
+        let dir = std::env::temp_dir();
+        let (mut spawn, mut out) = base(&["/usr/bin/id", "-G"], &dir);
+        spawn.user = current_user_name();
+        assert!(super::spawn(spawn).unwrap().wait().unwrap().success());
+        let mut text = String::new();
+        out.read_to_string(&mut text).unwrap();
+        let mut got: Vec<u32> = text
+            .split_whitespace()
+            .map(|g| g.parse().unwrap())
+            .collect();
+        got.sort_unstable();
+        got.dedup();
+        let mut mine = rustix::process::getgroups().unwrap();
+        mine.push(rustix::process::getegid());
+        let mut mine: Vec<u32> = mine.into_iter().map(|g| g.as_raw()).collect();
+        mine.sort_unstable();
+        mine.dedup();
+        assert_eq!(got, mine);
+    }
+
+    /// The name of the user running the tests.
+    fn current_user_name() -> String {
+        let out = std::process::Command::new("/usr/bin/id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
 }

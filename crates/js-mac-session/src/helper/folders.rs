@@ -35,9 +35,11 @@ pub(crate) struct NotAnEntry {
 pub(crate) const GETCONF: (&str, &str) = ("/usr/bin/getconf", "DARWIN_USER_DIR");
 
 /// Runs `program` with `args` as `uid` and `gid`, out of any session: an empty
-/// environment, `/` as its working directory, standard input empty (std drops the
-/// caller's supplementary groups before the `setuid` when the caller is root), and waits
-/// for it. Its answer is [`answer`] of what it printed.
+/// environment, `/` as its working directory, standard input empty, and waits for it. The
+/// ids are std's (`CommandExt::uid`, `gid`): when the caller is root std calls
+/// `setgroups(0)` first, which leaves group 0 on macOS (`crate::groups`), unlike a run
+/// (`crate::spawn`), which sets the user's own groups. The program is `getconf`, which
+/// only prints a path. Its answer is [`answer`] of what it printed.
 ///
 /// # Errors
 /// The program could not be started or waited for, or [`answer`] refused its output.
