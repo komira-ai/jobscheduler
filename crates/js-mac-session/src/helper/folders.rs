@@ -5,7 +5,7 @@
 //! `0` (`DARWIN_USER_DIR`), `C` (`DARWIN_USER_CACHE_DIR`) and `T`
 //! (`DARWIN_USER_TEMP_DIR`). Daemons make folders there for the user (a
 //! `com.apple.ScreenTimeAgent` folder under `C`, say) that outlive the account, so
-//! `user-delete` removes the entry whole. The entry is the one the uid's own
+//! `user-delete` removes the entry whole (emptied and kept where the system placed it). The entry is the one the uid's own
 //! `DARWIN_USER_DIR` names, never one guessed from the uid: only an answer of exactly
 //! that shape is taken, and its entry is spelled under the configured folders, so no
 //! answer can name a path outside them.

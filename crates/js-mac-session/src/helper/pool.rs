@@ -28,7 +28,8 @@
 //!   with every step clean returns the slot to free.
 //! - A reset that is not clean replaces the user ([`Helper::replace`]): the uid's
 //!   processes killed again, the user deleted as `user-delete` deleted a lease's user
-//!   (its `DARWIN_USER_DIR` entry removed whole, its home emptied and kept), then a new
+//!   (its `DARWIN_USER_DIR` entry removed whole, or emptied and kept where the system placed
+//!   it, its home emptied and kept), then a new
 //!   user made in the slot over that home, with the same name and uid, and the directory asked that it is not in `admin`
 //!   (a membership the deletion left would make it one). The slot is free only once the
 //!   new user exists and is not.

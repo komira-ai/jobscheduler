@@ -488,7 +488,8 @@ impl Helper {
     /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
     /// asked first, while the record is there ([`super::Host::user_dir`]); an answer that
     /// is not an entry of [`super::Settings::user_folders`] is refused, never guessed at,
-    /// and the entry is removed whole with the rest of the sweep. When the record is gone
+    /// and the entry is removed whole with the rest of the sweep (emptied and kept where the system
+    /// placed it). When the record is gone
     /// already (a delete repeated after it went, or a record removed by someone else),
     /// there is no `DARWIN_USER_DIR` of the uid's own to ask for: every entry of the
     /// per-user folders that the uid owns is removed instead.

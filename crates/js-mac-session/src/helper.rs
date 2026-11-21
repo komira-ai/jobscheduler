@@ -344,7 +344,7 @@ pub struct Settings {
     pub sweep: SweepPlan,
     /// Where macOS keeps each user's `DARWIN_USER_DIR` entry (`/private/var/folders`): the
     /// uid's own entry here, named by its `DARWIN_USER_DIR`, is removed whole by
-    /// `user-delete`.
+    /// `user-delete`, or emptied and kept where the system placed it (`sunlnk`).
     pub user_folders: PathBuf,
     /// The gate's grant keys; without them no administrator is ever made.
     pub grant_keys: Option<GrantKeys>,

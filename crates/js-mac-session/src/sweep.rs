@@ -69,7 +69,7 @@ impl SweepPlan {
     /// macOS's other places besides the home folder (which the helper adds from where
     /// it made it) and the uid's own entry under `/private/var/folders` (which the
     /// helper names from the uid's `DARWIN_USER_DIR` and removes whole with
-    /// [`remove_owned`]): launchd's per-uid overrides and login items, the shared user
+    /// [`remove_owned`], or empties and keeps where the system placed it): launchd's per-uid overrides and login items, the shared user
     /// folder and the temporary folders.
     #[must_use]
     pub fn macos() -> Self {
@@ -867,12 +867,13 @@ pub(crate) fn placed(flags: u32, rootless: bool) -> bool {
 }
 
 /// Whether the directory `name` of `dir`, examined as `stat`, was placed by the system
-/// (see [`placed`]) below a folder it keeps: neither its flags nor its ACL are the pool
-/// user's to change, and it is never removed; what is in it is the lease's, and goes. Only
-/// for a process that is not root, like the pool user's own sweeps.
+/// (see [`placed`]): its system flags are no process's to change, root's included (with SIP
+/// on, macOS refuses root the removal of a directory that carries `sunlnk`, as it does the
+/// per-user folders' `<xx>/<hash>` entries and their `0`, `C`, `T` and `X`), and it is never
+/// removed; what is in it is the lease's, and goes. The same for root (the helper) as for the
+/// pool user's own sweeps.
 fn is_placed(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> bool {
-    let not_root = !rustix::process::geteuid().is_root();
-    not_root & is_dir(stat) & system_placed(dir, name, stat)
+    is_dir(stat) & system_placed(dir, name, stat)
 }
 
 #[cfg(target_os = "macos")]
