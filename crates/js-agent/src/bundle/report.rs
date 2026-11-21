@@ -22,8 +22,8 @@ pub struct Reported {
 }
 
 /// The facts a host with `settings` reports: the manifest digests the store holds, its root,
-/// the read model and the builds of the Xcodes the host's probe found (`xcodes`, from
-/// [`crate::xcode::probe`]: at most [`MAX_CAPS_XCODES`] of them, ascending and distinct, in
+/// the read model and the builds of the Xcodes the host's survey found ready (`xcodes`, from
+/// [`crate::xcode::survey`]: at most [`MAX_CAPS_XCODES`] of them, ascending and distinct, in
 /// [`Caps::xcode`]; the host's own Xcode catalog, [`BundleHost::xcodes`], is for the bundle
 /// Xcode need and not reported). A store that cannot be listed reports no bundle and warns,
 /// so a job is never placed on a guess.

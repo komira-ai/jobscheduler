@@ -698,3 +698,99 @@ fn the_dev_fd_grant_lets_a_shell_write_through_a_descriptor_path() {
     );
     assert_eq!(String::from_utf8_lossy(&granted.stdout), "x\n");
 }
+
+/// `posix <verb> <name>`: `make` creates a POSIX shared memory object and keeps it,
+/// `open` opens one that exists, `unlink` removes one, and `sem` creates a named
+/// semaphore and removes it again. Prints `ok`, or the `errno` of the call that failed.
+const POSIX_C: &str = r#"#include <errno.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+static int failed(void) { printf("errno %d\n", errno); return 1; }
+int main(int argc, char **argv) {
+    if (argc != 3) return 2;
+    const char *verb = argv[1], *name = argv[2];
+    if (strcmp(verb, "make") == 0) {
+        int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd < 0) return failed();
+        close(fd);
+    } else if (strcmp(verb, "open") == 0) {
+        int fd = shm_open(name, O_RDWR, 0);
+        if (fd < 0) return failed();
+        close(fd);
+    } else if (strcmp(verb, "unlink") == 0) {
+        if (shm_unlink(name) != 0) return failed();
+    } else if (strcmp(verb, "sem") == 0) {
+        sem_t *sem = sem_open(name, O_CREAT | O_EXCL, 0600, 1);
+        if (sem == SEM_FAILED) return failed();
+        sem_close(sem);
+        if (sem_unlink(name) != 0) return failed();
+    } else {
+        return 2;
+    }
+    puts("ok");
+    return 0;
+}
+"#;
+
+/// The POSIX probe, built without the sandbox in `scene`'s run directory.
+fn posix_probe(scene: &Scene) -> String {
+    let source = scene.run.join("posix.c");
+    let exe = scene.run.join("posix");
+    std::fs::write(&source, POSIX_C).expect("source");
+    let built = control("/usr/bin/clang", &[os(&source), "-o".into(), os(&exe)]);
+    assert!(built.status.success(), "clang: {}", describe(&built));
+    exe.to_str().expect("utf8").to_owned()
+}
+
+/// What the probe printed.
+fn said(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Catches: a run that can create a POSIX shared memory object, which outlives it and
+/// which the next run of the same reused uid could open by its name (no interface lists
+/// the names, so the reset cannot remove it). The control creates one without the
+/// sandbox, so the refusal is the profile's; a run can still open an object that exists
+/// and create a named semaphore, which the profile leaves allowed.
+#[test]
+fn a_run_cannot_create_posix_shared_memory_and_can_open_it_and_make_a_semaphore() {
+    let scene = Scene::new("posix", "run");
+    let probe = posix_probe(&scene);
+    let pid = std::process::id();
+    let kept = format!("/jsmp-{pid}-kept");
+    let refused = format!("/jsmp-{pid}-run");
+    let semaphore = format!("/jsmp-{pid}-sem");
+
+    let made = control(&probe, &args(&["make", kept.as_str()]));
+    assert_eq!(said(&made), "ok", "control make: {}", describe(&made));
+    let opened = scene.sandboxed(Net::Off, &probe, &args(&["open", kept.as_str()]));
+    let unlinked = control(&probe, &args(&["unlink", kept.as_str()]));
+    assert_eq!(said(&opened), "ok", "sandboxed open: {}", describe(&opened));
+    assert_eq!(
+        said(&unlinked),
+        "ok",
+        "control unlink: {}",
+        describe(&unlinked)
+    );
+
+    let run = scene.sandboxed(Net::Off, &probe, &args(&["make", refused.as_str()]));
+    if said(&run) == "ok" {
+        // Made after all: unlinked before the assertion fails, so the Mac keeps nothing.
+        control(&probe, &args(&["unlink", refused.as_str()]));
+    }
+    assert_eq!(said(&run), "errno 1", "sandboxed make: {}", describe(&run));
+    let left = control(&probe, &args(&["open", refused.as_str()]));
+    assert_eq!(
+        said(&left),
+        "errno 2",
+        "nothing was left: {}",
+        describe(&left)
+    );
+
+    let sem = scene.sandboxed(Net::Off, &probe, &args(&["sem", semaphore.as_str()]));
+    assert_eq!(said(&sem), "ok", "sandboxed semaphore: {}", describe(&sem));
+}

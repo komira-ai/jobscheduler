@@ -15,6 +15,14 @@ no operator either. The taints that stay until the host is reimaged or an operat
 unreadable marker. This is how an operator clears one, once the cause is understood and the host is
 known to be clean.
 
+On a Mac, the native agent's post-job check is the helper's leak scan (docs/design/mac-lease-teardown.md,
+"After the run: the leak scan"). A run that left a login item or a Background Task Management entry
+taints the host as `scan-residue`, and a scan that could not read an item or could not be asked taints
+it as unchecked (`scan-unreadable`, `scan-failed`). The unchecked ones clear themselves once two
+re-checks of the idle host pass; `scan-residue` does not. The taint's line names
+the scan's items, and the helper's log line `leak scan` lists every item. Remove what the run left
+before you clear the taint.
+
 A host job's taint (`host-job`) is not cleared this way, and the verb refuses it (`host_job`):
 the machine is reimaged (docs/runbooks/host-jobs.md).
 

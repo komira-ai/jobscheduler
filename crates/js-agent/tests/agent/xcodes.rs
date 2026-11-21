@@ -12,6 +12,7 @@ use js_agent_wire::limits::MAX_CAPABILITY_VALUE_LEN;
 use serde_json::json;
 
 use crate::support::{FakeFiles, Scratch, code, linux_host, mac_host, run_scripted, welcome};
+use crate::xcode_survey::{applications, developer, owner, version_text};
 
 /// The `Contents/version.plist` of an Xcode of `build`, as Xcode writes it.
 pub fn version_plist(build: &str) -> String {
@@ -243,33 +244,48 @@ fn the_hello_value_stops_before_the_capability_limit_and_warns() {
     );
 }
 
-/// A Mac says hello with the builds of its two Xcodes in the capability `xcode`, ascending
-/// and joined with a comma, and logs the warning of an app it could not read, still saying
-/// hello. It catches a hello without the Xcodes and an unreadable app that stops the agent.
+/// A Mac says hello with the build of its Xcode that answers the survey in the capability
+/// `xcode`, and logs the warning of an app it could not read, still saying hello. It
+/// catches a hello without the Xcode and an unreadable app that stops the agent.
 #[test]
 fn a_mac_says_hello_with_the_builds_of_its_xcodes() {
+    let scratch = Scratch::new("xcode-hello");
+    let apps = [
+        ("Xcode-16.2.app", "16C5032a"),
+        ("Xcode-broken.app", "16C,5"),
+    ];
+    let (dir, files) = applications(&scratch, &apps);
+    let dev = developer(&dir, "Xcode-16.2.app");
     let mut host = mac_host();
-    host.files = with_installed(
-        host.files.clone(),
-        &[
-            ("Xcode-16.4.app", "16F6"),
-            ("Xcode-16.2.app", "16C5032a"),
-            ("Xcode-broken.app", "16C,5"),
-        ],
-    );
+    host.applications = dir.clone();
+    host.xcode_owner = owner();
+    host.files = files;
+    host.commands = host
+        .commands
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -version"),
+            Ok(&version_text("16.2", "16C5032a")),
+        )
+        .with(&format!("{dev}/usr/bin/xcodebuild -license check"), Ok(""))
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -checkFirstLaunchStatus"),
+            Ok(""),
+        )
+        .with(
+            "/usr/bin/xcrun --find clang",
+            Ok(&format!("{dev}/usr/bin/clang\n")),
+        );
     let (ran, sent, _) = run_scripted(&[], &host, vec![welcome(1)], 1);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(
         sent.borrow()[0].1["capabilities"],
-        json!({ "os": "macos", "arch": "arm64", "os_version": "26", "xcode": "16C5032a,16F6" })
+        json!({ "os": "macos", "arch": "arm64", "os_version": "26", "xcode": "16C5032a" })
     );
-    assert!(
-        ran.err.contains(
-            "/Applications/Xcode-broken.app: ProductBuildVersion \"16C,5\" is not a build id"
-        ),
-        "{}",
-        ran.err
+    let broken = format!(
+        "{}/Xcode-broken.app: ProductBuildVersion \"16C,5\" is not a build id",
+        dir.display()
     );
+    assert!(ran.err.contains(&broken), "{}", ran.err);
 }
 
 /// A Mac with no Xcode says hello without an `xcode` key. It catches an empty value, which
@@ -281,15 +297,45 @@ fn a_mac_without_xcode_has_no_xcode_capability() {
     assert_eq!(sent.borrow()[0].1["capabilities"].get("xcode"), None);
 }
 
-/// A Linux host is never asked for its `/Applications`: with Xcode apps in that directory its
-/// hello still has no `xcode` key. It catches a probe on every host.
+/// A Linux host is never asked for its Xcodes: with an Xcode in its applications directory
+/// that would answer the survey, its hello still has no `xcode` key and no program of the
+/// survey runs. It catches a probe or a survey on every host.
 #[test]
 fn a_linux_host_is_not_asked_for_its_applications() {
+    let scratch = Scratch::new("xcode-linux");
+    let (dir, _) = applications(&scratch, &[("Xcode-16.2.app", "16C5032a")]);
+    let dev = developer(&dir, "Xcode-16.2.app");
+    let plist = dir.join("Xcode-16.2.app/Contents/version.plist");
     let mut host = linux_host();
-    host.files = with_installed(host.files.clone(), &[("Xcode-16.2.app", "16C5032a")]);
+    host.files = with_installed(host.files.clone(), &[("Xcode-16.2.app", "16C5032a")])
+        .with_dir(&dir.to_string_lossy(), &["Xcode-16.2.app"])
+        .with(&plist.to_string_lossy(), &version_plist("16C5032a"));
+    host.applications = dir;
+    host.xcode_owner = owner();
+    host.commands = host
+        .commands
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -version"),
+            Ok(&version_text("16.2", "16C5032a")),
+        )
+        .with(&format!("{dev}/usr/bin/xcodebuild -license check"), Ok(""))
+        .with(
+            &format!("{dev}/usr/bin/xcodebuild -checkFirstLaunchStatus"),
+            Ok(""),
+        )
+        .with(
+            "/usr/bin/xcrun --find clang",
+            Ok(&format!("{dev}/usr/bin/clang\n")),
+        );
     let (ran, sent, _) = run_scripted(&[], &host, vec![welcome(1)], 1);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(sent.borrow()[0].1["capabilities"].get("xcode"), None);
+    let lines = host.commands.ran.borrow();
+    let asked: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("xcodebuild") || line.contains("xcrun"))
+        .collect();
+    assert_eq!(asked, Vec::<&String>::new());
 }
 
 /// Every file and directory under `dir` with its bytes (a file) and modification time.

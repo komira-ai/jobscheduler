@@ -15,7 +15,7 @@
 //! user running the tests (`real_runs`), which is how the `sandbox-exec` command line the
 //! runtime builds is applied without root.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
@@ -106,6 +106,12 @@ struct State {
     /// A journal a `run` turns into a directory before it starts, so nothing can be added
     /// to it any more.
     break_at_run: Option<PathBuf>,
+    /// What the next `scan`s answer, in order; a clean scan once they are used up.
+    scan_answers: VecDeque<Reply>,
+    /// How many `scan`s were asked. They are not in `seen`: the post-job checks ask one
+    /// after every job and one when the host is idle, and the tests of the runs' verbs
+    /// list what was done to a lease.
+    scans: usize,
     /// The pool slot each lease was lent, kept after the lease ends.
     slots: BTreeMap<String, u32>,
     /// The slot the next `user-create` lends.
@@ -284,6 +290,16 @@ impl FakeHelper {
             .iter()
             .find(|one| one.verb == "run" && one.lease == lease);
         found.expect("no such run").clone()
+    }
+
+    /// Answers the next `scan`s with `answers`, in order.
+    pub fn scan_answers(&self, answers: Vec<Reply>) {
+        self.shared.lock().scan_answers.extend(answers);
+    }
+
+    /// How many `scan`s were asked.
+    pub fn scans(&self) -> usize {
+        self.shared.lock().scans
     }
 
     /// From now on refuses `verb` with `reason`.
@@ -491,6 +507,20 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 reply(stream, &Reply::Deleted { existed });
             }
         },
+        Request::Scan => {
+            let answer = {
+                let mut state = shared.lock();
+                state.scans += 1;
+                state.scan_answers.pop_front()
+            };
+            let clean = Reply::Scanned {
+                clean: true,
+                added: Vec::new(),
+                removed: Vec::new(),
+                errors: Vec::new(),
+            };
+            reply(stream, &answer.unwrap_or(clean));
+        }
         other => panic!("the fake helper does not answer {other:?}"),
     }
 }
@@ -737,5 +767,6 @@ mod old {
             #[serde(default)]
             held: Vec<String>,
         },
+        Scan,
     }
 }

@@ -14,9 +14,10 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// a sandboxed process regardless, and Launch Services would start an application outside
 /// the sandbox.
 ///
-/// IPC is not denied: on a hosted runner `(deny ipc-sysv-shm)` did not stop `shmget`, so
-/// no rule is claimed. A System V or POSIX object of a user outlives its processes, and the
-/// helper reuses uids; the privileged tests measure what a reused uid finds.
+/// System V IPC is not denied: on a hosted runner `(deny ipc-sysv-shm)` did not stop
+/// `shmget`, so no rule is claimed, and the helper's reset removes a uid's System V
+/// objects. POSIX shared memory is denied in the floor (see [`FLOOR`]); POSIX named
+/// semaphores are not.
 const HEAD: [&str; 6] = [
     "(version 1)",
     "(allow default)",
@@ -42,12 +43,24 @@ const OFF_RULES: [&str; 2] = [
 ];
 
 /// The floor, emitted last and not removable: nothing in a policy reaches this constant.
-/// Denied services: registering a mach name, mounting, creating a launchd job, opening an
-/// application through Launch Services, the OS-owned protected stores, and what reaches
-/// an attached device (CoreDevice, `remoted`, the `usbmuxd` socket).
-const FLOOR: [&str; 8] = [
+/// Denied services: registering a mach name, mounting, creating a POSIX shared memory
+/// object, creating a launchd job, opening an application through Launch Services, the
+/// OS-owned protected stores, and what reaches an attached device (CoreDevice, `remoted`,
+/// the `usbmuxd` socket).
+///
+/// A POSIX shared memory object outlives every process of its user until it is unlinked
+/// or the Mac restarts, and no interface of macOS lists the names, so the helper's reset
+/// cannot find one to remove; the helper reuses uids, so the next run of the same uid
+/// could open what a run left. A run therefore cannot create one: `shm_open` with
+/// `O_CREAT` fails with `EPERM`. Opening an object that exists (the system's own, which
+/// the notification centre's clients read) is still allowed. POSIX named semaphores are
+/// not denied: Python's `multiprocessing` locks are made with `sem_open`, and a semaphore
+/// holds a count, not data. One a run leaves is found by no one either, so the next run
+/// of the uid can open it by its name until the Mac restarts.
+const FLOOR: [&str; 9] = [
     "(deny mach-register)",
     "(deny file-mount)",
+    "(deny ipc-posix-shm-write-create)",
     "(deny job-creation)",
     "(deny lsopen)",
     "(deny file-read* file-write* (subpath \"/private/var/protected/sfanalytics\") (subpath \"/private/var/protected/trustd/private\"))",

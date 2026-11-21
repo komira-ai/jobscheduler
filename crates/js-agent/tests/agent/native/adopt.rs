@@ -242,7 +242,7 @@ fn a_restarted_lifecycle_adopts_a_native_job_and_reports_its_result() {
     let (mut life, events) = Lifecycle::adopt(
         reopened(&dir),
         Box::new(runtime),
-        Box::new(NativeChecks),
+        Box::new(NativeChecks::over(fake.client())),
         Box::new(clock.clone()),
     )
     .unwrap();
