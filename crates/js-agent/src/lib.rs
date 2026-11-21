@@ -354,6 +354,7 @@ mod run;
 mod session;
 mod signals;
 mod system;
+pub mod systemd;
 #[cfg(test)]
 mod test_tracing;
 mod transport;
