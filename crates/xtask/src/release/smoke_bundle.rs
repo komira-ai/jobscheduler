@@ -251,7 +251,7 @@ pub fn run(verb: &Verb) -> Result<String, Error> {
     match verb {
         Verb::Pack(args) => pack(&recipe, &args.tree, &args.out),
         Verb::Push(args) => push(&recipe, args),
-        Verb::Check(args) => check(&recipe, args),
+        Verb::Check(args) => Ok(checked_line(&recipe, check(&recipe, args)?)),
     }
 }
 
@@ -308,8 +308,9 @@ pub fn printed_line(
     Ok(String::from_utf8_lossy(printed).trim().to_owned())
 }
 
-/// Pulls the bundle from the recipe's repository and compares it with the tree.
-fn check(recipe: &Recipe, args: &CheckArgs) -> Result<String, Error> {
+/// Pulls the bundle from the recipe's repository and compares it with the tree: the number of
+/// entries compared.
+fn check(recipe: &Recipe, args: &CheckArgs) -> Result<usize, Error> {
     let client = Client::new(Policy::new(vec![Allow::parse(&recipe.repository)?]));
     let repository = client.repository(Location::parse(&recipe.repository)?)?;
     let digest = Digest::parse(&recipe.digest)?;
@@ -317,8 +318,7 @@ fn check(recipe: &Recipe, args: &CheckArgs) -> Result<String, Error> {
         .enable_all()
         .build()
         .map_err(io_at(&args.scratch))?;
-    let compared = runtime.block_on(compare(&repository, &digest, &args.tree, &args.scratch));
-    compared.map(|entries| checked_line(recipe, entries))
+    runtime.block_on(compare(&repository, &digest, &args.tree, &args.scratch))
 }
 
 /// What `check` prints when the pulled bundle is the tree's `entries` entries.

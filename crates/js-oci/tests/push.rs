@@ -11,11 +11,17 @@ use js_oci::{
 use js_testkit::dir::TestDir;
 use support::{Artifact, Fixture, Network, REGISTRY, REPO, write_layout};
 
-/// The user and password of the tests, and the header they make (base64 of
-/// `pusher:s3cret-push-1`, worked out by hand).
+/// The user of the tests.
 const USER: &str = "pusher";
-const PASSWORD: &str = "s3cret-push-1";
-const BASIC: &str = "Basic cHVzaGVyOnMzY3JldC1wdXNoLTE=";
+
+/// A password made for this run, and the `Authorization` it gives: `Basic` and the base64 of
+/// `user:password` (RFC 7617).
+fn password_and_basic() -> (String, String) {
+    use base64::Engine as _;
+    let password = format!("run-{}", std::process::id());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{USER}:{password}"));
+    (password, format!("Basic {encoded}"))
+}
 
 /// What a publish's token request asks for: the repository's pull and push scope, whatever
 /// the challenge names.
@@ -194,8 +200,9 @@ async fn the_push_token_is_asked_for_with_the_entrys_credentials() {
     let artifact = bundle(1);
     let (_dir, layout) = layout("js-oci-push-credentials", &artifact).await;
     let fx = registry();
-    fx.behave(|b| b.token_basic = Some(BASIC.to_owned()));
-    let credentials = Credentials::new(USER, PASSWORD).expect("credentials");
+    let (password, basic) = password_and_basic();
+    fx.behave(|b| b.token_basic = Some(basic.clone()));
+    let credentials = Credentials::new(USER, &password).expect("credentials");
     let entry = Allow::parse(&format!("{}/team", fx.at(REGISTRY)))
         .expect("entry")
         .private()
@@ -212,7 +219,7 @@ async fn the_push_token_is_asked_for_with_the_entrys_credentials() {
     let host = fx.at(REGISTRY);
     assert_eq!(
         requests[1],
-        format!("{host} GET /token?{PUSH_QUERY} [{BASIC}]")
+        format!("{host} GET /token?{PUSH_QUERY} [{basic}]")
     );
     let writes: Vec<&String> = requests
         .iter()

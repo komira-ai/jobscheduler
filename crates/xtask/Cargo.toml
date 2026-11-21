@@ -72,8 +72,7 @@ ureq.workspace = true
 # The registry in this process the smoke bundle is published to and pulled from
 # (tests/smoke_bundle.rs).
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
-# The named pipe the stand-in test copies from (tests/stand_in_busy.rs), and the one in a tree
-# the smoke bundle's check refuses (tests/smoke_bundle.rs).
+# The named pipe the stand-in test copies from (tests/stand_in_busy.rs).
 rustix = { workspace = true, features = ["fs"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # The server addresses the client refuses (tests/js_agent_package.rs). js-agent, which the tests

@@ -279,7 +279,7 @@ async fn a_pulled_bundle_that_is_not_the_tree_names_the_first_difference() {
 }
 
 /// Proves the check holds the bundle to the recipe's shape and the tree to the format's
-/// kinds: a bundle of two layers is refused, a tree that holds a fifo is refused, and a
+/// kinds: a bundle of two layers is refused, a tree that holds a socket is refused, and a
 /// scratch directory that exists already is refused (it is never written into). Catches a
 /// check that compares one layer of several, or extracts over files it did not make.
 #[tokio::test(flavor = "multi_thread")]
@@ -333,26 +333,22 @@ async fn bundles_trees_and_scratch_directories_the_check_does_not_take_are_refus
         "the bundle has 2 layers and its config 2; the smoke bundle has one"
     );
 
-    let fifo = dir.join("fifo-tree");
-    copy_tree(&fifo);
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        fifo.join("bin/pipe"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from_raw_mode(0o644),
-        0,
-    )
-    .expect("fifo");
+    // A socket is a special file on every Unix the test builds for. Its path must be short
+    // (`SUN_LEN`), so this tree is under the system's temporary directory.
+    let short = TestDir::under(std::env::temp_dir(), "smoke-special");
+    let special = short.join("tree");
+    copy_tree(&special);
+    let _socket = std::os::unix::net::UnixListener::bind(special.join("bin/sock")).expect("socket");
     let layout = packed(&dir).await;
     let digest = Digest::parse(&recipe().digest).expect("digest");
-    let refused = compare(&layout, &digest, &fifo, &dir.join("x2"))
+    let refused = compare(&layout, &digest, &special, &dir.join("x2"))
         .await
-        .expect_err("fifo");
+        .expect_err("special");
     assert_eq!(
         refused.to_string(),
         format!(
             "{}: neither a directory, a regular file nor a symbolic link",
-            fifo.join("bin/pipe").display()
+            special.join("bin/sock").display()
         )
     );
 
