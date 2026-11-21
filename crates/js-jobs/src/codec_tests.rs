@@ -72,6 +72,11 @@ pub(super) fn full_job() -> JobRecord {
             ),
             (HostId::new("host-c").expect("a host"), Exclusion::ForLife),
         ]),
+        held_refusals: vec![
+            HostId::new("host-d").expect("a host"),
+            HostId::new("host-a").expect("a host"),
+            HostId::new("host-d").expect("a host"),
+        ],
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -110,6 +115,7 @@ pub(super) fn bare_job() -> JobRecord {
         client: None,
         failed_prepares: 0,
         prepare_bars: BTreeMap::new(),
+        held_refusals: Vec::new(),
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -468,6 +474,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_LOGS,
         job_whole_tag::FAILED_PREPARES,
         job_whole_tag::PREPARE_BARS,
+        job_whole_tag::HELD_REFUSALS,
     ] {
         row = without(&row, tag);
     }
@@ -476,6 +483,11 @@ fn a_field_the_row_lacks_reads_as_its_default() {
     assert_eq!(job.client, None, "a row before clients were named has none");
     assert_eq!(job.failed_prepares, 0, "a row before prepares were counted");
     assert_eq!(job.prepare_bars, BTreeMap::new(), "and before they barred");
+    assert_eq!(
+        job.held_refusals,
+        Vec::new(),
+        "and before held refusals were kept"
+    );
     assert_eq!(
         job.result,
         Some(JobResult {
