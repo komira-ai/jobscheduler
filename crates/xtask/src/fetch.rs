@@ -1,5 +1,5 @@
-//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
-//! [--cache <path>]`: installs a pinned tool for a CI job.
+//! `fetch --url <https url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
+//! [--tree]] [--cache <path>]`: installs a pinned tool for a CI job.
 //!
 //! The order is the point:
 //!
@@ -12,13 +12,18 @@
 //!    refused here, before any byte is unpacked or written: nothing is created on disk.
 //!    A cached file that does not match is refused too, not replaced by a download.
 //! 3. They are unpacked in memory: as is, or one regular file (`--member`, its path
-//!    inside the archive) out of a gzip tar (`--extract tar.gz`).
+//!    inside the archive) out of a gzip or xz tar (`--extract tar.gz` or `tar.xz`), or with
+//!    `--tree` every directory and regular file under the directory `--member` (a tool that
+//!    needs the files beside it, such as a compiler and its headers). A tree holding a link
+//!    or another special file, or an entry whose path climbs out of `--member`, is refused.
 //! 4. With `--cache` and no file there, the download as it came (the archive, not the
 //!    file taken out of it) is written to the `--cache` path, for the actions cache to
 //!    save: only a download that matched the pin and unpacked is kept.
 //! 5. The file is written to `<out>.part` beside `--out`, made executable (0755) and
 //!    renamed over `--out`. When writing or renaming fails, `<out>.part` is removed, so
-//!    `--out` holds either the whole new file or what it held before.
+//!    `--out` holds either the whole new file or what it held before. A tree is written the
+//!    same way, as the directory `<out>.part` (a file executable in the archive 0755, any
+//!    other 0644), and renamed to `--out`, which must not be a directory that holds anything.
 //!
 //! Steps 4 and 5 write through a `.part` file the same way; the kept download is mode 0644.
 
@@ -87,6 +92,26 @@ pub enum Format {
     /// A gzip-compressed tar: the file is its `--member`.
     #[value(name = "tar.gz")]
     TarGz,
+    /// An xz-compressed tar: the file is its `--member`.
+    #[value(name = "tar.xz")]
+    TarXz,
+}
+
+impl Format {
+    /// The tar archive `bytes` holds in this compression.
+    fn decode(self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut tar = Vec::new();
+        match self {
+            Format::TarGz => flate2::read::MultiGzDecoder::new(bytes)
+                .read_to_end(&mut tar)
+                .map(drop)
+                .map_err(unpack_error)?,
+            Format::TarXz => {
+                lzma_rs::xz_decompress(&mut &bytes[..], &mut tar).map_err(unpack_error)?
+            }
+        }
+        Ok(tar)
+    }
 }
 
 /// How the installed file comes out of the download.
@@ -100,35 +125,72 @@ pub enum Unpack {
         /// The path of the file inside the archive.
         member: PathBuf,
     },
+    /// The download is an xz-compressed tar archive; the file is the regular file at
+    /// `member` in it.
+    TarXz {
+        /// The path of the file inside the archive.
+        member: PathBuf,
+    },
+    /// The download is a tar archive packed as `format`; what is installed is the directory
+    /// `top` in it, with every directory and regular file under it.
+    Tree {
+        /// How the archive is compressed.
+        format: Format,
+        /// The path of the directory inside the archive.
+        top: PathBuf,
+    },
+}
+
+/// What an [`Unpack`] makes of a download: one file, or a tree of them.
+#[derive(Debug, PartialEq, Eq)]
+enum Unpacked {
+    /// The file to install at `--out`.
+    File(Vec<u8>),
+    /// The entries of the directory to install at `--out`, by their path under it, in the
+    /// archive's order (a directory before what it holds, as tar writes them).
+    Tree(Vec<(PathBuf, Node)>),
+}
+
+/// One entry of an [`Unpacked::Tree`].
+#[derive(Debug, PartialEq, Eq)]
+enum Node {
+    /// A directory.
+    Dir,
+    /// A regular file, and whether the archive gives it any execute bit.
+    File(Vec<u8>, bool),
 }
 
 impl Unpack {
-    /// `--extract` and `--member` as given; `Err` names the flag that is missing or
-    /// out of place.
-    pub fn new(extract: Option<Format>, member: Option<PathBuf>) -> Result<Unpack, String> {
-        match (extract, member) {
-            (None, None) => Ok(Unpack::Raw),
-            (Some(Format::TarGz), Some(member)) => Ok(Unpack::TarGz { member }),
-            (Some(Format::TarGz), None) => {
-                Err("--extract tar.gz needs --member, the file to take".to_owned())
-            }
-            (None, Some(_)) => {
-                Err("--member is a file in a tar: it needs --extract tar.gz".to_owned())
-            }
+    /// `--extract`, `--member` and `--tree` as given; `Err` names the flag that is missing
+    /// or out of place.
+    pub fn new(
+        extract: Option<Format>,
+        member: Option<PathBuf>,
+        tree: bool,
+    ) -> Result<Unpack, String> {
+        match (extract, member, tree) {
+            (None, None, false) => Ok(Unpack::Raw),
+            (Some(Format::TarGz), Some(member), false) => Ok(Unpack::TarGz { member }),
+            (Some(Format::TarXz), Some(member), false) => Ok(Unpack::TarXz { member }),
+            (Some(format), Some(top), true) => Ok(Unpack::Tree { format, top }),
+            (Some(_), None, _) => Err(
+                "--extract needs --member, the file to take (with --tree, the directory)"
+                    .to_owned(),
+            ),
+            (None, _, _) => Err(
+                "--member and --tree name what to take out of a tar: they need --extract"
+                    .to_owned(),
+            ),
         }
     }
 
-    /// The file this unpacking makes of `bytes`.
-    fn apply(&self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    /// What this unpacking makes of `bytes`.
+    fn apply(&self, bytes: &[u8]) -> Result<Unpacked, Error> {
         match self {
-            Unpack::Raw => Ok(bytes.to_vec()),
-            Unpack::TarGz { member } => {
-                let mut tar = Vec::new();
-                flate2::read::MultiGzDecoder::new(bytes)
-                    .read_to_end(&mut tar)
-                    .map_err(unpack_error)?;
-                tar_member(&tar, member)
-            }
+            Unpack::Raw => Ok(Unpacked::File(bytes.to_vec())),
+            Unpack::TarGz { member } => tar_member(&Format::TarGz.decode(bytes)?, member),
+            Unpack::TarXz { member } => tar_member(&Format::TarXz.decode(bytes)?, member),
+            Unpack::Tree { format, top } => tar_tree(&format.decode(bytes)?, top),
         }
     }
 }
@@ -188,9 +250,13 @@ pub enum Error {
     /// The archive holds no entry at the requested path.
     #[error("the archive has no {0:?}")]
     NoMember(PathBuf),
-    /// The entry at the requested path is a directory, a link or another special file.
+    /// The entry at the requested path is a directory, a link or another special file; or,
+    /// in a tree, an entry under it is a link or another special file.
     #[error("{0:?} in the archive is not a regular file")]
     NotAFile(PathBuf),
+    /// An entry of a tree whose path climbs out of the directory taken (a `..`).
+    #[error("{0:?} in the archive climbs out of the directory taken")]
+    Climbs(PathBuf),
     /// The file could not be written to its place.
     #[error("install {path:?}: {why}")]
     Install {
@@ -256,8 +322,8 @@ pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Re
     place(out, &file)
 }
 
-/// The file `unpack` makes of `bytes`, once their digest is `sha256`.
-fn checked(bytes: &[u8], sha256: &Sha256, unpack: &Unpack) -> Result<Vec<u8>, Error> {
+/// What `unpack` makes of `bytes`, once their digest is `sha256`.
+fn checked(bytes: &[u8], sha256: &Sha256, unpack: &Unpack) -> Result<Unpacked, Error> {
     let actual = Sha256::of(bytes);
     if actual != *sha256 {
         return Err(Error::Mismatch {
@@ -268,9 +334,13 @@ fn checked(bytes: &[u8], sha256: &Sha256, unpack: &Unpack) -> Result<Vec<u8>, Er
     unpack.apply(bytes)
 }
 
-/// Writes `file` to `out`, mode 0755.
-fn place(out: &Path, file: &[u8]) -> Result<(), Error> {
-    write_file(out, file, 0o755).map_err(|e| Error::Install {
+/// Writes `unpacked` to `out`: a file mode 0755, or a tree.
+fn place(out: &Path, unpacked: &Unpacked) -> Result<(), Error> {
+    match unpacked {
+        Unpacked::File(file) => write_file(out, file, 0o755),
+        Unpacked::Tree(nodes) => write_tree(out, nodes),
+    }
+    .map_err(|e| Error::Install {
         path: out.to_owned(),
         why: e.to_string(),
     })
@@ -356,8 +426,83 @@ pub(crate) fn write_file(out: &Path, data: &[u8], mode: u32) -> std::io::Result<
     written
 }
 
+/// Writes the tree `nodes` as the directory `<out>.part` and renames it to `out`, removing
+/// the part directory when a step fails. A part directory a killed run left is removed
+/// first.
+fn write_tree(out: &Path, nodes: &[(PathBuf, Node)]) -> std::io::Result<()> {
+    let part = part_path(out);
+    // Absent unless a run was killed while writing it.
+    let _ = std::fs::remove_dir_all(&part);
+    let written = std::fs::create_dir_all(&part)
+        .and_then(|()| {
+            nodes
+                .iter()
+                .try_for_each(|(path, node)| write_node(&part.join(path), node))
+        })
+        .and_then(|()| std::fs::rename(&part, out));
+    if written.is_err() {
+        // A part directory that cannot be removed is reported by the write error itself.
+        let _ = std::fs::remove_dir_all(&part);
+    }
+    written
+}
+
+/// Writes one entry of a tree at `path`, making its directories when the archive did not
+/// list them first.
+fn write_node(path: &Path, node: &Node) -> std::io::Result<()> {
+    match node {
+        Node::Dir => std::fs::create_dir_all(path),
+        Node::File(data, executable) => {
+            let mode = if *executable { 0o755 } else { 0o644 };
+            path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+            std::fs::write(path, data).and_then(|()| {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            })
+        }
+    }
+}
+
+/// The directory `top` of the tar archive `tar`: every directory and regular file under it,
+/// by its path under `top`. Entries elsewhere in the archive are passed over.
+fn tar_tree(tar: &[u8], top: &Path) -> Result<Unpacked, Error> {
+    let mut archive = tar::Archive::new(tar);
+    let mut nodes = Vec::new();
+    let mut found = false;
+    for entry in archive.entries().map_err(unpack_error)? {
+        let mut entry = entry.map_err(unpack_error)?;
+        let path = entry.path().map_err(unpack_error)?.into_owned();
+        let Ok(under) = path.strip_prefix(top) else {
+            continue;
+        };
+        found = true;
+        if under
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(Error::Climbs(path));
+        }
+        let kind = entry.header().entry_type();
+        let node = if kind.is_dir() {
+            Node::Dir
+        } else if kind.is_file() {
+            let executable = entry.header().mode().map_err(unpack_error)? & 0o111 != 0;
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(unpack_error)?;
+            Node::File(data, executable)
+        } else {
+            return Err(Error::NotAFile(path));
+        };
+        nodes.push((under.to_owned(), node));
+    }
+    if found {
+        Ok(Unpacked::Tree(nodes))
+    } else {
+        Err(Error::NoMember(top.to_owned()))
+    }
+}
+
 /// The contents of the regular file at `member` in the tar archive `tar`.
-fn tar_member(tar: &[u8], member: &Path) -> Result<Vec<u8>, Error> {
+fn tar_member(tar: &[u8], member: &Path) -> Result<Unpacked, Error> {
     let mut archive = tar::Archive::new(tar);
     for entry in archive.entries().map_err(unpack_error)? {
         let mut entry = entry.map_err(unpack_error)?;
@@ -369,7 +514,7 @@ fn tar_member(tar: &[u8], member: &Path) -> Result<Vec<u8>, Error> {
         }
         let mut file = Vec::new();
         entry.read_to_end(&mut file).map_err(unpack_error)?;
-        return Ok(file);
+        return Ok(Unpacked::File(file));
     }
     Err(Error::NoMember(member.to_owned()))
 }

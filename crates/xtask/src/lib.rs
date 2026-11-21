@@ -1,8 +1,8 @@
 //! `cargo xtask <verb>`: the repository's CI logic, in Rust with tests, so each workflow
 //! step is one command (the alias is in `.cargo/config.toml`).
 //!
-//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
-//!   [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
+//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
+//!   [--tree]] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
 //!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
 //!   before anything is unpacked or written.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
@@ -228,7 +228,8 @@ struct Cli {
 /// The verbs.
 #[derive(Subcommand)]
 enum Verb {
-    /// Download a pinned file, check its SHA-256 and install it (mode 0755).
+    /// Download a pinned file, check its SHA-256 and install it (mode 0755), or with `--tree`
+    /// a directory of a tar.
     Fetch {
         /// Where to download it from (HTTPS; redirects must stay on HTTPS).
         #[arg(long)]
@@ -236,15 +237,20 @@ enum Verb {
         /// The SHA-256 of the download (before unpacking), 64 lowercase hex digits.
         #[arg(long)]
         sha256: fetch::Sha256,
-        /// The file to install; its directory is created when missing.
+        /// The file to install (with `--tree`, the directory); its directory is created when
+        /// missing.
         #[arg(long)]
         out: PathBuf,
         /// How the download is packed (default: it is the file).
         #[arg(long, value_enum)]
         extract: Option<fetch::Format>,
-        /// The file to take out of a tar (`--extract tar.gz`): its path inside the archive.
+        /// The file to take out of a tar (`--extract`): its path inside the archive; with
+        /// `--tree`, the directory to take.
         #[arg(long)]
         member: Option<PathBuf>,
+        /// Install the directory `--member` and everything under it as the directory `--out`.
+        #[arg(long)]
+        tree: bool,
         /// The file the actions cache restores and saves: when it exists it is checked and
         /// used in place of the download; when it does not, the checked download is kept there.
         #[arg(long)]
@@ -436,9 +442,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             out,
             extract,
             member,
+            tree,
             cache,
         } => {
-            let unpack = fetch::Unpack::new(extract, member).map_err(Error::Usage)?;
+            let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
             Ok(fetch::fetch(
                 &url,

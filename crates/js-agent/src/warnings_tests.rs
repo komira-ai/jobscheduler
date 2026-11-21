@@ -76,7 +76,8 @@ fn info_and_below_are_not_written() {
 /// Asserts that the line the crun runtime writes when the input sources of a run whose job
 /// failed do not answer names the run's lease (which holds the run's id) and the source's
 /// path with the error the kernel gave. Catches the check of a run's inputs failing with no
-/// trace on the host of which run and which source.
+/// trace on the host of which run and which source. Linux only, as the crun runtime is.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_failed_input_check_of_a_run_names_its_lease_and_the_source() {
     let text = lines_of(|| {

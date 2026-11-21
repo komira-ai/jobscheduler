@@ -45,6 +45,8 @@ prost.workspace = true
 prost-types.workspace = true
 # The scratch directory and the guarded server child of `site-demo`.
 js-testkit = { path = "../js-testkit" }
+# `fetch --extract tar.xz` (and the xz archives its tests make).
+lzma-rs.workspace = true
 # The package's `md5sums` file (`release deb`).
 md-5.workspace = true
 rustls.workspace = true
