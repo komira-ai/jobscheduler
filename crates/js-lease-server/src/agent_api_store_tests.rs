@@ -828,12 +828,12 @@ fn a_stored_host_that_cannot_be_read_as_written_refuses_the_read() {
 /// Asserts that two servers over one store cannot lose a taint write to each other. Both
 /// hold the host with no taint. The second is told taint `a` and commits it. The first, which
 /// still holds none, is then told taint `b`: it is refused 503 `state-write-failed`, the
-/// store keeps `a` and the first holds none (a report must not overwrite or revive a taint
-/// the store holds). The first server then has the taint cleared and `b` stored (as the
-/// first's own beat would leave it); the second, which still holds `a`, is told `a` is
-/// cleared: refused the same way, the store keeps `b`, the second still holds `a` and nothing
-/// is acknowledged (a clear must not erase a newer taint). It catches the host binding's
-/// unconditional write, which let either lose.
+/// store keeps `a`, and the first takes `a` from the store (a report must not overwrite a
+/// taint the store holds, and the refused server is put level with the store). The store is
+/// then given `b` (as the first's own beat would leave it); the second, which still holds
+/// `a`, is told `a` is cleared: refused the same way, the store keeps `b`, the second takes
+/// `b` and nothing is acknowledged (a clear must not erase a newer taint). It catches the host
+/// binding's unconditional write, which let either lose.
 #[tokio::test]
 async fn two_servers_do_not_overwrite_each_others_taint() {
     let first = rig("two_first");
@@ -857,7 +857,8 @@ async fn two_servers_do_not_overwrite_each_others_taint() {
     );
     assert_eq!(first.commits(), commits, "nothing was written");
     assert_eq!(first.binding("host-a")["taint_run_id"], "r1");
-    assert!(first.held("host-a").unwrap().taint().is_none());
+    let held = first.held("host-a").unwrap();
+    assert_eq!(held.taint().unwrap().run_id.as_deref(), Some("r1"));
 
     let newer = first.binding("host-a");
     let mut newer = newer.as_object().unwrap().clone();
@@ -879,7 +880,7 @@ async fn two_servers_do_not_overwrite_each_others_taint() {
     assert_eq!(first.commits(), commits, "nothing was written");
     assert_eq!(first.binding("host-a")["taint_run_id"], "r2");
     let held = second.held("host-a").unwrap();
-    assert_eq!(held.taint().unwrap().run_id.as_deref(), Some("r1"));
+    assert_eq!(held.taint().unwrap().run_id.as_deref(), Some("r2"));
     drop(b);
 }
 
