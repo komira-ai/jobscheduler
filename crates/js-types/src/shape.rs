@@ -125,8 +125,12 @@ impl Shape {
 }
 
 /// The major version of an operating-system version text: `26` and `26.1` are 26. `None`
-/// when the text before the first dot is not a whole number.
-fn os_major(text: &str) -> Option<u32> {
+/// when the text before the first dot is not a whole number. [`Shape::satisfies`] reads both
+/// a host's `os_version` and a required one with it, and the scheduler's matching
+/// (`js_caps::Request` and `js_caps::NodeCaps`) does the same, so admission and placement
+/// read a host's reported version alike.
+#[must_use]
+pub fn os_major(text: &str) -> Option<u32> {
     text.split_once('.')
         .map_or(text, |(major, _)| major)
         .parse()

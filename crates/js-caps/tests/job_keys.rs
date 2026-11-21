@@ -1,8 +1,9 @@
-//! The capability keys a job request can require of a host: `disk-gib` and `exec`.
+//! The capability keys a job request can require of a host: `disk-gib`, `exec` and
+//! `os_version`.
 
 use js_caps::{
     Consumable, DETECTED_KEYS, DISK_GIB, EXEC, FUSE_JOBS, FUSE_URING, LAYERED_ROOTFS, NodeCaps,
-    ReportError, Request, RequestError, Unmet, XCODE,
+    OS_VERSION, ReportError, Request, RequestError, Unmet, XCODE,
 };
 
 fn req(props: &[(&str, &str)]) -> Result<Request, RequestError> {
@@ -113,10 +114,11 @@ fn a_report_with_a_bad_disk_is_refused() {
 }
 
 /// Asserts that the detected keys are exactly these fifteen, and that a request may name only
-/// `disk-gib`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring` and `xcode` of them (the
-/// layered root because the server asks for it of a job with layers, mounts or host ports,
-/// the FUSE keys of a job that needs the FUSE device, `xcode` of a job that names a build):
-/// each of the other nine is refused as an unknown key, naming it. It catches a detected key
+/// `disk-gib`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring`, `os_version` and `xcode` of
+/// them (the layered root because the server asks for it of a job with layers, mounts or host
+/// ports, the FUSE keys of a job that needs the FUSE device, `os_version` of a job that asks
+/// for a least macOS, `xcode` of a job that names a build): each of the other eight is refused
+/// as an unknown key, naming it. It catches a detected key
 /// added without the agent detecting it, and a host
 /// property a request could ask for though no agent reports it, so that a job naming it
 /// could be placed nowhere.
@@ -140,10 +142,16 @@ fn a_request_names_only_some_detected_keys() {
         "xcode",
     ];
     assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
-    for key in DETECTED_KEYS
-        .iter()
-        .filter(|key| ![DISK_GIB, EXEC, LAYERED_ROOTFS, FUSE_JOBS, FUSE_URING, XCODE].contains(key))
-    {
+    let nameable = [
+        DISK_GIB,
+        EXEC,
+        LAYERED_ROOTFS,
+        FUSE_JOBS,
+        FUSE_URING,
+        OS_VERSION,
+        XCODE,
+    ];
+    for key in DETECTED_KEYS.iter().filter(|key| !nameable.contains(key)) {
         let refused = req(&[(key, "true")]);
         assert_eq!(refused, Err(RequestError::UnknownKey((*key).to_owned())));
     }
@@ -153,9 +161,72 @@ fn a_request_names_only_some_detected_keys() {
         (LAYERED_ROOTFS, "true"),
         (FUSE_JOBS, "true"),
         (FUSE_URING, "true"),
+        (OS_VERSION, "26"),
         (XCODE, "16C5032a"),
     ];
     assert!(req(&named).is_ok());
+}
+
+/// Asserts that `os_version` is a least version, by major: a node that reports 27 meets a
+/// request for 26 and for 27 and not for 28, the miss named in full; a node that reports
+/// `26.4` is the major 26, and a request for `26.6` is the major 26 too; a node that reports
+/// none, or text that is no version, meets no request for one, and a request that names none
+/// is met by every node, as is one for 0. Catches the key refused as unknown (a job asking
+/// for a version would then be placed nowhere), a version compared as text (`27` would not
+/// meet `26`), and a minor version compared (a node on 26.4 would not meet a request for
+/// 26.6, though a hello reports the major alone and the job API takes a whole major only).
+#[test]
+fn os_version_is_a_least_major_version() {
+    let on = |version: &str| node(&[(OS_VERSION, version)]).unwrap();
+    let ask = |version: &str| req(&[(OS_VERSION, version)]).unwrap();
+    assert_eq!(Consumable::OsVersion.to_string(), "os_version");
+    assert!(ask("26").matches(&on("27")));
+    assert!(ask("27").matches(&on("27")));
+    let later = ask("28");
+    let on_27 = on("27");
+    assert_eq!(
+        later.unmet(&on_27),
+        [Unmet::Consumable {
+            what: Consumable::OsVersion,
+            want: 28,
+            have: 27
+        }]
+    );
+    assert_eq!(
+        later.unmet(&on_27)[0].to_string(),
+        "os_version>=28 (has 27)"
+    );
+    assert!(ask("26").matches(&on("26.4")));
+    assert!(ask("26.6").matches(&on("26.4")));
+    assert!(!ask("27").matches(&on("26.4")));
+    for unread in [node(&[]).unwrap(), on("beta"), on("")] {
+        assert!(!ask("26").matches(&unread));
+        assert!(Request::default().matches(&unread));
+        assert!(ask("0").matches(&unread));
+    }
+    let minor = ask("26.6");
+    assert_eq!(minor.properties(), [(OS_VERSION, "26".to_owned())]);
+}
+
+/// Asserts that a request whose `os_version` is no version, or that names it twice, is
+/// refused naming the key, and that a report that names it twice is refused, even when the
+/// first value is no version. Catches a bad version read as 0, which every node meets (the
+/// previous test asserts that a request for 0 is).
+#[test]
+fn a_bad_or_repeated_os_version_is_refused() {
+    for value in ["", "beta", "-1", ".5"] {
+        let bad = RequestError::BadValue {
+            key: OS_VERSION.into(),
+            value: value.into(),
+        };
+        assert_eq!(req(&[(OS_VERSION, value)]), Err(bad));
+    }
+    let twice = req(&[(OS_VERSION, "26"), (OS_VERSION, "27")]);
+    assert_eq!(twice, Err(RequestError::Repeated(OS_VERSION.into())));
+    for first in ["26", "beta"] {
+        let twice = node(&[(OS_VERSION, first), (OS_VERSION, "27")]);
+        assert_eq!(twice, Err(ReportError::Repeated(OS_VERSION.into())));
+    }
 }
 
 /// Asserts that the retired tree capability key, which no agent of any release reported, is

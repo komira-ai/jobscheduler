@@ -241,8 +241,8 @@ The lease server's agent pool configuration gains a pool the Macs meet: `capabil
 "arm64", layered-rootfs = "true" }` and `exec = "sandbox-exec"`. A joined pool places a host by the capabilities it
 names, so a job with mounts (which asks for `layered-rootfs`, as kbf's macOS action jobs do) is placed on a Mac only
 when the pool names it; every native agent of a release that takes mounts reports it, and one that does not is refused
-at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
-must reach its agent listener.
+at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The
+Macs' pool names `os_version = "26"` (`docs/design/mac-runtime.md`, section 5). The Macs must reach its agent listener.
 
 ## Platform properties
 
