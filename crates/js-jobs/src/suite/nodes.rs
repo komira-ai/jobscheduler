@@ -91,7 +91,7 @@ fn stored<S: Store, I: IdSource>(jobs: &JobStore<S, I>, host: &HostId) -> NodeRo
 }
 
 /// The answer a beat is, by name.
-fn kind(beat: &Beat) -> &'static str {
+pub(super) fn kind(beat: &Beat) -> &'static str {
     match beat {
         Beat::Applied(_) => "applied",
         Beat::Superseded(_) => "superseded",
@@ -101,7 +101,7 @@ fn kind(beat: &Beat) -> &'static str {
 }
 
 /// The row a beat answered with, whatever the answer.
-fn row_of(beat: Beat) -> Option<NodeRow> {
+pub(super) fn row_of(beat: Beat) -> Option<NodeRow> {
     match beat {
         Beat::Applied(row) | Beat::Superseded(row) | Beat::StaleEpoch(row) => Some(row),
         Beat::NoSession(row) => row,
@@ -117,7 +117,7 @@ fn seen(beat: Beat) -> (&'static str, u32, Option<AppliedBeat>) {
 }
 
 /// The row of a beat that must have been applied.
-fn applied_row(beat: Beat) -> NodeRow {
+pub(super) fn applied_row(beat: Beat) -> NodeRow {
     assert_eq!(kind(&beat), "applied", "the beat was not applied: {beat:?}");
     row_of(beat).expect("a row")
 }

@@ -3,11 +3,21 @@
 //! any heartbeat of any host, so a beat that lands on another server than the hello's is served
 //! as it is, with no second hello.
 //!
-//! - **A hello** the registry admitted is written as the row ([`js_jobs::JobStore::hello_node`]):
-//!   the store numbers the epoch (one more than the row's), and the welcome and the registry
-//!   take that number ([`hello_row`]). A hello whose row cannot be written is refused 503
-//!   `state-write-failed`, and the registry gives up the session it admitted, so the agent's
-//!   next hello is not refused `host-live` by a session nobody holds.
+//! - **A hello** the registry admitted is written as the row
+//!   ([`js_jobs::JobStore::hello_node_in_pool`]): the store numbers the epoch (one more than the
+//!   row's), and the welcome and the registry take that number ([`hello_row`]). A hello whose
+//!   row cannot be written is refused 503 `state-write-failed`, and the registry gives up the
+//!   session it admitted, so the agent's next hello is not refused `host-live` by a session
+//!   nobody holds.
+//! - **The pool's cap** counts every server's rows. A hello of a host that has no row is judged
+//!   against it before anything of the hello is written ([`room_in_pool`]): a full pool refuses
+//!   it 403 `pool-full`, with no token used and no binding written. The row's write decides it
+//!   again under the pool's admission row, so of two hellos that both found room one is
+//!   written; the other is the 503 of a row that could not be written, as for any row that
+//!   cannot be written: its token's use and its binding were committed before the row's write,
+//!   so a hello with a one-time token that was to be given a host credential cannot use the
+//!   token again (it is issued again), and any other agent's next hello is refused `pool-full`
+//!   before anything of it is written.
 //! - **The registry is a cache of the rows.** Before a hello is judged, and before a heartbeat
 //!   whose epoch the registry does not hold is checked, the row and the host's binding are read
 //!   and the session another server's hello wrote is adopted ([`refresh`]): its epoch, the
@@ -117,6 +127,38 @@ pub(super) async fn refresh_for_beat(
     refresh(agents, &host).await
 }
 
+/// Refuses the hello of `host` 403 `pool-full` when `host` has no row and its pool already holds
+/// the pool's cap of rows, over every server's rows ([`js_jobs::JobStore::pool_admits`]): before
+/// anything of the hello is written, as every refusal of a hello. Nothing without the job
+/// tables, or for a pool with no cap of its own.
+///
+/// # Errors
+///
+/// `403 pool-full`; `503 state-write-failed` when the rows could not be read, which the agent
+/// retries: a hello is never admitted on less than the rows.
+pub(super) async fn room_in_pool(
+    agents: &Arc<Agents>,
+    host: &HostId,
+    hello: &Hello,
+) -> Result<(), Refused> {
+    let (Some(jobs), Some(cap)) = (agents.jobs.clone(), agents.registry.pool_cap(&hello.pool))
+    else {
+        return Ok(());
+    };
+    let (named, pool) = (host.clone(), hello.pool.clone());
+    match blocking(move || jobs.pool_admits(&named, &pool, cap)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(super::refused_hello(hello, &Refusal::PoolFull)),
+        Err(error) => {
+            warn!(%error, %host, "agent hello refused: its pool's rows could not be read");
+            Err(Refused::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                STATE_WRITE_FAILED,
+            ))
+        }
+    }
+}
+
 /// Writes the hello the registry admitted as `welcome` into the row of `host`, when the server
 /// holds the job tables ([`record_hello`]). Nothing without the job tables.
 ///
@@ -156,15 +198,18 @@ pub(super) async fn hello_row(
 }
 
 /// Writes the hello the registry admitted as `welcome` into the row of `host`
-/// ([`js_jobs::JobStore::hello_node`]): the digest of the welcome's secret, what the hello
-/// announced, and the shape the registry books. The store numbers the epoch, and the registry
-/// and `welcome` take that number. Nothing without the job tables. It blocks on the store.
+/// ([`js_jobs::JobStore::hello_node_in_pool`], under the pool's cap when it has one): the digest
+/// of the welcome's secret, what the hello announced, and the shape the registry books. The
+/// store numbers the epoch, and the registry and `welcome` take that number. Nothing without
+/// the job tables. It blocks on the store.
 ///
 /// # Errors
 ///
-/// The row could not be written: the registry has given up the session it admitted
+/// The row could not be written, or the pool filled since [`room_in_pool`] read it
+/// ([`JobStoreError::PoolFull`]): the registry has given up the session it admitted
 /// ([`js_registry::Registry::abandon`]), so no beat of it is taken and the next hello is not
-/// refused `host-live` for it.
+/// refused `host-live` for it. The token's use and the binding the hello committed before the
+/// row stand.
 pub(crate) fn record_hello(
     agents: &Agents,
     host: &HostId,
@@ -184,7 +229,8 @@ pub(crate) fn record_hello(
         phase: hello.phase,
         agent_process: hello.agent_process.clone(),
     };
-    match jobs.hello_node(host, &row) {
+    let cap = agents.registry.pool_cap(&hello.pool).unwrap_or(usize::MAX);
+    match jobs.hello_node_in_pool(host, &row, cap) {
         Ok(row) => {
             agents
                 .registry

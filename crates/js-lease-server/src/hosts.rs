@@ -1,19 +1,23 @@
 //! `GET /v1/hosts`: the hosts the server lists, whichever source they come from.
 //!
-//! [`listing`] reads them once for both the JSON route and the job service's `ListHosts`:
+//! [`listing_with_rows`] reads them once for both the JSON route and the job service's `ListHosts`:
 //! the route writes the [`HostList`] as its body, and the job service maps the same entries
 //! to its own messages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
+use js_jobs::{HOST_JOB_TAINT, ScaleMark};
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, MemoryHeadroom, Shape};
 
 use crate::api::Shared;
+use crate::node_rows::{self, Seen};
 use crate::sched::map::lease_text as sched_lease_text;
+use crate::util::blocking;
 use serde::{Serialize, Serializer};
+use tracing::warn;
 
 /// The body of `GET /v1/hosts`.
 #[derive(Debug, Serialize)]
@@ -267,11 +271,68 @@ impl HostEntry {
     }
 }
 
+impl HostEntry {
+    /// A host this server's registry does not hold, known by its `node/` row alone: its state
+    /// from when it was last heard (live, or lost past the longest grace), the phase it
+    /// announced, the shape it is placed on, the capabilities of its claim (the booked shape's
+    /// without one), its labels, the mark of its `hostmark/<host>` row and the taint of its
+    /// `taint/<host>` row. Its session, cordon, load and version are the registry's of the
+    /// server that took its hello, and are not listed.
+    fn by_row(seen: Seen) -> Self {
+        let record = seen.row.record;
+        let state = match seen.lost {
+            true => HostState::Lost,
+            false => HostState::Live,
+        };
+        let mark = seen.mark.map(|mark| match mark {
+            ScaleMark::Draining => HostMark::Draining,
+            ScaleMark::Releasing => HostMark::Releasing,
+        });
+        let memory = MemoryHeadroom::full(seen.placed.resources().memory_bytes());
+        let claimed = record.claim.as_ref().unwrap_or(&seen.placed);
+        Self {
+            id: record.host,
+            source: Source::Registered,
+            state: Some(state),
+            lost: Some(seen.lost),
+            phase: Some(String::from(record.state.phase)),
+            shape: shape_view(&seen.placed),
+            memory: MemoryView::of(memory),
+            capabilities: claimed.capabilities().clone(),
+            labels: record.labels,
+            agent_version: None,
+            releasing: Some(mark == Some(HostMark::Releasing)),
+            taint: seen.taint.map(|taint| Taint {
+                reason: HOST_JOB_TAINT.to_owned(),
+                run_id: Some(taint.job.to_string()),
+                check: None,
+            }),
+            mark,
+            reserved_for: None,
+            drain_deadline_ms: None,
+            cordon: None,
+            load: None,
+        }
+    }
+}
+
 impl HostList {
     /// Every registered host, in id order, from the registry's own view, which knows their
     /// session.
     pub(crate) fn of(registered: Vec<HostView>) -> Self {
+        Self::with_rows(registered, Vec::new())
+    }
+
+    /// The `registered` hosts and the hosts of `rows` that are not among them, in id order: a
+    /// host in both is listed once, as the registry that holds it sees it.
+    pub(crate) fn with_rows(registered: Vec<HostView>, rows: Vec<Seen>) -> Self {
+        let held: BTreeSet<HostId> = registered.iter().map(|host| host.id.clone()).collect();
+        let by_row = rows
+            .into_iter()
+            .filter(|seen| !held.contains(seen.host()))
+            .map(HostEntry::by_row);
         let mut hosts: Vec<HostEntry> = registered.into_iter().map(HostEntry::registered).collect();
+        hosts.extend(by_row);
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }
     }
@@ -282,6 +343,26 @@ impl HostList {
 /// session. It books, cordons and counts nothing.
 pub(crate) fn listing(shared: &Shared) -> HostList {
     HostList::of(shared.agents().registry.hosts())
+}
+
+/// [`listing`] and the hosts of the job store's `node/` rows that this server's registry does
+/// not hold, whichever server took their hello: what `GET /v1/hosts` and the job service's
+/// `ListHosts` list. The rows are read on the pool for blocking calls. When they cannot be read
+/// the registry's hosts are listed alone and the failure is logged: a listing is no decision.
+pub(crate) async fn listing_with_rows(shared: &Shared) -> HostList {
+    let agents = shared.agents();
+    let registered = agents.registry.hosts();
+    let Some(jobs) = agents.jobs.clone() else {
+        return HostList::of(registered);
+    };
+    let registry = agents.registry.clone();
+    match blocking(move || node_rows::read(&registry, &jobs)).await {
+        Ok(rows) => HostList::with_rows(registered, rows),
+        Err(error) => {
+            warn!(%error, "the hosts' rows could not be read: only this server's hosts are listed");
+            HostList::of(registered)
+        }
+    }
 }
 
 /// A host id as the body writes it: its text.
@@ -449,3 +530,7 @@ mod tests {
         assert!(listing(&shared).hosts.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "hosts_rows_tests.rs"]
+mod rows_tests;

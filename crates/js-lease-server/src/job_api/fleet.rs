@@ -12,7 +12,7 @@
 //! service holds no registry of its own:
 //!
 //! - [`Hosts`], over the server's shared state ([`Shared`]): the listing that
-//!   `GET /v1/hosts` writes ([`hosts::listing`]: the registry's hosts),
+//!   `GET /v1/hosts` writes ([`hosts::listing_with_rows`]: the registry's hosts and the job store's rows),
 //!   and the registry's cordon of a host, saved before it is acknowledged.
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
@@ -777,7 +777,7 @@ fn estimated_run(row: &EndedRow) -> Option<u64> {
 #[tonic::async_trait]
 impl Hosts for Shared {
     async fn hosts(&self) -> HostList {
-        hosts::listing(self)
+        hosts::listing_with_rows(self).await
     }
 
     async fn cordon(&self, host: &HostId, length: Duration) -> Result<bool, Refused> {

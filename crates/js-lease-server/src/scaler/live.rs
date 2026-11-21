@@ -288,8 +288,13 @@ impl Effects for Live {
                 .cordon_now(&id, DEFAULT_CORDON)
                 .map_err(|_| Busy::UnknownHost),
         };
-        if let Err(busy) = done {
-            warn!(%host, %busy, ?call, "the registry did not do it");
+        match done {
+            Ok(()) => {
+                if let Some(row) = live_marks::row_of(call) {
+                    self.keep_mark(&id, row);
+                }
+            }
+            Err(busy) => warn!(%host, %busy, ?call, "the registry did not do it"),
         }
     }
 
@@ -305,7 +310,7 @@ impl Effects for Live {
         };
         let registry = &self.agents.registry;
         registry.mark_ending(&id);
-        registry.remove(&id)
+        registry.remove(&id).map(|()| self.forget_removed(&id))
     }
 }
 
@@ -442,7 +447,7 @@ mod tests {
         }
     }
 
-    fn live(name: &str) -> (Live, TestDir) {
+    pub(super) fn live(name: &str) -> (Live, TestDir) {
         live_with(name, vec![Arc::new(Stub)], Arc::new(Catalogs::new()))
     }
 
@@ -765,6 +770,13 @@ mod tests {
         );
     }
 }
+
+#[path = "live_marks.rs"]
+mod live_marks;
+
+#[cfg(test)]
+#[path = "live_marks_tests.rs"]
+mod marks_tests;
 
 #[cfg(test)]
 #[path = "live_providers_tests.rs"]

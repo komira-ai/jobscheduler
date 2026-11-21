@@ -320,7 +320,11 @@ pub(super) const NEVER: JobLimits = JobLimits {
 /// The service over the agent rig's tables and clock, admitting over its registry's hosts
 /// and no launching provider.
 pub(super) async fn served(rig: &Rig) -> Writes {
-    let admission = JobAdmission::new(Admit::default(), rig.agents.registry.clone());
+    let admission = JobAdmission::new(
+        Admit::default(),
+        rig.agents.registry.clone(),
+        Arc::clone(&rig.jobs),
+    );
     Writes::new(
         Arc::clone(&rig.jobs),
         rig.shared.clone(),
