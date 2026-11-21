@@ -367,6 +367,12 @@ impl Daemon {
     /// a transient launchd job, through `switch`, to its verdict.
     pub fn run(&self, order: &UpdateOrder, switch: Switch, store: &Path) -> Finished {
         fs::create_dir_all(store).expect("the record directory");
+        // The runner keeps its records only in a directory private to it, as the daemon's is.
+        fs::set_permissions(
+            store,
+            <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("the record directory private");
         let ran = Arc::clone(&self.ran);
         let log: StepLog = Arc::new(move |unit: &str, captured: &Captured| {
             let step = Ran {
