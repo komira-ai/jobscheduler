@@ -140,6 +140,14 @@ impl Pool {
         })
     }
 
+    /// The block whose job end is `job` ([`Pool::block`]'s second address); none for an
+    /// address that is not one.
+    pub(crate) fn index_of(&self, job: Ipv4Addr) -> Option<u32> {
+        let offset = u32::from(job).checked_sub(self.base)?;
+        let index = offset / 4;
+        (offset % 4 == 2 && index < self.capacity()).then_some(index)
+    }
+
     fn contains(&self, addr: Ipv4Addr) -> bool {
         let host = u32::MAX.checked_shr(u32::from(self.prefix)).unwrap_or(0);
         u32::from(addr) & !host == self.base
@@ -846,5 +854,28 @@ mod tests {
         );
         assert_eq!(pool.block(16384), None);
         assert_eq!(Pool::parse("10.1.2.0/24").expect("pool").capacity(), 64);
+    }
+
+    /// Asserts that the block of a job end is found from its address alone: the third address
+    /// of each /30 names its block, first to last, and the neighbours, the addresses below and
+    /// beyond the pool, and an address one block past the capacity name none. Catches an
+    /// adoption that reads another run's block, or one outside the pool, as a run's own.
+    #[test]
+    fn a_job_end_names_its_block_and_no_other_address_does() {
+        let pool = Pool::parse("198.18.0.0/16").expect("pool");
+        for index in [0, 1, 16383] {
+            let (host, job) = pool.block(index).expect("a block");
+            assert_eq!(pool.index_of(job), Some(index));
+            assert_eq!(pool.index_of(host), None, "the host end is not a job end");
+        }
+        let base = Ipv4Addr::new(198, 18, 0, 0);
+        assert_eq!(pool.index_of(base), None);
+        assert_eq!(pool.index_of(Ipv4Addr::new(198, 18, 0, 3)), None);
+        assert_eq!(pool.index_of(Ipv4Addr::new(198, 17, 255, 254)), None);
+        assert_eq!(pool.index_of(Ipv4Addr::new(198, 19, 0, 2)), None);
+        assert_eq!(pool.index_of(Ipv4Addr::new(10, 0, 0, 2)), None);
+        let small = Pool::parse("10.1.2.0/24").expect("pool");
+        assert_eq!(small.index_of(Ipv4Addr::new(10, 1, 2, 254)), Some(63));
+        assert_eq!(small.index_of(Ipv4Addr::new(10, 1, 3, 2)), None);
     }
 }

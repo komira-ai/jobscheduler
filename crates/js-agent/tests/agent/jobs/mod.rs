@@ -52,6 +52,8 @@ mod files_flags;
 #[cfg(target_os = "linux")]
 mod handover;
 #[cfg(target_os = "linux")]
+mod handover_egress;
+#[cfg(target_os = "linux")]
 mod hold_e2e;
 #[cfg(target_os = "linux")]
 mod per_job;

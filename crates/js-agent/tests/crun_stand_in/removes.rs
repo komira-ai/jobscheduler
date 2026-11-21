@@ -155,6 +155,20 @@ impl EgressPort for Fragile {
     ) -> Result<Box<dyn Wired>, EgressError> {
         Ok(Box::new(Brittle))
     }
+
+    fn adopt(
+        &self,
+        _run: &str,
+        _pid: u32,
+        _level: JobNetwork,
+        _ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        Ok(Box::new(Brittle))
+    }
+
+    fn settle(&self) -> Result<(), EgressError> {
+        Ok(())
+    }
 }
 
 /// A wiring whose release panics.
@@ -164,6 +178,8 @@ impl Wired for Brittle {
     fn release(self: Box<Self>) -> Result<(), EgressError> {
         panic!("the release of the network panicked")
     }
+
+    fn leave(self: Box<Self>) {}
 }
 
 /// Proves a removal whose thread dies leaves the lease to its sidecar: a running wired run

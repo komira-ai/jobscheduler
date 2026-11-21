@@ -55,10 +55,17 @@
 //!
 //! An update hands the runs over instead (`hands_over`, decided once, when the record is
 //! written, and kept in it as `handover`) on systemd with the crun runtime, the staged unit the
-//! same as the installed one, no egress ceiling in the host's flags file, and a previous agent
-//! whose `--version` lists `handover` on its `stops:` line. Its record is written with no cordon
-//! and the step ends after 6, saying so in its detail; the owed checks of the running agent are
-//! not looked at (it finishes them before it hands over, see `cutover`).
+//! same as the installed one, and a previous agent whose `--version` lists `handover` on its
+//! `stops:` line. A host whose flags file sets an egress ceiling (or cannot be read) hands over
+//! only when both the previous agent, which leaves the runs' network wiring in place, and the
+//! staged agent, which adopts it (and which the rollback stops in its turn), list
+//! `egress-handover` there too. Its record is written with no cordon and the step ends after 6,
+//! saying so in its detail; the owed checks of the running agent are not looked at (it finishes
+//! them before it hands over, see `cutover`).
+//!
+//! An update that does not hand over drains, and a success of `prepare` says why in its detail
+//! (one fixed text per [`Drain`] cause, in the order `hands_over` checks them), as does the
+//! deferral of a drain that passes its bound with a lease still running.
 //!
 //! A first install has no agent to drain and no host the lease server knows: it ends after 6.
 //!
@@ -87,6 +94,9 @@ const AGENT_NAME: &str = "js-agent";
 /// handover in it (see [`crate::lifecycle::handover`]).
 const STOPS: &str = "stops:";
 const HANDOVER_WORD: &str = "handover";
+/// The word of an agent that keeps the network wiring of the runs it leaves to the next
+/// process, and adopts the wiring of the runs it finds (see [`crate::lifecycle::handover`]).
+const EGRESS_WORD: &str = "egress-handover";
 
 /// The detail of a `prepare` that hands the runs over.
 pub(super) const HANDOVER_NOTE: &str =
@@ -119,9 +129,16 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     };
     check_agent(env, params)?;
     let restart = staged_unit(env, params)?;
+    let verdict = hands_over(env, params, restart.as_ref());
     let handover = match fresh {
-        true => hands_over(env, params, restart.as_ref()),
+        true => verdict.is_ok(),
         false => record.handover,
+    };
+    // Why the update drains, for the detail: the cause found now; a rerun whose conditions now
+    // allow a hand-over keeps the drain it began with.
+    let cause = match verdict {
+        Err(cause) => cause,
+        Ok(()) => Drain::Decided,
     };
     // The owed checks: a first install has no agent to settle them, and halts on them. An update
     // that drains waits for them (see `wait`) and lists them now only so that a state root that
@@ -165,36 +182,113 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     }
     place(env, &held, &mut record, params, fresh)?;
     let done = wait(env, &held, &mut record, params)?;
-    Ok(note_restart(done, &record))
+    Ok(note_drain(done, &record, cause))
 }
 
-/// Whether this update hands the agent's runs over to the new agent at the cutover, instead of
-/// draining the host: on systemd with the crun runtime, whose runs outlive the agent and are
-/// adopted by its next process; with the same unit (a changed one is started from an empty
-/// cgroup, see `cutover`); with no egress ceiling in the host's flags (an agent with one removes
-/// the runs it would adopt); and with a previous agent that takes the request: the previous
-/// release's agent lists `handover` on its `stops:` line of `--version`. An agent from before the
-/// handover would read the stop as a drain and hold the cutover for its whole drain wait.
-fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> bool {
-    let adoptable = env.manager == Manager::Systemd
-        && params.settings.runtime == "crun"
-        && restart.is_none()
-        && !env.egress;
-    adoptable
-        && params
-            .previous_release
-            .as_deref()
-            .is_some_and(|previous| takes_handover(env, previous))
+/// The condition that made an update drain the host instead of handing the runs over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drain {
+    /// The host does not run the agent under systemd.
+    NotSystemd,
+    /// The runtime is not crun.
+    NotCrun,
+    /// The staged unit differs from the installed one.
+    UnitChanges,
+    /// The previous agent does not list `handover`, could not be run, or there is none.
+    PreviousKeepsNoHandover,
+    /// The host has an egress ceiling and the previous agent does not list `egress-handover`.
+    PreviousKeepsNoEgress,
+    /// The host has an egress ceiling and the staged agent does not list `egress-handover`.
+    StagedAdoptsNoEgress,
+    /// A rerun of a prepare that began as a drain, whose conditions now allow a hand-over.
+    Decided,
 }
 
-/// Whether the agent of the release `release` lists the handover among its stops.
-fn takes_handover(env: &Env<'_>, release: &Path) -> bool {
+impl Drain {
+    /// The cause in plain words, one fixed text for each.
+    fn text(self) -> &'static str {
+        match self {
+            Self::NotSystemd => "the host does not run the agent under systemd",
+            Self::NotCrun => "the jobs do not run on the crun runtime",
+            Self::UnitChanges => "the unit changes",
+            Self::PreviousKeepsNoHandover => {
+                "the previous release's agent does not hand its jobs over \
+                 (no `handover` on its `stops:` line, or it could not be run)"
+            }
+            Self::PreviousKeepsNoEgress => {
+                "the host has an egress ceiling (or its flags file cannot be read) and the \
+                 previous release's agent does not keep the jobs' egress wiring \
+                 (no `egress-handover` on its `stops:` line)"
+            }
+            Self::StagedAdoptsNoEgress => {
+                "the host has an egress ceiling (or its flags file cannot be read) and the \
+                 staged release's agent does not adopt the jobs' egress wiring \
+                 (no `egress-handover` on its `stops:` line)"
+            }
+            Self::Decided => "decided when the update began",
+        }
+    }
+
+    /// The detail of a success that drains.
+    fn note(self) -> String {
+        format!("the cutover drains the host first: {}", self.text())
+    }
+}
+
+/// `Ok` when this update hands the agent's runs over to the new agent at the cutover, instead
+/// of draining the host, and otherwise the first condition, in a fixed order, that makes it
+/// drain: on systemd with the crun runtime, whose runs outlive the agent and are adopted by its
+/// next process; with the same unit (a changed one is started from an empty cgroup, see
+/// `cutover`); and with a previous agent that takes the request: the previous release's agent
+/// lists `handover` on its `stops:` line of `--version`. An agent from before the handover would
+/// read the stop as a drain and hold the cutover for its whole drain wait. On a host with an
+/// egress ceiling in its flags (`env.egress`) the runs have wiring, and the agent that is
+/// stopped must leave it and the agent that starts must adopt it: both list `egress-handover`
+/// (the staged agent is the one that starts, and the one a rollback stops). An agent without
+/// the word would cut the runs' network or remove the runs.
+fn hands_over(env: &Env<'_>, params: &Params, restart: Option<&UnitRestart>) -> Result<(), Drain> {
+    if env.manager != Manager::Systemd {
+        return Err(Drain::NotSystemd);
+    }
+    if params.settings.runtime != "crun" {
+        return Err(Drain::NotCrun);
+    }
+    if restart.is_some() {
+        return Err(Drain::UnitChanges);
+    }
+    let previous = params
+        .previous_release
+        .as_deref()
+        .map(|release| stops_of(env, release))
+        .unwrap_or_default();
+    if !previous.iter().any(|word| word == HANDOVER_WORD) {
+        return Err(Drain::PreviousKeepsNoHandover);
+    }
+    if !env.egress {
+        return Ok(());
+    }
+    if !previous.iter().any(|word| word == EGRESS_WORD) {
+        return Err(Drain::PreviousKeepsNoEgress);
+    }
+    let staged = stops_of(env, &params.staged_release);
+    match staged.iter().any(|word| word == EGRESS_WORD) {
+        true => Ok(()),
+        false => Err(Drain::StagedAdoptsNoEgress),
+    }
+}
+
+/// The words on the `stops:` lines of the `--version` of the agent of the release `release`;
+/// none when it cannot be run.
+fn stops_of(env: &Env<'_>, release: &Path) -> Vec<String> {
     let binary = agent_in(env.manager, release);
     let printed = env.runner.run(&binary.to_string_lossy(), &["--version"]);
-    printed.is_ok_and(|printed| {
-        let mut stops = printed.lines().filter_map(|line| line.strip_prefix(STOPS));
-        stops.any(|list| list.split_whitespace().any(|word| word == HANDOVER_WORD))
-    })
+    printed
+        .iter()
+        .flat_map(|printed| printed.lines())
+        .filter_map(|line| line.strip_prefix(STOPS))
+        .flat_map(str::split_whitespace)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The change from the installed unit to the staged one, and the staged unit must be there.
@@ -222,15 +316,34 @@ fn note_superseded(mut done: Done, superseded: Option<String>) -> Done {
     done
 }
 
-/// A success that says the unit changes, and which keys.
-fn note_restart(mut done: Done, record: &Record) -> Done {
-    if let (Outcome::Success, Some(restart)) = (done.outcome, &record.unit_restart) {
-        done.report.detail = Some(format!(
-            "the unit changes ({}): cutover starts the agent on the new unit",
-            restart.changed.join(", ")
-        ));
+/// A success of a prepare that drains says why, and the unit that changes, and which keys; a
+/// deferral for the drain bound says why the host was draining. The unit's text stands alone
+/// when the unit is the cause, so that no two notes say the same thing.
+fn note_drain(mut done: Done, record: &Record, cause: Drain) -> Done {
+    match (done.outcome, done.report.reason) {
+        (Outcome::Success, _) => {
+            let drain = cause.note();
+            done.report.detail = Some(match (&record.unit_restart, cause) {
+                (Some(restart), Drain::UnitChanges) => unit_note(restart),
+                (Some(restart), _) => format!("{}; {drain}", unit_note(restart)),
+                (None, _) => drain,
+            });
+        }
+        (Outcome::Deferred, Some(Reason::DrainBound)) => {
+            let detail = done.report.detail.take().unwrap_or_default();
+            done.report.detail = Some(format!("{detail}; draining because {}", cause.text()));
+        }
+        _ => {}
     }
     done
+}
+
+/// The detail that says the unit changes, and which keys.
+fn unit_note(restart: &UnitRestart) -> String {
+    format!(
+        "the unit changes ({}): cutover starts the agent on the new unit",
+        restart.changed.join(", ")
+    )
 }
 
 /// A first install needs a way to authenticate to the lease server. When the host's flags file

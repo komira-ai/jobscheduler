@@ -106,7 +106,9 @@ allocation on that host holds, and it places a job only on a host whose ceiling 
 and ports. `release` lists each table, deletes the run's rules by handle and frees their ports;
 a rule already gone is forgiven as a gone veth is, and a release that leaves a rule keeps the
 run's address block out of use. A
-start removes both tables, so a restarted agent holds no forward. `Egress::check` requires every
+start does not remove a forward of a run that still stands: it loads both tables again with those
+forwards put back (see "Configuration" below), and the next process's adoption takes
+them over. `Egress::check` requires every
 forward of a run wired now to be there, whole (its two rules, each exactly as written), its
 acceptance ahead of the other rules of `forward`, and no other rule under the prefix: a forward
 missing, left over from no run, changed or twice is `EgressError::Rules`, and the start is
@@ -148,11 +150,22 @@ alone. A start under `allow-list` or `open`
 first binds the abstract socket `@js-agent-egress` (`egress::HOST_LOCK`) and holds it while the
 agent's egress or any run it wired lives; the kernel frees it when the process ends, however it ends. The names it
 makes and removes are the host's, not an agent's, so a second agent with a wired ceiling is
-refused at start (`EgressError::Held`) instead of sweeping the first one's live wiring. Then it
-removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both tables a previous
-process left (the keeper kills the containers with the agent), loads the firewall and switches
-IPv4 forwarding on. That switch is host-wide and is never switched back: other users of the host
-may rely on it by then, and the agent cannot know. The tables are named `js_crun_egress` and
+refused at start (`EgressError::Held`) instead of taking or removing the first one's live wiring.
+Then it reads what a previous process left: the interfaces named `jsv<digits>` (with their
+ifindex) and `jsp<digits>` (exactly), the members of the sets `jobifs` and `openifs`, and the
+forwards of both tables. It loads the firewall in one `nft -f` transaction that replaces both
+tables and, in the same transaction, puts back each member whose `jsv` interface is still there
+(in its set, when the ceiling still has that set) and each whole forward whose interface is
+still there, reads both tables back and requires them to hold exactly the firewall and those
+forwards (otherwise the start fails, `EgressError::Rules`), and switches IPv4 forwarding on.
+nftables applies a batch whole, so a packet of a running job meets the old tables or the new
+ones, never none: a job is not left unfiltered or without its forward. The address blocks of every
+interface found are kept out of use until the runtime has settled. The wiring is the kernel's, so
+a process that ends leaves it: the crun runtime leaves every run's wiring when it is dropped
+(`Attachment::leave`) and the jobs go on under the same rules. That switch is host-wide and is never switched back: other users of the host
+may rely on it by then, and the agent cannot know. A start does not kill or remove a standing run (the unit's `KillMode=process` leaves the
+containers alive), and an update's hand-over keeps a job's egress before, during and after the
+restart. The tables are named `js_crun_egress` and
 `js_crun_egress_nat`; the Podman path's table `js_egress` and its flags were removed. The kernel's
 own reverse-path filter is not relied on; the firewall's `spoof` rule is, because it counts.
 
@@ -171,19 +184,35 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   `crun run` ends, or for the init's route wait at most), `Egress::attach` with the job's level
   (its interface goes in `jobifs` for `allow-list`, `openifs` for `open`), and
   `Attachment::release` when the runtime reads the run's end or removes the run, whichever
-  comes first. A container whose pid or wiring fails is removed with its lease, and its job never
+  comes first. A process that ends while a run stands drops its runtime, which leaves each run's
+  wiring (`Attachment::leave`) instead of releasing it. The next process adopts it:
+  `Egress::adopt` for each run of the ledger that still stands, after the runtime has read the
+  run's labels (`jobscheduler.dev/network`, and `jobscheduler.dev/network-ports` as `H:C,H:C`
+  when ports are declared, written at stage) and the container's pid. It opens the container's
+  network namespace and reads `eth0` there (`nsenter --net=<path> -- ip -j addr show dev eth0`),
+  and requires its peer's ifindex to be that of a `jsv` interface the start kept, one address of
+  prefix length 30 that is the block of that interface, the set member of the run's level, and
+  exactly the forwards of the run's declared ports; a level above the ceiling, a host port the
+  ceiling does not list, or a host port already held is refused (`EgressError::AboveCeiling`,
+  `Unadoptable`, `PortTaken`). A run that does not fit, or a run of an agent with a ceiling whose
+  container carries no network label, is removed and reported removed, like any run the agent cannot take
+  over. Once every run is adopted `Egress::settle` removes the kept interfaces,
+  members and forwards no run took over (a run removed, one that ended while no agent ran, a pair
+  a killed start left) and every stray `jsp<digits>`; a block is given out again only when its
+  removal succeeded, and the first error fails the open. A container whose pid or wiring fails is removed with its lease, and its job never
   ran (the init still waits for the route). A release that fails is logged and the removal goes
-  on, and its /30 block is not given out again until the next start sweeps the host: the sets
+  on, and its /30 block is not given out again until the next start settles the host: the sets
   hold interface names, so a member left in `openifs` would otherwise let the next run that
   took the name (an `allow-list` one, say) reach any address. A wired run on a runtime with no
   egress is refused at `stage`, before its container exists. For a wired job (`allow-list` or `open`) the backend writes the configured resolvers in
   the container's `resolv.conf` and starts the init with `--wait-route`; a `none` job, and every
   job in mode none, gets neither and is not attached.
 - The flags are parsed and checked at start. The agent starts the egress once, after it holds
-  the claims of its scratch root and host id (the start removes what an earlier agent left);
-  an allow-list that cannot be set up ends the agent with status 2. The start-up sweep of the
-  leases an earlier process left needs no call of its own: no `Attachment` of that process
-  exists, and the egress start has already removed its interfaces and tables. Only
+  the claims of its scratch root and host id (the start keeps what an earlier agent left for
+  the runtime to adopt or settle);
+  an allow-list that cannot be set up ends the agent with status 2. The wiring of the
+  leases an earlier process left is adopted or removed by the runtime when it opens, as above;
+  no `Attachment` of that process exists. Only
   the crun runtime enforces a ceiling, so the container engine is refused `allow-list` and `open` at
   start (its jobs get `none` only). Declared ports are forwarded through the DNAT rules of
   "Declared ports". The old Podman flags (`--container-network`, `--container-egress-allow`,
@@ -247,7 +276,8 @@ wiring takes the 31.0 ms.
 
 On one production host, with the `crun` runtime and an allow-list: a job reaches its endpoint
 on another host and is refused elsewhere (the metadata address included), the veth, the set
-member and the `jsv*` links are gone after the run and after an agent restart, and the
+member and the `jsv*` links are gone after the run, a job that runs across an agent update keeps
+its egress and its forwards, and no member or link of a run that ended is left after a restart, and the
 distribution's `crun` AppArmor profile is loaded (the restriction applies to the job user's `crun`).
 The CI job `agent-egress` runs the same through `CrunRuntime` on the runner's kernel; the
 host's kernel (6.8) and its AppArmor policy are exercised only by the canary, which no pull

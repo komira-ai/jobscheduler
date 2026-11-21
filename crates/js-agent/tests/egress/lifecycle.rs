@@ -79,11 +79,15 @@ fn a_run_that_ends_leaves_only_a_set_member_and_release_removes_it() {
     assert!(wired().is_empty());
 }
 
-/// Asserts the restart sweep: a run that was wired when the agent died (its attachment never
+/// Asserts the restart: a run that was wired when the agent died (its attachment never
 /// released, nothing of the old process left) and a pair that was made but never moved are
-/// removed by the next start, along with the set's members, while the process that was in
-/// the old namespace is untouched; the new agent then wires the same namespace again from the
-/// first block.
+/// found by the next start, which keeps them (the interfaces and the set member are still
+/// there, so a run that survived the agent could take them over); the settle that follows,
+/// when no run takes them over, removes them along with the set's members, while the process
+/// that was in the old namespace is untouched, and the names that only look like the agent's
+/// are left alone; the new agent then wires the same namespace again from the first block.
+/// Catches a restart that keeps what no run takes over, and one that removes what it does not
+/// own.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]
 fn a_restart_removes_what_a_crash_left() {
@@ -120,6 +124,13 @@ fn a_restart_removes_what_a_crash_left() {
     assert_eq!(links("jsp"), ["jsp7", "jspare0", "jspare1"]);
 
     let new = Egress::start(config()).expect("a restart");
+    assert_eq!(
+        links("jsv"),
+        ["jsv0", "jsv7"],
+        "a start keeps what a run may take over"
+    );
+    assert_eq!(wired(), ["jsv0"], "and the member of the kept interface");
+    new.settle().expect("settled");
     assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
     assert_eq!(
         links("jsp"),
@@ -237,7 +248,7 @@ fn two_runs_at_once_cannot_reach_each_other() {
 /// root, is refused as `Held` and removes nothing (the first run's veth and set member stay,
 /// and it still reaches the allowed endpoint). The hold lasts while the run is wired even
 /// after the egress itself is dropped (the second start is still `Held`), and ends with the
-/// run's release, after which a start succeeds. Catches a second agent that sweeps the first
+/// run's release, after which a start succeeds. Catches a second agent that removes the first
 /// one's live wiring, and a hold that ends before the last run's release.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]

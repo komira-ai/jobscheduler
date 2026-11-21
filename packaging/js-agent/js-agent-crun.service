@@ -46,9 +46,10 @@
 #                         so a crash does not cost a running job. A container's wall limit
 #                         is enforced only while an agent runs: the time it ran with no agent
 #                         counts, and one whose limit passed meanwhile is stopped at the
-#                         first step after the adoption. An agent with an allow-list --egress
-#                         adopts no container that may still run (its start removes the
-#                         network wiring): it removes those, and their jobs are lost; a
+#                         first step after the adoption. An agent with an --egress ceiling
+#                         leaves each run's network wiring as it is when it ends, and the next
+#                         one adopts it after checking it against the container: a container
+#                         whose wiring does not check is removed and its job lost; a
 #                         container that ended meanwhile is adopted and its result reported
 #   --drain-wait 3600 --stop-grace 120   a plain stop (systemctl stop) drains: the agent lets
 #                         the running jobs finish for up to an hour (the most --drain-wait
@@ -59,8 +60,8 @@
 #                         check is under way (seconds; --drain-wait at most), and exits leaving
 #                         every run as it is; the agent the cutover starts adopts them, as after
 #                         a crash. The update hook asks for it only of an agent that lists
-#                         `handover` in `js-agent --version` and has no --egress in its flags
-#                         file; see docs/runbooks/crun-host-setup.md
+#                         `handover` in `js-agent --version` (and `egress-handover`, if the
+#                         flags file has an --egress); see docs/runbooks/crun-host-setup.md
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
 #                         killed (its main process alone, as above: what it still ran is

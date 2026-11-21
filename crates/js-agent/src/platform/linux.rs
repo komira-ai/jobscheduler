@@ -26,10 +26,12 @@ use crate::{Failure, Services, crun, crun_host, disk, integrity};
 /// the container engine (`docker`, Docker or Podman) behind `--allow-container-engine`; then the
 /// ways its stop can go: `drain`, and `handover`, which the update hook looks for in the agent
 /// it is to stop before it asks that agent to leave its runs to the next process (see
-/// [`crate::lifecycle::handover`]).
+/// [`crate::lifecycle::handover`]); and `egress-handover`, which the hook looks for in both
+/// agents of an update on a host with an egress ceiling: the one it stops leaves the runs'
+/// network wiring in place, and the one it starts adopts it.
 pub const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "\nruntimes: docker crun\nstops: drain handover"
+    "\nruntimes: docker crun\nstops: drain handover egress-handover"
 );
 
 /// The one warning of an agent that runs its jobs through the container engine.
@@ -797,8 +799,10 @@ pub(crate) type Claims = Option<(crun::HostClaim, crun::HostClaim)>;
 /// What a crun agent takes before its jobs start: the image store and its claim files go in
 /// the directory above the scratch root, and one crun agent may hold each scratch root and
 /// each host id (the start-up sweep and the lease names go by them); then its egress starts,
-/// once (after the claims: an allow-list's start removes every interface and table a previous
-/// agent left, which must not be another agent's that still runs; mode none starts nothing).
+/// once (after the claims: the start keeps what an earlier process left and loads one transaction,
+/// and `Egress::settle`, called after the runs are adopted, removes what no run took over; an
+/// agent that still runs must not be another's, so the claims come first; mode none starts
+/// nothing).
 /// An agent of the engine, or one that runs no job, takes nothing.
 ///
 /// # Errors
@@ -835,7 +839,9 @@ pub(crate) fn claim(
     let plan = backend
         .as_mut()
         .and_then(|Backend::Container(s)| s.crun_mut());
-    if let Some(plan) = plan {
+    // A machine that supplies the egress (a test's) has the runtime use that, and the agent
+    // starts none.
+    if let Some(plan) = plan.filter(|_| services.machine.egress_port().is_none()) {
         let started = crun::start_egress(egress, crate::egress::Egress::start);
         let mode = egress.mode();
         plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;

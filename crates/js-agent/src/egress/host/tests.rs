@@ -65,6 +65,33 @@ fn allow_list() -> Config {
     config_with("allow-list", None)
 }
 
+/// The links `ip -j link show` prints for the interfaces `names`, each with the interface
+/// index 10 plus its place in the list.
+fn links(names: &[&str]) -> String {
+    let items: Vec<serde_json::Value> = (10u64..)
+        .zip(names)
+        .map(|(ifindex, name)| serde_json::json!({"ifname": name, "ifindex": ifindex}))
+        .collect();
+    serde_json::Value::Array(items).to_string()
+}
+
+/// The standard input of the first `nft -f -` the start made: the ruleset and what it keeps.
+fn loaded(fake: &Fake) -> String {
+    let state = fake.state();
+    let at = state
+        .log
+        .iter()
+        .position(|line| line.starts_with("nft -f -"))
+        .expect("a load");
+    // `stdins` has an entry for every program run, `log` one for every call; the writes of
+    // files are logged only, so count the runs before the load.
+    let runs = state.log[..at]
+        .iter()
+        .filter(|line| !line.starts_with("write "))
+        .count();
+    state.stdins[runs].clone()
+}
+
 /// What a path's identity reads as, one entry per read ; the last repeats.
 type Seen = Vec<(u64, u64)>;
 
@@ -76,6 +103,8 @@ struct State {
     calls: usize,
     fail: Option<usize>,
     answers: Vec<(String, Result<String, String>)>,
+    /// Answers given once, oldest first, ahead of `answers`.
+    once: Vec<(String, Result<String, String>)>,
     /// The calls whose program cannot be started, by a part of their logged line.
     not_run: Vec<String>,
     files: HashMap<String, String>,
@@ -132,6 +161,12 @@ impl Fake {
         self.state().answers.insert(0, (needle.to_owned(), result));
     }
 
+    /// Answers the next call whose logged line contains `needle` with `result`, once; the
+    /// ones after it get the standing answer.
+    fn answer_once(&self, needle: &str, result: Result<String, String>) {
+        self.state().once.push((needle.to_owned(), result));
+    }
+
     fn identity(&self, path: &str, seen: Seen) {
         self.state().identities.insert(path.to_owned(), (seen, 0));
     }
@@ -181,6 +216,13 @@ impl Sys for Fake {
         }
         if Self::counted(&mut state) {
             return Err(RunError::Failed("injected".to_owned()));
+        }
+        let queued = state
+            .once
+            .iter()
+            .position(|(needle, _)| line.contains(needle.as_str()));
+        if let Some(at) = queued {
+            return state.once.remove(at).1.map_err(RunError::Failed);
         }
         state
             .answers
@@ -290,37 +332,89 @@ fn mode_none_does_nothing() {
     assert_eq!(fake.calls(), 0, "no call for a mode that wires nothing");
 }
 
-/// Catches a sweep that removes what is not the agent's or leaves what is: of the
-/// interfaces, `jsv0` and `jsp3` (a name that is already gone with its pair is not an
-/// error) are deleted, and `jspare0`, `jsvx`, `jsv`, `eth0`, `lo` and an entry with no name
-/// are not; both tables go in one transaction.
+/// Asserts that a start keeps the interfaces of an earlier process and never deletes them,
+/// and that `settle` removes exactly `jsv0` and `jsp3` (a name already gone with its pair is not
+/// an error): `jspare0`, `jsvx`, `jsv`, `eth0`, `lo` and an entry with no name are not the
+/// agent's and are not touched, and the blocks 0 and 3 are out of use until the settle gave
+/// them back. Catches a start that deletes at start what a hand-over must keep, and
+/// a settle that removes what is not the agent's or leaves what is.
 #[test]
-fn the_sweep_removes_exactly_the_agents_numbered_interfaces() {
+fn a_start_keeps_the_agents_numbered_interfaces_and_settle_removes_exactly_those() {
     let fake = Fake::new();
     fake.answer(
         "link show",
-        Ok(r#"[{"ifname":"lo"},{"ifname":"jsv0"},{"ifname":"jspare0"},{"ifname":"jsvx"},{"ifname":"jsv"},{"ifname":"jsp3"},{"mtu":1500},{"ifname":"eth0"}]"#
+        Ok(r#"[{"ifname":"lo"},{"ifname":"jsv0","ifindex":10},{"ifname":"jspare0"},{"ifname":"jsvx"},{"ifname":"jsv"},{"ifname":"jsp3"},{"mtu":1500},{"ifname":"eth0"}]"#
             .to_owned()),
     );
     fake.answer(
         "link del jsp3",
         Err("Cannot find device \"jsp3\"".to_owned()),
     );
-    let _egress = started(&fake, allow_list());
+    let egress = started(&fake, allow_list());
+    assert!(
+        fake.log().iter().all(|call| !call.contains("link del")),
+        "{:?}",
+        fake.log()
+    );
+    let first = egress
+        .attach("a", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    let second = egress
+        .attach("b", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    let third = egress
+        .attach("c", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     assert_eq!(
-        fake.log()[..4],
-        [
-            "ip -j link show",
-            "ip link del jsv0",
-            "ip link del jsp3",
-            "nft -f - << add table inet js_crun_egress",
-        ]
+        [first.interface(), second.interface(), third.interface()],
+        [Some("jsv1"), Some("jsv2"), Some("jsv4")],
+        "blocks 0 and 3 are kept out of use"
+    );
+    let before = fake.log().len();
+    egress.settle().expect("settled");
+    assert_eq!(
+        fake.log()[before..],
+        ["ip link del jsv0", "ip link del jsp3"]
+    );
+    let fourth = egress
+        .attach("d", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    let fifth = egress
+        .attach("e", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    assert_eq!(
+        [fourth.interface(), fifth.interface()],
+        [Some("jsv0"), Some("jsv3")],
+        "both blocks are free once settled"
+    );
+    drop((first, second, third, fourth, fifth));
+}
+
+/// Asserts that a job end beside its host end is not a leftover of its own (it goes with
+/// the host end) and one alone is: `jsv5` with `jsp5` and `jsp7` alone, settled, delete `jsv5`
+/// and `jsp7` and never `jsp5`. Catches a settle that deletes a job end twice or leaves a
+/// stray pair half.
+#[test]
+fn a_job_end_beside_its_host_end_is_not_a_stray_of_its_own() {
+    let fake = Fake::new();
+    fake.answer(
+        "link show",
+        Ok(r#"[{"ifname":"jsp5"},{"ifname":"jsv5","ifindex":10},{"ifname":"jsp7"}]"#.to_owned()),
+    );
+    let egress = started(&fake, allow_list());
+    let before = fake.log().len();
+    egress.settle().expect("settled");
+    assert_eq!(
+        fake.log()[before..],
+        ["ip link del jsv5", "ip link del jsp7"]
     );
 }
 
-/// Catches an allow-list that starts without the firewall: after the sweep it switches IPv4
-/// forwarding on, loads the ruleset the module renders (in one transaction, the stdin of
-/// `nft -f -`) and reads both tables back for the baseline the check compares with.
+/// Asserts the whole start: it reads the interfaces and both old tables, switches IPv4
+/// forwarding on, loads the ruleset the module renders in one transaction (the stdin of
+/// `nft -f -`, with nothing after it when nothing was kept) and reads both tables back for
+/// the baseline the check compares with. Catches an allow-list that starts without the
+/// firewall, or one that deletes the old tables in a call of its own.
 #[test]
 fn an_allow_list_loads_the_firewall_and_reads_it_back() {
     let fake = Fake::new();
@@ -329,23 +423,24 @@ fn an_allow_list_loads_the_firewall_and_reads_it_back() {
         fake.log(),
         [
             "ip -j link show",
-            "nft -f - << add table inet js_crun_egress",
+            "nft -j list table inet js_crun_egress",
+            "nft -j list table ip js_crun_egress_nat",
             "write /proc/sys/net/ipv4/ip_forward 1",
             "nft -f - << add table inet js_crun_egress",
             "nft -j list table inet js_crun_egress",
             "nft -j list table ip js_crun_egress_nat",
         ]
     );
-    let loaded = fake.state().stdins[2].clone();
-    assert_eq!(loaded, ruleset::render(&allow_list()));
+    assert_eq!(loaded(&fake), ruleset::render(&allow_list()));
     assert_eq!(egress.config().allow().len(), 1);
     egress.check().expect("as loaded");
 }
 
 /// Catches a start that goes on past a failure: each of its calls, failing in turn, ends
 /// the start with an error that says what failed; and so does a list of interfaces that is
-/// not JSON, a leftover that cannot be deleted for a reason other than being gone, and a
-/// listing of the tables that is not what `nft -j` prints.
+/// not JSON, and a listing of the old tables that is not what `nft -j` prints (its text now
+/// names the reading of what an earlier process left; the deletion of a leftover is
+/// the settle's, tested with it).
 #[test]
 fn every_failure_of_the_start_is_an_error_that_names_it() {
     let calls = {
@@ -353,7 +448,7 @@ fn every_failure_of_the_start_is_an_error_that_names_it() {
         let _ = started(&fake, allow_list());
         fake.calls()
     };
-    assert_eq!(calls, 6);
+    assert_eq!(calls, 7);
     for n in 0..calls {
         let fake = Fake::new();
         fake.fail_call(n);
@@ -365,15 +460,11 @@ fn every_failure_of_the_start_is_an_error_that_names_it() {
     fake.answer("link show", Ok("nope".to_owned()));
     assert!(start(&fake).to_string().contains("listing the interfaces"));
     let fake = Fake::new();
-    fake.answer("link show", Ok(r#"[{"ifname":"jsv0"}]"#.to_owned()));
-    fake.answer("link del", Err("Operation not permitted".to_owned()));
-    assert!(start(&fake).to_string().contains("Operation not permitted"));
-    let fake = Fake::new();
     fake.answer("list table inet", Ok("nope".to_owned()));
     assert!(
         start(&fake)
             .to_string()
-            .contains("reading the firewall back")
+            .contains("reading the firewall an earlier process left")
     );
 }
 
@@ -666,6 +757,13 @@ fn each_error_reads_as_what_it_is() {
             EgressError::PortTaken { port: 8080 },
             "egress: host port 8080 is forwarded to another run already",
         ),
+        (
+            EgressError::Unadoptable {
+                pid: 4,
+                why: "no jsv1 was left on the host".to_owned(),
+            },
+            "egress: the wiring of container 4 cannot be taken over: no jsv1 was left on the host",
+        ),
     ];
     for (error, text) in kinds {
         assert_eq!(error.to_string(), text);
@@ -784,17 +882,17 @@ fn the_crun_runtimes_port_is_the_host_side() {
     assert_ne!(egress, started(&Fake::new(), allow_list()));
 }
 
-/// Catches a start that sweeps the host while another agent holds its egress, or when the
+/// Catches a start that touches the host while another agent holds its egress, or when the
 /// hold cannot be asked for: with the host held the start is refused as `Held`, and with the
 /// socket unusable it is an error naming the hold; either way nothing else is run (no
 /// interface listed or removed, no table touched). Mode none starts whoever holds it.
 #[test]
-fn a_held_host_refuses_an_allow_list_and_sweeps_nothing() {
+fn a_held_host_refuses_an_allow_list_and_touches_nothing() {
     let fake = Fake::new();
     fake.state().held = true;
     let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
     assert_eq!(refused, Err(EgressError::Held));
-    assert_eq!(fake.log(), Vec::<String>::new(), "nothing swept");
+    assert_eq!(fake.log(), Vec::<String>::new(), "nothing touched");
     assert!(
         EgressError::Held.to_string().contains(HOST_LOCK),
         "{}",
@@ -810,7 +908,7 @@ fn a_held_host_refuses_an_allow_list_and_sweeps_nothing() {
             why: "injected".to_owned(),
         })
     );
-    assert_eq!(broken.log(), Vec::<String>::new(), "nothing swept");
+    assert_eq!(broken.log(), Vec::<String>::new(), "nothing touched");
     let none = Fake::new();
     none.state().held = true;
     started(&none, config_with("none", None));
@@ -857,7 +955,7 @@ fn every_runtime_opened_from_a_crun_plan_shares_its_egress() {
 }
 
 /// Catches a hold on the host that ends while a run of it is still wired: with the last
-/// `Egress` dropped and an attachment alive, another start is refused as `Held` and sweeps
+/// `Egress` dropped and an attachment alive, another start is refused as `Held` and touches
 /// nothing (it would remove the run's live veth and could take its name, which the run's
 /// release would then delete); once the attachment is released the hold ends with it and a
 /// start succeeds.
@@ -872,10 +970,11 @@ fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
     let logged = fake.log().len();
     let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
     assert_eq!(refused, Err(EgressError::Held));
-    assert_eq!(fake.log().len(), logged, "nothing swept");
+    assert_eq!(fake.log().len(), logged, "nothing touched");
     attachment.release().expect("release");
     started(&fake, allow_list());
 }
 
 mod levels;
 mod ports;
+mod takeover;

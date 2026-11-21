@@ -248,11 +248,11 @@
 //!
 //! A stop that finds the handover file in the state root (the update hook writes it just
 //! before it stops the agent to restart it on another release) does not drain, in an agent
-//! with jobs and no egress ceiling: it takes no new job and announces `draining`, waits until
-//! no start, stop or post-job check is under way (at most `--drain-wait`), and exits 0
-//! leaving every run as it is for the next process to adopt (see [`lifecycle::handover`] and
-//! [`drive`]). An agent with an egress ceiling always drains: its next process removes the runs
-//! it would adopt. An agent removes a handover file it finds at its start.
+//! with jobs: it takes no new job and announces `draining`, waits until no start, stop or
+//! post-job check is under way (at most `--drain-wait`), and exits 0 leaving every run as it
+//! is for the next process to adopt (see [`lifecycle::handover`] and [`drive`]). Under an
+//! egress ceiling each run keeps its network wiring and its firewall rules throughout, and
+//! the next process takes them over. An agent removes a handover file it finds at its start.
 //!
 //! # A whole-node lease
 //!
@@ -863,11 +863,9 @@ fn execute(
         bundle: bundle.map(|settings| Admission::new(settings, host.clone())),
         quota: scratch_quota,
     };
-    // A stop hands the runs over to the next process (see `lifecycle::handover`) only when
-    // that process can adopt the ones still running: an agent with an egress ceiling removes
-    // them at its start (the wiring of an earlier process cannot be taken over), so its stop
-    // always drains.
-    let handover_root = lifecycle::handover::root_for(held_root.as_ref(), &local.egress);
+    // A stop asked to hand the runs over to the next process (see `lifecycle::handover`)
+    // leaves them as they are, their egress wiring included, for that process to adopt.
+    let handover_root = held_root.clone();
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     // A handover file is a request to the process running when it was written: one left

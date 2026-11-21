@@ -22,12 +22,19 @@
 //! there. A *container* is the real thing: `Oci` starts it as the job user with a user
 //! namespace of its own, and the agent wires it between the start and the job's first
 //! instruction. The end-to-end tests use containers.
+//!
+//! The `handover` tests also need `systemd-run` and `systemctl`: they run the agent's side as a
+//! probe of this binary in transient units, and a holder stands for a container that outlives its
+//! agent. An agent's start keeps the wiring it finds for its runs to take over
+//! (`Egress::adopt`), and `Egress::settle` removes what none took; a test that leaves a run
+//! wired removes it itself.
 #![cfg(target_os = "linux")]
 
 mod allow;
 mod container;
 mod dns;
 mod forward;
+mod handover;
 mod ipv6;
 mod lifecycle;
 mod modes;

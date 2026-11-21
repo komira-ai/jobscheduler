@@ -39,14 +39,32 @@
 //! Releasing a run removes the rules of its forwards (found by their comment `fwd-<host
 //! port>` in a listing of each table and deleted by handle), then the set member and the host
 //! end (which takes the job end with it); the container's namespace is the kernel's to free
-//! when its last process ends, so nothing of it outlives the run. A start under the ceiling
-//! `allow-list` or `open` begins by
-//! removing every interface named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and
-//! the two tables. An agent with such a ceiling does not adopt a crun run that may still run:
-//! it removes it at start (it takes over only a run that has ended, which has no network left),
-//! so nothing a previous process wired is in use; and only one agent at a time holds the
-//! host's egress ([`HOST_LOCK`]), so the sweep never removes the live wiring of another agent.
-//! Mode none runs no program and touches nothing.
+//! when its last process ends, so nothing of it outlives the run.
+//!
+//! The wiring is the kernel's, not the agent process's: the veth pair, the addresses, the
+//! route, the set member and the forwards stay as they are when the agent ends, and enforce
+//! the same rules with no agent running. A process that ends leaves them
+//! ([`Attachment::leave`]; the crun runtime leaves the wiring of every run it still holds
+//! when it is dropped), and the next process takes them over:
+//!
+//! - a start under the ceiling `allow-list` or `open` holds the host's egress ([`HOST_LOCK`]),
+//!   reads what an earlier process left (the interfaces `jsv<digits>` and `jsp<digits>`,
+//!   exactly; the members of the sets and the forwards of both tables), and loads the
+//!   firewall in one `nft -f` transaction that replaces both tables and, in the same
+//!   transaction, puts back each member whose interface is still there (in its set, if the
+//!   ceiling still has that set) and each whole forward whose interface is still there. The
+//!   kernel applies a transaction whole: a packet meets the old tables or the new ones, never
+//!   none, so a wired run is never left unfiltered and never loses its rules;
+//! - the runtime then adopts each run of its ledger that still stands ([`Egress::adopt`]): the
+//!   run's container must hold, as `eth0`, the job end of a pair whose host end the start kept,
+//!   addressed for that end's block, in the set of the run's level, with exactly the forwards
+//!   of its declared ports. A run that does not fit is removed by the runtime;
+//! - and last [`Egress::settle`] removes every kept interface, member and forward no run took
+//!   over (a run removed, one that ended while no agent ran, a pair a killed start left).
+//!
+//! Only one agent at a time holds the host's egress ([`HOST_LOCK`]), so a start never takes
+//! over or removes the live wiring of another agent. Mode none runs no program and touches
+//! nothing.
 //!
 //! Everything the agent does to the machine goes through [`Sys`], so the unit tests script
 //! the whole sequence, including a failure at each step, and the tests that need the real
@@ -132,6 +150,15 @@ pub enum EgressError {
     /// that agent's live interfaces and tables.
     #[error("egress: another agent on this host holds its egress (the socket @{HOST_LOCK})")]
     Held,
+    /// The wiring of an earlier process's run cannot be taken over ([`Egress::adopt`]): the
+    /// container's network is not the wiring the start kept for it.
+    #[error("egress: the wiring of container {pid} cannot be taken over: {why}")]
+    Unadoptable {
+        /// The pid of the container's first process.
+        pid: u32,
+        /// What does not fit.
+        why: String,
+    },
 }
 
 /// Why a program the host side runs gave no output: it could not be started at all, or it
@@ -257,7 +284,7 @@ fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::proc
 /// clone; every clone is the same pool, and two are equal when they are the same pool. A wired
 /// ceiling (`allow-list` or `open`) holds the host's egress ([`HOST_LOCK`]) until its last
 /// clone and its last [`Attachment`] are dropped: a run still wired keeps another start from
-/// sweeping it.
+/// taking the host's egress while it runs.
 #[derive(Debug, Clone)]
 pub struct Egress {
     inner: Arc<Inner>,
@@ -285,6 +312,9 @@ struct Inner {
     /// read back or removed, and while the check reads the tables, so no two of those
     /// overlap.
     forwards: Mutex<BTreeMap<u16, Forward>>,
+    /// The wiring an earlier process left that the start kept, by block, until a run takes it
+    /// over ([`Egress::adopt`]) or [`Egress::settle`] removes it; its blocks are in `used`.
+    kept: Mutex<adopt::Left>,
 }
 
 /// One run's wiring. Dropping it (or [`Attachment::release`]) takes it down.
@@ -361,15 +391,18 @@ fn sysctl(sys: &dyn Sys, path: &str, value: &str) -> Result<(), EgressError> {
 impl Egress {
     /// Starts the host side for `config`. Mode none runs nothing. A wired ceiling
     /// (`allow-list` or `open`) first holds the host's egress ([`HOST_LOCK`]: another agent's
-    /// live wiring is never swept), then removes what an earlier agent left (the interfaces
-    /// `jsv<digits>` and `jsp<digits>`, both tables), switches IPv4 forwarding on (a host-wide
-    /// switch, which stays on when the agent ends: other users of the host may rely on it, and
-    /// the agent cannot know) and loads the firewall. The forwards of an earlier agent go with
-    /// its tables, so a start holds none.
+    /// live wiring is never touched), then reads what an earlier process of the agent left
+    /// (the interfaces `jsv<digits>` and `jsp<digits>`, the members of the sets, the forwards),
+    /// switches IPv4 forwarding on (a host-wide switch, which stays on when the agent ends:
+    /// other users of the host may rely on it, and the agent cannot know) and loads the
+    /// firewall in one transaction that replaces both tables and keeps, in it, the members and
+    /// the forwards of the interfaces still there (see the module documentation). What it kept
+    /// waits for [`Egress::adopt`] and [`Egress::settle`]; its blocks are not given out.
     ///
     /// # Errors
     ///
-    /// [`EgressError::Held`], or a program could not run or refused what it was given.
+    /// [`EgressError::Held`], [`EgressError::Rules`] when the forwards it kept do not read
+    /// back, or a program could not run or refused what it was given.
     pub fn start(config: Config) -> Result<Self, EgressError> {
         Self::start_on(config, Arc::new(System))
     }
@@ -381,31 +414,33 @@ impl Egress {
     /// [`Egress::start_on`] holding the abstract socket `lock` in place of [`HOST_LOCK`]: a
     /// test on the real machine holds a name of its own, never the host's.
     fn start_holding(config: Config, sys: Arc<dyn Sys>, lock: &str) -> Result<Self, EgressError> {
-        let (mut baseline, mut host) = (None, None);
+        let (mut baseline, mut host, mut left) = (None, None, adopt::Left::default());
         if config.mode() != Mode::None {
             let held = sys
                 .lock_host(lock)
                 .map_err(|why| command("holding the host's egress", why))?;
             host = Some(held.ok_or(EgressError::Held)?);
-            sweep(&*sys, &config)?;
+            left = adopt::found(&*sys, &config)?;
             sysctl(&*sys, "net/ipv4/ip_forward", "1\n")?;
+            let text = format!("{}{}", ruleset::render(&config), left.text());
             call(
                 &*sys,
                 "loading the firewall",
                 config.nft(),
                 &["-f", "-"],
-                Some(&ruleset::render(&config)),
+                Some(&text),
             )?;
-            baseline = Some(listing(&*sys, &config)?);
+            baseline = Some(left.read_back(&*sys, &config)?);
         }
         Ok(Self {
             inner: Arc::new(Inner {
                 _host: host,
                 config,
                 sys,
-                used: Mutex::new(BTreeSet::new()),
+                used: Mutex::new(left.blocks()),
                 baseline,
                 forwards: Mutex::new(BTreeMap::new()),
+                kept: Mutex::new(left),
             }),
         })
     }
@@ -492,13 +527,7 @@ impl Egress {
             });
         }
         let set = match level {
-            JobNetwork::None => {
-                return Ok(Attachment {
-                    inner: inner.clone(),
-                    wired: None,
-                    forwards: Vec::new(),
-                });
-            }
+            JobNetwork::None => return Ok(Attachment::none(inner)),
             JobNetwork::AllowList => IFACE_SET,
             JobNetwork::Open => OPEN_SET,
         };
@@ -522,6 +551,15 @@ impl Egress {
 }
 
 impl Attachment {
+    /// The attachment of a run that is not wired: it holds nothing and releases nothing.
+    fn none(inner: &Arc<Inner>) -> Self {
+        Self {
+            inner: inner.clone(),
+            wired: None,
+            forwards: Vec::new(),
+        }
+    }
+
     /// The name of the host end of the run's veth pair, none for a run that is not wired.
     #[must_use]
     pub fn interface(&self) -> Option<&str> {
@@ -545,50 +583,72 @@ impl Attachment {
         self.take_down()
     }
 
+    /// Leaves the run's wiring as it is, for the next process of the agent to take over
+    /// ([`Egress::adopt`]): nothing is removed, now or when this is dropped. For a process
+    /// that ends while the run goes on.
+    pub fn leave(mut self) {
+        self.wired = None;
+        self.forwards.clear();
+    }
+
     fn take_down(&mut self) -> Result<(), EgressError> {
         let Some((index, name, set)) = self.wired.take() else {
             return Ok(());
         };
-        let unforwarded = forwards::remove(&self.inner, &std::mem::take(&mut self.forwards));
-        let (config, sys) = (&self.inner.config, &*self.inner.sys);
-        let element = format!("{{ \"{name}\" }}");
-        let removed = remove(
+        let hosts = std::mem::take(&mut self.forwards);
+        unwire(&self.inner, (index, &name, Some(set)), &hosts)
+    }
+}
+
+/// Removes the wiring of block `index`, whose host end is `name` and whose member is in `set`
+/// (none when it is in no set): the rules of the forwards of `hosts`, the set member and the
+/// host end, each tried whatever became of the one before. The block is given back only once
+/// all are gone.
+///
+/// # Errors
+///
+/// `nft` or `ip` failed for a reason other than the thing being gone already: the veth's error
+/// first, then the set member's, then the forwards'.
+fn unwire(
+    inner: &Inner,
+    (index, name, set): (u32, &str, Option<&str>),
+    hosts: &[u16],
+) -> Result<(), EgressError> {
+    let unforwarded = forwards::remove(inner, hosts);
+    let (config, sys) = (&inner.config, &*inner.sys);
+    let element = format!("{{ \"{name}\" }}");
+    let removed = set.map_or(Ok(()), |set| {
+        remove(
             sys,
             "removing the interface from the firewall set",
             config.nft(),
             &["delete", "element", "inet", TABLE, set, &element],
             None,
-        );
-        let deleted = remove(
-            sys,
-            "deleting the veth",
-            config.ip(),
-            &["link", "del", &name],
-            None,
-        );
-        // All three are tried; the veth's error is the one reported when more than one fails.
-        let result = match (unforwarded, removed, deleted) {
-            (_, _, Err(error)) | (_, Err(error), Ok(())) | (Err(error), Ok(()), Ok(())) => {
-                Err(error)
-            }
-            (Ok(()), Ok(()), Ok(())) => Ok(()),
-        };
-        // The block, and with it the name `jsvN` and its address, is given back only once all
-        // are gone. The sets hold names, so a member left behind would let the next run that
-        // takes the name in through that set's rule (an `allow-list` run taking the name an
-        // `open` run left in `openifs` would reach any address); a veth left behind would make
-        // the next run's pair fail; a forward left behind would send its port to the next run
-        // given the address. Such a block stays out of use until the next start sweeps the
-        // host.
-        if result.is_ok() {
-            self.inner
-                .used
-                .lock()
-                .expect("the pool lock is never poisoned")
-                .remove(&index);
-        }
-        result
+        )
+    });
+    let deleted = remove(
+        sys,
+        "deleting the veth",
+        config.ip(),
+        &["link", "del", name],
+        None,
+    );
+    // All three are tried; the veth's error is the one reported when more than one fails.
+    let result = match (unforwarded, removed, deleted) {
+        (_, _, Err(error)) | (_, Err(error), Ok(())) | (Err(error), Ok(()), Ok(())) => Err(error),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+    };
+    // The block, and with it the name `jsvN` and its address, is given back only once all
+    // are gone. The sets hold names, so a member left behind would let the next run that
+    // takes the name in through that set's rule (an `allow-list` run taking the name an
+    // `open` run left in `openifs` would reach any address); a veth left behind would make
+    // the next run's pair fail; a forward left behind would send its port to the next run
+    // given the address. Such a block stays out of use until a later start finds it and its
+    // settle removes it.
+    if result.is_ok() {
+        lock(&inner.used).remove(&index);
     }
+    result
 }
 
 impl Drop for Attachment {
@@ -621,21 +681,7 @@ fn wire(
         format!("{PEER_PREFIX}{index}"),
     );
     let (ip, nft) = (config.ip(), config.nft());
-    let container = |why: String| EgressError::Container { pid, why };
-
-    // The namespace is opened once and held: what is wired is the namespace seen now and
-    // not whatever a reused pid names later.
-    let netns = sys
-        .open_netns(pid)
-        .map_err(|why| container(format!("/proc/{pid}/ns/net: {why}")))?;
-    let own = sys
-        .identity("/proc/self/ns/net")
-        .map_err(|why| command("reading the agent's own network namespace", why))?;
-    if own == netns.identity {
-        return Err(container(
-            "it shares the host's network namespace".to_owned(),
-        ));
-    }
+    let netns = namespace(sys, pid)?;
 
     let step = |what: &str, program: &str, args: &[&str]| call(sys, what, program, args, None);
     step(
@@ -693,6 +739,29 @@ fn wire(
     .map(drop)
 }
 
+/// The network namespace of the process `pid`, opened once and held: what is wired or read is
+/// the namespace seen now and not whatever a reused pid names later.
+///
+/// # Errors
+///
+/// [`EgressError::Container`] when the process is gone or shares the host's (the agent's)
+/// namespace; the agent's own namespace cannot be read.
+fn namespace(sys: &dyn Sys, pid: u32) -> Result<Netns, EgressError> {
+    let container = |why: String| EgressError::Container { pid, why };
+    let netns = sys
+        .open_netns(pid)
+        .map_err(|why| container(format!("/proc/{pid}/ns/net: {why}")))?;
+    let own = sys
+        .identity("/proc/self/ns/net")
+        .map_err(|why| command("reading the agent's own network namespace", why))?;
+    match own == netns.identity {
+        true => Err(container(
+            "it shares the host's network namespace".to_owned(),
+        )),
+        false => Ok(netns),
+    }
+}
+
 /// Both tables as the kernel holds them, normalized.
 fn listing(sys: &dyn Sys, config: &Config) -> Result<Value, EgressError> {
     let mut tables = Vec::new();
@@ -711,51 +780,7 @@ fn listing(sys: &dyn Sys, config: &Config) -> Result<Value, EgressError> {
     Ok(Value::Array(tables))
 }
 
-/// Whether `name` is `prefix` and then digits, nothing else (`jsv12`, not `jsvx` or `jspare0`).
-fn numbered(name: &str, prefix: &str) -> bool {
-    name.strip_prefix(prefix)
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Removes every interface an earlier wired ceiling made and both tables.
-fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
-    let text = call(
-        sys,
-        "listing the interfaces",
-        config.ip(),
-        &["-j", "link", "show"],
-        None,
-    )?;
-    let links: Vec<Value> =
-        serde_json::from_str(&text).map_err(|why| command("listing the interfaces", why))?;
-    let leftovers = links
-        .iter()
-        .filter_map(|link| link.get("ifname").and_then(Value::as_str))
-        .filter(|name| numbered(name, IF_PREFIX) || numbered(name, PEER_PREFIX));
-    for name in leftovers {
-        // Deleting one end of a pair deletes the other, which may be later in the list.
-        remove(
-            sys,
-            "deleting a leftover veth",
-            config.ip(),
-            &["link", "del", name],
-            None,
-        )?;
-    }
-    // Add then delete makes the removal work whether or not the tables exist.
-    call(
-        sys,
-        "removing the earlier tables",
-        config.nft(),
-        &["-f", "-"],
-        Some(&format!(
-            "add table inet {TABLE}\ndelete table inet {TABLE}\n\
-             add table ip {NAT_TABLE}\ndelete table ip {NAT_TABLE}\n"
-        )),
-    )
-    .map(drop)
-}
-
+mod adopt;
 mod forwards;
 #[cfg(test)]
 mod tests;
