@@ -2,8 +2,8 @@
 //! `.github/workflows/release.yml` and of `.github/workflows/artifacts.yml`, which it calls to
 //! build and sign the files), read from the files as text: actions pinned to commit SHAs, no
 //! permission at the top, hosted runners, a push to main as the only trigger that releases, no
-//! wait for `ci` before the release (`plan` needs nothing, only the two reports need `ci-passed`)
-//! and no concurrency group, the read-only wait for `ci`, `id-token: write` and `contents: write`
+//! wait for `ci` before the release (`plan` needs nothing and no job waits for `ci`)
+//! and no concurrency group, `id-token: write` and `contents: write`
 //! only where they are meant, every attestation signed by artifacts.yml, the apt jobs'
 //! permissions, and the gamma step's shape. The fast lane's jobs (`unit-tests`, `turn`,
 //! `desired`, `deployed`, `release-red`, `release-green`) are held by `fast_lane`; the shape of
@@ -164,7 +164,6 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
     let mut gated: Vec<String> = [
-        "ci-passed",
         "plan",
         "unit-tests",
         "turn",
@@ -198,66 +197,6 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
     let plan = job(&jobs, "plan").join("\n");
     assert!(plan.contains("github.event_name == 'pull_request'"));
     assert!(!plan.contains("--tip"));
-}
-
-/// Asserts the wait for `ci` (which reports, and gates nothing: `fast_lane`): a job with exactly `actions: read` and nothing else, no
-/// checkout (no repository code runs in it), a four-hour limit, a poll every 120 s of the
-/// `ci` run of this commit's push and of its jobs (all of them: ci.yml has no macOS job, the
-/// platforms other than Linux x86_64 are the release's beta stage), and a failure naming the
-/// run and the jobs for any job that did not succeed or skip.
-#[test]
-fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
-    let text = workflow();
-    let jobs = jobs(&text);
-    let wait = job(&jobs, "ci-passed").join("\n");
-    assert!(
-        wait.contains("    permissions:\n      actions: read\n    steps:"),
-        "{wait}"
-    );
-    assert_eq!(wait.matches("permissions:").count(), 1, "{wait}");
-    assert!(!wait.contains("uses:") && !wait.contains("checkout") && !wait.contains("cargo "));
-    assert!(wait.contains("timeout-minutes: 240"));
-    assert!(wait.contains("workflows/ci.yml/runs?head_sha=$COMMIT&event=push"));
-    // The step's environment and strict shell.
-    assert!(wait.contains("        env:\n          GH_TOKEN: ${{ github.token }}\n          REPO: ${{ github.repository }}\n        run: |\n          set -euo pipefail\n          failed=0\n          while true; do\n"));
-    // The newest run is picked by creation time, and an absent run reads as empty.
-    assert!(wait.contains(r#"--jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.id) \(.status) \(.conclusion // "none") \(.html_url)"'"#));
-    assert!(wait.contains(
-        "      if [ -z \"$run\" ]; then\n              echo \"no ci run for $COMMIT yet\""
-    ));
-    // The jobs of that run's latest attempt are read from the jobs API, none left out of the
-    // count; a finished one counts as bad unless it succeeded or was skipped, and one not
-    // finished is pending.
-    assert!(wait.contains("actions/runs/$id/jobs?per_page=100&filter=latest"));
-    assert!(wait.contains(r#"--jq '.jobs | "\(length) "#));
-    assert!(!wait.contains("macos"), "{wait}");
-    assert!(wait.contains(r#"select(.status != "completed")"#));
-    assert!(wait.contains(r#"select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)""#));
-    // Any other job that failed, was cancelled or timed out fails the release at once,
-    // naming the jobs and the run, before the pass is considered.
-    assert!(wait.contains("              if [ -n \"$bad\" ]; then\n                echo \"::error::ci did not pass for $COMMIT: $bad, $url; release-red reports it\"\n                exit 1\n              fi\n"));
-    // All the jobs finished and none bad passes (exit 0); the pass comes after the failure
-    // check.
-    assert!(wait.contains("              if [ \"$total\" -gt 0 ] && [ \"$pending\" -eq 0 ]; then\n                echo \"ci passed: $url\"\n                exit 0\n              fi\n"));
-    assert!(
-        wait.find("if [ -n \"$bad\" ]").expect("bad check") < wait.find("exit 0").expect("pass"),
-        "{wait}"
-    );
-    // A finished run with no job is an error, not a pass.
-    assert!(wait.contains("              if [ \"$status\" = completed ]; then\n                echo \"::error::ci did not pass for $COMMIT: no job in the run, $url; release-red reports it\"\n                exit 1\n              fi\n"));
-    // Otherwise the wait goes on, two minutes at a time.
-    assert!(
-        wait.contains("echo \"ci is $status: $url ($pending of $total jobs still to finish)\"\n")
-    );
-    assert!(wait.contains("            sleep 120\n          done"));
-    // Ten failed reads in a row (of the runs or of the jobs) fail the job; a good read
-    // starts the count again.
-    assert!(wait.contains("failed=$((failed + 1))\n              if [ \"$failed\" -ge 10 ]; then\n                echo \"::error::reading the ci runs of $COMMIT failed $failed times in a row; release-red reports it\"\n                exit 1\n              fi\n"));
-    assert!(wait.contains(
-        "then\n              failed=0\n            else\n              failed=$((failed + 1))\n"
-    ));
-    assert!(wait.contains("              run=\"\"\n            fi\n"));
-    assert!(!wait.contains("nothing is released"), "{wait}");
 }
 
 /// Asserts that publish, deploy-tool, gamma and the control-plane deploy run only on the plan's

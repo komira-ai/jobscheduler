@@ -3,9 +3,8 @@
 # (docs/release.md). GitHub-hosted
 # runners only, actions pinned to commit SHAs.
 #
-# What starts it. A push to main (`on: push`), and nothing else releases: the wait and
-# every job that attests, publishes or deploys test that the event is a push and the ref is
-# main, and no tag and no manual run starts a release. A pull request that changes this file
+# What starts it. A push to main (`on: push`), and nothing else releases: every job that
+# attests, publishes or deploys tests that the event is a push and the ref is main, and no tag and no manual run starts a release. A pull request that changes this file
 # runs `plan` as a dry run (told so with --dry-run, on Linux x86_64 like every check of a pull
 # request) and never waits for `ci`, builds, attests, tags or publishes. A pull request that
 # changes only artifacts.yml starts no dry run. Pull requests run Linux x86_64 and nothing else:
@@ -23,13 +22,10 @@
 # `publish`, the apt repository (with `check-apt`, its install check), the control-plane deploy
 # and `desired`, which starts hostkeeper-desired.yml for the release. Nothing else gates it:
 # `ci` (lint, deny, coverage, the privileged and live jobs) and the beta stage (the macOS tests
-# and probe) run beside it or after it. `ci-passed` still waits for the jobs of the `ci` run of the commit
-# (polling every 120 s, up to four hours) but no job needs it to pass: when `ci` fails, the
-# release has shipped already and `release-red` reports it, and the fix is the next merge. It
-# holds `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
-# (about twenty minutes) fail it too.
+# and probe) run beside it or after it. Nothing in this file waits for `ci` or reports its result;
+# a failing `ci` run on a commit is that run's own red check, and the fix is the next merge.
 #
-# A failure of any job of the run on main (the deploy path, `ci-passed` or the beta stage) runs
+# A failure of any job of the run on main (the deploy path or the beta stage) runs
 # `release-red`, which opens an issue titled `RELEASE-RED: jobscheduler ...` with the label
 # `main-red`, the label the project's red-main alert watches, or comments on the one that is
 # open; a run in which every job passed or was skipped runs `release-green`, which closes it. A
@@ -154,70 +150,6 @@ env:
   COMMIT: ${{ github.sha }}
 
 jobs:
-  # Waits for the jobs of the `ci` run of this commit, and passes only
-  # when they all succeeded or were skipped. No job needs it to pass: the release does not wait
-  # for `ci` (the top of this file), and when `ci` fails this job fails and `release-red`
-  # reports it. It holds `actions: read` and nothing else, checks out nothing and runs no
-  # repository code. On a pull request it is skipped.
-  ci-passed:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    permissions:
-      actions: read
-    steps:
-      - name: Wait for ci on this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          failed=0
-          while true; do
-            # The newest run of `ci` for this commit's push (a re-run of it is the same run),
-            # and the jobs of its latest attempt, as three fields: how many,
-            # how many have not finished, and the finished ones that did not succeed or skip
-            # (name=conclusion, comma-separated). Both reads count towards the failed reads.
-            run=""
-            if run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" \
-              --jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.id) \(.status) \(.conclusion // "none") \(.html_url)"')" &&
-              { [ -z "$run" ] || { read -r id _ <<< "$run" &&
-                ci_jobs="$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100&filter=latest" \
-                  --jq '.jobs | "\(length) \([.[] | select(.status != "completed")] | length) \([.[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "\(.name)=\(.conclusion)"] | join(","))"')"; }; }; then
-              failed=0
-            else
-              failed=$((failed + 1))
-              if [ "$failed" -ge 10 ]; then
-                echo "::error::reading the ci runs of $COMMIT failed $failed times in a row; release-red reports it"
-                exit 1
-              fi
-              echo "::warning::reading the ci runs failed ($failed in a row); trying again"
-              run=""
-            fi
-            if [ -z "$run" ]; then
-              echo "no ci run for $COMMIT yet"
-            else
-              read -r id status conclusion url <<< "$run"
-              read -r total pending bad <<< "$ci_jobs"
-              # A job that failed, was cancelled or timed out fails the release at once, even
-              # while the others still run.
-              if [ -n "$bad" ]; then
-                echo "::error::ci did not pass for $COMMIT: $bad, $url; release-red reports it"
-                exit 1
-              fi
-              if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
-                echo "ci passed: $url"
-                exit 0
-              fi
-              if [ "$status" = completed ]; then
-                echo "::error::ci did not pass for $COMMIT: no job in the run, $url; release-red reports it"
-                exit 1
-              fi
-              echo "ci is $status: $url ($pending of $total jobs still to finish)"
-            fi
-            sleep 120
-          done
-
   # Whether to release, and as which version (crates/xtask, `release plan`).
   plan:
     # A push to main, at once (it does not wait for `ci`); or a pull request (a dry run).
@@ -2110,14 +2042,14 @@ jobs:
     steps:
       - run: echo "the publish and deploy jobs of this run have ended"
 
-  # A job of this run on main failed: the deploy path, `ci-passed` (the `ci` run of the commit)
-  # or the beta stage (`failure()` looks at every job these need, and every job those need).
+  # A job of this run on main failed: the deploy path or the beta stage (`failure()` looks at
+  # every job these need, and every job those need).
   # Opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
   # with the label `main-red`, whose body has a `Run:`, a `Head:` and up to five `Failing:` lines,
   # or comments the same lines on the RELEASE-RED issue that is open. It holds `issues: write`
   # and `actions: read` and runs `gh` only.
   release-red:
-    needs: [ci-passed, unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
+    needs: [unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
     if: ${{ failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -2156,7 +2088,7 @@ jobs:
   # moved on, a newer run may have opened them, so nothing is closed (the newer run's own green
   # closes them). Same permissions as `release-red`, `gh` only.
   release-green:
-    needs: [plan, ci-passed, unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
+    needs: [plan, unit-tests, deployed, beta-macos, beta-macos-probe, promote-macos]
     if: ${{ !cancelled() && !failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
