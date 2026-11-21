@@ -11,11 +11,13 @@
 //! The lease server is the one the agent's end-to-end tests start in their process (js-lease-server
 //! `start`), over TLS with the certificate the flags file's `--ca-cert` names, trusting the test's
 //! CA for agents (`--agent-client-ca`), with a pool `mac-build` that asks `os=macos` and
-//! `arch=arm64`. Its clock starts at a fixed instant inside the certificates' validity and then
-//! runs with the real time, and the server is ticked as its own interval would tick it (see
-//! [`Pump`]): a restarted agent's hello is refused `host-live` until the session before it has
-//! gone without a beat for the pool's grace, as on a real server, which a clock that stood still
-//! would never let happen.
+//! `arch=arm64`. Its clock reads the host's time when it starts and then runs with the real time,
+//! and the server is ticked as its own interval would tick it (see [`Pump`]): a restarted
+//! agent's hello is refused `host-live` until the session before it has gone without a beat for
+//! the pool's grace, as on a real server, which a clock that stood still would never let happen;
+//! and what the server stamps (a cordon's expiry) is judged by the update hook against the
+//! host's own clock, as a real server's is, which a clock set apart from the host's would fail.
+//! The certificates are valid from 2026-09-01 to 3000-01-01.
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
@@ -53,9 +55,6 @@ const IDENTITY_DIR: &str = "/var/lib/hostkeeper/identity";
 
 /// The URI SAN hostkeeper puts on a host's own certificate.
 const HOST_ROLE_URI: &str = "urn:hostkeeper:host-role:host";
-
-/// 2030-01-01T00:00:00Z: the server's clock, inside the validity of every certificate here.
-const SERVER_NOW_MS: u64 = 1_893_456_000_000;
 
 /// The client token the test reads the host list with.
 const CLIENT_TOKEN: &str = "client-token-0123456789-abcdefghijkl";
@@ -179,7 +178,11 @@ impl LeaseServer {
         ];
         let cli = Cli::try_parse_from(argv).expect("the server's flags");
         let config = Config::from_cli(cli).expect("the server's configuration");
-        let clock = ManualClock::new(Timestamp::from_millis(SERVER_NOW_MS));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the host's clock is after 1970");
+        let millis = u64::try_from(now.as_millis()).expect("the host's time in milliseconds");
+        let clock = ManualClock::new(Timestamp::from_millis(millis));
         let (ticks, ticker) = channel_ticker();
         let runtime = Runtime::new().expect("a runtime");
         let running = runtime
