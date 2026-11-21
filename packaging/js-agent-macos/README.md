@@ -112,10 +112,14 @@ come back. Nothing in the package does any of this at install time.
 
 ## Signing
 
-The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls
+The workflow has three jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
 unsigned, checks it and uploads it, and names no secret: no code of a branch can see a signing
-key. `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
+key. `first-install` runs on a manual run alone, on any branch, and calls
+`js-agent-macos-first-install.yml` with the version typed: it installs the unsigned package
+`build` made on the runner, the way hostkeeper does, and runs the update hook's prepare,
+cutover, verify and cleanup as root with launchd loading the jobs (the release runs it as its own
+beta job, `beta-macos-first-install`). `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
 from `build`, imports the installer certificate into a temporary keychain, finds the
 "Developer ID Installer" identity there by its SHA-1, signs with `productsign --timestamp`,
 checks the signed package again and writes `SHA256SUMS` for it. It does not notarize. When the
@@ -227,15 +231,17 @@ Known limits:
 
 ## Not done yet
 
-- The update hook's `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`, `print`) has
-  run against a fake of `launchctl` only, never against a real launchd: what `launchctl print`
-  prints of a daemon that crashed (its `last exit code`), the time a `bootstrap` takes to start
-  the daemon, and `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and
-  from what the fake says, not from a Mac. `kickstart -k` runs a daemon whatever its `KeepAlive`
+- The update hook's unit tests run its `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`,
+  `print`) against a fake of `launchctl`; the real launchd is reached by the first-install
+  test (`mac_first_install`, run by `js-agent-macos-first-install.yml` on a hosted runner), which
+  covers the install and the first update only: what `launchctl print` prints of a daemon that
+  crashed (its `last exit code`) and `bootout` waiting out the agent's `ExitTimeOut` are read
+  from the manual and from what the fake says unless that run meets them. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
 - The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake
-  `pfctl` and a fake `launchctl` only, not on a Mac.
+  `pfctl` and a fake `launchctl` in their unit tests; the first-install run is the only run of
+  them on a Mac.
 - The config hook (`js-agent config-hook`) restarts the agent without loading the anchor first:
   a config package that changes the `--native-pf-*` flags of a running Mac leaves the new anchor
   to the pf job's next run (within 30 seconds), and an agent that starts before it refuses to

@@ -1,12 +1,13 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
-//! read as it is in the repository. Two jobs: `build` runs in the release's beta stage and by hand
+//! read as it is in the repository. Three jobs: `build` runs in the release's beta stage and by hand
 //! (never on a pull request), holds no secret and signs nothing, and builds a hostkeeper
 //! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
 //! plist naming the agent of the same package by its cdhash); `sign` runs only on main (by hand,
 //! or in the release's call that asks for it), in the protected environment `pkg-signing`, takes
 //! the checked unsigned package from `build` without rebuilding, and is the only place a secret
-//! is named, on the step that signs and nowhere else. Nothing is notarized. Neither job
-//! publishes anything.
+//! is named, on the step that signs and nowhere else. Nothing is notarized. `first-install` calls
+//! the first-install workflow on a manual run alone (never in the release's call), with the
+//! version typed and no secret. No job publishes anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -75,10 +76,163 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// The call of the first-install workflow: the one `uses:` that is not pinned to a commit.
+const FIRST_INSTALL_USES: &str = "uses: ./.github/workflows/js-agent-macos-first-install.yml";
+
+/// The jobs that run steps of their own (`build` and `sign`): those that do not call a workflow.
+fn step_jobs(text: &str) -> BTreeMap<String, Vec<&str>> {
+    jobs(text)
+        .into_iter()
+        .filter(|(_, job)| {
+            !job.iter()
+                .any(|l| indent(l) == 4 && l.trim().starts_with("uses:"))
+        })
+        .collect()
+}
+
 #[test]
-fn the_workflow_has_a_build_job_and_a_sign_job() {
+fn the_workflow_has_a_build_job_a_first_install_call_and_a_sign_job() {
     let names: Vec<String> = jobs(&read(WORKFLOW)).into_keys().collect();
-    assert_eq!(names, ["build", "sign"]);
+    assert_eq!(names, ["build", "first-install", "sign"]);
+    let steps: Vec<String> = step_jobs(&read(WORKFLOW)).into_keys().collect();
+    assert_eq!(steps, ["build", "sign"]);
+}
+
+/// One line per way the job `first-install` of the workflow `text` is not the call of the
+/// first-install workflow that only a manual run makes: after `build`, for the event
+/// `workflow_dispatch` alone, with `contents: read`, the version typed by hand, and no secret.
+fn call_problems(text: &str) -> Vec<String> {
+    let all = jobs(text);
+    let Some(job) = all.get("first-install") else {
+        return vec!["there is no first-install job".to_owned()];
+    };
+    let at_four: Vec<&str> = job
+        .iter()
+        .filter(|l| indent(l) == 4)
+        .map(|l| l.trim())
+        .collect();
+    let body = job.join("\n");
+    let mut problems = Vec::new();
+    let mut want = |ok: bool, what: &str| {
+        if !ok {
+            problems.push(what.to_owned());
+        }
+    };
+    want(
+        at_four.contains(&"needs: [build]"),
+        "the call does not wait for build alone",
+    );
+    want(
+        at_four.contains(&"if: ${{ github.event_name == 'workflow_dispatch' }}"),
+        "the call is not for the event workflow_dispatch alone",
+    );
+    want(
+        at_four.contains(&FIRST_INSTALL_USES),
+        "the call is not of js-agent-macos-first-install.yml",
+    );
+    let perms: Vec<&str> = job
+        .iter()
+        .skip_while(|l| l.trim() != "permissions:")
+        .skip(1)
+        .take_while(|l| indent(l) > 4)
+        .map(|l| l.trim())
+        .collect();
+    want(
+        perms == ["contents: read"],
+        "the call's permissions are not contents: read",
+    );
+    let with: Vec<&str> = job
+        .iter()
+        .skip_while(|l| l.trim() != "with:")
+        .skip(1)
+        .take_while(|l| indent(l) > 4)
+        .map(|l| l.trim())
+        .collect();
+    want(
+        with == ["version: ${{ inputs.version }}"],
+        "the call does not pass the version typed and nothing else",
+    );
+    want(!body.contains("secret"), "the call passes secrets");
+    want(
+        at_four.iter().all(|l| {
+            ["needs:", "if:", "permissions:", "uses:", "with:"]
+                .iter()
+                .any(|k| l.starts_with(k))
+        }),
+        "the call has a key besides needs, if, permissions, uses and with",
+    );
+    problems
+}
+
+#[test]
+fn the_first_install_job_is_a_manual_run_only_call_with_no_secret() {
+    assert_eq!(call_problems(&read(WORKFLOW)), Vec::<String>::new());
+}
+
+/// Each way the call can stop being the manual-run call of the first install is named.
+#[test]
+fn each_way_of_changing_the_first_install_call_is_named() {
+    let text = read(WORKFLOW);
+    let head = "  first-install:\n    needs: [build]\n    if: ${{ github.event_name == 'workflow_dispatch' }}\n    permissions:\n      contents: read\n    uses: ./.github/workflows/js-agent-macos-first-install.yml\n    with:\n      version: ${{ inputs.version }}\n";
+    assert!(text.contains(head));
+    for (to, says) in [
+        (
+            head.replace("needs: [build]\n", ""),
+            "the call does not wait for build alone",
+        ),
+        (
+            head.replace("needs: [build]", "needs: [build, sign]"),
+            "the call does not wait for build alone",
+        ),
+        (
+            head.replace(
+                "    if: ${{ github.event_name == 'workflow_dispatch' }}\n",
+                "",
+            ),
+            "the call is not for the event workflow_dispatch alone",
+        ),
+        (
+            head.replace("== 'workflow_dispatch'", "== 'push'"),
+            "the call is not for the event workflow_dispatch alone",
+        ),
+        (
+            head.replace(
+                "github.event_name == 'workflow_dispatch'",
+                "github.event_name == 'workflow_dispatch' || github.event_name == 'push'",
+            ),
+            "the call is not for the event workflow_dispatch alone",
+        ),
+        (
+            format!("{head}    secrets: inherit\n"),
+            "the call passes secrets",
+        ),
+        (
+            format!("{head}      other: x\n"),
+            "the call does not pass the version typed and nothing else",
+        ),
+        (
+            head.replace("js-agent-macos-first-install.yml", "beta.yml"),
+            "the call is not of js-agent-macos-first-install.yml",
+        ),
+        (
+            head.replace("contents: read", "contents: write"),
+            "the call's permissions are not contents: read",
+        ),
+        (
+            head.replace("${{ inputs.version }}", "0.0.0"),
+            "the call does not pass the version typed",
+        ),
+        (
+            format!("{head}    environment: pkg-signing\n"),
+            "the call has a key besides",
+        ),
+    ] {
+        let problems = call_problems(&text.replacen(head, &to, 1));
+        assert!(
+            problems.iter().any(|p| p.contains(says)),
+            "{to:?} must say {says:?}: {problems:?}"
+        );
+    }
 }
 
 /// The lines of the `on:` block, without comments.
@@ -165,16 +319,24 @@ fn the_workflow_holds_read_access_only_and_publishes_nothing() {
 }
 
 #[test]
-fn every_action_is_pinned_to_a_commit_and_both_jobs_run_on_macos_15() {
+fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_15() {
     let text = read(WORKFLOW);
-    for line in code(&text).into_iter().filter(|l| l.contains("uses:")) {
+    let uses: Vec<&str> = code(&text)
+        .into_iter()
+        .filter(|l| l.contains("uses:"))
+        .collect();
+    // The one call that is not pinned is the local workflow, which is this repository's own.
+    let local: Vec<&&str> = uses.iter().filter(|l| l.contains("uses: ./")).collect();
+    assert_eq!(local.len(), 1, "{local:?}");
+    assert_eq!(local[0].trim(), FIRST_INSTALL_USES);
+    for line in uses.iter().filter(|l| !l.contains("uses: ./")) {
         let pin = line.split('@').nth(1).unwrap_or("");
         assert!(
             pin.len() >= 40 && pin[..40].chars().all(|c| c.is_ascii_hexdigit()),
             "{line}"
         );
     }
-    for (name, job) in jobs(&text) {
+    for (name, job) in step_jobs(&text) {
         assert!(
             job.iter().any(|l| l.trim() == "runs-on: macos-15"),
             "{name}"
@@ -389,9 +551,9 @@ fn the_key_is_imported_for_productsign_alone() {
 }
 
 #[test]
-fn both_jobs_check_the_version_before_anything_else_but_the_presence_check() {
+fn the_jobs_that_run_steps_check_the_version_before_anything_else_but_the_presence_check() {
     let text = read(WORKFLOW);
-    for (name, job) in jobs(&text) {
+    for (name, job) in step_jobs(&text) {
         let all = steps(&job);
         let at = usize::from(name == "sign");
         let (step, lines) = &all[at];

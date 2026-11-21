@@ -178,6 +178,7 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "cp-deploy",
         "beta-macos",
         "beta-macos-pkg",
+        "beta-macos-first-install",
         "beta-macos-probe",
         "promote-macos",
         "pkg-upload",

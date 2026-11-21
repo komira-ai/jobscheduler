@@ -144,7 +144,10 @@ as owner), any script, and another identifier or version.
 
 1. `release.yml`'s `beta-macos-pkg` calls `js-agent-macos-pkg.yml` with `version` the release's, `sign: true` and
    `secrets: inherit` (a called workflow reads every secret it is not passed as empty, so without it `sign` would skip).
-   A pull request runs none of it.
+   A pull request runs none of it. The release's `beta-macos-first-install` (after `beta-macos-pkg`, no secret)
+   calls `js-agent-macos-first-install.yml`, which installs the unsigned package on a runner through hostkeeper's
+   installer and runs the update hook as root; only `promote-macos` waits for it, never the deploy. A manual run of
+   `js-agent-macos-pkg.yml` calls it too, so a branch's package can be tried before it merges.
 2. The `sign` job runs on main for that call (and for a manual run), in the environment `pkg-signing`, with the
    secrets `MACOS_INSTALLER_P12` (the "Developer ID Installer" certificate and key as a base64 PKCS#12 file) and
    `MACOS_INSTALLER_P12_PASSWORD`. It imports them into a temporary keychain for `productsign` alone, finds the
