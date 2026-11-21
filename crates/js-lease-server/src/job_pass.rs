@@ -183,7 +183,8 @@ impl Agents {
         // server claimed the period: the pass's writes are conditional on the rows it read, so
         // two passes in one period do no wrong, and one that is never run would leave the
         // removed host's jobs unended.
-        if gone.is_empty() {
+        let claimed = gone.is_empty();
+        if claimed {
             match jobs.claim_duty(JOB_PASS, self.duty_period()) {
                 Ok(true) => {}
                 Ok(false) => return None,
@@ -220,6 +221,10 @@ impl Agents {
                 }
                 let settle = |placer: &Arc<SchedPlacer>| placer.settle_gone(&gone);
                 self.placer.iter().for_each(settle);
+                // Only the server that claimed the period forgets rows: one per period.
+                if claimed {
+                    self.forget_silent_rows(jobs);
+                }
                 Some(Pass::Ran(ran))
             }
             Err(error) => {
@@ -230,6 +235,24 @@ impl Agents {
         };
         self.trim_feed();
         seen
+    }
+
+    /// Forgets the `node/` rows of the hosts silent for longer than the registry's
+    /// [`Registry::forget_after`] that hold nothing ([`js_jobs::JobStore::forget_silent_nodes`]),
+    /// so a pool's cap counts only rows not forgotten. The hosts forgotten are logged; a store
+    /// that fails is logged, and the next period forgets them.
+    fn forget_silent_rows(&self, jobs: &ServerJobs) {
+        match jobs.forget_silent_nodes(self.registry.forget_after()) {
+            Ok(forgotten) => {
+                if !forgotten.is_empty() {
+                    let hosts: Vec<&str> = forgotten.iter().map(HostId::as_str).collect();
+                    info!(hosts = ?hosts, "the rows of silent hosts were forgotten");
+                }
+            }
+            Err(error) => {
+                warn!(%error, "silent hosts' rows could not be forgotten; the next period tries again")
+            }
+        }
     }
 
     /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
@@ -262,3 +285,7 @@ mod tests;
 #[cfg(test)]
 #[path = "job_pass_clock_tests.rs"]
 mod clock_tests;
+
+#[cfg(test)]
+#[path = "job_pass_forget_tests.rs"]
+mod forget_tests;

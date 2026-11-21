@@ -106,6 +106,9 @@ pub(crate) struct Agents {
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
+    /// The store's rows the last pass offered hosts by, which the next read takes each row from
+    /// while it stands at the version it had ([`crate::sched`]). Its lock is a leaf.
+    pub(crate) rows_read: Mutex<Option<Arc<crate::sched::jobs_rows::RowsRead>>>,
     /// The host credentials and job sinks of live logs, with `sink = "object_store"`
     /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
     /// under it or under the registry's.
@@ -336,6 +339,7 @@ fn placed_in(
         job_state,
         usage_in_job_store,
         placer: Some(placer.clone()),
+        rows_read: Mutex::default(),
         logs,
         job_limits,
         cpu_slack,
@@ -410,6 +414,7 @@ impl Agents {
             job_state: None,
             usage_in_job_store: false,
             placer: None,
+            rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),
             cpu_slack: CpuSlack::default(),
@@ -850,7 +855,8 @@ impl Agents {
     /// hello limits of those that left the file once they are refilled (a limit that is still
     /// spent stays, whoever it is of, so a certificate host's is not reset), then read the job service's client token
     /// files again ([`AgentTokens::reload_clients`]), put the job store's cordons on the
-    /// registry ([`Agents::mirror_cordons`]), and make the file of bindings current
+    /// registry ([`Agents::mirror_cordons`]) and its scale-down marks
+    /// ([`Agents::mirror_host_marks`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
     /// force, and their limits; a client token file that cannot be read, or holds no valid
@@ -883,6 +889,7 @@ impl Agents {
             }
         }
         self.mirror_cordons().await;
+        self.mirror_host_marks().await;
         self.save_bindings().await;
         // A due time that cannot be committed (only a store's commit fails here) is counted
         // with no arm of its own, so every test binary runs the same code of the tick.
