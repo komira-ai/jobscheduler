@@ -112,7 +112,9 @@ struct Rig {
     worker: Handle,
     machine: Arc<FakeMachine>,
     address: Arc<Mutex<String>>,
-    _files: Scratch,
+    /// The agent's flags, which the next process of the agent is started with too.
+    flags: Vec<String>,
+    files: Scratch,
 }
 
 /// Starts the server and the agent (`extra` flags beside the container ones), waits until
@@ -131,12 +133,23 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
     connector: impl Fn(Arc<Mutex<String>>) -> C,
 ) -> Rig {
     let files = Scratch::new(&format!("{name}-files"));
+    rig_in(server, address, files, extra, connector)
+}
+
+/// [`rig_over`] with the agent's files in `files`, which the test may have put things in.
+fn rig_in<C: js_agent::Connector + Send + 'static>(
+    server: Server,
+    address: Arc<Mutex<String>>,
+    files: Scratch,
+    extra: &[&str],
+    connector: impl Fn(Arc<Mutex<String>>) -> C,
+) -> Rig {
     let exec = files.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();
     let state = private(&files, "state").display().to_string();
     let scratch = private(&files, "run-scratch").display().to_string();
     let exec = exec.display().to_string();
-    let mut flags = vec![
+    let mut flags: Vec<String> = [
         "--host-id",
         "h1",
         "--allow-container-engine",
@@ -150,14 +163,40 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
         &state,
         "--scratch-root",
         &scratch,
-    ];
-    flags.extend_from_slice(extra);
+    ]
+    .iter()
+    .map(|flag| (*flag).to_owned())
+    .collect();
+    flags.extend(extra.iter().map(|flag| (*flag).to_owned()));
     let machine = Arc::new(FakeMachine::new());
+    let (agent, worker, polls) = launch(&server, &address, &flags, &machine, connector);
+    Rig {
+        polls,
+        server,
+        agent,
+        worker,
+        machine,
+        address,
+        flags,
+        files,
+    }
+}
+
+/// Starts an agent of the rig's host with `flags` over `machine`, and waits until it has said
+/// hello.
+fn launch<C: js_agent::Connector + Send + 'static>(
+    server: &Server,
+    address: &Arc<Mutex<String>>,
+    flags: &[String],
+    machine: &Arc<FakeMachine>,
+    connector: impl Fn(Arc<Mutex<String>>) -> C,
+) -> (Agent, Handle, Receiver<Poll>) {
     let (events, polls) = channel();
     let dispatch = Announcing {
         inner: Redirect(address.clone()),
         events: Mutex::new(events),
     };
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let agent = Agent::spawn_polling(
         server.url(),
         server.join_file(),
@@ -168,15 +207,7 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
     );
     let worker = agent.worker();
     assert_eq!(agent.next_wait(), INTERVAL, "the hello");
-    Rig {
-        polls,
-        server,
-        agent,
-        worker,
-        machine,
-        address,
-        _files: files,
-    }
+    (agent, worker, polls)
 }
 
 impl Rig {
@@ -412,7 +443,8 @@ fn a_running_job_survives_a_server_restart_and_its_result_arrives() {
         worker,
         machine,
         address,
-        _files,
+        flags: _,
+        files: _files,
     } = rig;
     let server = server.restart();
     *address.lock().unwrap() = server.url();
@@ -459,7 +491,8 @@ fn a_stop_for_a_job_the_restarted_server_forgot_stops_it_silently() {
         worker,
         machine,
         address,
-        _files,
+        flags: _,
+        files: _files,
     } = rig;
     let server = server.restart_forgetting_jobs();
     *address.lock().unwrap() = server.url();
@@ -697,4 +730,125 @@ fn a_cordoned_host_is_placed_no_job_until_it_is_uncordoned() {
     assert_eq!(rig.machine.world.created(), [job.as_str()]);
     let ran = rig.drain_now();
     assert_eq!(ran.status(), code(0), "{}", ran.err);
+}
+
+/// Asserts an agent update over a busy host, end to end against the real server: two jobs
+/// run; the update's request (the handover file in the state root) and the stop end the agent
+/// with status 0 and stop no job; one job ends while no agent runs; the next process of the
+/// agent, started once the server has stopped counting the old session as live, says hello,
+/// takes both jobs over and lists them, and the server records the job that ended in the gap
+/// as failed with its own exit and the other, when it ends, as succeeded; each result is
+/// acknowledged once and nothing is started twice. It catches an update that stops the jobs or
+/// drains, a next agent that loses a job or its result, and a result sent under another job.
+#[test]
+fn an_update_hands_the_running_jobs_to_the_next_agent_and_each_result_reaches_the_server() {
+    let rig = rig("jobs_e2e_handover", &[]);
+    let first = rig.queued(1000);
+    rig.until_running(&first);
+    let second = rig.queued(1000);
+    rig.until_running(&second);
+
+    js_agent::lifecycle::handover::write(&rig.files.path("state")).unwrap();
+    rig.agent.signal();
+    let Rig {
+        server,
+        agent,
+        machine,
+        address,
+        flags,
+        files,
+        ..
+    } = rig;
+    let ran = agent.finish();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("js-agent: handed over: every run is left as it is to the next process"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(machine.world.alive(), 2);
+    assert!(
+        !machine
+            .world
+            .log()
+            .iter()
+            .any(|call| call.starts_with("stop ")),
+        "{:?}",
+        machine.world.log()
+    );
+
+    // The second job ends while no agent runs; the server's clock passes its grace.
+    machine.world.exit(&second, 3);
+    server.clock.advance(Duration::from_secs(61));
+    let (agent, worker, polls) = launch(&server, &address, &flags, &machine, Redirect);
+    let rig = Rig {
+        polls,
+        server,
+        agent,
+        worker,
+        machine,
+        address,
+        flags,
+        files,
+    };
+    assert!(
+        !rig.files.path("state").join("handover").exists(),
+        "the next agent removed nothing it was asked: there was nothing left"
+    );
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.view(&first).0, RUNNING);
+    assert_eq!(
+        rig.view(&second),
+        ("JOB_STATE_FAILED".into(), Some("RESULT_REASON_EXIT".into()))
+    );
+    rig.machine.world.exit(&first, 0);
+    assert!(rig.worker.settle());
+    rig.tick();
+    assert_eq!(
+        rig.view(&first),
+        (
+            "JOB_STATE_SUCCEEDED".into(),
+            Some("RESULT_REASON_EXIT".into())
+        )
+    );
+    assert!(
+        rig.worker.snapshot().results.is_empty(),
+        "both acknowledged"
+    );
+    assert_eq!(
+        rig.machine.world.created(),
+        [first.as_str(), second.as_str()]
+    );
+    let ran = rig.agent.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+}
+
+/// Asserts what the next process does with a handover file the last stop left (an update step
+/// killed after it wrote the file): it removes it at its start and says so, so its own stop
+/// drains; and a file it cannot remove is named in a warning and the agent still starts.
+/// Catches a request made of one process that a later one acts on unasked.
+#[test]
+fn an_agent_removes_a_handover_file_left_by_an_earlier_stop() {
+    for (name, make, said) in [
+        (
+            "jobs_e2e_handover_left",
+            (|path: &Path| js_agent::lifecycle::handover::write(path).unwrap()) as fn(&Path),
+            "js-agent: removed a handover file left by an earlier stop",
+        ),
+        (
+            "jobs_e2e_handover_stuck",
+            |path: &Path| std::fs::create_dir(path.join("handover")).unwrap(),
+            "js-agent: warning: a handover file left by an earlier stop cannot be removed (",
+        ),
+    ] {
+        let server = Server::start_pool(name, &[], POOL_RUNS_QUICK_TOML);
+        let address = Arc::new(Mutex::new(server.url()));
+        let files = Scratch::new(&format!("{name}-files"));
+        make(&private(&files, "state"));
+        let rig = rig_in(server, address, files, &["--drain-wait", "0"], Redirect);
+        let ran = rig.agent.stop();
+        assert!(ran.err.contains(said), "{name}: {}", ran.err);
+    }
 }

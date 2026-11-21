@@ -97,6 +97,10 @@ pub struct Env<'a> {
     /// both; `None` when it names neither or cannot be read. A first install that has them
     /// needs no join token (see `prepare`).
     pub host_identity: Option<&'a HostIdentity>,
+    /// The host's flags file sets an egress ceiling (`--egress allow-list` or `open`), or
+    /// cannot be read: the agent's next process would remove the runs it was to adopt, so an
+    /// update drains the host instead of handing the runs over (see `prepare`).
+    pub egress: bool,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,

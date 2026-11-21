@@ -47,6 +47,7 @@ mod steps_cutover;
 mod steps_cutover_cordon;
 mod steps_cutover_launchd;
 mod steps_drain;
+mod steps_handover;
 mod steps_helper;
 mod steps_host_files;
 mod steps_host_setup;

@@ -716,4 +716,12 @@ impl StateView for FaultedState<'_> {
     fn has_credential(&self) -> bool {
         self.root.has_credential()
     }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        self.root.request_handover()
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        self.root.withdraw_handover()
+    }
 }

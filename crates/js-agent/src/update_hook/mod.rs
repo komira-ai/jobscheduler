@@ -12,6 +12,12 @@
 //! the hook takes both, for every step ([`is_hook_word`] routes the program to it). `uninstall`
 //! is refused: the package declares no uninstall bound.
 //!
+//! An update of a crun host under systemd whose running agent can hand its runs over does not
+//! drain it: `prepare` records the handover and neither cordons nor waits, and `cutover` and
+//! `rollback` write the handover file in the agent's state root before they stop the unit, so the
+//! stopping agent leaves its runs to the one started next (see `prepare` for when, and
+//! [`crate::lifecycle::handover`]). Every other host is cordoned and drained first.
+//!
 //! `drain` and `resume` are the steps of a maintenance run (hostkeeper's maintenance-updates
 //! design, 5.2): the package manifest names them (`hook.drain`, `hook.resume`), and hostkeeper
 //! runs `drain` before work on the host that is not an update (an OS update, a reboot) and
