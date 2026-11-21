@@ -1,7 +1,8 @@
 //! Duty 3: the post-job checks list the `--watch-dir` directories (`SUGGESTED_WATCH_DIRS`
 //! names `/root/.ssh`, `/etc/sudoers.d` and others that only root can read). A directory the
-//! agent cannot read must make the agent refuse to start and, once running, taint the host
-//! as unchecked: never a silent skip.
+//! agent cannot read must make the agent refuse to start and, once running, be noted in the log
+//! (`watch-unreadable`, taking the directory as unchanged: no contained job can write a watched
+//! directory, so it taints nothing): never a silent skip.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -62,6 +63,7 @@ pub fn probe(name: &str) -> Option<Vec<Kv>> {
                 live_slots: &[],
                 held_mounts: &[],
             });
+            let notes = checks.notes();
             fs::set_permissions(&watched, fs::Permissions::from_mode(0o700)).unwrap();
             let (kind, code, detail) = match found {
                 Ok(()) => ("none", "", String::new()),
@@ -73,6 +75,14 @@ pub fn probe(name: &str) -> Option<Vec<Kv>> {
                 kv("finding_kind", kind),
                 kv("finding_code", code),
                 kv("finding_detail", detail),
+                kv("notes", notes.len().to_string()),
+                kv("note_code", notes.first().map_or("", |note| note.code)),
+                kv(
+                    "note_detail",
+                    notes
+                        .first()
+                        .map_or(String::new(), |note| note.detail.clone()),
+                ),
             ])
         }
         _ => None,
@@ -146,24 +156,26 @@ fn an_unreadable_watch_dir_stops_the_agent_from_taking_its_baseline() {
     );
 }
 
-/// A: a directory that was readable at the baseline and is not after the job is a finding
-/// of a check that did not run (`unchecked`, code `watch-unreadable`), not a pass: the
-/// slot is not freed and the host is tainted. It runs against the real `/proc` and a real
-/// directory closed with mode 0 after the baseline, as a user with `CAP_SYS_PTRACE` only.
+/// A: a directory that was readable at the baseline and is not after the job is not a finding
+/// and not a silent pass: the check passes and notes it once (code `watch-unreadable`, the
+/// reason in the detail), taking the directory as unchanged, so the host is not tainted. It
+/// runs against the real `/proc` and a real directory closed with mode 0 after the baseline,
+/// as a user with `CAP_SYS_PTRACE` only.
 #[test]
 #[ignore = "needs root: see the module docs of tests/privilege/main.rs"]
-fn a_watch_dir_closed_after_the_baseline_taints_the_host_as_unchecked() {
+fn a_watch_dir_closed_after_the_baseline_is_noted_and_taints_nothing() {
     let work = work_dir("priv-watch-post");
     let own = work.path().join("agent-owned");
     make_dir(&own, 0o700, AGENT);
     let report = run_agent(&[cap::SYS_PTRACE], "watch_post_job", &[("DIR", &own)]);
     report.expect("start", "ok");
-    report.expect("finding_kind", "unchecked");
-    report.expect("finding_code", "watch-unreadable");
+    report.expect("finding_kind", "none");
+    report.expect("notes", "1");
+    report.expect("note_code", "watch-unreadable");
     assert!(
-        report.get("finding_detail").contains("Permission denied"),
+        report.get("note_detail").contains("Permission denied"),
         "{}",
-        report.get("finding_detail")
+        report.get("note_detail")
     );
 }
 
@@ -185,7 +197,7 @@ fn a_root_agent_reads_a_closed_watch_dir_of_another_user() {
 /// owner: `r` without `x`) is NOT an error. Its entries cannot be examined, so they are
 /// digested by name alone: rewriting a file in it does not change the digest, while an
 /// agent with `CAP_DAC_READ_SEARCH` sees the change. This is the one way a watch directory
-/// is weaker than unreadable-means-taint, and it is why shape A must give the agent search
+/// is weaker than unreadable-means-noted, and it is why shape A must give the agent search
 /// permission on every watched directory (a capability, or `x` through an ACL), not read
 /// alone. It pins the blind spot so the design's statement about it stays true.
 #[test]

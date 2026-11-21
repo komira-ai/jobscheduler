@@ -165,7 +165,19 @@
 //!   `failed_to_start` with the code `host-tainted`, lets the jobs it runs finish, and
 //!   offers the taint until the server acknowledges it. A marker that cannot be written
 //!   keeps the agent tainted in memory (it refuses starts and frees no slot) and the taint
-//!   is not reported until it is written; the marker is tried again at every step.
+//!   is not reported until it is written; the marker is tried again at every step. Every
+//!   taint says what changed in one line: the line the worker prints when the host is
+//!   tainted names the reason, the check, the run and the check's detail
+//!   ([`Lifecycle::taint_detail`] keeps the detail of the first taint for the health route).
+//! - **A post-job check taints only for what a contained job can leave behind that the
+//!   sandbox cannot prevent.** That is a process of a job's user that outlives the job
+//!   (`process-as-job-user`), or a check that cannot run (an unreadable process table). An
+//!   orphan that is not a job's process, a mount, a user or group, a kernel module or a
+//!   watched directory that changed is the host's own doing (a package install while jobs
+//!   run adds a group, may mount, start a service or load a module): the check returns it as a
+//!   [`CheckNote`] ([`CheckHook::notes`]) and the lifecycle logs it as a [`Finding`] after
+//!   every call of the check, a re-check and an exclusive lease's check included. A note
+//!   never taints the host, holds a job or quarantines a slot.
 //! - **A check owed is not lost with the agent.** Before the first step of a job's cleanup
 //!   the agent records, in the state root, that the job's checks are owed; it removes the
 //!   record once they have run (and, when they found something, once the taint is on
@@ -177,17 +189,19 @@
 //!   at the next start**, and the agent never clears that taint (see below); an operator's
 //!   clear must remove the `owed-*` records and `taint.pinned` as well as `taint.json`, or the next start
 //!   taints the host again (see [`taint`]).
-//! - **A taint a check judged clears itself.** A taint of a process a job left, or of an
-//!   input the checks could not read, is re-checked while the host is idle (every run over,
-//!   `Blocked` ones included): two clean full checks `--taint-recheck-ms` apart make the
-//!   agent report the clear (`taint_cleared`), and the server's acknowledgement (`taint_cleared_ack`) ends the
-//!   taint, frees the blocked runs and their slots, and keeps the marker as
-//!   `taint.json.cleared-<time>`. A process still there keeps the host tainted; a failed
-//!   removal, owed checks, a host job and a change of mounts, users, groups, modules or a
-//!   watched directory are never cleared by the agent. A residue of a process read from the
-//!   marker at start is re-checked too, with rules that need no baseline
-//!   ([`CheckHook::run_restored`]); any other restored taint stays until an operator moves
-//!   the marker. See [`taint`] for the rules and
+//! - **A taint whose cause is gone clears itself.** A taint of a process a job left, or of
+//!   an input the checks could not read, is re-checked while the host is idle (every run
+//!   over, `Blocked` ones included): two clean full checks `--taint-recheck-ms` apart make
+//!   the agent report the clear (`taint_cleared`), and the server's acknowledgement
+//!   (`taint_cleared_ack`) ends the taint, frees the blocked runs and their slots, and keeps
+//!   the marker as `taint.json.cleared-<time>`. A process still there keeps the host
+//!   tainted; a failed removal, owed checks and a host job are never cleared by the agent.
+//!   A marker an older agent wrote for a check that no longer taints (`daemonised-child`,
+//!   `new-mount`, `user-changed`, `group-changed`, `kernel-module-changed`,
+//!   `watch-dir-changed`) is re-checked like a process residue and clears at the next clean
+//!   re-check. A residue read from the marker at start is re-checked too, with rules that
+//!   need no baseline ([`CheckHook::run_restored`]); any other restored taint stays until an
+//!   operator moves the marker. See [`taint`] for the rules and
 //!   `docs/design/taint-self-clearing.md` for the reasons.
 //! - **A held host starts nothing** (see [`hold`]). While the hold file is in the state
 //!   root (the drain of an update wrote it), every `Start` and job start is answered
@@ -314,7 +328,7 @@ use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
 pub use event::{CleanupTimeline, Event, Finding, Skip, StartTimeline};
-pub use finding::{CHECK_DETAIL_MAX, CheckFinding};
+pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
@@ -406,6 +420,15 @@ pub trait CheckHook {
     /// As [`CheckHook::run`].
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.run(job)
+    }
+
+    /// What the last `run` or `run_restored` saw change that does not taint the host, drained
+    /// by the call; none by default. The lifecycle logs each as a [`Finding`] after every
+    /// call of either (after a job's checks as the job's finding, with its run id; for a
+    /// re-check or a whole-node lease's check with none), whatever it returned: a note never taints the host, holds a job or
+    /// quarantines a slot.
+    fn notes(&mut self) -> Vec<CheckNote> {
+        Vec::new()
     }
 
     /// The host is idle: a job is about to start, and no other job's container, scratch

@@ -39,7 +39,7 @@ fn tainted_by(name: &str, found: CheckFinding) -> Harness {
 }
 
 fn residue() -> CheckFinding {
-    CheckFinding::residue(check::DAEMONISED_CHILD, "pid 41")
+    CheckFinding::residue(check::PROCESS_AS_JOB_USER, "pid 41")
 }
 
 /// The server acknowledges the report of the taint.
@@ -164,7 +164,7 @@ fn a_residue_taint_on_an_idle_host_clears_after_two_clean_rechecks() {
             .contains("the re-checks passed twice, 60000 ms apart")
             && finding
                 .message
-                .contains("reason residue, check daemonised-child, run r1")
+                .contains("reason residue, check process-as-job-user, run r1")
             && finding.message.contains("taint.json.cleared-"),
         "{}",
         finding.message
@@ -458,24 +458,15 @@ fn every_blocked_run_is_freed_when_the_taint_clears() {
 }
 
 /// Asserts that taints a re-check cannot speak for never clear, however long the host is
-/// idle: a failed container removal (`cleanup-failed`), a mount, a user, a group, a module
-/// and a watched directory that changed (each a residue of a check that is not about a
-/// process), a check owed at start, and a taint of a run that may change the host. It
-/// catches a rule that clears by reason alone, and one that treats a quiet host as proof
-/// that a change was undone.
+/// idle: a failed container removal (`cleanup-failed`), a check owed at start, a taint of a
+/// run that may change the host, and a residue that names no check. It catches a rule that
+/// clears by reason alone, and one that treats a quiet host as proof that a change was
+/// undone.
 #[test]
 fn what_the_host_really_holds_never_clears() {
-    for found in [
-        check::NEW_MOUNT,
-        check::USER_CHANGED,
-        check::GROUP_CHANGED,
-        check::MODULE_CHANGED,
-        check::WATCH_DIR_CHANGED,
-    ] {
-        let mut h = tainted_by("changed", CheckFinding::residue(found, "x"));
-        ack(&mut h);
-        stays_tainted(&mut h, 4);
-    }
+    let mut h = tainted_by("no-check", CheckFinding::residue("unheard-of", "x"));
+    ack(&mut h);
+    stays_tainted(&mut h, 4);
 
     let mut h = Harness::new("remove-failed");
     h.fake.fail("remove", 1);
@@ -610,15 +601,26 @@ impl CheckHook for Restored {
     }
 }
 
-/// Asserts that a residue of a process read from the marker at start clears like a fresh one:
+/// Asserts that a residue of a post-job check read from the marker at start clears like a fresh one:
 /// the taint is reported again after the restart, two clean re-checks a wait apart report
 /// the clear, and the server's acknowledgement ends the taint, keeps the marker as
-/// `taint.json.cleared-<time>` and lets the next start run. It holds for both checks of a
-/// process. Catches a restart that leaves the host tainted until an operator moves the
-/// marker, which took every build node out of service for a process that was long gone.
+/// `taint.json.cleared-<time>` and lets the next start run. It holds for the check of a
+/// process and for each check an older agent tainted for what the checks now only note (an
+/// orphan, a mount, a user, a group, a kernel module, a watched directory): the marker such
+/// an agent left clears at the first clean re-checks. Catches a restart that leaves the host
+/// tainted until an operator moves the marker, which took every build node out of service for
+/// a process that was long gone, and a stored taint of a demoted check that is never re-checked.
 #[test]
 fn a_restored_residue_taint_clears_after_two_clean_rechecks() {
-    for what in [check::DAEMONISED_CHILD, check::PROCESS_AS_JOB_USER] {
+    for what in [
+        check::PROCESS_AS_JOB_USER,
+        check::DAEMONISED_CHILD,
+        check::NEW_MOUNT,
+        check::USER_CHANGED,
+        check::GROUP_CHANGED,
+        check::MODULE_CHANGED,
+        check::WATCH_DIR_CHANGED,
+    ] {
         let mut h = tainted_by("restored-clears", CheckFinding::residue(what, "pid 41"));
         ack(&mut h);
         h.restart().unwrap();
@@ -706,13 +708,13 @@ fn a_taint_made_in_this_process_is_rechecked_against_the_baseline() {
     assert!(h.life.pending_taint_clear().is_some());
 }
 
-/// Asserts that a restored taint that is not a residue of a process stays until an operator
+/// Asserts that a restored taint that is not a residue of a post-job check stays until an operator
 /// moves the marker aside, with the host idle for any number of waits: an input that could
 /// not be read, `host-not-visible`, a failed removal, a check owed, a host job, an unreadable
-/// marker, and a mount, user, group, module or watched-directory residue. Catches a restart
+/// marker, and a residue that names no check or one that reads an input. Catches a restart
 /// that lets a re-check of the restart baseline clear a taint it cannot speak for.
 #[test]
-fn a_restored_taint_that_is_not_a_process_residue_stays_pinned() {
+fn a_restored_taint_that_is_not_a_check_residue_stays_pinned() {
     for (why, what) in [
         (reason::UNCHECKED, Some(check::PROCESSES_UNREADABLE)),
         (reason::UNCHECKED, Some(check::MOUNTS_UNREADABLE)),
@@ -720,11 +722,8 @@ fn a_restored_taint_that_is_not_a_process_residue_stays_pinned() {
         (reason::CLEANUP_FAILED, Some(code::CONTAINER_REMOVE_FAILED)),
         (reason::CHECK_OWED, None),
         (reason::HOST_JOB, None),
-        (reason::RESIDUE, Some(check::NEW_MOUNT)),
-        (reason::RESIDUE, Some(check::USER_CHANGED)),
-        (reason::RESIDUE, Some(check::GROUP_CHANGED)),
-        (reason::RESIDUE, Some(check::MODULE_CHANGED)),
-        (reason::RESIDUE, Some(check::WATCH_DIR_CHANGED)),
+        (reason::RESIDUE, None),
+        (reason::RESIDUE, Some(check::PROCESSES_UNREADABLE)),
     ] {
         let mut h = Harness::new("restored-pinned");
         leave_marker(&h, why, what);
@@ -806,19 +805,29 @@ fn a_marker_an_operator_moved_is_already_kept() {
     assert_eq!(cleared_copies(&h), ["taint.json.cleared-1"]);
 }
 
-/// Asserts which taints [`clearable`] says the agent may clear: the residue of a process and
-/// the unchecked of an input that could not be read or of a run whose container group was not
-/// found, and nothing else (`host-not-visible` of an engine runtime included), a taint with no
-/// check or an unknown one included. It catches a code added to the checks and cleared by
-/// default, and `cgroup-not-found` left off the allow-list.
+/// Asserts which taints [`clearable`] says the agent may clear: the residue of a post-job check
+/// (the process of a job's user, and the six codes an older agent tainted for what the checks
+/// now only note) and the unchecked of an input that could not be read or of a run whose
+/// container group was not found, and nothing else (`host-not-visible` of an engine runtime
+/// included), a taint with no check or an unknown one included. It catches a code added to the
+/// checks and cleared by default, a legacy code left off the allow-list (its marker would stay
+/// pinned), and `cgroup-not-found` left off the allow-list.
 #[test]
-fn only_a_process_or_an_unread_input_may_clear() {
+fn only_a_post_job_check_or_an_unread_input_may_clear() {
     let taint = |why: &str, what: Option<&str>| Taint {
         reason: why.to_owned(),
         run_id: Some("r1".to_owned()),
         check: what.map(str::to_owned),
     };
-    for what in [check::PROCESS_AS_JOB_USER, check::DAEMONISED_CHILD] {
+    for what in [
+        check::PROCESS_AS_JOB_USER,
+        check::DAEMONISED_CHILD,
+        check::NEW_MOUNT,
+        check::USER_CHANGED,
+        check::GROUP_CHANGED,
+        check::MODULE_CHANGED,
+        check::WATCH_DIR_CHANGED,
+    ] {
         assert!(clearable(&taint(reason::RESIDUE, Some(what))), "{what}");
     }
     for what in [
@@ -834,12 +843,11 @@ fn only_a_process_or_an_unread_input_may_clear() {
         assert!(clearable(&taint(reason::UNCHECKED, Some(what))), "{what}");
     }
     for refused in [
-        taint(reason::RESIDUE, Some(check::NEW_MOUNT)),
-        taint(reason::RESIDUE, Some(check::USER_CHANGED)),
-        taint(reason::RESIDUE, Some(check::GROUP_CHANGED)),
-        taint(reason::RESIDUE, Some(check::MODULE_CHANGED)),
-        taint(reason::RESIDUE, Some(check::WATCH_DIR_CHANGED)),
         taint(reason::RESIDUE, Some(check::PROCESSES_UNREADABLE)),
+        taint(reason::UNCHECKED, Some(check::NEW_MOUNT)),
+        taint(reason::UNCHECKED, Some(check::USER_CHANGED)),
+        taint(reason::HOST_JOB, Some(check::GROUP_CHANGED)),
+        taint(reason::CLEANUP_FAILED, Some(check::MODULE_CHANGED)),
         taint(reason::RESIDUE, None),
         taint(reason::UNCHECKED, Some(code::HOST_NOT_VISIBLE)),
         taint(reason::UNCHECKED, Some(check::DAEMONISED_CHILD)),

@@ -967,9 +967,9 @@ with this agent's id mapping, by the run of build item 6.
   success;
 - restart: `detach-all-except` lists exactly the kept runs, is sent before the sweep, and is repeated while the fake is
   down, with no tree job admitted meanwhile;
-- integrity: a `fuse.tierstore` mount at the configured point appearing after the baseline is not a finding; a FUSE
-  mount at another point is `new-mount`; another type at that point is `new-mount`; with no `--tierstore-fs` the
-  allowance does not exist.
+- integrity: a `fuse.tierstore` mount at the configured point appearing after the baseline is not named; a FUSE
+  mount at another point is a `new-mount` note (logged, never a taint); another type at that point is a `new-mount` note; with
+  no `--tierstore-fs` the allowance does not exist.
 - amended, A1: the attach line with `prefetch all`, then `prefetched`; the job stays preparing until `prefetched`
   answers and starts on an empty `failures`; fails `tree-prefetch-failed` on one failure; fails `tree-prefetch-slow` at
   `TREE_PREFETCH_LIMIT` on the injected clock and not one millisecond before; a held `prefetched` of one job does not

@@ -300,6 +300,11 @@ fn round_trip_of_every_message() {
         }],
         taint_ack: true,
         taint_cleared_ack: false,
+        host_taint: Some(Taint {
+            reason: "host-job".into(),
+            run_id: None,
+            check: None,
+        }),
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),

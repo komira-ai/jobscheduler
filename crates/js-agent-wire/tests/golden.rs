@@ -296,6 +296,7 @@ fn heartbeat_reply_wire_form() {
         }],
         taint_ack: true,
         taint_cleared_ack: false,
+        host_taint: None,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
@@ -595,4 +596,76 @@ fn taint_cleared_ack_wire_form() {
         serde_json::from_value(json!({"commands": [], "result_acks": [], "taint_ack": true}))
             .unwrap();
     assert!(old.taint_ack && !old.taint_cleared_ack);
+}
+
+/// Asserts the exact JSON of a heartbeat that says its agent holds a taint and of one that
+/// says it holds none, that the field is left out when it is None, and that a body from before
+/// the field decodes with it None. It catches a renamed field, a `false` that is dropped (the
+/// server then never hears that the agent holds none), a field sent when it is None, and a
+/// required new field, which would refuse every deployed agent.
+#[test]
+fn tainted_wire_form() {
+    let beat = |tainted| Heartbeat {
+        taint: None,
+        tainted,
+        results: Vec::new(),
+        held: Vec::new(),
+        ..heartbeat()
+    };
+    let head = r#"{"host_id":"mac-01","epoch":3,"session":"s3cret-0","phase":"draining","held":[],"results":[]"#;
+    assert_eq!(
+        serde_json::to_string(&beat(Some(true))).unwrap(),
+        format!(r#"{head},"tainted":true}}"#)
+    );
+    assert_eq!(
+        serde_json::to_string(&beat(Some(false))).unwrap(),
+        format!(r#"{head},"tainted":false}}"#)
+    );
+    assert_eq!(
+        serde_json::to_string(&beat(None)).unwrap(),
+        format!("{head}}}")
+    );
+    for tainted in [Some(true), Some(false), None] {
+        let wire = serde_json::to_value(beat(tainted)).unwrap();
+        let back: Heartbeat = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.tainted, tainted);
+        assert_eq!(back.validate(), Ok(()));
+    }
+    let plain = serde_json::to_value(heartbeat()).unwrap();
+    assert!(plain.get("tainted").is_none());
+    let old: Heartbeat = serde_json::from_value(plain).unwrap();
+    assert_eq!(old.tainted, None);
+}
+
+/// Asserts the exact JSON of a reply that carries the taint the server holds, that the field
+/// is left out when None, and that a reply from before the field decodes with it None. It
+/// catches a renamed field, a null sent to every agent, and a required new field.
+#[test]
+fn host_taint_wire_form() {
+    let reply = HeartbeatReply {
+        host_taint: Some(Taint {
+            reason: "host-job".into(),
+            run_id: Some("run-1".into()),
+            check: None,
+        }),
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&reply).unwrap(),
+        concat!(
+            r#"{"commands":[],"result_acks":[],"taint_ack":false,"#,
+            r#""host_taint":{"reason":"host-job","run_id":"run-1"}}"#
+        )
+    );
+    let back: HeartbeatReply =
+        serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+    assert_eq!(back, reply);
+    assert_eq!(
+        serde_json::to_string(&HeartbeatReply::default()).unwrap(),
+        r#"{"commands":[],"result_acks":[],"taint_ack":false}"#
+    );
+    let old: HeartbeatReply =
+        serde_json::from_value(json!({"commands": [], "result_acks": [], "taint_ack": true}))
+            .unwrap();
+    assert_eq!(old.host_taint, None);
 }

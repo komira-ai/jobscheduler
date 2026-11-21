@@ -124,7 +124,9 @@ others none), or that has an entitlement and no hardened runtime.
   label is a label of the service (`js-agent.` and more), as hostkeeper requires of a `run` label.
 - The manifest: `package` `com.komira.js-agent`, `run: ["js-agent", "js-agent.session", "js-agent.pf-pool"]` (the
   agent first, so the observer reports the agent's version), the hook command `["/Library/Application Support/js-agent/bin/js-agent",
-  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, and the same `minHostkeeper` and `installerBounds` as the Linux entry. The hook's `params` are
+  "update-hook"]`, `hook.drain` `drain` and `hook.resume` `resume`, the same `minHostkeeper` and `installerBounds` as the
+  Linux entry, and no `healthUrl` (the Linux entry's names the agent's `--health-listen` route; the Mac agent is started
+  without it). The hook's `params` are
   `unit` `js-agent`, `helper_unit` `js-agent.session`, `pf_unit` `js-agent.pf-pool`, `state_dir`
   `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
