@@ -22,8 +22,9 @@
 //!   one that is mounted elsewhere is unmounted first (see
 //!   [`scratch_volume`](crate::lifecycle::scratch_volume)). Nothing names it in the file system
 //!   table, which macOS does not let the hook write: the agent mounts it again at each of its
-//!   starts, which is what makes a boot find it on the scratch root. A scratch root its user does not own (a volume that ignores ownership) is given
-//!   ownership (`diskutil enableOwnership`) before it is made the hook's user's again. Last, the
+//!   starts, which is what makes a boot find it on the scratch root. A scratch root its user
+//!   does not own (a volume that ignores ownership) is given ownership (`diskutil
+//!   enableOwnership`) before it is made the hook's user's again. Last, the
 //!   copy of the file system table that an earlier release's setup wrote beside it and could
 //!   not rename over it ([`FSTAB_LEFTOVER`]) is removed: nothing reads it.
 //!

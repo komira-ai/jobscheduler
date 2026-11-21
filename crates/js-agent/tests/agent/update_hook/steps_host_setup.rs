@@ -156,7 +156,7 @@ fn an_update_sets_up_the_mac_before_it_cordons() {
     let log = spy.log();
     let mount = log
         .iter()
-        .position(|call| call.contains(" mount -mountPoint "));
+        .position(|call| call.contains(" mount nobrowse -mountPoint "));
     let cordon = log.iter().position(|call| call.starts_with("cordon("));
     assert!(mount.unwrap() < cordon.expect("cordoned"), "{log:?}");
 }

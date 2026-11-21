@@ -621,7 +621,9 @@ fn an_agent_whose_cap_is_on_does_not_start_while_the_anchor_is_not_enforced() {
 
 /// A property list of one dictionary with `body`, as `diskutil -plist` prints it.
 fn plist(body: &str) -> String {
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>{body}</dict></plist>\n")
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>{body}</dict></plist>\n"
+    )
 }
 
 /// Asserts that a Mac agent whose scratch root is on its state root's file system (as after a
@@ -666,7 +668,14 @@ fn a_mac_agent_mounts_the_scratch_volume_before_it_opens_its_roots() {
     );
     assert_eq!(hello, Value::Null);
     let ran_commands = host.commands.ran.borrow().clone();
-    let at = |line: &str| ran_commands.iter().position(|ran| ran == line);
-    assert!(at(data) < at(list) && at(list) < at(info), "{ran_commands:?}");
     assert_eq!(ran_commands.last(), Some(&mount), "{ran_commands:?}");
+    let diskutil: Vec<&String> = ran_commands
+        .iter()
+        .filter(|ran| ran.starts_with("/usr/sbin/diskutil "))
+        .collect();
+    assert_eq!(
+        diskutil,
+        [data, list, info, mount.as_str()],
+        "{ran_commands:?}"
+    );
 }

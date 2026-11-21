@@ -222,7 +222,8 @@ again ends as an uninterrupted one. A part that cannot be read or made defers th
 (exit 75, `host_setup_missing`, the part and the cause in the detail) with no record written and no cordon placed;
 hostkeeper orders the host again later. A system call the system refuses (`EPERM`), which no retry changes, fails the
 step instead (exit 1, `host_setup_refused`, class environment, the path and the error in the detail), with no record
-written and no cordon placed, so that the order fails where an operator sees it. No step undoes the setup: it belongs to the host, not to a release.
+written and no cordon placed, so that the order fails where an operator sees it. No step undoes the setup: it belongs
+to the host, not to a release.
 
 Not made by the hook:
 
