@@ -33,6 +33,8 @@ hostkeeper-steps.workspace = true
 # (started in the test process).
 js-client = { path = "../js-client" }
 js-lease-server = { path = "../js-lease-server" }
+# The hex of a package's SHA-256.
+hex.workspace = true
 # The scratch directories.
 js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }

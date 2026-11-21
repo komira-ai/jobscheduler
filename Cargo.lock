@@ -1669,6 +1669,7 @@ dependencies = [
 name = "js-mac-first-install"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hostkeeper-config",
  "hostkeeper-hook",
  "hostkeeper-install",
