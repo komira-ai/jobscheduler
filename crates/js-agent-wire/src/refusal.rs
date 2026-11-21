@@ -259,9 +259,11 @@ pub const HOST_PORT_LOST: &str = "host-port-lost";
 /// is held (its hold file is there: the host is being drained for an update, or its update
 /// halted). Nothing was created. It is the host's state and not the run's, and, unlike
 /// [`HOST_TAINTED`], not a taint: the host is put back when the step that drains it is
-/// undone. The run may be sent to another host. A held agent also cordons its host, so
-/// placement sends it nothing once the cordon is in force; the code answers what was placed
-/// before (between the host's hello and its cordon).
+/// undone. The lease server sends a job refused so back to its queue, keeps it off the host
+/// for as long as a held host's cordon lasts and counts no failure; it fails the job only
+/// when held hosts refused it several times in a row, naming them. A held agent also cordons
+/// its host, so placement sends it nothing once the cordon is in force; the code answers what
+/// was placed before (between the host's hello and its cordon).
 pub const HOST_HELD: &str = "host-held";
 
 /// A whole-node lease request that failed after the host could not be prepared within the

@@ -26,6 +26,12 @@
 //! transaction that frees the allocation and puts the job back to queued, or ends it failed to
 //! start when the placement engine says its prepares are used up.
 //!
+//! A start that a **held host** refused (the agent's code `host-held`: the host is held for
+//! maintenance and made nothing) sends its job back to the queue: [`JobStore::requeue_held`]
+//! frees the allocation, keeps the job off the host with a bar in [`JobRecord::prepare_bars`]
+//! and appends the host to [`JobRecord::held_refusals`], in one transaction, counting no
+//! failure.
+//!
 //! A **taint** is the mark a host-isolation job's placement puts on its host ([`HostTaint`],
 //! reason [`HOST_JOB_TAINT`]): [`JobStore::place`] and [`JobStore::place_with`] write it in the
 //! transaction that places the job, and the caller deletes it once it holds the taint where it
@@ -145,6 +151,7 @@
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
 //! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it, and delete `mark/<id>` at its version or check it absent), or nothing for an ended job or a second cancel |
+//! | [`JobStore::requeue_held`] | put `job/<id>` at its version (placed or starting to queued, with the bars, the queue note and the host appended to the held refusals), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete the allocation's start from `dispatch/<host>/` at its version |
 //! | [`JobStore::fail_prepare_with`] | put `job/<id>` at its version (placed to queued with the failed-prepare count and bars, or ended failed to start), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete `mark/<id>` at its version or check it absent |
 //! | [`JobStore::restart_prepare`] | put `alloc/<id>` at its version (the new prepare deadline), check `job/<id>` at its version |
 //! | [`JobStore::mark_releasing`] | put `alloc/<id>` at its version, or nothing when it is not booked |
@@ -217,6 +224,7 @@ pub use result::{
     Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Backfill, Beside, CordonWrite, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE,
-    MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, Step, UncordonWrite, Written, queue_order,
+    Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,
+    MAX_PAGE, MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, Step, UncordonWrite, Written,
+    queue_order,
 };

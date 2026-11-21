@@ -16,6 +16,19 @@ use crate::engine::rig::{Tables, at, engine_over, host, spec_of};
 
 const GIB: u64 = 1 << 30;
 
+impl Engine {
+    /// [`Engine::walk_jobs`] as it was before the scheduler held its matches over a walk:
+    /// each round matches every open host again.
+    fn walk_jobs_matching_each_round(
+        &mut self,
+        queued: &[JobRecord],
+        open: &BTreeMap<HostId, OpenHost>,
+        now: js_types::sched::FarmTime,
+    ) -> (Vec<Decided>, Vec<(JobId, bool)>) {
+        self.walk_holding(queued, open, now, false)
+    }
+}
+
 /// A generator of test states: xorshift64, seeded.
 struct Gen(u64);
 

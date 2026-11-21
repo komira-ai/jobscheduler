@@ -487,7 +487,7 @@ fn golden_of(family: &str) -> GoldenFile {
     GoldenFile::new(
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/trace-hashes.txt"),
         family,
-        "cargo test -p js-sim-cell --test replay -- --ignored regenerate_golden_hashes",
+        "cargo test -p js-sim-cell --features slow-families --test replay -- --ignored regenerate_golden_hashes",
     )
 }
 
