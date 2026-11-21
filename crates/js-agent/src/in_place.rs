@@ -13,17 +13,18 @@
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
+
+use js_mac_session::disclaim;
 
 use crate::exit;
 
-/// Runs the command line `args` (the program first) over this process. It returns only when
-/// that failed, with the error.
+/// Runs the command line `args` (the program first) over this process, through the one
+/// spawner ([`disclaim::exec`]). It returns only when that failed, with the error.
 #[must_use]
 pub fn exec(args: &[OsString]) -> io::Error {
     match args.split_first() {
-        Some((program, rest)) => Command::new(program).args(rest).exec(),
+        Some((program, rest)) => disclaim::exec(program, rest),
         None => io::Error::new(io::ErrorKind::InvalidInput, "there is no program name"),
     }
 }
