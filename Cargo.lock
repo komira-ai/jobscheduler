@@ -1329,6 +1329,7 @@ dependencies = [
  "flate2",
  "hex",
  "js-oci",
+ "js-supervise",
  "js-testkit",
  "js-types",
  "libc",
@@ -1868,6 +1869,19 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "js-supervise"
+version = "0.1.0"
+dependencies = [
+ "js-testkit",
+ "libc",
+ "nix 0.31.3",
+ "rustix",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

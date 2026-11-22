@@ -82,6 +82,7 @@ the binary is static and the check passes.
 | `js-mac-probe` | its child tests expect an absolute `PATH` |
 | `js-mac-session` | its tests read `/etc/passwd` and need directories without other mounts; `tests/as_root.rs` holds `#[ignore]`d root tests |
 | `js-testkit` | its fake's tests read `PATH`; its dir, database and reaped targets hold `#[ignore]`d child tests |
+| `js-supervise` | its tests start stand-in supervisors (`sh`, `cat`, `true`) and expect an absolute `PATH` |
 | `js-state` | its tests need a Postgres server (`KBF_TEST_POSTGRES_URL`); `postgres_write_rate.rs` holds an `#[ignore]`d test |
 | `js-sched` | five test targets hold `#[ignore]`d tests (golden regeneration, seed replay, long runs) |
 | `js-sim` | its determinism and toy_counter targets hold `#[ignore]`d golden regeneration |
