@@ -226,6 +226,8 @@ pub struct NativeRuntime {
     /// The wall clock, in milliseconds since the Unix epoch: when a run started and each step
     /// of its start was done, and when a stop's grace ends.
     now_ms: Clock,
+    /// Whether each run's supervisor opens an audit session of its own (which needs root).
+    new_session: bool,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -307,6 +309,7 @@ impl NativeRuntime {
             hand_over: files::lchown(),
             logs: None,
             now_ms: system_clock(),
+            new_session: true,
         })
     }
 
@@ -322,6 +325,18 @@ impl NativeRuntime {
     #[must_use]
     pub fn with_clock(self, now_ms: Clock) -> Self {
         Self { now_ms, ..self }
+    }
+
+    /// The same runtime, its supervisors opening no audit session of their own, which only root
+    /// may: how a test runs the real supervisor as the user running the tests. An agent never
+    /// calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn without_new_session(self) -> Self {
+        Self {
+            new_session: false,
+            ..self
+        }
     }
 
     /// The same runtime, giving a run's files to its account through `hand_over` in place of

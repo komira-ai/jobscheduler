@@ -242,7 +242,7 @@ impl NativeRuntime {
             spec: SuperviseSpec {
                 uid,
                 gid: account.gid,
-                new_session: true,
+                new_session: self.new_session,
                 profile: built.text().to_owned(),
                 params: built.params().to_vec(),
                 program: native.program.clone(),
