@@ -1,0 +1,407 @@
+//! Tests of making an account: its shape, the order of what is recorded and made, how a uid
+//! is chosen, and what a failure part-way leaves.
+
+use std::sync::{Arc, Mutex};
+
+use super::*;
+use crate::mac_accounts::tests::fake::Print;
+use crate::mac_accounts::tests::rig::{Rig, me, my_gid};
+use crate::mac_accounts::{MAX_NAME, PREFIX};
+
+fn read(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Why the pool can find no free uid: the reasons of the refusal of a loan.
+fn reasons(pool: &Pool) -> Vec<String> {
+    match pool.lend("probe") {
+        Err(AccountError::NoFreeUid { reasons, .. }) => reasons,
+        other => panic!("a uid was free: {:?}", other.map(|lent| lent.account)),
+    }
+}
+
+/// Asserts the shape of the account the pool makes: a name of the pool's own prefix and at
+/// most 31 bytes, the uid of the range, the pool's group, a home `<homes>/<name>` that
+/// exists; and that what is recorded comes before what is made: `made` is in the ledger
+/// before the home exists, and `ready` is not there until the record is made.
+#[test]
+fn an_account_is_recorded_before_it_is_made_and_has_the_shape_of_the_design() {
+    let rig = Rig::new("shape", 3, 1);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ledger = rig.dir.join("state/accounts");
+    for op in ["make_home", "create_account"] {
+        let (seen, ledger) = (Arc::clone(&seen), ledger.clone());
+        rig.fake.on(op, move || {
+            seen.lock().unwrap().push((op, read(&ledger)));
+        });
+    }
+    let _pool = rig.open();
+    let made = format!("made kbf-acct-1 {}\n", me());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [("make_home", made.clone()), ("create_account", made)]
+    );
+    let calls = rig.fake.take_calls();
+    let home = calls
+        .iter()
+        .position(|c| c == "make_home kbf-acct-1")
+        .unwrap();
+    let record = calls
+        .iter()
+        .position(|c| c == "create_account kbf-acct-1")
+        .unwrap();
+    assert!(
+        home < record,
+        "the home is made before the record: {calls:?}"
+    );
+
+    let users = rig.fake.state().users.clone();
+    let user = &users["kbf-acct-1"];
+    assert!(user.name.starts_with(PREFIX) && user.name.len() <= MAX_NAME);
+    assert_eq!((user.uid, user.gid), (me(), my_gid()));
+    assert_eq!(user.home, rig.home(1));
+    assert!(rig.home(1).is_dir());
+}
+
+/// Asserts that a uid comes after the last one given and wraps, rather than the lowest free:
+/// a uid is used again as late as the range allows, and not until the account that had it is
+/// gone.
+#[test]
+fn the_next_uid_comes_after_the_last_one_given_and_wraps() {
+    let rig = Rig::new("uid-order", 4, 0);
+    let pool = rig.open();
+    let uids: Vec<u32> = (1..=2)
+        .map(|n| pool.lend(&format!("job-{n}")).unwrap().account.uid)
+        .collect();
+    assert_eq!(uids, [me(), me() + 1]);
+    // The first account's uid is free again; the next uid is still the one after the last.
+    pool.retire(pool.account(1, me())).unwrap();
+    assert_eq!(pool.lend("job-3").unwrap().account.uid, me() + 2);
+    assert_eq!(pool.lend("job-4").unwrap().account.uid, me() + 3);
+    // Wrapped: the first uid, free again, and not the second, which an account holds.
+    assert_eq!(pool.lend("job-5").unwrap().account.uid, me());
+    let (b, c, d, a) = (me() + 1, me() + 2, me() + 3, me());
+    assert_eq!(
+        pool.lend("job-6").unwrap_err().to_string(),
+        format!(
+            "no free uid in {a}-{d}: {b}: held by kbf-acct-2; {c}: held by kbf-acct-3; \
+             {d}: held by kbf-acct-4; {a}: held by kbf-acct-5"
+        )
+    );
+}
+
+/// Asserts that an account is made with the number after any the ledger has ever seen, so a
+/// name is never used again, across restarts and after the account was deleted.
+#[test]
+fn a_name_is_never_used_again_across_restarts() {
+    let rig = Rig::new("names", 6, 1);
+    let pool = rig.open();
+    let first = pool.lend("job-1").unwrap().account;
+    pool.retire(first).unwrap();
+    drop(pool);
+    let pool = rig.open();
+    let second = pool.lend("job-2").unwrap().account;
+    drop(pool);
+    let pool = rig.open();
+    let names: Vec<String> = rig
+        .lines()
+        .iter()
+        .filter_map(|line| {
+            line.strip_prefix("made ")?
+                .split(' ')
+                .next()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(names, ["kbf-acct-1", "kbf-acct-2", "kbf-acct-3"]);
+    assert_eq!(second.name, "kbf-acct-2");
+    assert_eq!(pool.ready_count(), 1);
+}
+
+/// Asserts that a uid is passed over when a record has it or a process runs as it, each for
+/// its own reason, and that the first free uid after the busy ones is taken.
+#[test]
+fn a_uid_with_a_record_or_a_process_is_passed_over() {
+    let rig = Rig::new("busy-host", 1, 0);
+    rig.fake.add_user("someone", me(), 20, &rig.settings.homes);
+    let pool = rig.open();
+    assert_eq!(reasons(&pool), [format!("{}: a user record has it", me())]);
+
+    let rig = rig.next("busy-process", 1, 0);
+    rig.fake.add_process(me(), 500, "daemon");
+    let pool = rig.open();
+    assert_eq!(reasons(&pool), [format!("{}: 1 processes run as it", me())]);
+
+    let rig = rig.next("busy-then-free", 3, 0);
+    rig.fake.add_user("someone", me(), 20, &rig.settings.homes);
+    rig.fake.add_process(me() + 1, 500, "daemon");
+    let pool = rig.open();
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, me() + 2);
+}
+
+/// Asserts, with the test's own uid as the busy one, that a directory two levels down in the
+/// per-user folders, an entry in a shared place, and an entry of the places of schedules each
+/// make the uid busy and name what is owned by it.
+#[test]
+fn a_uid_that_owns_files_is_busy() {
+    let rig = Rig::new("owns-files", 1, 0);
+    let pool = rig.open();
+    let uid = me();
+    let folder = rig.dir.join("folders/ab/hash");
+    std::fs::create_dir_all(&folder).unwrap();
+    assert_eq!(
+        reasons(&pool),
+        [format!("{uid}: {} is owned by it", folder.display())]
+    );
+    std::fs::remove_dir_all(rig.dir.join("folders/ab")).unwrap();
+    for (place, entry) in [("Shared", "left"), ("tmp", "left"), ("at/jobs", "job")] {
+        let path = rig.dir.join(place).join(entry);
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(
+            reasons(&pool),
+            [format!("{uid}: {} is owned by it", path.display())]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    let plist = rig.dir.join(format!("launchd/disabled.{uid}.plist"));
+    std::fs::write(&plist, "x").unwrap();
+    assert_eq!(
+        reasons(&pool),
+        [format!("{uid}: {} is owned by it", plist.display())]
+    );
+    std::fs::remove_file(&plist).unwrap();
+    // Nothing is left: the uid is free, and an account is made.
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
+}
+
+/// Asserts that an error in looking at a uid is not "free": the uid is passed over and the
+/// refusal names why, for each way of looking.
+#[test]
+fn an_error_in_looking_at_a_uid_is_not_free() {
+    let rig = Rig::new("look-errors", 1, 0);
+    let pool = rig.open();
+    let uid = me();
+    let why = |pool: &Pool| reasons(pool).join("; ");
+    rig.fake.fail(&format!("uid_taken {uid}"));
+    assert_eq!(
+        why(&pool),
+        format!("{uid}: looking up its record: uid_taken {uid} failed")
+    );
+    rig.fake.heal(&format!("uid_taken {uid}"));
+    rig.fake.fail(&format!("processes {uid}"));
+    assert_eq!(
+        why(&pool),
+        format!("{uid}: listing its processes: processes {uid} failed")
+    );
+    rig.fake.heal(&format!("processes {uid}"));
+
+    let folders = rig.dir.join("folders");
+    std::fs::remove_dir(&folders).unwrap();
+    std::fs::write(&folders, "").unwrap();
+    let text = why(&pool);
+    assert!(
+        text.starts_with(&format!(
+            "{uid}: searching the per-user folders: {}: ",
+            folders.display()
+        )),
+        "{text}"
+    );
+    std::fs::remove_file(&folders).unwrap();
+    std::fs::create_dir(&folders).unwrap();
+
+    let shared = rig.dir.join("Shared");
+    std::fs::remove_dir(&shared).unwrap();
+    std::fs::write(&shared, "").unwrap();
+    let text = why(&pool);
+    assert!(
+        text.starts_with(&format!(
+            "{uid}: looking in the shared places: {}: ",
+            shared.display()
+        )),
+        "{text}"
+    );
+    std::fs::remove_file(&shared).unwrap();
+    std::fs::create_dir(&shared).unwrap();
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
+}
+
+/// Asserts that a refusal for want of a free uid names up to eight uids and says how many
+/// more.
+#[test]
+fn a_refusal_for_want_of_a_free_uid_names_eight_and_counts_the_rest() {
+    let rig = Rig::new("none-free", 12, 0);
+    let pool = rig.open();
+    for n in 0..12 {
+        rig.fake
+            .add_user(&format!("user-{n}"), me() + n, 20, &rig.settings.homes);
+    }
+    let Err(AccountError::NoFreeUid { range, reasons }) = pool.lend("job-1") else {
+        panic!("a uid was free");
+    };
+    assert_eq!(range, format!("{}-{}", me(), me() + 11));
+    assert_eq!(reasons.len(), 9);
+    assert_eq!(reasons[0], format!("{}: a user record has it", me()));
+    assert_eq!(reasons[8], "and 4 more");
+    let text = pool.lend("job-1").unwrap_err().to_string();
+    assert!(
+        text.starts_with(&format!("no free uid in {}-{}: ", me(), me() + 11)),
+        "{text}"
+    );
+    assert!(text.ends_with("; and 4 more"), "{text}");
+}
+
+/// Asserts what a failure while making leaves: at the home or at the record, what was made
+/// is deleted and shown gone, the ledger says `gone`, the error names the step and says so,
+/// and the next account is made under the next number.
+#[test]
+fn a_failure_while_making_deletes_what_was_made() {
+    for (failing, step, why) in [
+        ("make_home kbf-acct-1", Step::Home, "making"),
+        (
+            "create_account kbf-acct-1",
+            Step::Record,
+            "creating the record",
+        ),
+    ] {
+        let rig = Rig::new("make-fails", 3, 1);
+        rig.fake.fail(failing);
+        let error = rig.refused();
+        let AccountError::Make {
+            account,
+            step: at,
+            why: text,
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!((account.as_str(), *at), ("kbf-acct-1", step), "{failing}");
+        assert!(text.contains(why), "{text}");
+        assert!(
+            text.ends_with("; what was made was deleted and shown gone"),
+            "{text}"
+        );
+        assert_eq!(
+            rig.lines(),
+            [
+                format!("made kbf-acct-1 {}", me()),
+                "gone kbf-acct-1".to_owned()
+            ]
+        );
+        assert!(rig.fake.state().users.is_empty());
+        assert!(!rig.home(1).exists(), "the half-made home is removed");
+
+        rig.fake.heal(failing);
+        let pool = rig.open();
+        assert_eq!(pool.ready_count(), 1);
+        assert!(
+            rig.lines()
+                .contains(&format!("made kbf-acct-2 {}", me() + 1)),
+            "the number and the uid are not reused"
+        );
+    }
+}
+
+/// Asserts that a home that is already there refuses the account (a new account takes
+/// nothing of what another left) and is removed with the failed account.
+#[test]
+fn a_home_that_exists_refuses_the_account() {
+    let rig = Rig::new("home-exists", 3, 1);
+    std::fs::create_dir(rig.home(1)).unwrap();
+    std::fs::write(rig.home(1).join("leftover"), "x").unwrap();
+    let AccountError::Make { step, why, .. } = rig.refused() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Home);
+    assert!(why.contains("File exists"), "{why}");
+    assert!(!rig.home(1).exists());
+    assert_eq!(rig.open().ready_count(), 1);
+}
+
+/// Asserts that when what was made cannot be deleted, the account is held: the ledger says
+/// `held` at the step, the error says it did not complete, the uid is passed over from then
+/// on, and a retirement tries it again.
+#[test]
+fn a_failed_making_that_cannot_be_deleted_is_held() {
+    let rig = Rig::new("make-held", 2, 1);
+    rig.fake.fail("create_account kbf-acct-1");
+    rig.fake.fail("delete_account kbf-acct-1");
+    let AccountError::Make { account, step, why } = rig.refused() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Record));
+    assert!(
+        why.ends_with("deleting what was made did not complete, at record: deleting the record kbf-acct-1: delete_account kbf-acct-1 failed"),
+        "{why}"
+    );
+    assert_eq!(
+        rig.lines(),
+        [
+            format!("made kbf-acct-1 {}", me()),
+            "held kbf-acct-1 record".to_owned()
+        ]
+    );
+
+    rig.fake.heal("create_account kbf-acct-1");
+    rig.fake.heal("delete_account kbf-acct-1");
+    let pool = rig.open();
+    // The open's sweep deleted it, and the uid is free again.
+    assert!(pool.held().is_empty());
+    assert!(rig.lines().contains(&"gone kbf-acct-1".to_owned()));
+}
+
+/// Asserts that a ledger that cannot take the `made` record stops the making before
+/// anything exists, and one that fails after the record is made deletes it, though the
+/// deletion cannot be recorded either: the error says where.
+#[test]
+fn a_ledger_that_fails_while_making_is_named() {
+    let rig = Rig::new("make-ledger", 3, 0);
+    let pool = Arc::new(rig.open());
+    let path = rig.dir.join("state/accounts");
+    pool.ledger().fail_writes(&path);
+    let error = pool.lend("job-1").unwrap_err();
+    let AccountError::Make { account, step, why } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!((account.as_str(), *step), ("kbf-acct-1", Step::Ledger));
+    assert!(why.starts_with("recording made: "), "{why}");
+    assert!(
+        rig.fake
+            .take_calls()
+            .iter()
+            .all(|call| !call.starts_with("make_home"))
+    );
+
+    // A second pool over the same files, whose ledger fails after the record is made.
+    let rig = rig.next("make-ledger-late", 3, 0);
+    let pool = Arc::new(rig.open());
+    let broken = Arc::clone(&pool);
+    let path = rig.dir.join("state/accounts");
+    rig.fake
+        .on("create_account", move || broken.ledger().fail_writes(&path));
+    let AccountError::Make { account, step, why } = pool.lend("job-1").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Ledger));
+    assert!(why.starts_with("recording ready: "), "{why}");
+    assert!(
+        why.contains("deleting what was made did not complete, at ledger: recording gone: "),
+        "{why}"
+    );
+    // The account was deleted all the same: only the ledger does not know.
+    assert!(rig.fake.state().users.is_empty());
+    assert_eq!(rig.lines(), [format!("made kbf-acct-1 {}", me())]);
+}
+
+/// Asserts that the proof's launchd judgment is used for a uid that is passed over: a domain
+/// that prints holds nothing in the choice of a uid (only the records, processes and files
+/// do), so a uid whose domain prints is chosen and its deletion judges the domain.
+#[test]
+fn a_domain_that_prints_does_not_make_a_uid_busy() {
+    let rig = Rig::new("domain-not-busy", 1, 0);
+    let pool = rig.open();
+    rig.fake
+        .state()
+        .print
+        .insert(format!("user/{}", me()), Print::Stays);
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, me());
+}
