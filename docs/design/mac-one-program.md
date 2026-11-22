@@ -245,8 +245,8 @@ Each step is a pull request that leaves main shippable. Steps 2 and 3 depend on 
 
 **Step 1. The system-domain probe and a supervisor probe on the hosted runner.** Done: the result is in section 4.3.
 
-- Run the root probe (section 4.3) and record its result in this document.
-- Add a probe to `js-mac-probe` that runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job.
+- The root probe (section 4.3) ran, and its result is recorded there.
+- A probe in `js-mac-probe` runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job.
 
 **Step 2. The pf job folded into the agent.**
 

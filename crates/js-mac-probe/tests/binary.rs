@@ -70,7 +70,7 @@ fn own_gid(scratch: &TestDir) -> u32 {
 }
 
 #[test]
-fn a_hold_child_prints_its_own_ids_and_stays_in_its_parents_group() {
+fn a_hold_child_prints_its_own_ids_and_leads_no_group_or_session_of_its_own() {
     let scratch = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hold-plain");
     let (hello, pid) = hold(&scratch, &[]);
     assert_eq!(hello.pid, i32::try_from(pid).unwrap());

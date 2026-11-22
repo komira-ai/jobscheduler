@@ -234,6 +234,27 @@ fn the_instances_are_the_pids_in_order_and_other_lines_are_left_out() {
 }
 
 #[test]
+fn cleanup_finds_every_process_with_a_tag_of_the_case_and_no_other_cases() {
+    let rows = [
+        row(20, 1, "/p child hold --tag /s/kill-9/same-group --secs 900"),
+        row(
+            21,
+            40,
+            "/p child hold --tag /s/kill-9/supervised-job --secs 900",
+        ),
+        row(
+            22,
+            1,
+            "/p child hold --tag /s/kill-9-abandon/own-group --secs 900",
+        ),
+        row(23, 1, "/p child launchd-job --state /s/kill-9 --secs 900"),
+        row(24, 1, "/usr/sbin/other"),
+    ];
+    assert_eq!(tagged(&rows, Path::new("/s/kill-9")), [20, 21]);
+    assert!(tagged(&rows, Path::new("/s/bootout")).is_empty());
+}
+
+#[test]
 fn a_tag_is_the_kind_under_the_state_directory() {
     assert_eq!(
         tag(Path::new("/s/kill-9"), Kind::OwnSession),

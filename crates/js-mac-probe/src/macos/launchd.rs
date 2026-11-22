@@ -4,8 +4,13 @@
 //! end, and reads with `ps` which children run on and with which parent. Asserted: every
 //! child but the one in the job's own group runs on, the job's own with parent pid 1 and the
 //! supervisor's child with the supervisor as its parent. Reported with it: each child's state
-//! just before the stop, and how each child the job reaped ended. Each case removes
-//! its job and ends its children, whatever happened.
+//! just before the stop, and how each child the job reaped ended. Each case boots its job
+//! out and kills every process whose command line carries one of the case's tags, whatever
+//! happened.
+//!
+//! A run killed between a bootstrap and its case's cleanup leaves that `KeepAlive` job
+//! loaded until a reboot, its children ending after `LIFETIME_SECS`: boot it out by hand
+//! (`launchctl bootout <domain>/js-mac-probe.launchd.<pid>.<case>`).
 //!
 //! Unprivileged it runs in the user's `gui/<uid>` domain (`user/<uid>` when the runner has
 //! no GUI domain); as root, in the `system` domain, with a child that drops to another uid.
@@ -20,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use super::exec::{Outcome, run};
 use crate::launchd::{
-    self, Case, Fate, Ids, Kind, Plist, Row, Spawned, Stop, judge, parse_children, parse_instances,
+    self, Case, Ids, Kind, Plist, Row, Spawned, Stop, judge, parse_children, parse_instances,
     parse_ps, print_summary,
 };
 use crate::report::{Probe, Report};
@@ -62,7 +67,9 @@ pub fn probes(dir: &Path, exe: &Path, drop: Option<Ids>, report: &mut Report) {
 
 /// `dir`, mode 0755, with a copy of the probe in it that every uid may run.
 fn setup(dir: &Path, exe: &Path) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
+    // A path that is already there, a link included, fails: as root under a directory every
+    // user may write, the probe must not run a copy or a plist someone else placed.
+    fs::create_dir(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
     let copy = dir.join("js-mac-probe");
     fs::copy(exe, &copy)?;
@@ -257,31 +264,23 @@ impl Ctx<'_> {
     }
 }
 
-/// Boots the job out if it is still there and ends every child of the case still running.
+/// Boots the job out if it is still there and kills every process left with one of the
+/// case's tags, found among all processes (not only those the children file lists).
 fn cleanup(service: &str, state: &Path) {
     let _ = launchctl(&[OsString::from("bootout"), service.into()]);
-    let children = read_children(state).unwrap_or_default();
-    let running = || {
-        let rows = ps(&children);
-        let fates = launchd::fates(&children, state, &rows);
-        let pids = children
-            .iter()
-            .filter_map(|c| c.outcome.as_ref().ok().map(|h| h.pid));
-        let left: Vec<String> = pids
-            .zip(fates)
-            .filter(|(_, fate)| *fate != Fate::Gone)
-            .map(|(pid, _)| pid.to_string())
-            .collect();
-        left
+    let left = || {
+        let mut cmd = Command::new("/bin/ps");
+        cmd.args(["-ww", "-axo", "pid=,ppid=,pgid=,uid=,command="]);
+        launchd::tagged(&parse_ps(&run(cmd).stdout), state)
     };
-    let left = running();
-    if !left.is_empty() {
+    let pids: Vec<String> = left().iter().map(ToString::to_string).collect();
+    if !pids.is_empty() {
         let mut cmd = Command::new("/bin/kill");
-        cmd.arg("-9").args(&left);
+        cmd.arg("-9").args(&pids);
         let _ = run(cmd);
     }
-    if !wait_until(|| running().is_empty()) {
-        eprintln!("children still running after cleanup: {:?}", running());
+    if !wait_until(|| left().is_empty()) {
+        eprintln!("processes still running after cleanup: {:?}", left());
     }
 }
 

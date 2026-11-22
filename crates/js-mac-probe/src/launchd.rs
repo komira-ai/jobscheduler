@@ -372,6 +372,15 @@ pub fn tag(state: &Path, kind: Kind) -> PathBuf {
     state.join(kind.name())
 }
 
+/// The pids of the rows whose command line carries a tag of the case at `state` (a path
+/// under `state/`; another case's directory whose name starts with this one's is not).
+#[must_use]
+pub fn tagged(rows: &[Row], state: &Path) -> Vec<i32> {
+    let under = format!("{}/", state.to_string_lossy());
+    let carries = |row: &&Row| row.command.contains(&under);
+    rows.iter().filter(carries).map(|row| row.pid).collect()
+}
+
 /// A process as `ps -o pid=,ppid=,pgid=,uid=,command=` shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
