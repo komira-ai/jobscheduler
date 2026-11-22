@@ -309,6 +309,32 @@ fn a_key_held_at_its_limit_books_a_step_above_it_and_stays_there() {
     assert_eq!(memory(&s, &k), 9728 * MIB, "it fits: no further step");
 }
 
+/// M2: what a key that keeps reaching its limit costs before it fits: a compile that needs
+/// 10 GiB, booked 7.75 GiB from its earlier runs, is held at its limit on two runs (at
+/// 7.75 GiB, then at 9.5 GiB) and fits on the third (11.75 GiB); its first measured peak
+/// then books it 12.25 GiB, where it stays. Each booking holds the run to it: the peak is
+/// `min(need, booking)`.
+#[test]
+fn a_key_that_needs_10_gib_from_7_75_is_held_on_two_runs_and_fits_on_the_third() {
+    let b = Bounds::default();
+    let (mut s, k) = (Summaries::default(), linux(1));
+    feed(&mut s, &k, &success(6450 * MIB), 10);
+    let need = 10 * GIB;
+    let mut bookings = Vec::new();
+    let mut held = 0;
+    for _ in 0..6 {
+        let booked = memory(&s, &k);
+        bookings.push(booked / MIB);
+        let peak = need.min(booked);
+        if peak * 100 >= booked * 95 {
+            held += 1;
+        }
+        s.observe(&k, &under(booked, peak), DAY, &b);
+    }
+    assert_eq!(held, 2, "runs held at their limit before one fits");
+    assert_eq!(bookings, [7936, 9728, 12032, 12544, 12544, 12544]);
+}
+
 /// M2 closed loop: the booking follows the estimate and each run's limit is its booking,
 /// so its peak is `min(need, limit)`, 200 runs per key. A key that needs more than its
 /// booking climbs a step per run that reaches the limit until it fits, then reaches it no
