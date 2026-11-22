@@ -1,6 +1,6 @@
 # One agent program on a Mac
 
-Status: accepted, 2026-11-22 (the owner's answers are in section 10); steps 4 and later wait for the root probe of section 4.3. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
+Status: accepted, 2026-11-22 (the owner's answers are in section 10). The root probe of section 4.3 ran on macOS 27.0.1 and holds for the design, so steps 4 and later no longer wait for it. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
 ## 1. What changes for an operator
 
@@ -168,7 +168,29 @@ So launchd sends `SIGTERM` to the job's own process, then `SIGKILL` after `ExitT
 
 In that domain a process group of its own is enough, and a supervisor already gets one from `process_group(0)`. The session does not matter, and no plist key is needed. The design leaves `AbandonProcessGroup` unset (D4): launchd should still clean up anything else the agent leaves in its own group, such as a `pfctl` it was running when it was stopped.
 
-**Not proven yet: the system domain.** The agent runs in the `system` domain, as root, which needs root to probe. The same probe, written for the system domain and adding a child that drops to an unprivileged uid, is written as a script for an operator to run as root on a Mac with no agent installed; running it is step 1 of section 7, which records the result here. If the system domain kills a separate group, step 1 tries `AbandonProcessGroup` true there (which kept even same-group children in the user domain). If that fails too, the design goes back to the owner before step 4: the fallback is section 9's helper started by the agent.
+**The system domain, as root.** The same probe ran in the `system` domain as root on macOS 27.0.1 (build 26A434, arm64), on a Mac with an agent installed (the probe used launchd labels and files of its own). It is `js-mac-probe launchd-system` (`crates/js-mac-probe/src/macos/launchd.rs`). A `KeepAlive` LaunchDaemon started six children, and the probe stopped it three ways, each with and without `AbandonProcessGroup`:
+
+- A in the daemon's process group (root);
+- B in a group of its own (root);
+- C in a session of its own (root);
+- D in a group of its own, as `nobody` (uid -2);
+- S in a group of its own (root), the supervisor's shape, whose own child
+- J runs in a group of its own as `nobody`, the run's job.
+
+Each case waited until launchd had forgotten the daemon (`bootout`) or started it again (`kickstart -k`, `kill -9`), and then read the children with `ps`. Before every stop, every child ran with the daemon as its parent, and J with S as its parent. The daemon reaped no child before the stop.
+
+| How the daemon ended | A (same group) | B (own group) | C (own session) | D (own group, `nobody`) | S (supervisor) | J (the supervisor's child, `nobody`) |
+|---|---|---|---|---|---|---|
+| `launchctl bootout` | killed | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent S |
+| `launchctl kickstart -k` (a restart) | killed | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent S |
+| `kill -9` of the daemon, which `KeepAlive` restarts | killed | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent S |
+| any of the three, with `AbandonProcessGroup` true | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent pid 1 | runs on, parent S |
+
+`launchctl print system/<label>` showed, before each stop, `state = running`, `runs = 1`, the daemon's pid and `last exit code = (never exited)`, with `abandon process group` among the properties when the key was set. After `bootout` the service was gone (`Could not find service`, exit 113). After `kickstart -k` it showed `runs = 2`, a new pid and `last terminating signal = Terminated: 15`: `kickstart -k` sends `SIGTERM`. After `kill -9` it showed `runs = 2`, a new pid and `last terminating signal = Killed: 9`.
+
+The system domain does what the user domain does. A process group of its own is enough, as root and as another uid; a session of its own changes nothing; and launchd kills only the daemon's own group, unless `AbandonProcessGroup` is true. The supervisor's `process_group(0)` keeps it and its run through every stop of the agent's job, and D4 stands. Section 9's fallback, the helper started by the agent, is not needed.
+
+On the beta stage's macOS runner, the probe in `js-mac-probe` runs both ways on every push to main. `report` runs it as the runner's user in that user's domain, and `launchd-system` runs it as root through `sudo` (`.github/workflows/macos-probe.yml`). Each fails its step when a child other than A does not run on with its parent, so a macOS release that starts killing the descendants of a stopped job holds back `promote-macos`. The root run is also the check that step 5's test needs, that a root job on that runner can bootstrap and boot out a LaunchDaemon. Its first run is the first push to main that carries it; until then that point rests on the runner's `sudo` without a password (`beta.yml`).
 
 **Who reaps and who signals.** Once the agent is gone, the supervisor's parent is `launchd` (pid 1), which reaps it when it exits, as the probe's `ps` shows. Root can signal any process, so the next agent (root) can end a supervisor. It names the supervisor by `{pid, start}`, so a reused pid is never signalled. The pool user cannot signal the supervisor (root) or the agent.
 
@@ -221,7 +243,7 @@ The pf enable token is kept in a file (`<state dir>/pf-token`), not held by a pr
 
 Each step is a pull request that leaves main shippable. Steps 2 and 3 depend on nothing and can land in either order. Step 4 waits for steps 1 and 3, step 5 for steps 2 and 4, and step 6 for step 5. Each step says what is reverted if it fails on a Mac.
 
-**Step 1. The system-domain probe and a supervisor probe on the hosted runner.**
+**Step 1. The system-domain probe and a supervisor probe on the hosted runner.** Done: the result is in section 4.3.
 
 - Run the root probe (section 4.3) and record its result in this document.
 - Add a probe to `js-mac-probe` that runs unprivileged on the beta stage's macOS runner. It starts a process group under a `launchd` job, boots the job out, and asserts that the group runs on with parent pid 1. It catches a macOS release that starts killing the descendants of a stopped job.
@@ -316,13 +338,13 @@ The arguments for keeping the helper, strongest first, with the answers:
 
 1. **The agent's restart would reset pool users.** Strong: the reset runs once per start of the helper today, and a naive merge would run it at every agent start. The answer is section 4.2's reset: `boot_reset` gains the adopted list, the agent adopts before it resets, and step 5 tests a restart, a lost journal line and a supervisor the journal never named.
 2. **Many root supervisors against one ledger: a supervisor's deadline kill could hit a uid that was already reset and lent to another lease, or race the agent's own kill.** Strong. The answer has three parts. The agent's `remove` waits until the supervisor is gone before it resets the uid. A supervisor kills only under its lease's lock, which the agent also takes for any kill or reset of that uid. And a supervisor writes its own `supervisor` file before it can run a job, so the next agent finds every one (D7).
-3. **The design rests on launchd behaviour proven only in a user domain.** Strong. Step 4 waits for the root probe of step 1, and section 4.3 says what happens if it fails.
+3. **The design rests on launchd behaviour proven only in a user domain.** Strong. The root probe of step 1 has since run in the system domain on macOS 27: a supervisor in its own group, and its child as another uid, outlive every stop of the daemon (section 4.3). The beta stage's runner repeats it on every push to main.
 4. **The switch would ship before the test that proves it.** Strong for the order. The real-macOS restart test now lands in step 5 and holds back `promote-macos`.
 5. **The verb set is a validation layer against bugs.** Medium. The agent holds only `Pool`, whose destructive calls are keyed by a lease and resolve its uid from the ledger inside the pool's range (section 3). It never holds the `Host` itself.
 6. **Keep the helper, but start it from the agent: one launchd job, one program, a `__helper` mode, a socket pair.** Medium. It removes the plists, the hook steps, the group and the cdhash pin. It loses on the point that matters:
    - The helper keeps its runs in memory, and its boot reset ends every lease. So the helper itself cannot be updated with jobs running: each agent update that replaces it either drains or ends the jobs.
    - A helper that is not replaced runs an older release beside a newer agent, and a new agent must find it again through a named socket and check who it is. That keeps the protocol, the client and their tests.
-   - The supervisor removes both problems with less code, because Linux already has it. This option is the fallback only if the root probe fails.
+   - The supervisor removes both problems with less code, because Linux already has it. This option was the fallback had the root probe failed, and it did not (section 4.3).
 7. **Blocking pool calls inside an async agent.** Medium. Pool calls run on blocking threads, and the ledger lock is not held across a supervisor's ready wait (section 3, section 4.2).
 8. **Privacy grants.** Weak to medium. Neither daemon is known to hold a grant. The supervisor and the job are each started disclaimed, and `spawn_sites` fails any other start (section 4.2).
 9. **Crash isolation.** Weak. Today a helper crash ends every job (its table is in memory and its reset ends every lease, `runs.rs:6-10`). After the change, an agent crash ends none. A crash mid-teardown leaves a `resetting` slot that the next start finishes.
@@ -342,7 +364,7 @@ The owner answered yes to all five questions of section 8:
 - **D1.** No new platform trait: `Runtime` above and `Host` below already have two implementations each (R9).
 - **D2.** The Mac arm gets its own mode word (`__supervise-native`) instead of growing Linux's argument list: the two arms take different arguments, and each parses only its own.
 - **D3.** The agent locks the ledger for its whole life and keeps it at its current path, so the switch moves no file.
-- **D4.** `AbandonProcessGroup` stays unset unless the root probe shows the system domain needs it. The supervisor's own process group is what the user-domain probe shows it needs, and launchd keeps cleaning up the agent's own leftovers.
+- **D4.** `AbandonProcessGroup` stays unset. The supervisor's own process group is all it needs, in the user domain and, as the root probe showed, in the system domain; and launchd keeps cleaning up the agent's own leftovers.
 - **D5.** The supervisor runs as root and only its child drops to the pool user, so that it can hold the deadline (killing a uid and booting out its domains needs root) and so that the pool user cannot signal it or write its record.
 - **D6.** `--native-helper-socket` is removed in the switch release, not kept as an ignored flag. Only the package's own agent plist passes it, and that plist is replaced in the same cutover. A rollback restores the previous plist with the previous program.
 - **D7.** A per-lease lock file in `<state root>/native/<lease>/` orders the supervisor's deadline kill against the agent's kill and reset of the same uid. The ledger keeps one writer, the agent.
