@@ -162,6 +162,23 @@ pub(super) fn rules(
         .map_err(|tree| format!("{} is not beneath {}", tree.display(), root.display()))
 }
 
+/// The mount root and the trees' resolved paths, for the builder; `None` without trees.
+pub(super) fn mount_trees(
+    args: &Args,
+    mounted: &[Mounted],
+) -> Result<Option<(PathBuf, Vec<PathBuf>)>, String> {
+    if mounted.is_empty() {
+        return Ok(None);
+    }
+    let Some((_, root)) = provider(args)? else {
+        return Err("trees are mounted and no --mount-root is given".to_owned());
+    };
+    Ok(Some((
+        root,
+        mounted.iter().map(|m| m.resolved.clone()).collect(),
+    )))
+}
+
 /// Releases every mounted tree: the report's entries, each with its release.
 pub(super) fn release(args: &Args, job: &JobFile, mounted: Vec<Mounted>) -> Vec<TreeUse> {
     let provider = match provider(args) {

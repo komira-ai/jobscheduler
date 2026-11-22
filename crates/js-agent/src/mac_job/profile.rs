@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 
+use js_mac_pool::seatbelt::{
+    AbsPath, Caps, MountTrees, Net, Policy, Ports, Profile, ReadModel, SlotLayout,
+};
+
 use super::spec::Network;
 
 /// The name of the profile's one parameter: the job folder, absolute and resolved.
@@ -147,6 +151,76 @@ pub fn render(kind: Kind, network: &Network, mount: &str, added: &str) -> String
         }
     }
     text
+}
+
+/// The paths the proof build denies reads of, as given; each again below `/System/Volumes/Data`.
+const READ_DENIES: [&str; 12] = [
+    "/Library/Application Support/com.apple.TCC",
+    "/Library/Bluetooth",
+    "/Library/Trial",
+    "/Library/Preferences/com.apple.TimeMachine.plist",
+    "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist",
+    "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist.backup",
+    "/private/var/db/CoreDuet",
+    "/private/var/db/com.apple.backgroundtaskmanagement",
+    "/private/var/db/com.apple.security.cryptexd",
+    "/private/var/db/os_eligibility",
+    "/private/var/protected/sfanalytics",
+    "/private/var/protected/xprotect/db",
+];
+
+/// The confined-writes profile from `js-mac-pool`'s builder (proof build: the Mac fence test
+/// runs the pool's text on a `__mac-job`), with `added` appended; its text and parameters.
+pub fn built(
+    job: &Path,
+    network: &Network,
+    trees: Option<(&Path, &[PathBuf])>,
+    added: &str,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let abs = |p: &Path| AbsPath::new(p).map_err(|why| format!("{}: {why}", p.display()));
+    let mut read_denies = Vec::new();
+    for prefix in ["", "/System/Volumes/Data"] {
+        for path in READ_DENIES {
+            read_denies.push(abs(Path::new(&format!("{prefix}{path}")))?);
+        }
+    }
+    let trees = match trees {
+        Some((root, list)) => {
+            let list = list.iter().map(|t| abs(t)).collect::<Result<Vec<_>, _>>()?;
+            Some(MountTrees::new(abs(root)?, list).map_err(|why| why.to_string())?)
+        }
+        None => None,
+    };
+    let layout = SlotLayout {
+        run: abs(job)?,
+        uid_entry: None,
+        inputs: Vec::new(),
+        read_denies,
+        mounts: Vec::new(),
+        trees,
+    };
+    let net = if !network.outbound_ports.is_empty() {
+        Net::Remote(Ports::new(&network.outbound_ports).map_err(|why| why.to_string())?)
+    } else if network.loopback {
+        Net::Loopback
+    } else {
+        Net::Off
+    };
+    let caps = Caps {
+        net,
+        read_model: ReadModel::Open,
+    };
+    let policy = Policy::base(layout, caps).map_err(|why| why.to_string())?;
+    let profile = Profile::for_policy(&policy).map_err(|why| why.to_string())?;
+    let mut text = profile.text().to_owned();
+    if !added.is_empty() {
+        text.push_str("\n; added for this run\n");
+        text.push_str(added);
+        if !added.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    Ok((text, profile.params().to_vec()))
 }
 
 /// The rules that keep a job on the mount to its own trees, and the parameters they name: no

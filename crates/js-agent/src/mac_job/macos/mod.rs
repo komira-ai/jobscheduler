@@ -169,20 +169,40 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         }
     };
 
-    let (mount_text, mount_params) = match trees::rules(args, &mounted) {
-        Ok(rules) => rules,
+    let built = if args.profile == profile::Kind::ConfinedWrites {
+        // Proof build: the confined-writes kind is built by js-mac-pool's builder.
+        trees::mount_trees(args, &mounted).and_then(|mt| {
+            let pair = mt
+                .as_ref()
+                .map(|(root, list)| (root.as_path(), list.as_slice()));
+            profile::built(&layout.folder, &job.network, pair, added)
+        })
+    } else {
+        trees::rules(args, &mounted).map(|(mount_text, mount_params)| {
+            let mut params = vec![(
+                JOB_PARAM.to_owned(),
+                layout.folder.to_string_lossy().into_owned(),
+            )];
+            params.extend(mount_params);
+            (
+                profile::render(args.profile, &job.network, &mount_text, added),
+                params,
+            )
+        })
+    };
+    let (profile_text, profile_params) = match built {
+        Ok(pair) => pair,
         Err(why) => {
             let _ = trees::release(args, &job, mounted);
             let _ = files::remove_folder(&layout.folder);
             return Err(Stop::Setup(why));
         }
     };
-    let profile_text = profile::render(args.profile, &job.network, &mount_text, added);
     let new_session = args.audit_session == AuditSession::New;
     let started = Instant::now();
     let profile_of = Profile {
         text: &profile_text,
-        params: &mount_params,
+        params: &profile_params,
     };
     let started_job = start(&job, &layout, name, &user, &profile_of, new_session, args);
     let mut child = match started_job {
@@ -405,12 +425,7 @@ fn start(
         new_session,
         asid_file: asid_file.to_string_lossy().into_owned(),
         profile: profile.text.to_owned(),
-        params: std::iter::once((
-            JOB_PARAM.to_owned(),
-            layout.folder.to_string_lossy().into_owned(),
-        ))
-        .chain(profile.params.iter().cloned())
-        .collect(),
+        params: profile.params.to_vec(),
         program: job.program.clone(),
         args: job.args.clone(),
         disclaim: args.spawn == Spawn::Disclaimed,
