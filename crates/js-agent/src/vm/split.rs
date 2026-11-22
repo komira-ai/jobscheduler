@@ -139,6 +139,11 @@ impl Runtime for WithVms {
         lines
     }
 
+    /// The other runtime's: a VM makes no account.
+    fn held_accounts(&self) -> usize {
+        self.other.held_accounts()
+    }
+
     fn supports_gpus(&self) -> bool {
         self.other.supports_gpus()
     }

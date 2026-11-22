@@ -50,9 +50,9 @@ use std::path::{Path, PathBuf};
 use js_agent_wire::RunResult;
 use serde::{Deserialize, Serialize};
 
-use super::job::{Job, Keyed, Retired};
+use super::job::{Job, Keyed, Retired, account_held_taint};
 use super::{Lifecycle, MAX_JOBS};
-use crate::lifecycle::taint::StateRoot;
+use crate::lifecycle::taint::{ACCOUNTS_HELD_TAINT, StateRoot};
 use crate::lifecycle::{Event, Finding, code};
 
 /// The directory of the held results, in the state root.
@@ -559,6 +559,27 @@ impl Records {
 }
 
 impl Lifecycle {
+    /// What ends every [`Lifecycle::apply`] and [`Lifecycle::step`]: the host is tainted when
+    /// the runtime holds accounts enough (a start, a removal or a step of a job may have
+    /// left one), and then the results and retired ids are written down.
+    pub(super) fn finish_call(&mut self, events: &mut Vec<Event>) {
+        self.taint_held_accounts(events);
+        self.persist_held(events);
+    }
+
+    /// Taints the host [`reason::ACCOUNT_NOT_DELETED`] when the runtime holds
+    /// [`ACCOUNTS_HELD_TAINT`] accounts or more, wherever they were left: by a removal, by a
+    /// start that failed, by the runtime's reclaim or boot reset at start. It is done once.
+    /// The count falling back later (a retry deleted one) does not clear the taint: only an
+    /// operator does, and the marker is kept until then.
+    pub(super) fn taint_held_accounts(&mut self, events: &mut Vec<Event>) {
+        if self.runtime.held_accounts() < ACCOUNTS_HELD_TAINT || self.taint.accounts_sealed() {
+            return;
+        }
+        self.seal(account_held_taint(), events);
+        self.taint.seal_accounts();
+    }
+
     /// Writes down the results and retired ids the call just made, and takes back the
     /// files of the results it dropped. Called at the end of every call that changes them,
     /// so that a result is on disk before a heartbeat can carry it.

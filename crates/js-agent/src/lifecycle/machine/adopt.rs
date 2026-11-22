@@ -114,6 +114,8 @@ impl Lifecycle {
         let now = this.clock.now_ms();
         this.quota_health = QuotaHealth::at_start(this.config.quota.as_ref(), now, &mut events);
         this.owed_at_start(&mut events);
+        // Accounts the runtime's start (its reclaim, its boot reset) left held count here.
+        this.taint_held_accounts(&mut events);
         let mut stuck = Vec::new();
         for (_, container) in found {
             let now = this.clock.now_ms();
@@ -265,7 +267,7 @@ impl Lifecycle {
 
     /// Taints the host with `taint` and writes the marker; a marker that cannot be written
     /// is a finding that belongs to no run.
-    fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) {
+    pub(super) fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) {
         if let Err(why) = self.taint.seal(taint, None, events) {
             events.push(Event::Finding(Finding {
                 run_id: None,

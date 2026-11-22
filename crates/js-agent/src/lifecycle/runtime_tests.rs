@@ -177,6 +177,13 @@ fn only_a_held_account_says_how_many_accounts_are_held() {
     assert_eq!(RuntimeError::blind("not seen").held_accounts(), None);
 }
 
+/// Asserts that a runtime that makes no accounts holds none. Catches a default that would
+/// taint every host.
+#[test]
+fn a_runtime_that_makes_no_accounts_holds_none() {
+    assert_eq!(Bare.held_accounts(), 0);
+}
+
 /// A run of no consequence.
 fn spec() -> RunSpec {
     RunSpec {

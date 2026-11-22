@@ -1,7 +1,7 @@
-//! A native run's account that the helper would not delete: the helper's refusal of a step of
-//! the end leaves the account held (its lease stays live in the journal, its uid held), the
-//! runtime goes on without the run and says how many accounts are held, the lifecycle taints
-//! the host from two, and the runtime ends each held account again at the end of the next job
+//! A native run's account that the helper would not delete: the helper's refusal of the
+//! `user-delete` leaves the account held (its lease stays live in the journal, its uid held),
+//! the runtime goes on without the run and says how many accounts are held, the lifecycle
+//! taints the host from two, a refused `kill-uid` is no hold (the run stays), and the runtime ends each held account again at the end of the next job
 //! and at its start. A failure that is not a refusal (the socket, a helper that needs its boot
 //! reset) is not a hold. The helper is the fake that speaks the real protocol, which refuses a
 //! verb of one lease, or of every lease, when a test says so.
@@ -45,12 +45,14 @@ fn handle(lease: &str) -> RunHandle {
 /// Asserts what a deletion the helper refuses leaves: the removal fails with what the helper
 /// said and how many accounts are held, the run is gone from the runtime, the lease stays live
 /// in the journal and its home stays, and a second account that is refused makes two. A kill
-/// the helper refuses holds the account the same way and asks for no delete (a process of the
-/// user may still run). It catches a refusal that keeps the run for the lifecycle to remove
-/// again for ever, a lease marked done while its account is there, and a count that does not
-/// grow.
+/// the helper refuses is not a hold: it asks for no delete (a process of the user may still
+/// run), fails as any removal does, keeps the run in the runtime for the lifecycle to remove
+/// again, and counts no account; once the helper allows it the removal ends the run and the
+/// held account of the first. It catches a refusal of the delete that keeps the run for ever,
+/// a lease marked done while its account is there, a count that does not grow, and a refused
+/// kill that forgets a run whose processes may be alive.
 #[test]
-fn a_refused_step_holds_the_account_and_the_lease_stays_in_the_journal() {
+fn a_refused_delete_holds_the_account_and_a_refused_kill_does_not() {
     let mut rig = Rig::new("held-refused");
     let first = rig.start("r1", "/bin/true", &[]);
     rig.fake.refuse("user-delete", BUSY);
@@ -70,9 +72,16 @@ fn a_refused_step_holds_the_account_and_the_lease_stays_in_the_journal() {
         error.0,
         "kill-uid: kbf-mac-session refused: a process of uid 613 is left"
     );
-    assert_eq!(error.held_accounts(), Some(2));
+    assert_eq!(error.held_accounts(), None, "a refused kill is not a hold");
+    assert_ne!(rig.rt.poll(&second).unwrap(), Status::Gone, "the run stays");
+    assert_eq!(rig.rt.held_accounts(), 1);
     assert_eq!(rig.fake.verbs().last().unwrap(), "kill-uid 7.1");
     assert_eq!(live(&rig), ["7.0", "7.1"]);
+
+    rig.fake.allow("kill-uid 7.1");
+    rig.rt.remove(&second).unwrap();
+    assert!(live(&rig).is_empty(), "the held account is ended too");
+    assert_eq!(rig.rt.held_accounts(), 0);
 }
 
 /// Asserts that the end of the next job asks the helper again for each held account: a job
@@ -119,36 +128,46 @@ fn the_next_jobs_end_tries_a_held_account_again_and_retires_it_when_it_is_gone()
     );
 }
 
-/// Asserts that a start that failed and could not be undone (the helper refuses the kill and
-/// the delete as well as the account) holds its lease like a removal does: the lease stays
-/// live in the journal, and the end of the next job retires it once the helper allows it. It
-/// catches a failed start whose lease nothing ends before the next start of the agent.
+/// Asserts what a start that failed leaves when it could not be undone: a refused `kill-uid`
+/// (a process of the user may be alive) leaves the lease live in the journal and holds
+/// nothing, so no later job's end retries it and the next start of the agent ends it; a refused
+/// `user-delete` after a `kill-uid` that went through holds the account, which the end of the
+/// next job retires once the helper allows it. It catches a failed start whose lease nothing
+/// ends before the next start of the agent, and a refused kill counted as a held account.
 #[test]
-fn a_start_that_could_not_be_undone_holds_its_lease_until_a_job_ends() {
-    let mut rig = Rig::new("held-discard");
+fn a_failed_start_holds_its_account_only_when_the_delete_is_refused() {
+    let mut rig = Rig::new("held-discard-kill");
     rig.fake.refuse("user-create", "no free uid in 600-699");
     rig.fake.refuse("kill-uid", "stuck");
     rig.fake.refuse("user-delete", "busy");
     let spec = rig.spec("r1", native("/bin/true", &[]));
     rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(live(&rig), ["7.0"]);
-
+    assert_eq!(rig.rt.held_accounts(), 0, "a refused kill is not a hold");
     for verb in ["user-create", "kill-uid", "user-delete"] {
         rig.fake.allow(verb);
     }
     let id = rig.start("r2", "/bin/true", &[]);
     rig.rt.remove(&id).unwrap();
+    assert_eq!(live(&rig), ["7.0"], "no job's end retries it");
+    let lines = later(&rig).reclaim();
+    assert_eq!(lines, ["ended the lease user 7.0 an earlier process left"]);
     assert!(live(&rig).is_empty());
-    let verbs = rig.fake.verbs();
-    assert_eq!(
-        verbs[verbs.len() - 4..],
-        [
-            "kill-uid 7.1",
-            "user-delete 7.1",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
+
+    let mut rig = Rig::new("held-discard-delete");
+    rig.fake.refuse("user-create", "no free uid in 600-699");
+    rig.fake.refuse("user-delete", "busy");
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    rig.rt.create_and_start(&spec).unwrap_err();
+    assert_eq!(live(&rig), ["7.0"]);
+    assert_eq!(rig.rt.held_accounts(), 1);
+    for verb in ["user-create", "user-delete"] {
+        rig.fake.allow(verb);
+    }
+    let id = rig.start("r2", "/bin/true", &[]);
+    rig.rt.remove(&id).unwrap();
+    assert!(live(&rig).is_empty());
+    assert_eq!(rig.rt.held_accounts(), 0);
 }
 
 /// Asserts that a runtime that starts holds the lease an earlier process left whose end the
@@ -247,9 +266,10 @@ fn a_socket_error_or_a_helper_needing_its_reset_is_not_a_hold() {
 /// Asserts the whole path through the lifecycle: the first job whose account the helper
 /// refuses to delete ends with its result and a finding that says what the helper said, the
 /// cleanup goes through every step and frees the slot, the host is not tainted and the lease
-/// is live in the journal; the second job's end taints the host `account-not-deleted` before
-/// its finding, and the next start is refused as the host is tainted. A removal that fails on
-/// the socket taints as `cleanup-failed` as before. It catches a held account answered as a
+/// is live in the journal; the second job's end taints the host `account-not-deleted` once
+/// its cleanup is done, and the next start is refused as the host is tainted. A removal that
+/// fails on the socket, or on a refused `kill-uid`, taints as `cleanup-failed` and keeps the
+/// slot booked, as before. It catches a held account answered as a
 /// failed removal (a taint at once, and a slot kept for ever) and a second one that taints
 /// nothing.
 #[test]
@@ -277,18 +297,15 @@ fn one_held_account_is_a_finding_and_two_taint_the_host() {
     assert_eq!(h.start(job("r2", "/bin/true")), ["started r2"]);
     h.fake.exit("7.1", 0);
     let events = h.until(|life| life.busy_slots().is_empty());
-    let mut want = vec![
-        "result r2".to_owned(),
-        "tainted r2 account-not-deleted".to_owned(),
-        "finding r2 account-held".to_owned(),
-    ];
+    let mut want = vec!["result r2".to_owned(), "finding r2 account-held".to_owned()];
     want.extend(cleanup("r2"));
+    want.push("tainted - account-not-deleted".to_owned());
     assert_eq!(names(&events), want);
     assert_eq!(
         h.life.pending_taint(),
         Some(Taint {
             reason: "account-not-deleted".to_owned(),
-            run_id: Some("r2".to_owned()),
+            run_id: None,
             check: Some("account-held".to_owned()),
         })
     );
@@ -303,4 +320,14 @@ fn one_held_account_is_a_finding_and_two_taint_the_host() {
     let taint = h.life.pending_taint().unwrap();
     assert_eq!(taint.reason, "cleanup-failed");
     assert_eq!(taint.check.as_deref(), Some("container-remove-failed"));
+
+    let mut h = Native::new("held-life-kill");
+    h.fake.refuse("kill-uid", "stuck");
+    h.start(job("r1", "/bin/true"));
+    h.fake.exit("7.0", 0);
+    h.until(|life| life.is_tainted());
+    let taint = h.life.pending_taint().unwrap();
+    assert_eq!(taint.reason, "cleanup-failed");
+    assert_eq!(taint.check.as_deref(), Some("container-remove-failed"));
+    assert!(!h.life.busy_slots().is_empty(), "the slot stays booked");
 }

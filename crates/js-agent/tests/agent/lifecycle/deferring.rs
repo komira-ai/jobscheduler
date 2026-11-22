@@ -51,6 +51,11 @@ struct Gate {
     /// The accounts held that the next removals answer, one for each: each removal ends the
     /// run and fails as a native run's does when the helper cannot delete its account.
     accounts_held: VecDeque<usize>,
+    /// How many accounts the runtime holds now (`Runtime::held_accounts`).
+    held_now: usize,
+    /// When set, every start fails as a native one whose discard left an account held, the
+    /// count after it being this.
+    start_holds: Option<usize>,
 }
 
 /// The test's hand on the gate of a [`Deferring`] runtime.
@@ -104,6 +109,18 @@ impl Control {
             .borrow_mut()
             .accounts_held
             .extend(held.iter().copied());
+    }
+
+    /// The runtime holds `held` accounts from now on, as one whose reclaim or boot reset
+    /// found some does, whatever the lifecycle did.
+    pub fn set_held(&self, held: usize) {
+        self.0.borrow_mut().held_now = held;
+    }
+
+    /// From now on every start fails as a native one whose discard left an account held, the
+    /// runtime then holding `held` accounts.
+    pub fn fail_starts_holding(&self, held: usize) {
+        self.0.borrow_mut().start_holds = Some(held);
     }
 
     /// How often the lifecycle asked about the removal of the container `id`.
@@ -169,7 +186,7 @@ impl Runtime for Deferring {
             return Created::Pending;
         }
         drop(gate);
-        Created::Done(self.inner.create_and_start(spec))
+        Created::Done(self.create_and_start(spec))
     }
 
     fn poll_create(&mut self, run_id: &str) -> Created {
@@ -200,7 +217,17 @@ impl Runtime for Deferring {
     }
 
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
+        let mut gate = self.gate.0.borrow_mut();
+        if let Some(held) = gate.start_holds {
+            gate.held_now = held;
+            return Err(RuntimeError::new("user-create: the start failed"));
+        }
+        drop(gate);
         self.inner.create_and_start(spec)
+    }
+
+    fn held_accounts(&self) -> usize {
+        self.gate.0.borrow().held_now
     }
 
     fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
@@ -223,8 +250,12 @@ impl Runtime for Deferring {
             clock.advance(*ms);
         }
         let removed = self.inner.remove(id);
-        match self.gate.0.borrow_mut().accounts_held.pop_front() {
-            Some(held) if removed.is_ok() => Err(RuntimeError::account_held(ACCOUNT_HELD, held)),
+        let mut gate = self.gate.0.borrow_mut();
+        match gate.accounts_held.pop_front() {
+            Some(held) if removed.is_ok() => {
+                gate.held_now = held;
+                Err(RuntimeError::account_held(ACCOUNT_HELD, held))
+            }
             _ => removed,
         }
     }

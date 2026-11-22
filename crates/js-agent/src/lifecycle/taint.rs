@@ -531,6 +531,9 @@ pub(super) struct TaintState {
     due: Option<u64>,
     /// The re-checks passed and the clear is reported until the server acknowledges it.
     clearing: bool,
+    /// The host was tainted [`reason::ACCOUNT_NOT_DELETED`] (by this process, or the marker read
+    /// at start says so): the held accounts are not sealed again.
+    accounts_sealed: bool,
 }
 
 impl TaintState {
@@ -544,7 +547,11 @@ impl TaintState {
         let restored = taint
             .as_ref()
             .is_some_and(|taint| root.restored_rechecks(taint));
+        let accounts_sealed = taint
+            .as_ref()
+            .is_some_and(|taint| taint.reason == reason::ACCOUNT_NOT_DELETED);
         Self {
+            accounts_sealed,
             persisted: taint.is_some(),
             pinned: taint.is_some() && !restored,
             pin_recorded: true,
@@ -557,6 +564,16 @@ impl TaintState {
             due: None,
             clearing: false,
         }
+    }
+
+    /// Whether the host was tainted for held accounts ([`reason::ACCOUNT_NOT_DELETED`]).
+    pub(super) fn accounts_sealed(&self) -> bool {
+        self.accounts_sealed
+    }
+
+    /// Notes that the host was tainted for held accounts.
+    pub(super) fn seal_accounts(&mut self) {
+        self.accounts_sealed = true;
     }
 
     pub(super) fn is_tainted(&self) -> bool {

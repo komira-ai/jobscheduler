@@ -286,12 +286,13 @@ impl Lifecycle {
                     }
                     Removal::Done(Err(why)) => match why.held_accounts() {
                         // The run is gone and only its account is held: the helper could not
-                        // delete it, so the account stays with its uid, and the runtime deletes
-                        // it after a later run. It is a finding, and the host is tainted only
-                        // once the held accounts reach `ACCOUNTS_HELD_TAINT`; the cleanup goes
-                        // on. Only the native runtime makes accounts.
-                        Some(held) => {
-                            job.account_held((taint, held), &why, events);
+                        // delete it, so the account stays with its uid, and the runtime ends
+                        // it again after a later run. It is a finding; the cleanup goes on.
+                        // The host is tainted by the count of held accounts, which the
+                        // lifecycle reads after every call (`taint_held_accounts`). Only the
+                        // native runtime makes accounts.
+                        Some(_) => {
+                            job.account_held(&why, events);
                             events.push(Event::ContainerRemoved {
                                 run_id: run_id.clone(),
                             });

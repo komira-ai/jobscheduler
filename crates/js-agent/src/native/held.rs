@@ -1,17 +1,22 @@
 //! Ending a lease's account, and the accounts the helper would not delete.
 //!
 //! A run's account is ended by `kill-uid` and then `user-delete`, which deletes the account
-//! and shows it gone. A helper that refuses either (a step failed, or the proof that the
-//! account is gone did not hold) leaves the lease live in its ledger with its uid held, and
-//! says which step in the refusal. The agent keeps such a lease in its journal and in a
+//! and shows it gone. A `kill-uid` the helper refuses is an ordinary removal failure: a
+//! process of the user may still be alive, so the run stays in the runtime, the lifecycle
+//! keeps the job in removal and tries the step again. A `user-delete` the helper refuses
+//! after a `kill-uid` that went through (a step failed, or the proof that the account is gone
+//! did not hold) leaves the lease live in its ledger with its uid held, and says which step in
+//! the refusal. Only that is a held account: no process of the user is left. The agent keeps
+//! such a lease in its journal and in a
 //! [`HeldAccounts`](crate::lifecycle::held_accounts::HeldAccounts), takes the run out of the
 //! runtime, and fails the removal as a held account ([`RuntimeError::account_held`]), which
-//! the lifecycle reports and, from two held accounts, taints the host for. It repeats the
-//! end for each held lease after each removal that succeeds, and at its start, and a lease
-//! the helper then shows gone is done in the journal and no longer held. A failure that is
-//! not a refusal (the socket, a helper that needs its boot reset again) is not a hold: the
-//! call fails as it always did and the lease stays as it was. The decisions are in
-//! [`crate::lifecycle::held_accounts`], which is tested on every platform.
+//! the lifecycle reports; the lifecycle taints the host from two held accounts wherever the
+//! runtime counted them ([`Runtime::held_accounts`](crate::lifecycle::Runtime::held_accounts)).
+//! The runtime repeats the end for each held lease after each removal that succeeds, and at
+//! its start, and a lease the helper then shows gone is done in the journal and no longer
+//! held. A failure that is not a refusal (the socket, a helper that needs its boot reset
+//! again) is not a hold: the call fails as it always did and the lease stays as it was. The
+//! decisions are in [`crate::lifecycle::held_accounts`], which is tested on every platform.
 //!
 //! The helper does not give a held uid to another lease, so the range it gives from has one
 //! uid fewer for each held account: that is the one native job fewer at a time. A Mac agent
@@ -24,7 +29,7 @@ use js_mac_session::client::{Client, ClientError};
 
 use super::{NativeRuntime, fail, logs, outputs};
 use crate::lifecycle::RuntimeError;
-use crate::lifecycle::held_accounts::{Ending, ending};
+use crate::lifecycle::held_accounts::{Ending, ending, gone};
 
 /// Why ending a lease's account stopped: the step, and what the helper answered.
 #[derive(Debug)]
@@ -36,9 +41,10 @@ pub(super) struct Stop {
 }
 
 impl Stop {
-    /// Whether the helper refused to end the account: it is held.
+    /// Whether the account is held: the helper refused the `user-delete` after a `kill-uid`
+    /// that went through. A refused `kill-uid` is not: processes of the user may be alive.
     fn held(&self) -> bool {
-        ending(&self.why) == Ending::Held
+        self.verb == USER_DELETE && ending(&self.why) == Ending::Held
     }
 }
 
@@ -47,6 +53,9 @@ impl fmt::Display for Stop {
         write!(f, "{}: {}", self.verb, self.why)
     }
 }
+
+/// The helper verb that deletes the account.
+const USER_DELETE: &str = "user-delete";
 
 /// The answer of the helper to `verb`, as a step of ending an account: an answer that says
 /// nothing is left to end is the end that was wanted.
@@ -60,7 +69,7 @@ fn step(verb: &'static str, result: Result<(), ClientError>) -> Result<(), Stop>
 /// Ends the account of `lease`: `kill-uid`, then `user-delete` once no process of it is left.
 fn end_lease(helper: &Client, lease: &str) -> Result<(), Stop> {
     step("kill-uid", helper.kill_uid(lease))?;
-    step("user-delete", helper.user_delete(lease).map(drop))
+    step(USER_DELETE, helper.user_delete(lease).map(drop))
 }
 
 impl NativeRuntime {
@@ -74,15 +83,15 @@ impl NativeRuntime {
             run.collect(lease, max_file_bytes);
             logs::close(&mut run.logs, &run.scratch);
         }
-        step("user-delete", self.helper.user_delete(lease).map(drop))
+        step(USER_DELETE, self.helper.user_delete(lease).map(drop))
     }
 
-    /// The failure of a removal of `lease` that stopped at `stop`. A refusal holds the
-    /// account: the run is taken out of the runtime, its lease stays live in the journal, and
-    /// the failure says what the helper said, how many accounts are held and, when the
-    /// removal had copied the run's outputs and some could not be copied, which (the run is
-    /// gone, so nothing would say it later). Any other failure leaves the run in the runtime,
-    /// to be removed again.
+    /// The failure of a removal of `lease` that stopped at `stop`. A refused `user-delete`
+    /// holds the account: the run is taken out of the runtime, its lease stays live in the
+    /// journal, and the failure says what the helper said, how many accounts are held and,
+    /// when the removal had copied the run's outputs and some could not be copied, which (the
+    /// run is gone, so nothing would say it later). Any other failure, a refused `kill-uid`
+    /// among them, leaves the run in the runtime, to be removed again.
     pub(super) fn stopped(&mut self, lease: &str, stop: Stop) -> RuntimeError {
         if !stop.held() {
             self.learn(&stop.why);
@@ -103,15 +112,18 @@ impl NativeRuntime {
 
     /// Ends the user of `lease` after a start that failed, so none is left behind, and says
     /// what could not be done: the start's own error is the first thing the operator needs,
-    /// but a user that is left is a uid held in the helper's range. A refusal holds the
-    /// account.
+    /// but a user that is left is a uid held in the helper's range. A refused `user-delete`
+    /// after a `kill-uid` that went through holds the account. A refused `kill-uid` does not:
+    /// a process of the user may be alive, so the lease stays live in the journal, as it
+    /// always did, and the next start ends it.
     pub(super) fn discard(&mut self, lease: &str) -> Vec<String> {
         let killed = self.helper.kill_uid(lease);
+        let killed_ok = killed.as_ref().map_or_else(gone, |()| true);
         let deleted = self.helper.user_delete(lease).map(drop);
         let mut problems = Vec::new();
-        for (verb, result) in [("kill-uid", killed), ("user-delete", deleted)] {
+        for (verb, result) in [("kill-uid", killed), (USER_DELETE, deleted)] {
             if let Err(why) = result {
-                if ending(&why) == Ending::Held {
+                if verb == USER_DELETE && killed_ok && ending(&why) == Ending::Held {
                     self.held.hold(lease);
                 }
                 problems.push(format!("{verb}: {why}"));
@@ -146,6 +158,10 @@ impl NativeRuntime {
                 }
                 Err(stop) => {
                     self.learn(&stop.why);
+                    // A refused `kill-uid` counts as held here too: no run is attached to
+                    // the lease (the run of an earlier process is not adopted), so nothing
+                    // is forgotten that a process could still use, and the lease stays live
+                    // in the journal to be ended again at the next start or after a removal.
                     lines.push(format!("cannot end the lease user {lease}: {stop}"));
                     self.held.hold(&lease);
                 }
@@ -158,7 +174,9 @@ impl NativeRuntime {
     }
 
     /// Tries again to end each held account, after a removal that succeeded: a lease the
-    /// helper now shows gone is done in the journal and given up, the others stay held.
+    /// helper now shows gone is done in the journal and given up, the others stay held. A
+    /// lease whose `kill-uid` is refused stays held as well: it has no run attached, so
+    /// keeping it live in the journal to be tried again is all there is to do.
     pub(super) fn retry_held(&mut self) {
         let helper = &self.helper;
         let retried = self

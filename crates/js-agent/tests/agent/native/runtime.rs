@@ -345,11 +345,13 @@ fn a_stop_asks_the_helper_to_stop_with_its_grace() {
 }
 
 /// Asserts that a removal kills the user, deletes it (the helper deletes its home), and
-/// forgets the run, and that a removal the helper refuses at either step leaves the account
-/// held: the run is forgotten all the same, the lease stays in the journal, and the error is
-/// the helper's refusal, naming the step, as a held account (`held_accounts`), which a removal
-/// tried again ends. It catches a lease user left on the Mac after its job, and a refused
-/// delete that keeps the run for ever.
+/// forgets the run, that a delete the helper refuses leaves the account held (the run is
+/// forgotten, the lease stays in the journal, and the error is the helper's refusal, naming
+/// the step, as a held account, `held_accounts`), and that a kill it refuses is an ordinary
+/// failure: the run is kept, no delete is asked, and the error is not a held account. A removal
+/// tried again ends it. It catches a lease user left on the Mac after its job, a refused
+/// delete that keeps the run for ever, and a refused kill that forgets a run whose processes
+/// may be alive.
 #[test]
 fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     let mut rig = Rig::new("remove");
@@ -362,11 +364,21 @@ fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     assert_eq!(error.held_accounts(), Some(1));
     assert!(home.is_dir(), "a refused delete removes nothing");
     assert_eq!(rig.rt.poll(&id).unwrap(), Status::Gone, "the run is gone");
-    rig.fake.refuse("kill-uid", "stuck");
-    let error = rig.rt.remove(&id).unwrap_err();
+    let mut other = Rig::new("remove-kill");
+    let kept = other.start("r1", "/bin/true", &[]);
+    other.fake.refuse("kill-uid", "stuck");
+    let error = other.rt.remove(&kept).unwrap_err();
     assert_eq!(error.0, "kill-uid: kbf-mac-session refused: stuck");
-    assert_eq!(error.held_accounts(), Some(1), "the same account");
-    rig.fake.allow("kill-uid");
+    assert_eq!(error.held_accounts(), None, "a refused kill is not a hold");
+    assert_ne!(
+        other.rt.poll(&kept).unwrap(),
+        Status::Gone,
+        "the run is kept"
+    );
+    assert_eq!(other.rt.held_accounts(), 0);
+    assert_eq!(other.fake.verbs().last().unwrap(), "kill-uid 7.0");
+    other.fake.allow("kill-uid");
+    other.rt.remove(&kept).unwrap();
     rig.fake.allow("user-delete");
     rig.rt.remove(&id).unwrap();
     assert!(!home.exists());

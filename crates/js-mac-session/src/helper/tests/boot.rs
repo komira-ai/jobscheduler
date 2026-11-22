@@ -147,7 +147,7 @@ fn an_account_outside_the_range_or_the_prefix_is_not_the_helpers_to_delete() {
     account(&rig, "kbf-lease-84-1", me() + 50);
     account(&rig, "kbf-lease-pool-7", me() + 51);
     account(&rig, "kbf-vm", me() + 1);
-    account(&rig, "adi", 501);
+    account(&rig, "staff-user", 501);
     let reset = rig.helper.boot_reset(&[]).unwrap();
     assert_eq!(reset.deleted, Vec::<LeaseId>::new());
     assert_eq!(names(&rig).len(), 4);

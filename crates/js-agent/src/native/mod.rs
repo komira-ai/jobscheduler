@@ -46,11 +46,13 @@
 //!    one that cannot be copied does not stop the removal, which then fails as
 //!    [`RuntimeError`] of its outputs only.
 //!
-//! A step of the end that fails at the helper leaves the account held: the helper refuses by
-//! naming the step, the lease stays live in its ledger with its uid held, and in the journal.
-//! The removal then ends the run and fails as [`RuntimeError::account_held`], carrying how
-//! many accounts are held; the lifecycle goes on with the cleanup and reports it, and taints
-//! the host from two held accounts. The agent repeats the end of each held account after each
+//! A `kill-uid` the helper refuses fails the removal as any does and keeps the run: a process
+//! of the user may be alive. A `user-delete` it refuses leaves the account held: the helper
+//! refuses by naming the step, the lease stays live in its ledger with its uid held, and in
+//! the journal. The removal then ends the run and fails as [`RuntimeError::account_held`],
+//! carrying how many accounts are held; the lifecycle goes on with the cleanup and reports
+//! it, and taints the host from two held accounts, wherever the runtime counted them
+//! ([`Runtime::held_accounts`]). The agent repeats the end of each held account after each
 //! removal that succeeds and at its start (`native/held.rs`); the helper does not give a held
 //! uid out, so the range it gives from has one uid fewer for each, which is one native job
 //! fewer at a time (a Mac agent has no native slot count of its own). A failure of the socket
@@ -745,8 +747,10 @@ impl Runtime for NativeRuntime {
 
     /// Kills, copies the run's outputs (once: a removal that is tried again does not copy
     /// them again), deletes the user, and only then reports outputs that could not be copied.
-    /// A helper that refuses to end the account leaves it held (`native/held.rs`): the run
-    /// goes, its lease stays in the journal, and the error says how many accounts are held.
+    /// A helper that refuses the `kill-uid` fails the removal and keeps the run (a process of
+    /// the user may be alive). One that refuses the `user-delete` leaves the account held
+    /// (`native/held.rs`): the run goes, its lease stays in the journal, and the error says how
+    /// many accounts are held.
     /// After a removal that succeeds, the held accounts are ended again.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.ready()?;
@@ -773,6 +777,11 @@ impl Runtime for NativeRuntime {
     /// held and tried again after each removal (`native/held.rs`).
     fn reclaim(&mut self) -> Vec<String> {
         self.end_unadopted()
+    }
+
+    /// The accounts held: the leases of the held set (`native/held.rs`).
+    fn held_accounts(&self) -> usize {
+        self.held.count()
     }
 
     /// Every run this runtime holds, those an earlier process started adopted first

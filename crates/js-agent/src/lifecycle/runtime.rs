@@ -507,9 +507,10 @@ pub trait Runtime {
     ///
     /// # Errors
     ///
-    /// The runtime cannot remove it. A native runtime that ended the run and could not delete
-    /// its account fails with [`RuntimeError::account_held`] and forgets the run: the lifecycle
-    /// goes on with the cleanup.
+    /// The runtime cannot remove it. A native runtime that ended the run's processes and could
+    /// not delete its account fails with [`RuntimeError::account_held`] and forgets the run:
+    /// the lifecycle goes on with the cleanup. One that could not end the processes fails as
+    /// any removal does, keeps the run, and is asked again.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError>;
 
     /// Begins, or follows, [`Runtime::remove`] of the container `id`, off the lifecycle's
@@ -668,6 +669,16 @@ pub trait Runtime {
     /// has nothing to do.
     fn reclaim(&mut self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// How many accounts of native jobs the runtime holds because the helper would not
+    /// delete them (see [`RuntimeError::account_held`]), wherever it learned of them: a
+    /// removal, a start that failed, its reclaim or its boot reset. The lifecycle reads it
+    /// after each call and taints the host from
+    /// [`ACCOUNTS_HELD_TAINT`](crate::lifecycle::ACCOUNTS_HELD_TAINT). The default is a
+    /// runtime that makes no accounts.
+    fn held_accounts(&self) -> usize {
+        0
     }
 
     /// Whether a container made here can use a GPU. A start that names a GPU where this

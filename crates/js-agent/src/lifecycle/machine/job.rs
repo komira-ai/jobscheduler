@@ -16,7 +16,7 @@ use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{
     Body, Exit, Found, JobFs, ResolvedMount, RunHandle, RunSpec, RuntimeError, Ticket,
 };
-use crate::lifecycle::taint::{ACCOUNTS_HELD_TAINT, TaintState, reason};
+use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{
     Capacity, CheckFinding, CleanupTimeline, Event, Finding, code, detail, label,
 };
@@ -147,12 +147,13 @@ pub(super) fn cleanup_taint(run_id: Option<&str>, code: &str) -> Taint {
     }
 }
 
-/// The taint of a native run whose account stayed held beside another: the helper could not
-/// delete it, and the host holds accounts no retry has freed.
-pub(super) fn account_held_taint(run_id: &str) -> Taint {
+/// The taint of a host that holds [`ACCOUNTS_HELD_TAINT`](crate::lifecycle::ACCOUNTS_HELD_TAINT) accounts the helper could not
+/// delete, which no retry has freed. No run is named: the accounts are counted where the
+/// runtime holds them, not by the job that left one.
+pub(super) fn account_held_taint() -> Taint {
     Taint {
         reason: reason::ACCOUNT_NOT_DELETED.to_owned(),
-        run_id: Some(run_id.to_owned()),
+        run_id: None,
         check: Some(code::ACCOUNT_HELD.to_owned()),
     }
 }
@@ -451,19 +452,10 @@ impl Job {
         }
     }
 
-    /// Taints the host when `held` accounts (this job's among them) reach
-    /// [`ACCOUNTS_HELD_TAINT`], and notes that the helper could not delete the account of this
-    /// job's run, as `why` says.
-    pub(super) fn account_held(
-        &mut self,
-        (state, held): (&mut TaintState, usize),
-        why: &RuntimeError,
-        events: &mut Vec<Event>,
-    ) {
-        if held >= ACCOUNTS_HELD_TAINT {
-            let tainted = account_held_taint(&self.run_id);
-            self.taint(state, tainted, events);
-        }
+    /// Notes that the helper could not delete the account of this job's run, as `why` says.
+    /// The host is tainted by the count of held accounts (see `Lifecycle::taint_held_accounts`),
+    /// not here.
+    pub(super) fn account_held(&mut self, why: &RuntimeError, events: &mut Vec<Event>) {
         self.note(code::ACCOUNT_HELD, why.to_string(), events);
     }
 

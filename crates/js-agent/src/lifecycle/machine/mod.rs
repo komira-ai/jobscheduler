@@ -257,7 +257,7 @@ impl Lifecycle {
         self.taint.ack(reply.taint_ack);
         self.finish_taint_clear(reply.taint_cleared_ack, &mut events);
         self.sweep();
-        self.persist_held(&mut events);
+        self.finish_call(&mut events);
         events
     }
 
@@ -308,7 +308,7 @@ impl Lifecycle {
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
         self.sweep();
-        self.persist_held(&mut events);
+        self.finish_call(&mut events);
         events
     }
 
