@@ -342,7 +342,9 @@ pub fn checked_line(recipe: &Recipe, entries: usize) -> String {
 /// first: the number of entries below the tree's root.
 ///
 /// # Errors
-/// What the pull or the extractor refuses, [`Error::Layers`], and [`Error::Differs`] at the
+/// [`Error::NotPublic`] when the registry answers the manifest's fetch (the pull's first
+/// request) 401 or 403; what the pull or the extractor refuses, [`Error::Layers`], and
+/// [`Error::Differs`] at the
 /// first path (in byte order) where the two differ.
 pub async fn compare(
     source: &dyn BundleSource,
@@ -356,11 +358,7 @@ pub async fn compare(
         .fetch_manifest(digest, &kind)
         .await
         .map_err(refused)?;
-    let config = source
-        .fetch_config(&manifest, &kind)
-        .await
-        .map_err(refused)?;
-    let config = BundleConfig::parse(&config)?;
+    let config = BundleConfig::parse(&source.fetch_config(&manifest, &kind).await?)?;
     let ([blob], [layer]) = (manifest.layers(), config.layers.as_slice()) else {
         return Err(Error::Layers {
             manifest: manifest.layers().len(),
@@ -368,7 +366,7 @@ pub async fn compare(
         });
     };
     let mut bytes = Vec::new();
-    source.fetch_blob(blob, &mut bytes).await.map_err(refused)?;
+    source.fetch_blob(blob, &mut bytes).await?;
     let encoding = LayerEncoding::from_media_type(blob.media_type());
     let encoding = encoding.ok_or(Error::LayerType)?;
     let scratch = Scratch::create(scratch)?;
@@ -389,8 +387,8 @@ pub async fn compare(
     differ(&pulled, &committed).map_or(Ok(committed.len()), Err)
 }
 
-/// A failed fetch: [`Error::NotPublic`] when the registry answered 401 or 403, which to a
-/// pull without credentials means the package is not public or not there.
+/// A failed fetch of the manifest: [`Error::NotPublic`] when the registry answered 401 or 403,
+/// which to a pull without credentials means the package is not public or not there.
 fn refused(e: js_oci::Error) -> Error {
     if matches!(
         e,
