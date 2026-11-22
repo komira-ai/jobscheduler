@@ -1,6 +1,6 @@
 //! The report: its status and its JSON.
 
-use super::{Ended, Leftovers, Outputs, Report, TAIL_MAX, tail};
+use super::{AccountUse, Ended, Leftovers, Outputs, Report, TAIL_MAX, tail};
 use crate::mac_job::status;
 use crate::mac_job::sweep::Tally;
 
@@ -20,9 +20,38 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
+        account: None,
+        spawn: "ordinary".to_owned(),
         stdout_tail: String::new(),
         stderr_tail: String::new(),
     }
+}
+
+fn lent(retired: Result<String, String>) -> Option<AccountUse> {
+    Some(AccountUse {
+        name: "kbf-acct-1".to_owned(),
+        made_now: false,
+        retired,
+    })
+}
+
+#[test]
+fn a_held_account_is_something_left_and_a_retired_one_is_not() {
+    let ok = Report {
+        account: lent(Ok("gone".to_owned())),
+        ..report()
+    };
+    assert_eq!(ok.status(), status::OK);
+    let held = Report {
+        account: lent(Err("held at delete".to_owned())),
+        ..report()
+    };
+    assert_eq!(held.status(), status::LEFT_BEHIND);
+    let json = serde_json::to_string(&held.account).expect("json");
+    assert_eq!(
+        json,
+        r#"{"name":"kbf-acct-1","made_now":false,"retired":{"Err":"held at delete"}}"#
+    );
 }
 
 #[test]

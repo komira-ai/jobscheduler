@@ -17,12 +17,14 @@ use std::time::{Duration, Instant};
 use js_mac_session::disclaim::Program;
 use js_types::Arch;
 
+use crate::mac_accounts::Pool;
+
 use super::layout::{Layout, SUBFOLDERS};
 use super::profile::{self, JOB_PARAM};
-use super::report::{self, Ended, Leftovers, Report};
+use super::report::{self, AccountUse, Ended, Leftovers, Report};
 use super::spec::JobFile;
 use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
-use super::{Args, AuditSession, status};
+use super::{Args, AuditSession, Spawn, status};
 
 /// How often the wait for the program looks.
 const POLL: Duration = Duration::from_millis(50);
@@ -86,19 +88,58 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
             .map_err(|why| Stop::Usage(format!("{}: {why}", path.display())))?,
         None => String::new(),
     };
-    let user = sys::user(&args.user).map_err(|why| Stop::Setup(format!("{}: {why}", args.user)))?;
-    if user.uid == 0 {
-        return Err(Stop::Setup(format!("{} is root", args.user)));
+    let pool = match &args.accounts {
+        Some(state) => Some(
+            Pool::open(state, args.ready)
+                .map_err(|why| Stop::Setup(format!("the account pool: {why}")))?,
+        ),
+        None => None,
+    };
+    let Some(pool) = pool else {
+        let Some(name) = &args.user else {
+            return Err(Stop::Usage("neither --accounts nor --user".to_owned()));
+        };
+        return run_as(args, job, &added, name);
+    };
+    let lent = pool
+        .lend(&job.id)
+        .map_err(|why| Stop::Setup(format!("lending an account: {why}")))?;
+    let name = lent.account.name.clone();
+    // The account is retired whatever the run did: it ran, or was meant to run, a job.
+    let run = run_as(args, job, &added, &name);
+    let retired = pool
+        .retire(lent.account)
+        .map(|done| format!("{done:?}"))
+        .map_err(|held| held.to_string());
+    let account = AccountUse {
+        name,
+        made_now: lent.made_now,
+        retired,
+    };
+    match run {
+        Ok(report) => Ok(Report {
+            account: Some(account),
+            ..report
+        }),
+        Err(Stop::Usage(why)) => Err(Stop::Usage(format!("{why}; account: {account:?}"))),
+        Err(Stop::Setup(why)) => Err(Stop::Setup(format!("{why}; account: {account:?}"))),
     }
-    let groups = sys::groups(&args.user, user.gid).map_err(|why| Stop::Setup(why.to_string()))?;
+}
+
+/// The run as the user `name`, up to its report.
+fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, Stop> {
+    let user = sys::user(name).map_err(|why| Stop::Setup(format!("{name}: {why}")))?;
+    if user.uid == 0 {
+        return Err(Stop::Setup(format!("{name} is root")));
+    }
+    let groups = sys::groups(name, user.gid).map_err(|why| Stop::Setup(why.to_string()))?;
     if groups.contains(&sys::ADMIN_GID) {
-        return Err(Stop::Setup(format!("{} is an administrator", args.user)));
+        return Err(Stop::Setup(format!("{name} is an administrator")));
     }
     let before = user_processes(user.uid)?;
     if !before.is_empty() {
         return Err(Stop::Setup(format!(
-            "{} runs {} process(es) already ({before:?}); one job per user at a time",
-            args.user,
+            "{name} runs {} process(es) already ({before:?}); one job per user at a time",
             before.len()
         )));
     }
@@ -111,18 +152,10 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
     let snapshot = files::Snapshot::take(&scan_roots, user.uid);
     make_folder(&layout, &job, user.uid, user.gid)?;
 
-    let profile_text = profile::render(args.profile, &job.network, &added);
+    let profile_text = profile::render(args.profile, &job.network, added);
     let new_session = args.audit_session == AuditSession::New;
     let started = Instant::now();
-    let started_job = start(
-        &job,
-        &layout,
-        &args.user,
-        &user,
-        &profile_text,
-        new_session,
-        &args.out,
-    );
+    let started_job = start(&job, &layout, name, &user, &profile_text, new_session, args);
     let (mut child, asid) = match started_job {
         Ok(started) => started,
         Err(why) => {
@@ -157,7 +190,7 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
     };
     Ok(Report {
         id: job.id,
-        user: args.user.clone(),
+        user: name.to_owned(),
         uid: user.uid,
         asid,
         folder: layout.folder.display().to_string(),
@@ -167,6 +200,8 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         sweep,
         outputs,
         leftovers,
+        account: None,
+        spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
@@ -238,8 +273,9 @@ fn start(
     user: &sys::User,
     profile_text: &str,
     new_session: bool,
-    out: &Path,
+    args: &Args,
 ) -> Result<(std::process::Child, Option<i32>), String> {
+    let out = args.out.as_path();
     let threads =
         sys::own_threads().map_err(|why| format!("counting this process's threads: {why}"))?;
     if threads != 1 {
@@ -271,6 +307,10 @@ fn start(
     };
     // SAFETY: as above: the steps allocate only because no other thread exists to hold a lock.
     let mut program = unsafe { Program::with_steps(&job.program, &job.args, run_steps) };
+    if args.spawn == Spawn::Ordinary {
+        // Provisional (the module documentation of `super`): the job holds the agent's grants.
+        program.keep_responsibility();
+    }
     program
         .env_clear()
         .envs(layout.env(job, user_name))

@@ -61,10 +61,25 @@ pub struct Report {
     pub outputs: Outputs,
     /// What was left.
     pub leftovers: Leftovers,
+    /// The lent account and what its retirement did, when the pool lent one.
+    pub account: Option<AccountUse>,
+    /// How the program was started: `ordinary` or `disclaimed`.
+    pub spawn: String,
     /// The last [`TAIL_MAX`] bytes of the program's standard output.
     pub stdout_tail: String,
     /// The last [`TAIL_MAX`] bytes of its standard error.
     pub stderr_tail: String,
+}
+
+/// An account the pool lent for the job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountUse {
+    /// Its name.
+    pub name: String,
+    /// Whether none was ready and it was made for this job.
+    pub made_now: bool,
+    /// What its retirement did, or why the account is held.
+    pub retired: Result<String, String>,
 }
 
 /// The most of each stream a report carries.
@@ -90,7 +105,8 @@ impl Report {
     /// The mode's status for this run.
     #[must_use]
     pub fn status(&self) -> u8 {
-        if !self.leftovers.is_clean() || !self.sweep.clean {
+        let held = self.account.as_ref().is_some_and(|a| a.retired.is_err());
+        if held || !self.leftovers.is_clean() || !self.sweep.clean {
             status::LEFT_BEHIND
         } else if self.ended == Ended::Exited(0) && self.outputs.missing.is_empty() {
             status::OK

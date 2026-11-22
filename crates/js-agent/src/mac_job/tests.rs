@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::profile::Kind;
-use super::{Args, AuditSession, VERB, parse, run, status};
+use super::{Args, AuditSession, Spawn, VERB, parse, run, status};
 
 fn words(list: &[&str]) -> Vec<OsString> {
     list.iter().map(OsString::from).collect()
@@ -22,7 +22,10 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
         Args {
             job: Some(PathBuf::from("j.json")),
             job_inline: None,
-            user: "u".to_owned(),
+            accounts: None,
+            user: Some("u".to_owned()),
+            ready: 1,
+            spawn: Spawn::Ordinary,
             root: PathBuf::from("/r"),
             out: PathBuf::from("/o"),
             profile: Kind::ConfinedWrites,
@@ -66,7 +69,7 @@ fn a_missing_flag_is_a_usage_error_naming_it() {
     );
     assert_eq!(code, std::process::ExitCode::from(status::USAGE));
     let err = String::from_utf8(err).expect("utf-8");
-    assert!(err.contains("--user"), "{err}");
+    assert!(err.contains("--root"), "{err}");
     assert!(out.is_empty());
 }
 
@@ -114,6 +117,22 @@ fn the_job_may_come_inline_and_exactly_one_of_the_two_is_needed() {
     assert_eq!(args.job, None);
     assert_eq!(args.job_inline.as_deref(), Some("{}"));
     let mut both = vec!["--job", "j.json", "--job-inline", "{}"];
+    both.extend(rest);
+    assert!(parse(&words(&both)).is_err());
+    assert!(parse(&words(&rest)).is_err());
+}
+
+#[test]
+fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
+    let rest = ["--job", "j.json", "--root", "/r", "--out", "/o"];
+    let mut pooled = vec!["--accounts", "/s", "--ready", "3", "--spawn", "disclaimed"];
+    pooled.extend(rest);
+    let args = parse(&words(&pooled)).expect("parses");
+    assert_eq!(args.accounts, Some(PathBuf::from("/s")));
+    assert_eq!(args.user, None);
+    assert_eq!(args.ready, 3);
+    assert_eq!(args.spawn, Spawn::Disclaimed);
+    let mut both = vec!["--accounts", "/s", "--user", "u"];
     both.extend(rest);
     assert!(parse(&words(&both)).is_err());
     assert!(parse(&words(&rest)).is_err());

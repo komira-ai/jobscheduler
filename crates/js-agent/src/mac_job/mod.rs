@@ -1,7 +1,8 @@
 //! `js-agent __mac-job`: one native macOS job, run by this program alone, start to end.
 //!
 //! ```text
-//! js-agent __mac-job (--job <file> | --job-inline <json>) --user <name> --root <dir> --out <dir>
+//! js-agent __mac-job (--job <file> | --job-inline <json>) (--accounts <dir> | --user <name>)
+//!     --root <dir> --out <dir> [--ready <n>] [--spawn ordinary|disclaimed]
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
 //! ```
@@ -12,8 +13,10 @@
 //! 1. reads the job ([`spec::JobFile`]): the operating system it is for, the program, its
 //!    arguments and environment, a folder of inputs, the outputs to keep, the network it may use
 //!    and its wall limit. A job for another operating system or architecture is refused.
-//! 2. checks the one ordinary user it runs jobs as: not root, not an administrator, and running
-//!    no process (this prototype runs one job per user at a time).
+//! 2. takes the job's user: with `--accounts`, an account lent by the account pool
+//!    ([`crate::mac_accounts::Pool`], its ledger in that folder), which has never run a job;
+//!    with `--user`, one existing account, for measurement. Either way it checks the user is not
+//!    root, not an administrator, and runs no process.
 //! 3. makes the job folder `<root>/<id>` ([`layout::Layout`]) owned by that user, copies the
 //!    inputs into its `work` folder, and points `HOME`, `TMPDIR` and the caches inside it.
 //! 4. starts the program through [`js_mac_session::disclaim::Program`]. In the child, before the
@@ -25,7 +28,14 @@
 //!    which may be killed because no other job runs as that user.
 //! 6. copies the declared outputs to `--out`, removes the job folder, and checks that nothing is
 //!    left: no process of the user, no file of the user's outside the folder that is new or
-//!    changed, no job folder.
+//!    changed, no job folder. A lent account is then retired: the pool ends its uid, deletes it,
+//!    shows it gone, and refills.
+//!
+//! `--spawn ordinary` (the default) starts the job the usual way, so it answers to the privacy
+//! controls as the agent and holds the agent's Full Disk Access: the one way measured to let a
+//! job read tierstore's network file system mount. `--spawn disclaimed` disclaims it, as the
+//! agent's other starts do. The default is provisional, until the owner decides how jobs get the
+//! right to read the mount.
 //!
 //! It writes a JSON report ([`report::Report`]) to `<out>/report.json` and to standard output,
 //! and the program's standard output and error to `<out>/stdout` and `<out>/stderr`.
@@ -73,6 +83,15 @@ pub mod status {
     pub const SETUP: u8 = 4;
 }
 
+/// How the job's program is started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Spawn {
+    /// The usual way: it holds the agent's privacy grants (provisional default).
+    Ordinary,
+    /// With its privacy responsibility disclaimed.
+    Disclaimed,
+}
+
 /// Whether the job gets an audit session of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AuditSession {
@@ -96,9 +115,18 @@ pub struct Args {
     /// The job's JSON itself, in place of a file.
     #[arg(long)]
     pub job_inline: Option<String>,
-    /// The ordinary user the job runs as.
+    /// The account pool's state folder: the job runs as an account it lends.
+    #[arg(long, required_unless_present = "user", conflicts_with = "user")]
+    pub accounts: Option<PathBuf>,
+    /// One existing ordinary user the job runs as, in place of a lent account.
     #[arg(long)]
-    pub user: String,
+    pub user: Option<String>,
+    /// How many ready accounts the pool keeps.
+    #[arg(long, default_value_t = 1)]
+    pub ready: usize,
+    /// How the job is started.
+    #[arg(long, value_enum, default_value = "ordinary")]
+    pub spawn: Spawn,
     /// The folder the job folder is made in: absolute, owned by root.
     #[arg(long)]
     pub root: PathBuf,
