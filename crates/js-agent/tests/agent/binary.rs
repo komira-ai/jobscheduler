@@ -125,6 +125,57 @@ fn the_binary_registers_and_drains_on_sigterm() {
     assert_eq!(server.host("bin-1")["phase"], "draining");
 }
 
+/// Asserts that SIGHUP to the real binary is a replace request: an agent that runs no job
+/// has nothing to hand over, says so, goes on serving (the host is still `serving`), and a
+/// later SIGTERM still drains it and ends it with status 0. It proves the daemon reads SIGHUP
+/// as a request and no longer dies of it.
+#[test]
+fn the_binary_ignores_a_replace_request_it_cannot_serve_and_still_drains_on_sigterm() {
+    let server = Server::start_pool("binary_hup", &[], POOL_OPEN_TOML);
+    let mut agent = Agent::start(&server, "bin-2");
+    let stderr = agent.stderr();
+    let mut seen = String::new();
+    // The handlers are installed before the first hello, so the agent that registered reads SIGHUP.
+    let mut registered = false;
+    for _ in 0..REGISTER_LINES {
+        let line = next_line(&stderr, &seen);
+        let line = line.unwrap_or_else(|| panic!("the agent ended before it registered: {seen}"));
+        seen.push_str(&line);
+        seen.push('\n');
+        if line.contains("registered, epoch 1") {
+            registered = true;
+            break;
+        }
+    }
+    assert!(
+        registered,
+        "no registration in {REGISTER_LINES} lines: {seen}"
+    );
+    let mut ignored = false;
+    kill_process(agent.pid(), Signal::HUP).unwrap();
+    for _ in 0..REGISTER_LINES {
+        let line = next_line(&stderr, &seen);
+        let line = line.unwrap_or_else(|| panic!("the agent ended on SIGHUP: {seen}"));
+        seen.push_str(&line);
+        seen.push('\n');
+        if line.contains("a replace request is ignored: the agent has no jobs") {
+            ignored = true;
+            break;
+        }
+    }
+    assert!(ignored, "no line about the replace request: {seen}");
+    assert_eq!(server.host("bin-2")["phase"], "serving");
+
+    kill_process(agent.pid(), Signal::TERM).unwrap();
+    while let Some(line) = next_line(&stderr, &seen) {
+        seen.push_str(&line);
+        seen.push('\n');
+    }
+    let status = agent.child.wait().unwrap();
+    assert!(status.success(), "{status}: {seen}");
+    assert_eq!(server.host("bin-2")["phase"], "draining");
+}
+
 /// Asserts that a test which fails while the agent runs leaves no process behind: the
 /// guard's drop, run by the unwinding of a failed assertion, ends the child and collects
 /// it, so signal 0 to its pid finds no process. It catches a guard that only drops the

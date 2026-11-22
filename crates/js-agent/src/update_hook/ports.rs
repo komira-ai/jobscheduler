@@ -66,6 +66,13 @@ pub trait StateView {
     /// # Errors
     /// The file is there and could not be removed.
     fn withdraw_handover(&self) -> Result<(), PortError>;
+
+    /// Whether the handover file is still there: the agent removes it once it has taken the
+    /// request, after it has adopted the runs.
+    ///
+    /// # Errors
+    /// The file could not be looked at (a missing file is no error).
+    fn handover_pending(&self) -> Result<bool, PortError>;
 }
 
 impl StateView for StateRoot {
@@ -95,6 +102,14 @@ impl StateView for StateRoot {
         handover::remove(self.path())
             .map(|_| ())
             .map_err(PortError::from)
+    }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        match std::fs::symlink_metadata(self.path().join(handover::HANDOVER_FILE)) {
+            Ok(_) => Ok(true),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(why) => Err(PortError::from(why)),
+        }
     }
 }
 

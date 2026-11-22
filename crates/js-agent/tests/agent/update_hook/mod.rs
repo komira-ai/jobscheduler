@@ -56,6 +56,7 @@ mod steps_host_setup;
 mod steps_host_setup_adopt;
 mod steps_host_setup_verb;
 mod steps_host_setup_volume;
+mod steps_in_place;
 mod steps_owed_checks;
 mod steps_pf;
 mod steps_prepare;

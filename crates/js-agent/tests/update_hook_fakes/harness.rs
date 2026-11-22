@@ -724,4 +724,8 @@ impl StateView for FaultedState<'_> {
     fn withdraw_handover(&self) -> Result<(), PortError> {
         self.root.withdraw_handover()
     }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        self.root.handover_pending()
+    }
 }

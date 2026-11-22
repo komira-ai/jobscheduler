@@ -150,6 +150,29 @@ impl SupervisorId {
         names(stat_of(self.pid), self.start)
     }
 
+    /// Collects the exit status of the process it names when it has ended and is still a
+    /// zombie (its `/proc/<pid>/stat` has the same start time and the state `Z`), so that it
+    /// does not stay one. A supervisor an earlier process started and this one adopted
+    /// (see [`Supervised::adopt`]) is a child of this process after an in-place restart
+    /// of the agent, with no [`Child`] to wait for it, and nothing else collects it. The
+    /// status is of no use and the call does nothing else: a process that is not this one's
+    /// child, or is already collected, is left alone (the error is ignored). A zombie is
+    /// named by its pid until it is collected, so the pid cannot be another process's; and
+    /// the thread that waits for a supervisor this process started itself has taken the
+    /// status first or takes it with no harm, as its error is ignored too. On macOS
+    /// `proc_pidinfo` gives no answer for a zombie, so there it collects nothing.
+    pub(crate) fn reap(&self) {
+        let Some(pid) = i32::try_from(self.pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            return;
+        };
+        if stat_of(self.pid) == Some(('Z', self.start)) {
+            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+        }
+    }
+
     /// Whether the process it names runs as the user `uid` (on Linux the owner of its
     /// `/proc` entry, on macOS its effective user).
     #[must_use]
@@ -551,6 +574,9 @@ impl Supervised {
         // Looked at before the record: a supervisor that is gone has written its record
         // already, so a record not there then is a record that never will be.
         let alive = self.id.alive();
+        if !alive {
+            self.id.reap();
+        }
         match read_exit_record(&self.lease) {
             Ok(Some(record)) => Some(record.end),
             Ok(None) if alive => None,
