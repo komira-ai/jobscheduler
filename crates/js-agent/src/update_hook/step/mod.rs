@@ -189,7 +189,8 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
     Ok((held, record))
 }
 
-/// [`open_state`] without the rules: the record as it was loaded, for `prepare` to judge.
+/// [`open_state`] without the rules: the record as it was loaded, for `prepare` and `rollback`
+/// to judge themselves (see [`supersede`]).
 fn open_unchecked(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
     helper::refuse_without_launchd(env, params)?;
     pf::refuse_without_launchd(env, params)?;

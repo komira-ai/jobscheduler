@@ -265,7 +265,8 @@ its steps treat the record so:
 - the updater's `rollback` that follows rolls back the update on record, with the record's own
   target, previous version, digest and releases, and its detail begins `the record is of the
   update to <target>, not <ordered>`. It is refused, record kept, when the record returns the
-  host to another previous release than the order's.
+  host to another previous version or release than the order's, and for a first install's
+  record.
 
 A hook from before this behaviour refuses such a record at both steps. To finish it by hand with
 jobs running, run that hook's `rollback` with a params file that is the package's `[params]`

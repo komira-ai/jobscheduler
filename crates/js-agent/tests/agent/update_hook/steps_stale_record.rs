@@ -244,11 +244,15 @@ fn prepare_finishes_an_in_place_record_whose_request_was_taken() {
     let mut record = rig.record().unwrap();
     record.in_place = true;
     rig.put_record(&record);
+    let before = rig.record_bytes().unwrap();
     let spy = next_spy(&rig);
+    let aside = format!("record.rolled-back-{LEFT}-{}.json", spy.now_ms());
     let done = prepare(&spy, &rig, &next_order(&rig));
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(rig.record().unwrap().update.target, NEXT);
-    assert_eq!(state_files(&rig).len(), 2, "{:?}", state_files(&rig));
+    assert_eq!(state_files(&rig), ["record.json".to_owned(), aside.clone()]);
+    assert_eq!(fs::read(rig.state_dir().join(&aside)).unwrap(), before);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
 }
 
 /// The updater's `rollback` of the next order, run after its `prepare` failed, rolls back the
@@ -313,7 +317,8 @@ fn the_rollback_of_the_next_order_finishes_a_rollback_on_record_that_is_not_comp
 #[test]
 fn prepare_keeps_a_record_whose_rollback_is_not_complete_and_says_what_is_left() {
     type Make = fn(&Rig, &Spy<'_>, &mut Record);
-    let cases: [(&str, Make, fn(&Rig) -> String); 10] = [
+    type What = fn(&Rig) -> String;
+    let cases: [(&str, Make, What); 10] = [
         (
             "unit-down",
             |rig, _, _| rig.world.seed_unit(UNIT, "failed", "failed"),
@@ -415,8 +420,8 @@ fn prepare_keeps_a_record_whose_rollback_is_not_complete_and_says_what_is_left()
 /// A record of another target that returns the host to another previous release than the
 /// order's is kept by `prepare` and by `rollback`, with no act: neither knows that release to be
 /// the one that runs, and the detail says the rollback needs the record's own params. A first
-/// install's record under the params of an update is refused by `rollback` the same way: its
-/// rollback would stop the agent the updater says runs now.
+/// install's record of another target is refused by `rollback`, under the params of an update
+/// or of a first install: its rollback stops the agent it started, which no other order may do.
 ///
 /// Catches a `rollback` of the next order that stops or starts the unit for an update the
 /// order does not return the host from.
@@ -469,10 +474,60 @@ fn a_record_that_returns_the_host_elsewhere_is_kept_by_prepare_and_rollback() {
         &done,
         &before,
         &kept(&format!(
-            "the update to {LEFT} returns the host to no previous version, not to the previous release the params table names: run its rollback with the params it was written under"
+            "the first install of {LEFT} is rolled back only with the params it was written under"
         )),
     );
     assert_eq!(rig.world.show(UNIT).unwrap().active, "active");
+
+    // Under the params of a first install of the next target too: neither order returns the
+    // host anywhere, and the agent the first install of 1.4.0 started is not the next order's
+    // to stop.
+    let mut params = next_order(&rig);
+    params.previous_version = None;
+    params.previous_release = None;
+    let done = rollback(&spy, &rig, &params);
+    refused_as_is(
+        &rig,
+        &spy,
+        &done,
+        &before,
+        &kept(&format!(
+            "the first install of {LEFT} is rolled back only with the params it was written under"
+        )),
+    );
+    assert_eq!(rig.world.show(UNIT).unwrap().active, "active");
+}
+
+/// The previous version and the previous release are each held to the order's: a record that
+/// differs in only one of the two is kept by `prepare` and by `rollback`.
+#[test]
+fn a_record_that_differs_from_the_order_in_one_previous_field_is_kept() {
+    for field in ["version", "release"] {
+        let rig = left_by_a_refused_rollback(&format!("hook-stale-one-field-{field}"));
+        let mut params = next_order(&rig);
+        match field {
+            "version" => params.previous_version = Some("1.3.5".to_owned()),
+            _ => params.previous_release = Some(rig.tmp.path().join("releases/1.3.5")),
+        }
+        let before = rig.record_bytes().unwrap();
+        let spy = next_spy(&rig);
+        for done in [prepare(&spy, &rig, &params), rollback(&spy, &rig, &params)] {
+            assert_eq!(
+                done.report.reason,
+                Some(Reason::StateInvalid),
+                "{field}: {done:?}"
+            );
+            assert!(
+                done.report.detail.as_deref().is_some_and(
+                    |d| d.contains("not to the previous release the params table names")
+                ),
+                "{field}: {done:?}"
+            );
+        }
+        assert_eq!(rig.record_bytes().as_deref(), Some(&before[..]), "{field}");
+        assert_eq!(state_files(&rig), ["record.json"], "{field}");
+        assert_eq!(spy.act_names(), Vec::<String>::new(), "{field}");
+    }
 }
 
 /// `rollback` rolls back only a record this hook wrote of another target: a record of the same
@@ -508,4 +563,31 @@ fn rollback_still_refuses_a_record_it_did_not_write_for_another_target() {
         &before,
         "the record is not valid: target of the record is not what the params table says",
     );
+}
+
+/// A record whose cutover marked the stop but issued no start, and whose rollback made no act
+/// (the stop never took: the previous agent still runs on the previous release, its session
+/// live), is complete in effect too: its rollback would only see that session and delete the
+/// record. `prepare` of the next target finishes it.
+#[test]
+fn prepare_finishes_a_record_whose_stop_never_took_and_whose_rollback_made_no_act() {
+    let rig = left_by_a_refused_rollback("hook-stale-stop-never-took");
+    let mut record = rig.record().unwrap();
+    record.link_moved = false;
+    record.start_issued = false;
+    record.rb = Rollback::default();
+    record.rb_pre_stop_session_ms = None;
+    rig.put_record(&record);
+    let spy = next_spy(&rig);
+    let done = prepare(&spy, &rig, &next_order(&rig));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(
+        done.report
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with(&format!("finished the record of {LEFT}"))),
+        "{done:?}"
+    );
+    assert_eq!(rig.record().unwrap().update.target, NEXT);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
 }

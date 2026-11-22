@@ -5,8 +5,8 @@
 //!
 //! In this order, each before anything is changed:
 //! 1. the lock, the record and the params agree, or the record is of another target and is
-//!    rolled back with the params it was written under (below); a taint the restarted agent will not re-check
-//!    halts (76), here and again before each phase below (an agent with such a taint refuses
+//!    rolled back with the params it was written under (below); a taint the restarted agent
+//!    will not re-check halts (76), here and again before each phase below (an agent with such a taint refuses
 //!    every start, the old release included, so nothing is gained by going on; a taint it will
 //!    re-check, a residue of a post-job check the pin file does not name, does not halt the
 //!    step; if the previous release is one that predates self-clearing, such a taint stays
@@ -95,14 +95,15 @@
 //! left unconfirmed, and not past its expiry; an operator's, and one that may be anyone's, are
 //! never touched, renewed or placed again.
 //!
-//! The update rolled back is the one on record. A record of another target that this hook wrote
-//! (it keeps every rule under its own target, previous version, digest and releases) and that
-//! returns the host to the previous release the params name is rolled back with those params
-//! of its own, and the last line of every ending says so: an update that failed half way
+//! The update rolled back is the one on record. A record of an update to another target that
+//! this hook wrote (it keeps every rule under its own target, previous version, digest and
+//! releases) and that returns the host to the previous version and release the params name is
+//! rolled back with those params of its own, and the last line of every ending says so: an update that failed half way
 //! through its rollback is finished by the updater's rollback of the next order, whose
 //! `prepare` refused it (see [`supersede`](super::supersede)). A record of another target that
-//! returns the host elsewhere is refused (`state_invalid`) and kept, and the detail says that
-//! its rollback needs the params it was written under; so is every other record that does not
+//! returns the host elsewhere, and a first install's record of another target, are refused
+//! (`state_invalid`) and kept, and the detail says that its rollback needs the params it was
+//! written under; so is every other record that does not
 //! agree with the params.
 //!
 //! The ending: the record is deleted (no `cleanup` follows a rollback), so a rerun finds none

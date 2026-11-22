@@ -14,8 +14,8 @@
 //!   install whose unit is down (`inactive` or `failed`, which is also what the unit manager
 //!   says of a unit that is not installed). Its `rollback` would make no act on the agent;
 //! - *rolled back* (`record.rolled-back-<target>-<ms>.json`): an update past its stop whose
-//!   rollback is complete in effect, though it never finished (no `rb.hello_ok`, record not
-//!   deleted): it returns the host to the previous release this order names, the release link
+//!   rollback is complete in effect, though the record was never deleted (whatever its `rb`
+//!   marks say): it returns the host to the previous release this order names, the release link
 //!   is on that release, the unit is active, the record does not say the agent that runs is the
 //!   one the update started, an in-place hand-back has no request left (`in_place`), and the
 //!   lease server shows the previous agent's live session (as `rollback` judges its hello). Its
@@ -32,9 +32,12 @@
 //! host to another previous release than this order's, whose rollback only an operator can run.
 //!
 //! `rollback` rolls back the update on record (see [`for_rollback`]): given a record of another
-//! target that this hook wrote and that returns the host to the previous release the params
-//! name, it runs with the params that record was written under, and its last line says so. So
-//! the updater's rollback of an order that a `prepare` refused finishes the earlier update.
+//! target that this hook wrote, of an update (not a first install) that returns the host to the
+//! previous version and release the params name, it runs with the params that record was
+//! written under, and its last line says so. So the updater's rollback of an order that a
+//! `prepare` refused finishes the earlier update, and one that never took the host is deleted as
+//! its own rollback would. A first install's record of another target is refused, kept: its
+//! rollback stops the agent it started, which no other order may do.
 
 use std::path::Path;
 
@@ -212,8 +215,8 @@ fn ordered(record: &Record, params: &Params) -> Params {
 }
 
 /// The params `rollback` rolls `record` back with, and what its last line adds: `params` for a
-/// record of this update; for a record of another target this hook wrote that returns the host
-/// to the previous release the params name, the params it was written under and a note that
+/// record of this update; for a record of an update to another target this hook wrote that
+/// returns the host to the previous version and release the params name, the params it was written under and a note that
 /// says so. Every other record is refused, `state_invalid`.
 pub(super) fn for_rollback(
     params: &Params,
@@ -226,12 +229,15 @@ pub(super) fn for_rollback(
         return Err(refusal(invalid, None));
     }
     let target = &record.update.target;
+    let Some(previous) = record.update.previous.as_deref() else {
+        return Err(refusal(
+            invalid,
+            Some(format!(
+                "the first install of {target} is rolled back only with the params it was written under"
+            )),
+        ));
+    };
     if !returns_to_order(record, params) {
-        let previous = record
-            .update
-            .previous
-            .as_deref()
-            .unwrap_or("no previous version");
         return Err(refusal(
             invalid,
             Some(format!(
