@@ -131,7 +131,7 @@ fn a_started_run_is_recorded_with_its_account_and_uid_until_it_is_removed() {
     let launched = rig.launcher.last();
     let name = launched.var("USER").unwrap().to_owned();
     let journal = Journal::new(&rig.dir.path("native-leases"));
-    assert_eq!(live(&rig), [id.0.clone()]);
+    assert_eq!(live(&rig), std::slice::from_ref(&id.0));
     let records = journal.runs().unwrap();
     let record = &records[&id.0];
     assert_ne!(record.pid, 0);
