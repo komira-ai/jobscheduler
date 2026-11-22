@@ -1,19 +1,18 @@
 //! A pool user is never deleted: `pool-create` adopts the pool's own users that are
-//! already on the Mac (and refuses any other record on a slot's uid), and an
-//! administrator's lease adds its user to `admin` and has it taken out at its end.
+//! already on the Mac (and refuses any other record on a slot's uid).
 
 use std::path::PathBuf;
 
-use super::tests::{entry, grant, home, records, restarted, slots};
+use super::tests::{entry, home, records, restarted, slots};
 use crate::helper::tests::{Rig, log, me, my_gid, rig, rig_with};
-use crate::helper::{DSEDITGROUP, Host as _, NewUser, UserRecord};
+use crate::helper::{Host as _, NewUser, UserRecord};
 use crate::lease::UidRange;
 
 /// Catches a first install on a Mac that already has the pool's users (an earlier install
 /// left them, and they can never be deleted) that cannot use them, or that deletes or
 /// makes them again: with no ledger, `pool-create` adopts each user record that is the
 /// pool's own, kills what runs as it, empties its home and its per-user folder, sets its
-/// record back (group, shell, `admin` membership) and records the slot free; no record is
+/// record back (group, shell, hidden) and records the slot free; no record is
 /// made or deleted.
 #[test]
 fn pool_create_adopts_the_pool_s_own_users_a_lost_ledger_left() {
@@ -28,7 +27,6 @@ fn pool_create_adopts_the_pool_s_own_users_a_lost_ledger_left() {
     {
         let mut state = rig.host.state();
         state.procs.insert(uid + 1, 1);
-        state.users.get_mut(&name(0)).unwrap().admin = true;
         state.records.insert(
             name(1),
             UserRecord {
@@ -53,7 +51,6 @@ fn pool_create_adopts_the_pool_s_own_users_a_lost_ledger_left() {
     assert_eq!(status.missing, slots(&[]));
     let state = rig.host.state();
     assert_eq!(state.procs.get(&(uid + 1)), None);
-    assert!(!state.users[&name(0)].admin);
     assert!(!home(&rig, 0).join("left").exists());
     assert!(home(&rig, 0).is_dir());
     assert!(kept.join("T").is_dir());
@@ -64,7 +61,7 @@ fn pool_create_adopts_the_pool_s_own_users_a_lost_ledger_left() {
         rig.host.user_record(&name(1)).unwrap().unwrap().gid,
         my_gid()
     );
-    assert_eq!(rig.helper.user_create("86.1", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("86.1"), Ok(uid));
 }
 
 /// Catches a record that is not the pool's own adopted because it has the uid: a record
@@ -82,7 +79,6 @@ fn a_record_on_a_slot_s_uid_that_is_not_the_pool_s_own_is_refused() {
         uid,
         gid: my_gid(),
         home: home(rig, 0),
-        admin: false,
     };
     let record = |rig: &Rig| UserRecord {
         uid,
@@ -167,56 +163,6 @@ fn a_record_on_a_slot_s_uid_that_is_not_the_pool_s_own_is_refused() {
     );
 }
 
-/// Catches an administrator's lease that leaves a membership the next lease inherits,
-/// and a grant that keeps a slot it could not use: a lease with a grant has its user in
-/// `admin` while it runs, and when it ends the user is taken out, asked about and free;
-/// a slot whose user the directory still says is a member after the reset is broken.
-#[test]
-fn an_administrator_s_user_is_added_for_the_lease_and_removed_at_its_end() {
-    let rig = rig("pool-admin-lease", 1);
-    rig.helper
-        .user_create("83.2", Some(&grant("83.2")))
-        .unwrap();
-    assert!(rig.host.state().users["kbf-lease-pool-0"].admin);
-    log(&rig);
-    assert_eq!(rig.helper.user_delete("83.2"), Ok(true));
-    let calls = log(&rig);
-    let removed = calls
-        .iter()
-        .position(|c| c == "set_admin kbf-lease-pool-0 false")
-        .unwrap();
-    let asked = calls
-        .iter()
-        .position(|c| c.starts_with(&format!("command {DSEDITGROUP} -o checkmember")))
-        .unwrap();
-    assert!(removed < asked, "{calls:#?}");
-    assert_eq!(records(&calls), Vec::<String>::new());
-    assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
-    assert_eq!(rig.helper.pool_status().free, slots(&[0]));
-
-    // A removal that does not take is found by the directory's answer: the slot is
-    // broken, not retired for good, and a later reset that works frees it.
-    rig.helper
-        .user_create("83.3", Some(&grant("83.3")))
-        .unwrap();
-    rig.host.state().answers.insert(
-        format!("{DSEDITGROUP} -o checkmember -m kbf-lease-pool-0 admin"),
-        crate::autologin::CommandOutput {
-            success: true,
-            stdout: "yes kbf-lease-pool-0 is a member of admin\n".to_owned(),
-            stderr: String::new(),
-        },
-    );
-    let error = rig.helper.user_delete("83.3").unwrap_err();
-    assert!(
-        error.ends_with("the directory says it is a member"),
-        "{error}"
-    );
-    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
-    rig.host.state().answers.clear();
-    assert_eq!(rig.helper.pool_create().free, slots(&[0]));
-}
-
 /// Catches an adoption that takes a pool user's missing home for a failure, or lends the
 /// slot with no home: a record that is the pool's own whose home folder is gone (macOS's
 /// own `sysadminctl -deleteUser` removes the home and then fails to delete the record,
@@ -237,5 +183,5 @@ fn a_pool_user_whose_home_is_gone_is_adopted_with_its_home_made_again() {
     assert_eq!(rig.helper.pool_status().free, slots(&[0]));
     let made = format!("make_home {} {uid}:{}", home(&rig, 0).display(), my_gid());
     assert!(calls.contains(&made), "{calls:#?}");
-    assert_eq!(rig.helper.user_create("87.1", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("87.1"), Ok(uid));
 }

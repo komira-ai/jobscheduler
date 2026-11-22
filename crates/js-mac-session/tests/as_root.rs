@@ -58,7 +58,7 @@ const CLIENT: &str = "kbf-ci-client";
 /// The file name of the copy signed under another identifier.
 const IMPOSTOR: &str = "kbf-ci-impostor";
 /// The tests' own directory, where every user may search (the runner's home is not):
-/// the copies, the grant keys, the login window's files, lease directories. Root's.
+/// the copies, the login window's files, lease directories. Root's.
 const SCRATCH: &str = "/private/tmp/kbf-mac-session-as-root";
 const RUN_DIR: &str = "/private/var/run/kbf-ci-mac-session";
 const SOCKET: &str = "/private/var/run/kbf-ci-mac-session/socket";
@@ -357,7 +357,6 @@ struct Mac {
     /// The client copy's cdhash: the daemon requirement.
     genuine: String,
     runner: Runner,
-    serial: String,
     process: Mutex<Option<Child>>,
     first: FirstContact,
 }
@@ -409,9 +408,6 @@ impl Mac {
             groups.split_whitespace().any(|g| g == "admin"),
             "the runner is not in the admin group: {groups}"
         );
-        let ioreg = quiet("/usr/sbin/ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"]);
-        let serial = js_mac_session::start::parse_serial(&ioreg.stdout).expect("a serial number");
-        println!("serial: {serial}");
 
         let _ = fs::remove_dir_all(RUN_DIR);
         let _ = fs::remove_dir_all(STATE);
@@ -422,13 +418,9 @@ impl Mac {
             act,
             genuine,
             runner,
-            serial,
             process: Mutex::new(None),
             first: FirstContact::empty(),
         };
-        let pubkey = mac.client(&["pubkey", "07"]);
-        assert!(pubkey.ok(), "pubkey: {}", pubkey.all());
-        write_root(&format!("{SCRATCH}/grant-keys"), &pubkey.stdout);
 
         println!("== a power cut mid-session, as the boot finds it");
         // Auto-login names a lease user, and an intent record names a lease the server
@@ -475,8 +467,6 @@ impl Mac {
             autologin_cipher_path(),
             "--loginwindow".to_owned(),
             loginwindow(),
-            "--grant-keys".to_owned(),
-            format!("{SCRATCH}/grant-keys"),
         ]);
         args
     }
@@ -560,12 +550,10 @@ impl Mac {
         argv
     }
 
-    /// `user-create` for `lease` (with a gate grant), which must give the next uid.
+    /// `user-create` for `lease`, which must give the next uid.
     #[track_caller]
-    fn create(&self, lease: &str, grant: Option<&str>) -> Lease<'_> {
-        let mut args = vec!["create", SOCKET, lease];
-        args.extend(grant);
-        let out = self.client(&args);
+    fn create(&self, lease: &str) -> Lease<'_> {
+        let out = self.client(&["create", SOCKET, lease]);
         assert!(out.ok(), "user-create {lease}: {}", out.all());
         let uid: u32 = out.said().parse().expect("user-create prints the uid");
         let made = Lease {

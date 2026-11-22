@@ -47,7 +47,8 @@
 //!   strictly below it, and an estimate (with the client's hint) that would reach it is
 //!   [`Fallback::OverCap`]: the caller books cold and the ladder and digest floors
 //!   decide.
-//! * **CPU.** `round_up_250m(P90(sample))`, clamped to `[250 m, node cpus]`, where a run's
+//! * **CPU.** `round_up_250m(P50(sample))`, clamped to `[250 m, node cpus]`: the
+//!   nearest-rank median of the last 32 kept samples, where a run's
 //!   sample is its peak over a short window ([`Run::cpu_peak_millis`]) when measured, else
 //!   `cpu_usage / wall` (a 0.3-core action costs 500 m); [`COLD_CPU_MILLIS`] with no CPU
 //!   sample. A sample taken at or

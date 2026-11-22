@@ -818,12 +818,31 @@ fn cpu_counters_count_each_case() {
     assert_eq!(s.cpu_counts().kept, 2);
 }
 
-/// Rule 3.3: the estimate is the nearest-rank P90 of the last 32 samples.
+/// Rule 3.3: the estimate is the nearest-rank median (P50) of the last 32 samples, each
+/// the mean CPU of one run: the ceil(n / 2)-th smallest.
 #[test]
-fn cpu_is_the_p90_of_the_recent_samples() {
+fn cpu_is_the_p50_of_the_recent_samples() {
     let b = Bounds::default();
-    assert_eq!(cpu_of(&[(1500, Some(0), 28), (4000, Some(0), 4)], &b), 4000);
+    // 32 samples: the median is the 16th smallest.
+    assert_eq!(
+        cpu_of(&[(1500, Some(0), 16), (4000, Some(0), 16)], &b),
+        1500
+    );
+    assert_eq!(
+        cpu_of(&[(1500, Some(0), 15), (4000, Some(0), 17)], &b),
+        4000
+    );
+    // A burst of heavy runs in a light key does not move the booking.
     assert_eq!(cpu_of(&[(1500, Some(0), 29), (4000, Some(0), 3)], &b), 1500);
+    // Few samples: 2 are ranked 1st (the lower), 3 are ranked 2nd (the middle).
+    assert_eq!(cpu_of(&[(1000, Some(0), 1), (4000, Some(0), 1)], &b), 1000);
+    assert_eq!(
+        cpu_of(
+            &[(1000, Some(0), 1), (4000, Some(0), 1), (2000, Some(0), 1)],
+            &b
+        ),
+        2000
+    );
     // Only the last 32 count: 32 heavy samples are replaced by 32 light ones.
     assert_eq!(
         cpu_of(&[(4000, Some(0), 32), (1000, Some(0), 32)], &b),
