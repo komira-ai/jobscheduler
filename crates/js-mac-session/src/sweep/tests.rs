@@ -302,8 +302,8 @@ fn places_that_cannot_be_read_are_errors_and_the_walk_goes_on() {
     }
 }
 
-/// Catches a deep tree that makes the sweep fail (a lease builds 300 directories to cost
-/// its slot for good), a search of another owner's deep tree that fails or blocks, and a
+/// Catches a deep tree that makes the sweep fail (a lease builds 300 directories to keep
+/// its account from being deleted), a search of another owner's deep tree that fails or blocks, and a
 /// removal that recurses without a bound: another uid's view of the tree is searched to
 /// the limit with no error and no removal; the departing uid's own tree is removed whole.
 #[test]
@@ -657,8 +657,8 @@ fn clear_flags_opens_a_directory_its_owner_left_without_permissions() {
     assert_eq!(modes, [0o700, 0o700]);
 }
 
-/// Catches a flag clear that fails on a deep tree (a lease that builds one would cost its
-/// slot for good: the removal that follows clears the locks itself) or that recurses
+/// Catches a flag clear that fails on a deep tree (a lease that builds one would keep its
+/// account from being deleted: the removal that follows clears the locks itself) or that recurses
 /// without a bound: past the limit it stops looking, with no error, for either owner.
 #[test]
 fn clear_flags_stops_at_its_depth_limit_without_an_error() {

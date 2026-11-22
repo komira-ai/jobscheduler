@@ -544,8 +544,8 @@ fn a_print_that_fails_after_the_gui_domain_went_refuses_the_teardown() {
 /// Asserts that a `kill-uid` and a `user-delete` whose `launchctl print user/<uid>`
 /// exits 0 with the empty user domain macOS 27 prints (it makes the domain, for any
 /// uid) end clean: the teardown judges that domain gone, though it prints. Catches a
-/// teardown that read exit 0 as a domain that stays, which broke a slot at the end of
-/// every native job on a Mac (`launchd domains of uid 600 remain after 10 attempts`).
+/// teardown that read exit 0 as a domain that stays, which held the account at the end
+/// of every native job on a Mac (`launchd domains of uid 600 remain after 10 attempts`).
 #[test]
 fn an_empty_user_domain_that_prints_does_not_hold_the_teardown() {
     let (rig, uid) = one("teardown-empty-domain", "80.1");

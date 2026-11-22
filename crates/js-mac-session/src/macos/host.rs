@@ -157,11 +157,28 @@ impl Host for MacHost {
                 let record = item
                     .downcast_ref::<ODRecord>()
                     .ok_or_else(|| io::Error::other("a result of the query is not a record"))?;
-                let name = first_value(record, RECORD_NAME)?;
-                let uid = first_value(record, UNIQUE_ID)?;
-                let uid = uid.parse().map_err(|_| {
-                    io::Error::other(format!("the uid of {name} is not a number: {uid}"))
-                })?;
+                // A record whose name or uid cannot be read (one a crash left half made,
+                // between its creation and its uid) is named in the log and passed over,
+                // so it does not stop the listing of the rest: with no uid it holds none,
+                // and a lease the ledger knows is deleted by its name all the same.
+                let name = match first_value(record, RECORD_NAME) {
+                    Ok(name) => name,
+                    Err(why) => {
+                        tracing::warn!("a lease user record without a readable name: {why}");
+                        continue;
+                    }
+                };
+                let uid = match first_value(record, UNIQUE_ID).and_then(|uid| {
+                    uid.parse().map_err(|_| {
+                        io::Error::other(format!("the uid of {name} is not a number: {uid}"))
+                    })
+                }) {
+                    Ok(uid) => uid,
+                    Err(why) => {
+                        tracing::warn!("passing over {name}: {why}");
+                        continue;
+                    }
+                };
                 accounts.push((name, uid));
             }
             Ok(accounts)

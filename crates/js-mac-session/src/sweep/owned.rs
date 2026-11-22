@@ -7,8 +7,10 @@
 //! the uid owns, never through a link, never past the filesystem of the place, searching
 //! the directories of other owners down to [`MAX_DEPTH`]. What the sweep takes as no failure
 //! the look takes as none: a top-level entry the system refuses an examination of (an Apple
-//! data vault) is skipped, an entry gone since the listing is gone, and a directory of
-//! another owner that cannot be searched is logged and passed over. Nothing is changed.
+//! data vault) is skipped, and an entry gone since the listing is gone. A directory of
+//! another owner that cannot be searched is not passed over, as the sweep passes it: the
+//! look fails, naming it, so what was not searched is never read as holding nothing of
+//! the uid. Nothing is changed.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -28,8 +30,9 @@ use super::{
 /// is not looked at when `user` is `None`: a uid alone does not name it.
 ///
 /// # Errors
-/// A place could not be read: its directory could not be opened or listed, or an entry
-/// could not be examined (other than the cases the module documentation names).
+/// A place could not be read: its directory, or a directory below it, could not be opened
+/// or listed, or an entry could not be examined (other than the cases the module
+/// documentation names).
 pub(crate) fn owned_left(
     plan: &SweepPlan,
     user: Option<&str>,
@@ -105,9 +108,14 @@ pub(super) fn look_in(
                 open_child(dir, &name, &stat)
                     .and_then(|child| look_in(&child, &here, (uid, dev), depth + 1, left)),
             );
-            if let Err(why) = searched {
-                tracing::debug!(folder = %here.display(), "not searched: {why}");
-            }
+            // Unlike the sweep, the look cannot pass a directory over: what it did not
+            // search it cannot say holds nothing of the uid.
+            searched.map_err(|why| {
+                io::Error::new(
+                    why.kind(),
+                    format!("{}: not searched: {why}", here.display()),
+                )
+            })?;
         }
     }
     Ok(())

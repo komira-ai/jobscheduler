@@ -167,11 +167,10 @@ fn what_vanishes_while_it_is_looked_at_is_not_an_error() {
     assert_eq!(left.unwrap(), Vec::<PathBuf>::new());
 }
 
-/// Catches: a directory of another owner that cannot be searched failing the look (it is
-/// another lease's or user's, which may close it under the walk: the sweep logs and passes
-/// it over, and so does the look).
+/// Catches: a directory of another owner that cannot be searched read as holding nothing
+/// of the uid (the sweep passes it over; the look, which is a proof, fails and names it).
 #[test]
-fn a_directory_that_cannot_be_searched_is_passed_over() {
+fn a_directory_that_cannot_be_searched_fails_the_look_by_name() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
@@ -183,5 +182,13 @@ fn a_directory_that_cannot_be_searched_is_passed_over() {
     chmod(&base.join("closed"), 0o000);
     let left = owned_left(&owned_plan(&base), None, other());
     chmod(&base.join("closed"), 0o700);
-    assert_eq!(left.unwrap(), Vec::<PathBuf>::new());
+    let why = left.unwrap_err();
+    assert_eq!(why.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        why.to_string(),
+        format!(
+            "{}: not searched: Permission denied (os error 13)",
+            base.join("closed").display()
+        )
+    );
 }
