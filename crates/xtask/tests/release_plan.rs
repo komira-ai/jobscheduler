@@ -653,3 +653,27 @@ fn the_command_line_runs_plan_and_stamp() {
     ]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
 }
+
+/// Catches a `release next-version` verb the command line does not reach, or one that
+/// answers a malformed version with a next one: the binary prints `version=<patch + 1>`
+/// and exits 0 for a version, and exits 1, naming it, for one that is not
+/// `MAJOR.MINOR.PATCH`.
+#[test]
+fn the_next_version_verb_names_the_patch_after_a_version_and_refuses_a_malformed_one() {
+    let xtask = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(args)
+            .output()
+            .expect("xtask")
+    };
+    let out = xtask(&["release", "next-version", "--version", "0.4.2"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "version=0.4.3\n");
+
+    let out = xtask(&["release", "next-version", "--version", "0.4"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "xtask: not a version MAJOR.MINOR.PATCH: \"0.4\"\n"
+    );
+}
