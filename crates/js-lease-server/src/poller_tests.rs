@@ -4,7 +4,7 @@
 use js_jobs::{JobId, JobState, NewJob};
 
 use super::{pass, poked_pass};
-use crate::agent_api::job_rig::{Rig, clocked_rig, spec};
+use crate::agent_api::job_rig::{FakeAgent, Rig, clocked_rig, spec};
 use crate::agent_api::peer_rig::NEVER;
 
 /// The job id `name`.
@@ -63,6 +63,45 @@ async fn a_poked_turn_runs_a_pass_only_when_poked() {
     rig.agents.poller.poke();
     assert!(poked_pass(&rig.agents).await);
     assert_eq!(rig.job(&id("job-a")).state, JobState::Placed);
+    assert!(!rig.agents.poller.take_poke());
+}
+
+/// Asserts that a heartbeat of a host with room for a queued job places nothing itself: after
+/// its reply the job is still queued and a poke waits for the poller, whose pass then places the
+/// job. It catches a heartbeat that still runs the pass in its own request, and one that does
+/// not poke.
+#[tokio::test]
+async fn a_heartbeat_pokes_the_poller_and_places_nothing_itself() {
+    let rig = rig_with_a_queued_job("poller_beat_pokes");
+    let agent = FakeAgent::new("host-a");
+    rig.beat_unpolled(&agent, None).await.unwrap();
+    assert_eq!(rig.job(&id("job-a")).state, JobState::Queued);
+    assert!(rig.agents.poller.take_poke());
+    rig.agents.poller.poke_after_beat();
+    pass(&rig.agents).await;
+    assert_eq!(rig.job(&id("job-a")).state, JobState::Placed);
+}
+
+/// Asserts which pass each poke brings, after a pass that saw everything (one host, an empty
+/// queue): a heartbeat's poke
+/// brings the heartbeat's pass, which skips (nothing it depends on changed); a submit's poke
+/// brings the forced pass, which does not skip, even when a heartbeat poked too before the
+/// poller ran. It catches a heartbeat's poke that forces a full pass on every beat, and a
+/// submit's poke lost to a heartbeat's.
+#[tokio::test]
+async fn a_heartbeats_poke_brings_the_skipping_pass_and_a_submits_the_forced_one() {
+    let mut rig = clocked_rig("poller_which_pass", true, NEVER);
+    rig.register("host-a", true);
+    let placer = rig.agents.placer.as_ref().unwrap();
+    rig.agents.place_jobs();
+    let skipped = placer.passes_skipped();
+    rig.agents.poller.poke_after_beat();
+    pass(&rig.agents).await;
+    assert_eq!(placer.passes_skipped(), skipped + 1);
+    rig.agents.poller.poke_after_beat();
+    rig.agents.poller.poke();
+    pass(&rig.agents).await;
+    assert_eq!(placer.passes_skipped(), skipped + 1);
     assert!(!rig.agents.poller.take_poke());
 }
 

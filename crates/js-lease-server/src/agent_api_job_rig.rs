@@ -669,13 +669,23 @@ impl Rig {
         agent: &FakeAgent,
         taint: Option<Taint>,
     ) -> Result<HeartbeatReply, Refused> {
+        let reply = self.beat_unpolled(agent, taint).await;
+        crate::poller::poked_pass(&self.agents).await;
+        reply
+    }
+
+    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route, with no turn
+    /// of the placement poller after it: what the route alone does.
+    pub(crate) async fn beat_unpolled(
+        &self,
+        agent: &FakeAgent,
+        taint: Option<Taint>,
+    ) -> Result<HeartbeatReply, Refused> {
         let sent = self.heartbeat(agent, taint);
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
         let agents = State(Arc::clone(&self.agents));
         let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
-        let reply = answer.await.map(|Json(reply)| reply);
-        crate::poller::poked_pass(&self.agents).await;
-        reply
+        answer.await.map(|Json(reply)| reply)
     }
 
     /// The next heartbeat of `agent`'s host reporting `taint`, as [`Rig::beat_reporting`]

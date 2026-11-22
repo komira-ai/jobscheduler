@@ -636,14 +636,13 @@ async fn serve_jobs(
             .as_ref()
             .map_or_else(|| Err(JobStoreError::NodeMoved { host: host() }), apply);
         // A listing a newer beat or hello overtook is answered from the rows as they stand.
-        let served = match served {
+        match served {
             Err(JobStoreError::NodeMoved { .. }) => {
                 let answer = rows_answer(&inputs.jobs, &context, (listed, retired), inputs.room);
                 answer.map(|answer| (answer, false))
             }
             served => served,
-        };
-        served
+        }
     })
     .await;
     // What the listing ended or freed, and the load the beat brought, can make room for a

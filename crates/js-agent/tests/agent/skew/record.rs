@@ -384,6 +384,22 @@ impl Cell {
         reply.body["job"]["id"].as_str().unwrap().to_owned()
     }
 
+    /// Reads the job `id` until the server's placement poller, which a submit pokes and which
+    /// places on a task of its own, has taken it out of the queue, so that the next heartbeat
+    /// is answered from the placement. The reads are counted, not timed: a job still queued
+    /// after 10 000 of them fails the test rather than holding it up.
+    pub fn left_the_queue(&self, id: &str) {
+        let jobs = self.jobs();
+        for _ in 0..10_000 {
+            let reply = jobs.get(&format!("/v1/jobs/{id}")).unwrap();
+            if reply.body["job"]["state"] != "JOB_STATE_QUEUED" {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the job {id} is still queued after 10000 reads");
+    }
+
     /// Cancels the job `id`.
     pub fn cancel(&self, id: &str) {
         let path = format!("/v1/jobs/{id}:cancel");

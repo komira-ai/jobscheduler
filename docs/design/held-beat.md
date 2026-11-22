@@ -30,12 +30,18 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    job store since the last pass, the poked pass adds the job to the tables it read then instead of
    reading the four tables again. A retry of a job already recorded is answered with the job as it now
    is, in whatever state, and pokes too; its pass finds nothing new. The server in process
-   (`in_process`, the simulation and test seam) spawns no task: a poke there waits for the caller's
-   next tick.
+   (`in_process`, the simulation and test seam) spawns no task: its caller runs the poller's turn
+   (`InProcess::poll`) after each request, and a poke it leaves waits for the next tick.
 
-   The heartbeat's pass (`Agents::place_jobs_after_beat`) and the tick's pass (`Agents::place_jobs`)
-   run as before, beside the poller's: whether they too only poke the poller is an open question for
-   the owner, with what each answer costs, and this document says what the code does.
+   A heartbeat that lists its jobs pokes the poller too (`Poller::poke_after_beat`), after the
+   listing's commit, and runs no pass itself. The pass that poke brings, when no submit poked, is the
+   heartbeat's (`Agents::place_jobs_after_beat`): skipped when nothing it depends on changed since the
+   last pass, so a quiet fleet's beats cost no pass. So placement has one place where an event asks for
+   it, the poller. The tick keeps its own forced pass (`Agents::place_jobs`) beside it: it is the only
+   thing that notices what the clock alone changes (a refusal bar or a whole-host mark that ends, the
+   regain grace) and it covers a poller task that died. A placement a heartbeat made room for no longer
+   rides on that heartbeat's own reply: it wakes the host's held heartbeat, or, for a host without
+   held heartbeats, rides on its next one.
 2. **Hold the heartbeat.** An agent that reports the hello capability `held-beat` is one whose session
    sends its next heartbeat at once after a reply that says `beat_now`. The server watches such a host's
    heartbeat from before it reads the store for the reply (`held_beat::Wakes::watch`), when the heartbeat's

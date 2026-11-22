@@ -142,7 +142,7 @@ pub fn start_after(flow: &[Value], index: usize) -> Option<(usize, Value)> {
     commands.find(|(_, command)| command["type"] == "job_start")
 }
 
-/// A job start this release's server may send one heartbeat before the previous server did
+/// A job start this release's server sends one heartbeat before the previous server did
 /// (its placement poller, which the submit pokes, places the job at once, where the previous
 /// server placed it at the next heartbeat): when the previous release's reply `then` held no command and the reply `now`
 /// holds exactly one, a `job_start`, takes that command out of `now` and returns it. Any
