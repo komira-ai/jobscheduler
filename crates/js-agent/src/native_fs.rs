@@ -234,7 +234,7 @@ impl Missing {
                     give(&path, (owner, group, mode), chown).map_err(|why| named(&path, why))?
                 }
                 Err(why) if why.kind() == io::ErrorKind::AlreadyExists => {
-                    let there = fs::symlink_metadata(&path).map_err(|why| named(&path, why))?;
+                    let there = fs::symlink_metadata(&path)?;
                     if !there.is_dir() {
                         return Err(io::Error::new(
                             io::ErrorKind::AlreadyExists,
