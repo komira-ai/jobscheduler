@@ -71,6 +71,7 @@ mod live_update;
 mod live_update_load;
 mod live_update_rig;
 mod logs_round_trip;
+mod mac_os_version;
 mod memory_percent;
 mod metrics_listen;
 mod placement;

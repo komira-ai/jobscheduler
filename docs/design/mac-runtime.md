@@ -1,10 +1,10 @@
 # The macOS runtime: where it lives and what macOS enforces
 
-Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this workspace. It is the pool of reused users, the `js-mac-session` root helper, the Seatbelt profile per run and pf per uid. It does not become a separate repository or a standalone OCI runtime: no one else would use it, and its only caller is the agent. This document fixes three things: the one interface both backends implement, the crate boundaries, and what macOS can and cannot enforce for each part of a job. It ends with the change that does need building, memory and CPU limits.
+Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this workspace. It is the pool of reused users, the `js-mac-session` root helper, the Seatbelt profile per run and pf per uid. It does not become a separate repository or a standalone OCI runtime: no one else would use it, and its only caller is the agent. This document fixes three things: the one interface both backends implement, the crate boundaries, and what macOS can and cannot enforce for each part of a job. Then it covers the change that does need building, memory and CPU limits, and the least macOS version the Macs' pool admits.
 
 ## What changes
 
-Nothing in this document changes behaviour by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
+Nothing in this document changes code by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 5 sets one value of the Macs' pool file, its least `os_version`. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
 
 ## 1. One runtime interface
 
@@ -72,3 +72,28 @@ These facts were not re-checked on current macOS releases beyond those checks.
 3. The memory cap: `memory_cap_bytes`, the kill, and the `oom_killed` report.
 
 Each step is tested on Linux against the helper's fake host (`Host` in `js-mac-session`), and on the beta stage's macOS runner.
+
+## 5. The least macOS version of the Macs' pool
+
+**The farm.** The four Macs run three macOS releases: two run 27.0.1, one 26.6 and one 26.4. An agent's hello reports the major version alone (`crates/js-agent/src/os_version.rs`), so the server sees 27, 27, 26 and 26. A job asks for a least major version in `constraints.osVersion`, compared as at least.
+
+**The policy: one pool with a floor.** The Macs stay in one pool, `mac-build`, and its `[capabilities]` name `os_version = "26"`:
+
+```toml
+[capabilities]
+os = "macos"
+arch = "arm64"
+os_version = "26"
+```
+
+- The floor only admits. Each Mac is placed by the version its own hello reports, not by the pool's value (`placement_shape` in `crates/js-registry/src/config.rs`). So a job that asks for 27 is placed only on the two Macs on 27, and a job that asks for 26, or for no version, on all four.
+- One pool per version would add nothing to placement and would cost more:
+  - Every Mac is booked at the same shape, so the version is the only thing that would differ.
+  - A version is matched as at least, and a pool has no ceiling, so a pool for 26 would still admit a Mac on 27. It could not hold its hosts to 26.
+  - Each extra pool needs its own join tokens and the same `memory_schedulable_percent`.
+  - A Mac names its pool in its flags, so each macOS update would also move the Mac to another pool.
+- 26 is the least version on the farm. The macOS runtime has been built and tested on 26.4, 26.6 and 27.0.1 only. A Mac below 26, or one whose hello reports no version (its probe failed, or its agent predates the report), is refused at its hello with `shape-not-accepted`, reason `below-floor`. That refusal shows in the agent's log, which is better than a Mac that joins and quietly serves only the jobs that ask for no version.
+- Minor versions are not placed. 26.4 and 26.6 are the same version to the scheduler, and a job cannot ask for 26.6. No job needs that today.
+- Raising the floor, once every Mac runs 27, is an edit of this value in the pool file, made after the Macs are updated. A Mac still below the new floor is refused at its next hello.
+
+**Check.** `crates/js-lease-server/tests/server/mac_os_version.rs` runs a server over this pool with four Macs (two on 27, two on 26). Jobs that ask for 27 fill only the two Macs on 27. Jobs that ask for 26 fill all four. A job that asks for 28 is refused `no-capable-host`. A Mac on 25, or one that reports no version, is refused `below-floor`.

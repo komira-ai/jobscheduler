@@ -1,13 +1,20 @@
-//! `farm-build --buck2 <path> --target <label>`: the farm lane's build (`.github/workflows/farm.yml`,
-//! docs/farm.md), one command. In this order:
+//! `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo <owner/name>
+//! --run-id <id>`: the farm lane's build (`.github/workflows/farm.yml`, docs/farm.md), one command.
+//! In this order:
 //!
 //! 1. `buck2 audit config buildrules_re.linux_x86_64_properties --style json` must give the key a
 //!    value that is not blank: the worker property set farm-connect wrote, which `.buckconfig`
 //!    hands to buildrules. Without one buck2 has no execution platform, and this says so first.
-//! 2. `buck2 build <label>`. What buck2 prints on its standard error (its progress, the output of
+//! 2. The generated build table must be fresh ([`table`]): `buildrules check`, with the
+//!    `buildrules` command line built from the pinned buildrules cell on the farm. When it calls the
+//!    table stale, the job runs `buildrules sync`, writes what sync changed as a patch to `--patch`
+//!    (the workflow uploads it as the artifact [`table::PATCH_ARTIFACT`]) and the stale inputs, the
+//!    changed files and the one command that applies the patch to `--summary` (the job summary),
+//!    and fails without building.
+//! 3. `buck2 build <label>`. What buck2 prints on its standard error (its progress, the output of
 //!    a failed action, its summary) is written to the log line by line as buck2 prints it, so a
 //!    long build shows its progress in the job's log; a failed build is a failure.
-//! 3. The build's summary line, `Commands: N (cached: N, remote: N, local: N)`, must be there and
+//! 4. The build's summary line, `Commands: N (cached: N, remote: N, local: N)`, must be there and
 //!    say `local: 0`: every action ran on the farm or came from its cache, none on this machine.
 //!    The line is what the verb prints.
 //!
@@ -17,6 +24,10 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+pub mod table;
+
+pub use table::Handoff;
 
 /// The key of the worker property set buildrules reads.
 pub const PROPERTIES_KEY: &str = "buildrules_re.linux_x86_64_properties";
@@ -46,6 +57,9 @@ pub enum Error {
          linux_x86_64_properties, so buck2 has no farm to build on"
     )]
     NoWorkers,
+    /// The generated build table is not fresh, or its freshness could not be settled.
+    #[error(transparent)]
+    Table(#[from] table::Error),
     /// The build ended with a failure status.
     #[error("`buck2 build {target}` failed ({status})")]
     Build {
@@ -87,13 +101,19 @@ pub fn summary(log: &str) -> Option<(&str, u64)> {
 }
 
 /// Builds `target` with the buck2 at `buck2`, writing buck2's standard error to `log` as it
-/// comes, and stops buck2's daemon after: the summary line, or why the build is not a farm build.
+/// comes, once the generated build table is fresh, and stops buck2's daemon after: the summary
+/// line, or why the build is not a farm build. A stale table leaves its fix where `handoff` says.
 ///
 /// # Errors
-/// buck2 cannot be started, names no worker property set, fails the build, prints no summary
-/// line, or ran an action on this machine.
-pub fn build(buck2: &Path, target: &str, log: &mut dyn Write) -> Result<String, Error> {
-    let result = build_and_check(buck2, target, log);
+/// buck2 cannot be started, names no worker property set, the table is stale or its check
+/// fails, buck2 fails the build, prints no summary line, or ran an action on this machine.
+pub fn build(
+    buck2: &Path,
+    target: &str,
+    handoff: &Handoff,
+    log: &mut dyn Write,
+) -> Result<String, Error> {
+    let result = build_and_check(buck2, target, handoff, log);
     // The daemon outlives the command: stop it however the build ended.
     let _ = Command::new(buck2)
         .arg("kill")
@@ -105,20 +125,20 @@ pub fn build(buck2: &Path, target: &str, log: &mut dyn Write) -> Result<String, 
 }
 
 /// The error for a program that could not be started or waited for.
-fn start_error(buck2: &Path) -> impl FnOnce(std::io::Error) -> Error {
+fn start_error(program: &Path) -> impl FnOnce(std::io::Error) -> Error {
     move |e| Error::Start {
-        program: buck2.to_owned(),
+        program: program.to_owned(),
         why: e.to_string(),
     }
 }
 
-/// `buck2 <args>` run to its end, its standard input closed.
-fn buck2_output(buck2: &Path, args: &[&str]) -> Result<Output, Error> {
-    Command::new(buck2)
+/// `program <args>` run to its end, its standard input closed.
+fn output(program: &Path, args: &[&str]) -> Result<Output, Error> {
+    Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .output()
-        .map_err(start_error(buck2))
+        .map_err(start_error(program))
 }
 
 /// Every line `from` gives, written to `log` as it comes, and all of them.
@@ -135,8 +155,13 @@ fn tee(from: impl std::io::Read, log: &mut dyn Write) -> Vec<u8> {
 }
 
 /// The checks and the build, without the daemon's stop.
-fn build_and_check(buck2: &Path, target: &str, log: &mut dyn Write) -> Result<String, Error> {
-    let audit = buck2_output(
+fn build_and_check(
+    buck2: &Path,
+    target: &str,
+    handoff: &Handoff,
+    log: &mut dyn Write,
+) -> Result<String, Error> {
+    let audit = output(
         buck2,
         &["audit", "config", PROPERTIES_KEY, "--style", "json"],
     )?;
@@ -149,6 +174,7 @@ fn build_and_check(buck2: &Path, target: &str, log: &mut dyn Write) -> Result<St
     if !has_value(&String::from_utf8_lossy(&audit.stdout)) {
         return Err(Error::NoWorkers);
     }
+    table::ensure_fresh(buck2, handoff, log)?;
     let mut child = Command::new(buck2)
         .args(["build", target])
         .stdin(Stdio::null())

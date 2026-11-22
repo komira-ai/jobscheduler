@@ -6,8 +6,11 @@
 //!   HTTPS (or taken from the file the actions cache restored at `--cache`) and refused unless
 //!   its SHA-256 matches, before anything is unpacked or written; `--extract zst` is one
 //!   zstd-compressed file (buck2's release form), decompressed whole.
-//! - `farm-build --buck2 <path> --target <label>` ([`farm`]): the build of the farm lane
-//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set, then
+//! - `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo
+//!   <owner/name> --run-id <id>` ([`farm`]): the build of the farm lane
+//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set; refused when
+//!   the generated build table is stale, with what `buildrules sync` changed written as a patch to
+//!   `--patch` and the command that applies it to the job summary `--summary`; then
 //!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
 //!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
@@ -258,8 +261,8 @@ enum Verb {
         #[arg(long)]
         cache: Option<PathBuf>,
     },
-    /// Build a target with buck2 on the build farm, failing unless every action ran there or
-    /// came from its cache (the `farm` workflow's one step).
+    /// Build a target with buck2 on the build farm, failing unless the generated build table is
+    /// fresh and every action ran there or came from its cache (the `farm` workflow's build step).
     FarmBuild {
         /// The buck2 program.
         #[arg(long)]
@@ -267,6 +270,18 @@ enum Verb {
         /// The label to build, `//:ci` for the lane.
         #[arg(long)]
         target: String,
+        /// Where a stale table's patch (what `buildrules sync` changed) is written.
+        #[arg(long)]
+        patch: PathBuf,
+        /// The job summary a stale table's fix is appended to.
+        #[arg(long)]
+        summary: PathBuf,
+        /// The repository of the run, `owner/name`, for the command that downloads the patch.
+        #[arg(long)]
+        repo: String,
+        /// The run's id, for the command that downloads the patch.
+        #[arg(long)]
+        run_id: u64,
     },
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
@@ -464,8 +479,26 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &roots,
             )?)
         }
-        Verb::FarmBuild { buck2, target } => {
-            Ok(farm::build(&buck2, &target, &mut std::io::stderr())?)
+        Verb::FarmBuild {
+            buck2,
+            target,
+            patch,
+            summary,
+            repo,
+            run_id,
+        } => {
+            let handoff = farm::Handoff {
+                patch,
+                summary,
+                repo,
+                run_id,
+            };
+            Ok(farm::build(
+                &buck2,
+                &target,
+                &handoff,
+                &mut std::io::stderr(),
+            )?)
         }
         Verb::Debs { pins, dir } => {
             let roots = fetch::host_roots();
