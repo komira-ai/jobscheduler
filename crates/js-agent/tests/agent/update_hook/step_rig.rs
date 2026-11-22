@@ -783,6 +783,10 @@ impl Link for Spy<'_> {
             target.display()
         );
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.world.real(path)
+    }
 }
 
 impl Lease for Spy<'_> {

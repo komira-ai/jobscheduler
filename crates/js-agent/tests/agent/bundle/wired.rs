@@ -35,6 +35,10 @@ impl Wired {
 }
 
 impl BundleHost for Wired {
+    fn prepare_store(&self, _store: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
     fn check_start(&self, _store: &Path, _scratch: &Path) -> Result<(), String> {
         Ok(())
     }

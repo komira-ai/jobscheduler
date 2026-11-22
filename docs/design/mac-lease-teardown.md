@@ -1,6 +1,6 @@
 # Mac lease user teardown
 
-How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `user-delete`), what each step proves, and what happens when one fails. A lease's user is a pool user (`kbf-lease-pool-<slot>`): `user-delete` resets it for the next lease, and deletes it (then makes a new one in the slot) only when the reset is not clean. The deletion below is that replacement's, and is also how the user of a lease that a release before the pool created is ended. The native runtime (`crates/js-agent/src/native`) calls both verbs when a run is removed and again, from its journal, at the next start. The two-run isolation test (`crates/js-agent/tests/native_isolation`) checks the result on a real Mac.
+How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `user-delete`), what each step proves, and what happens when one fails. A lease's user is a pool user (`kbf-lease-pool-<slot>`): `user-delete` resets it in place for the next lease, and nothing of it is ever deleted (the pool's users are permanent). The deletion below is how the user of a lease that a release before the pool created is ended. The native runtime (`crates/js-agent/src/native`) calls both verbs when a run is removed and again, from its journal, at the next start. The two-run isolation test (`crates/js-agent/tests/native_isolation`) checks the result on a real Mac.
 
 ## What can outlive a user
 
@@ -11,7 +11,7 @@ How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `
 
 ## `kill-uid`
 
-The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains no longer print.
+The verdict is the outcome, never what a `launchctl` call answered: no process of the uid is left, and the uid's launchd domains are gone (they no longer print, or print as a domain that holds nothing).
 
 1. Before anything is killed, decide whether the uid may have a GUI login session. It may when any of these holds:
    - the session switch's intent record names the account (the login window logs in only the user it names, so a login may be on its way);
@@ -34,7 +34,7 @@ The verdict is the outcome, never what a `launchctl` call answered: no process o
    The loop runs at most `KILL_ROUNDS` (10) attempts. The bound is a count, never a time. If the outcome still does not hold after the last attempt, `kill-uid` fails naming what remains (the processes, the domains, and why each domain was not told gone), and the uid is quarantined (see below). For the VM user (`role-kill-uid`), which is no lease, the refusal says the verb can be repeated instead. A process table that cannot be read stops the teardown at once (not retried); the uid stays held and the caller repeats it.
 5. Remove the crontab and `at` jobs, then run 2–4 again.
 
-A domain prints when `launchctl print` exits 0. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
+A domain prints when `launchctl print` exits 0, except a domain that holds nothing: `launchctl print user/<uid>` exits 0 for any uid, even one with no account, because the print makes the user domain (measured on macOS 27.0.1: an idle pool user, a uid after its lease and uid 799 with no account all print the same domain), so a print whose own top-level `services = {` and `unmanaged processes = {` blocks (one tab deep, not an endpoint's) are both empty is a domain that is gone. A print with anything in either block, or without either block, is a domain that stays. Any other exit status is a domain launchd does not print. No exit status is matched as "not found": launchd's answer for a domain it does not have varies (on macOS 26, `launchctl print gui/<uid>` for a user that never logged in has exited 112 and 113, "Could not find domain", and 125, "Domain does not support specified action", from run to run). A `launchctl` that a signal ended, or that could not be run, gave no answer: the domain is not taken as gone, and the next attempt looks again.
 
 This reading is the teardown's only. A domain wrongly read as gone there is caught by the look at the processes. The readiness checks (`session-ready`, `role-session-ready`, `role-run`, and the session switch's rest at the VM user) act on a "not up": the switch logs the VM user in again. So they keep the strict reading: exit 0 is up, exit 112 or 113 with "Could not find domain" is not up, and any other answer (125 included) is an error that changes nothing.
 
@@ -46,14 +46,18 @@ The lease is recorded over (the ledger's `deleted`, then the slot's `resetting`)
 2. The user's record must exist; the entry is taken from its `DARWIN_USER_DIR`, as in the deletion's step 1.
 3. Settle, as in the deletion's step 2. Remove the crontab and `at` jobs; no process may remain.
 4. Remove the uid's System V IPC objects: every object `ipcs -a` lists with the uid (or its name) as owner or creator, removed with `ipcrm` (a failure only logged), then `ipcs` again: an object still listed fails the step. POSIX shared memory and semaphores have no listing on macOS and are not found (see above: a run cannot create shared memory).
-5. Sweep the other places and remove the home whole; make the home again, new, empty and the user's.
+5. Sweep the other places and empty the home: every entry below it is removed (dot files too, user flags cleared first as the sweep does), and the folder itself is kept, never removed or made again, because macOS refuses a process without Full Disk Access the removal of a folder of `/Users` (`/Users` carries the `sunlnk` flag). Then give the home back: its owner and group are set to the pool user's and its mode to 0700, and its user flags, ACL and extended attributes (but the system's own, which it protects) are taken off. An empty folder below the home that the system refuses root the removal of (an account's `Library/Preferences`, which macOS guards even against root without Full Disk Access; only a process with that grant could remove it) is kept, as the sweep's `kept`, and is no failure. The step fails only if an entry below the home that cannot be emptied (named) or the home cannot be given back.
 6. Empty the entry, keeping its `0`, `C` and `T` (each emptied).
 7. Settle again.
 8. Ask the directory that the user is not in `admin` (`dseditgroup -o checkmember`): only its "no" passes.
 
-A clean reset records the slot free. One that is not replaces the user: the kill again, the deletion below (with step 4 of the reset before its sweep), a new record with the same name, uid and home, and step 8. The slot is free only once that holds. The user of an administrator's lease is always replaced, never reset; its `resetting` record says so, so the recovery after a crash replaces it too.
+8a. Before step 7's last look, the record's attributes that the pool owns and macOS lets root write on an existing account are set back (primary group, shell, hidden), its uid and home path are compared and never written (macOS 27 refuses root a write of an existing account's home attribute, so a record whose uid or home is not the slot's leaves the slot broken, naming what differs), and the user is taken out of `admin`; step 8 then asks the directory.
 
-## The deletion (`user-delete` of a lease from before the pool, and a pool user's replacement)
+A clean reset records the slot free. One that is not leaves the slot broken, naming the entry or step that blocked it. Nothing of a pool user is ever deleted: the pool's users are made once and are permanent. Measured on macOS 27.0.1 with System Integrity Protection on, as root from a launchd daemon and from an ssh root shell: root may not delete a local user record (`dscl . -delete` fails with eDSPermissionError -14120, and so does the helper's OpenDirectory delete), may not remove an existing account's home, and may not remove the per-user folders the system placed (`/private/var/folders/<xx>/<hash>` and its `0`, `C`, `T` and `X` carry `sunlnk`); everything can be emptied, and making users works.
+
+The user of an administrator's lease is reset like any other. The grant adds the slot's user to `admin` for the lease (`user-create`), and the reset takes it out and asks the directory that it is out. A slot is not retired for having been an administrator's: a retired slot could never be reclaimed, so a few grants would end the pool. What the reset removes is what a replacement removed (the uid's processes, files, launchd domains, IPC objects, record attributes and membership); what an administrator may have put in root's own places (a launch daemon naming the user, say) a replacement never reached either, and the leak scan below is what looks for that. The ledger's `resetting <slot> replace` record is still written and read, and is reset in place too.
+
+## The deletion (`user-delete` of a lease from before the pool)
 
 1. **The entry.**
    - While the record exists, ask for the uid's `DARWIN_USER_DIR` (`getconf DARWIN_USER_DIR`, run as the uid and its group with an empty environment, `/` as its working directory and empty input). Take only an answer of the form `/var/folders/<xx>/<hash>/0`; the entry is `<user_folders>/<xx>/<hash>`. Never guess the path from the uid.
@@ -68,11 +72,13 @@ A clean reset records the slot free. One that is not replaces the user: the kill
    - nothing past the entry's filesystem is touched;
    - a subtree too deep to remove in place is moved up *inside* the entry, so a removal cut short leaves everything under the entry, where the next removal finds it.
 5. Settle again.
-6. Delete the record. For a lease from before the pool, then record the deletion in the ledger.
+6. Delete the record. For a lease from before the pool, then record the deletion in the ledger. This is the one deletion left, and it fails on macOS 27 (the record, the home and the placed folders are refused, as above): the lease stays live and its uid held, unless the helper holds Full Disk Access (see `mac-hostkeeper-package.md`).
 
 ## Failure: the uid is held
 
-A pool user is lent only from a free slot. A reset that is not clean replaces the user; a replacement that fails leaves the slot broken: it is lent to no one, `pool-status` and the pool-full refusal name it, and the next `pool-create` (the boot reset runs one) replaces it again. A slot found resetting after a restart, or leased to a lease that is not live, is reset (or replaced) by the boot reset before it is free. A ledger write that fails leaves the slot not free. Either way no other lease gets the uid until a reset or a replacement completes.
+A pool user is lent only from a free slot. A reset that is not clean leaves the slot broken: it is lent to no one, `pool-status`, the pool-full refusal and the `pool-create` log line name it (the refusal and the log line with the entry or step that blocked it), and the next `pool-create` (the boot reset runs one) resets it again in place. A slot found resetting after a restart, or leased to a lease that is not live, is reset by the boot reset before it is free. A ledger write that fails leaves the slot not free. Either way no other lease gets the uid until a reset completes.
+
+`pool-create` adopts a user record that is already there for a slot's uid when it is the pool's own: named `kbf-lease-pool-<n>`, with that uid, hidden, and the home `/Users/kbf-lease-pool-<n>`. It resets it in place and only then records the slot free, so a first install on a Mac that already has the pool's users (left by an earlier install, and kept by it for good) works, with or without the ledger. A record with that uid that differs in any of those is refused, naming how, and the slot is left unmade.
 
 For a lease from before the pool, a step that fails leaves the lease live in the helper's ledger: the uid is quarantined. A live lease's uid is never handed to another lease, nor made a pool slot. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
 

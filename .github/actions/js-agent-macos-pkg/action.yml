@@ -1,0 +1,103 @@
+# One command that builds the unsigned js-agent installer package of one version, on a macOS
+# runner that has checked out the repository and installed the toolchain: it stamps the version,
+# builds the programs, checks that they print it, stages the payload, builds the package with
+# pkgbuild and productbuild, reads it back with the xtask `pkg check-macos` verb and sums it. The
+# package is `dist/js-agent-<version>-macos-arm64.pkg` with `dist/SHA256SUMS`, in the workspace.
+#
+# js-agent-macos-pkg.yml calls it twice, in two jobs that run side by side: `build` for the
+# release's version, whose package is the one that is signed and released, and `build-update` for
+# the next patch version, which the first-install test updates the agent to and which no release
+# takes. A job builds one version, since the stamp rewrites the workspace's version and the
+# second build would rebuild every crate in the same job.
+#
+# No command expands an expression: a step reads its environment. The caller checks the version
+# as MAJOR.MINOR.PATCH before it calls this. crates/xtask/tests/macos_pkg_workflow/ pins these
+# rules.
+name: js-agent-macos-pkg
+description: Build, check and sum the unsigned js-agent installer package of one version
+
+inputs:
+  version:
+    description: The package version, MAJOR.MINOR.PATCH
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stamp the version
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: cargo xtask release stamp --to "$VERSION"
+    - name: Build the programs
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo build --locked --release -p js-agent --bin js-agent
+        cargo build --locked --release -p js-mac-session --bin js-mac-session
+        cargo build --locked --release -p js-mac-provision --bin js-mac-provision
+    - name: The programs print the version
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        for bin in js-agent js-mac-session js-mac-provision; do
+          printed="$(target/release/$bin --version | sed -n 1p)"
+          echo "$printed"
+          case "$printed" in
+            *" $VERSION") ;;
+            *)
+              echo "::error::$bin prints '$printed', not $VERSION"
+              exit 1
+              ;;
+          esac
+        done
+    - name: Stage the payload
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        mkdir inputs
+        # The root helper admits the agent of this package alone: the cdhash of its binary, which
+        # the linker's ad hoc signature gives and a copy keeps.
+        cdhash="$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
+        if ! [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::the cdhash of js-agent is '$cdhash', not 40 hex digits"
+          exit 1
+        fi
+        target/release/js-mac-provision agent-plist > inputs/agent.plist
+        target/release/js-mac-provision session-plist --daemon-requirement "cdhash H\"$cdhash\"" > inputs/session.plist
+        target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist
+        plutil -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist
+        cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage
+        staged="$(/usr/bin/codesign --display --verbose=4 "stage/root/Library/Application Support/js-agent/bin/js-agent" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
+        if [ "$staged" != "$cdhash" ]; then
+          echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"
+          exit 1
+        fi
+    - name: Build the package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        mkdir dist
+        pkgbuild --root stage/root --identifier com.komira.js-agent --version "$VERSION" --install-location / --ownership recommended stage/component.pkg
+        productbuild --package stage/component.pkg --version "$VERSION" "dist/js-agent-$VERSION-macos-arm64.pkg"
+    - name: The unsigned package is the package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: cargo xtask pkg check-macos --pkg "dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION"
+    - name: Sum the unsigned package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        cd dist
+        shasum -a 256 "js-agent-$VERSION-macos-arm64.pkg" > SHA256SUMS
+        shasum -a 256 --check SHA256SUMS
+        cat SHA256SUMS

@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use js_update_hook::{CUTOVER_MARGIN_SECS, START_WAIT_SECS};
+use js_update_hook::{CUTOVER_MARGIN_SECS, START_WAIT_SECS, points_at};
 
 use crate::update_hook::{Done, LOCK_WAIT_SECS, Params, Reason, Record};
 
@@ -70,13 +70,13 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     Ok(success())
 }
 
-/// Whether `link` points at `release`.
+/// Whether `link` points at `release`: the two are one directory by their real paths, however
+/// each is spelt (see [`points_at`]).
 pub(super) fn on(env: &Env<'_>, link: &Path, release: &Path) -> Result<bool, Done> {
-    let target = env.ports.link.target(link).map_err(|why| {
+    points_at(env.ports.link, link, release).map_err(|why| {
         super::failure(
             Reason::LinkFailed,
             format!("cannot read {}: {why}", link.display()),
         )
-    })?;
-    Ok(target.as_deref() == Some(release))
+    })
 }

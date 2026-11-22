@@ -7,6 +7,7 @@ use js_agent_wire::limits::MAX_CAPABILITY_VALUE_LEN;
 use js_oci::Allow;
 
 use super::host::BundleHost;
+use super::layout::inside_scratch;
 use super::list::parse_digests;
 use crate::RegistryCredentials;
 use crate::cli::Cli;
@@ -197,8 +198,8 @@ impl Settings {
     /// # Errors
     ///
     /// The text names the flag at fault: a bundle flag without `--bundle-store`; a store
-    /// off a Mac, without `--scratch-root`, without a budget, on a volume the checks refuse
-    /// or not absolute; a choice that is none of its values; `--read-model allow`; a
+    /// off a Mac, without `--scratch-root`, inside it, without a budget, on a volume the
+    /// checks refuse, below a directory a lease user cannot walk through, or not absolute; a choice that is none of its values; `--read-model allow`; a
     /// registry entry that is not `HOST[:PORT]/PREFIX`, or an `--image-allow` entry that is
     /// not a js-oci allow-list entry; `--bundle-pull missing` with trust `digest` or with
     /// neither an `--image-allow` entry nor a registry; trust `list` without an allow list that holds a
@@ -227,6 +228,9 @@ impl Settings {
                     .to_owned(),
             );
         };
+        if let Some(why) = inside_scratch(store, scratch) {
+            return Err(format!("--bundle-store: {why}"));
+        }
         let budget = match cli.bundle_budget_gib {
             Some(gib) if gib > 0 => gib,
             _ => {
@@ -307,6 +311,10 @@ impl Settings {
                 list(flag, host, file)?;
             }
         }
+        // The store is made (when it is missing) and its way from `/` checked first:
+        // `check_start` reads the directory.
+        host.prepare_store(store)
+            .map_err(|why| format!("--bundle-store: {why}"))?;
         host.check_start(store, scratch)
             .map_err(|why| format!("--bundle-store: {why}"))?;
         // The path is also the `bundle-root` capability, which the wire holds to a length.

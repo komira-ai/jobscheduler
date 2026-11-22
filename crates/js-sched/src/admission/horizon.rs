@@ -31,8 +31,9 @@ use js_types::sched::Resources;
 use js_types::sched::usage::LeaseCost;
 
 use super::LoadConfig;
-use super::ledger::{Left, Refusal, Totals};
+use super::ledger::{Left, Totals};
 use super::profile::{Profile, SLOTS};
+use crate::refusal::{Refusal, RefusalKind};
 
 /// The CPU a worker is charged `slot` minutes ahead, before a new lease: the covered
 /// leases (at slot 0 raised to the measurement), the uncovered, and the VMs' booked cores.
@@ -93,8 +94,10 @@ pub(crate) fn refusal(
     let new_mem = new_charge(cost, profile, left, capacity, 0).1;
     for slot in 0..SLOTS {
         let at = cpu_left(t, slot, left.measured, cfg);
-        if at.saturating_add(new_cpu(slot)) > cpu_limit {
-            return Some(Refusal::Cpu);
+        let new = new_cpu(slot);
+        if at.saturating_add(new) > cpu_limit {
+            let refusal = Refusal::new(RefusalKind::Cpu, at, new, cpu_limit);
+            return Some(refusal.measured(left.measured));
         }
     }
     // Memory is checked at minute 0 alone: a charge by curve is the remaining maximum
@@ -103,7 +106,12 @@ pub(crate) fn refusal(
     // any later minute is no more than at minute 0 (the measurement enters at 0 too).
     let at = mem_left(t, 0, left.working_set);
     if at.saturating_add(new_mem) > mem_limit {
-        return Some(Refusal::Memory);
+        return Some(Refusal::new(
+            RefusalKind::PredictedMemory,
+            at,
+            new_mem,
+            mem_limit,
+        ));
     }
     None
 }
@@ -123,10 +131,8 @@ pub(crate) fn flat_memory_refusal(
     cfg: &LoadConfig,
 ) -> Option<Refusal> {
     let d = cfg.flat_memory_slack_permille?;
-    let flat = t
-        .mem_all()
-        .saturating_add(t.vm_mem)
-        .saturating_add(cost.memory_bytes);
+    let held = t.mem_all().saturating_add(t.vm_mem);
     let limit = super::scale(capacity.memory_bytes, 1000 + u64::from(d), 1000);
-    (flat > limit).then_some(Refusal::Memory)
+    (held.saturating_add(cost.memory_bytes) > limit)
+        .then(|| Refusal::new(RefusalKind::BookedMemory, held, cost.memory_bytes, limit))
 }

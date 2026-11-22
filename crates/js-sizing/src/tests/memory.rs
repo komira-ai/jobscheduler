@@ -423,7 +423,11 @@ fn a_mixed_key_is_never_lowered_and_raised_only_by_kills() {
         "mixed: the default, not the sized 3.25 GiB"
     );
     feed(&mut s, &k, &success(5 * GIB), 1);
-    assert_eq!(memory(&s, &k), 4 * GIB, "samples do not raise a mixed key");
+    assert_eq!(
+        memory(&s, &k),
+        6 * GIB + GIB / 4,
+        "its own largest peak (5 GiB x 1.2 + 128 MiB) raises a mixed key above the default"
+    );
     s.observe(&k, &heavy_kill(), DAY, &Bounds::default());
     assert!(memory(&s, &k) >= 16 * GIB, "a kill does");
 }
@@ -439,7 +443,7 @@ fn the_mixed_boundary_is_exact() {
     assert_eq!(memory(&s, &k), 5 * GIB);
     feed(&mut s, &k, &success(4 * GIB + 1), 1);
     assert!(s.get(&k).unwrap().mixed());
-    assert_eq!(memory(&s, &k), 4 * GIB);
+    assert_eq!(memory(&s, &k), 5 * GIB, "mixed: sized from its own peak");
     assert!(
         !Summary::new(Basis::Cgroup, DAY).mixed(),
         "no samples is not mixed"

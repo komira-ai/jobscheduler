@@ -1,6 +1,7 @@
-//! The agent's start on a Mac mounts the scratch volume the host setup made on the scratch root
-//! while the scratch root is on the state root's file system, as it is after every boot (no file
-//! system table names the volume): `lifecycle::scratch_volume::mount_at_start`, over the fake
+//! The agent's start on a Mac mounts the scratch volume the host setup made on the scratch root's
+//! parent (the volume's mount point, with the scratch root a directory on the volume) while that
+//! parent is on the state root's file system, as it is after every boot (no file system table
+//! names the volume): `lifecycle::scratch_volume::mount_at_start`, over the fake
 //! Mac of the host setup's tests.
 
 use std::cell::RefCell;
@@ -71,11 +72,14 @@ impl FileReader for Start {
     }
 }
 
-/// A Mac whose state root and scratch root are directories of a test directory named `name`,
-/// one file system until the scratch volume is mounted on the scratch root.
+/// A Mac whose state root and scratch volume mount point are directories of a test directory
+/// named `name`, one file system until the scratch volume is mounted on the mount point; the
+/// scratch root is the directory `runs` of the mount point, which the volume holds and the
+/// unmounted mount point does not.
 struct Rig {
     _tmp: js_testkit::dir::TestDir,
     state: PathBuf,
+    mount: PathBuf,
     scratch: PathBuf,
     start: Start,
 }
@@ -83,13 +87,14 @@ struct Rig {
 impl Rig {
     fn new(name: &str) -> Rig {
         let tmp = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
-        let (state, scratch) = (tmp.path().join("state"), tmp.path().join("scratch"));
+        let (state, mount) = (tmp.path().join("state"), tmp.path().join("scratch"));
         fs::create_dir(&state).unwrap();
-        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&mount).unwrap();
         Rig {
             _tmp: tmp,
             state,
-            scratch,
+            scratch: mount.join("runs"),
+            mount,
             start: Start {
                 mac: FakeMac::new(),
                 ran: RefCell::new(Vec::new()),
@@ -104,17 +109,19 @@ impl Rig {
     fn mount_line(&self) -> String {
         format!(
             "{DISKUTIL} mount nobrowse -mountPoint {} {DEVICE}",
-            self.scratch.display()
+            self.mount.display()
         )
     }
 }
 
-/// Asserts that a start whose scratch root shares the state root's file system mounts the
-/// volume there, `nobrowse`, so that the scratch root is then on a device of its own; and that
-/// a volume macOS mounted in `/Volumes` by itself at the boot is unmounted first. Catches an
-/// agent that refuses to start after every reboot of a Mac.
+/// Asserts that a start whose scratch root's parent shares the state root's file system mounts
+/// the volume on that parent, `nobrowse`, not on the scratch root, so that the parent is then on a
+/// device of its own and the store can lie beside the scratch root; and that a volume macOS
+/// mounted in `/Volumes` by itself at the boot is unmounted first. Catches an agent that refuses
+/// to start after every reboot of a Mac, and a volume mounted on the scratch root (the store
+/// beside it would then be on the state root's volume).
 #[test]
-fn a_start_mounts_the_scratch_volume_on_the_scratch_root() {
+fn a_start_mounts_the_scratch_volume_on_the_scratch_roots_parent() {
     let rig = Rig::new("start-volume-unmounted");
     rig.start.mac.with_volume(Volume {
         mount: None,
@@ -122,6 +129,7 @@ fn a_start_mounts_the_scratch_volume_on_the_scratch_root() {
     });
     assert_eq!(rig.mount(), Ok(()));
     assert_eq!(rig.start.mac.changes(), [rig.mount_line()]);
+    assert_ne!(rig.start.device(&rig.mount), rig.start.device(&rig.state));
     assert_ne!(rig.start.device(&rig.scratch), rig.start.device(&rig.state));
 
     let rig = Rig::new("start-volume-elsewhere");
@@ -136,25 +144,25 @@ fn a_start_mounts_the_scratch_volume_on_the_scratch_root() {
     );
 }
 
-/// Asserts that a start whose scratch root is on a file system of its own already, or whose
-/// roots cannot be looked at, runs no command and is left to the agent's check of its file
-/// systems.
+/// Asserts that a start whose scratch root's parent is on a file system of its own already (a Mac
+/// whose volume was mounted on it by an earlier start or release), or whose state root or parent
+/// cannot be looked at, runs no command and is left to the agent's check of its file systems.
 #[test]
 fn a_start_with_the_roots_apart_or_unlooked_runs_nothing() {
     let rig = Rig::new("start-volume-mounted");
     rig.start.mac.with_volume(Volume {
-        mount: Some(rig.scratch.clone()),
+        mount: Some(rig.mount.clone()),
         owners: true,
     });
     assert_eq!(rig.mount(), Ok(()));
     assert!(rig.start.ran.borrow().is_empty());
 
-    for unlooked in ["state", "scratch"] {
+    for unlooked in ["state", "mount"] {
         let rig = Rig::new(&format!("start-volume-unlooked-{unlooked}"));
         let path = if unlooked == "state" {
             rig.state.clone()
         } else {
-            rig.scratch.clone()
+            rig.mount.clone()
         };
         rig.start.mac.look_fails.borrow_mut().insert(path);
         assert_eq!(rig.mount(), Ok(()), "{unlooked}");
@@ -171,10 +179,10 @@ fn a_start_that_cannot_mount_the_volume_says_why() {
     assert_eq!(
         rig.mount(),
         Err(format!(
-            "--scratch-root: {} is on the file system of the --state-root and {DISKUTIL} lists \
-             no js-agent-scratch in disk3, the Data volume's container: the update hook's \
-             prepare makes it",
-            rig.scratch.display()
+            "--scratch-root: {}, the directory above it, is on the file system of the \
+             --state-root and {DISKUTIL} lists no js-agent-scratch in disk3, the Data volume's \
+             container: the update hook's prepare makes it",
+            rig.mount.display()
         ))
     );
     assert!(rig.start.mac.changes().is_empty());

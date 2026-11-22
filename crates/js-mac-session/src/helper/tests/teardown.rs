@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::testing::{found, no_domain};
+use crate::testing::{EMPTY_DOMAIN, empty_domain, found, no_domain};
 
 /// The tail of a `kill-uid` refusal: the uid stays quarantined.
 fn quarantined(uid: u32) -> String {
@@ -425,6 +425,7 @@ fn kill_uid_of_a_uid_with_no_domain_succeeds_though_each_bootout_fails() {
 fn killed() -> PrintAnswer {
     PrintAnswer {
         code: None,
+        stdout: String::new(),
         stderr: "killed\n".to_owned(),
     }
 }
@@ -523,4 +524,72 @@ fn a_print_that_fails_after_the_gui_domain_went_refuses_the_teardown() {
         ]
     );
     assert!(rig.host.state().domains.is_empty());
+}
+
+/// Asserts that a `kill-uid` and a `user-delete` whose `launchctl print user/<uid>`
+/// exits 0 with the empty user domain macOS 27 prints (it makes the domain, for any
+/// uid) end clean: the teardown judges that domain gone, though it prints. Catches a
+/// teardown that read exit 0 as a domain that stays, which broke a slot at the end of
+/// every native job on a Mac (`launchd domains of uid 600 remain after 10 attempts`).
+#[test]
+fn an_empty_user_domain_that_prints_does_not_hold_the_teardown() {
+    let (rig, uid) = one("teardown-empty-domain", "80.1");
+    rig.host.state().absent_print = Some(empty_domain(uid));
+    assert_eq!(rig.helper.kill_uid("80.1"), Ok(()));
+    assert_eq!(rig.helper.user_delete("80.1"), Ok(true));
+    assert!(!rig.host.state().users.contains_key("kbf-lease-80-1"));
+}
+
+/// Asserts that a `kill-uid` whose user domain prints with a service in it, with an
+/// unmanaged process in it, or in a shape without the blocks the judgement reads,
+/// stays refused with the domain named, and the uid held. Catches an empty-domain
+/// judgement that frees a domain that still holds a job, or one it could not read.
+#[test]
+fn a_user_domain_that_prints_something_still_holds_the_teardown() {
+    let services = |uid| {
+        let mut answer = empty_domain(uid);
+        answer.stdout = answer.stdout.replace(
+            "\tservices = {\n\t}",
+            "\tservices = {\n\t\t 123 - com.apple.job\n\t}",
+        );
+        answer
+    };
+    let unmanaged = |uid| {
+        let mut answer = empty_domain(uid);
+        answer.stdout = answer.stdout.replace(
+            "\tunmanaged processes = {\n\t}",
+            "\tunmanaged processes = {\n\t\t 4242 - sleep\n\t}",
+        );
+        answer
+    };
+    let unreadable = |uid| {
+        let mut answer = empty_domain(uid);
+        answer.stdout = format!("user/{uid} = {{\n\ttype = user\n}}\n");
+        answer
+    };
+    for (n, case) in [
+        &services as &dyn Fn(u32) -> PrintAnswer,
+        &unmanaged,
+        &unreadable,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let lease = format!("{}.1", 81 + n);
+        let (rig, uid) = one(&format!("teardown-busy-domain-{n}"), &lease);
+        let answer = case(uid);
+        assert_ne!(answer.stdout, EMPTY_DOMAIN.replace("799", &uid.to_string()));
+        rig.host.state().absent_print = Some(answer);
+        let user = format!("user/{uid}");
+        held(
+            &rig,
+            &format!("kbf-lease-{}-1", 81 + n),
+            rig.helper.kill_uid(&lease),
+            &format!(
+                "launchd domains of uid {uid} remain after {KILL_ROUNDS} attempts: \
+                 {user} (bootout: no such domain {user}); {}",
+                quarantined(uid)
+            ),
+        );
+    }
 }

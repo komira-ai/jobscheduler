@@ -70,3 +70,22 @@ pub(crate) fn left(why: &io::Error) -> bool {
 pub(crate) fn left(why: &io::Error) -> bool {
     matches!(why.raw_os_error(), Some(libc::ENODATA | libc::EPERM))
 }
+
+/// Removes the access control list of `fd`.
+///
+/// # Errors
+/// The list could not be removed.
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_acl(fd: &OwnedFd) -> io::Result<()> {
+    crate::macos::clear_dir_acl(fd)
+}
+
+/// There is no ACL to remove off macOS: always done.
+///
+/// # Errors
+/// None.
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)] // the macOS variant can fail
+pub(crate) fn clear_acl(_fd: &OwnedFd) -> io::Result<()> {
+    Ok(())
+}
