@@ -82,7 +82,7 @@ const START_TIMEOUT: Duration = JobLimits::DEFAULT.start_timeout;
 
 /// How many times a start a host refused for capacity sends a job back to the queue, unless
 /// the pool says.
-const CAPACITY_REQUEUES: u64 = 8;
+const CAPACITY_REQUEUES: u64 = JobLimits::DEFAULT.capacity_requeues as u64;
 
 /// The most `capacity_requeues` a pool may set.
 const MAX_CAPACITY_REQUEUES: u64 = 1000;

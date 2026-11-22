@@ -490,7 +490,7 @@ impl Agents {
     }
 
     /// This agent side placing with `placer` (`--placement js-sched`), for a test of the
-    /// heartbeat's pass over the queued jobs. The registry must already hold it.
+    /// placement pass over the queued jobs. The registry must already hold it.
     #[cfg(test)]
     pub(crate) fn with_placer(self, placer: Arc<SchedPlacer>) -> Self {
         Self {

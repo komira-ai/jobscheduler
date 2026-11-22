@@ -8,14 +8,14 @@
 //! A placed or starting job with no cancel asked for is requeued in one commit
 //! ([`js_jobs::JobStore::requeue_held`]): its allocation is freed, the host is appended to the
 //! job's held refusals (for `host-held`) or capacity refusals (for `no-capacity`), the job is
-//! kept off the host for [`HELD_BAR`] or the pool's `capacity_refusal_bar`, and its queue status says why it waits
-//! again. The held bar is the length of the cordon a held host keeps on itself, so the bar covers
+//! kept off the host for [`HELD_BAR`] or the pool's `capacity_refusal_bar`, and its queue
+//! status says why it waits again. The held bar is the length of the cordon a held host keeps on itself, so the bar covers
 //! the time before that cordon is in force, whatever placed the job. Nothing counts a requeue as
 //! a failure: no start failure is told to the metrics, no failed prepare is counted and the host
 //! is not tainted.
 //!
-//! A job a host refuses when [`MAX_HELD_REQUEUES`] held refusals, or the pool's `capacity_requeues`
-//! capacity refusals, already sent it back ends as any refused start ends, failed to start with
+//! A job a host refuses when [`MAX_HELD_REQUEUES`] held refusals, or the pool's
+//! `capacity_requeues` capacity refusals, already sent it back ends as any refused start ends, failed to start with
 //! [`js_jobs::StartFailure::AgentRefused`], with a detail that names every host that refused it
 //! for that reason ([`named`]), so a fault that keeps answering the same code cannot keep a job
 //! in the queue for ever. The two counts are kept apart: a held refusal does not count against

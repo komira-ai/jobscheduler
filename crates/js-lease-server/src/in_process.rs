@@ -8,8 +8,8 @@
 //! no placement poller and no check loop. Requests are answered by the routers it hands out,
 //! called as `tower::Service`s ([`InProcess::client_router`], [`InProcess::agent_router`]), time
 //! acts only when the caller says [`InProcess::tick`], and the placement a submit or a heartbeat
-//! pokes for runs when the caller says [`InProcess::poll`] (or at the next tick). It reads no environment and no clock but the
-//! [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
+//! pokes for runs when the caller says [`InProcess::poll`] (or at the next tick). It reads no
+//! environment and no clock but the [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
 //! acceptor, the connection limits, `--drain-timeout`) is not used.
 //!
 //! The metrics time what they measure on the configuration's monotonic clock, which is the
