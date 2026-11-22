@@ -271,3 +271,41 @@ fn an_account_range_is_for_a_pool_and_not_for_a_named_user() {
     list.extend(["--account-range", "700-799"]);
     assert!(parse(&words(&list)).is_err());
 }
+
+#[test]
+fn the_start_mode_takes_exactly_its_start_file_and_refuses_off_macos() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    for bad in [
+        vec!["js-agent", super::start::VERB],
+        vec!["js-agent", super::start::VERB, "--start"],
+        vec!["js-agent", super::start::VERB, "--file", "f"],
+        vec!["js-agent", super::start::VERB, "--start", "f", "extra"],
+    ] {
+        err.clear();
+        let code = super::dispatch(&words(&bad), &mut out, &mut err);
+        assert_eq!(
+            code,
+            Some(std::process::ExitCode::from(status::USAGE)),
+            "{bad:?}"
+        );
+        assert_eq!(
+            String::from_utf8(err.clone()).expect("utf-8"),
+            "usage: js-agent __mac-job-start --start <file>\n"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        err.clear();
+        let code = super::dispatch(
+            &words(&["js-agent", super::start::VERB, "--start", "f"]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, Some(std::process::ExitCode::from(status::USAGE)));
+        assert_eq!(
+            String::from_utf8(err.clone()).expect("utf-8"),
+            "js-agent: __mac-job-start runs on macOS only\n"
+        );
+    }
+    assert!(out.is_empty());
+}

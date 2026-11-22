@@ -525,7 +525,7 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
-    // Before anything starts a thread: the mode's start allocates between fork and exec.
+    // A native Mac job, and its start in a process of its own.
     if let Some(code) = mac_job::dispatch(&args, out, err) {
         return code;
     }

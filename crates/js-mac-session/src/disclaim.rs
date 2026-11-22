@@ -301,6 +301,15 @@ impl Program {
     }
 }
 
+/// Executes `program` with `args` in this process's place, in its environment, its
+/// responsibility NOT disclaimed: the program answers to the privacy controls as this process
+/// does. Returns only when it could not. For the start of a native job (`js-agent
+/// __mac-job-start`), which the owner decided is an ordinary child of the agent; every other
+/// program is executed by [`exec`].
+pub fn exec_kept(program: &OsStr, args: &[OsString]) -> io::Error {
+    Command::new(program).args(args).exec()
+}
+
 /// Executes `program` with `args` in this process's place, in its environment, as
 /// `execvp` does, with its responsibility disclaimed; returns only when it could not.
 #[cfg(target_os = "macos")]
