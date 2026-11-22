@@ -145,15 +145,8 @@ impl Launch<'_> {
     }
 }
 
-/// How one `crun run` ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RunEnd {
-    /// `crun run` exited with this status: the container's exit code (`128 + n` if it
-    /// was killed by signal `n`), or `crun`'s own failure, told apart by the log.
-    Exited(i32),
-    /// `crun` could not be run, or its task did not finish.
-    Failed(String),
-}
+/// How one `crun run` ended (`js-supervise`'s, as the exit record holds it).
+pub use js_supervise::RunEnd;
 
 /// The exit status a shell would report for `status`.
 pub fn code_of(status: ExitStatus) -> i32 {
