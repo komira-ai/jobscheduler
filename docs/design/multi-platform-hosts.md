@@ -12,12 +12,13 @@ This file is the design for three connected changes, and it is the only place th
    the macOS work only a Mac can do. The rule is general: the same rule keeps a GPU machine free for GPU jobs.
 
 It is a design only. Section 7 splits the implementation into pull-request-sized tasks. Section 8 records the owner's choices,
-section 9 holds the two decisions still to take, and section 10 lists what this design settles itself.
+section 9 holds the three decisions still to take, and section 10 lists what this design settles itself.
 
-Two parts of the design depend on those decisions:
+Three parts of the design depend on those decisions:
 
 - The demand-driven split on a Mac (2.4, 2.7 item 4, section 4, and the memory row of section 8) assumes option (a) of C1.
 - Where a host's size comes from (2.1) assumes option (a) of C2.
+- Linux jobs on Macs at all (2.6, 2.7, the Mac rows of 3.3, and the task `jsmp-mac-session`) assume option (a) of C3.
 
 **How references read.**
 
@@ -269,18 +270,13 @@ CLI code.
 
 **What B costs.** The macOS agent runs two sessions, and the operator counts machines, not hosts (6.5).
 
-**One agent program per host still holds.** The two sessions are one `js-agent` program, the one program a Mac runs
-([mac-one-program.md](mac-one-program.md)).
+**One agent program per host, and the program inside a Linux VM.** The two sessions are one `js-agent` program, the one program
+a Mac runs ([mac-one-program.md](mac-one-program.md)).
 
-What the operating system forces is only this: a Linux job needs a Linux kernel, so on a Mac it runs in a VM, and something
-inside that VM must start `crun`. That something is a run-only guest program:
-
-- It has no hello, session, host id, pool or heartbeat, and it is never a `js-agent`.
-- It takes one job's start and kill from the Mac's `js-agent` over a virtio socket, and returns the job's exit record.
-- It ends with the VM.
-
-The only scheduling agent on the Mac is the host's `js-agent`. No other program registers with the server, inside a VM or beside
-it.
+What the operating system forces is this: a Linux job needs a Linux kernel, so on a Mac it runs in a VM, and something inside that
+VM must start `crun`. The design keeps a run-only guest program there for that. It is a second program on the host, so the ruling
+"one agent program per host" puts it to the owner as decision C3 (9). Everything in this design about Linux jobs on Macs assumes
+C3's option (a).
 
 ### 2.3 Terms
 
@@ -371,13 +367,13 @@ The job definition is one OCI image on both platforms, as [jobscheduler-design.m
   2. gives it the image's layers and the job's inputs;
   3. hands it the OCI config `js-contain` builds;
   4. reads the exit record at the end.
-- Inside the VM, a small init runs `crun`, the same `crun` and the same config as on a Linux server. The job's hardening is
+- Inside the VM, the run-only guest program of decision C3 runs `crun`, the same `crun` and the same config as on a Linux server. The job's hardening is
   therefore the Linux agent's: user, capabilities, seccomp, `no_new_privs`, a read-only root and a `noexec` `/tmp`. So is its
-  network rule, the `nft` rules of [agent-egress.md](agent-egress.md), set inside the guest by the init before `crun` starts.
+  network rule, the `nft` rules of [agent-egress.md](agent-egress.md), set inside the guest by that program before `crun` starts.
 - The VM is started through Virtualization.framework, through `js-vmm`, which today stages macOS images and boots macOS probe
   guests. New work, all owned by the Linux-on-Mac runtime design (`docs/design/linux-on-mac-runtime.md`, to be written):
   - a Linux boot path;
-  - a guest image: kernel, the run-only guest program and `crun`;
+  - a guest image: kernel, the run-only guest program of decision C3 and `crun`;
   - a job-control protocol for the start (the OCI config, the image's layers and the inputs) and the exit record. It is built
     on the virtio-socket framing `js-guest-wire` has for probe guests, and is a new protocol version there, not an edit.
 
@@ -963,6 +959,8 @@ The preference is the server's: kbf names no pool and no machine.
 - `a_linux_job_vm_never_takes_a_macos_vm_slot`: two macOS VMs and Linux job VMs run together, and a third macOS VM is still
   refused.
 - `a_linux_session_reports_ceiling_none_until_its_guest_sets_egress_rules`
+- `the_guest_program_is_given_no_credential_and_no_server_address`: the start the Mac's `js-agent` sends into the VM
+  carries neither, by exact equality of its fields (C3).
 
 **`js-sim-cell`: the three examples of 3.3**, as scenarios on the fake clock
 
@@ -1049,6 +1047,49 @@ and memory".
   source for numbers the agent already reads from the same operating system, and a new field in the facts file.
 - (c) Both, and the agent refuses to start when they disagree. It catches a wrong facts file, at the cost of (b) plus a check.
 
+**C3. The run-only program inside each Linux VM on a Mac.**
+
+- **What forces it.** A Linux job needs a Linux kernel, so on a Mac it runs in a VM, and something inside that VM must start
+  `crun`. The ruling is one agent program per host. A program inside the VM is a second program on the host, so this is the
+  owner's to accept or refuse.
+
+- **(a) Accept a run-only guest program.** Recommended.
+
+  **Its form.** It is the Linux build of `js-agent` started in a guest mode (`__guest-run`), as the supervisor is a mode of the one
+  program today (`__supervise-run` on Linux, `__supervise-native` in [mac-one-program.md](mac-one-program.md)).
+  - It is built from this repository, inside the guest image the macOS package carries.
+  - It is pinned with the agent's release, and is never updated on its own.
+
+  **What it can do, and nothing more:**
+  - run as the VM's first process;
+  - mount the image's layers and the job's inputs, which the Mac's `js-agent` hands it read-only;
+  - set the guest's `nft` rules from the job's network level;
+  - run one `crun` with the OCI config the Mac's `js-agent` sent;
+  - stream the job's output and exit record back over its one virtio socket to the Mac's `js-agent`;
+  - kill the job when told, then power the VM off.
+
+  **What it cannot do:**
+  - It never says hello, registers, holds a session, host id, pool or heartbeat, or speaks to the server. It is given no server
+    address.
+  - It holds no credential: no join token, no host certificate or key, no session secret, and no client token.
+  - It places nothing and books nothing.
+  - It takes no second job. Its VM and disk are destroyed when the job ends, so it keeps nothing between jobs.
+  - It takes orders only from the Mac's `js-agent`, over a socket only that process holds.
+
+  **Its cost.** The guest image and its tests, which the Linux-on-Mac runtime design owns.
+
+- **(b) No program in the VM: `crun` as the VM's first process.** The Mac's `js-agent` would build a boot image per job holding
+  the config, and read the exit status from the VM's console. Its costs:
+  - No egress rules inside the guest, so the Linux session's ceiling stays `none` for good.
+  - No mounting of inputs beyond what the kernel's command line can say.
+  - A kill only by stopping the VM.
+  - A boot image built for every job.
+
+- **(c) No Linux jobs on Macs.** Linux arm64 work runs on the four Linux servers alone, and the Macs run macOS work only. Its costs:
+  - The Macs' cores and memory (up to 4 x 32 cores) are lost to Linux bursts.
+  - The second session, the side pool and the Mac rows of 3.3 are not built.
+  - The machine ledger and the narrowness rule stay, for GPU machines and for any later machine with more than one side.
+
 ## 10. Settled in this design
 
 Each of these was open in an earlier draft. This design settles it, for the reason given.
@@ -1059,6 +1100,6 @@ Each of these was open in an earlier draft. This design settles it, for the reas
   - Memory or cores change on Linux and macOS only with a reboot or a restart of the agent's unit, so a hello follows.
   - A size reported between hellos would be an additive heartbeat field with no use today (B20).
 - **Egress for the Linux VMs follows from 2.6.**
-  - The job runs under `crun` in the guest, and the guest's init sets the same `nft` rules the Linux agent sets.
+  - The job runs under `crun` in the guest, and the guest program of C3 sets the same `nft` rules the Linux agent sets.
   - The Linux session's ceiling is what those rules enforce, and `none` until they are built in the Linux-on-Mac design.
   - Until then, Linux jobs that need egress do not spill onto the Macs (2.7, item 3).
