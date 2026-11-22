@@ -10,7 +10,8 @@
 //! the same uid may have left another.
 //!
 //! Emptied is the state the proof shows and the free check requires: nothing but directories
-//! at the top level of a folder, and nothing in them. The walk is in `tree`.
+//! at the top level of a folder, and nothing in them but the sealed items macOS's own daemons
+//! make there ([`tree::SYSTEM_KEPT`]), which root may not remove. The walk is in `tree`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -37,15 +38,16 @@ pub(super) fn empty(folders: &Path, uid: u32, os: &dyn Os) -> io::Result<()> {
 }
 
 /// What the per-user folders `uid` owns hold that emptied ones do not: each non-directory at
-/// a folder's top level, and each entry directly below its top-level directories.
+/// a folder's top level, and each entry directly below its top-level directories, except the
+/// sealed items macOS's own daemons make there ([`tree::SYSTEM_KEPT`]).
 ///
 /// # Errors
 /// `folders` could not be searched, or a folder could not be looked at: what was not looked at
 /// is never read as empty.
-pub(super) fn left(folders: &Path, uid: u32) -> io::Result<Vec<PathBuf>> {
+pub(super) fn left(folders: &Path, uid: u32, os: &dyn Os) -> io::Result<Vec<PathBuf>> {
     let mut left = Vec::new();
     for folder in tree::folder_entries(folders, uid)? {
-        left.extend(tree::leftovers(&folder)?);
+        left.extend(tree::leftovers(&folder, os)?);
     }
     Ok(left)
 }

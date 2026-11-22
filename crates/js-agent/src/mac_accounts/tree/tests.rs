@@ -438,11 +438,11 @@ fn a_folder_that_cannot_be_read_is_named() {
         chmod(&hash, 0o000);
         let why = empty_folder(&hash, me(), &System).unwrap_err().to_string();
         assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
-        let why = leftovers(&hash).unwrap_err().to_string();
+        let why = leftovers(&hash, &System).unwrap_err().to_string();
         assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
         chmod(&hash, 0o755);
         chmod(&hash.join("T"), 0o000);
-        let why = leftovers(&hash).unwrap_err().to_string();
+        let why = leftovers(&hash, &System).unwrap_err().to_string();
         assert!(
             why.starts_with(&format!("{}: ", hash.join("T").display())),
             "{why}"
@@ -560,7 +560,14 @@ fn a_look_passes_over_an_entry_that_vanished() {
     fs::create_dir_all(&hash).unwrap();
     let folder = rustix::fs::openat(CWD, &hash, DIRECTORY, Mode::empty()).unwrap();
     let mut left = Vec::new();
-    top_leftovers(&folder, OsStr::new("gone"), &hash.join("gone"), &mut left).unwrap();
+    top_leftovers(
+        &folder,
+        OsStr::new("gone"),
+        &hash.join("gone"),
+        &mut left,
+        &System,
+    )
+    .unwrap();
     assert!(left.is_empty());
 }
 
@@ -574,13 +581,13 @@ fn a_look_at_a_folder_reports_what_an_emptied_one_does_not_hold() {
     for top in ["0", "C", "T", "X"] {
         fs::create_dir_all(hash.join(top)).unwrap();
     }
-    assert!(leftovers(&hash).unwrap().is_empty());
-    assert!(leftovers(&dir.join("none")).unwrap().is_empty());
+    assert!(leftovers(&hash, &System).unwrap().is_empty());
+    assert!(leftovers(&dir.join("none"), &System).unwrap().is_empty());
     fs::create_dir_all(hash.join("T/inner/deeper")).unwrap();
     fs::write(hash.join("C/file"), "x").unwrap();
     fs::write(hash.join("stray"), "x").unwrap();
     symlink(dir.join("elsewhere"), hash.join("X/link")).unwrap();
-    let mut left = leftovers(&hash).unwrap();
+    let mut left = leftovers(&hash, &System).unwrap();
     left.sort();
     assert_eq!(
         left,
