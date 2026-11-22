@@ -791,8 +791,10 @@ kept off the lifecycle worker, and what the bound means.
 
 Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, mount providers, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once); a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` and a provider's source `input-not-allowed` until they are.
 How a Mac gives a job a provider's tree is proposed in `docs/design/mac-input-trees.md`, for the owner's decision (its
-D1 and D2): the link of 5.2 to a directory the provider has written whole on the Mac's local disk, since macOS refuses
-reads of a network volume to the programs a job runs. That document's step 1 builds it while the owner decides. How a Mac would give a copy-on-write mount (13, Q1) is open for the owner: that
+D1 and D2): the link of 5.2 to a directory the provider has written whole on the Mac's local disk, since macOS refused
+reads of a network volume to the programs a job runs, as jobs are started today (disclaimed). Whether a job started
+from a signed starter holding a Network Volumes grant may read it is untested; a probe is running (that document's D1
+(ii)), and the local tree is the fallback. That document's step 1 builds it while the owner decides. How a Mac would give a copy-on-write mount (13, Q1) is open for the owner: that
 document recommends a private copy the agent makes in the run's home (its D5). This section fixes
 what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the three candidates 5.3
 compared. The wire and the server of sections 2 and 3 do not change.
@@ -861,7 +863,8 @@ that document refuses copy-on-write. Under (b) the agent clones the whole tree w
 `clonefile` into the job's new home; the source must be on the homes' volume, as a provider's tree on a Mac is, and a
 source on another volume is refused `input-not-allowed`. Then one walk gives every entry to the job's account. The result is an ordinary tree, so
 every program gets ordinary semantics; nothing is mounted in the home and nothing is installed. No candidate is lazy
-on a Mac: macOS refuses reads of a network volume to the programs a job runs. (a) is rejected:
+on a Mac while jobs cannot read a network volume. That holds as jobs are started today, and an inherited grant is under
+test (that document's D1 (ii)). (a) is rejected:
 the OS's `MNT_UNION` is lookup fallthrough only, a second server over the provider measured 1.6 times slower on a cold `stat` and 25 times with eight threads,
 and a hung hard mount leaves job processes unkillable. That doc gives the evidence, the flags, the refusals, the
 measured costs and the bound past which the choice is reopened.

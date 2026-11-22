@@ -5,6 +5,9 @@ Status: **proposed; every decision in it awaits the owner (D1 to D5).**
 - **Step 1 (read-only whole trees) is being built.** It rests on two of those proposals: D1's answer (i), that a job's
   start waits for the whole tree, and D2, that the provider writes the tree on the local disk. Both await the owner,
   like the rest.
+- **D1's option (ii) is untested, and a probe of it is running.** It would keep the lazy NFS mount by giving every
+  program a job runs one inherited Network Volumes grant. Until the probe gives its verdict, nothing here says the mount
+  cannot serve a job. The local trees of step 1 are the fallback if the probe fails.
 - **The later steps (copy-on-write, D5; the trees' space, D3) are proposals only.**
 
 This document answers question Q1 of `docs/design/job-rootfs.md` (section 13), how a native macOS job could get a
@@ -87,24 +90,37 @@ Each needs the owner. The details and the evidence follow the list.
 
 | | Decision | Options | Recommendation |
 |---|---|---|---|
-| D1 | Laziness on a Mac | (i) accept that a job's start waits for the whole tree; (ii) grant every job program reads of the NFS mount; (iii) a lazy local file system of our own (FSKit) | (i): (ii) cannot be done, and (iii) only past the bound of section 11 |
-| D2 | tierstore writes whole local trees | (i) tierstore writes them; (ii) the agent fetches through the cache's S3 front; (iii) no provider trees on a Mac | (i), built in step 1. Still missing: the owner's merge of komira-ai/tierstore#430, and a line in tierstore's decision C9 recording that the NFS frontend does not serve jobs on a Mac |
+| D1 | Laziness on a Mac | (i) accept that a job's start waits for the whole tree; (ii) keep the lazy NFS mount: start the job not disclaimed from a signed starter that holds only a Network Volumes grant, so every program it runs inherits that one right (untested; probe running); (iii) a lazy local file system of our own (FSKit) | (i) for now, as the fallback; decide between (i) and (ii) on the probe's verdict. (iii) only past the bound of section 11 |
+| D2 | tierstore writes whole local trees | (i) tierstore writes them; (ii) the agent fetches through the cache's S3 front; (iii) no provider trees on a Mac | (i), built in step 1, at least as the fallback of D1 (ii). Still missing: the owner's merge of komira-ai/tierstore#430, and a line in tierstore's decision C9 recording that the NFS frontend does not serve jobs on a Mac |
 | D3 | Space of `job-trees` (a later step; step 1 has none) | (i) count it in the cache's one budget, with eviction of unheld trees; (ii) a budget of its own; (iii) keep removing trees by hand | (i) |
-| D4 | Wait for the measurement of what a program that is not Apple's gets from the privacy control? | (i) decide without it; (ii) wait | (i): no job and no process of the agent reads a network volume under this design |
+| D4 | Wait for the measurement of what a program that is not Apple's gets from the privacy control? | (i) decide without it; (ii) wait | (i) for the local trees, which no job or agent process reads over a network volume. D1 (ii)'s probe measures the question for its starter |
 | D5 | Copy-on-write on a Mac (a later step) | (i) one clone of the whole tree into the job's new account's home, then one walk, candidate (b); (ii) a union file system, (a); (iii) per-file links with copy on first write, (c) | (i) |
 
 ## The decisions in detail
 
-**D1. Laziness.** Recommended: a provider's tree is not read lazily on a Mac, so a job's start waits until the whole
-tree is on the Mac's disk.
+**D1. Laziness.** Recommended for now, as the fallback: a provider's tree is not read lazily on a Mac, so a job's
+start waits until the whole tree is on the Mac's disk. The choice between (i) and (ii) waits for the probe of (ii).
 
 - Options:
   - (i) accept that; or
-  - (ii) keep the lazy NFS mount and grant every program a job runs the right to read it; or
+  - (ii) keep the lazy NFS mount, with one inherited grant. This is **untested; a probe of it is running on a Mac
+    Studio.** A small signed starter holds one right only, the Network Volumes grant, given by a device-management
+    profile naming its signature. It starts the job *not* disclaimed, so macOS judges every program the job runs by
+    the starter, its responsible process, and each inherits that one right; or
   - (iii) build a lazy local file system of our own (an FSKit module).
-- Recommendation: (i).
-  - (ii) cannot be done. macOS refuses reads of a network volume to Apple's own programs (section 1), every job
-    program answers for itself, and a program a build has just made has no signature to grant (2.1).
+- Recommendation: (i) for now, and (ii) if its probe passes and the owner accepts its costs.
+  - (ii) as first written here, a grant per program, cannot be given: a program a build has just made has no
+    signature to grant (2.1). The inherited grant is the route that could work, and it is what the probe tests.
+  - What (ii) would cost, if the probe passes:
+    - a fourth program to sign, ship and name in a profile;
+    - an exception to the rule that every job start is disclaimed (`docs/design/spawn-disclaim.md`), limited to that
+      starter;
+    - the hard-mount behaviour, in which a reader blocked mid-read stays unkillable until a forced unmount (*measured*,
+      macos E16), to be handled before an account is deleted.
+  - (ii) and the one-program ruling: the starter cannot be the agent's own program. After the one-program switch that
+    program holds Full Disk Access (komira-ai/jobscheduler#1004's grant, moved to it), and a job started from it not
+    disclaimed would inherit that grant too. So (ii) needs the starter as a program apart, holding only the Network
+    Volumes grant. That is a second program, which the owner's ruling would have to allow.
   - (iii) is a signed system extension on every Mac, a file system with overlay semantics of our own, and an unknown
     answer from the privacy control. It is the next step only if section 11's bound is passed.
 - Cost, from the stand-in of section 11 (not yet the real provider):
@@ -122,8 +138,10 @@ directory.** It is built in step 1 (komira-ai/tierstore#430). It needs the tiers
 - What tierstore decided: C9 (komira-ai/tierstore `docs/design/virtual-build-fs.md`) reads "NFSv3 now, FSKit later if
   it measures better" for the macOS frontend, and "the writable directory of a run is the client's, not the core's".
 - What D2 changes: for jobs on a Mac, a written local tree replaces the NFS frontend. The trees stay read-only and the
-  writable directory stays the client's, so that half of C9 holds. The frontend half does not, because the NFS frontend
-  cannot serve a job.
+  writable directory stays the client's, so that half of C9 holds.
+  - The frontend half is in question. As jobs are started today, disclaimed, the NFS frontend does not serve a job
+    (section 1).
+  - If D1 (ii)'s probe passes, it could. The local trees would then be the fallback, and C9's frontend would stand.
   - #430 does not edit C9's text. Recording the change there is the one piece of the agreement still missing.
 - Options:
   - (i) tierstore writes local trees;
@@ -163,9 +181,9 @@ nothing.
 - Options:
   - (i) decide without it; or
   - (ii) wait.
-- Recommendation: (i). Whatever the agent's program is allowed, a job's programs are refused. No job reads a network
-  volume under this design, and no process of the agent does either (2.1). The answer can change only how a client
-  outside jobs reads the mount.
+- Recommendation: (i) for the local trees. Under them no job reads a network volume, and no process of the agent does
+  either (2.1), so the answer cannot change them. D1 (ii) is the one place the question matters, for its starter, and
+  its probe measures exactly that.
 
 **D5. Copy-on-write on a Mac, for a later step.** Recommended: one clone of the whole tree into the job's new home,
 then one walk that gives every entry to the job's account. The source must be on the homes' volume.
@@ -242,11 +260,15 @@ a pull request's run on a real Mac; *inferred* means reasoning.
 
 ## 1. What a Mac has today
 
-- **macOS refuses reads of a network volume to Apple's programs.**
-  - *Measured* on a Mac Studio with macOS 27.0.1, on tierstore's loopback NFS mount: `ls`, `sh`, `shasum` and
-    `python3` get `EPERM` for every user, from a shell and from a launchd job alike.
-  - No request reaches the file-system service. The privacy daemon (TCC) logs its Network Volumes service with
+- **macOS refused reads of a network volume to Apple's programs, as they were started in one measurement.**
+  - *Reported*, not measured by this document's author: on a Mac Studio with macOS 27.0.1, on tierstore's loopback NFS
+    mount, `ls`, `sh`, `shasum` and `python3` got `EPERM` for every user, from a shell and from a launchd job alike.
+  - No request reached the file-system service. The privacy daemon (TCC) logged its Network Volumes service with
     "Platform binary prompting is Deny".
+  - Its raw output is not reproduced here; this document's author did not run it and does not hold it. Which program
+    started the readers, from which session, and whether disclaimed, are not recorded here.
+  - A process holding the Network Volumes grant, and one started not disclaimed from such a process, were not tried.
+    That is D1 (ii)'s probe.
 - **Every job program answers for itself.** Each is started with its privacy responsibility disclaimed
   (`docs/design/spawn-disclaim.md`; under the one-program ruling the run's supervisor starts the job so,
   the one-program design, 4.2). No grant of the agent's reaches it, and macOS checks the job's own program: `/bin/sh`,
@@ -303,13 +325,14 @@ a pull request's run on a real Mac; *inferred* means reasoning.
 | the provider (tierstore's cache, as `_tierstore`) | its own cache, on the local disk | nothing: it never reads its own mount |
 | the agent (`js-agent`, root, a launchd daemon) | the source of a copy-on-write mount, to copy it (3.1) | a Network Volumes grant for its program, by a profile naming its signature |
 | the run's supervisor (`js-agent __supervise-native`, root, one per run) | nothing of the tree: it starts the job in `exec/` | nothing |
-| the job (its own account) | a `READ_ONLY` link's target | a grant for every program it runs, including one a build has just made, which has no stable signature to grant. A grant to `/bin/sh` would reach every job of the Mac. This cannot be given |
+| the job (its own account) | a `READ_ONLY` link's target | either a grant for every program it runs, which cannot be given (a program a build has just made has no stable signature, and a grant to `/bin/sh` would reach every job of the Mac); or one Network Volumes grant inherited from a signed starter that starts it not disclaimed: untested, D1 (ii), probe running |
 
-So no job can read through the mount. With the mount kept, every tree would have to be copied by the agent, the
-read-only ones too. That copy would need a grant for the agent, a root daemon for the hard mount, and a full NFS read of
-every tree, never a clone (`EXDEV`).
+So, as jobs are started today (disclaimed), no job can read through the mount. Whether a job started from a granted
+starter can is D1 (ii)'s probe. Without (ii), keeping the mount would mean the agent copies every tree, the read-only
+ones too. That copy would need a grant for the agent, a root daemon for the hard mount, and a full NFS read of every
+tree, never a clone (`EXDEV`).
 
-**Recommended, and built in step 1 (D2): no network volume on the path.**
+**Recommended for now, built in step 1, and the fallback if D1 (ii) fails (D2): no network volume on the path.**
 
 - The provider writes each tree whole into a directory on the Mac's local disk, and answers `Mount` with it.
 - The provider reads only its cache. The agent and the job read only local APFS files.
@@ -878,4 +901,5 @@ on these Macs and warm, for that client's median tree, passes **30 s**.
 - Below it the mechanism stands. A tree that several jobs share costs its write once.
 
 **Still being measured, not waited for (D4):** what a program that is not Apple's gets from the privacy control on the
-NFS mount. Under this design no job and no process of the agent reads that mount, so the answer cannot change it.
+NFS mount. Under the local trees no job and no process of the agent reads that mount, so the answer cannot change
+them. For D1 (ii) it is that probe's question.
