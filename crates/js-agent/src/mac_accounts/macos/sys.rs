@@ -250,10 +250,22 @@ fn clear_acl(path: &Path) -> io::Result<()> {
 /// Strips the ACL of the entry `name` of `dir` and of `dir` itself: an ACL that denies
 /// `delete` on the entry or `delete_child` on its directory refuses the removal, root's too,
 /// until it is gone. Neither is followed if it is a link (`acl_set_link_np`). Both are
-/// tried, and the entry's failure is reported first.
+/// tried, and either one stripped is enough to try the removal again: the directory is often
+/// a top-level directory of a per-user folder (`0`, `C`, `T`, `X`), whose own ACL System
+/// Integrity Protection refuses to change (measured: "Failed to clear ACL ... Operation not
+/// permitted"), while the entry's is the job's and can be stripped.
+///
+/// # Errors
+/// Neither ACL could be stripped; the entry's failure is named first.
 pub(crate) fn strip_acl(dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
     let folder = path_of(dir)?;
     let entry = clear_acl(&folder.join(name));
     let directory = clear_acl(&folder);
-    entry.and(directory)
+    match (entry, directory) {
+        (Err(entry), Err(directory)) => Err(io::Error::new(
+            entry.kind(),
+            format!("{entry}; its directory: {directory}"),
+        )),
+        _ => Ok(()),
+    }
 }
