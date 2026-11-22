@@ -15,7 +15,10 @@
 //! ([`whole_jobs`]): the pass marks, grants and cancels it from what the job tables hold.
 //!
 //! The engine is given no learned curves: each allocation is charged what it books, and each
-//! host by its load readings when it has fresh ones.
+//! host by its load readings when it has fresh ones. The leases a reading covers are the
+//! engine's own: the job allocations it held on the host at the previous reading the scheduler
+//! accepted and holds still, which ran through the whole window between the two; every other
+//! allocation is charged in full beside the measurement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,6 +42,8 @@ pub mod jobs;
 #[path = "jobs_seen.rs"]
 pub(crate) mod jobs_seen;
 pub use jobs_seen::TablesFrom;
+#[path = "refusals.rs"]
+pub mod refusals;
 #[path = "whole.rs"]
 pub mod whole;
 #[path = "whole_jobs.rs"]
@@ -100,8 +105,15 @@ pub struct Engine {
     whole_jobs: BTreeMap<js_jobs::JobId, OperationId>,
     /// The whole-node settings the scheduler has now, if it has any.
     whole_settings: Option<js_registry::WholeNodeConfig>,
+    /// The job leases the engine held on each host when the scheduler last accepted a load
+    /// reading of it: the leases the next reading can cover. A host whose reading the
+    /// scheduler dropped has none.
+    at_reading: BTreeMap<HostId, BTreeSet<SchedLeaseId>>,
     /// The history the jobs that book nothing are sized from ([`crate::sizes`]).
     sizes: JobSizes,
+    /// Why hosts refused the queued jobs the walks offered them, until a pass announces it
+    /// ([`refusals`]).
+    refused: refusals::Book,
     /// The sequence the next grant of a whole-host job gets, in [`whole::WHOLE_TERM`].
     whole_seq: u64,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
@@ -126,7 +138,9 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole_jobs: BTreeMap::new(),
             whole_settings: None,
+            at_reading: BTreeMap::new(),
             sizes: JobSizes::with_cold(settings.cold),
+            refused: refusals::Book::default(),
             whole_seq: 0,
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
@@ -162,6 +176,7 @@ impl Engine {
             return;
         }
         let _ = self.sched.forget_worker(&map::worker(host));
+        self.at_reading.remove(host);
         self.hosts.remove(host);
     }
 
@@ -193,9 +208,13 @@ impl Engine {
 
     /// A heartbeat of `host` the registry accepted, with the reading it brought. The heartbeat
     /// lists every job allocation and pending grant of a whole-host job the engine holds
-    /// there as running, so none is given up for a beat; the per-lease parts of the reading
+    /// there as running, so none is given up for a beat. The per-lease parts of the reading
     /// name the leases of the previous release's protocol, which the engine holds none of, and
-    /// are dropped. The scheduler takes no heartbeat of a host that is no worker of it.
+    /// are dropped; the reading covers instead the job leases the engine held on the host at
+    /// the previous reading the scheduler accepted and still holds, which ran through the
+    /// whole window between the two. A lease the engine took after that reading, a pending
+    /// grant of a whole-host job and a host's first reading after a dropped one cover
+    /// nothing. The scheduler takes no heartbeat of a host that is no worker of it.
     pub fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
         let _ = self.heard_changed(host, load, now);
     }
@@ -212,16 +231,22 @@ impl Engine {
         now: FarmTime,
     ) -> bool {
         let before = (self.sched.leases_held(), self.sched.queued_len());
-        let running = self
-            .job_leases_on(host)
+        let jobs: BTreeSet<SchedLeaseId> = self.job_leases_on(host).collect();
+        let running = jobs
+            .iter()
+            .copied()
             .chain(self.pending_on(&map::worker(host)))
             .collect();
+        let covered = self.at_reading.get(host).map_or_else(Vec::new, |earlier| {
+            earlier.intersection(&jobs).copied().collect()
+        });
         let translated = load.map(|load| NodeLoad {
-            covered: Vec::new(),
+            covered,
             lease_clocks: Vec::new(),
             minutes: Vec::new(),
             ..load.clone()
         });
+        let accepted = self.sched.load_counters().readings_accepted;
         let beat = Event::Heartbeat {
             worker: map::worker(host),
             running,
@@ -229,6 +254,13 @@ impl Engine {
         };
         let effects = self.feed(now, beat);
         let after = (self.sched.leases_held(), self.sched.queued_len());
+        if load.is_some() {
+            if self.sched.load_counters().readings_accepted > accepted {
+                self.at_reading.insert(host.clone(), jobs);
+            } else {
+                self.at_reading.remove(host);
+            }
+        }
         load.is_some() | !effects.is_empty() | (before != after)
     }
 
@@ -442,5 +474,175 @@ mod tests {
         engine.host_up(&b, &shape(true), at(0));
         assert!(engine.heard_changed(&b, Some(&reading(1, &[])), at(5_000)));
         assert!(!engine.heard_changed(&b, None, at(6_000)));
+    }
+
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+
+    /// A reading numbered `seq` of a host that has used `used` millicore-windows (a window is
+    /// 5 s, a millicore-window 5 ms of one core) since the agent started, with a working set
+    /// of `ws` and no per-lease parts: the difference of two readings is the cores busy over
+    /// the window between them, in millicores.
+    fn measured(seq: u64, used: u64, ws: u64) -> NodeLoad {
+        NodeLoad {
+            seq,
+            mono_usec: seq * 5_000_000,
+            cpu_usage_usec: used * 5_000,
+            memory_working_set_bytes: ws,
+            ..NodeLoad::default()
+        }
+    }
+
+    /// The engine holding `n` jobs `held-<i>` on host `b` of the 8-core, 16 GiB shape, each
+    /// booking `cpu` millicores and `memory` bytes.
+    fn holding(n: u64, cpu: u64, memory: u64) -> (Engine, HostId) {
+        let mut engine = Engine::build(Settings::default(), at(0));
+        let b = host("b");
+        engine.host_up(&b, &shape(true), at(0));
+        for i in 0..n {
+            let job = js_jobs::JobId::parse(&format!("held-{i}")).unwrap();
+            let booked = js_jobs::Booked::Shape {
+                cpu_millis: cpu,
+                memory_bytes: memory,
+                disk_bytes: 0,
+                accelerators: 0,
+            };
+            engine.take_job(&job, &b, booked, Vec::new());
+        }
+        (engine, b)
+    }
+
+    /// Places the job `name` booking `cpu` and `memory` on host `b` as a pass does, and holds
+    /// it: whether the engine placed it.
+    fn place(engine: &mut Engine, b: &HostId, name: &str, (cpu, memory): (u64, u64)) -> bool {
+        let job = js_jobs::JobId::parse(name).unwrap();
+        let operation = engine.sched.next_operation();
+        let request = Request {
+            key: WorkKey::new("job", job.as_str()),
+            qos: Qos::Batch,
+            kind: LeaseKind::Action,
+            resources: js_types::sched::Resources::new(cpu, memory),
+            needs: js_caps::Request::default(),
+            hermetic: false,
+            do_not_cache: true,
+            whole_worker: false,
+            pin: None,
+        };
+        let charge = Prediction {
+            cpu_millis: cpu,
+            memory_bytes: memory,
+            cold: false,
+            life_minutes: 1,
+        };
+        let only = BTreeSet::from([map::worker(b)]);
+        let wall = std::time::Duration::from_secs(3600);
+        let now = engine.now;
+        let Some((lease, _)) = engine.place_one((operation, request), (wall, charge), only, now)
+        else {
+            return false;
+        };
+        engine.hold_job(&job, b, Vec::new(), Placed { lease, operation });
+        true
+    }
+
+    /// How many jobs of `cpu` millicores and 64 MiB the engine places on `b` before one is
+    /// refused.
+    fn fill(engine: &mut Engine, b: &HostId, cpu: u64) -> usize {
+        let mut placed = 0;
+        while place(engine, b, &format!("new-{placed}"), (cpu, 64 * MIB)) {
+            placed += 1;
+        }
+        placed
+    }
+
+    /// A host whose jobs use exactly what they book (8 of 1 core on 8 cores) is filled up
+    /// to the slack limit, 8.8 cores, once two readings have shown it: the jobs the engine
+    /// held at the first reading and holds at the second are covered, so their use is not
+    /// charged again beside their booking.
+    #[test]
+    fn jobs_that_use_their_booking_fill_the_host_to_the_slack_limit() {
+        let (mut engine, b) = holding(8, 1000, 64 * MIB);
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        engine.heard(&b, Some(&measured(2, 8000, 8 * 64 * MIB)), at(10_000));
+        let view = engine.load_of("b").unwrap();
+        assert_eq!(view.uncovered_cpu_millis, 0);
+        assert_eq!(view.left_cpu_millis, 8000);
+        assert_eq!(fill(&mut engine, &b, 100), 8);
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 8800);
+    }
+
+    /// A job placed after the previous reading is charged in full beside the measurement
+    /// at the next one, and covered from the one after.
+    #[test]
+    fn a_job_placed_after_the_previous_reading_is_charged_in_full() {
+        let (mut engine, b) = holding(8, 1000, 64 * MIB);
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        assert!(place(&mut engine, &b, "late", (500, 64 * MIB)));
+        engine.heard(&b, Some(&measured(2, 8000, 0)), at(10_000));
+        let view = engine.load_of("b").unwrap();
+        assert_eq!(view.uncovered_cpu_millis, 500);
+        assert_eq!(view.left_cpu_millis, 8500);
+        assert!(!place(&mut engine, &b, "over", (400, 64 * MIB)));
+        assert!(place(&mut engine, &b, "fits", (300, 64 * MIB)));
+        engine.heard(&b, Some(&measured(3, 16_500, 0)), at(15_000));
+        let view = engine.load_of("b").unwrap();
+        assert_eq!(view.uncovered_cpu_millis, 300);
+        assert_eq!(view.left_cpu_millis, 8800);
+    }
+
+    /// A reading the scheduler drops (its sequence goes back) leaves nothing covered: the
+    /// reading after it is a baseline, and only the leases held at that one are covered by
+    /// the next.
+    #[test]
+    fn a_dropped_reading_covers_nothing_until_two_are_accepted() {
+        let (mut engine, b) = holding(2, 1000, 64 * MIB);
+        engine.heard(&b, Some(&measured(5, 0, 0)), at(5_000));
+        engine.heard(&b, Some(&measured(6, 2000, 0)), at(10_000));
+        assert_eq!(engine.load_of("b").unwrap().uncovered_cpu_millis, 0);
+        engine.heard(&b, Some(&measured(2, 6000, 0)), at(15_000));
+        assert!(!engine.at_reading.contains_key(&b));
+        engine.heard(&b, Some(&measured(7, 4000, 0)), at(20_000));
+        assert_eq!(engine.load_of("b").unwrap().uncovered_cpu_millis, 2000);
+        engine.heard(&b, Some(&measured(8, 6000, 0)), at(25_000));
+        assert_eq!(engine.load_of("b").unwrap().uncovered_cpu_millis, 0);
+    }
+
+    /// A job the engine let go of leaves the covered set, and a host forgotten keeps no
+    /// record of its readings.
+    #[test]
+    fn a_released_job_leaves_the_covered_set_and_a_forgotten_host_its_record() {
+        let (mut engine, b) = holding(2, 1000, 64 * MIB);
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        assert_eq!(engine.at_reading.get(&b).map(BTreeSet::len), Some(2));
+        let gone = engine.jobs.keys().next().cloned().unwrap();
+        let lease = engine.job_leases_on(&b).next().unwrap();
+        engine.jobs.remove(&gone).unwrap();
+        engine.sched.unplace(lease).unwrap();
+        engine.heard(&b, Some(&measured(2, 1000, 0)), at(10_000));
+        let view = engine.load_of("b").unwrap();
+        assert_eq!(view.predicted_cpu_millis, 1000);
+        assert_eq!(view.uncovered_cpu_millis, 0);
+        engine.jobs.clear();
+        engine.host_gone(&b);
+        assert!(engine.at_reading.is_empty());
+    }
+
+    /// Memory is filled to the bookings and not past them (the flat sum of the bookings is
+    /// the limit), and a working set above the covered jobs' bookings (residue, kernel
+    /// memory) still counts whole, so the memory it holds is not offered again.
+    #[test]
+    fn memory_is_filled_to_the_bookings_and_a_larger_working_set_still_refuses() {
+        let (mut engine, b) = holding(3, 1000, 4 * GIB);
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        engine.heard(&b, Some(&measured(2, 3000, 12 * GIB)), at(10_000));
+        assert!(!place(&mut engine, &b, "big", (500, 5 * GIB)));
+        assert!(place(&mut engine, &b, "exact", (500, 4 * GIB)));
+        assert!(!place(&mut engine, &b, "more", (500, 64 * MIB)));
+
+        let (mut engine, b) = holding(2, 1000, 4 * GIB);
+        engine.heard(&b, Some(&measured(1, 0, 0)), at(5_000));
+        engine.heard(&b, Some(&measured(2, 2000, 12 * GIB)), at(10_000));
+        assert!(!place(&mut engine, &b, "over", (500, 5 * GIB)));
+        assert!(place(&mut engine, &b, "fits", (500, 4 * GIB)));
     }
 }

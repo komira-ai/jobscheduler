@@ -13,6 +13,7 @@ use js_types::sched::{FarmTime, LeaseId, Resources};
 use super::horizon;
 use super::profile::{Lanes, Profile};
 use super::{LoadConfig, LoadCounters, charge};
+use crate::refusal::{Refusal, RefusalKind};
 
 /// A reading is dropped when it implies more cores than this many times the worker's
 /// capacity, or more memory than this many times its capacity.
@@ -243,15 +244,6 @@ impl Left {
     pub(crate) fn charged_cpu(&self, cost: &LeaseCost) -> u64 {
         cost.cpu_millis.max(self.floor_cpu)
     }
-}
-
-/// Why the predicate refused a lease.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    Cpu,
-    Memory,
-    /// Only the cold cap of the window stands in the way.
-    ColdCap,
 }
 
 /// A worker's load state.
@@ -637,18 +629,33 @@ impl WorkerLoad {
                 return Err(refusal);
             }
         } else {
-            if left.cpu.saturating_add(left.charged_cpu(cost)) > cfg.cpu_limit(capacity) {
-                return Err(Refusal::Cpu);
+            let (new, limit) = (left.charged_cpu(cost), cfg.cpu_limit(capacity));
+            if left.cpu.saturating_add(new) > limit {
+                let refusal = Refusal::new(RefusalKind::Cpu, left.cpu, new, limit);
+                return Err(refusal.measured(left.measured));
             }
-            if left.mem.saturating_add(cost.memory_bytes) > cfg.mem_limit(capacity) {
-                return Err(Refusal::Memory);
+            let limit = cfg.mem_limit(capacity);
+            if left.mem.saturating_add(cost.memory_bytes) > limit {
+                return Err(Refusal::new(
+                    RefusalKind::PredictedMemory,
+                    left.mem,
+                    cost.memory_bytes,
+                    limit,
+                ));
             }
         }
         if let Some(refusal) = self.flat_memory_refusal(cost, capacity, cfg) {
             return Err(refusal);
         }
-        if cost.cold && self.cold_admitted(now, cfg) >= cfg.cold_cap(capacity) {
-            return Err(Refusal::ColdCap);
+        let admitted = self.cold_admitted(now, cfg);
+        let cap = cfg.cold_cap(capacity);
+        if cost.cold && admitted >= cap {
+            return Err(Refusal::new(
+                RefusalKind::ColdCap,
+                u64::from(admitted),
+                1,
+                u64::from(cap),
+            ));
         }
         Ok(())
     }

@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crate::codec::result_fields::job_result_tag;
 use crate::codec::tests::{full_job, full_result, job_row, without};
 use crate::codec::{Carried, decode_job, field_of, job_tag};
 use crate::record::JobRecord;
@@ -11,8 +12,8 @@ use crate::result::{CpuThrottle, JobResult, ResourceUsage};
 
 /// The tags of the CPU throttle counters and the CPU pressure of a usage.
 const CPU_TAGS: [u16; 2] = [
-    job_tag::RESULT_CPU_THROTTLE,
-    job_tag::RESULT_CPU_PRESSURE_SOME,
+    job_result_tag::RESULT_CPU_THROTTLE,
+    job_result_tag::RESULT_CPU_PRESSURE_SOME,
 ];
 
 /// A job whose usage has the given CPU counters.

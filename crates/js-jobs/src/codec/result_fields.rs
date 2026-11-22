@@ -1,8 +1,7 @@
 //! The result fields of a job row, tags 31 (the reason) to 40 (the usage), 43 (the stream
 //! lengths), 58 (the code of an input that failed, `rootfs_fields`) and 60 and 61 (the CPU
-//! throttle counters and the CPU pressure of the usage). They are written only
-//! when the job has a result, and the reason is what says it
-//! has one: a row without it, as every row written before results were stored, reads with no
+//! throttle counters and the CPU pressure of the usage). They are written only when the job has
+//! a result, and the reason is what says it has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
 //! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
 //! it back unchanged. Tags 60 and 61 are written only for a usage that has the value, and read
@@ -12,6 +11,7 @@
 
 use js_state::StoreTime;
 
+use self::job_result_tag::{RESULT_CPU_PRESSURE_SOME, RESULT_CPU_THROTTLE};
 use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
     DecodeError, Fields, Writer, bool_of, byte_of, i32_of, job_tag as t, text, text_of, time,
@@ -24,6 +24,18 @@ const TIME_LEN: usize = 12;
 
 /// The bytes of a lengths value: four `u64`.
 const LOGS_LEN: usize = 32;
+
+/// The job-row tags of the usage's CPU counters, beside the result tags of
+/// [`crate::codec::job_tag`].
+pub(crate) mod job_result_tag {
+    /// The CPU throttle counters of the job's control group (16 bytes: the periods, then the
+    /// throttled periods, each a u64), written beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent
+    /// reported them. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
+    pub const RESULT_CPU_THROTTLE: u16 = 60;
+    /// The time some task of the group waited for a CPU (time), written beside
+    /// [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent reported it. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
+    pub const RESULT_CPU_PRESSURE_SOME: u16 = 61;
+}
 
 /// Puts the fields of `result`, when there is one, in `row`.
 pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
@@ -45,9 +57,9 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
     row.put(t::RESULT_ENDED_AT, time(timing.ended_at));
     row.put_opt(t::RESULT_USAGE, result.usage.map(usage));
     if let Some(used) = result.usage {
-        row.put_opt(t::RESULT_CPU_THROTTLE, used.cpu_throttle.map(throttle));
+        row.put_opt(RESULT_CPU_THROTTLE, used.cpu_throttle.map(throttle));
         row.put_opt(
-            t::RESULT_CPU_PRESSURE_SOME,
+            RESULT_CPU_PRESSURE_SOME,
             used.cpu_pressure_some
                 .map(|waited| time(StoreTime::from_duration(waited))),
         );
@@ -62,9 +74,9 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
         return Ok(None);
     };
     let usage = fields.opt(t::RESULT_USAGE, usage_of)?;
-    let cpu_throttle = fields.opt(t::RESULT_CPU_THROTTLE, throttle_of)?;
+    let cpu_throttle = fields.opt(RESULT_CPU_THROTTLE, throttle_of)?;
     let cpu_pressure_some = fields
-        .opt(t::RESULT_CPU_PRESSURE_SOME, time_of)?
+        .opt(RESULT_CPU_PRESSURE_SOME, time_of)?
         .map(StoreTime::as_duration);
     Ok(Some(JobResult {
         exit_code: fields.opt(t::RESULT_EXIT_CODE, i32_of)?,

@@ -285,6 +285,36 @@ impl Summaries {
             .map_or(0, |summary| summary.floor(bounds))
     }
 
+    /// The memory the largest recent samples of `key` ask for on `now`, whatever their
+    /// number or dispersion: `round_up_256MiB(max(1.2 * long_max + 128 MiB, held,
+    /// floor))`, at least [`crate::MIN_MEMORY`], over the fresh summaries of the key's
+    /// levels (the larger of L1 and L2). `None` when no fresh summary holds a memory
+    /// sample. It ignores the default booking, [`N_MIN`] and the mixed rule, and it can
+    /// reach `bounds.host_memory`: the caller decides what that means.
+    pub fn peak_memory(&self, key: &Key, now: Day, bounds: &Bounds) -> Option<u64> {
+        let now = now.min(Day(MAX_DAY));
+        let l1 = if key.has_cfg() { self.get(key) } else { None };
+        [l1, self.get(&key.l2())]
+            .into_iter()
+            .flatten()
+            .filter(|summary| fresh(summary, now))
+            .filter_map(|summary| summary.peak_memory(bounds))
+            .max()
+    }
+
+    /// The CPU estimate of `key` on `now`, in millicores, from the first fresh level (L1,
+    /// then L2) that holds a CPU sample, whatever its number of memory samples; `None` when
+    /// no fresh level holds one (the caller books its own unlearned CPU).
+    pub fn cpu(&self, key: &Key, now: Day, bounds: &Bounds) -> Option<u32> {
+        let now = now.min(Day(MAX_DAY));
+        let l1 = if key.has_cfg() { self.get(key) } else { None };
+        [l1, self.get(&key.l2())]
+            .into_iter()
+            .flatten()
+            .find(|summary| fresh(summary, now) && summary.has_cpu_sample())
+            .map(|summary| summary.cpu(bounds))
+    }
+
     /// The size to book for an action of `key` on `now`, or why there is none.
     ///
     /// The first level with at least [`N_MIN`] samples answers; failing that the first

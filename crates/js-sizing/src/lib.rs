@@ -27,7 +27,8 @@
 //!   limit) is censored: it contributes `min(peak, booked)` with no headroom, so it can
 //!   hold an estimate at the booking but never raise it; only a kill raises past the
 //!   booking. CPU samples are successful runs with CPU time that started below
-//!   [`CPU_PRESSURE_MAX_PERMILLE`] node CPU pressure.
+//!   [`CPU_PRESSURE_MAX_PERMILLE`] node CPU pressure and were not held at a CPU
+//!   ceiling ([`Run::cpu_held`]).
 //! * **Memory.** `round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))` in integer
 //!   arithmetic (`M + ceil(M / 5)`, so results match on every architecture), where `M`
 //!   is the maximum uncensored sample over the last 256 or more runs (nine chunk
@@ -36,8 +37,11 @@
 //!   statistic is the maximum, not a percentile. With fewer than [`N_MIN`] samples, or
 //!   while raise-only, the estimate may only raise (it is at least the default
 //!   booking). A *mixed* key (the largest of its last 32 samples over four times their
-//!   median) is never lowered and raised only by kills: its estimate is the default
-//!   booking or its floor.
+//!   median) is never lowered by samples and raised by kills: its estimate is the larger
+//!   of the default booking, its floor and its own sized estimate
+//!   `round_up_256MiB(max(1.2 * M + 128 MiB, held))`, so it is never booked below
+//!   its own largest recent peak with the margin. [`Summaries::peak_memory`] answers
+//!   what a key's largest recent samples ask for whatever their number or dispersion.
 //! * **Never a whole host.** A booking at or above the memory of the largest matching
 //!   live node ([`Bounds::host_memory`]) owns the host. The crate's key floors stay
 //!   strictly below it, and an estimate (with the client's hint) that would reach it is
@@ -45,7 +49,8 @@
 //!   decide.
 //! * **CPU.** `round_up_250m(P90(cpu_usage / wall))`, clamped to `[250 m, node cpus]`
 //!   (a 0.3-core action costs 500 m); [`COLD_CPU_MILLIS`] with no CPU sample. A sample taken at or
-//!   above [`CPU_PRESSURE_MAX_PERMILLE`] node pressure, or with no pressure reading, is
+//!   above [`CPU_PRESSURE_MAX_PERMILLE`] node pressure, with no pressure reading, or
+//!   from a run held at a ceiling ([`Run::cpu_held`]: its mean is a lower bound), is
 //!   kept only when it exceeds the key's current estimate ([`COLD_CPU_MILLIS`] for a key
 //!   with no sample), so under load an estimate can only rise. [`Observed::cpu`] says
 //!   which happened and [`Summaries::cpu_counts`] counts it.

@@ -303,3 +303,28 @@ fn a_malformed_cpu_throttle_reads_as_none_and_keeps_the_usage() {
         assert_eq!(read, result(Some(expected)), "{bad}");
     }
 }
+
+/// Behaviour: a CPU pressure that is not a whole number of microseconds (negative, a string,
+/// a float) reads as absent and leaves the rest of the usage, the throttle counters included,
+/// as it was sent.
+#[test]
+fn a_malformed_cpu_pressure_reads_as_none_and_keeps_the_usage() {
+    for bad in [json!(-1), json!("9"), json!(1.5), json!([9])] {
+        let mut text = previous_text();
+        text["usage"] = json!({
+            "peak_memory_bytes": 3_221_225_472_u64,
+            "cpu_usage_usec": 4_500_000,
+            "cpu_throttle": { "periods": 10, "throttled_periods": 2 },
+            "cpu_pressure_some_usec": bad.clone()
+        });
+        let read: JobResult = serde_json::from_value(text).unwrap();
+        let expected = JobUsage {
+            cpu_throttle: Some(CpuThrottle {
+                periods: 10,
+                throttled_periods: 2,
+            }),
+            ..counted()
+        };
+        assert_eq!(read, result(Some(expected)), "{bad}");
+    }
+}

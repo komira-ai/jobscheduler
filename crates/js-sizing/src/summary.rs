@@ -26,8 +26,8 @@ pub const CPU_MIN_MILLIS: u32 = 250;
 /// What a key with no CPU sample is counted at when a pressured sample is compared with
 /// its estimate: two cores, the measured mean parallelism of an unlearned action.
 pub const COLD_CPU_MILLIS: u32 = 2000;
-/// A CPU sample taken below this node CPU pressure (tenths of a percent) when the run
-/// started is always kept. At or above it, or with no reading, wall inflates under
+/// A CPU sample whose contention ([`Run::node_cpu_pressure_permille`], tenths of a percent)
+/// is below this is always kept (unless held at a ceiling). At or above it, or with no reading, wall inflates under
 /// contention and the ratio understates the demand: the sample is kept only when it
 /// exceeds the key's current estimate, so it can only raise it.
 pub const CPU_PRESSURE_MAX_PERMILLE: u16 = 100;
@@ -271,13 +271,15 @@ impl Summary {
         Observed { memory, cpu }
     }
 
-    /// A CPU measurement: kept when the node was quiet, otherwise only when it exceeds
-    /// the current estimate (a starved run never overstates its demand).
+    /// A CPU measurement: kept when the node was quiet and the run was not held at a
+    /// ceiling, otherwise only when it exceeds the current estimate (a starved or held
+    /// run never overstates its demand, it only understates it).
     fn observe_cpu(&mut self, run: &Run, bounds: &Bounds) -> CpuSample {
         let millis = cpu_millis(run);
-        let quiet = run
-            .node_cpu_pressure_permille
-            .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
+        let quiet = !run.cpu_held
+            && run
+                .node_cpu_pressure_permille
+                .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
         if quiet {
             self.record_cpu(millis);
             CpuSample::Kept
@@ -443,14 +445,13 @@ impl Summary {
     /// reach the host: the caller turns that into [`crate::Fallback::OverCap`].
     pub(crate) fn memory(&self, bounds: &Bounds, raise_only: bool) -> u64 {
         let floor = self.floor(bounds);
+        let sized = self.sized_memory();
         let memory = if self.mixed() {
-            // Never lowered, raised only by a kill.
-            bounds.default_memory.max(floor)
+            // Never lowered by samples and raised by a kill, but its own largest
+            // recent peak with the usual margin raises it.
+            bounds.default_memory.max(floor).max(sized)
         } else {
-            let max = self.long_max();
-            let held = self.chunk_held.iter().copied().fold(0, u64::max);
-            let sized = max.saturating_add(max.div_ceil(5)).saturating_add(SLACK);
-            let memory = round_up(sized.max(held).max(floor), MEMORY_STEP);
+            let memory = round_up(sized.max(floor), MEMORY_STEP);
             if self.n_total < N_MIN || raise_only {
                 memory.max(bounds.default_memory)
             } else {
@@ -458,6 +459,26 @@ impl Summary {
             }
         };
         memory.max(MIN_MEMORY)
+    }
+
+    /// The largest recent peaks with the usual margin, rounded up to a step:
+    /// `round_up(max(1.2 * long_max + 128 MiB, held))`.
+    fn sized_memory(&self) -> u64 {
+        let max = self.long_max();
+        let held = self.chunk_held.iter().copied().fold(0, u64::max);
+        let sized = max.saturating_add(max.div_ceil(5)).saturating_add(SLACK);
+        round_up(sized.max(held), MEMORY_STEP)
+    }
+
+    /// What the largest recent samples ask for whatever their number or dispersion:
+    /// `round_up(max(1.2 * long_max + 128 MiB, held, floor))`, at least [`MIN_MEMORY`];
+    /// `None` when the summary holds no memory sample.
+    pub(crate) fn peak_memory(&self, bounds: &Bounds) -> Option<u64> {
+        (self.n_total > 0).then(|| {
+            self.sized_memory()
+                .max(round_up(self.floor(bounds), MEMORY_STEP))
+                .max(MIN_MEMORY)
+        })
     }
 
     /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample,

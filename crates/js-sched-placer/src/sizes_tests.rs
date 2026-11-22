@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationStep, Booked, ClientName, EndReason, JobEnd, JobId, JobRecord, JobSpec, JobState,
-    Needs, NewJob, Output, ResourceUsage,
+    AllocationStep, Booked, ClientName, CpuThrottle, EndReason, JobEnd, JobId, JobRecord, JobSpec,
+    JobState, Needs, NewJob, Output, ResourceUsage,
 };
 use js_registry::Placer;
 use js_sizing::{Bounds, Day};
@@ -31,19 +31,19 @@ fn capacity(cpu_millis: u64, memory_bytes: u64) -> Capacity {
     Capacity::new(cpu_millis, memory_bytes)
 }
 
-/// The cold size of this module's tests: two cores and 4 GiB, a quarter of [`bounds`]'s host,
-/// so that a cold booking leaves the host room. The default cold size (4 cores and 16 GiB,
-/// the whole of that host's memory) is the subject of `sizes_cold_tests` and of
+/// The cold size of this module's tests: two cores and 4 GiB, a quarter of [`bounds`]'s host
+/// memory, so that a cold booking leaves the host room. The default cold size (4 cores and
+/// 4 GiB) is the subject of `sizes_cold_tests` and of
 /// [`a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs`].
 const MODULE_COLD: ColdSize = ColdSize {
     cpu_millis: 2000,
     memory_bytes: 4 * GIB,
 };
 
-/// The bounds of one host of eight cores and 16 GiB; [`JobSizes::with_cold`] of
-/// [`MODULE_COLD`] puts its cold booking at two cores and 4 GiB.
+/// The bounds of one host of 32 cores (a class books at most four of them) and 16 GiB;
+/// [`JobSizes::with_cold`] of [`MODULE_COLD`] puts its cold booking at two cores and 4 GiB.
 fn bounds() -> Bounds {
-    bounds_of([capacity(8000, 16 * GIB)]).unwrap()
+    bounds_of([capacity(32_000, 16 * GIB)]).unwrap()
 }
 
 /// Needs of `cpu_millis` and `memory_bytes`.
@@ -69,14 +69,18 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
     spec
 }
 
-/// What a job's host reported: `peak` bytes at most and `cpu` of CPU time.
+/// What the host of an uncapped agent reported: `peak` bytes at most and `cpu` of CPU time,
+/// no CPU pressure and no throttled period (so the run's CPU is a measurement).
 fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
             cpu_time: cpu,
             peak_memory_bytes: peak,
-            cpu_throttle: None,
-            cpu_pressure_some: None,
+            cpu_throttle: Some(CpuThrottle {
+                periods: 0,
+                throttled_periods: 0,
+            }),
+            cpu_pressure_some: Some(Duration::ZERO),
         }),
         ..Output::default()
     }
@@ -170,22 +174,27 @@ fn size(sizes: &JobSizes, job: &JobRecord) -> (u64, u64) {
 
 /// A queued job of `spec`, recorded in fresh tables as `id`.
 fn queued(id: &str, spec: JobSpec) -> JobRecord {
+    queued_by(None, id, spec)
+}
+
+/// A queued job of `spec` submitted by `client`, recorded in fresh tables as `id`.
+fn queued_by(client: Option<&str>, id: &str, spec: JobSpec) -> JobRecord {
     let tables = Tables::new();
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),
         spec,
         priority: 0,
-        client: None,
+        client: client.map(|client| ClientName::parse(client).unwrap()),
     };
     tables.jobs.insert_queued(new).unwrap().record
 }
 
-/// Asserts that a job that books nothing is booked the default cold size (4 cores and 16 GiB,
-/// held at the largest host's cores and bookable memory) while its class has no runs, that a
-/// job that names both its CPU and its memory, and one that books the whole host, are booked
-/// as they ask, and that before any host is known every job is left as it is. Catches a cold
-/// size held at the smallest host (4 cores and 8 GiB here), a sizing that overrides a
-/// declared booking, and a whole-host job made a share.
+/// Asserts that a job that books nothing is booked the default cold size (4 cores and 4 GiB,
+/// held at the largest host's cores and bookable memory) while neither its class nor its client
+/// has runs, that a job that names both its CPU and its memory, and one that books the whole
+/// host, are booked as they ask, and that before any host is known every job is left as it is.
+/// Catches a cold size held at the smallest host (2 cores and 2 GiB here), a sizing that
+/// overrides a declared booking, and a whole-host job made a share.
 #[test]
 fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
     let mut sizes = JobSizes::new();
@@ -196,10 +205,10 @@ fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
         "no host known: as it is"
     );
     sizes.set_bounds(bounds_of([
-        capacity(4000, 8 * GIB),
+        capacity(2000, 2 * GIB),
         capacity(8000, 16 * GIB),
     ]));
-    assert_eq!(size(&sizes, &nothing), (4000, 16 * GIB));
+    assert_eq!(size(&sizes, &nothing), (4000, 4 * GIB));
     let declared = queued("declared", of_class("build", needs(500, GIB)));
     assert_eq!(sizes.sized(&declared, Day(0)), declared);
     let whole = queued("whole", of_class("build", Needs::WholeHost));
@@ -224,24 +233,33 @@ fn a_dimension_the_job_names_is_kept_and_only_the_other_is_sized() {
     assert_eq!((sized.disk_bytes(), sized.gpus()), (7, 0));
 }
 
-/// Asserts that five successful runs of a class size its next job from them: the memory is
-/// `1.2 x` their peak plus 128 MiB rounded up to 256 MiB (2 GiB peaks give 2.75 GiB) and the
-/// CPU what they used per second (30 s of CPU in 10 s is three cores), while four runs give
-/// the CPU but keep the memory at the cold booking (the class may not lower it yet). Another
-/// class is still cold. Catches an estimate taken from too few runs, a CPU not learned, and
-/// a history shared across classes.
+/// Asserts that the successful runs of a class size its next job from them, from even the
+/// first: the memory is `1.2 x` their peak plus 128 MiB rounded up to 256 MiB (2 GiB peaks give
+/// 2.75 GiB, whether four runs or five) and the CPU what they used per second (30 s of CPU in
+/// 10 s is three cores, under the eighth of the host's cores a class may book). Another class
+/// of the same client books from that client's history (the same figures); a class of another
+/// client, which has none, is still cold. Catches a young class held at the cold booking, a CPU
+/// not learned, and a history shared across clients.
 #[test]
-fn five_successful_runs_size_the_class_from_their_peak_and_cpu() {
+fn runs_size_the_class_from_their_peak_and_cpu_and_a_new_class_from_its_clients() {
     let tables = Tables::new();
     let end = || exited(0, 2 * GIB, Duration::from_secs(30));
     let jobs = runs(&tables, "build", 5, "build", booked(2000, 4 * GIB), end);
     let next = queued("next", of_class("build", needs(0, 0)));
     let four = taught(&jobs[..4], booked(2000, 4 * GIB));
-    assert_eq!(size(&four, &next), (3000, 4 * GIB));
+    assert_eq!(size(&four, &next), (3000, 11 * 256 * MIB));
     let five = taught(&jobs, booked(2000, 4 * GIB));
     assert_eq!(size(&five, &next), (3000, 11 * 256 * MIB));
     let other = queued("other", of_class("test", needs(0, 0)));
-    assert_eq!(size(&five, &other), (2000, 4 * GIB));
+    assert_eq!(size(&five, &other), (3000, 11 * 256 * MIB), "the client's");
+    assert_eq!(five.sized_from(&other, Day(0)), Some(SizedFrom::Fallback));
+    let stranger = queued_by(Some("stranger"), "stranger", of_class("test", needs(0, 0)));
+    assert_eq!(
+        size(&five, &stranger),
+        (2000, 4 * GIB),
+        "another client: cold"
+    );
+    assert_eq!(five.sized_from(&stranger, Day(0)), Some(SizedFrom::Cold));
 }
 
 /// Asserts that runs of one image and command that name no class share a history although
@@ -385,8 +403,8 @@ fn a_memory_kill_raises_the_class_to_twice_the_booking_it_died_at() {
 }
 
 /// Asserts that a class whose runs would need the host's whole bookable memory books all of
-/// it (and the cold CPU), so it waits for an empty host rather than being cut. Catches an
-/// over-large class booked cold, where it would be killed.
+/// it (and the CPU its runs used, a core), so it waits for an empty host rather than being
+/// cut. Catches an over-large class booked cold, where it would be killed.
 #[test]
 fn a_class_whose_runs_reach_the_host_books_all_of_its_memory() {
     let tables = Tables::new();
@@ -394,7 +412,7 @@ fn a_class_whose_runs_reach_the_host_books_all_of_its_memory() {
     let jobs = runs(&tables, "huge", 2, "huge", booked(2000, 16 * GIB), end);
     let sizes = taught(&jobs, booked(2000, 16 * GIB));
     let next = queued("next", of_class("huge", needs(0, 0)));
-    assert_eq!(size(&sizes, &next), (2000, 16 * GIB));
+    assert_eq!(size(&sizes, &next), (1000, 16 * GIB));
 }
 
 /// Asserts that runs that failed, were stopped at their wall limit, failed an input or were
@@ -557,8 +575,8 @@ fn freed_names_each_allocation_gone_since_the_last_call_once() {
 }
 
 /// Asserts the bounds of a set of hosts: none with no host or no memory; otherwise the
-/// largest host's memory and cores, with a cold booking of the default 16 GiB held at that
-/// memory (16 GiB on a host of 16 GiB and 100 bytes or of 251 GiB, 2 GiB on a host of 2 GiB),
+/// largest host's memory and cores, with a cold booking of the default 4 GiB held at that
+/// memory (4 GiB on a host of 16 GiB and 100 bytes or of 251 GiB, 2 GiB on a host of 2 GiB),
 /// and cores beyond what the estimator counts held at its most. Catches a cold booking taken
 /// from the host's size, one above the host, or a count that wraps.
 #[test]
@@ -568,13 +586,13 @@ fn the_bounds_are_the_largest_hosts_with_the_default_cold_memory() {
     let odd = bounds_of([capacity(8000, 16 * GIB + 100), capacity(1000, GIB)]).unwrap();
     assert_eq!(
         (odd.default_memory, odd.host_memory, odd.node_cpu_millis),
-        (16 * GIB, 16 * GIB + 100, 8000)
+        (4 * GIB, 16 * GIB + 100, 8000)
     );
     assert_eq!(
         bounds_of([capacity(88_000, 251 * GIB)])
             .unwrap()
             .default_memory,
-        16 * GIB
+        4 * GIB
     );
     assert_eq!(
         bounds_of([capacity(1000, 2 * GIB)]).unwrap().default_memory,
@@ -628,7 +646,7 @@ fn placer() -> SchedPlacer {
     };
     let placer = SchedPlacer::new(settings, clock);
     let caps = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
-    let shape = Shape::new(Resources::new(8000, 16 * GIB, 0, None).unwrap(), caps);
+    let shape = Shape::new(Resources::new(32_000, 16 * GIB, 0, None).unwrap(), caps);
     placer.engine().host_up(&host("a"), &shape, at(0));
     placer
 }
@@ -656,17 +674,28 @@ fn allocation(tables: &Tables, id: &str) -> Booked {
 
 /// Records the queued job `id` of `class` that books nothing.
 fn submit(tables: &Tables, id: &str, class: &str) {
+    submit_by(tables, id, class, None);
+}
+
+/// Records the queued job `id` of `class` that books nothing, submitted by `client`.
+fn submit_by(tables: &Tables, id: &str, class: &str, client: Option<&str>) {
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),
         spec: of_class(class, needs(0, 0)),
         priority: 0,
-        client: None,
+        client: client.map(|client| ClientName::parse(client).unwrap()),
     };
     tables.jobs.insert_queued(new).unwrap();
 }
 
 /// Starts the placed job `id` and ends it with a 2 GiB peak and three cores, freeing it.
 fn finish(tables: &Tables, id: &str) {
+    finish_at(tables, id, 2 * GIB);
+}
+
+/// Starts the placed job `id` and ends it with a peak of `peak` bytes and three cores, freeing
+/// it.
+fn finish_at(tables: &Tables, id: &str, peak: u64) {
     let id = JobId::parse(id).unwrap();
     tables
         .jobs
@@ -678,7 +707,7 @@ fn finish(tables: &Tables, id: &str) {
         .unwrap();
     let start = tables.clock.now().as_duration().as_millis();
     tables.set_ms(u64::try_from(start).unwrap() + 10_000);
-    let end = exited(0, 2 * GIB, Duration::from_secs(30));
+    let end = exited(0, peak, Duration::from_secs(30));
     tables
         .jobs
         .end_and_free(&id, end, EndReason::Exited)
@@ -686,8 +715,9 @@ fn finish(tables: &Tables, id: &str) {
 }
 
 /// Asserts the pass end to end: a job that books nothing is placed booked the cold size (its
-/// own needs stay as submitted), each run is learned once its allocation is freed (two runs
-/// teach the CPU), and after five runs the next job of the class is booked what they used.
+/// own needs stay as submitted), each run is learned once its allocation is freed (from the
+/// first run on, the class books what its runs used: their CPU and `1.2 x` their peak plus
+/// 128 MiB), and after five runs the next job of the class is booked the same.
 /// Catches a pass that books 0 for a job that names nothing (which packs a host without
 /// bound), a size written over the job's own needs (a retried submit would no longer be the
 /// same job), and a job placed and freed between two passes never learned.
@@ -699,11 +729,15 @@ fn a_pass_books_a_job_that_books_nothing_from_its_class_and_learns_each_freed_ru
         let id = format!("build-{run}");
         submit(&tables, &id, "build");
         assert_eq!(pass(&placer, &tables), vec![JobId::parse(&id).unwrap()]);
-        let cpu = if run < 2 { 2000 } else { 3000 };
+        let expected = if run == 0 {
+            booked(2000, 4 * GIB)
+        } else {
+            booked(3000, 11 * 256 * MIB)
+        };
         assert_eq!(
             allocation(&tables, &id),
-            booked(cpu, 4 * GIB),
-            "run {run}: cold until two runs teach the CPU"
+            expected,
+            "run {run}: cold until a run is learned, then what the runs used"
         );
         let record = tables
             .jobs
@@ -804,18 +838,18 @@ fn a_start_teaches_every_ended_job_and_a_later_pass_each_job_live_then() {
     pass(&placer, &tables);
     assert_eq!(
         allocation(&tables, "next"),
-        booked(3000, 4 * GIB),
-        "four runs: the CPU only"
+        booked(3000, 11 * 256 * MIB),
+        "four runs: what they used"
     );
-    finish(&tables, "live");
+    finish_at(&tables, "live", 3 * GIB);
     let freed = tables.jobs.free(&releasing, EndReason::Exited).unwrap();
     assert_eq!(freed.step, AllocationStep::Freed);
     submit(&tables, "after", "build");
     pass(&placer, &tables);
     assert_eq!(
         allocation(&tables, "after"),
-        booked(3000, 11 * 256 * MIB),
-        "six with the live and the releasing one"
+        booked(3000, 15 * 256 * MIB),
+        "six with the live one (3 GiB) and the releasing one"
     );
     assert_eq!(
         placer.learn_ended(&tables.jobs),
@@ -856,94 +890,14 @@ fn a_class_is_named_by_its_label_else_by_the_hash_of_its_command() {
     );
 }
 
-/// Asserts that jobs labelled with the class of one build target
-/// ([`js_types::SizeClass::of_target`]) share that target's history across passes, and that a
-/// job of another target in the same pass is still booked cold. Catches a target's runs that
-/// teach another target, or a repeat run of a target that is not booked from its own runs.
-#[test]
-fn a_repeat_run_of_a_build_target_is_booked_from_that_targets_runs_only() {
-    let tables = Tables::new();
-    let placer = placer();
-    let class = |target: &str| {
-        js_types::SizeClass::of_target(target)
-            .unwrap()
-            .as_str()
-            .to_owned()
-    };
-    let built = class("root//crates/js-sched:js-sched");
-    for run in 0..5 {
-        let id = format!("js-sched-{run}");
-        submit(&tables, &id, &built);
-        pass(&placer, &tables);
-        finish(&tables, &id);
-    }
-    submit(&tables, "js-sched-again", &built);
-    submit(
-        &tables,
-        "js-state-first",
-        &class("root//crates/js-state:js-state"),
-    );
-    pass(&placer, &tables);
-    assert_eq!(
-        allocation(&tables, "js-sched-again"),
-        booked(3000, 11 * 256 * MIB),
-        "the target's own runs"
-    );
-    assert_eq!(
-        allocation(&tables, "js-state-first"),
-        booked(2000, 4 * GIB),
-        "another target: cold"
-    );
-}
-
 #[path = "sizes_cold_tests.rs"]
 mod cold;
 
 #[path = "sizes_fallback_tests.rs"]
 mod fallback;
 
-/// Asserts that only a run that carries its usage teaches a class: five successful runs with a
-/// peak size the class from its own history (booked below the cold size, `sized_from` class)
-/// and each answers `true`; five successful runs of another class whose ended jobs carry no
-/// usage are seen, answer `false` and leave that class cold at the cold size. Catches a run
-/// with no measurement counted as taught (the count that said a whole history was learned when
-/// none of it was) and a class that stays cold for lack of a usage nobody sent.
-#[test]
-fn only_runs_with_usage_teach_a_class_and_the_rest_leave_it_cold() {
-    let tables = Tables::new();
-    let measured = || exited(0, 2 * GIB, Duration::from_secs(30));
-    let unmeasured = || JobEnd::Exited {
-        exit_code: 0,
-        output: Output::default(),
-    };
-    let with = runs(
-        &tables,
-        "with",
-        5,
-        "measured",
-        booked(2000, 4 * GIB),
-        measured,
-    );
-    let without = runs(
-        &tables,
-        "without",
-        5,
-        "bare",
-        booked(2000, 4 * GIB),
-        unmeasured,
-    );
-    let mut sizes = JobSizes::with_cold(MODULE_COLD);
-    sizes.set_bounds(Some(bounds()));
-    for job in &with {
-        assert!(sizes.observe(job, booked(2000, 4 * GIB)), "{}", job.id);
-    }
-    for job in &without {
-        assert!(!sizes.observe(job, booked(2000, 4 * GIB)), "{}", job.id);
-    }
-    let next = |class: &str| queued(&format!("next-{class}"), of_class(class, needs(0, 0)));
-    let (heard, silent) = (next("measured"), next("bare"));
-    assert_eq!(sizes.sized_from(&heard, Day(0)), Some(SizedFrom::Class));
-    assert_eq!(size(&sizes, &heard).1, 11 * 256 * MIB);
-    assert_eq!(sizes.sized_from(&silent, Day(0)), Some(SizedFrom::Cold));
-    assert_eq!(size(&sizes, &silent), (2000, 4 * GIB));
-}
+#[path = "sizes_client_tests.rs"]
+mod client;
+
+#[path = "sizes_farm_tests.rs"]
+mod farm;
