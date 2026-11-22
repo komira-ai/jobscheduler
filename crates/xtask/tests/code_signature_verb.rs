@@ -134,7 +134,8 @@ fn the_table_names_the_three_programs_by_distinct_identifiers() {
     assert_eq!(mac_programs::program("js-mac-session"), Some(PROGRAMS[1]));
     assert_eq!(mac_programs::program("js-vmm"), None);
     assert_eq!(mac_programs::grant_holder().name, FULL_DISK_ACCESS_PROGRAM);
-    assert_eq!(FULL_DISK_ACCESS_PROGRAM, "js-mac-session");
+    assert_eq!(FULL_DISK_ACCESS_PROGRAM, "js-agent");
+    assert_eq!(mac_programs::grant_holder(), PROGRAMS[0]);
     assert_eq!(
         PROGRAMS[0].install_path(),
         "/Library/Application Support/js-agent/bin/js-agent"
@@ -554,17 +555,20 @@ fn the_committed_profile_is_the_one_the_table_renders() {
 
 /// The profile grants one service to one program by its installed path and its requirement.
 ///
-/// Catches a profile that grants more than Full Disk Access, to more than the root helper, or
-/// by a path other than the package's.
+/// Catches a profile that grants more than Full Disk Access, to another program than the agent
+/// (the root helper, say) or to more than one, or by a path other than the package's.
 #[test]
-fn the_profile_grants_full_disk_access_to_the_root_helper_alone() {
+fn the_profile_grants_full_disk_access_to_the_agent_alone() {
     let text = mac_programs::privacy_profile();
     assert_eq!(text.matches("<key>Identifier</key>").count(), 1);
     assert_eq!(text.matches("<key>SystemPolicy").count(), 1);
     assert!(text.contains("<key>SystemPolicyAllFiles</key>"));
     assert!(text.contains(&format!(
-        "<key>Identifier</key>\n\t\t\t\t\t\t<string>{INSTALL_DIR}/js-mac-session</string>"
+        "<key>Identifier</key>\n\t\t\t\t\t\t<string>{INSTALL_DIR}/js-agent</string>"
     )));
+    assert!(text.contains("<string>identifier \"com.komira.js-agent\" and anchor apple generic"));
+    assert!(!text.contains("js-agent.session"));
+    assert!(!text.contains("bin/js-mac-session"));
     assert!(text.contains("<key>IdentifierType</key>\n\t\t\t\t\t\t<string>path</string>"));
     assert!(text.contains("<key>Authorization</key>\n\t\t\t\t\t\t<string>Allow</string>"));
     assert!(text.contains("<key>StaticCode</key>\n\t\t\t\t\t\t<false/>"));
@@ -594,20 +598,23 @@ fn each_way_a_profile_differs_is_named() {
     let cases: Vec<(String, &str)> = vec![
         (text.replace("= U7RTX4XD3X", "= ABCDE12345"), "ABCDE12345"),
         (
-            text.replace(holder.identifier, "com.komira.js-agent"),
-            "com.komira.js-agent\\\" and anchor",
+            text.replace(
+                "identifier \"com.komira.js-agent\"",
+                "identifier \"com.komira.js-agent.session\"",
+            ),
+            "com.komira.js-agent.session\\\" and anchor",
         ),
         (
             text.replace(" and anchor apple generic", " and cdhash H\"0123456789012345678901234567890123456789\" and anchor apple generic"),
             "cdhash",
         ),
         (
-            text.replace(&holder.install_path(), "/tmp/js-mac-session"),
-            "/tmp/js-mac-session",
+            text.replace(&holder.install_path(), "/tmp/js-agent"),
+            "/tmp/js-agent",
         ),
         (
-            text.replace(&holder.install_path(), "/Library/Application Support/js-agent/bin/js-agent"),
-            "bin/js-agent<",
+            text.replace(&holder.install_path(), "/Library/Application Support/js-agent/bin/js-mac-session"),
+            "bin/js-mac-session<",
         ),
         (
             text.replace("SystemPolicyAllFiles", "SystemPolicyDesktopFolder"),
