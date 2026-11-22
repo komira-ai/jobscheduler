@@ -134,7 +134,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 }
 
 /// The value after the flag at `at`.
-fn value<'a>(args: &'a [String], at: usize) -> Result<&'a str, String> {
+fn value(args: &[String], at: usize) -> Result<&str, String> {
     args.get(at + 1)
         .map(String::as_str)
         .ok_or_else(|| format!("{} takes a value", args[at]))
