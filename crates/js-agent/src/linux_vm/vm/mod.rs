@@ -70,6 +70,7 @@ use super::client;
 use super::clock;
 use super::control::{self, Control};
 use super::flags::RunFlags;
+use super::wire;
 
 /// How long the framework has to call a start, stop or connect completion handler.
 const COMPLETION: Duration = Duration::from_secs(60);
@@ -581,6 +582,26 @@ impl Owner {
         st.last_activity = clock::now();
     }
 
+    /// Asks the guest program to power the guest off; whether it said it will.
+    fn guest_poweroff(&self) -> bool {
+        let Ok((fd, keep)) = connect_guest(&self.queue, &self.holder, wire::GUEST_PORT) else {
+            return false;
+        };
+        let Ok(mut stream) = stream_of(fd) else {
+            return false;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let Ok(line) = wire::request_line(&wire::Request::Poweroff) else {
+            return false;
+        };
+        let mut reply = String::new();
+        let said = writeln!(stream, "{line}").is_ok()
+            && BufReader::new(&stream).read_line(&mut reply).is_ok()
+            && wire::parse_reply(&reply).is_ok_and(|r| r.ok);
+        drop(keep);
+        said
+    }
+
     /// Stops the VM: with `graceful`, the guest is asked to shut down (the power button) and
     /// the VM is stopped if it has not in [`SHUTDOWN_GRACE`]; otherwise at once. Returns
     /// whether a stop began.
@@ -595,14 +616,18 @@ impl Owner {
             self.changed.notify_all();
         }
         self.event(serde_json::json!({"event": "stopping", "why": why, "graceful": graceful}));
+        // First the guest program's `poweroff` over the virtio socket (the guest shuts down
+        // at once); when it does not answer, the framework's power button, which a guest can
+        // ignore (a freshly booted one often does).
         let asked = graceful
-            && matches!(
-                on_queue(&self.queue, &self.holder, |vm| {
-                    // SAFETY: on the VM's queue.
-                    unsafe { vm.requestStopWithError() }.map_err(|e| describe(&e))
-                }),
-                Some(Ok(()))
-            );
+            && (self.guest_poweroff()
+                || matches!(
+                    on_queue(&self.queue, &self.holder, |vm| {
+                        // SAFETY: on the VM's queue.
+                        unsafe { vm.requestStopWithError() }.map_err(|e| describe(&e))
+                    }),
+                    Some(Ok(()))
+                ));
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             if asked {

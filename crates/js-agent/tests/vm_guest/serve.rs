@@ -33,6 +33,8 @@ pub struct Flags {
     pub job_user: (u32, u32),
     /// The directory of the hardened runtime.
     pub hardened_work: Option<PathBuf>,
+    /// The host's virtio socket port to send the ready line to once listening; 0 for none.
+    pub ready_port: u32,
 }
 
 fn parse(args: &[String]) -> Result<Flags, String> {
@@ -44,6 +46,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         busybox: None,
         job_user: (1000, 1000),
         hardened_work: None,
+        ready_port: 0,
     };
     let mut at = 0;
     while at < args.len() {
@@ -52,6 +55,9 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             .ok_or_else(|| format!("{} takes a value", args[at]))?;
         match args[at].as_str() {
             "--port" => flags.port = value.parse().map_err(|_| "--port: not a number")?,
+            "--ready-port" => {
+                flags.ready_port = value.parse().map_err(|_| "--ready-port: not a number")?;
+            }
             "--crun" => flags.crun = PathBuf::from(value),
             "--rootfs" => flags.rootfs = PathBuf::from(value),
             "--runs" => flags.runs = PathBuf::from(value),
@@ -115,6 +121,50 @@ fn listen(port: u32) -> std::io::Result<OwnedFd> {
             return Err(std::io::Error::last_os_error());
         }
         Ok(owned)
+    }
+}
+
+/// A connection to the host's virtio socket `port` (context id 2).
+fn connect_host(port: u32) -> std::io::Result<UnixStream> {
+    // SAFETY: plain system calls on a descriptor this function owns; `addr` is a zeroed
+    // `sockaddr_vm` with its family, port and context id set, passed with its own size.
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = OwnedFd::from_raw_fd(fd);
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_port = port;
+        addr.svm_cid = libc::VMADDR_CID_HOST;
+        let len = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+        if libc::connect(fd, std::ptr::addr_of!(addr).cast(), len) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(UnixStream::from(owned))
+    }
+}
+
+/// Tells the VM's owner that this program listens: `ready uptime=<s> ip=<first address>`.
+fn say_ready(port: u32) {
+    let uptime = std::fs::read_to_string("/proc/uptime").unwrap_or_default();
+    let uptime = uptime.split_whitespace().next().unwrap_or("?").to_owned();
+    let ip = js_mac_session::disclaim::Program::new("hostname", ["-I"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .unwrap_or_default();
+    match connect_host(port) {
+        Ok(mut stream) => {
+            let _ = writeln!(stream, "ready uptime={uptime} ip={ip}");
+        }
+        Err(why) => eprintln!("js-vm-guest: tell the owner on port {port}: {why}"),
     }
 }
 
@@ -199,6 +249,17 @@ fn serve(stream: UnixStream, shared: &Shared) {
             ok: true,
             ..Reply::default()
         },
+        Ok(Request::Poweroff) => {
+            // Answered first; the shutdown follows on its own thread.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = js_mac_session::disclaim::Program::new("systemctl", ["poweroff"]).output();
+            });
+            Reply {
+                ok: true,
+                ..Reply::default()
+            }
+        }
         Ok(Request::Run { id, args, wall_ms }) => plain::run(shared, &id, &args, wall_ms),
         Ok(Request::Kill { id, signal }) => plain::kill(shared, &id, &signal),
         Ok(Request::Wait { id }) => plain::wait(shared, &id),

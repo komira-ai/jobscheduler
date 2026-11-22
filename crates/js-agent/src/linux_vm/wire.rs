@@ -7,6 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The virtio socket port the guest program listens on.
+pub const GUEST_PORT: u32 = 7000;
+
 /// The most output of one stream a reply carries: the end of the stream.
 pub const OUTPUT_TAIL: usize = 4096;
 
@@ -16,6 +19,8 @@ pub const OUTPUT_TAIL: usize = 4096;
 pub enum Request {
     /// Answer at once: the channel's own round trip.
     Ping,
+    /// Power the guest off: answer, then shut the guest down.
+    Poweroff,
     /// Start a container `id` from the guest's prepared root with `args` as its process, wait
     /// for it to end, and answer with its exit. `wall_ms`, when not 0, is the guest's limit
     /// on its wall time: the container is killed when it is reached.
@@ -212,6 +217,7 @@ mod tests {
     fn requests_round_trip_through_a_line() {
         let all = [
             Request::Ping,
+            Request::Poweroff,
             Request::Run {
                 id: "c1".into(),
                 args: vec!["/bin/true".into()],
