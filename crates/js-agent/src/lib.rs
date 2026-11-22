@@ -316,6 +316,7 @@ mod credential;
 pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
+pub mod dev_exec;
 pub mod disk;
 pub mod dispatch;
 pub mod egress;
@@ -524,6 +525,14 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    // The prototype's development verb for the Full Disk Access proof: answered first, as it
+    // only starts one program and waits for it.
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(dev_exec::VERB))
+    {
+        return dev_exec::run(&args, err);
+    }
     // A native macOS job run by this program alone, start to end: answered before anything
     // else starts a thread, because its start allocates between fork and exec.
     if args
