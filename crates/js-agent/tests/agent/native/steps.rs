@@ -9,7 +9,7 @@ use js_agent::native::{Journal, NativeRuntime, STEPS};
 use js_agent_wire::refusal;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
-use super::{Failing, Rig, TERM, config, native, open_pool, pool_settings, settle};
+use super::{Failing, Rig, TERM, config, native, pool_settings, settle};
 use crate::support::Scratch;
 
 /// The leases the rig's journal holds live.
@@ -150,7 +150,11 @@ fn a_start_that_fails_before_an_account_is_lent_lends_none() {
     spec.bundle = Some("example.com/b@sha256:00".to_owned());
     let why = rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(why.0, "the bundle: this runtime holds no bundle store");
-    assert_eq!(rig.accounts.records(), [ready.clone()], "still ready");
+    assert_eq!(
+        rig.accounts.records(),
+        std::slice::from_ref(&ready),
+        "still ready"
+    );
     assert_eq!(live(&rig), Vec::<String>::new());
 
     // One slot, held by a run: the next start finds no free uid.
@@ -160,7 +164,11 @@ fn a_start_that_fails_before_an_account_is_lent_lends_none() {
         .create_and_start(&rig.spec("second", native("/usr/bin/true", &[])))
         .unwrap_err();
     assert!(why.0.starts_with("the account pool: "), "{}", why.0);
-    assert_eq!(live(&rig), [first.0.clone()], "only the first run's lease");
+    assert_eq!(
+        live(&rig),
+        std::slice::from_ref(&first.0),
+        "only the first run's lease"
+    );
     assert_eq!(rig.launcher.launched().len(), 1);
     rig.settle(&first);
     rig.rt.remove(&first).unwrap();
@@ -208,7 +216,7 @@ fn an_account_that_cannot_be_retired_is_held_and_said() {
         "{}",
         why.0
     );
-    assert_eq!(live(&rig), [id.0.clone()]);
+    assert_eq!(live(&rig), std::slice::from_ref(&id.0));
     rig.accounts.free_record(&lent);
     rig.rt.remove(&id).unwrap();
     assert!(rig.pool.held().is_empty());

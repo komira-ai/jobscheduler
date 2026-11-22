@@ -309,7 +309,10 @@ fn a_ledger_that_cannot_record_the_sweep_fails_it() {
     pool.ledger().fail_writes(&rig.dir.join("state/accounts"));
     let why = pool.sweep(&BTreeSet::new()).unwrap_err();
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
-    assert!(why.to_string().contains("recording gone: "), "{why}");
+    assert!(
+        why.to_string().contains("recording gone: "),
+        "the error does not say what the test expects"
+    );
     assert!(rig.fake.state().users.is_empty(), "the account was deleted");
 }
 
