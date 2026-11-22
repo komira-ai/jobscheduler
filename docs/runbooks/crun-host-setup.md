@@ -257,7 +257,9 @@ its steps treat the record so:
 - `prepare` finishes the record itself when the rollback is complete in effect: the record
   returns the host to the previous release this update names, the release link is on that
   release, the unit is active, the record does not say the agent that runs is the one the
-  failed update started, and the lease server shows the previous agent's live session. It moves
+  failed update started, and the lease server shows the previous agent's live session (a
+  session it shows with no version, as a server that did not take the hello does, counts by the
+  session; one that names a version must name the previous one). It moves
   the record aside as `record.rolled-back-<target>-<ms>.json` in the same directory, says so in
   its detail, and goes on. Otherwise it fails `state_invalid` with the record kept, and the
   detail names the first thing left (`... its rollback is not complete: <what>; the rollback step
@@ -275,6 +277,12 @@ table plus the record's own `updater.target_version`, `updater.previous_version`
 of its `update` object, byte for byte). With the unit active on the previous release it makes no
 act on the unit: it waits for the previous agent's session, deletes the record and prints
 `{"class":"release","promotion_pending":false,"reversible":false}`.
+Such a hook refuses a session the lease server shows with no version (`version_mismatch: the
+session is of no version on container, ...`), having changed nothing. When that happens and the
+unit is active with the release link on the previous release, move the record aside under the
+hook's lock, keeping its bytes, as the newer hook does:
+`flock -n /var/lib/js-agent-update mv -n /var/lib/js-agent-update/record.json
+/var/lib/js-agent-update/record.rolled-back-<target>-manual.json`.
 
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:

@@ -591,3 +591,74 @@ fn prepare_finishes_a_record_whose_stop_never_took_and_whose_rollback_made_no_ac
     assert_eq!(rig.record().unwrap().update.target, NEXT);
     assert_eq!(spy.act_names(), Vec::<String>::new());
 }
+
+/// The host as the lease server answered for it: the previous agent's live session shown with
+/// no version (a server that did not take the hello reads the session from the store's row of
+/// the host, which keeps none), on the container runtime.
+fn shown_with_no_version(name: &str) -> Rig {
+    let rig = left_by_a_refused_rollback(name);
+    rig.world.alter_host(|host| host.agent_version = None);
+    let host = rig.host();
+    assert_eq!(host.state, "live");
+    assert_eq!(host.agent_version, None);
+    assert_eq!(host.runtime.as_deref(), Some("container"));
+    rig
+}
+
+/// With the session shown with no version, the record's rollback with its own params, the
+/// next target's `prepare` and the next order's `rollback` each finish the record by its
+/// session, and none acts on the unit.
+///
+/// Catches the refusal a released hook gave for that answer: `version_mismatch: the session is
+/// of no version on container, not 1.3.0 on container`, which left the record in place.
+#[test]
+fn a_live_session_shown_with_no_version_is_the_previous_agents_by_its_session() {
+    let rig = shown_with_no_version("hook-stale-no-version-by-hand");
+    let spy = spy(&rig);
+    let done = rollback(&spy, &rig, &rig.params);
+    assert_eq!(
+        line(&done),
+        json!({"class": "release", "promotion_pending": false, "reversible": false})
+    );
+    assert_eq!(rig.record(), None);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+
+    let rig = shown_with_no_version("hook-stale-no-version-prepare");
+    let spy = next_spy(&rig);
+    let aside = format!("record.rolled-back-{LEFT}-{}.json", spy.now_ms());
+    let done = prepare(&spy, &rig, &next_order(&rig));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(state_files(&rig), ["record.json".to_owned(), aside]);
+    assert_eq!(rig.record().unwrap().update.target, NEXT);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+
+    let rig = shown_with_no_version("hook-stale-no-version-rollback");
+    let spy = next_spy(&rig);
+    let done = rollback(&spy, &rig, &next_order(&rig));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(done.report.detail, Some(on_record()));
+    assert_eq!(rig.record(), None);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
+}
+
+/// A session shown with no version is still held to the session rule: the session the server
+/// showed before the rollback's first act is no proof, and `prepare` keeps the record.
+#[test]
+fn a_session_with_no_version_from_before_the_rollback_is_no_proof() {
+    let rig = shown_with_no_version("hook-stale-no-version-old-session");
+    let mut record = rig.record().unwrap();
+    record.rb_pre_stop_session_ms = rig.host().session_started_ms;
+    rig.put_record(&record);
+    let before = rig.record_bytes().unwrap();
+    let spy = next_spy(&rig);
+    let done = prepare(&spy, &rig, &next_order(&rig));
+    refused_as_is(
+        &rig,
+        &spy,
+        &done,
+        &before,
+        &not_complete(
+            "the lease server does not show the live session of the previous agent (1.3.0) the rollback waits for",
+        ),
+    );
+}

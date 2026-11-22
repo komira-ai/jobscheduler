@@ -91,6 +91,15 @@
 //! refuse exactly the old agents a rollback exists to bring back. A hello that names one must
 //! name the declared mode.
 //!
+//! A session the server shows with no version is accepted by its session alone. A server that
+//! did not take the host's hello itself reads the session from the store's row of the host,
+//! which keeps no version, so such a reading says nothing of which agent runs. The session is
+//! still proof: after an act of this step it must differ from the one recorded before that act,
+//! and every agent process begun since then runs the previous release, since the release link
+//! is on it before the first act and the unit's program is reached through it; with no act made
+//! the agent that runs is the one that always did, which the record says is not the one the
+//! update started (item 4). A session that names a version must name the previous one.
+//!
 //! Whose cordon it lifts is `cutover`'s rule: only one marked as placed by this update, not
 //! left unconfirmed, and not past its expiry; an operator's, and one that may be anyone's, are
 //! never touched, renewed or placed again.
@@ -621,7 +630,10 @@ pub(super) fn hello(
     if !new_session {
         return Err(Look::Silent);
     }
-    let version_ok = host.agent_version.as_deref() == Some(previous);
+    let version_ok = match host.agent_version.as_deref() {
+        None => true,
+        Some(reported) => reported == previous,
+    };
     let runtime_ok = match host.runtime.as_deref() {
         None => true,
         Some(reported) => reported == runtime,
