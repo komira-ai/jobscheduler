@@ -11,9 +11,25 @@ use std::path::{Path, PathBuf};
 
 use common::{Scratch, path, tree};
 use js_mac_pool::seatbelt::{
-    AbsPath, BUNDLE_PREFIX, Caps, MAX_PATH_BYTES, MAX_PORTS, Net, PathError, PinnedTree, Policy,
-    Ports, PortsError, Profile, ReadModel, SlotLayout, ToolError, ToolPath, check_path_dirs,
+    AbsPath, BUNDLE_PREFIX, Caps, MAX_PATH_BYTES, MAX_PORTS, MountGrant, MountTrees, Net,
+    PathError, PinnedTree, Policy, Ports, PortsError, Profile, ReadModel, SlotLayout, ToolError,
+    ToolPath, check_path_dirs,
 };
+
+/// Paths that spell profile syntax: quotes, parentheses, a space, `=`, `;`, a backslash, a
+/// whole injected rule, and a parameter reference.
+const HOSTILE: [&str; 10] = [
+    "/Volumes/a\"b",
+    "/Volumes/a)b",
+    "/Volumes/a(b",
+    "/Volumes/a b",
+    "/Volumes/a=b",
+    "/Volumes/a;b",
+    "/Volumes/a\\b",
+    "/Volumes/x\"))(allow file-write* (subpath \"/\"))((\"",
+    "/Volumes/;(allow default)",
+    "/Volumes/(param \"RUN\")",
+];
 
 #[test]
 fn paths_that_are_not_plain_absolute_normal_text_are_refused() {
@@ -95,23 +111,12 @@ fn every_error_says_what_is_wrong() {
 /// profile of a plain path, and the hostile text is only a parameter value.
 #[test]
 fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
-    let hostile = [
-        "/Volumes/a\"b",
-        "/Volumes/a)b",
-        "/Volumes/a(b",
-        "/Volumes/a b",
-        "/Volumes/a=b",
-        "/Volumes/a;b",
-        "/Volumes/a\\b",
-        "/Volumes/x\"))(allow file-write* (subpath \"/\"))((\"",
-        "/Volumes/;(allow default)",
-        "/Volumes/(param \"RUN\")",
-    ];
     let caps = || Caps {
         net: Net::Loopback,
         read_model: ReadModel::Open,
     };
     let layout = |run: &str, entry: &str, input: &str, deny: &str| SlotLayout {
+        trees: None,
         run: AbsPath::parse(run).expect("run"),
         uid_entry: Some(AbsPath::parse(entry).expect("entry")),
         inputs: vec![AbsPath::parse(input).expect("input")],
@@ -124,7 +129,7 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
     )
     .expect("plain");
     let plain_profile = Profile::for_policy(&plain).expect("plain profile");
-    for text in hostile {
+    for text in HOSTILE {
         let policy = Policy::base(layout(text, text, text, text), caps()).expect("hostile");
         let profile = Profile::for_policy(&policy).expect("hostile profile");
         assert_eq!(profile.text(), plain_profile.text(), "{text:?}");
@@ -135,6 +140,58 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
             .map(|(_, value)| value.as_str())
             .collect();
         assert_eq!(values, [text, text, text, text], "{text:?}");
+    }
+}
+
+/// A job's trees on the mount and a read-write mount, each named by a hostile path: the
+/// profile text is the one of plain paths, and the hostile text is only parameter values.
+/// A NUL, which would cut a C string, is refused by [`AbsPath`] before a tree or a grant
+/// can hold it.
+///
+/// Catches a tree, mount root or mount grant spelled into the profile text.
+#[test]
+fn hostile_tree_and_mount_paths_never_enter_the_profile_text() {
+    let layout = |root: &str| {
+        let at = |rest: &str| AbsPath::parse(&format!("{root}{rest}")).expect("path");
+        let trees = MountTrees::new(at(""), vec![at("/t0"), at("/t1")]).expect("trees");
+        SlotLayout {
+            run: AbsPath::parse("/Volumes/run").expect("run"),
+            uid_entry: None,
+            inputs: vec![],
+            read_denies: vec![],
+            mounts: vec![MountGrant {
+                path: at("-rw"),
+                write: true,
+                no_exec: false,
+            }],
+            trees: Some(trees),
+        }
+    };
+    let caps = || Caps {
+        net: Net::Remote(Ports::new(&[443]).expect("ports")),
+        read_model: ReadModel::Open,
+    };
+    let profile_of = |root: &str| {
+        let policy = Policy::base(layout(root), caps()).expect("policy");
+        Profile::for_policy(&policy).expect("profile")
+    };
+    let plain = profile_of("/Volumes/r");
+    for text in HOSTILE {
+        let profile = profile_of(text);
+        assert_eq!(profile.text(), plain.text(), "{text:?}");
+        assert!(!profile.text().contains(text), "{text:?}");
+        let values: Vec<String> = profile.params().iter().map(|(_, v)| v.clone()).collect();
+        let expected = [
+            "/Volumes/run".to_owned(),
+            text.to_owned(),
+            format!("{text}/t0"),
+            format!("{text}/t1"),
+            format!("{text}-rw"),
+        ];
+        assert_eq!(values, expected, "{text:?}");
+    }
+    for nul in ["/Volumes/r\0/t0", "/Volumes/r/t\0", "/Volumes/r-rw\0"] {
+        assert_eq!(AbsPath::parse(nul), Err(PathError::Control), "{nul:?}");
     }
 }
 
