@@ -1,6 +1,6 @@
 # CPU packing replay
 
-14140 jobs over 5.9 h on 6 hosts of 88 cores: 622 core-hours of CPU, a mean of 104.7 cores (19.8% of the farm). Recorded wait p50 1232 s, p90 1861 s, p99 3070 s. The most CPU a run of 10 s or more averaged: 23.3 cores (a shorter run is taken to average at most 24.0).
+14140 jobs over 5.9 h on 6 hosts of 88 cores: 622 core-hours of CPU, a mean of 104.7 cores (19.8% of the farm). Recorded wait p50 1232 s, p90 1861 s, p99 3070 s. The most CPU a run of 10 s or more averaged: 23.3 cores (a shorter run is taken to average at most 24.0). Runs of 30 s or more: 6932, with 87.3% of the CPU, their mean CPU p25 2.8, p50 4.2, p75 5.0 cores.
 
 ## Jobs by class
 

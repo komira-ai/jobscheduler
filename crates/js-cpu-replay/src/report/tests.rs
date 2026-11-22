@@ -51,7 +51,8 @@ fn the_report_describes_the_trace_and_its_classes() {
         lines[2],
         "9 jobs over 0.0 h on 6 hosts of 88 cores: 2 core-hours of CPU, a mean of 51.0 cores \
          (9.7% of the farm). Recorded wait p50 0 s, p90 0 s, p99 0 s. The most CPU a run of 10 s \
-         or more averaged: 24.0 cores (a shorter run is taken to average at most 24.0)."
+         or more averaged: 24.0 cores (a shorter run is taken to average at most 24.0). Runs of 30 \
+         s or more: 7, with 99.5% of the CPU, their mean CPU p25 1.0, p50 24.0, p75 24.0 cores."
     );
     for expected in [
         "5 classes, 8 runs that ended with 0. The 5 with the most CPU:",

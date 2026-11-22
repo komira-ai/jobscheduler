@@ -84,6 +84,9 @@ const LONG_MS: u64 = 60_000;
 /// stamp barely shortens.
 const LONG_RUN_MS: u64 = 10_000;
 
+/// The runs the summary describes apart, in milliseconds: those that carry the CPU.
+const THIRTY_S: u64 = 30_000;
+
 /// The waits the checks compare twice: of every job, and of the jobs that arrived after the
 /// trace's first hour, when the replayed farm holds as many jobs as the recorded one did.
 const WARM_MS: u64 = 3_600_000;
@@ -155,10 +158,18 @@ pub fn summary(jobs: &[Job], farm: Farm) -> String {
         .map(|job| job.cpu_ms * 1000 / job.wall_ms)
         .max()
         .unwrap_or(0);
+    let long: Vec<&Job> = jobs.iter().filter(|job| job.wall_ms >= THIRTY_S).collect();
+    let means = sorted(
+        long.iter()
+            .map(|job| job.cpu_ms * 1000 / job.wall_ms)
+            .collect(),
+    );
+    let long_cpu: u64 = long.iter().map(|job| job.cpu_ms).sum();
     format!(
         "{} jobs over {:.1} h on {} hosts of {} cores: {:.0} core-hours of CPU, a mean of {:.1} \
          cores ({}% of the farm). Recorded wait p50 {} s, p90 {} s, p99 {} s. The most CPU a run \
-         of {} s or more averaged: {} cores (a shorter run is taken to average at most {}).\n",
+         of {} s or more averaged: {} cores (a shorter run is taken to average at most {}). Runs \
+         of {} s or more: {}, with {}% of the CPU, their mean CPU p25 {}, p50 {}, p75 {} cores.\n",
         jobs.len(),
         span as f64 / 3_600_000.0,
         farm.hosts,
@@ -172,6 +183,12 @@ pub fn summary(jobs: &[Job], farm: Farm) -> String {
         LONG_RUN_MS / 1000,
         cores(most),
         cores(MOST_MEAN_MILLI),
+        THIRTY_S / 1000,
+        long.len(),
+        percent(long_cpu as f64, cpu as f64),
+        cores(percentile(&means, 25)),
+        cores(percentile(&means, 50)),
+        cores(percentile(&means, 75)),
     )
 }
 

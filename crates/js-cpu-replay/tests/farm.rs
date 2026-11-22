@@ -36,7 +36,8 @@ fn the_whole_export_sums_to_the_figures_the_design_cites() {
         "250739 jobs over 68.9 h on 6 hosts of 88 cores: 5755 core-hours of CPU, a mean of 83.5 \
          cores (15.8% of the farm). Recorded wait p50 24 s, p90 774 s, p99 2145 s. The most CPU a \
          run of 10 s or more averaged: 23.3 cores (a shorter run is taken to average at most \
-         24.0).\n"
+         24.0). Runs of 30 s or more: 91105, with 96.2% of the CPU, their mean CPU p25 0.7, p50 \
+         1.0, p75 1.2 cores.\n"
     );
 }
 
