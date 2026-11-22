@@ -1,0 +1,58 @@
+[package]
+name = "js-mac-first-install"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A test-only crate: the library is empty, and the one test (tests/mac_first_install.rs) is
+# js-agent's first install on a Mac, run by .github/workflows/js-agent-macos-first-install.yml.
+# It lives here, not in js-agent, because it runs hostkeeper's own code, and one of that code's
+# dependencies (`libproc`) generates its bindings only when the build host is a Mac: a
+# dev-dependency of js-agent would break the macOS clippy the lint job cross-builds on Linux,
+# and a dev-dependency cannot be optional. The lint job's macOS clippy and beta.yml's workspace
+# build and tests exclude this crate; the first-install workflow builds it on a Mac.
+
+# Everything the test uses is a dev-dependency for macOS alone; none of it is built for Linux.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# A service's name and a version, and a package's SHA-256, as hostkeeper's installer takes them.
+hostkeeper-config.workspace = true
+# The hook contract: the verdicts and parameters of the update hook the step runner runs.
+hostkeeper-hook.workspace = true
+# The macos-pkg installer (stage, activate, remove) and the sealed version directory it fills.
+hostkeeper-install.workspace = true
+# The daemon's launchd step launcher, the boot id, `launchctl` and the unit control of the switch.
+hostkeeper-launchd.workspace = true
+# The switch of the package's `current` link.
+hostkeeper-placed.workspace = true
+# The daemon's step runner, which runs the hook's steps as the daemon does.
+hostkeeper-steps.workspace = true
+# The client the agent's host identity is checked with, and the lease server the agent joins
+# (started in the test process).
+js-client = { path = "../js-client" }
+js-lease-server = { path = "../js-lease-server" }
+# The hex of a package's SHA-256.
+hex.workspace = true
+# The scratch directories.
+js-testkit = { path = "../js-testkit" }
+js-types = { path = "../js-types" }
+# The test CA and the host certificate it signs.
+rcgen.workspace = true
+rustix = { workspace = true, features = ["process"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: its one test is an `#[ignore]`d macOS root test (a first install on a
+# disposable Mac, run by .github/workflows/js-agent-macos-first-install.yml), and buildrules'
+# test gate refuses a test target with an ignored test.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

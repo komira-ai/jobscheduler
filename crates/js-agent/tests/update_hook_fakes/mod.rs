@@ -27,7 +27,7 @@ use js_agent::update_hook::{
     MAX_CORDON_SECS, Params, PortError, Uncordoned, UnitState, Units, read_link,
 };
 use js_agent_wire::Taint;
-use js_update_hook::swap_link;
+use js_update_hook::{real_path, swap_link};
 use serde::{Deserialize, Serialize};
 
 pub mod harness;
@@ -642,6 +642,12 @@ impl Link for World {
         }
         self.gate();
         swap_link(&file, target).map_err(|why| io_err(&why))
+    }
+
+    /// The real path on the world's own scratch directory, as on the machine: the releases the
+    /// params name are directories there.
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        real_path(path).map_err(|why| io_err(&why))
     }
 }
 

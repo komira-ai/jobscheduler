@@ -18,10 +18,12 @@
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
 //!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
-//! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
+//! - `release plan --head <sha>`, `release stamp --to <version>`,
+//!   `release next-version --version <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
-//!   and laying down the files of each release archive (docs/release.md).
+//!   the patch version after a version (the macOS update package's), and laying down the files
+//!   of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
@@ -444,6 +446,8 @@ enum ReleaseVerb {
     Plan(release::plan::PlanArgs),
     /// Set the release version in this checkout (not committed).
     Stamp(release::stamp::StampArgs),
+    /// The version after a package's: its patch plus one.
+    NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
@@ -603,6 +607,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+            ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,

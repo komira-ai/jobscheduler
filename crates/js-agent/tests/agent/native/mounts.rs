@@ -378,7 +378,7 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
     let exec = rig.fake.home_of("7.0").join("exec");
-    assert_eq!(fs::read_dir(exec).unwrap().count(), 0);
+    assert_eq!(visible(&exec), 0);
 }
 
 /// Asserts that a read-only mount may come from either kind of root, a read-write one only
@@ -429,7 +429,7 @@ fn discarding_the_file_system_of_a_run_drops_its_plan_and_is_idempotent() {
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
     let exec = rig.fake.home_of("7.0").join("exec");
-    assert_eq!(fs::read_dir(exec).unwrap().count(), 0);
+    assert_eq!(visible(&exec), 0);
     let parsed = parse(&rig.fake.run_of("7.0").argv);
     assert!(
         parsed
@@ -519,4 +519,20 @@ fn the_mount_roots_are_read_denies_of_every_run() {
         "--mount-root: /tmp/root: path starts with /tmp, a symbolic link; use the canonical \
          /private spelling"
     );
+}
+
+/// How many entries of the run directory `exec` the job did not get from the runtime: all
+/// but the hidden directories the runtime makes there for the job's home and temporary files.
+fn visible(exec: &Path) -> usize {
+    fs::read_dir(exec)
+        .unwrap()
+        .filter(|entry| {
+            !entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')
+        })
+        .count()
 }

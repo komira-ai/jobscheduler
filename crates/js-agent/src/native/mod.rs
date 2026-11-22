@@ -9,8 +9,8 @@
 //!    the helper's pool, and answers its uid; `pool-status` then names the lease's slot,
 //!    and so its user and home (`native/pool_user.rs`).
 //! 2. The agent, as root and before any process of that user exists, makes the run
-//!    directory below the user's home (`exec/`, the working directory, and `tmp/`) and
-//!    gives it to the user. It makes the job's three standard streams as files in the
+//!    directory below the user's home (`exec/`, the working directory, with `.home/`,
+//!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
 //! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
@@ -19,9 +19,15 @@
 //!    stands between the profile and the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
-//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
-//!    else, and the helper builds the process's environment around the one the agent
-//!    passes. The connection stays open until the process exits: a thread of the runtime
+//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the run directory
+//!    `exec/` and nothing else: the account's home itself is not writable to the job (macOS
+//!    guards what a job would make in `~/Library` even against root, so the sweep could
+//!    not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
+//!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper
+//!    sets `HOME` to the account's home whatever the agent passes, so the command is
+//!    `sandbox-exec ... /usr/bin/env HOME=<exec/.home> <program> <args>`: `env` runs
+//!    inside the profile and executes the program, and the helper's wire is unchanged.
+//!    The helper builds the process's environment around the one the agent passes. The connection stays open until the process exits: a thread of the runtime
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
 //!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
 //!    `--run-files-root`) has their directory given to the user before this, `0500` with
@@ -49,7 +55,7 @@
 //!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's
-//! own `trees` directory, and `@bundle/<entrypoint>` resolved to the file in the store (or
+//! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in the store (or
 //! the clone) that the bundle's config names; the environment and arguments are the
 //! bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
 //! the run.
@@ -130,7 +136,7 @@
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
 //! grant the user's `/var/folders` entry (toolchains that need it get their temporary files
-//! from `TMPDIR`, which is inside the home).
+//! from `TMPDIR`, which is inside the run directory).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
@@ -468,8 +474,12 @@ impl NativeRuntime {
     ) -> Result<Run, RuntimeError> {
         let user = pool_user::user_of(&self.helper, id, lease)?;
         let home = self.config.homes.join(user);
-        let (exec, tmp) = (home.join("exec"), home.join("tmp"));
-        for dir in [&exec, &tmp] {
+        let exec = profile::run_dir(&home);
+        let (tmp, job_home) = (
+            exec.join(profile::JOB_TMP_DIR),
+            exec.join(profile::JOB_HOME_DIR),
+        );
+        for dir in [&exec, &tmp, &job_home] {
             make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
         }
         // The files and the inputs go to the user before any process of it exists.
@@ -485,7 +495,7 @@ impl NativeRuntime {
             .map_err(|why| RuntimeError::new(why.to_string()))?;
         let (native, mut env) = match &pinned {
             Some(pinned) => {
-                let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp, dev.as_deref()))
+                let prepared = bundle::prepare(pinned, native, &exec, (uid, &tmp, dev.as_deref()))
                     .map_err(|why| fail(&"the bundle", &why))?;
                 let body = NativeSpec {
                     program: prepared.program,
@@ -497,6 +507,7 @@ impl NativeRuntime {
             }
             None => (native.clone(), env::plain(native, &tmp, dev.as_deref())),
         };
+        env.push(env::job_home(&job_home));
         let files = spec.files.as_deref();
         if let Some(dir) = files {
             env.push((files::FILES_DIR_ENV.to_owned(), dir.display().to_string()));

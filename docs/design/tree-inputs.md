@@ -667,7 +667,7 @@ tree must be readable and the rest of the mount must not:
   checked at `:85`); the agent canonicalises `--tierstore-fs` once at start and builds each tree path as
   `<mount>/trees/<64 hex>` from it, so no per-run `realpath` is needed. A `subpath` rule matches the resolved path, so a
   symbolic link in a tree that points outside it leads to a denied path (tierstore Measured: macos E15, E18a).
-- A tree path is never a write grant: the profile's head denies `file-write*` everywhere but the run's home.
+- A tree path is never a write grant: the profile's head denies `file-write*` everywhere but the run directory (`exec/` in the pool user's home).
 
 The builder bounds each list at 64 entries (`MAX_LISTED`, `policy.rs:16`). The read-only list of a run holds its files
 directory, its mount inputs and, with this design, its tree links (4.3); the agent checks that sum at admission and
@@ -678,7 +678,7 @@ refuses a start over it (`too-many-inputs-here`), and the tree grants are a seco
 The run's working directory is `exec/` in the pool user's home. A `ReadOnly` tree at `dest` appears as a symbolic link
 `exec/<dest>` → `/private/var/tierstore/fs/trees/<64 hex>`, made by the agent before the job's first process. The link
 is in the run's read-only list (`IN_i`, `profile.rs:129-132`), which keeps the job from removing or replacing the link
-itself; writes through it already land outside the run's home, where the profile's head denies them. A job that
+itself; writes through it already land outside the run directory, where the profile's head denies them. A job that
 resolves the link reads the tree lazily.
 
 The agent's working-directory check follows a link only when it resolves inside `exec/` (`native/cwd.rs:44-80`), so a

@@ -351,6 +351,20 @@ fn cutover_makes_no_call_when_the_machine_is_already_done() {
     assert!(record.stop_begun && record.start_issued && !record.link_moved);
 }
 
+/// Asserts that a link already on the staged release spelt through a symbolic link on the way
+/// (macOS `/var` against `/private/var`) is on it: no stop, no relink, no start.
+///
+/// Catches a comparison by name, which stops the unit and moves the link again, or fails.
+#[test]
+fn cutover_makes_no_call_when_the_link_is_on_the_staged_release_by_another_spelling() {
+    let rig = cut_rig("spc-cutover-link-aliased");
+    *rig.link.target.borrow_mut() = Some(rig.aliased("2.0.0"));
+    let done = rig.run(Step::Cutover);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.calls(), Vec::<String>::new());
+    assert_eq!(*rig.link.target.borrow(), Some(rig.aliased("2.0.0")));
+}
+
 /// Asserts that a link that cannot be read fails `cutover` with `link_failed` (class release,
 /// irreversible) naming the link, and nothing is stopped.
 #[test]
