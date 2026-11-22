@@ -6,9 +6,9 @@
 //! by its host certificate. On the host that install leaves, the host group's config package is
 //! rolled over the running agent (the config hook restarts it onto the new flags) and then the
 //! agent itself is updated to the next version. The host the lease server lists carries the
-//! capability `full-disk-access` as `not-granted`: the root helper the hosted runner installs is
-//! not signed by the release's identity, so no privacy profile grants it Full Disk Access, and
-//! the agent reports what its helper says. (That such an agent refuses every native job with
+//! capability `full-disk-access` as `not-granted`: the agent the hosted runner installs is not
+//! signed by the release's identity and the runner has no privacy profile, so it holds no Full
+//! Disk Access, and the agent reports what its own listing shows. (That such an agent refuses every native job with
 //! `no-full-disk-access` is the agent's own tests; submitting a job here would need a lease
 //! request, a native job body and its outcome read back, which is more machinery than this
 //! install test carries.) What of hostkeeper's daemon is reproduced, and
@@ -275,13 +275,13 @@ fn config_update(daemon: &Arc<Daemon>, server: &LeaseServer, scratch: &Path) {
     );
 }
 
-/// The host entry carries the helper's answer to the agent's question as the capability
-/// `full-disk-access`: `not-granted`, as the helper of this runner is unsigned and holds no grant.
+/// The host entry carries the agent's own answer as the capability `full-disk-access`:
+/// `not-granted`, as the agent of this runner is unsigned and holds no grant.
 fn assert_full_disk_access_not_granted(server: &LeaseServer) {
     let seen = server.host(HOST_ID);
     assert_eq!(
         seen["capabilities"]["full-disk-access"], "not-granted",
-        "the host list shows the helper without Full Disk Access: {seen}"
+        "the host list shows the agent without Full Disk Access: {seen}"
     );
 }
 
@@ -356,7 +356,7 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// the next one cannot install on, a config hook that halts on the links above its state
 /// directory (`/var` is one) or leaves the agent on the old flags, and an update of a running
 /// agent that does not switch `current` and `previous`, or does not bring the agent of the next
-/// version up and joined, and an agent that does not report whether its helper holds Full Disk
+/// version up and joined, and an agent that does not report whether it holds Full Disk
 /// Access (the host list then lacks the capability or shows another state).
 #[test]
 #[ignore = "needs root on a disposable Mac: installs the js-agent package, updates it and loads launchd jobs"]

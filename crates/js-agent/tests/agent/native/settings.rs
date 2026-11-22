@@ -643,12 +643,12 @@ fn on_without_pf_flags_still_fails_to_open() {
 }
 
 /// Asserts that settings made from the flags know nothing of Full Disk Access (it is
-/// `undetermined`, which refuses every native job) until the agent has asked the helper and
-/// says so with `with_full_disk_access`, which changes that state and nothing else. Catches
+/// `undetermined`, which refuses every native job) until the agent has listed the privacy
+/// database's directory and says so with `with_full_disk_access`, which changes that state and nothing else. Catches
 /// settings that start out granted (a Mac that runs jobs before it asked) and a builder that
 /// disturbs another setting.
 #[test]
-fn settings_are_undetermined_until_the_helper_has_been_asked() {
+fn settings_are_undetermined_until_the_agent_has_looked() {
     let dir = Scratch::new("native-set-grant");
     let homes = dir.path("homes");
     fs::create_dir(&homes).unwrap();
