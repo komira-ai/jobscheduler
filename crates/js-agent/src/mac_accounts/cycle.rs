@@ -36,6 +36,7 @@
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -74,7 +75,7 @@ pub const LISTED: usize = 20;
 const JOB: &str = "account-cycle";
 
 /// How the command line reads.
-const USAGE: &str = "usage: js-agent __account-cycle --state <dir> [-- <program> [args...]]";
+const USAGE: &str = "usage: js-agent __account-cycle --state <dir> [--range <first>-<last>] [-- <program> [args...]]";
 
 /// The command line after the mode word.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,9 @@ pub struct Args {
     pub state: PathBuf,
     /// The programs to run as the account, each with its arguments, in order.
     pub commands: Vec<Vec<String>>,
+    /// The uids the pool's slots take, when not the pool's own range ([`super::UID_RANGE`]):
+    /// a proof on a Mac whose range an earlier release's accounts still fill runs beside them.
+    pub range: Option<RangeInclusive<u32>>,
 }
 
 /// The programs run when none is given: the one that makes the slot's per-user folder, and
@@ -111,6 +115,7 @@ fn default_commands() -> Vec<Vec<String>> {
 /// What is wrong with it, in words.
 pub fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut state = None;
+    let mut range = None;
     let mut command: Option<Vec<String>> = None;
     let mut words = args.iter();
     while let Some(word) = words.next() {
@@ -119,6 +124,12 @@ pub fn parse(args: &[OsString]) -> Result<Args, String> {
                 let value = words.next().ok_or("--state needs a directory")?;
                 if state.replace(PathBuf::from(value)).is_some() {
                     return Err("--state is given twice".to_owned());
+                }
+            }
+            Some("--range") => {
+                let value = words.next().ok_or("--range needs <first>-<last>")?;
+                if range.replace(range_of(value)?).is_some() {
+                    return Err("--range is given twice".to_owned());
                 }
             }
             Some("--" | "--command") => {
@@ -141,7 +152,22 @@ pub fn parse(args: &[OsString]) -> Result<Args, String> {
     Ok(Args {
         state: state.ok_or("--state is required")?,
         commands: command.map_or_else(default_commands, |command| vec![command]),
+        range,
     })
+}
+
+/// The range `<first>-<last>` of `value`, both uids, the first not above the last.
+fn range_of(value: &OsString) -> Result<RangeInclusive<u32>, String> {
+    let bad =
+        || format!("--range {value:?}: not <first>-<last>, two uids, the first not above the last");
+    let (first, last) = value
+        .to_str()
+        .and_then(|text| text.split_once('-'))
+        .ok_or_else(bad)?;
+    match (first.parse::<u32>(), last.parse::<u32>()) {
+        (Ok(first), Ok(last)) if first <= last => Ok(first..=last),
+        _ => Err(bad()),
+    }
 }
 
 /// Runs the verb: `args` is the whole command line, the mode word second.
@@ -160,9 +186,13 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitC
 /// run a program as an account.
 #[cfg(target_os = "macos")]
 fn run_parsed(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    let mut settings = Settings::macos(1);
+    if let Some(range) = &args.range {
+        settings.range = range.clone();
+    }
     drive(
         args,
-        Settings::macos(1),
+        settings,
         Arc::new(super::MacHost),
         &super::macos::AsAccount,
         out,

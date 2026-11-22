@@ -102,6 +102,7 @@ fn args_of(rig: &Rig) -> Args {
     Args {
         state: rig.dir.join("state"),
         commands: default_commands(),
+        range: None,
     }
 }
 
@@ -128,6 +129,7 @@ fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
                     "yes"
                 ]),
             ],
+            range: None,
         }
     );
     for form in ["--", "--command"] {
@@ -329,6 +331,7 @@ fn the_command_given_is_run_and_how_it_ended_is_printed() {
     let args = Args {
         state: rig.dir.join("state"),
         commands: vec![command(&["/bin/sh", "-c", "exit 3"])],
+        range: None,
     };
     let runner = Script::new(vec![Ok(Ran {
         code: Some(3),
@@ -470,6 +473,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
     let args = Args {
         state: state.clone(),
         commands: vec![command(&["/bin/true"])],
+        range: None,
     };
     let runner = Script::new(vec![Ok(ran(0, "", ""))]);
     let (status, _, err) = cycle(&rig, &args, &runner);
@@ -483,6 +487,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
         let args = Args {
             state: rig.dir.join(path),
             commands: vec![command(&["/bin/true"])],
+            range: None,
         };
         let (status, out, err) = cycle(&rig, &args, &Script::new(vec![]));
         assert_eq!(status, status::REFUSED, "{path}");
@@ -591,5 +596,39 @@ fn a_listing_that_cannot_be_read_is_an_error() {
         assert_eq!(why.kind(), io::ErrorKind::PermissionDenied);
     } else {
         eprintln!("skipped: permission bits do not stop root");
+    }
+}
+
+/// Asserts that `--range <first>-<last>` gives the slots' uids, and that a range given twice,
+/// with no value, not two uids, or reversed is a usage error naming what is wrong.
+#[test]
+fn a_range_is_two_uids_the_first_not_above_the_last() {
+    let parsed = parse(&words(&["--state", "/s", "--range", "700-709"])).unwrap();
+    assert_eq!(parsed.range, Some(700..=709));
+    assert_eq!(
+        parse(&words(&["--state", "/s", "--range", "7-7"]))
+            .unwrap()
+            .range,
+        Some(7..=7)
+    );
+    assert_eq!(parse(&words(&["--state", "/s"])).unwrap().range, None);
+    assert_eq!(
+        parse(&words(&[
+            "--state", "/s", "--range", "700-709", "--range", "1-2"
+        ])),
+        Err("--range is given twice".to_owned())
+    );
+    assert_eq!(
+        parse(&words(&["--state", "/s", "--range"])),
+        Err("--range needs <first>-<last>".to_owned())
+    );
+    for wrong in ["709-700", "700", "a-b", "700-", "-700"] {
+        assert_eq!(
+            parse(&words(&["--state", "/s", "--range", wrong])),
+            Err(format!(
+                "--range {wrong:?}: not <first>-<last>, two uids, the first not above the last"
+            )),
+            "{wrong}"
+        );
     }
 }
