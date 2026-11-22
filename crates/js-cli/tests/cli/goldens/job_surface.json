@@ -167,7 +167,7 @@
         "required": false
       },
       {
-        "doc": "The mode the host runs jobs in. Unspecified: either.",
+        "doc": "The mode the host runs jobs in. A client need not give it: how a job is run follows from its os, a macos job that names an image running it natively as a bundle and any other job in a container. When given it is honoured, as an older client sends it: the job is placed only on a host that reports the mode, and sandbox-exec runs the image natively and container in a container, whatever os says. Unspecified: either.",
         "field": [
           "spec",
           "constraints",

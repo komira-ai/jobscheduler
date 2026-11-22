@@ -33,11 +33,11 @@ The host runs jobs from bundles already: `js-agent` has a bundle store (`--bundl
 ```
 js job run --server https://js.example.com:<job port> --token-file <client token> --ca-cert <ca.pem> \
   --spec.image ghcr.io/komira-ai/js/smoke:1@sha256:9e02a9ff48c04e969131abf064e01af65a167038ecc85764a8236a75cb1dc9a7 \
-  --spec.constraints.os macos --spec.constraints.arch arm64 --spec.constraints.exec sandbox-exec \
+  --spec.constraints.os macos --spec.constraints.arch arm64 \
   --spec.args proof --spec.wall-limit-seconds 5m
 ```
 
-No `--spec.command`: the program is the bundle's entrypoint named as the bundle, `smoke` (the last part of the image's name), which is `bin/smoke` in its tree. On a host that does not hold the bundle yet, the job's start fetches it in the background and is held (`bundle-pending`) until the bundle is in the store; the job then starts as any other.
+No `--spec.constraints.exec`: a job on `macos` that names an image is started natively, from the bundle (a client that still sends `sandbox-exec` gets the same start). No `--spec.command`: the program is the bundle's entrypoint named as the bundle, `smoke` (the last part of the image's name), which is `bin/smoke` in its tree. On a host that does not hold the bundle yet, the job's start fetches it in the background and is held (`bundle-pending`) until the bundle is in the store; the job then starts as any other.
 
 What `js` prints: the job's stdout, one line, on stdout, for instance
 
