@@ -28,12 +28,15 @@ fn a_job_env_reaches_the_helper_over_the_agents_and_stays_off_the_command_line()
     spec.env = env;
     rig.rt.create_and_start(&spec).unwrap();
     let run = rig.fake.run_of("7.0");
-    let tmp = rig.fake.home_of("7.0").join("tmp").display().to_string();
+    let home = rig.fake.home_of("7.0");
+    let tmp = home.join("exec/.tmp").display().to_string();
+    let job_home = home.join("exec/.home").display().to_string();
     assert_eq!(
         run.env,
         [
             pair("B", "kept"),
             pair("TMPDIR", &tmp),
+            pair("CFFIXED_USER_HOME", &job_home),
             pair("A", "value-a-17"),
             pair("PATH", "/job/path"),
         ]

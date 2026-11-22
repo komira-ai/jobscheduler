@@ -123,6 +123,10 @@ impl PassMetrics for Watched<'_> {
     fn job_tables(&self, from: TablesFrom) {
         self.metrics.job_tables(from);
     }
+
+    fn refused(&self, host: &HostId, reason: &'static str) {
+        self.metrics.refused(host, reason);
+    }
 }
 
 /// When each of `cordons` lapses, each with the time it had left at `now`.

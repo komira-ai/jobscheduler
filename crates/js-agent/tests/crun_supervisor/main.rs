@@ -8,6 +8,7 @@
 #![cfg(target_os = "linux")]
 
 mod gpu_unit;
+mod refused;
 mod unit;
 
 /// Proves, in a real systemd unit started as the packaged unit is (`Delegate=yes` and

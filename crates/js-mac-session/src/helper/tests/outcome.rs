@@ -38,6 +38,7 @@ fn two_passes(uid: u32, domains: &[&str]) -> Vec<String> {
 fn answer(code: i32, stderr: &str) -> PrintAnswer {
     PrintAnswer {
         code: Some(code),
+        stdout: String::new(),
         stderr: stderr.to_owned(),
     }
 }

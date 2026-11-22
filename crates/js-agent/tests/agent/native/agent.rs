@@ -626,17 +626,35 @@ fn plist(body: &str) -> String {
     )
 }
 
-/// Asserts that a Mac agent whose scratch root is on its state root's file system (as after a
-/// boot, which mounts no scratch volume) asks `diskutil` to mount the scratch volume on the
-/// scratch root before it opens either root, and that one whose mount fails ends before the
-/// hello naming `--scratch-root` and the command. Catches an agent that never mounts the
-/// volume, which would refuse to start after every reboot.
+/// Asserts that a Mac agent whose scratch root's parent is on its state root's file system (as
+/// after a boot, which mounts no scratch volume) asks `diskutil` to mount the scratch volume on
+/// that parent, not on the scratch root, before it opens either root or looks at the bundle
+/// store, and that one whose mount fails ends before the hello naming `--scratch-root` and the
+/// command. Catches an agent that never mounts the volume, which would refuse to start after
+/// every reboot, and one that mounts it on the scratch root, which leaves no volume for the
+/// store beside it.
 #[test]
 fn a_mac_agent_mounts_the_scratch_volume_before_it_opens_its_roots() {
     let dir = Scratch::new("native-agent-scratch-volume");
     let fake = FakeHelper::start(&dir);
-    let extra = native_flags(&dir, &fake);
-    let scratch = dir.path("scratch").display().to_string();
+    let mut extra = native_flags(&dir, &fake);
+    // A store beside the scratch root, which does not exist yet: it can be made and checked
+    // only once the volume is mounted, so a mount that fails ends the start first.
+    let bundles = dir.path("bundles").display().to_string();
+    extra.extend(
+        [
+            "--bundle-store",
+            &bundles,
+            "--bundle-budget-gib",
+            "10",
+            "--bundle-trust",
+            "digest",
+        ]
+        .map(str::to_owned),
+    );
+    // The volume is mounted on the directory above the scratch root.
+    let scratch = dir.path("scratch");
+    let scratch = scratch.parent().unwrap().display().to_string();
     let data = "/usr/sbin/diskutil info -plist /System/Volumes/Data";
     let list = "/usr/sbin/diskutil apfs list -plist disk3";
     let info = "/usr/sbin/diskutil info -plist disk3s7";

@@ -744,6 +744,9 @@ pub(crate) fn output() -> Output {
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         logs: None,
     }

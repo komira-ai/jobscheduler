@@ -364,14 +364,13 @@ fn a_path_that_is_not_plain_is_refused_before_anything_is_opened() {
     }
 }
 
-/// A link in place of a directory above the state directory is refused as an ancestor
-/// (the link's own path is named), not followed.
+/// A link above the state directory that leads nowhere is refused as an ancestor that is a
+/// link (the link's own path is named), not followed and not made good.
 #[test]
-fn a_symbolic_link_above_the_state_directory_is_refused_as_an_ancestor() {
+fn a_dangling_link_above_the_state_directory_is_refused_as_an_ancestor() {
     let tmp = cell("state-open-ancestor-link");
-    fs::create_dir_all(tmp.path().join("real").join("state")).unwrap();
     let link = tmp.path().join("link");
-    symlink(tmp.path().join("real"), &link).unwrap();
+    symlink(tmp.path().join("nowhere"), &link).unwrap();
     let error = open(&link.join("state")).unwrap_err();
     assert!(
         matches!(&error, StateError::Ancestor { path, problem: DirProblem::Symlink } if *path == link),
@@ -383,6 +382,108 @@ fn a_symbolic_link_above_the_state_directory_is_refused_as_an_ancestor() {
             "above the state directory, {}: is a symbolic link",
             link.display()
         )
+    );
+}
+
+/// A Mac's `/var` is a link into `/private`; a state directory reached through such a root-owned
+/// link is opened at its real location, and the lock is taken there.
+///
+/// Catches a walk that refuses every link above the state directory, which halts every update
+/// of a package whose state directory is under `/var` on a Mac.
+#[test]
+fn a_state_directory_reached_through_a_system_link_is_opened_at_its_real_location() {
+    let tmp = cell("state-open-system-link");
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    dir_with_mode(&root.join("private/var/lib/state"), 0o700);
+    symlink("private/var", root.join("var")).unwrap();
+    let held = Held::<Note>::open(&root.join("var/lib/state"), &rooted(&root)).unwrap();
+    assert!(root.join("private/var/lib/state").join(LOCK_FILE).exists());
+    drop(held);
+}
+
+/// Through a link, the directories it leads to are held to the rules like any other: a real
+/// directory that others can write is refused (named by its real path), so a link put in the
+/// path by someone else gets no further than that directory.
+#[test]
+fn a_link_into_a_directory_others_can_write_is_refused_at_its_real_path() {
+    let tmp = cell("state-open-link-writable");
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    dir_with_mode(&root.join("planted/state"), 0o700);
+    symlink("planted", root.join("link")).unwrap();
+    let writable = stat_of(false, true, 0, 0, 0o777);
+    let error = Held::<Note>::open(
+        &root.join("link/state"),
+        &seeing(&root.join("planted"), writable),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, StateError::Ancestor { path, problem: DirProblem::Writable { mode: 0o777 } } if *path == root.join("planted")),
+        "{error:?}"
+    );
+    assert!(!root.join("planted/state").join(LOCK_FILE).exists());
+}
+
+/// A link into a directory another user owns is refused at its real path as not root's.
+#[test]
+fn a_link_into_a_directory_another_user_owns_is_refused_at_its_real_path() {
+    let tmp = cell("state-open-link-foreign");
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    dir_with_mode(&root.join("theirs/state"), 0o700);
+    symlink("theirs", root.join("link")).unwrap();
+    let foreign = stat_of(false, true, 1000, 1000, 0o755);
+    let error = Held::<Note>::open(
+        &root.join("link/state"),
+        &seeing(&root.join("theirs"), foreign),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, StateError::Ancestor { path, problem: DirProblem::NotRootOwned { uid: 1000 } } if *path == root.join("theirs")),
+        "{error:?}"
+    );
+}
+
+/// A link above the state directory is walked through when the state directory has to be made:
+/// the missing directories are made at the real location.
+#[test]
+fn a_missing_state_directory_behind_a_system_link_is_made_at_its_real_location() {
+    let tmp = cell("state-make-system-link");
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    dir_with_mode(&root.join("private/var"), 0o755);
+    symlink("private/var", root.join("var")).unwrap();
+    let held = Held::<Note>::open_or_make(&root.join("var/lib/state"), &rooted(&root)).unwrap();
+    assert!(root.join("private/var/lib/state").join(LOCK_FILE).exists());
+    drop(held);
+}
+
+/// The root itself is not a directory with one above it: it is looked at as the state
+/// directory, and refused for its mode.
+#[test]
+fn the_root_as_the_state_directory_is_refused_for_its_mode() {
+    let wide = stat_of(false, true, 0, 0, 0o755);
+    let error = Held::<Note>::open(Path::new("/"), &seeing(Path::new("/"), wide)).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            StateError::Dir {
+                problem: DirProblem::Mode { mode: 0o755 },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+/// A path whose parent cannot be resolved because a file is in the way is walked as it is, so
+/// the walk names the file.
+#[test]
+fn a_path_through_a_file_is_refused_at_the_file() {
+    let tmp = cell("state-open-through-file");
+    let file = tmp.path().join("file");
+    fs::write(&file, "x").unwrap();
+    let error = open(&file.join("sub").join("state")).unwrap_err();
+    assert!(
+        matches!(&error, StateError::Ancestor { path, problem: DirProblem::NotDirectory } if *path == file),
+        "{error:?}"
     );
 }
 
@@ -664,7 +765,7 @@ fn a_lock_file_that_is_not_a_regular_file_fails_the_step_and_releases_the_direct
 }
 
 /// Reading the record without the lock refuses a directory as `open` does: not plain, a link
-/// above, a wrong owner at the end.
+/// above that leads nowhere, a wrong owner at the end.
 #[test]
 fn peek_refuses_a_directory_as_open_does() {
     let tmp = cell("state-peek-dir-errors");
@@ -683,9 +784,8 @@ fn peek_refuses_a_directory_as_open_does() {
         "{error:?}"
     );
 
-    fs::create_dir_all(tmp.path().join("real").join("state")).unwrap();
     let link = tmp.path().join("link");
-    symlink(tmp.path().join("real"), &link).unwrap();
+    symlink(tmp.path().join("nowhere"), &link).unwrap();
     let error = peek::<Note>(&link.join("state"), &as_root).unwrap_err();
     assert!(
         matches!(&error, StateError::Ancestor { path, problem: DirProblem::Symlink } if *path == link),

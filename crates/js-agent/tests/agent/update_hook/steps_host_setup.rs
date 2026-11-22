@@ -1,6 +1,7 @@
 //! The host setup of a Mac in `prepare` (`socket_group`, `scratch_root`): the helper's socket
 //! group is made before the helper is bootstrapped, the state root and the scratch root are made
-//! and the scratch root gets a volume of its own, mounted on it with no file system table
+//! and the scratch root's parent gets a volume of its own, mounted on it (mode 0711, the
+//! scratch root a private directory on it), with no file system table
 //! written; a part that cannot be made defers `host_setup_missing` with nothing written and
 //! nothing cordoned; a rerun after a kill at any point ends as an uninterrupted run; a systemd
 //! host that names a part is refused. The error paths of the volume are in
@@ -16,7 +17,7 @@ use js_agent::update_hook::step::{DISKUTIL, DSCL, DSEDITGROUP, SCRATCH_VOLUME};
 use js_agent::update_hook::{Class, Done, LAUNCHCTL, Outcome, Reason};
 
 use super::fake_mac::{
-    DEVICE, FIRST_GID, FakeMac, GROUP, QUOTA, UUID, Volume, mac_rig, scratch_of, spy_on,
+    DEVICE, FIRST_GID, FakeMac, GROUP, QUOTA, UUID, Volume, mac_rig, mount_of, scratch_of, spy_on,
 };
 use super::step_rig::{MAC_UNIT, RETRY_AFTER_SECS, Rig, Spy, killable};
 
@@ -44,7 +45,7 @@ pub(super) fn assert_no_table(rig: &Rig) {
 
 /// What a first install on an empty Mac changes, in order.
 pub(super) fn first_changes(rig: &Rig) -> Vec<String> {
-    let scratch = scratch_of(rig).display().to_string();
+    let scratch = mount_of(rig).display().to_string();
     vec![
         format!("{DSEDITGROUP} -o create {GROUP}"),
         format!("{DISKUTIL} apfs addVolume disk3 APFS {SCRATCH_VOLUME} -quota {QUOTA} -nomount"),
@@ -101,28 +102,33 @@ fn a_socket_group_that_is_there_is_not_made_again() {
     assert_eq!(mac.groups.borrow().get(GROUP), Some(&401));
 }
 
-/// Asserts that a first install on an empty Mac makes the state root and the scratch root
-/// (0700, their parent 0755), makes the scratch volume with nine tenths of the container as its
-/// quota, mounts it on the scratch root (`nobrowse`) and gives it ownership, in that order,
-/// writes no file system table, and writes its record. Catches an agent that refuses to start
+/// Asserts that a first install on an empty Mac makes the state root (0700), makes the scratch
+/// volume with nine tenths of the container as its quota, mounts it (`nobrowse`) on the scratch
+/// root's parent and gives it ownership, in that order, then makes the scratch root on the volume
+/// (0700) and sets the mount point to 0711 (its parent 0755), makes no store directory, writes
+/// no file system table, and writes its record. Catches a mount point a lease user cannot search
+/// (a native job of a bundle in the store beside the scratch root ends 71 `Permission denied`),
+/// a scratch root made under the mount instead of on the volume, an agent that refuses to start
 /// because its two roots share a file system, and a setup that needs a table macOS refuses.
 #[test]
-fn a_first_install_makes_the_roots_and_gives_the_scratch_root_its_own_volume() {
+fn a_first_install_makes_the_roots_and_mounts_the_scratch_volume_on_the_scratch_roots_parent() {
     let rig = mac_rig("hook-setup-roots", false);
     let mac = FakeMac::new();
     let spy = spy_on(&rig, &mac);
     let done = spy.prepare(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let scratch = scratch_of(&rig);
+    let (scratch, mount) = (scratch_of(&rig), mount_of(&rig));
     assert_eq!(mode(&rig.params.state_root), 0o700);
     assert_eq!(mode(&scratch), 0o700);
-    assert_eq!(mode(scratch.parent().unwrap()), 0o755);
+    assert_eq!(mode(&mount), 0o711);
+    assert_eq!(mode(mount.parent().unwrap()), 0o755);
+    assert!(!mount.join("bundles").exists());
     assert_eq!(mac.changes(), first_changes(&rig));
     assert_no_table(&rig);
     assert_eq!(
         *mac.volume.borrow(),
         Some(Volume {
-            mount: Some(scratch),
+            mount: Some(mount),
             owners: true,
         })
     );
@@ -275,9 +281,10 @@ fn ends(rig: &Rig, spy: &Spy<'_>, mac: &FakeMac) -> String {
         .record()
         .map(|record| serde_json::to_string(&record).unwrap());
     let state = format!(
-        "{record:?} {:?} {:o} {:o} {:?} {:?}",
+        "{record:?} {:?} {:o} {:o} {:o} {:?} {:?}",
         spy.fstab_leftover.exists(),
         mode(&rig.params.state_root),
+        mode(&mount_of(rig)),
         mode(&scratch_of(rig)),
         mac.groups.borrow(),
         mac.volume.borrow(),

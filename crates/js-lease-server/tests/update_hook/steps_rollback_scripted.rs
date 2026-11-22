@@ -70,6 +70,33 @@ impl Link for ReadsFail<'_> {
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
         self.inner.relink(link, target)
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.inner.real(path)
+    }
+}
+
+/// The real link fake, except that resolving `bad` fails.
+struct RealFails<'a> {
+    inner: &'a FakeLink,
+    bad: PathBuf,
+}
+
+impl Link for RealFails<'_> {
+    fn target(&self, link: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.inner.target(link)
+    }
+
+    fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
+        self.inner.relink(link, target)
+    }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        match path == self.bad {
+            true => Err(PortError::Io("Permission denied (os error 13)".to_owned())),
+            false => self.inner.real(path),
+        }
+    }
 }
 
 /// A store whose lock follows the unit: nobody holds it while the unit is not active, `new`
@@ -196,6 +223,37 @@ fn rollback_fails_link_failed_when_the_link_cannot_be_read_at_the_move() {
     let done = step::run(Step::Rollback, &env, &rig.params);
     fails(&done, Outcome::Failure, Reason::LinkFailed, Class::Release);
     assert_eq!(rig.calls(), ["stop".to_owned()]);
+}
+
+/// Asserts that a path that cannot be resolved while the rollback compares where the link leads
+/// ends it `link_failed` (class release) with no stop: the link's directory, the previous
+/// release (the first comparison), and the staged release (the second, with the unit up and the
+/// link on a third release).
+///
+/// Catches a resolution failure taken as "not on this release", which would stop the unit or
+/// relink on a guess.
+#[test]
+fn rollback_fails_link_failed_when_a_path_cannot_be_resolved_in_a_comparison() {
+    for case in ["directory", "previous", "staged"] {
+        let rig = after_cutover(&format!("uvr-rb-real-{case}"));
+        rig.store.answer([held("new")]);
+        let bad = match case {
+            "directory" => rig.path("link"),
+            "previous" => rig.previous(),
+            _ => rig.staged(),
+        };
+        // A third release that exists, so each comparison goes on to resolve the release.
+        std::fs::create_dir_all(rig.path("releases/3.0.0")).unwrap();
+        *rig.link.target.borrow_mut() = Some(rig.path("releases/3.0.0"));
+        let link = RealFails {
+            inner: &rig.link,
+            bad,
+        };
+        let env = env_over(&rig, &rig.units, &link, &rig.store);
+        let done = step::run(Step::Rollback, &env, &rig.params);
+        fails(&done, Outcome::Failure, Reason::LinkFailed, Class::Release);
+        assert_eq!(rig.calls(), Vec::<String>::new(), "{case}");
+    }
 }
 
 /// Asserts that a rollback killed at any of its kill points leaves the record, and that a clean

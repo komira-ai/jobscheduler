@@ -61,14 +61,20 @@
 #   --drain-wait 3600 --stop-grace 120   a plain stop (systemctl stop) drains: the agent lets
 #                         the running jobs finish for up to an hour (the most --drain-wait
 #                         allows) and then stops them within 120 s before it exits. An update
-#                         does not drain: its cutover writes the file handover in the state
-#                         root just before it stops the unit, and the agent that finds it at the
-#                         stop takes no new job, waits only until no start, stop or post-job
-#                         check is under way (seconds; --drain-wait at most), and exits leaving
-#                         every run as it is; the agent the cutover starts adopts them, as after
-#                         a crash. The update hook asks for it only of an agent that lists
-#                         `handover` in `js-agent --version` (and `egress-handover`, if the
-#                         flags file has an --egress); see docs/runbooks/crun-host-setup.md
+#                         hands the runs over in place and does not stop the unit: its cutover
+#                         writes the file handover in the state root and sends the agent SIGHUP
+#                         (systemctl kill --kill-whom=main); the agent takes no new job, waits
+#                         until no start, stop or post-job check is under way (seconds;
+#                         --drain-wait at most), and runs its program again in the same process,
+#                         which adopts every run, as after a crash. The unit is not stopped and
+#                         systemd starts nothing, so it places no process in the unit's cgroup
+#                         while the leases hold their controllers. The update hook does this
+#                         only when the running and the staged agent both list `in-place` on the
+#                         `stops:` line of `js-agent --version` (and `handover`, and
+#                         `egress-handover` if the flags file has an --egress). An update whose
+#                         agents cannot stops and starts the unit on systemd 257 or older, with
+#                         the handover file written before the stop, and drains on 258 or newer
+#                         (ExecStopPost= below says why); see docs/runbooks/crun-host-setup.md
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
 #                         killed (its main process alone, as above: what it still ran is
@@ -82,10 +88,21 @@
 #                         agent is admitted and neither it nor the lease server holds a taint on
 #                         the host, 503 and the reason otherwise, so a tainted host is reported
 #                         unhealthy. Loopback only; the farm unit has no such route
-#   ExecStartPre=+systemd-tmpfiles
-#                         reads /usr/lib/tmpfiles.d/js-agent-crun.conf, the package's tmpfiles file
-#                         (without the /opt/js-agent release layout of the setup script's file,
-#                         which the package replaces)
+#   (no ExecStartPre=)    the agent makes its state root (mode 0700) and its scratch root (mode
+#                         0711) itself at start when they are missing, the leaf only; the
+#                         tmpfiles file is applied at boot and by the setup script
+#   ExecStopPost=/usr/bin/js-agent crun-start-refused --result ${SERVICE_RESULT}
+#                         systemd 258 or newer clones the first process of a start into the
+#                         unit's own cgroup and moves it to <unit>/supervisor only after, and the
+#                         kernel refuses a process in a cgroup that has controllers enabled for its
+#                         children, which the leases under <unit>/actions keep. So a start with
+#                         runs left (after a crash, since Restart=always starts the unit again
+#                         with them) is refused, result `resources`, until they end. This step
+#                         runs after every stop, in <unit>/.control, which the kernel accepts, and
+#                         does nothing unless the result is `resources`; then, on systemd 258 or
+#                         newer, it ends the runs left (the supervisors first, then the lease
+#                         cgroups) so that the next start, Restart=always, places the agent. Those
+#                         runs are lost: no agent could report them while the unit could not start
 #   Wants=/After=js-agent-crun-gpu.service
 #                         a oneshot that writes, before each start, the drop-in with the --gpu-*
 #                         flags for the host's NVIDIA nodes, and reloads systemd (see that unit).
@@ -112,8 +129,8 @@ Delegate=yes
 DelegateSubgroup=supervisor
 StateDirectory=js-agent
 StateDirectoryMode=0711
-ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent-crun.conf
 ExecStart=/usr/bin/js-agent --flags-file /etc/js-agent/flags --health-listen 127.0.0.1:7311 --token-file /etc/js-agent/token --drain-wait 3600 --stop-grace 120 --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+ExecStopPost=/usr/bin/js-agent crun-start-refused --result ${SERVICE_RESULT}
 KillMode=process
 TimeoutStopSec=3900
 Restart=always

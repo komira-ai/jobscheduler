@@ -35,6 +35,7 @@
 
 mod admit;
 mod host;
+mod layout;
 mod list;
 mod place;
 mod report;
@@ -42,6 +43,7 @@ mod settings;
 
 pub use admit::Admission;
 pub use host::{BundleHost, Fetch, HostXcode, MAX_LIST_BYTES, Needs, SystemHost};
+pub use layout::{DirFacts, STORE_MODE, inside_scratch, lease_users_reach, make_store};
 pub use list::{ListError, parse_digests};
 pub use place::{Pinned, PlaceError, Placer, load_config, manifest_of};
 pub use report::{Reported, hello_capabilities, report, reserve_bytes};

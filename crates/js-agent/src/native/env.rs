@@ -32,6 +32,16 @@ pub(super) fn plain(
     env
 }
 
+/// `CFFIXED_USER_HOME`, which Foundation reads for the home: the job's home in the run
+/// directory, as `HOME` is (`profile.rs` sets that one, because the helper sets `HOME`
+/// itself).
+pub(super) fn job_home(job_home: &Path) -> (String, String) {
+    (
+        "CFFIXED_USER_HOME".to_owned(),
+        job_home.display().to_string(),
+    )
+}
+
 /// `base` with the job start's environment `job` laid over it: a name `job` sets is dropped
 /// from `base`, and `job` follows in its own order, so the job's value is the one the run
 /// sees. The names `job` may hold were checked before a user was made
