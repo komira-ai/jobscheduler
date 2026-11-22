@@ -19,7 +19,7 @@ use js_types::Arch;
 
 use super::layout::{Layout, SUBFOLDERS};
 use super::profile::{self, JOB_PARAM};
-use super::report::{Ended, Leftovers, Report};
+use super::report::{self, Ended, Leftovers, Report};
 use super::spec::JobFile;
 use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
 use super::{Args, AuditSession, status};
@@ -74,8 +74,12 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(Stop::Setup(format!("{} runs as root", super::VERB)));
     }
-    let text = fs::read_to_string(&args.job)
-        .map_err(|why| Stop::Usage(format!("{}: {why}", args.job.display())))?;
+    let text = match (&args.job, &args.job_inline) {
+        (_, Some(inline)) => inline.clone(),
+        (Some(path), None) => fs::read_to_string(path)
+            .map_err(|why| Stop::Usage(format!("{}: {why}", path.display())))?,
+        (None, None) => return Err(Stop::Usage("no job named".to_owned())),
+    };
     let job = JobFile::parse(&text, here()).map_err(|why| Stop::Usage(why.to_string()))?;
     let added = match &args.profile_add {
         Some(path) => fs::read_to_string(path)
@@ -163,6 +167,8 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         sweep,
         outputs,
         leftovers,
+        stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
+        stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
 }
 
@@ -178,6 +184,13 @@ fn user_processes(uid: u32) -> Result<Vec<i32>, Stop> {
 
 /// `root`, resolved: a folder of root's that only root may write.
 fn checked_root(root: &Path) -> Result<PathBuf, Stop> {
+    if !root.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(root)
+            .map_err(|why| Stop::Setup(format!("{}: {why}", root.display())))?;
+    }
     let resolved =
         fs::canonicalize(root).map_err(|why| Stop::Setup(format!("{}: {why}", root.display())))?;
     let meta = fs::metadata(&resolved)

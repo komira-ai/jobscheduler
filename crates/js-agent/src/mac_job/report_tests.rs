@@ -1,6 +1,6 @@
 //! The report: its status and its JSON.
 
-use super::{Ended, Leftovers, Outputs, Report};
+use super::{Ended, Leftovers, Outputs, Report, TAIL_MAX, tail};
 use crate::mac_job::status;
 use crate::mac_job::sweep::Tally;
 
@@ -20,7 +20,22 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
     }
+}
+
+#[test]
+fn a_stream_tail_keeps_the_last_bytes_only() {
+    assert_eq!(tail(b"short"), "short");
+    let long: Vec<u8> = (0..TAIL_MAX + 10).map(|i| b'a' + (i % 26) as u8).collect();
+    let cut = tail(&long);
+    assert_eq!(cut.len(), TAIL_MAX);
+    assert_eq!(cut.as_bytes(), &long[10..]);
+    // A multi-byte character cut at the start reads as one replacement character.
+    let mut text = vec![0xC3, 0xA9];
+    text.extend(std::iter::repeat_n(b'x', TAIL_MAX - 1));
+    assert_eq!(tail(&text), format!("\u{FFFD}{}", "x".repeat(TAIL_MAX - 1)));
 }
 
 #[test]

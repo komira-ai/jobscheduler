@@ -41,7 +41,7 @@ impl Leftovers {
 pub struct Report {
     /// The job's id.
     pub id: String,
-    /// The user it ran as, and that user's id.
+    /// The user it ran as.
     pub user: String,
     /// The user's id.
     pub uid: u32,
@@ -61,6 +61,20 @@ pub struct Report {
     pub outputs: Outputs,
     /// What was left.
     pub leftovers: Leftovers,
+    /// The last [`TAIL_MAX`] bytes of the program's standard output.
+    pub stdout_tail: String,
+    /// The last [`TAIL_MAX`] bytes of its standard error.
+    pub stderr_tail: String,
+}
+
+/// The most of each stream a report carries.
+pub const TAIL_MAX: usize = 4096;
+
+/// The last [`TAIL_MAX`] bytes of `bytes`, as text (a cut character reads as U+FFFD).
+#[must_use]
+pub fn tail(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(TAIL_MAX);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
 /// The declared outputs.

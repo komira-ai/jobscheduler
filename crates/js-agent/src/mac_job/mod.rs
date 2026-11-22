@@ -1,7 +1,7 @@
 //! `js-agent __mac-job`: one native macOS job, run by this program alone, start to end.
 //!
 //! ```text
-//! js-agent __mac-job --job <file> --user <name> --root <dir> --out <dir>
+//! js-agent __mac-job (--job <file> | --job-inline <json>) --user <name> --root <dir> --out <dir>
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
 //! ```
@@ -29,6 +29,10 @@
 //!
 //! It writes a JSON report ([`report::Report`]) to `<out>/report.json` and to standard output,
 //! and the program's standard output and error to `<out>/stdout` and `<out>/stderr`.
+//!
+//! `--job-inline` takes the job's JSON as the argument itself, for a run that can pass arguments
+//! to the program but no file; the job then fetches its own inputs. `--root` is made (root's,
+//! mode 0755) when it is missing.
 //!
 //! Its statuses ([`status`]): 0 the job exited 0 and nothing is left; 1 the job failed and
 //! nothing is left; 2 the command line or the job file is wrong; 3 something was left; 4 the job
@@ -83,8 +87,15 @@ pub enum AuditSession {
 #[command(name = "js-agent __mac-job", no_binary_name = true)]
 pub struct Args {
     /// The job file (JSON, [`spec::JobFile`]).
+    #[arg(
+        long,
+        required_unless_present = "job_inline",
+        conflicts_with = "job_inline"
+    )]
+    pub job: Option<PathBuf>,
+    /// The job's JSON itself, in place of a file.
     #[arg(long)]
-    pub job: PathBuf,
+    pub job_inline: Option<String>,
     /// The ordinary user the job runs as.
     #[arg(long)]
     pub user: String,

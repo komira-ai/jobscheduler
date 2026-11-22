@@ -20,7 +20,8 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
     assert_eq!(
         args,
         Args {
-            job: PathBuf::from("j.json"),
+            job: Some(PathBuf::from("j.json")),
+            job_inline: None,
             user: "u".to_owned(),
             root: PathBuf::from("/r"),
             out: PathBuf::from("/o"),
@@ -102,4 +103,18 @@ fn the_agent_answers_the_mode_word_before_anything_else() {
     assert_eq!(code, std::process::ExitCode::from(status::USAGE));
     let err = String::from_utf8(err).expect("utf-8");
     assert!(err.contains("--job"), "{err}");
+}
+
+#[test]
+fn the_job_may_come_inline_and_exactly_one_of_the_two_is_needed() {
+    let rest = ["--user", "u", "--root", "/r", "--out", "/o"];
+    let mut inline = vec!["--job-inline", "{}"];
+    inline.extend(rest);
+    let args = parse(&words(&inline)).expect("parses");
+    assert_eq!(args.job, None);
+    assert_eq!(args.job_inline.as_deref(), Some("{}"));
+    let mut both = vec!["--job", "j.json", "--job-inline", "{}"];
+    both.extend(rest);
+    assert!(parse(&words(&both)).is_err());
+    assert!(parse(&words(&rest)).is_err());
 }
