@@ -51,13 +51,15 @@ pub fn check_provider_mode(mount: &JobMount) -> Result<(), NativeRefusal> {
 
 /// Checks `--native-trees-root` (`given`) against the mount roots and the providers the
 /// agent was given (`providers`: at least one `--mount-provider`): the canonical path of an
-/// absolute `given`, which is a `--mount-root-ro` and no `--mount-root`. `None` when it is
+/// absolute `given`, which is a `--mount-root-ro` and no `--mount-root`, with no other mount
+/// root above or below it. `None` when it is
 /// not given.
 ///
 /// # Errors
 ///
 /// The text names the flag: a path that is not absolute, no `--mount-provider`, a path that
-/// cannot be resolved, one that is no mount root, and one that is a writable root.
+/// cannot be resolved, one that is no mount root, one that is a writable root, and one that
+/// lies above or below another mount root.
 pub fn trees_root(
     given: Option<&Path>,
     roots: &MountRoots,
@@ -91,6 +93,19 @@ pub fn trees_root(
         return Err(format!(
             "{TREES_ROOT_FLAG}: {} is no --mount-root-ro",
             root.display()
+        ));
+    }
+    // Every other root is a read deny, rendered after the trees' grants: one above the trees
+    // root, or below it, would hide the trees it covers.
+    if let Some(other) = roots
+        .paths()
+        .find(|path| *path != root && (root.starts_with(path) || path.starts_with(&root)))
+    {
+        return Err(format!(
+            "{TREES_ROOT_FLAG}: {} and the mount root {} hold one another: every other mount \
+             root is a read deny of every run, which would hide the trees",
+            root.display(),
+            other.display()
         ));
     }
     Ok(Some(root))
