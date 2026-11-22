@@ -4,6 +4,10 @@
 # assets to the release (release.yml's `promote-macos`); nothing of Linux x86_64 waits for it.
 # No pull request runs it: a pull request's checks are Linux x86_64 alone
 # (crates/xtask/tests/pr_linux_only holds every workflow to that).
+# A pull request compiles what this job tests, though: ci.yml's `lint` job runs clippy for
+# aarch64-apple-darwin on Linux over the same crates and features (crates/xtask/tests/
+# macos_clippy holds the two lists together), so code that does not compile for macOS fails its
+# pull request rather than this job.
 #
 # The workspace builds and passes its tests on Apple silicon but for the three crates that are
 # Linux code and are not built for macOS: js-contain (the crun runtime, cgroups), js-host-step
@@ -68,7 +72,7 @@ jobs:
       # GITHUB_ENV for the steps after this one.
       - name: Start a Postgres server for the tests that need one
         run: cargo xtask postgres-for-tests --bin-dir /opt/homebrew/opt/postgresql@17/bin --data-dir "$RUNNER_TEMP/pg" --socket-dir "$RUNNER_TEMP" --github-env "$GITHUB_ENV"
-      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
+      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm
       - name: Check the minimum macOS of the built binaries
         run: |
           set -euo pipefail
@@ -86,7 +90,7 @@ jobs:
           done
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job, but with js-sim-cell's feature `slow-families` on, which that job leaves off.
-      - run: cargo test --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mdm
+      - run: cargo test --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

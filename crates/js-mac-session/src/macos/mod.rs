@@ -146,6 +146,34 @@ pub(crate) fn clear_dir_flags(dir: &OwnedFd, mask: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Removes every entry of the access control list of the open directory `dir`, which
+/// `chmod -N` does.
+pub(crate) fn clear_dir_acl(dir: &OwnedFd) -> io::Result<()> {
+    // SAFETY: `acl_init` allocates an empty list that `acl_set_fd` only reads and that is
+    // freed below; the descriptor is one this function borrows.
+    // FFI-BOUNDARY: the list `acl_init` returns is owned here and freed here with
+    // `acl_free`; `acl_set_fd` does not keep it.
+    unsafe {
+        let acl = acl_init(0);
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let set = acl_set_fd(dir.as_raw_fd(), acl);
+        let why = io::Error::last_os_error();
+        acl_free(acl);
+        if set != 0 {
+            return Err(why);
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_fd(fd: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+    fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+}
+
 /// Whether the directory `name` of `dir` (not followed if it is a link) has the extended
 /// attribute `attr`; false if it cannot be opened.
 pub(crate) fn dir_has_xattr(dir: &OwnedFd, name: &std::ffi::OsStr, attr: &std::ffi::CStr) -> bool {

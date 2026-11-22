@@ -14,8 +14,9 @@
 //! - `background-tasks`: each entry `sfltool dumpbtm` prints, by the uid its record
 //!   is under, its identifier, type, URL, executable and disposition.
 //! - `lease-users`: each uid of the lease range that a user record has, except the uids
-//!   of the pool's free users: a free pool user is the clean node's own, and a leased,
-//!   resetting or broken one (or a user the pool does not hold) is reported.
+//!   of the pool's free users and of the live leases: a free pool user is the clean
+//!   node's own and a live lease's user is its lease's, while a resetting or broken one,
+//!   one leased to a lease that is over, or a user the pool does not hold is reported.
 //! - `auto-login`: the login window's `autoLoginUser`, whether `/etc/kcpassword` is
 //!   there, and the session switch's intent record.
 //!
@@ -185,10 +186,10 @@ pub fn diff(baseline: &BTreeSet<String>, now: &BTreeSet<String>) -> Diff {
     }
 }
 
-/// Collects every item of the minimal set; `free` are the uids of the pool's free users,
-/// which are not items.
+/// Collects every item of the minimal set; `own` are the uids of the pool's free users
+/// and of the live leases, which are not items.
 #[must_use]
-pub fn collect(host: &dyn Host, settings: &Settings, free: &BTreeSet<u32>) -> Snapshot {
+pub fn collect(host: &dyn Host, settings: &Settings, own: &BTreeSet<u32>) -> Snapshot {
     let mut snapshot = Snapshot::default();
     for folder in &settings.scan.folders {
         if let Err(why) = folder_items(folder, &mut snapshot.items) {
@@ -199,7 +200,7 @@ pub fn collect(host: &dyn Host, settings: &Settings, free: &BTreeSet<u32>) -> Sn
     }
     let collected = [
         background_tasks(host),
-        lease_users(host, settings, free),
+        lease_users(host, settings, own),
         auto_login(host, settings),
     ];
     for result in collected {
@@ -347,14 +348,14 @@ fn is_entry_header(line: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Each uid of the lease range a user record has, but those in `free`.
+/// Each uid of the lease range a user record has, but those in `own`.
 fn lease_users(
     host: &dyn Host,
     settings: &Settings,
-    free: &BTreeSet<u32>,
+    own: &BTreeSet<u32>,
 ) -> Result<Vec<String>, String> {
     let mut items = Vec::new();
-    for uid in settings.range.uids().filter(|uid| !free.contains(uid)) {
+    for uid in settings.range.uids().filter(|uid| !own.contains(uid)) {
         let taken = host
             .uid_taken(uid)
             .map_err(|why| format!("{LEASE_USERS}: looking up uid {uid}: {why}"))?;
@@ -375,7 +376,7 @@ fn auto_login(host: &dyn Host, settings: &Settings) -> Result<Vec<String>, Strin
         .map_err(|why| format!("{AUTO_LOGIN}: running {DEFAULTS}: {why}"))?;
     if read.success {
         items.push(format!("{AUTO_LOGIN} user {:?}", read.stdout.trim()));
-    } else if !read.stderr.contains("does not exist") {
+    } else if !crate::autologin::key_absent(&read.stderr) {
         return Err(format!(
             "{AUTO_LOGIN}: defaults read {domain} {AUTO_LOGIN_USER} failed: {}",
             read.stderr.trim()

@@ -20,15 +20,21 @@
 //! ([`SchedPlacer::gone`]); a host the engine holds a job allocation on is never forgotten for
 //! silence ([`Placer::holds_work_on`]).
 //!
-//! Locks: the placer's mutex is taken only inside a call the registry makes under its own
-//! lock (registry, then placer), and the placer never calls the registry, so the order is
-//! fixed. A pass over the queued jobs ([`super::engine::jobs`]) takes its own lock, then the
-//! engine's, and reads the registry before either. The record of removed hosts has a lock of
-//! its own, a leaf, and so has the record of what pass 2 told of the queued jobs.
+//! Locks: the registry tells the placer of its hosts under its own lock, and a pass over the
+//! queued jobs ([`super::engine::jobs`]) holds the engine's lock for as long as it decides,
+//! which can be long with a long queue. So a call the registry makes never waits for the
+//! engine's lock ([`Placer`]): when the engine is free it is told at once, and when a pass
+//! holds it the call is kept, in the order the registry made it, and the engine is told
+//! first thing when it is next taken ([`SchedPlacer::engine`]). The registry's lock, which the
+//! job service's read calls and the agents' heartbeats take on the server's async workers,
+//! is so never held while a pass decides. The placer never calls the registry, and a pass
+//! takes its own lock, then the engine's, and reads the registry before either. The record
+//! of removed hosts has a lock of its own, a leaf, and so have the calls kept for the engine
+//! and the record of what pass 2 told of the queued jobs.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use js_jobs::JobId;
 use js_registry::Placer;
@@ -50,6 +56,10 @@ pub struct SchedPlacer {
     /// whole-host jobs the store held then wait from for their hosts' hellos.
     boot: FarmTime,
     engine: Mutex<Engine>,
+    /// The registry's calls that found the engine held by a pass, in the order the registry
+    /// made them, until the engine is next taken ([`SchedPlacer::engine`]). Its lock is a
+    /// leaf.
+    kept: Mutex<Vec<Tell>>,
     /// Held for each pass over the queued jobs, so two passes never decide at once
     /// ([`super::engine::jobs`]); taken before the engine's lock, never under it.
     passes: Mutex<()>,
@@ -63,7 +73,8 @@ pub struct SchedPlacer {
     /// came ([`SchedPlacer::note_outcomes`]); the pass takes them all. Its lock is a leaf.
     pub(crate) outcomes: Mutex<BTreeMap<JobId, Vec<Outcome>>>,
     /// How many times the registry changed the engine: the calls the passes over the queued
-    /// jobs depend on ([`SchedPlacer::engine_changes`]).
+    /// jobs depend on, and every call kept while the engine was held
+    /// ([`SchedPlacer::engine_changes`]).
     changes: AtomicU64,
     /// What the last pass over the queued jobs that ran found, while it failed nothing
     /// (`engine::jobs_seen`). Its lock is a leaf.
@@ -83,6 +94,7 @@ impl SchedPlacer {
         let now = farm_time(&*clock);
         Self {
             engine: Mutex::new(Engine::build(settings, now)),
+            kept: Mutex::default(),
             passes: Mutex::new(()),
             clock,
             boot: now,
@@ -97,9 +109,55 @@ impl SchedPlacer {
         }
     }
 
-    /// The engine, under its lock.
+    /// The engine, under its lock, told first of the registry's calls that found it held
+    /// ([`Placer`]).
     pub fn engine(&self) -> MutexGuard<'_, Engine> {
-        self.engine.lock().unwrap_or_else(PoisonError::into_inner)
+        let engine = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+        self.caught_up(engine)
+    }
+
+    /// The engine, under its lock and told of the kept calls, when no one holds it; `None`
+    /// while a pass does.
+    fn free_engine(&self) -> Option<MutexGuard<'_, Engine>> {
+        let engine = match self.engine.try_lock() {
+            Ok(engine) => engine,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        Some(self.caught_up(engine))
+    }
+
+    /// `engine` told of the calls kept for it, in the order they came. They were counted
+    /// when they were kept ([`SchedPlacer::tell`]).
+    fn caught_up<'a>(&self, mut engine: MutexGuard<'a, Engine>) -> MutexGuard<'a, Engine> {
+        let kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(PoisonError::into_inner));
+        for tell in kept {
+            let _ = tell.apply(&mut engine);
+        }
+        engine
+    }
+
+    /// Tells the engine `tell` now when it is free, counting the change when it answers one;
+    /// keeps it for the engine's next taker when a pass holds the engine, counting it as a
+    /// change, so the next pass is not skipped for one it has not seen
+    /// ([`SchedPlacer::engine_changes`]).
+    fn tell(&self, tell: Tell) {
+        let changed = match self.free_engine() {
+            Some(mut engine) => tell.apply(&mut engine),
+            None => {
+                self.kept
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(tell);
+                // The holder may have let go between the try and the push: an engine free now
+                // is told of the kept calls here rather than at its next taker.
+                drop(self.free_engine());
+                true
+            }
+        };
+        if changed {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// `change` made to the engine under its lock, then counted
@@ -116,14 +174,10 @@ impl SchedPlacer {
         answer
     }
 
-    /// `change` made to the engine under its lock, and counted ([`SchedPlacer::changing`]).
-    fn changed<T>(&self, change: impl FnOnce(&mut Engine) -> T) -> T {
-        self.changing(|engine| (change(engine), true))
-    }
-
     /// How many times the registry changed the engine, through the [`Placer`] calls that can
     /// change what a pass over the queued jobs reads of it: every call that changes the
-    /// engine counts, except a heartbeat with no load reading that gives no allocation up. The
+    /// engine counts, except a heartbeat with no load reading that gives no allocation up. A
+    /// call kept while a pass held the engine counts when it is kept, whatever it changes. The
     /// passes' own changes are not counted (`engine::jobs_seen`).
     pub fn engine_changes(&self) -> u64 {
         self.changes.load(Ordering::SeqCst)
@@ -240,29 +294,64 @@ fn farm_time(clock: &dyn Clock) -> FarmTime {
     FarmTime::from_millis(clock.now().millis())
 }
 
+/// A call of the registry's, as the engine is told it ([`Placer`]).
+enum Tell {
+    /// [`Placer::host_up`], at the placer's time of the call.
+    Up(HostId, Shape, FarmTime),
+    /// [`Placer::heard`], at the placer's time of the call.
+    Heard(HostId, Option<NodeLoad>, FarmTime),
+    /// [`Placer::host_gone`].
+    Gone(HostId),
+}
+
+impl Tell {
+    /// Tells `engine`, answering whether that changed what a pass reads of it.
+    fn apply(self, engine: &mut Engine) -> bool {
+        match self {
+            Tell::Up(host, shape, now) => {
+                engine.host_up(&host, &shape, now);
+                true
+            }
+            Tell::Heard(host, load, now) => engine.heard_changed(&host, load.as_ref(), now),
+            Tell::Gone(host) => {
+                engine.host_gone(&host);
+                true
+            }
+        }
+    }
+}
+
+/// Each call is made under the registry's lock and never waits for the engine's: the engine
+/// is told at once when it is free, else first thing when it is next taken
+/// ([`SchedPlacer::tell`]).
 impl Placer for SchedPlacer {
     fn host_up(&self, host: &HostId, shape: &Shape) {
         self.removed().remove(host);
-        let now = self.now();
-        self.changed(|engine| engine.host_up(host, shape, now));
+        self.tell(Tell::Up(host.clone(), shape.clone(), self.now()));
     }
 
     fn heard(&self, host: &HostId, load: Option<&NodeLoad>) {
-        let now = self.now();
-        self.changing(|engine| ((), engine.heard_changed(host, load, now)));
+        self.tell(Tell::Heard(host.clone(), load.cloned(), self.now()));
     }
 
     /// Recorded for the job pass ([`SchedPlacer::gone`]) as well as told to the engine: a
     /// removed host's job allocations are freed only by the pass, never here.
     fn host_gone(&self, host: &HostId) {
-        self.changed(|engine| engine.host_gone(host));
+        self.tell(Tell::Gone(host.clone()));
         let removal = self.removals.fetch_add(1, Ordering::Relaxed);
         self.removed().insert(host.clone(), removal);
     }
 
     /// A host the engine holds a job allocation on is not forgotten for silence: only its
     /// confirmation or the provider's absence frees that allocation (design section 6.3).
+    /// While a pass holds the engine the answer is that it holds work there, so the host is
+    /// kept until a call that finds the engine free asks again.
     fn holds_work_on(&self, host: &HostId) -> bool {
-        self.engine().holds_jobs_on(host)
+        self.free_engine()
+            .is_none_or(|engine| engine.holds_jobs_on(host))
     }
 }
+
+#[cfg(test)]
+#[path = "place_tests.rs"]
+mod tests;

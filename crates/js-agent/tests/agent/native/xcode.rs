@@ -41,7 +41,9 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
     spec.xcode = Some("16F6".to_owned());
     rig.rt.create_and_start(&spec).unwrap();
     let run = rig.fake.run_of("7.0");
-    let tmp = rig.fake.home_of("7.0").join("tmp").display().to_string();
+    let home = rig.fake.home_of("7.0");
+    let tmp = home.join("exec/.tmp").display().to_string();
+    let job_home = home.join("exec/.home").display().to_string();
     assert_eq!(
         run.env,
         [
@@ -50,6 +52,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
                 "DEVELOPER_DIR".to_owned(),
                 "/Applications/Xcode.app/Contents/Developer".to_owned()
             ),
+            ("CFFIXED_USER_HOME".to_owned(), job_home),
         ]
     );
     let named: Vec<&(String, String)> = run
@@ -60,7 +63,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
     assert!(named.is_empty(), "{named:?}");
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
     assert!(run.argv.iter().all(|arg| !arg.contains("xcode-select")));
 }

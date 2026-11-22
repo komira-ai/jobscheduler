@@ -191,6 +191,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         manager: Manager::Systemd,
         euid: rustix::process::geteuid().as_raw(),
         host_identity: None,
+        egress: false,
         token: &token(
             step_now == Step::Prepare
                 && fault == Some(Fault::Defer)
@@ -206,7 +207,7 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
         },
         // A systemd host: the host setup of a Mac is refused before it looks at anything.
         look: Machine::system().look,
-        fstab: Machine::system().fstab,
+        fstab_leftover: Machine::system().fstab_leftover,
     };
     let done = match step_now {
         Step::Prepare => step::prepare(&env, params),

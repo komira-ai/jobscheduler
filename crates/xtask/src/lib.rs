@@ -1,19 +1,29 @@
 //! `cargo xtask <verb>`: the repository's CI logic, in Rust with tests, so each workflow
 //! step is one command (the alias is in `.cargo/config.toml`).
 //!
-//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz --member <path>]
-//!   [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
-//!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
-//!   before anything is unpacked or written.
+//! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
+//!   [--tree] | --extract zst] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over
+//!   HTTPS (or taken from the file the actions cache restored at `--cache`) and refused unless
+//!   its SHA-256 matches, before anything is unpacked or written; `--extract zst` is one
+//!   zstd-compressed file (buck2's release form), decompressed whole.
+//! - `farm-build --buck2 <path> --target <label> --patch <path> --summary <path> --repo
+//!   <owner/name> --run-id <id>` ([`farm`]): the build of the farm lane
+//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set; refused when
+//!   the generated build table is stale, with what `buildrules sync` changed written as a patch to
+//!   `--patch` and the command that applies it to the job summary `--summary`; then
+//!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
+//!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
 //!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
-//! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
+//! - `release plan --head <sha>`, `release stamp --to <version>`,
+//!   `release next-version --version <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
-//!   and laying down the files of each release archive (docs/release.md).
+//!   the patch version after a version (the macOS update package's), and laying down the files
+//!   of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
@@ -36,6 +46,12 @@
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
 //!   what the control plane's deploy of `js-server` is given.
+//! - `release smoke-bundle pack --tree <dir> --out <dir>`, `release smoke-bundle push --layout
+//!   <dir> --user <name> --password-file <file>` and `release smoke-bundle check --tree <dir>
+//!   --scratch <dir>` ([`release::smoke_bundle`]): the smoke bundle packed from its committed
+//!   tree and refused unless it gives the digest its recipe names, pushed to the recipe's
+//!   repository and tag (a held tag is never moved), and pulled back by digest anonymously and
+//!   compared with the tree, every byte.
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
@@ -51,6 +67,12 @@
 //!   each test target built as this user and run in a `Delegate=yes` system unit of its own;
 //!   with `--job-user`, the targets of a root daemon, run as root, which start every
 //!   container as that user.
+//! - `mac-root-tests --work <dir> [--sudo <path>] [--root <dir>]` ([`mac_root`]): on a Mac
+//!   with no lease users, the root tests of `js-mac-provision`, `js-treestore`, `js-mac-pool` and
+//!   `js-agent` (every one `#[ignore]`d under a plain `cargo test`), built as this user and run as
+//!   root through `sudo -n` from the new directory `--work`, the users the `js-agent` ones make
+//!   deleted after each, and a table of every test's result printed and written to
+//!   `target/mac-root-tests/table.tsv`.
 //! - `unit-result --unit <name> --count-file <path> [--sudo <path>]` ([`crun_tests::check_unit`]): fails unless a
 //!   system unit a step ran with `systemd-run --wait` exited 0, by the unit's own result, and
 //!   ran at least one test, by the `--count-file` its `count-run` wrote.
@@ -73,9 +95,9 @@
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
 //!   joins, submits a GPU job (refused, since no host could serve it) and lists the jobs.
-//! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
+//! - `site-changed --event <name> --base <ref> [--group-base <commit>] --paths <file> --github-output <file>`
 //!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
-//!   files a pull request changes against the entries of `site/ci-paths`.
+//!   files a pull request or a merge group changes against the entries of `site/ci-paths`.
 //! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
 //!   service's descriptor set into the two checked-in files, and the generated blocks of
@@ -120,10 +142,12 @@ pub mod debs;
 pub mod deploy;
 pub mod determinism;
 pub mod doc_refs;
+pub mod farm;
 pub mod fetch;
 pub mod image;
 pub mod job_surface;
 pub mod layering;
+pub mod mac_root;
 pub mod macpkg;
 pub mod merge_profiles;
 pub mod postgres_for_tests;
@@ -149,12 +173,18 @@ pub enum Error {
     /// `release image-digest` gave no digest.
     #[error(transparent)]
     ImageDigest(#[from] release::image_digest::Error),
+    /// `release smoke-bundle` failed.
+    #[error(transparent)]
+    SmokeBundle(#[from] release::smoke_bundle::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
     /// The determinism lint failed, or could not read the tree.
     #[error(transparent)]
     Determinism(#[from] determinism::Error),
+    /// The farm lane's build failed.
+    #[error(transparent)]
+    Farm(#[from] farm::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -183,7 +213,7 @@ pub enum Error {
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
-    /// The real-crun tests, or the build of their targets, failed.
+    /// The real-crun tests or the Mac root tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
     /// The machine image recipes could not be made.
@@ -212,7 +242,8 @@ struct Cli {
 /// The verbs.
 #[derive(Subcommand)]
 enum Verb {
-    /// Download a pinned file, check its SHA-256 and install it (mode 0755).
+    /// Download a pinned file, check its SHA-256 and install it (mode 0755), or with `--tree`
+    /// a directory of a tar.
     Fetch {
         /// Where to download it from (HTTPS; redirects must stay on HTTPS).
         #[arg(long)]
@@ -220,19 +251,46 @@ enum Verb {
         /// The SHA-256 of the download (before unpacking), 64 lowercase hex digits.
         #[arg(long)]
         sha256: fetch::Sha256,
-        /// The file to install; its directory is created when missing.
+        /// The file to install (with `--tree`, the directory); its directory is created when
+        /// missing.
         #[arg(long)]
         out: PathBuf,
         /// How the download is packed (default: it is the file).
         #[arg(long, value_enum)]
         extract: Option<fetch::Format>,
-        /// The file to take out of a tar (`--extract tar.gz`): its path inside the archive.
+        /// The file to take out of a tar (`--extract`): its path inside the archive; with
+        /// `--tree`, the directory to take. Not given with `--extract zst`.
         #[arg(long)]
         member: Option<PathBuf>,
+        /// Install the directory `--member` and everything under it as the directory `--out`.
+        #[arg(long)]
+        tree: bool,
         /// The file the actions cache restores and saves: when it exists it is checked and
         /// used in place of the download; when it does not, the checked download is kept there.
         #[arg(long)]
         cache: Option<PathBuf>,
+    },
+    /// Build a target with buck2 on the build farm, failing unless the generated build table is
+    /// fresh and every action ran there or came from its cache (the `farm` workflow's build step).
+    FarmBuild {
+        /// The buck2 program.
+        #[arg(long)]
+        buck2: PathBuf,
+        /// The label to build, `//:ci` for the lane.
+        #[arg(long)]
+        target: String,
+        /// Where a stale table's patch (what `buildrules sync` changed) is written.
+        #[arg(long)]
+        patch: PathBuf,
+        /// The job summary a stale table's fix is appended to.
+        #[arg(long)]
+        summary: PathBuf,
+        /// The repository of the run, `owner/name`, for the command that downloads the patch.
+        #[arg(long)]
+        repo: String,
+        /// The run's id, for the command that downloads the patch.
+        #[arg(long)]
+        run_id: u64,
     },
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
@@ -267,6 +325,21 @@ enum Verb {
         /// range).
         #[arg(long)]
         job_user: Option<String>,
+    },
+    /// Run the Mac root tests of js-mac-provision, js-treestore, js-mac-pool and js-agent as
+    /// root on this Mac (one with no lease users), from a new work directory, and print a
+    /// table of every test's result.
+    MacRootTests {
+        /// The work directory, made root-owned with mode 0755; it must not exist, and its
+        /// parent must (`/Users/Shared/<name>` suits).
+        #[arg(long)]
+        work: PathBuf,
+        /// The sudo program; it is run with `-n`, so it never prompts.
+        #[arg(long, default_value = "sudo")]
+        sudo: PathBuf,
+        /// The repository root, where cargo builds the test targets.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
     /// Fail unless the system unit a step ran with `systemd-run --wait` (without
     /// `--collect`) exited 0, reading the unit's own result rather than `systemd-run`'s
@@ -373,6 +446,8 @@ enum ReleaseVerb {
     Plan(release::plan::PlanArgs),
     /// Set the release version in this checkout (not committed).
     Stamp(release::stamp::StampArgs),
+    /// The version after a package's: its patch plus one.
+    NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
@@ -388,6 +463,12 @@ enum ReleaseVerb {
     ImageDigest(release::image_digest::DigestArgs),
     /// Wait for this run's turn to publish and deploy, or skip it when a newer one has it.
     Turn(release::turn::TurnArgs),
+    /// Pack, push or check the smoke bundle (`packaging/js-smoke-bundle/`).
+    SmokeBundle {
+        /// Which step.
+        #[command(subcommand)]
+        verb: release::smoke_bundle::Verb,
+    },
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -399,9 +480,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             out,
             extract,
             member,
+            tree,
             cache,
         } => {
-            let unpack = fetch::Unpack::new(extract, member).map_err(Error::Usage)?;
+            let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
             Ok(fetch::fetch(
                 &url,
@@ -410,6 +492,27 @@ fn run(cli: Cli) -> Result<String, Error> {
                 &out,
                 cache.as_deref(),
                 &roots,
+            )?)
+        }
+        Verb::FarmBuild {
+            buck2,
+            target,
+            patch,
+            summary,
+            repo,
+            run_id,
+        } => {
+            let handoff = farm::Handoff {
+                patch,
+                summary,
+                repo,
+                run_id,
+            };
+            Ok(farm::build(
+                &buck2,
+                &target,
+                &handoff,
+                &mut std::io::stderr(),
             )?)
         }
         Verb::Debs { pins, dir } => {
@@ -436,6 +539,22 @@ fn run(cli: Cli) -> Result<String, Error> {
                 sudo: &crun_tests::SudoProgram(&sudo),
                 root: &root,
                 job_user: job_user.as_deref(),
+            })?)
+        }
+        Verb::MacRootTests { work, sudo, root } => {
+            // `cargo xtask` runs this program under cargo, which sets `CARGO`.
+            let cargo = std::env::var_os("CARGO").unwrap_or_default();
+            let machine = mac_root::RealMachine {
+                cargo: &cargo,
+                root: &root,
+                sudo: &sudo,
+            };
+            Ok(mac_root::run(&mac_root::MacRootTests {
+                os: std::env::consts::OS,
+                machine: &machine,
+                root: &root,
+                work: &work,
+                owner_uid: rustix::process::getuid().as_raw(),
             })?)
         }
         Verb::UnitResult {
@@ -488,6 +607,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+            ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
@@ -501,6 +621,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 release::turn::Error::Usage(why) => Error::Usage(why),
                 other => Error::Turn(other),
             })?,
+            ReleaseVerb::SmokeBundle { verb } => release::smoke_bundle::run(&verb)?,
         }),
     }
 }

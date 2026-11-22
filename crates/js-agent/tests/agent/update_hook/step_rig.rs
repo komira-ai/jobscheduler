@@ -17,7 +17,7 @@ use js_agent::CommandRunner;
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::step::{self, Env, LookFn, PathFacts, TokenFacts, TokenFn};
 use js_agent::update_hook::{
-    Clock, Cordoned, DirStat, Done, Gate, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
+    Clock, Cordoned, DirStat, Done, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
     Params, PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units,
     UpdateInfo, agent_in,
 };
@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 
 use super::fake_mac::FakeMac;
 use super::fakes::{START_MS, World};
+pub use super::step_rig_state::{end_state, marks, pre_stop};
 
 pub const UNIT: &str = "js-agent-crun.service";
 /// The launchd label of the agent on a Mac: the service's name, as hostkeeper requires.
@@ -41,6 +42,10 @@ pub const LEASE_SECS: u64 = 300;
 pub const MAX_SECS: u64 = 17_355;
 /// The bound of the drain wait and the poll interval the steps use.
 pub const DRAIN_WAIT_SECS: u64 = 3600;
+
+/// What a prepare of a host whose previous agent lists no `handover` says of why it drains.
+pub const DRAINS_NO_HANDOVER: &str = "the cutover drains the host first: the previous release's \
+     agent does not hand its jobs over (no `handover` on its `stops:` line, or it could not be run)";
 pub const POLL_SECS: u64 = 10;
 /// The retry hint a deferred `prepare` gives.
 pub const RETRY_AFTER_SECS: u64 = 300;
@@ -56,58 +61,11 @@ pub const PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>x</string></d
 /// See [`PLIST_TEXT`].
 pub const NEW_PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>y</string></dict></plist>\n";
 
-/// A state directory that is as the hook requires, whoever runs the test.
-pub fn as_root(_: &Path, _: BorrowedFd<'_>) -> io::Result<DirStat> {
-    Ok(DirStat {
-        is_symlink: false,
-        is_dir: true,
-        uid: 0,
-        gid: 0,
-        mode: 0o700,
-    })
-}
-
-/// The kill points: counts them, and panics at the one it is armed for (a process killed
-/// there, from the point of view of the step: nothing after it runs).
-#[derive(Default)]
-pub struct Kill {
-    points: Cell<u32>,
-    at: Cell<Option<u32>>,
-}
-
-impl Kill {
-    pub fn points(&self) -> u32 {
-        self.points.get()
-    }
-
-    /// Counts from zero again and dies at the `n`th point of the next run.
-    pub fn arm(&self, n: u32) {
-        self.points.set(0);
-        self.at.set(Some(n));
-    }
-
-    /// Counts from zero again and never dies.
-    pub fn disarm(&self) {
-        self.points.set(0);
-        self.at.set(None);
-    }
-}
-
-impl Gate for Kill {
-    fn point(&self) {
-        let n = self.points.get() + 1;
-        self.points.set(n);
-        assert!(self.at.get() != Some(n), "killed at kill point {n}");
-    }
-}
-
-struct Shared(Rc<Kill>);
-
-impl Gate for Shared {
-    fn point(&self) {
-        self.0.point();
-    }
-}
+mod kill;
+mod systemctl;
+use kill::Shared;
+pub use kill::{Kill, as_root};
+pub use systemctl::{OnSignal, SYSTEMD_257, SYSTEMD_258};
 
 /// The tree of one test.
 pub struct Rig {
@@ -479,12 +437,21 @@ pub struct Spy<'a> {
     on_pause: RefCell<Option<PauseHook<'a>>>,
     /// The calls that fail, by name: `host`, `cordon`, `uncordon`, `owed`.
     pub fail: RefCell<BTreeSet<&'static str>>,
+    /// The checks of this run fail just before the next listing of the owed records: the agent
+    /// writes a taint a restart does not re-check (`unchecked`, `processes-unreadable`) and then
+    /// removes the run's record, so the listing no longer shows it.
+    pub check_fails_at_list: Cell<Option<&'static str>>,
     /// The operator cordons just before the next cordon call reaches the server.
     pub operator_races: Cell<bool>,
     /// The code the server refuses a reading of the host with (`LeaseError::Refused`), while set.
     pub host_refuses: Cell<Option<&'static str>>,
-    /// What the staged agent prints to `--version`.
+    /// What the staged agent prints to `--version`; the previous release's agent too, unless
+    /// `previous_version` is set.
     pub version: RefCell<Result<String, String>>,
+    /// What the previous release's agent prints to `--version` instead of `version`, while set.
+    pub previous_version: RefCell<Option<Result<String, String>>>,
+    /// The previous release's agent binary, as the hook runs it; none for a first install.
+    previous_agent: Option<String>,
     /// The changes made to the unit and the link, in order.
     pub acts: RefCell<Vec<Act>>,
     /// The unit state a stop leaves behind instead of `inactive`, `(ActiveState, SubState)`.
@@ -496,6 +463,8 @@ pub struct Spy<'a> {
     /// The host certificate and key the flags file names ([`HOST_CERT_PATH`] and
     /// [`HOST_KEY_PATH`]); none by default, as when the flags file names neither.
     pub host_identity: Option<HostIdentity>,
+    /// Whether the host's flags set an egress ceiling, as the hook reads them (`Env::egress`).
+    pub egress: Cell<bool>,
     /// What the host certificate file shows. Nothing is there by default.
     pub identity_cert: Rc<Cell<TokenFile>>,
     /// What the host key file shows. Nothing is there by default.
@@ -504,13 +473,18 @@ pub struct Spy<'a> {
     /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
     /// they are used up it prints `0`.
     pub tasks: RefCell<VecDeque<Result<String, String>>>,
+    /// What `systemctl --version` prints; [`SYSTEMD_257`] by default.
+    pub systemd: RefCell<Result<String, String>>,
+    /// What the agent does when the signal of the in-place request reaches it.
+    pub on_signal: Cell<OnSignal>,
     record_path: PathBuf,
     /// The Mac the host setup's commands and looks go to, once [`Spy::on_mac`] names one; until
     /// then a look is at the file system as it is.
     mac: Rc<RefCell<Option<Rc<FakeMac>>>>,
     look_fn: Box<LookFn>,
-    /// The file system table the host setup writes: `fstab` in the rig's tree.
-    pub fstab: PathBuf,
+    /// The copy of the file system table an earlier release's host setup left, which the host
+    /// setup removes: `etc/fstab.js-agent` in the rig's tree (no `etc` is made).
+    pub fstab_leftover: PathBuf,
 }
 
 /// The certificate file a flags file names in the tests that give the host an identity.
@@ -565,9 +539,10 @@ impl<'a> Spy<'a> {
                     })
                 }
             }),
-            fstab: rig.tmp.path().join("fstab"),
+            fstab_leftover: rig.tmp.path().join("etc/fstab.js-agent"),
             token,
             host_identity: None,
+            egress: Cell::new(false),
             identity_cert,
             identity_key,
             token_fn: Box::new(move |path| {
@@ -585,15 +560,24 @@ impl<'a> Spy<'a> {
                 }
             }),
             tasks: RefCell::new(VecDeque::new()),
+            systemd: RefCell::new(Ok(SYSTEMD_257.to_owned())),
+            on_signal: Cell::new(OnSignal::Takes),
             world: &rig.world,
             kill: &rig.kill,
             state: rig.world.state_root(),
             log: RefCell::new(Vec::new()),
             on_pause: RefCell::new(None),
             fail: RefCell::new(BTreeSet::new()),
+            check_fails_at_list: Cell::new(None),
             operator_races: Cell::new(false),
             host_refuses: Cell::new(None),
             version: RefCell::new(Ok(format!("js-agent {}\n", rig.params.target_version))),
+            previous_version: RefCell::new(None),
+            previous_agent: rig.params.previous_release.as_deref().map(|release| {
+                agent_in(rig.manager, release)
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             acts: RefCell::new(Vec::new()),
             stop_leaves: RefCell::new(None),
             start_leaves: RefCell::new(None),
@@ -695,9 +679,10 @@ impl<'a> Spy<'a> {
             euid: euid(),
             token: &*self.token_fn,
             host_identity: self.host_identity.as_ref(),
+            egress: self.egress.get(),
             stat,
             look: &*self.look_fn,
-            fstab: &self.fstab,
+            fstab_leftover: &self.fstab_leftover,
         }
     }
 
@@ -798,6 +783,10 @@ impl Link for Spy<'_> {
             target.display()
         );
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.world.real(path)
+    }
 }
 
 impl Lease for Spy<'_> {
@@ -838,11 +827,38 @@ impl StateView for Spy<'_> {
         if self.fail.borrow().contains("owed") {
             return Err(PortError::Io("the state root cannot be listed".to_owned()));
         }
+        if let Some(run) = self.check_fails_at_list.take() {
+            self.state
+                .write(&Taint {
+                    reason: "unchecked".to_owned(),
+                    run_id: Some(run.to_owned()),
+                    check: Some("processes-unreadable".to_owned()),
+                })
+                .unwrap();
+            self.state.settle(run).unwrap();
+        }
         StateView::owed(&self.state)
     }
 
     fn has_credential(&self) -> bool {
         StateView::has_credential(&self.state)
+    }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        self.act("handover.request".to_owned());
+        self.port_check("handover")?;
+        StateView::request_handover(&self.state)
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        self.act("handover.withdraw".to_owned());
+        self.port_check("withdraw")?;
+        StateView::withdraw_handover(&self.state)
+    }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        self.port_check("pending")?;
+        StateView::handover_pending(&self.state)
     }
 }
 
@@ -895,11 +911,14 @@ impl CommandRunner for Spy<'_> {
             return Ok("installed com.apple/com.komira.js.pool for uids 600-699\n".to_owned());
         }
         if program == SYSTEMCTL {
-            return self
-                .tasks
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or_else(|| Ok("0\n".to_owned()));
+            return self.systemctl(args);
+        }
+        let previous = self.previous_version.borrow();
+        if let (Some(answer), true) = (
+            previous.as_ref(),
+            self.previous_agent.as_deref() == Some(program),
+        ) {
+            return answer.clone();
         }
         self.version.borrow().clone()
     }
@@ -929,30 +948,4 @@ pub fn running(rig: Rig) -> Rig {
     // The setup passed kill points; the count is of the step's.
     rig.kill.disarm();
     rig
-}
-
-/// Everything a `cutover` leaves behind, without the directories of the rig: the record, the
-/// link, the unit and the cordon.
-pub fn end_state(rig: &Rig) -> serde_json::Value {
-    let unit = rig.world.show(&rig.unit).unwrap();
-    let state = serde_json::json!({
-        "record": rig.record(),
-        "link": rig.world.resolved_target(&rig.link).unwrap(),
-        "unit": format!("{} {}", unit.active, unit.sub),
-        "cordon": rig.cordon_expiry(),
-    });
-    let root = rig.tmp.path().display().to_string();
-    serde_json::from_str(&state.to_string().replace(&root, "<root>")).unwrap()
-}
-
-/// The session of the host as the server showed it just before the stop, as the record on disk
-/// holds it.
-pub fn pre_stop(rig: &Rig) -> Option<u64> {
-    rig.record().expect("a record").pre_stop_session_ms
-}
-
-/// The `stop_begun`, `link_moved` and `start_issued` marks on disk.
-pub fn marks(rig: &Rig) -> [bool; 3] {
-    let record = rig.record().unwrap();
-    [record.stop_begun, record.link_moved, record.start_issued]
 }

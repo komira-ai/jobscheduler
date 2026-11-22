@@ -19,6 +19,39 @@
 //! What is left then is not dropped: a run whose container still exists is adopted by the
 //! next process of the agent, which lists it first, and its result is sent from there.
 //!
+//! # The handover
+//!
+//! A stop request that finds the handover file in the state root (the update hook writes it
+//! before it stops the agent to restart it on another release, see
+//! [`crate::lifecycle::handover`]) does not drain, in a session given the state root to look
+//! in ([`Session::with_handover`]): the worker takes no new job and the next heartbeat says
+//! `draining` at once, as in a drain; then, after each heartbeat, the worker is asked to park
+//! ([`Worker::park`](crate::Worker::park)), which it does only once no start, no stop and no
+//! finished job's cleanup is under way. Parked, it does nothing more, and the loop ends with
+//! status 0, every run left as it is for the next process to adopt and every result not yet
+//! acknowledged kept in the state root for it to send. Nothing is stopped and no result is
+//! waited for. When [`Drain::wait`] passes before the worker parks, or at a second stop
+//! request, the loop ends all the same and says so: what was under way is then the next
+//! process's, as after a crash. A file that is there but not of its form is not a request:
+//! the stop drains, and the log says why.
+//!
+//! # The handover in place
+//!
+//! A replace request (SIGHUP to the main process, which the update hook sends after it wrote the
+//! handover file, instead of stopping the unit) hands over the same way, in a session given the
+//! state root and holding jobs, when the handover file is there and of its form. The loop does
+//! what a stop does with that file (see the handover above) and ends with [`Exit::Replaced`]
+//! instead of [`Exit::Stopped`]: the program then runs again in the same process (see
+//! `crate::in_place`), so systemd sees no stop and starts nothing, and the next process of the
+//! agent adopts the runs as after any handover. A stop request during that hand-over ends it
+//! with [`Exit::Stopped`]: a stop wins, the process exits and nothing is run again; so does one
+//! that comes after the loop ended and before the exec ([`Sleeper::ready_to_run_again`], which
+//! also gives SIGTERM and SIGINT their default action and ignores SIGHUP until the next program
+//! installs its handlers). Another
+//! replace request during it is ignored. A replace request with no handover file, or one that
+//! is not of its form, or in a session with no jobs, is ignored with a line that says why, and
+//! the loop goes on as before; one during a drain is ignored too.
+//!
 //! # The other ends
 //!
 //! The agent never leaves a container without somebody to enforce its wall limit if it can
@@ -44,8 +77,14 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::hold_cordon::Keeper;
+use crate::lifecycle::handover::Handover;
 use crate::session::{Drain, Fatal, Note, Session, Step};
-use crate::worker::Snapshot;
+use crate::worker::{Parked, Snapshot};
+
+/// The longest a handover waits for the worker's answer to a park before it heartbeats again
+/// and asks later: a worker inside a slow runtime call holds neither the heartbeats nor the
+/// handover's bound.
+const PARK_WAIT: Duration = Duration::from_secs(5);
 
 /// How a wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +93,9 @@ pub enum Wake {
     Elapsed,
     /// The process was asked to stop (SIGTERM or SIGINT).
     Stop,
+    /// The process was asked to hand its runs over and run its program again in place
+    /// (SIGHUP). A stop request comes before it.
+    Replace,
     /// The bell rang: the job worker has news for the server ([`Sleeper::sleep_or_bell`]).
     Bell,
 }
@@ -72,6 +114,14 @@ pub trait Sleeper {
         self.sleep(duration)
     }
 
+    /// Readies the process to run its program again in place ([`crate::in_place`]) after the
+    /// loop ended [`Exit::Replaced`], and says whether it may: `false` when a stop request came
+    /// in the meantime, which then wins (the process exits, its runs handed over). The default,
+    /// a test's sleeper, readies nothing and finds no stop.
+    fn ready_to_run_again(&mut self) -> bool {
+        true
+    }
+
     /// The bell [`Sleeper::sleep_or_bell`] wakes on, for the job worker to ring; none for a
     /// sleeper without one (the default).
     fn bell(&self) -> Option<crate::lifecycle::Wake> {
@@ -84,6 +134,8 @@ pub trait Sleeper {
 pub enum Exit {
     /// A stop request: the host announced that it drains.
     Stopped,
+    /// A replace request handed the runs over: the program runs again in this process.
+    Replaced,
     /// The server refused the host for good.
     Fatal(Fatal),
     /// The agent cannot go on: its job worker is gone.
@@ -127,8 +179,14 @@ pub fn drive_holding(
                     true => sleeper.sleep_or_bell(after),
                     false => sleeper.sleep(after),
                 };
-                if woken == Wake::Stop {
-                    return stop(session, sleeper, log);
+                match woken {
+                    Wake::Stop => return stop(session, sleeper, log),
+                    Wake::Replace => {
+                        if let Some(exit) = replace(session, sleeper, log) {
+                            return exit;
+                        }
+                    }
+                    Wake::Elapsed | Wake::Bell => {}
                 }
             }
         }
@@ -164,12 +222,73 @@ fn print(session: &Session<'_>, log: &mut dyn Write) {
 /// The end after a stop request.
 fn stop(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn Write) -> Exit {
     match session.drain_plan() {
-        Some(plan) => drain_jobs(session, plan, sleeper, log),
+        Some(plan) => match session.handover() {
+            Handover::Asked => hand_over(session, plan, sleeper, log, Ends::Stopped),
+            Handover::Absent => drain_jobs(session, plan, sleeper, log),
+            Handover::Refused(why) => {
+                let _ = writeln!(
+                    log,
+                    "js-agent: the handover file is not used ({why}): the agent drains"
+                );
+                drain_jobs(session, plan, sleeper, log)
+            }
+        },
         None => {
             session.drain().iter().for_each(|note| {
                 let _ = writeln!(log, "js-agent: {note}");
             });
             Exit::Stopped
+        }
+    }
+}
+
+/// The end after a replace request, see the module documentation: `None` when it is ignored
+/// and the loop goes on, with the line that says why.
+fn replace(
+    session: &mut Session<'_>,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+) -> Option<Exit> {
+    let Some(plan) = session.drain_plan() else {
+        let _ = writeln!(
+            log,
+            "js-agent: a replace request is ignored: the agent has no jobs"
+        );
+        return None;
+    };
+    match session.handover() {
+        Handover::Asked => Some(hand_over(session, plan, sleeper, log, Ends::Replaced)),
+        Handover::Absent => {
+            let _ = writeln!(
+                log,
+                "js-agent: a replace request is ignored: there is no handover file"
+            );
+            None
+        }
+        Handover::Refused(why) => {
+            let _ = writeln!(
+                log,
+                "js-agent: a replace request is ignored: the handover file is not used ({why})"
+            );
+            None
+        }
+    }
+}
+
+/// What a handover ends with once the worker parked or the wait passed.
+#[derive(Debug, Clone, Copy)]
+enum Ends {
+    /// After a stop request: [`Exit::Stopped`].
+    Stopped,
+    /// After a replace request: [`Exit::Replaced`].
+    Replaced,
+}
+
+impl Ends {
+    fn exit(self) -> Exit {
+        match self {
+            Self::Stopped => Exit::Stopped,
+            Self::Replaced => Exit::Replaced,
         }
     }
 }
@@ -189,17 +308,9 @@ fn drain_jobs(
         // What this heartbeat lists is what the server then believes: the drain is done
         // when a heartbeat that listed nothing has been sent.
         let idle = !session.drain_left();
-        let step = session.tick();
-        print(session, log);
-        let after = match step {
-            Step::Fatal(fatal) => return refused(session, fatal, log),
-            Step::Failed(why) => return failed(session, why, log),
-            Step::Wait { after, note } => {
-                note.iter().for_each(|note| {
-                    let _ = writeln!(log, "js-agent: {note}");
-                });
-                after
-            }
+        let after = match beat(session, log) {
+            Ok(after) => after,
+            Err(exit) => return exit,
         };
         waited = waited.saturating_add(after);
         if idle || waited >= end {
@@ -210,6 +321,68 @@ fn drain_jobs(
         }
         if sleeper.sleep(after) == Wake::Stop {
             return leave(session, log);
+        }
+    }
+}
+
+/// The handover of a session with jobs, see the module documentation; it ends with `ends`,
+/// except that a stop request during it ends it with [`Exit::Stopped`]. Time passes only in
+/// `sleeper`, and is counted as the waits asked for; a replace request during it is ignored
+/// and ends the wait it came in, so the next heartbeat is sent at once.
+fn hand_over(
+    session: &mut Session<'_>,
+    plan: Drain,
+    sleeper: &mut dyn Sleeper,
+    log: &mut dyn Write,
+    ends: Ends,
+) -> Exit {
+    session.begin_drain();
+    let _ = writeln!(
+        log,
+        "js-agent: handing over: no new job is taken, and the runs are left to the next \
+         process once no start, stop or check is under way"
+    );
+    let mut waited = Duration::ZERO;
+    loop {
+        let after = match beat(session, log) {
+            Ok(after) => after,
+            Err(exit) => return exit,
+        };
+        // Asked after the heartbeat, so the worker has the reply's stops and acknowledgements
+        // before it looks.
+        if session.park_jobs(PARK_WAIT) != Some(Parked::Busy) {
+            let _ = writeln!(
+                log,
+                "js-agent: handed over: every run is left as it is to the next process"
+            );
+            return ends.exit();
+        }
+        waited = waited.saturating_add(after);
+        let stopped = waited < plan.wait && sleeper.sleep(after) == Wake::Stop;
+        if waited >= plan.wait || stopped {
+            let _ = writeln!(
+                log,
+                "js-agent: handing over: a start, a stop or a check is still under way and is \
+                 left to the next process"
+            );
+            return if stopped { Exit::Stopped } else { ends.exit() };
+        }
+    }
+}
+
+/// One heartbeat of a drain or a handover, and the lines it makes: the wait it asks for, or the
+/// end a refusal for good or the end of the worker makes (see the module documentation).
+fn beat(session: &mut Session<'_>, log: &mut dyn Write) -> Result<Duration, Exit> {
+    let step = session.tick();
+    print(session, log);
+    match step {
+        Step::Fatal(fatal) => Err(refused(session, fatal, log)),
+        Step::Failed(why) => Err(failed(session, why, log)),
+        Step::Wait { after, note } => {
+            note.iter().for_each(|note| {
+                let _ = writeln!(log, "js-agent: {note}");
+            });
+            Ok(after)
         }
     }
 }

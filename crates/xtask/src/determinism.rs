@@ -90,6 +90,7 @@ pub const CRATES: &[&str] = &[
     "js-sim-cell",
     "js-sizing",
     "js-state",
+    "js-supervise",
     "js-system-clock",
     "js-testkit",
     "js-treestore",

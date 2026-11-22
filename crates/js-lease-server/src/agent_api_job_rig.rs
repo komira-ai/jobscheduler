@@ -666,10 +666,20 @@ impl Rig {
         agent: &FakeAgent,
         taint: Option<Taint>,
     ) -> Result<HeartbeatReply, Refused> {
+        let sent = self.heartbeat(agent, taint);
+        let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
+        let agents = State(Arc::clone(&self.agents));
+        let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
+        answer.await.map(|Json(reply)| reply)
+    }
+
+    /// The next heartbeat of `agent`'s host reporting `taint`, as [`Rig::beat_reporting`]
+    /// sends it.
+    pub(crate) fn heartbeat(&self, agent: &FakeAgent, taint: Option<Taint>) -> Heartbeat {
         let (epoch, session) = self.sessions[&agent.host].clone();
         let seq = self.seq.as_ref();
         let seq = seq.map(|seq| seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
-        let sent = Heartbeat {
+        Heartbeat {
             seq,
             host_id: agent.host.clone(),
             epoch,
@@ -687,11 +697,7 @@ impl Rig {
             jobs: agent.listing(),
             retired_jobs: agent.retired.iter().cloned().collect(),
             log_grant_state: agent.log_state(),
-        };
-        let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
-        let agents = State(Arc::clone(&self.agents));
-        let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
-        answer.await.map(|Json(reply)| reply)
+        }
     }
 
     /// Records the job `id` and places it on `host` with [`BOOKED`].

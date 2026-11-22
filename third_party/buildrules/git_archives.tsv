@@ -1,0 +1,2 @@
+# repository commit sha256 bytes top-directory; each archive was compared with cargo's checkout of the commit by `buildrules sync`
+github.com/komira-ai/hostkeeper 75199c6468a18c0bd836ca9f198e0fdf8f907084 31c9a05756aa893292308d901d4e142520577d1e57e80afa2a188c6da93ce1f0 8672820 hostkeeper-75199c6468a18c0bd836ca9f198e0fdf8f907084

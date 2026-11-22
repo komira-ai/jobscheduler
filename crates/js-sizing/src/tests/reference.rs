@@ -85,10 +85,12 @@ impl Reference {
             }
             _ => {}
         }
-        if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
-            let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-            let millis = millis.min(u128::from(u32::MAX)) as u32;
-            let quiet = run.node_cpu_pressure_permille.is_some_and(|p| p < 100);
+        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
+        if run.outcome == Outcome::Success && trusted && used {
+            let mean = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+            let mean = mean.min(u128::from(u32::MAX)) as u32;
+            let millis = run.cpu_peak_millis.unwrap_or(mean);
+            let quiet = !run.cpu_held && run.node_cpu_pressure_permille.is_some_and(|p| p < 100);
             if quiet || millis > self.cpu_estimate(b) {
                 self.cpu.push(millis);
             }
@@ -164,14 +166,14 @@ impl Reference {
         let ceiling = b.host_memory.saturating_sub(1) / STEP * STEP;
         let floor = self.floor.min(ceiling);
         let raise_only = day.max(self.last_seen).min(MAX_DAY) < self.until;
+        let max = self.window(false).into_iter().max().unwrap_or(0);
+        let held = self.window(true).into_iter().max().unwrap_or(0);
+        let sized = max
+            .saturating_add(max.div_ceil(5))
+            .saturating_add(128 * MIB);
         let mut memory = if self.mixed() {
-            b.default_memory.max(floor)
+            b.default_memory.max(floor).max(up(sized.max(held)))
         } else {
-            let max = self.window(false).into_iter().max().unwrap_or(0);
-            let held = self.window(true).into_iter().max().unwrap_or(0);
-            let sized = max
-                .saturating_add(max.div_ceil(5))
-                .saturating_add(128 * MIB);
             let memory = up(sized.max(held).max(floor));
             if n < 5 || raise_only {
                 memory.max(b.default_memory)
@@ -240,6 +242,8 @@ pub(super) fn random_run(rng: &mut Rng, host: u64) -> Run {
             rng.size(40_000_000)
         },
         node_cpu_pressure_permille: (rng.below(5) != 0).then(|| rng.below(300) as u16),
+        cpu_held: rng.below(4) == 0,
+        cpu_peak_millis: (rng.below(3) == 0).then(|| u32::try_from(rng.below(16_000)).unwrap()),
     }
 }
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use js_agent::{
     Answer, CommandRunner, Connector, Dialer, FileReader, Handle, Jitter, Login, Machine, Platform,
-    Services, Sleeper, Transport, Wake, run_with,
+    Services, Sleeper, Streams, Transport, Wake, run_with_exec,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
@@ -170,11 +170,17 @@ pub fn ioreg() -> String {
     )
 }
 
+/// A program's line (the program and its arguments joined with spaces) and its whole
+/// environment.
+pub type RanWith = (String, Vec<(String, String)>);
+
 /// Programs and their recorded output. A program not listed is not found.
 #[derive(Clone, Default)]
 pub struct FakeCommands {
     answers: BTreeMap<String, Result<String, String>>,
     pub ran: Rc<RefCell<Vec<String>>>,
+    /// The environment of each program run with both streams read, by its line.
+    pub envs: Rc<RefCell<Vec<RanWith>>>,
 }
 
 impl FakeCommands {
@@ -202,6 +208,38 @@ impl CommandRunner for FakeCommands {
         _env: &[(&str, &str)],
     ) -> Result<String, String> {
         self.run(program, args)
+    }
+}
+
+/// [`FakeCommands`] as the agent under test runs them: a program run with both streams read
+/// is answered from the same table (the answer is the standard output, the standard error
+/// is empty), and its environment is recorded in [`FakeCommands::envs`].
+pub struct Streaming<'a>(pub &'a FakeCommands);
+
+impl CommandRunner for Streaming<'_> {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+        self.0.run(program, args)
+    }
+
+    fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+        self.0.run_in(program, args, env)
+    }
+
+    fn run_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        _keep: usize,
+        _limit: Duration,
+    ) -> Result<Streams, String> {
+        let line = format!("{program} {}", args.join(" "));
+        let env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned()));
+        self.0.envs.borrow_mut().push((line, env.collect()));
+        self.0.run(program, args).map(|stdout| Streams {
+            stdout: stdout.into_bytes(),
+            ..Streams::default()
+        })
     }
 }
 
@@ -367,6 +405,21 @@ pub struct Host {
     pub ancestors_floor: PathBuf,
     /// The owner a `--registry-credentials` file must have (root, as in production).
     pub secret_owner: u32,
+    /// Where the Xcodes are looked for (`/Applications`, as in production).
+    pub applications: PathBuf,
+    /// Who besides root may own an Xcode app and the directories above it (root, as in
+    /// production).
+    pub xcode_owner: u32,
+}
+
+impl Host {
+    /// Where the agent looks for the Xcodes of this host, and whose they must be.
+    pub fn site(&self) -> js_agent::xcode::Site<'_> {
+        js_agent::xcode::Site {
+            applications: &self.applications,
+            owner: self.xcode_owner,
+        }
+    }
 }
 
 pub fn platform(os: &str, arch: &str) -> Platform {
@@ -395,6 +448,8 @@ pub fn linux_host() -> Host {
         euid: 0,
         ancestors_floor: PathBuf::from("/"),
         secret_owner: 0,
+        applications: PathBuf::from(js_agent::xcode::APPLICATIONS),
+        xcode_owner: 0,
     }
 }
 
@@ -412,6 +467,8 @@ pub fn mac_host() -> Host {
         euid: 0,
         ancestors_floor: PathBuf::from("/"),
         secret_owner: 0,
+        applications: PathBuf::from(js_agent::xcode::APPLICATIONS),
+        xcode_owner: 0,
     }
 }
 
@@ -802,7 +859,34 @@ fn run_exactly(
         (connector, dispatch),
         (sleeper, jitter),
         jobs,
-        store,
+        (store, &|_| {
+            std::io::Error::other("these tests run nothing again")
+        }),
+    )
+}
+
+/// What runs the command line again in a test: it is given the arguments and returns the
+/// error that says it did not.
+pub type Again<'a> = &'a dyn Fn(&[std::ffi::OsString]) -> std::io::Error;
+
+/// [`run_on`] with the program that runs the command line again after a handover in place
+/// given, and the arguments exactly as given. Linux only, as its tests are (they run jobs).
+#[cfg(target_os = "linux")]
+pub fn run_in_place(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jobs: Jobs<'_>,
+    again: Again<'_>,
+) -> Ran {
+    run_polling(
+        args,
+        host,
+        (connector, &Dialer),
+        (sleeper, &mut Lowest),
+        jobs,
+        (FakeHost::new(), again),
     )
 }
 
@@ -822,7 +906,9 @@ pub fn run_on_polling(
         connectors,
         (sleeper, &mut Lowest),
         jobs,
-        FakeHost::new(),
+        (FakeHost::new(), &|_| {
+            std::io::Error::other("these tests run nothing again")
+        }),
     )
 }
 
@@ -832,13 +918,14 @@ fn run_polling(
     connectors: (&dyn Connector, &(dyn Connector + Sync)),
     waiting: (&mut dyn Sleeper, &mut dyn Jitter),
     jobs: Jobs<'_>,
-    store: Arc<FakeHost>,
+    (store, again): (Arc<FakeHost>, Again<'_>),
 ) -> Ran {
     let ((connector, dispatch), (sleeper, jitter)) = (connectors, waiting);
     let (mut out, mut err) = (Capped::new(), Capped::new());
+    let commands = Streaming(&host.commands);
     let mut services = Services {
         platform: host.platform.clone(),
-        commands: &host.commands,
+        commands: &commands,
         files: &host.files,
         connector,
         dispatch,
@@ -852,10 +939,11 @@ fn run_polling(
         euid: host.euid,
         ancestors_floor: &host.ancestors_floor,
         secret_owner: host.secret_owner,
+        xcode_site: host.site(),
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();
-    let status = run_with(argv, &mut out, &mut err, &mut services);
+    let status = run_with_exec(argv, &mut out, &mut err, &mut services, again);
     Ran {
         status,
         out: out.text(),

@@ -8,14 +8,20 @@
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
 //!    must point at the staged release (`link_failed` otherwise, nothing done);
 //! 2. unless the stop is begun already: a taint the restarted agent will not re-check (see
-//!    `refuse_host` in `prepare`), or an `owed-*`
-//!    record, halts (76), and the host
-//!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
-//!    between the placing and the confirming), so a cordon of ours that is gone is put back
-//!    within the cap, and a cap that is spent or a lease that came in defers (75, class
-//!    environment) with nothing stopped (a failed lift of the cordon on the way is no reason to
-//!    fail: the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or
-//!    rollback to lift). A cordon that is not ours (an operator's) is neither renewed nor
+//!    `refuse_taint` in `prepare`) halts (76), as does an `owed-*` record on a first install,
+//!    and the host must be cordoned, hold no lease and owe no check. An update that hands the
+//!    runs over (the record's `handover`, see `prepare`) looks at the taint alone and reads the
+//!    host once, for its session, with no cordon, whatever leases it holds and whatever checks
+//!    its agent owes (the agent finishes them before it ends). Otherwise: `prepare` can end with
+//!    no cordon held (it was killed between the placing and the confirming), so a cordon of ours
+//!    that is gone is put back within the cap, and a cap that is spent, a lease that came in or
+//!    an `owed-*` record (a job of the running agent whose checks have not run yet: stopping the
+//!    agent now would leave the record and taint the host) defers (75, class environment,
+//!    `drain_bound`) with nothing stopped; the records are read after the host and the taint
+//!    again after the records, so a check that failed meanwhile with a taint the restarted agent
+//!    will not re-check halts (76). A failed lift of the cordon on the way is no reason to fail:
+//!    the cordon stays as recorded, as in `prepare`, for the next prepare, cleanup or rollback
+//!    to lift. A cordon that is not ours (an operator's) is neither renewed nor
 //!    lifted. A cordon in force under a mark that was never confirmed may be ours or not, and
 //!    nothing would renew it through the stop: that defers too, the mark left as it is;
 //! 3. the unit is read, so that a read that fails leaves nothing begun; then the record gets
@@ -23,7 +29,11 @@
 //!    the host in the reading of step 2 (one save, so that the stop is never marked without it
 //!    and it is never written without the stop; a rerun that finds the stop begun reads no host
 //!    and keeps it), and the unit is stopped and waited for (renewing the cordon if it is
-//!    ours), for at most the declared bound less the start wait and a margin;
+//!    ours), for at most the declared bound less the start wait and a margin. On a handover the
+//!    handover file is written in the agent's state root just before every stop issued (the
+//!    agent reads it when the stop reaches it, finishes the starts, stops and post-job checks
+//!    under way, and exits leaving its runs), and removed once the unit is down (the new agent
+//!    removes one it finds at its start, so a removal that fails is let be);
 //! 4. if the record holds a restart plan (the unit changed, see `prepare`) on systemd, the wait
 //!    for the unit's cgroup to hold no process, so that the new `Slice`, `Delegate` and
 //!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
@@ -40,6 +50,28 @@
 //!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
 //!    at any look); a unit still waiting in `start` is not.
 //!
+//! An update that hands the runs over in place (the record's `in_place`, see `prepare`) does not
+//! stop the unit: with the unit up, steps 3 to 5 are replaced by the following. The record gets
+//! `stop_begun` with `pre_stop_session_ms` as in step 3; the handover file is written; the
+//! record gets `link_moved` and then `start_issued` (each before its act: the one act is the
+//! signal, which both ends the old program and starts the new one); and the unit's main process
+//! is sent SIGHUP (`systemctl kill --kill-whom=main --signal=SIGHUP`). The agent hands the runs
+//! over and runs the new release's program as the same process, so the unit stays active and
+//! systemd places no process in its cgroup; it removes the handover file at its start, and the
+//! step waits for that, for at most the stop's bound (see [`in_place`]): a signal the unit
+//! manager refuses fails the step (`stop_failed`, class environment) and leaves the request on
+//! disk, which tells the rerun that no agent took it; a bound that passes with the request still there fails it the same way and
+//! leaves the request for the agent; a unit that is no longer active (the agent ended instead
+//! of running again, or the new program died) is started and waited for as in step 5. A rerun
+//! that finds the start issued with the unit up signals again while the request is there (an
+//! agent that has taken it ignores a repeat) and is done when it is gone. A unit that is not up
+//! when the cutover begins has no agent to hand over: it is started as in step 5.
+//!
+//! A start that fails ends `start_failed` (class by the rule of step 5) and its detail adds
+//! that the staged release is installed and its agent is not running (on systemd: the manager
+//! retries the unit, `Restart=always`): the commit is made and the node runs no agent until
+//! the unit starts. `reversible` is `false` all the same.
+//!
 //! Each mark is written before its act, so a run that is killed leaves the marks of every act
 //! it may have made. A rerun does not rely on them: it asks the unit manager, and does what is
 //! not yet done, so every act is a no-op when its effect is already there. The state of the unit
@@ -51,17 +83,19 @@
 //! A first install has no agent to drain, no host the lease server knows and no unit to stop:
 //! it skips steps 2 to 4, writes no `stop_begun`, and is irreversible from `link_moved` on.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
+
+use js_update_hook::points_at;
 
 use crate::update_hook::{
     CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Manager, Outcome, POLL_SECS,
     Params, Reason, Record, Report, START_WAIT_SECS, SYSTEMCTL, UnitState,
 };
 
-use super::prepare::{ask_secs, place, refuse_host, renew};
+use super::prepare::{ask_secs, busy_detail, idle, owed, place, refuse_host, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, success};
-use super::{helper, pf};
+use super::{helper, in_place, pf};
 
 /// Runs `cutover`.
 pub fn cutover(env: &Env<'_>, params: &Params) -> Done {
@@ -117,8 +151,18 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     // that finds the stop begun reads nothing and keeps what the record holds.
     let mut session = None;
     if !entered_begun {
-        refuse_host(env)?;
-        session = hold(env, held, record, params)?;
+        // The agent that would settle an owed check runs until the stop: a drain waits for it
+        // in `hold`, and an agent that hands its runs over finishes it before it ends. A first
+        // install has no such agent.
+        if record.update.previous.is_none() {
+            refuse_host(env)?;
+        } else {
+            refuse_taint(env)?;
+        }
+        session = match record.handover {
+            true => look(env)?,
+            false => hold(env, held, record, params)?,
+        };
     }
     // A first install has no unit to stop.
     if record.update.previous.is_some() {
@@ -126,6 +170,14 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         // leaves nothing begun.
         let unit = record.update.unit.clone();
         let state = show(env, &unit, Reason::StopFailed)?;
+        if record.in_place && matches!(life(&state), Life::Up) {
+            if !entered_begun {
+                record.pre_stop_session_ms = session;
+                mark(env, held, record, |record| record.stop_begun = true)?;
+            }
+            hand_over_in_place(env, held, record, params)?;
+            return Ok(success());
+        }
         if !entered_begun {
             // One save: the stop is never marked without the session it is to be judged against
             // (`mark` saves a copy of the record as it stands, with the session in it).
@@ -134,6 +186,7 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         }
         let since = env.ports.clock.now_ms();
         stop(env, held, record, params, state, entered_begun)?;
+        withdraw_handover(env, record);
         // A unit started by an earlier run holds the new agent: nothing to wait for.
         if !record.start_issued {
             wait_empty(env, held, record, params, since)?;
@@ -150,6 +203,64 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
     }
     start(env, held, record, params)?;
     Ok(success())
+}
+
+/// The hand-over in place, with the unit up (see [`in_place`]): the request, the marks of the
+/// move of the link and of the start, each before the act, and the signal, which both ends the
+/// old program and starts the new one; then the wait until the agent has taken the request. A
+/// rerun that finds the start issued does not ask again: with the request gone the new agent
+/// runs, and with it still there the signal is sent again (an agent that has taken the request
+/// ignores a repeat).
+fn hand_over_in_place(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+) -> Result<(), Done> {
+    if record.start_issued {
+        if !in_place::pending(env)? {
+            return Ok(());
+        }
+    } else {
+        request_handover(env, record)?;
+        mark_link_moved(env, held, record)?;
+        mark(env, held, record, |record| record.start_issued = true)?;
+    }
+    let unit = record.update.unit.clone();
+    in_place::signal(env, &unit)?;
+    let note = staged_not_running(env, record);
+    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
+}
+
+/// The session the lease server shows for the host, for an update that hands the runs over:
+/// the last reading before the stop, with no cordon placed and no idle host waited for.
+fn look(env: &Env<'_>) -> Result<Option<u64>, Done> {
+    let host = env.ports.lease.host().map_err(lease_failure)?;
+    Ok(host.session_started_ms)
+}
+
+/// Asks the agent the stop is about to reach to hand its runs over (see `prepare`): written
+/// before every stop issued, so a rerun asks again.
+pub(super) fn request_handover(env: &Env<'_>, record: &Record) -> Result<(), Done> {
+    if !record.handover {
+        return Ok(());
+    }
+    env.ports.point();
+    env.ports.state.request_handover().map_err(|why| {
+        environment(
+            Reason::StopFailed,
+            format!("cannot ask the agent to hand its runs over: {why}"),
+        )
+    })
+}
+
+/// Removes the handover file of an update that hands the runs over: the agent that read it has
+/// ended, or no stop reached it. The agent removes a file it finds at its start, so one this
+/// cannot remove asks nothing of a later process, and the failure is let be.
+pub(super) fn withdraw_handover(env: &Env<'_>, record: &Record) {
+    if record.handover {
+        let _ = env.ports.state.withdraw_handover();
+    }
 }
 
 /// A failure of something remote or shared: not the release's doing.
@@ -225,10 +336,14 @@ fn hold(
         replace(env, held, record, params, now)?;
         env.ports.lease.host().map_err(lease_failure)?
     };
-    if host.leases == 0 && !host.releasing {
+    // The records after the host, and the taint after the records: a check that failed before
+    // its record went has its taint on disk already.
+    let owed = owed(env)?;
+    refuse_taint(env)?;
+    if idle(&host, &owed) {
         return Ok(host.session_started_ms);
     }
-    Err(busy(env, held, record, params, &host).unwrap_or_else(|done| done))
+    Err(busy(env, held, record, params, &host, &owed).unwrap_or_else(|done| done))
 }
 
 /// Puts a cordon back where there is none: the one that was lost, or the one `prepare` never
@@ -253,8 +368,8 @@ fn replace(
     place(env, held, record, params, false)
 }
 
-/// The host holds a lease under the cordon (or in its absence): lift the cordon if it is ours
-/// and defer. Nothing was stopped.
+/// The host holds a lease under the cordon (or in its absence), or a job's checks are owed:
+/// lift the cordon if it is ours and defer. Nothing was stopped.
 ///
 /// A cordon that cannot be lifted is left as recorded (placed, with its expiry), as `prepare`'s
 /// deferral leaves it: the next prepare, cleanup or rollback tries to lift it, and it lapses
@@ -265,6 +380,7 @@ fn busy(
     record: &mut Record,
     params: &Params,
     host: &HostReading,
+    owed: &[String],
 ) -> Result<Done, Done> {
     let mut left = None;
     if ours(record, env.ports.clock.now_ms()) {
@@ -277,9 +393,12 @@ fn busy(
             Err(error) => left = Some(error),
         }
     }
-    let mut detail = format!(
-        "the host is not idle: {} lease(s), releasing: {}",
-        host.leases, host.releasing
+    let mut detail = busy_detail(
+        format!(
+            "the host is not idle: {} lease(s), releasing: {}",
+            host.leases, host.releasing
+        ),
+        owed,
     );
     if let Some(error) = left {
         detail.push_str(&format!(
@@ -317,33 +436,18 @@ pub(super) fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitStat
         .map_err(|why| environment(reason, format!("cannot read the state of {unit}: {why}")))
 }
 
-/// Where a link at `link` that holds `target` points: an absolute target as it is, a relative
-/// one from the link's directory, with `.` and `..` resolved by name (nothing is looked up).
-pub(super) fn resolved(link: &Path, target: &Path) -> PathBuf {
-    let mut path = link.parent().unwrap_or(link).to_path_buf();
-    for part in target.components() {
-        match part {
-            Component::RootDir => path = PathBuf::from("/"),
-            Component::ParentDir => {
-                path.pop();
-            }
-            Component::CurDir | Component::Prefix(_) => {}
-            Component::Normal(name) => path.push(name),
-        }
-    }
-    path
-}
-
-/// Whether the link points at the staged release. A target the updater wrote relative to the
-/// link's directory (`current -> 1.4.0`) is read from there.
+/// Whether the link points at the staged release: where it points (a target the updater wrote
+/// relative to the link's directory, `current -> 1.4.0`, is read from there) and the staged
+/// release are one directory by their real paths, however each is spelt. hostkeeper names the
+/// staged release by its real path, so on macOS it is `/private/var/lib/hostkeeper/...` while
+/// the link is `/var/lib/hostkeeper/.../current`.
 pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
-    let target = env.ports.link.target(link).map_err(|why| {
+    points_at(env.ports.link, link, staged).map_err(|why| {
         environment(
             Reason::LinkFailed,
             format!("cannot read {}: {why}", link.display()),
         )
-    })?;
-    Ok(target.is_some_and(|target| resolved(link, &target) == staged))
+    })
 }
 
 /// Waits one poll and renews the cordon if it is ours.
@@ -378,10 +482,16 @@ fn stop(
             if entered_begun && record.start_issued {
                 return Ok(());
             }
+            request_handover(env, record)?;
             env.ports.point();
-            env.ports.units.stop_no_block(&unit).map_err(|why| {
-                environment(Reason::StopFailed, format!("cannot stop {unit}: {why}"))
-            })?;
+            if let Err(why) = env.ports.units.stop_no_block(&unit) {
+                // No stop reached the agent: a later one is not the update's to hand over.
+                withdraw_handover(env, record);
+                return Err(environment(
+                    Reason::StopFailed,
+                    format!("cannot stop {unit}: {why}"),
+                ));
+            }
         }
     }
     // The step is killed at the declared bound; ending a little before it says why.
@@ -490,14 +600,22 @@ fn mark_link_moved(env: &Env<'_>, held: &Held, record: &mut Record) -> Result<()
 }
 
 /// A start that failed: the release's fault only if the unit ran and died, now or at an earlier
-/// look (`seen_crash`); a unit that is anything else says nothing of the binary.
-fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) -> Done {
+/// look (`seen_crash`); a unit that is anything else says nothing of the binary. `suffix` is
+/// what the caller adds to the detail about the node's state.
+fn start_failure(
+    env: &Env<'_>,
+    unit: &str,
+    detail: String,
+    seen_crash: bool,
+    suffix: &str,
+) -> Done {
     let ran = seen_crash
         || env
             .ports
             .units
             .show(unit)
             .is_ok_and(|state| state.crashed());
+    let detail = format!("{detail}{suffix}");
     if ran {
         failure(Reason::StartFailed, detail)
     } else {
@@ -505,25 +623,41 @@ fn start_failure(env: &Env<'_>, unit: &str, detail: String, seen_crash: bool) ->
     }
 }
 
+/// What a failed start of the staged agent adds to the detail: the staged release is the
+/// installed one and no agent runs.
+pub(super) fn staged_not_running(env: &Env<'_>, record: &Record) -> String {
+    let retry = match env.manager {
+        Manager::Systemd => " (systemd retries the unit: Restart=always)",
+        Manager::Launchd => "",
+    };
+    format!(
+        "; the staged release {} is installed and its agent is not running{retry}",
+        record.update.target
+    )
+}
+
 /// Marks the start, then starts the unit and waits for it to be active.
 fn start(env: &Env<'_>, held: &Held, record: &mut Record, params: &Params) -> Result<(), Done> {
     if !record.start_issued {
         mark(env, held, record, |record| record.start_issued = true)?;
     }
-    bring_up(env, held, record, params)
+    let note = staged_not_running(env, record);
+    bring_up(env, held, record, params, &note)
 }
 
 /// Starts the unit if it is down and waits for it to be active, for at most the start wait. A
-/// start that fails is the release's fault only if the unit ran and died. The mark of the
-/// start is the caller's: `cutover`'s and `rollback`'s are not the same.
+/// start that fails is the release's fault only if the unit ran and died; `suffix` is added to
+/// the detail of such an ending. The mark of the start is the caller's: `cutover`'s and
+/// `rollback`'s are not the same.
 pub(super) fn bring_up(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
     params: &Params,
+    suffix: &str,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
-    bring_up_unit(env, held, record, params, &unit)
+    bring_up_unit(env, held, record, params, &unit, suffix)
 }
 
 /// [`bring_up`] for the unit `unit`, which is the agent's or its helper's.
@@ -533,12 +667,19 @@ pub(super) fn bring_up_unit(
     record: &mut Record,
     params: &Params,
     unit: &str,
+    suffix: &str,
 ) -> Result<(), Done> {
     let state = show(env, unit, Reason::StartFailed)?;
     if matches!(life(&state), Life::Down | Life::Stopping) {
         env.ports.point();
         env.ports.units.start(unit).map_err(|why| {
-            start_failure(env, unit, format!("cannot start {unit}: {why}"), false)
+            start_failure(
+                env,
+                unit,
+                format!("cannot start {unit}: {why}"),
+                false,
+                suffix,
+            )
         })?;
     }
     let bound_ms = START_WAIT_SECS * 1000;
@@ -555,6 +696,7 @@ pub(super) fn bring_up_unit(
                     unit,
                     format!("{unit} is {} after it was started", state.active),
                     seen_crash,
+                    suffix,
                 ));
             }
             Life::Starting => {}
@@ -565,6 +707,7 @@ pub(super) fn bring_up_unit(
                 unit,
                 format!("{unit} is still {} after {START_WAIT_SECS} s", state.active),
                 seen_crash,
+                suffix,
             ));
         }
         pause(env, held, record, params)?;

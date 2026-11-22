@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use js_testkit::dir::TestDir;
 
 use super::adopt::{agree, fields_of, in_cgroup, is_dir, named_in, report_lines, scratch_fits};
-use super::ledger::{Booked, Entry, Failed, Reason, Removed, Supervisor, SweepReport};
+use super::ledger::{Booked, Entry, Failed, Left, Reason, Removed, Supervisor, SweepReport};
 use crate::cli_runtime::container_name;
 use crate::lifecycle::label;
 
@@ -203,8 +203,10 @@ fn each_reason_for_a_removal_reads_differently() {
 }
 
 /// Catches a start that says nothing of what it did to the leases it found: one line for each
-/// run adopted, each lease removed with its reason and each lease that could not be removed,
-/// and no line for a pass that did nothing. The lines name no host path.
+/// run adopted, each lease removed with its reason, each lease that could not be removed and
+/// each lease whose sidecar this agent cannot read (one a later agent wrote in a form this one
+/// does not know: its job is left running, never ended unsaid), none for another agent's
+/// lease, and no line for a pass that did nothing. The lines name no host path.
 #[test]
 fn the_pass_over_the_ledger_is_told_in_one_line_for_each_lease() {
     assert!(report_lines(&SweepReport::default()).is_empty());
@@ -221,7 +223,16 @@ fn the_pass_over_the_ledger_is_told_in_one_line_for_each_lease() {
             name: "js-x-r3".to_owned(),
             why: "busy".to_owned(),
         }],
-        left: Vec::new(),
+        left: vec![
+            Left::Malformed {
+                path: PathBuf::from("/store/oci-labels/js-x-r4.json"),
+                why: "its form is version 3".to_owned(),
+            },
+            Left::Foreign {
+                path: PathBuf::from("/store/oci-labels/js-y-r5.json"),
+                agent: "y".to_owned(),
+            },
+        ],
     };
     assert_eq!(
         report_lines(&report),
@@ -229,6 +240,9 @@ fn the_pass_over_the_ledger_is_told_in_one_line_for_each_lease() {
             "crun: adopted job r1".to_owned(),
             format!("crun: removed the lease of job r2: {}", Reason::NeverRan),
             "crun: could not remove the lease of job r3: busy".to_owned(),
+            "crun: left the lease js-x-r4 alone: its sidecar cannot be read (its form is version \
+             3), so its job, if it still runs, is neither taken over nor stopped"
+                .to_owned(),
         ]
     );
 }

@@ -655,6 +655,10 @@ impl Link for Faulted<'_> {
             target.display()
         );
     }
+
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        self.world.real(path)
+    }
 }
 
 impl Lease for Faulted<'_> {
@@ -715,5 +719,17 @@ impl StateView for FaultedState<'_> {
 
     fn has_credential(&self) -> bool {
         self.root.has_credential()
+    }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        self.root.request_handover()
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        self.root.withdraw_handover()
+    }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        self.root.handover_pending()
     }
 }

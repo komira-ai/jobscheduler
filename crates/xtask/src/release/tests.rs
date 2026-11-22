@@ -211,6 +211,9 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/js-agent.service",
         "packaging/js-agent/tmpfiles.conf",
         "packaging/js-agent/crun_host_setup.sh",
+        // The smoke bundle's tree and recipe: the release publishes the bundle.
+        "packaging/js-smoke-bundle/bundle.toml",
+        "packaging/js-smoke-bundle/tree/bin/smoke",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -242,6 +245,10 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/deb/README.md",
         "packaging/js-agent/deb-notes/tmpfiles.conf",
         "packaging/js-agent/deb",
+        // The smoke bundle's README is in no bundle; a directory that only starts like its
+        // directory is not its.
+        "packaging/js-smoke-bundle/README.md",
+        "packaging/js-smoke-bundle-notes/bundle.toml",
         // The earlier hostkeeper archive package's directories no longer ship.
         "packaging/js-agent/hostkeeper/manifest.toml.in",
         "packaging/js-agent-macos/hostkeeper/units/js-agent.plist",
@@ -685,5 +692,103 @@ fn the_default_ship_roots_are_the_released_binaries_crates() {
             "js-mac-provision",
             "js-mdm"
         ]
+    );
+}
+
+/// Catches a next-version that does not raise the patch by one, or that changes the major or
+/// the minor, or that prints something other than the `version=` line the workflow appends to
+/// its output.
+#[test]
+fn next_version_raises_the_patch_by_one_and_prints_the_output_line() {
+    use super::next_version::{NextVersionArgs, after, run as next_version};
+    assert_eq!(after("0.0.0"), Ok(v(0, 0, 1)));
+    assert_eq!(after("1.22.39"), Ok(v(1, 22, 40)));
+    assert_eq!(after("1.2.9"), Ok(v(1, 2, 10)));
+    let said = next_version(&NextVersionArgs {
+        version: "3.4.5".to_owned(),
+        output: None,
+    });
+    assert_eq!(said, Ok("version=3.4.6".to_owned()));
+}
+
+/// Catches a next-version that takes a version the release never makes (empty, a leading zero,
+/// two or four parts, a non-digit, a space, a sign) and does not name it in the refusal.
+#[test]
+fn next_version_refuses_each_malformed_version_naming_it() {
+    use super::next_version::after;
+    for bad in [
+        "",
+        "1.02.3",
+        "01.2.3",
+        "1.2.03",
+        "1.2",
+        "1.2.3.4",
+        "1.x.3",
+        "1.2.3-rc1",
+        " 1.2.3",
+        "1.2.3 ",
+        "1. 2.3",
+        "1.2.+3",
+        "v1.2.3",
+        "1.2.3\n",
+        "-1.2.3",
+    ] {
+        let refused = after(bad).expect_err(bad);
+        assert_eq!(refused, Error::NotAVersion(bad.to_owned()));
+        assert!(
+            refused.to_string().contains(&format!("{bad:?}")),
+            "{refused}"
+        );
+    }
+}
+
+/// Catches a patch of the largest number wrapping to zero (a version below the one given) or
+/// a number above `u64` being taken as a version.
+#[test]
+fn next_version_refuses_a_patch_that_cannot_be_raised() {
+    use super::next_version::after;
+    let largest = u64::MAX;
+    assert_eq!(after(&format!("1.2.{}", largest - 1)), Ok(v(1, 2, largest)));
+    let top = format!("1.2.{largest}");
+    let refused = after(&top).expect_err("overflow");
+    assert_eq!(refused, Error::PatchOverflow(top.clone()));
+    assert!(refused.to_string().contains(&top), "{refused}");
+    let beyond = format!("1.2.{largest}0");
+    assert_eq!(after(&beyond), Err(Error::NotAVersion(beyond)));
+}
+
+/// Catches a next-version that overwrites the output file instead of appending to it (the
+/// other steps' outputs would be lost), writes it without the line end, or reports a file that
+/// cannot be written as success.
+#[test]
+fn next_version_appends_its_line_to_the_output_file_and_reports_a_file_it_cannot_write() {
+    use super::next_version::{NextVersionArgs, run as next_version};
+    let dir = scratch("next-version");
+    let out = dir.join("output");
+    std::fs::write(&out, "other=1\n").expect("earlier output");
+    let args = |output: &Path, version: &str| NextVersionArgs {
+        version: version.to_owned(),
+        output: Some(output.to_owned()),
+    };
+    assert_eq!(
+        next_version(&args(&out, "0.7.0")),
+        Ok("version=0.7.1".to_owned())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out).expect("read"),
+        "other=1\nversion=0.7.1\n"
+    );
+    // A directory cannot be opened for appending; a bad version writes nothing.
+    assert!(matches!(
+        next_version(&args(&dir, "0.7.0")),
+        Err(Error::Io { .. })
+    ));
+    assert_eq!(
+        next_version(&args(&out, "0.7")),
+        Err(Error::NotAVersion("0.7".to_owned()))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out).expect("read"),
+        "other=1\nversion=0.7.1\n"
     );
 }

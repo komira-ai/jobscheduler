@@ -13,6 +13,7 @@ use js_treestore::Sealer;
 #[cfg(target_os = "macos")]
 use js_treestore::mac::{Clonefile, Fchflags, MacSealer, Owner};
 
+use super::layout::{self, lease_users_reach, make_store};
 use super::list::is_digest;
 use super::place::{Placer, load_config, manifest_of};
 use super::settings::Settings;
@@ -63,6 +64,13 @@ pub enum Fetch {
 /// the machine as it is now: nothing is cached, so a change to a list file or to the store
 /// is seen by the next start.
 pub trait BundleHost: Send + Sync {
+    /// Makes the store directory when it is missing (the agent's user's, mode
+    /// [`STORE_MODE`](super::STORE_MODE), in a parent that is there) and checks that a lease
+    /// user can search every directory from `/` down to it: each is root's, closed to writes
+    /// by group and others, and has `o+x` ([`lease_users_reach`]). It runs before
+    /// [`BundleHost::check_start`], which needs the directory.
+    fn prepare_store(&self, store: &Path) -> Result<(), String>;
+
     /// Checks the store's volume and the kernel's securelevel against the scratch root's
     /// volume (`js_treestore::mac::check_volumes` and `check_securelevel`).
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String>;
@@ -222,6 +230,11 @@ fn blocks_below(dir: &Path) -> io::Result<u64> {
 }
 
 impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost<R> {
+    fn prepare_store(&self, store: &Path) -> Result<(), String> {
+        make_store(store).map_err(|why| format!("{}: {why}", store.display()))?;
+        lease_users_reach(store, self.owner, &layout::look)
+    }
+
     #[cfg(target_os = "macos")]
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String> {
         js_treestore::mac::start_checks(store, scratch).map_err(|why| why.to_string())
@@ -286,8 +299,9 @@ impl<R: CommandRunner + Clone + Send + Sync + 'static> BundleHost for SystemHost
     }
 
     fn xcodes(&self) -> Vec<HostXcode> {
-        // The Xcode catalog arrives with the profile builder; until then a host reports
-        // none, and a bundle that needs Xcode is refused `bundle-xcode-mismatch`.
+        // The bundle's Xcode need is not met from the agent's survey (`crate::xcode::survey`)
+        // yet; until it is, a host reports none, and a bundle that needs Xcode is refused
+        // `bundle-xcode-mismatch`.
         Vec::new()
     }
 

@@ -5,9 +5,10 @@
 //! - Run under any name but `sudo`, it is cargo: it appends its arguments as one line to
 //!   `target/debug/cargo-args` in its working directory and prints the file
 //!   `cargo-messages` in its working directory, the JSON messages a test wrote for it
-//!   (every build it is asked for is `--no-run`).
+//!   (every test build it is asked for is `--no-run`; a `cargo build` prints the same file).
 //! - Run as `sudo`, it appends `<working directory>: <arguments>` as one line to
-//!   `sudo-args` next to it, and exits 0 (the tests it was asked to run passed). Asked for
+//!   `sudo-args` next to it, whatever the command (`mac-root-tests` runs it too), and exits
+//!   0 (the tests it was asked to run passed). Asked for
 //!   `systemctl show <unit> ...`, it prints the properties of a unit whose main process
 //!   exited 0; asked for `systemctl reset-failed`, it does nothing.
 //!
@@ -25,6 +26,25 @@
 //!   `200 ok` (`503` under `server-unhealthy`), and exits 0 after a `GET /quit`.
 //! - Run as `js`, it is the client of `site-demo`: `job submit` prints the refusal the real client
 //!   prints when no host could serve the job and exits 3, and `job list` prints nothing.
+//!
+//! - Run as `buck2`, it is the buck2 of `farm-build`: it appends its arguments, joined by spaces, as
+//!   one line to `buck2.calls` of its working directory. `kill` then exits 0. Any other call answers
+//!   from the files `buck2-<key>.stdout`, `.stderr` and `.status` of the working directory, where
+//!   `<key>` is `tool` for the build of `buildrules//cli:buildrules` and the verb (`audit`, `build`)
+//!   for any other: it prints the first (when there is none: for `audit`, `{}`, buck2's answer for a
+//!   key that is not set; for `tool`, the line `buildrules//cli:buildrules <its own directory>/buildrules`;
+//!   for any other, nothing), prints the second on stderr, and exits with the number in the third
+//!   (0 when there is none). It answers from files, not from the environment.
+//! - Run as `buildrules`, it is the command line `farm-build` builds, over a table of its own: it
+//!   appends its arguments as one line to `buildrules.calls` of its working directory. `sync` writes
+//!   what a sync of the working directory writes: `buildrules.lock.bzl`, one line `<file> <sha256>`
+//!   for each of `Cargo.toml` and `Cargo.lock`, and `third_party/buildrules/git_archives.tsv` when
+//!   `Cargo.toml` has a `git = ` dependency (removed when it has none). `check` exits 1, with no
+//!   `STALE:` line, when there is no `buildrules.lock.bzl`; else with one `STALE:` line, in the real
+//!   command line's form, for each of the two files the table records another sha256 of, or when they
+//!   agree, for each generated file that is not what `sync` writes; else 0. Defects:
+//!   `sync-fails` (sync exits 1 with a line), `sync-writes-nothing` (sync exits 0 and writes
+//!   nothing), `check-usage` (check exits 2 with a usage line).
 //!
 //! `XTASK_FAKE_DEFECT`, or the first line of a file named `defect` next to the program, asks for one
 //! failure of the real programs: `build-fails` (every build
@@ -91,7 +111,8 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
     if args.get(1).is_some_and(|program| program == "systemctl") {
         return systemctl(&args[2..], &defect);
     }
-    // Past `systemctl`, the only command is `systemd-run`, whose unit runs `count-run`.
+    // Past `systemctl`, a `systemd-run` (whose unit runs `count-run`) writes its count; any
+    // other command (`mac-root-tests`'s) is only recorded.
     write_count(args, &defect);
     if failing {
         ExitCode::from(101)
@@ -102,10 +123,9 @@ fn sudo(me: &Path, args: &[String]) -> ExitCode {
 
 /// What the wrapper in a `systemd-run` command would have written to its count file.
 fn write_count(args: &[String], defect: &str) {
-    let at = args
-        .iter()
-        .position(|a| a == "--count-file")
-        .expect("a systemd-run of count-run");
+    let Some(at) = args.iter().position(|a| a == "--count-file") else {
+        return;
+    };
     let text = match defect {
         "no-count" => return,
         "zero-tests" => "0\n",
@@ -206,6 +226,130 @@ fn server(args: &[String]) -> ExitCode {
     }
 }
 
+/// The target of the `buildrules` command line.
+const TOOL: &str = "buildrules//cli:buildrules";
+
+/// The fake `buck2`: records the call and answers from the files of the working directory.
+fn buck2(me: &Path, args: &[String]) -> ExitCode {
+    append(Path::new("buck2.calls"), &args.join(" "));
+    let verb = args.first().map_or("", String::as_str);
+    if verb == "kill" {
+        return ExitCode::SUCCESS;
+    }
+    let key = if args.iter().any(|a| a == TOOL) {
+        "tool"
+    } else {
+        verb
+    };
+    let read = |suffix: &str, default: &str| {
+        std::fs::read_to_string(format!("buck2-{key}.{suffix}"))
+            .unwrap_or_else(|_| default.to_owned())
+    };
+    let tool = format!("{TOOL} {}\n", me.with_file_name("buildrules").display());
+    let stdout = match key {
+        "audit" => "{}",
+        "tool" => &tool,
+        _ => "",
+    };
+    print!("{}", read("stdout", stdout));
+    eprint!("{}", read("stderr", ""));
+    ExitCode::from(read("status", "0").trim().parse().unwrap_or(2))
+}
+
+/// The fake table.
+const TABLE: &str = "buildrules.lock.bzl";
+/// The fake's one generated file beside the table, there only for a git dependency.
+const ARCHIVES: &str = "third_party/buildrules/git_archives.tsv";
+/// The files the fake table records.
+const INPUTS: [&str; 2] = ["Cargo.toml", "Cargo.lock"];
+/// The fix the real command line ends each of its lines with.
+const FIX: &str = "run `buildrules sync` and commit the result";
+
+/// The file `path` of the working directory, `None` when it cannot be read.
+fn file(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The sha256 of the file `path` (of nothing, when it cannot be read), in hex.
+fn sha256(path: &str) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(file(path).unwrap_or_default()))
+}
+
+/// What a sync of the working directory writes: each generated file, and its text (`None`: the
+/// file is removed).
+fn synced() -> [(&'static str, Option<String>); 2] {
+    let table = INPUTS
+        .iter()
+        .map(|input| format!("{input} {}\n", sha256(input)))
+        .collect();
+    let git = file("Cargo.toml").is_some_and(|m| m.contains("git = "));
+    [
+        (TABLE, Some(table)),
+        (ARCHIVES, git.then(|| "github.com/o/r 0123abc\n".to_owned())),
+    ]
+}
+
+/// The fake `buildrules`: records the call, then syncs or checks as asked.
+fn buildrules(args: &[String]) -> ExitCode {
+    append(Path::new("buildrules.calls"), &args.join(" "));
+    let defect = defect();
+    if args.first().is_some_and(|verb| verb == "sync") {
+        if defect == "sync-fails" {
+            eprintln!("buildrules: sync: CargoFailed");
+            return ExitCode::from(1);
+        }
+        if defect != "sync-writes-nothing" {
+            for (path, text) in synced() {
+                match text {
+                    Some(text) => {
+                        let path = Path::new(path);
+                        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+                        std::fs::write(path, text).expect("write");
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+        println!("buildrules: wrote {TABLE}");
+        return ExitCode::SUCCESS;
+    }
+    if defect == "check-usage" {
+        eprintln!("buildrules: check: unknown argument --nope");
+        return ExitCode::from(2);
+    }
+    let Some(table) = file(TABLE) else {
+        eprintln!("buildrules: {TABLE} is missing: {FIX}");
+        return ExitCode::from(1);
+    };
+    let mut stale: Vec<String> = INPUTS
+        .iter()
+        .filter_map(|input| {
+            let now = sha256(input);
+            let recorded = table
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{input} ")))
+                .unwrap_or("none");
+            (recorded != now).then(|| {
+                format!("{input} changed since `buildrules sync` (recorded sha256 {recorded}, now {now})")
+            })
+        })
+        .collect();
+    if stale.is_empty() {
+        stale = synced()
+            .into_iter()
+            .filter(|(path, text)| file(path) != *text)
+            .map(|(path, _)| format!("{path} is not what sync writes"))
+            .collect();
+    }
+    for line in &stale {
+        eprintln!("buildrules: STALE: {line}: {FIX}");
+    }
+    ExitCode::from(u8::from(!stale.is_empty()))
+}
+
 /// The fake client: `job submit` is refused for want of a host, `job list` is empty.
 fn job_client(args: &[String]) -> ExitCode {
     if defect() == "js-fails" {
@@ -243,6 +387,10 @@ fn main() -> ExitCode {
         server(&args)
     } else if name == "js" {
         job_client(&args)
+    } else if name == "buck2" {
+        buck2(&me, &args)
+    } else if name == "buildrules" {
+        buildrules(&args)
     } else if name == "testbin" {
         testbin()
     } else {

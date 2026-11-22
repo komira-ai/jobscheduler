@@ -979,3 +979,6 @@ fn a_whole_host_job_with_layers_mounts_or_host_ports_stays_queued() {
 
 #[path = "jobs_xcode_tests.rs"]
 mod xcode;
+
+#[path = "jobs_os_version_tests.rs"]
+mod os_version;

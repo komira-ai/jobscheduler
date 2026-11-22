@@ -170,6 +170,8 @@ fn the_states_launchd_prints_map_to_the_states_the_steps_know() {
         ("exited", "inactive", "dead"),
         ("spawn scheduled", "activating", "auto-restart"),
         ("spawning", "activating", "start"),
+        ("xpcproxy", "activating", "start"),
+        ("SIGTERMed", "deactivating", "stop-sigterm"),
     ] {
         assert_reads(printed, "", active, sub);
     }
@@ -256,6 +258,32 @@ fn a_negative_exit_code_is_a_bad_end() {
 fn a_spawning_service_reads_as_a_start_however_it_last_ended() {
     for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
         assert_reads("spawning", extra, "activating", "start");
+    }
+}
+
+/// A service launchd has forked and is executing (`state = xpcproxy`, which a real
+/// `launchctl print` showed for the session helper just after its bootstrap) is a start under
+/// way, however the last run ended.
+///
+/// Catches a reading of `xpcproxy` as an unknown state, which failed the first install's cutover
+/// with `start_failed` after its commit.
+#[test]
+fn a_service_launchd_is_executing_reads_as_a_start_however_it_last_ended() {
+    for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
+        assert_reads("xpcproxy", extra, "activating", "start");
+    }
+}
+
+/// A service launchd has sent SIGTERM and waits for (`state = SIGTERMed`, which a real
+/// `launchctl print` showed for the agent during an update's stop on a Mac) is stopping, however
+/// the last run ended.
+///
+/// Catches a reading of `SIGTERMed` as an unknown state, which failed an update's cutover with
+/// `stop_failed` after its commit.
+#[test]
+fn a_service_launchd_has_sent_sigterm_reads_as_stopping_however_it_last_ended() {
+    for extra in [DIED, SIGNALLED, CLEAN, NEVER, ""] {
+        assert_reads("SIGTERMed", extra, "deactivating", "stop-sigterm");
     }
 }
 
@@ -467,6 +495,41 @@ fn bootout_is_run_by_the_stop_runner_and_nothing_else_is() {
     assert_eq!(tool.calls(), [print_line(LABEL)]);
     units.start(LABEL).unwrap();
     assert_eq!(stopper.calls().len(), 1);
+}
+
+/// A start of a service launchd runs or has begun to start (`spawning`, `xpcproxy`: a real Mac
+/// showed the session helper spawned at once by its bootstrap during an update) asks launchd for
+/// nothing more: only the print is made.
+///
+/// Catches a `kickstart -k` of a service launchd had just spawned, which killed the new instance
+/// 7 ms after its start, made launchd hold the next one for its 30 s throttle, and failed the
+/// update's cutover with start_failed.
+#[test]
+fn a_start_of_a_service_launchd_has_begun_issues_no_kickstart() {
+    for state in ["running", "spawning", "xpcproxy"] {
+        let tool = Script::default().prints(&[&print_with(state, "")]);
+        assert_eq!(LaunchUnits::new(&tool).start(LABEL), Ok(()), "{state}");
+        assert_eq!(tool.calls(), [print_line(LABEL)], "{state}");
+    }
+}
+
+/// A kickstart goes to the stop runner, which allows launchd's throttle: a service launchd has
+/// scheduled (`spawn scheduled`, as a real Mac showed for the session helper bootstrapped again
+/// within its throttle during an update) is kicked there, and the main runner only reads.
+///
+/// Catches a kickstart run with the main runner's 10 s bound, which a throttled start outlasted
+/// and which failed an update's cutover with start_failed.
+#[test]
+fn a_kickstart_is_run_by_the_stop_runner() {
+    let tool = Script::default().prints(&[
+        &print_with("spawn scheduled", ""),
+        &print_with("running", "\truns = 1\n"),
+    ]);
+    let stopper = Script::default().ok(&kick_line());
+    let units = LaunchUnits::new(&tool).with_stop_runner(&stopper);
+    assert_eq!(units.start(LABEL), Ok(()));
+    assert_eq!(stopper.calls(), [kick_line()]);
+    assert!(!tool.calls().contains(&kick_line()), "{:?}", tool.calls());
 }
 
 /// Without a stop runner the main runner runs `bootout`.

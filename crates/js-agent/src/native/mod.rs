@@ -1,17 +1,16 @@
 //! The runtime of native jobs: a program run on a Mac as a user of its own, under a
 //! Seatbelt profile, through the root helper `js-mac-session`.
 //!
-//! The helper owns everything that needs root. One run uses four of its verbs, each on a
+//! The helper owns everything that needs root. One run uses five of its verbs, each on a
 //! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
 //! journal's paragraph below):
 //!
-//! 1. `user-create` makes the run's user, a fresh one named for the run's lease id
-//!    (`<term>.<sequence>`: the term is drawn when the runtime is made and the sequence
-//!    counts up, so a name is never used twice, which the helper's ledger also demands).
-//!    The reply is the user's uid, taken from the helper's range.
+//! 1. `user-create` lends the run's lease (`<term>.<sequence>`, never used twice) a user of
+//!    the helper's pool, and answers its uid; `pool-status` then names the lease's slot,
+//!    and so its user and home (`native/pool_user.rs`).
 //! 2. The agent, as root and before any process of that user exists, makes the run
-//!    directory below the user's home (`exec/`, the working directory, and `tmp/`) and
-//!    gives it to the user. It makes the job's three standard streams as files in the
+//!    directory below the user's home (`exec/`, the working directory, with `.home/`,
+//!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
 //! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
@@ -20,9 +19,15 @@
 //!    stands between the profile and the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
-//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
-//!    else, and the helper builds the process's environment around the one the agent
-//!    passes. The connection stays open until the process exits: a thread of the runtime
+//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the run directory
+//!    `exec/` and nothing else: the account's home itself is not writable to the job (macOS
+//!    guards what a job would make in `~/Library` even against root, so the sweep could
+//!    not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
+//!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper
+//!    sets `HOME` to the account's home whatever the agent passes, so the command is
+//!    `sandbox-exec ... /usr/bin/env HOME=<exec/.home> <program> <args>`: `env` runs
+//!    inside the profile and executes the program, and the helper's wire is unchanged.
+//!    The helper builds the process's environment around the one the agent passes. The connection stays open until the process exits: a thread of the runtime
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
 //!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
 //!    `--run-files-root`) has their directory given to the user before this, `0500` with
@@ -35,12 +40,12 @@
 //!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
-//!    none of its per-user agents; `user-delete` removes the user and sweeps its home and
-//!    its entry under `/var/folders`. A step that fails leaves the user in the helper's
-//!    ledger, its uid held, and the lease in the journal for the next start to end. Between
-//!    the two, a removal copies the run's declared outputs out of `exec/` into the run's
-//!    scratch directory (`native/outputs.rs`); one that cannot be copied does not stop the
-//!    removal, which then fails as [`RuntimeError`] of its outputs only.
+//!    none of its per-user agents; `user-delete` resets the user and returns it to the
+//!    pool. A step that fails leaves the user in the helper's ledger, its uid held, and
+//!    the lease in the journal for the next start to end. Between the two, a removal
+//!    copies the run's declared outputs out of `exec/` into the run's scratch directory
+//!    (`native/outputs.rs`); one that cannot be copied does not stop the removal, which
+//!    then fails as [`RuntimeError`] of its outputs only.
 //!
 //! A run whose start carried a sink, on a runtime given [`LiveLogs`]
 //! ([`NativeRuntime::with_live_logs`]), has its two log files uploaded while it runs and
@@ -50,7 +55,7 @@
 //!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's
-//! own `trees` directory, and `@bundle/<entrypoint>` resolved to the file in the store (or
+//! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in the store (or
 //! the clone) that the bundle's config names; the environment and arguments are the
 //! bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
 //! the run.
@@ -131,7 +136,7 @@
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
 //! grant the user's `/var/folders` entry (toolchains that need it get their temporary files
-//! from `TMPDIR`, which is inside the home).
+//! from `TMPDIR`, which is inside the run directory).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
@@ -148,6 +153,7 @@ mod mounts;
 mod network;
 mod outputs;
 mod pf;
+mod pool_user;
 mod profile;
 mod settings;
 mod xcode;
@@ -171,18 +177,19 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
-use js_mac_session::lease::{Dotted, user_name};
+use js_mac_session::lease::Dotted;
 use js_mac_session::proto::Limits;
 use js_types::LeaseId;
 
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Body, CheckFinding, CheckHook, Exit, Finished, Found, FsPrepared, JobFs, NativeRefusal,
-    RunHandle, RunSpec, Runtime, RuntimeError, Status, check_run_env,
+    Body, Exit, Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError,
+    Status, check_run_env,
 };
 use crate::logs::{LiveLogs, RunLogs};
 
+pub use crate::leak_scan::NativeChecks;
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
@@ -465,9 +472,14 @@ impl NativeRuntime {
         (id, lease, uid): (LeaseId, &str, u32),
         (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
-        let home = self.config.homes.join(user_name(id));
-        let (exec, tmp) = (home.join("exec"), home.join("tmp"));
-        for dir in [&exec, &tmp] {
+        let user = pool_user::user_of(&self.helper, id, lease)?;
+        let home = self.config.homes.join(user);
+        let exec = profile::run_dir(&home);
+        let (tmp, job_home) = (
+            exec.join(profile::JOB_TMP_DIR),
+            exec.join(profile::JOB_HOME_DIR),
+        );
+        for dir in [&exec, &tmp, &job_home] {
             make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
         }
         // The files and the inputs go to the user before any process of it exists.
@@ -483,7 +495,7 @@ impl NativeRuntime {
             .map_err(|why| RuntimeError::new(why.to_string()))?;
         let (native, mut env) = match &pinned {
             Some(pinned) => {
-                let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp, dev.as_deref()))
+                let prepared = bundle::prepare(pinned, native, &exec, (uid, &tmp, dev.as_deref()))
                     .map_err(|why| fail(&"the bundle", &why))?;
                 let body = NativeSpec {
                     program: prepared.program,
@@ -495,6 +507,7 @@ impl NativeRuntime {
             }
             None => (native.clone(), env::plain(native, &tmp, dev.as_deref())),
         };
+        env.push(env::job_home(&job_home));
         let files = spec.files.as_deref();
         if let Some(dir) = files {
             env.push((files::FILES_DIR_ENV.to_owned(), dir.display().to_string()));
@@ -958,19 +971,6 @@ impl Runtime for NativeRuntime {
 fn limits_of(config: &NativeConfig) -> Result<Limits, RuntimeError> {
     Limits::new(config.max_file_bytes, config.max_processes)
         .map_err(|why| fail(&"the limits", &why))
-}
-
-/// The post-job check of a native agent. A Mac has no `/proc` for the container agent's
-/// checks to read; what a run leaves behind is the helper's to find, and `user-delete`
-/// refuses while any process of the user remains and sweeps what the user owns, so a run
-/// that left residue fails its removal (and taints the host) before this runs.
-#[derive(Debug, Clone, Copy)]
-pub struct NativeChecks;
-
-impl CheckHook for NativeChecks {
-    fn run(&mut self, _: &Finished<'_>) -> Result<(), CheckFinding> {
-        Ok(())
-    }
 }
 
 /// An error of `what`, for the operator's log.

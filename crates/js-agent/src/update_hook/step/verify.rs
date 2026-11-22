@@ -20,7 +20,8 @@
 //!
 //! Before it starts: a record with `start_issued` and the release link on the staged release
 //! (`state_invalid` otherwise, nothing read of the lease server). A taint the restarted
-//! agent will not re-check (see `refuse_host` in `prepare`), or an `owed-*` record, halts (76),
+//! agent will not re-check (see `refuse_host` in `prepare`), or an `owed-*` record (not after a
+//! handover: the new agent runs the checks of the jobs it adopted), halts (76),
 //! at every look. At each look the unit is read
 //! with `show`: `failed`,
 //! `inactive`, `deactivating` or a restart pending (`auto-restart`) ends the step at once as a
@@ -42,7 +43,7 @@ use crate::update_hook::{
 };
 
 use super::cutover::linked;
-use super::prepare::refuse_host;
+use super::prepare::refuse_host_in;
 use super::{Env, failure, lease_failure, open_state, save, success};
 
 /// Runs `verify`.
@@ -59,7 +60,7 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
         ));
     };
     // A taint the agent cannot clear halts even a rerun after the mark.
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if record.verify_ok {
         return Ok(success());
     }
@@ -131,7 +132,7 @@ fn wait(env: &Env<'_>, params: &Params, record: &Record) -> Result<(), Done> {
     let began = env.ports.clock.now_ms();
     let mut last = Look::Silent;
     loop {
-        refuse_host(env)?;
+        refuse_host_in(env, record.handover)?;
         let state = env.ports.units.show(unit).map_err(|why| {
             let mut done = failure(
                 Reason::StartFailed,

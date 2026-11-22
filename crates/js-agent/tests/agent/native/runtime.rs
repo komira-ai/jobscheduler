@@ -33,10 +33,11 @@ fn exited(code: i32) -> Status {
 }
 
 /// Asserts that a start asks the helper for a user named for the run's lease, makes the run
-/// directory (`exec`, the working directory, and `tmp`) private to that user before the
-/// program starts, hands the helper a working directory and an empty standard input, and
-/// runs the program under `sandbox-exec` with a profile that grants writes to the home and
-/// not to the user's folder entry, with `TMPDIR` inside the home. It catches a program
+/// directory (`exec`, the working directory, with `.home` and `.tmp` inside it) private to
+/// that user before the program starts, hands the helper a working directory and an empty
+/// standard input, and runs the program under `sandbox-exec` with a profile that grants
+/// writes to the run directory (not to the home, nor to the user's folder entry), with
+/// `TMPDIR` and `CFFIXED_USER_HOME` inside the run directory. It catches a program
 /// started without its profile, a working directory that is not a directory, a run
 /// directory the user cannot use, and a start that skips the helper's reset.
 #[test]
@@ -49,20 +50,25 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     assert_eq!(id, handle("7.0"));
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
     let home = rig.fake.home_of("7.0");
-    for dir in ["exec", "tmp"] {
+    for dir in ["exec", "exec/.tmp", "exec/.home"] {
         let mode = fs::metadata(home.join(dir)).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o700, "{dir}");
     }
     let run = rig.fake.run_of("7.0");
     assert!(run.cwd_is_dir, "the working directory is a directory");
     assert_eq!(run.stdin_bytes, 0, "standard input is empty");
-    let tmp = home.join("tmp").display().to_string();
+    let tmp = home.join("exec/.tmp").display().to_string();
+    let job_home = home.join("exec/.home").display().to_string();
     assert_eq!(
         run.env,
-        [("A".to_owned(), "b".to_owned()), ("TMPDIR".to_owned(), tmp)]
+        [
+            ("A".to_owned(), "b".to_owned()),
+            ("TMPDIR".to_owned(), tmp),
+            ("CFFIXED_USER_HOME".to_owned(), job_home),
+        ]
     );
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
@@ -76,7 +82,7 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     );
     assert_eq!(
         parsed.params[0],
-        ("RUN".to_owned(), home.display().to_string())
+        ("RUN".to_owned(), home.join("exec").display().to_string())
     );
     assert!(
         parsed
@@ -103,6 +109,92 @@ fn each_start_gets_a_user_of_its_own() {
     assert_eq!((first, second), (handle("7.0"), handle("7.1")));
     assert_ne!(rig.fake.home_of("7.0"), rig.fake.home_of("7.1"));
     assert!(rig.fake.home_of("7.1").join("exec").is_dir());
+}
+
+/// Asserts that a run's home is the home of the pool user the helper lent its lease,
+/// named by the slot `pool-status` gives (`kbf-lease-pool-<slot>`), and not a name made
+/// from the lease id: the helper lends slots 4 and 5 to the leases `7.0` and `7.1`, and
+/// each run's directory and its profile's write grant are in that slot's home. It catches
+/// a run directory made below a home the helper never made (`kbf-lease-<term>-<seq>`, or
+/// a slot guessed from the lease's sequence), which fails every start on a Mac whose
+/// helper lends pool users.
+#[test]
+fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
+    let mut rig = Rig::new("poolhome");
+    rig.fake.lend_from(4);
+    rig.start("r1", "/bin/true", &[]);
+    rig.start("r2", "/bin/true", &[]);
+    let homes = rig.fake.homes().to_path_buf();
+    for (lease, slot) in [("7.0", 4), ("7.1", 5)] {
+        let home = homes.join(format!("kbf-lease-pool-{slot}"));
+        assert_eq!(rig.fake.home_of(lease), home);
+        assert!(home.join("exec").is_dir(), "{}", home.display());
+        let ran = parse(&rig.fake.run_of(lease).argv);
+        assert_eq!(
+            ran.params[0],
+            ("RUN".to_owned(), home.join("exec").display().to_string())
+        );
+    }
+    for name in ["kbf-lease-7-0", "kbf-lease-pool-0", "kbf-lease-pool-1"] {
+        assert!(!homes.join(name).exists(), "{name}");
+    }
+    assert_eq!(
+        rig.fake.verbs()[..4],
+        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
+    );
+}
+
+/// Asserts that on a helper from before the pool, which refuses `pool-status` as a verb it
+/// cannot read, a run's home is the user that helper made for the lease alone
+/// (`kbf-lease-<term>-<seq>`). It catches an agent that cannot run a job while its helper
+/// is still the release before the pool, as during an update.
+#[test]
+fn on_a_helper_from_before_the_pool_a_run_lives_in_its_leases_own_home() {
+    let mut rig = Rig::new("prepool");
+    rig.fake.be_old();
+    rig.start("r1", "/bin/true", &[]);
+    let home = rig.fake.homes().join("kbf-lease-7-0");
+    assert_eq!(rig.fake.home_of("7.0"), home);
+    assert!(home.join("exec").is_dir());
+    assert_eq!(
+        rig.fake.verbs(),
+        ["boot-reset", "user-create 7.0", "unreadable", "run 7.0"]
+    );
+}
+
+/// Asserts that a start whose lease `pool-status` cannot place fails by name and ends the
+/// user it was lent: when the helper refuses `pool-status`, and when the status names no
+/// slot for the lease. Nothing is made below the homes directory and no `run` is sent.
+/// It catches a run directory guessed when the helper did not say which user the lease
+/// holds, and a lent user left behind by such a start.
+#[test]
+fn a_lease_the_pool_status_does_not_place_fails_the_start_and_is_ended() {
+    let ended = [
+        "boot-reset",
+        "user-create 7.0",
+        "pool-status",
+        "kill-uid 7.0",
+        "user-delete 7.0",
+    ];
+    let mut rig = Rig::new("nostatus");
+    rig.fake.refuse("pool-status", "busy");
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.starts_with("pool-status: "), "{}", error.0);
+    assert!(error.0.contains("busy"), "{}", error.0);
+    assert_eq!(rig.fake.verbs(), ended);
+    assert!(!rig.fake.home_of("7.0").exists());
+
+    let mut rig = Rig::new("unnamed");
+    rig.fake.status_names_no_lease();
+    let spec = rig.spec("r1", native("/bin/true", &[]));
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert_eq!(
+        error.0,
+        "pool-status: the helper names no pool user for lease 7.0"
+    );
+    assert_eq!(rig.fake.verbs(), ended);
+    assert!(!rig.fake.home_of("7.0").exists());
 }
 
 /// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
@@ -513,9 +605,14 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     }
     let profile_at = argv.iter().position(|word| word == "-p").unwrap();
     assert_eq!(
-        &argv[profile_at + 2..],
+        argv[profile_at + 2],
+        "/usr/bin/env",
+        "env, which sets the job's HOME, follows the profile"
+    );
+    assert_eq!(
+        &argv[profile_at + 4..],
         ["/usr/bin/id", "-u"],
-        "the program follows the profile"
+        "the program follows"
     );
     assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
 

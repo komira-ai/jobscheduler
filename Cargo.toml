@@ -53,6 +53,9 @@ hyper-util = { version = "0.1.21", default-features = false }
 libc = "0.2.190"
 # Dev-dependency of js-provider-lambdalabs: a sink for the HTTP client's own log lines.
 log = "0.4.34"
+# xtask's `fetch --extract tar.xz`: the xz decoder, in Rust (the pinned zig and cargo-zigbuild
+# archives are xz tars).
+lzma-rs = "0.3.0"
 # js-contain: `unshare(CLONE_FILES)` as a safe call, for the thread that writes an installed
 # program (its `sched` feature). rustix has the call only as `unshare_unsafe`.
 nix = { version = "0.31.3", default-features = false }
@@ -147,8 +150,16 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 # hook contract and its conformance harness (`hostkeeper-hook`, a dev-dependency of js-agent,
 # whose tests drive `js-agent update-hook` through the harness), the daemon's step runner
 # (`hostkeeper-steps`, a dev-dependency of js-agent, whose tests run a first install of the
-# package as a native entry through it).
+# package as a native entry through it). And, for the macOS first-install test of js-agent
+# (crates/js-mac-first-install/tests/mac_first_install.rs, built on macOS only), the daemon's macos-pkg
+# installer and version directories (`hostkeeper-install`), its launchd step launcher, boot id
+# and unit control (`hostkeeper-launchd`), its switch of `current` (`hostkeeper-placed`) and the
+# names they take (`hostkeeper-config`).
+hostkeeper-config = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 hostkeeper-hook = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
+hostkeeper-install = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
+hostkeeper-launchd = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
+hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 hostkeeper-steps = { git = "https://github.com/komira-ai/hostkeeper", rev = "75199c6468a18c0bd836ca9f198e0fdf8f907084" }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 webpki-roots = { version = "1.0.11", default-features = false }
@@ -242,3 +253,16 @@ opt-level = 2
 # variable for a per-package override, so the job cannot undo the `test` overrides above.
 [profile.coverage]
 inherits = "dev"
+
+# The policy of the Buck2 build through buildrules (docs/farm.md): `//:ci` is every member's
+# rustfmt check (`:fmt`, with rustfmt.toml), its clippy (`:lint`, warnings as errors, as ci.yml's)
+# and its tests (`:test`), but where a member's own `[package.metadata.buildrules]` keeps its tests
+# in ci.yml. Cargo ignores this table.
+[workspace.metadata.buildrules]
+default-action = "ci"
+
+[workspace.metadata.buildrules.actions]
+ci = ["fmt", "lint", "test"]
+
+[workspace.metadata.buildrules.lint]
+deny-warnings = true

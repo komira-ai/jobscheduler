@@ -7,12 +7,25 @@
 # and hostkeeper's coordinator orders it onto the Macs of a host group. It publishes nothing
 # itself: release.yml's `pkg-upload` job puts the signed package in the package repository.
 #
-# Two jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
+# Four jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
 # this file on a push to main) and by hand; no pull request runs it. It builds, checks and sums
-# the package unsigned, and no secret is named anywhere in it, so no code of a branch (a build
-# script, a macro, xtask) can see one. The root helper's plist names the agent by the cdhash of
+# the package unsigned (the steps are the local action .github/actions/js-agent-macos-pkg), and
+# no secret is named anywhere in it, so no code of a branch (a build script, a macro, xtask) can
+# see one. The root helper's plist names the agent by the cdhash of
 # the `js-agent` binary of this same package, which `build` reads from the binary on the macOS
 # runner (the linker signs an arm64 binary ad hoc), so the helper needs no flags file.
+#
+# `build-update` builds a second package, of the next patch version, with the same action, beside
+# `build`: the first install updates the agent to it. It is uploaded as its own artifact and no
+# job signs it or releases it.
+#
+# `first-install` runs on a manual run alone, on any branch: it calls
+# js-agent-macos-first-install.yml, which installs the unsigned package `build` made the way
+# hostkeeper does, runs the update hook as root, rolls a config package over the agent and
+# updates it to the package `build-update` made, so a branch's package can be tried before it
+# merges (`gh workflow run js-agent-macos-pkg.yml --ref <branch> -f version=X`). The release's
+# call (a push) skips it, since release.yml's `beta-macos-first-install` runs it in its own job
+# and `pkg-upload` waits for `beta-macos-pkg`, which it would lengthen.
 #
 # `sign` runs only on main: by hand, or in the release's call (`sign: true`, on a push, with
 # `secrets: inherit`, without which a called workflow reads every secret as empty). It runs
@@ -31,7 +44,7 @@
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
 # The release's call builds the release's version; a manual run builds the version typed.
-# crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
+# crates/xtask/tests/macos_pkg_workflow/ pins these rules.
 name: js-agent-macos-pkg
 
 on:
@@ -88,64 +101,10 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - name: Stamp the version
-        run: cargo xtask release stamp --to "$VERSION"
-      - name: Build the programs
-        run: |
-          set -euo pipefail
-          cargo build --locked --release -p js-agent --bin js-agent
-          cargo build --locked --release -p js-mac-session --bin js-mac-session
-          cargo build --locked --release -p js-mac-provision --bin js-mac-provision
-      - name: The programs print the version
-        run: |
-          set -euo pipefail
-          for bin in js-agent js-mac-session js-mac-provision; do
-            printed="$(target/release/$bin --version | sed -n 1p)"
-            echo "$printed"
-            case "$printed" in
-              *" $VERSION") ;;
-              *)
-                echo "::error::$bin prints '$printed', not $VERSION"
-                exit 1
-                ;;
-            esac
-          done
-      - name: Stage the payload
-        run: |
-          set -euo pipefail
-          mkdir inputs
-          # The root helper admits the agent of this package alone: the cdhash of its binary, which
-          # the linker's ad hoc signature gives and a copy keeps.
-          cdhash="$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-          if ! [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::the cdhash of js-agent is '$cdhash', not 40 hex digits"
-            exit 1
-          fi
-          target/release/js-mac-provision agent-plist > inputs/agent.plist
-          target/release/js-mac-provision session-plist --daemon-requirement "cdhash H\"$cdhash\"" > inputs/session.plist
-          target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist
-          plutil -lint inputs/agent.plist inputs/session.plist inputs/pf-pool.plist
-          cargo xtask pkg stage-macos --version "$VERSION" --bin-dir target/release --license LICENSE --agent-plist inputs/agent.plist --session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage
-          staged="$(/usr/bin/codesign --display --verbose=4 "stage/root/Library/Application Support/js-agent/bin/js-agent" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')"
-          if [ "$staged" != "$cdhash" ]; then
-            echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"
-            exit 1
-          fi
-      - name: Build the package
-        run: |
-          set -euo pipefail
-          mkdir dist
-          pkgbuild --root stage/root --identifier com.komira.js-agent --version "$VERSION" --install-location / --ownership recommended stage/component.pkg
-          productbuild --package stage/component.pkg --version "$VERSION" "dist/js-agent-$VERSION-macos-arm64.pkg"
-      - name: The unsigned package is the package
-        run: cargo xtask pkg check-macos --pkg "dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION"
-      - name: Sum the unsigned package
-        run: |
-          set -euo pipefail
-          cd dist
-          shasum -a 256 "js-agent-$VERSION-macos-arm64.pkg" > SHA256SUMS
-          shasum -a 256 --check SHA256SUMS
-          cat SHA256SUMS
+      - name: Build, check and sum the unsigned package
+        uses: ./.github/actions/js-agent-macos-pkg
+        with:
+          version: ${{ env.VERSION }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-macos-pkg-unsigned
@@ -156,6 +115,36 @@ jobs:
         with:
           name: js-agent-macos-checker
           path: target/debug/xtask
+          if-no-files-found: error
+          retention-days: 1
+
+  # The package the first install updates the agent to: the next patch version of the same
+  # programs, built by the same action in a job of its own so that it runs beside `build` and
+  # lengthens nothing. It is not signed and no release takes it.
+  build-update:
+    name: js-agent-macos-pkg-update
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Name the next version
+        id: next
+        uses: ./.github/actions/js-agent-next-version
+        with:
+          version: ${{ env.VERSION }}
+      - name: Build, check and sum the unsigned update package
+        uses: ./.github/actions/js-agent-macos-pkg
+        with:
+          version: ${{ steps.next.outputs.version }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-pkg-update-unsigned
+          path: dist/
           if-no-files-found: error
           retention-days: 1
 
@@ -262,3 +251,12 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  first-install:
+    needs: [build, build-update]
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/js-agent-macos-first-install.yml
+    with:
+      version: ${{ inputs.version }}
