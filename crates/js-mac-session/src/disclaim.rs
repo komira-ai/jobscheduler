@@ -333,6 +333,20 @@ pub fn exec(program: &OsStr, args: &[OsString]) -> io::Error {
     Command::new(program).args(args).exec()
 }
 
+/// Starts `program` with `args` as a plain child of this process, with its responsibility
+/// NOT disclaimed, so the child answers for this process's privacy grants; standard input,
+/// output and error are inherited.
+///
+/// Prototype only: `js-agent __dev-exec` uses it to show on a Mac that the grant a privacy
+/// profile gives the signed agent is in force for what the agent does itself. It is removed
+/// before any release, and no job is ever started this way.
+///
+/// # Errors
+/// The program could not be started.
+pub fn spawn_undisclaimed_for_proof(program: &OsStr, args: &[OsString]) -> io::Result<Child> {
+    Command::new(program).args(args).spawn()
+}
+
 /// The pid of the process that `pid` answers to for the privacy controls: its own pid
 /// when its starter disclaimed the responsibility, or launchd started it.
 ///
