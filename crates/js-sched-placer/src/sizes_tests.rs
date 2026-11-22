@@ -71,8 +71,8 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
 
 /// What the host of a new agent reported: `peak` bytes at most and `cpu` of CPU time, no CPU
 /// pressure and no throttled period, and a CPU peak equal to the run's mean over the ten
-/// seconds [`ran`] gives each run (so the run's CPU is a measurement, and a class books what
-/// its runs used).
+/// seconds [`ran`] gives each run (the run's CPU is a measurement, and a class books the mean
+/// its runs used, their CPU time over their wall time; the peak is reported, not booked).
 fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
