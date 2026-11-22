@@ -25,6 +25,10 @@ Labels used throughout:
    - median queue wait: 15 min before, 4 min after;
    - median run time: 32 s before, 65 s after;
    - load average on an 88-thread host: 13 to 26 before, 250 to 330 after.
+
+   That was a queue of waiting jobs released at once. MEASURED 25 minutes after the change, with the backlog
+   drained: load 78 to 113 on 88 threads, 14 to 20 jobs per host, and jobs waiting for a CPU 11 to 15% of the time
+   (the kernel's pressure "some" over 60 s). The overshoot is mostly at bursts of arrivals, not a steady 3x.
 2. A booking is one number. A class can average a few cores and burst to 20 for a few seconds. The sum of bookings
    can then sit at 1.1x of a host's cores while the real demand in some seconds is several times that.
 3. A host cannot be measured above its cores (READ: `NodeLoad::busy_millicores_since` is CPU time over wall time),
@@ -113,8 +117,11 @@ Labels used throughout:
    of choosing jobs per hour instead: it barely moves at 99% busy (REPLAY: every rule with learned bookings finishes
    within 1% of the same jobs per hour at 4x but one, the limit 0.9 at 7.7% fewer), so nothing would ever pass.
 3. **Keep today's flat ceiling beside the curve rule** (the curve rule can only hold a job, never admit more).
-   Recommend yes for step 4.
-4. **Hold bound: 30 s** (setting). A job can be held at most that long on the forecast. Recommend 30 s.
+   Recommend yes for step 4. Since the overshoot comes with bursts of arrivals, the curve rule's value is in
+   spreading a burst of starts. At steady load the flat ceiling already holds pressure near 11 to 15%.
+4. **Hold bound: 30 s** (setting). A job can be held at most that long on the forecast. Recommend 30 s. A burst of
+   hundreds of arrivals is released over several passes, so the bound must cover the spreading of one burst:
+   about 30 s in the worked example (section 6). A shorter bound gives the burst back to today's rule.
 5. **Gate on the replay, and stop if shape does not pay.** Recommend yes, with the pass mark in section 10. The
    replay now exists and must also beat today's rule at a limit of 1.0, which on flat data gets most of the gain.
 
