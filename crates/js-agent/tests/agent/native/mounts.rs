@@ -27,6 +27,7 @@ fn rig(name: &str) -> Rig {
             config.mount_roots.push(MountRoot {
                 path,
                 read_only: root == "ro",
+                trees: false,
             });
         }
     })
@@ -518,6 +519,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let roots = vec![MountRoot {
         path: root.clone(),
         read_only: true,
+        trees: false,
     }];
     let settings = settings.with_mount_roots(roots.clone()).unwrap();
     let config = settings.config();
@@ -532,6 +534,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let bad = vec![MountRoot {
         path: PathBuf::from("/tmp/root"),
         read_only: false,
+        trees: false,
     }];
     let why = settings.with_mount_roots(bad).unwrap_err();
     assert_eq!(
