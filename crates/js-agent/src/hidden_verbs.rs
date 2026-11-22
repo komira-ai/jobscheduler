@@ -71,4 +71,28 @@ mod tests {
             assert_eq!((out, err), (Vec::new(), Vec::new()), "{args:?}");
         }
     }
+
+    /// Asserts that the native Mac job's mode and its start are answered here, each with its own
+    /// usage error for a command line it cannot run.
+    #[test]
+    fn the_mac_job_and_its_start_are_answered() {
+        for (verb, said) in [
+            (crate::mac_job::VERB, "--job"),
+            (
+                crate::mac_job::start::VERB,
+                "usage: js-agent __mac-job-start --start <file>",
+            ),
+        ] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = dispatch(&words(&["js-agent", verb]), &mut out, &mut err);
+            assert_eq!(
+                code,
+                Some(ExitCode::from(crate::mac_job::status::USAGE)),
+                "{verb}"
+            );
+            let err = String::from_utf8(err).unwrap();
+            assert!(err.contains(said), "{verb}: {err}");
+            assert!(out.is_empty(), "{verb}");
+        }
+    }
 }

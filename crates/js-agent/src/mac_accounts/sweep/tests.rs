@@ -512,9 +512,6 @@ type Spoil = (&'static str, fn(&Rig));
 /// Asserts that the account of an adopted job whose record or home is no longer there is
 /// not repaired but logged and ended at open, `gone` recorded: the job cannot be running
 /// without them.
-/// A named way to spoil an adopted job's account.
-type Spoil = (&'static str, fn(&Rig));
-
 #[test]
 fn the_account_of_an_adopted_job_that_lost_its_record_or_home_is_ended() {
     let base = Rig::new("adopted-lost", 2, 0);
