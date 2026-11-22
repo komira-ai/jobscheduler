@@ -10,6 +10,8 @@
 mod as_account;
 mod directory;
 mod procs;
+#[cfg(test)]
+mod root_tests;
 mod sys;
 
 use std::io;
