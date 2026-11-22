@@ -15,7 +15,7 @@ what the package holds (`crates/xtask/src/macpkg.rs`).
 
 | path | mode |
 |---|---|
-| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision}` | 0755 |
+| `/Library/Application Support/js-agent/bin/{js-agent,js-mac-session,js-mac-provision}` | 0755, signed (see Signing) |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 |
 | `/Library/Application Support/js-agent/log/` | 0755, empty; launchd writes the daemons' logs here |
 | `/Library/Application Support/js-agent/update/` | 0700, empty; the update hook's state directory |
@@ -42,9 +42,10 @@ shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
   `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
   no server and no pool.
 - The helper's plist holds its caller to `cdhash H"<40 hex>"`, the code directory hash of
-  the `js-agent` binary of the same package. The workflow reads the hash from the built
-  binary on the Mac (the linker signs arm64 binaries ad hoc) and gives it to
-  `session-plist --daemon-requirement`. The helper needs no flags file, and its socket group
+  the `js-agent` binary of the same package. The workflow reads the hash from the signed
+  binary that goes into the package (`sign-code` signed it with the Developer ID Application
+  identity; a build that no job signs, such as the first-install test's, reads the hash the
+  linker's ad hoc signature gives) and gives it to `session-plist --daemon-requirement`. The helper needs no flags file, and its socket group
   is `_jsagent`.
 
 The flags file is one argument per line (`--flags-file` in `crates/js-agent/src/flags_file.rs`).
@@ -125,7 +126,7 @@ is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there a
 real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
 whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
 inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
-home even against root without Full Disk Access (which the helper does not have and is not given):
+home even against root without Full Disk Access (the helper is given it by the profile above, but the pool reset of this release does not rely on it):
 a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
 system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
 it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
@@ -138,7 +139,8 @@ could remove it, or nothing; the pool tolerates it as it is, and a job can no lo
 The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
 unsigned (the steps are the local action `.github/actions/js-agent-macos-pkg`), checks it and
-uploads it, and names no secret: no code of a branch can see a signing key. `build-update` runs
+uploads it with the three programs it built, and names no secret: no code of a branch can see a
+signing key. `build-update` runs
 beside it and builds a second package with the same action, of the next patch version
 (`.github/actions/js-agent-next-version`), as the artifact `js-agent-macos-pkg-update-unsigned`
 for a day: the first install updates the agent to it, and nothing signs it or releases it.
@@ -147,22 +149,40 @@ for a day: the first install updates the agent to it, and nothing signs it or re
 `build` made on the runner, the way hostkeeper does, runs the update hook's prepare,
 cutover, verify and cleanup as root with launchd loading the jobs, rolls a config package over
 the agent and updates the agent to the package `build-update` made (the release runs it as its own
-beta job, `beta-macos-first-install`). `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
-from `build`, imports the installer certificate into a temporary keychain, finds the
-"Developer ID Installer" identity there by its SHA-1, signs with `productsign --timestamp`,
-checks the signed package again and writes `SHA256SUMS` for it. It does not notarize. When the
-environment or its secrets are not set up it prints a notice and skips every step after the
-first, and the run succeeds.
+beta job, `beta-macos-first-install`). Three more jobs run only on main (by hand, or in the release's call), in this order.
+`sign-code` runs in the environment `pkg-signing`: it takes the three programs from `build`,
+checks them against `build`'s sums, imports the application certificate into a temporary
+keychain for `/usr/bin/codesign` alone, imports Apple's Developer ID G2 intermediate (fetched
+over HTTPS and held to its SHA-256), finds the identity `Developer ID Application: Komira AI,
+Inc. (U7RTX4XD3X)` there, fails when it expires within 30 days, and signs each program with
+`codesign --options runtime --timestamp` under the identifier of the table in
+`crates/xtask/src/release/mac_programs.rs` (`com.komira.js-agent`, `com.komira.js-agent.session`,
+`com.komira.js-agent.provision`). It runs nothing built from the repository, and it fails,
+naming the secret, when one is not set. `package` has no secret: it makes the package with the
+local action from the signed programs instead of building them, checking each staged program
+first with `cargo xtask release check-code-signature <binary> --program <name>`, which runs
+`codesign --verify --strict` and reads the signature back (an ad hoc signature, another
+identifier or team, an authority chain other than the team's Developer ID chain, no timestamp,
+no hardened runtime or another designated requirement is refused). `sign` runs in the same
+environment: it takes the checked package from `package`, imports the installer certificate into
+a temporary keychain, finds the "Developer ID Installer" identity there by its SHA-1, signs with
+`productsign --timestamp`, checks the signed package again and writes `SHA256SUMS` for it. It
+does not notarize. When the environment or the installer certificate's secrets are not set `sign`
+prints a notice and skips every step after the first, and the run succeeds.
 
 `pkg-signing` is created by a repository administrator, with a rule that only main may
 deploy to it and with these secrets as environment secrets (none is in the tree):
 
 - `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a PKCS#12 file, base64.
 - `MACOS_INSTALLER_P12_PASSWORD`: its password.
+- `MACOS_APPLICATION_P12`: the "Developer ID Application" certificate and key, a PKCS#12 file,
+  base64.
+- `MACOS_APPLICATION_P12_PASSWORD`: its password.
 
-No certificate name and no team id is written in the tree: the identity is found in the
-temporary keychain by its hash. Each secret is named only in the environment of the step
-that needs it.
+The installer identity is found in the temporary keychain by its SHA-1. The application
+identity is named in `sign-code` and in the table of `mac_programs.rs` (its name and the team id
+`U7RTX4XD3X` are in every program's signature, so they are public), and a test holds the two
+together. Each secret is named only in the environment of the steps that use it.
 
 ## Config packages: `js-agent config-hook`
 
@@ -197,9 +217,17 @@ exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the updat
 
 ## Privacy grants (TCC)
 
-The agent and the helper need no privacy grant (Full Disk Access, or any other the
-Privacy & Security settings list), and nothing in this package or this repository gives
-one. A grant given to either by hand, or by a profile, never reaches a job. macOS lets a
+The root helper `js-mac-session` is granted Full Disk Access (the privacy service
+`SystemPolicyAllFiles`), and nothing else is granted anything. The grant is given by the profile
+`mdm/js-agent-full-disk-access.mobileconfig` of this directory, which the owner installs through
+device management (see `mdm/README.md`): one entry, for the path
+`/Library/Application Support/js-agent/bin/js-mac-session` (where the package lays the program
+and updates replace it in place) and the program's designated requirement, which names the
+identifier `com.komira.js-agent.session`, Apple's Developer ID chain and the team and no hash, so
+every release of the program meets it. That is why the release signs the three programs (see
+Signing), and `cargo test -p xtask` holds the profile to the table the signing uses. The agent and
+`js-mac-provision` need no grant. A grant given to the helper or the agent, by hand or by a
+profile, never reaches a job. macOS lets a
 process use the grants of its *responsible* process, which is whoever started it, unless
 the starter disclaims that responsibility as it starts it. Every process the helper
 starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for

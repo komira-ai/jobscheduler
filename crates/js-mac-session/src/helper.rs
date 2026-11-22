@@ -73,7 +73,9 @@
 //! - `role-run` starts one program, the configured `js-vmm`, and only as `vm-run --spec
 //!   <file>` with the file inside the images directory ([`vmrun`]). `role-reap` ends the
 //!   process group of such a run, found again by pid, start time and boot ([`reap`]).
-//! - Every verb but `boot-reset` is refused until the boot reset has succeeded.
+//! - Every verb but `boot-reset` and `full-disk-access` is refused until the boot reset
+//!   has succeeded. `full-disk-access` lists the privacy database's directory
+//!   ([`Host::list_privacy_dir`]) and reads nothing of the pool.
 //!
 //! The mutating verbs run one at a time (one lock around the ledger), and `run` holds
 //! it while it starts the process, so no process starts for a lease being deleted.
@@ -90,6 +92,7 @@ use js_types::LeaseId;
 use rustix::fs::{CWD, Gid, Mode, OFlags, Uid};
 
 use crate::autologin::{CommandOutput, Intent, SessionPaths, read_intent};
+use crate::full_disk_access::{self, FullDiskAccess};
 use crate::grant::{self, Expect, GrantKeys};
 use crate::lease::{Dotted, PoolSize, Slot, UidRange, VmUser, parse_lease};
 use crate::ledger::{Entry, Ledger};
@@ -177,7 +180,10 @@ pub trait Host: Send + Sync {
     /// Deletes the user record `name` (and any group membership it has); `false` when
     /// there is none. Only a lease user from before the pool is ever deleted: the pool's
     /// users are permanent, and macOS refuses root the deletion of a local user record
-    /// unless the helper holds Full Disk Access.
+    /// unless the helper holds Full Disk Access. The release signs the helper and a
+    /// privacy profile grants it that access ([`Host::list_privacy_dir`] shows whether it
+    /// holds it), but the pool's reset does not use the grant yet:
+    /// `docs/design/mac-account-per-job.md` deletes an account per job.
     ///
     /// # Errors
     /// The record could not be deleted.
@@ -238,6 +244,14 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The process table could not be read.
     fn live_processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>>;
+    /// Lists the directory of the privacy database ([`full_disk_access::PRIVACY_DIR`]),
+    /// which only a process with Full Disk Access may list: opens no file and reads no
+    /// database.
+    ///
+    /// # Errors
+    /// The listing failed; a refusal for want of permission is
+    /// [`io::ErrorKind::PermissionDenied`].
+    fn list_privacy_dir(&self) -> io::Result<()>;
     /// Waits a moment between kill rounds, and between the listings of a wait.
     fn pause(&self);
     /// Runs `program` with `args` and an empty environment
@@ -462,7 +476,9 @@ impl Helper {
     /// `boot-reset` is done before the boot reset has succeeded.
     pub fn handle(&self, request: Request, fds: Vec<OwnedFd>) -> Outcome {
         let refused = |reason: String| Outcome::Reply(Reply::Refused { reason });
-        if !self.reset_done() && !matches!(request, Request::BootReset { .. }) {
+        if !self.reset_done()
+            && !matches!(request, Request::BootReset { .. } | Request::FullDiskAccess)
+        {
             return refused(RESET_NEEDED.to_owned());
         }
         let result = match request {
@@ -497,6 +513,9 @@ impl Helper {
                 .map_err(|why| why.to_string()),
             Request::PoolCreate => Ok(pool_reply(self.pool_create())),
             Request::PoolStatus => Ok(pool_reply(self.pool_status())),
+            Request::FullDiskAccess => Ok(Reply::FullDiskAccess {
+                state: self.full_disk_access(),
+            }),
             Request::KillUid { lease } => self.kill_uid(&lease).map(|()| Reply::Killed),
             Request::Stop { lease, grace_ms } => self
                 .stop(&lease, Duration::from_millis(grace_ms))
@@ -538,6 +557,18 @@ impl Helper {
             Request::RebootDirty => self.reboot_dirty().map(|()| Reply::Restarting),
         };
         result.map_or_else(refused, Outcome::Reply)
+    }
+
+    /// `full-disk-access`: whether the helper holds Full Disk Access, as a listing of the
+    /// privacy database's directory shows ([`full_disk_access::judge`]). Logs the answer
+    /// each time, and the error of an undetermined one.
+    pub fn full_disk_access(&self) -> FullDiskAccess {
+        let (state, why) = full_disk_access::judge(self.host.list_privacy_dir());
+        match why {
+            None => tracing::info!("full disk access: {}", state.as_str()),
+            Some(why) => tracing::warn!("full disk access: {} ({why})", state.as_str()),
+        }
+        state
     }
 
     /// `user-create <lease> [grant]`: the lease takes a free pool user (an administrator,

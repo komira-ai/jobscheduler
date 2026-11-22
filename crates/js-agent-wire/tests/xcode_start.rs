@@ -43,6 +43,7 @@ fn start(xcode: Option<&str>) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: xcode.map(str::to_owned),
+        sizing: None,
     }
 }
 

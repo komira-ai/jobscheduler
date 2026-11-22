@@ -77,6 +77,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "start-fence": "true",
             "held-beat": "true",
             "dispatch-poll": "true",
+            "load-admission": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";
@@ -109,6 +110,36 @@ fn the_hello_reports_the_per_job_capability() {
     );
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     let said = "--capability: per-job is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+}
+
+/// Asserts that the hello of an agent that runs jobs reports `load-admission` as `true`, that
+/// the hello of the previous release (the wire's fixture) does not, and that an operator cannot
+/// give it with `--capability` (status 2 naming the key, nothing sent). It catches an agent
+/// that admits a job start by the job service's placement without saying so (the job service
+/// would pack its host by summed bookings), and one an operator could make claim it on a build
+/// that still sums them (the job service would place starts it refuses).
+#[test]
+fn the_hello_reports_load_admission_and_an_operator_cannot_give_it() {
+    let (_, hello) = container_hello("contract-load-admission", &[], &linux_host());
+    assert_eq!(hello["capabilities"]["load-admission"], "true");
+    let previous: Value = serde_json::from_str(include_str!(
+        "../../../../js-agent-wire/tests/fixtures/v0.1.135/hello.json"
+    ))
+    .unwrap();
+    assert!(
+        previous["capabilities"].get("load-admission").is_none(),
+        "{previous}"
+    );
+    let (ran, sent, _) = run_scripted(
+        &["--capability", "load-admission=true"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: load-admission is detected and cannot be set";
     assert!(ran.err.contains(said), "{}", ran.err);
     assert!(sent.borrow().is_empty());
 }

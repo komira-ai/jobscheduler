@@ -229,7 +229,7 @@ mod tests {
         hello
     }
 
-    /// Asserts that `start-fence`, `held-beat` and `dispatch-poll` are reported as `true`, beside `per-job`, by
+    /// Asserts that `start-fence`, `held-beat`, `dispatch-poll` and `load-admission` are reported as `true`, beside `per-job`, by
     /// the hello of an agent that runs containers (its lifecycle judges a job start by its fence
     /// and stops its jobs after a silence; its session beats again at once after a held reply),
     /// and that the hello still validates. It catches a server never told that a container
@@ -254,12 +254,17 @@ mod tests {
             flag(&contained, DISPATCH_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(&contained, js_agent_wire::LOAD_ADMISSION_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(contained.validate(), Ok(()));
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
+        assert_eq!(js_agent_wire::LOAD_ADMISSION_CAPABILITY, "load-admission");
     }
 
     /// Asserts that the job half of a native agent's hello (`report_native_jobs`, which the
-    /// macOS build calls) is `per-job`, `start-fence`, `held-beat` and `layered-rootfs`, each `true`, and
+    /// macOS build calls) is `per-job`, `start-fence`, `held-beat`, `load-admission` and `layered-rootfs`, each `true`, and
     /// that the hello still validates. It catches a native agent that hides that it takes
     /// job starts and gives mounts, so no server sends it the kbf action jobs.
     #[test]
@@ -271,6 +276,7 @@ mod tests {
             START_FENCE_CAPABILITY,
             HELD_BEAT_CAPABILITY,
             DISPATCH_CAPABILITY,
+            js_agent_wire::LOAD_ADMISSION_CAPABILITY,
             js_caps::LAYERED_ROOTFS,
         ] {
             assert_eq!(

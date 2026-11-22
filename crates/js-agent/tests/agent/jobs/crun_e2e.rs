@@ -186,6 +186,7 @@ pub(super) fn seams() -> Seams {
         hooks: Hooks {
             chown: |_, _, _| Ok(()),
             now_ms: || 5_000,
+            mono_us: || 7_000_000,
             kill_wait: LONG,
             pull_limit: LONG,
             call_limit: LONG,

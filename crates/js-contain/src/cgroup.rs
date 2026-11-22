@@ -19,11 +19,16 @@
 //! operator sets). CPU is compressible: `cpu.weight` from the booked CPU, never
 //! `cpu.max`.
 //!
-//! [`LeasePolicy::Hard`] is the other policy, for a backend that replaces an engine
-//! whose limits were the booking (`--memory` equal to `--memory-swap`, `--cpus`):
-//! `memory.max` the booking, `memory.swap.max` 0, and `cpu.max` the booked cores. A lease
-//! booking is then what the lease-server's arithmetic assumes it is, and an OOM kill is
-//! the job's own. [`SwapKill`] has nothing to watch under it (no swap).
+//! [`LeasePolicy::HardMemory`] is the other policy, the agent's for a job: `memory.max` the
+//! booking and `memory.swap.max` 0, so a lease's memory is what the lease-server's arithmetic
+//! assumes it is and an OOM kill is the job's own ([`SwapKill`] has nothing to watch: no
+//! swap). Its CPU booking is what the job is guaranteed (placement packs a host by the
+//! bookings), and nothing holds a job below what it needs: there is no `cpu.max`, so a job
+//! uses every core no other job wants. `cpu.weight` from the booking is how the kernel keeps
+//! the guarantee when the host is busier than planned: leases that all want CPU get the cores
+//! in proportion to their bookings. An operator's ceiling, when set
+//! ([`CpuCeiling`](crate::CpuCeiling)), is a `cpu.max` beside the weight
+//! ([`LeaseCgroup::hold_cpu`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -71,32 +76,17 @@ pub enum LeasePolicy {
     /// `cpu.weight` only.
     #[default]
     BuildHost,
-    /// The booking is the limit: `memory.max` the booking, `memory.swap.max` 0, `cpu.max` the
-    /// booked CPUs.
-    Hard,
+    /// The memory booking is the limit and the CPU booking the guarantee: `memory.max` the
+    /// booking, `memory.swap.max` 0, `cpu.weight` from the booked CPU, and no `cpu.max` (an
+    /// operator's ceiling is written apart, [`LeaseCgroup::hold_cpu`]).
+    HardMemory,
 }
 
-/// The hard `memory.max` for a lease that booked `memory_bytes` under [`LeasePolicy::Hard`].
+/// The hard `memory.max` for a lease that booked `memory_bytes` under
+/// [`LeasePolicy::HardMemory`].
 #[must_use]
 pub fn hard_memory_max(memory_bytes: u64) -> Option<u64> {
     (memory_bytes > 0).then_some(memory_bytes)
-}
-
-/// The CFS period of `cpu.max`, in microseconds: the kernel's default, and what the
-/// engine this backend replaces used for `--cpus`.
-const CPU_PERIOD: u64 = 100_000;
-/// The least quota the kernel takes, in microseconds.
-const CPU_QUOTA_FLOOR: u64 = 1000;
-
-/// The `cpu.max` text for a lease that booked `cpu_millis` under [`LeasePolicy::Hard`]:
-/// the booked cores as a quota per period (`--cpus 1.5` is `150000 100000`), never below
-/// the kernel's least. `None` when nothing was booked.
-#[must_use]
-pub fn cpu_max(cpu_millis: u64) -> Option<String> {
-    (cpu_millis > 0).then(|| {
-        let quota = (cpu_millis.saturating_mul(CPU_PERIOD / 1000)).max(CPU_QUOTA_FLOOR);
-        format!("{quota} {CPU_PERIOD}")
-    })
 }
 
 /// When the driver kills a lease that keeps pushing into swap at its own cap.
@@ -320,27 +310,34 @@ impl LeaseCgroup {
                 if let Some(max) = memory_max(resources.memory_bytes()) {
                     self.write("memory.max", &max.to_string())?;
                 }
-                if let Some(weight) = cpu_weight(resources.cpu_millis()) {
-                    self.write("cpu.weight", &weight.to_string())?;
-                }
             }
-            LeasePolicy::Hard => {
+            LeasePolicy::HardMemory => {
                 // A kernel without swap accounting has no `memory.swap.max`: the write
                 // then fails and so does the lease, rather than a job that can swap.
                 if let Some(max) = hard_memory_max(resources.memory_bytes()) {
                     self.write("memory.max", &max.to_string())?;
                     self.write("memory.swap.max", "0")?;
                 }
-                if let Some(cpu) = cpu_max(resources.cpu_millis()) {
-                    self.write("cpu.max", &cpu)?;
-                }
             }
+        }
+        if let Some(weight) = cpu_weight(resources.cpu_millis()) {
+            self.write("cpu.weight", &weight.to_string())?;
         }
         if let Some(pin) = pin {
             self.write("cpuset.cpus", &pin.cpus().to_string())?;
             self.write("cpuset.mems", &pin.node().to_string())?;
         }
         Ok(())
+    }
+
+    /// Holds the lease to `cpu_millis` thousandths of a core: its `cpu.max`
+    /// ([`cpu_max`](crate::cpu_ceiling::cpu_max)), for an operator's optional ceiling
+    /// ([`CpuCeiling`](crate::CpuCeiling)). Nothing is written for 0.
+    pub fn hold_cpu(&self, cpu_millis: u64) -> io::Result<()> {
+        match crate::cpu_ceiling::cpu_max(cpu_millis) {
+            Some(max) => self.write("cpu.max", &max),
+            None => Ok(()),
+        }
     }
 
     /// The name the bundle's `cgroupsPath` is made under.

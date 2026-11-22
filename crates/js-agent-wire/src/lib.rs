@@ -196,6 +196,7 @@ pub mod protocol;
 pub mod refusal;
 mod rootfs;
 mod run;
+pub mod sizing;
 
 pub use caps::{
     Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability, is_xcode_build,
@@ -239,6 +240,7 @@ pub use rootfs::{
     HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation, is_provider_name,
 };
 pub use run::RunSpec;
+pub use sizing::{BookedFrom, StartSizing};
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration
 /// says otherwise, in milliseconds.
