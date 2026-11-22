@@ -23,6 +23,9 @@ pub fn repo() -> PathBuf {
 /// be); each has a manifest that names no dependency.
 pub struct Tree {
     dir: TestDir,
+    /// Whether this is a copy of the real sources: only those hold the files of `KEEPERS`, so
+    /// a small tree is checked with no keepers.
+    real: bool,
 }
 
 impl Tree {
@@ -30,6 +33,7 @@ impl Tree {
     pub fn new(name: &str) -> Tree {
         let tree = Tree {
             dir: TestDir::under(env!("CARGO_TARGET_TMPDIR"), &format!("spawn-sites-{name}")),
+            real: false,
         };
         tree.manifest("js-agent", "");
         tree.put("crates/js-agent/src/lib.rs", "");
@@ -45,7 +49,8 @@ impl Tree {
     /// A copy of the real crates the check reads (their sources, manifests, and the test-only
     /// binaries' modules that a `#[path]` reaches), in a scratch directory named after `name`.
     pub fn real(name: &str) -> Tree {
-        let tree = Tree::new(name);
+        let mut tree = Tree::new(name);
+        tree.real = true;
         for krate in crates(&repo()).unwrap() {
             let rel = Path::new("crates").join(krate);
             copy(
@@ -109,9 +114,19 @@ impl Tree {
         );
     }
 
-    /// What the check found, each as `file:line: what`.
+    /// What the check found, each as `file:line: what`: with the real `KEEPERS` for a copy of
+    /// the real sources, with none for a small tree.
     pub fn sites(&self) -> Vec<String> {
-        shown(check(self.root()))
+        shown(self.check())
+    }
+
+    /// The check of this tree, as [`Tree::sites`] says.
+    fn check(&self) -> Result<Vec<Site>, Error> {
+        if self.real {
+            check(self.root())
+        } else {
+            check_with_keepers(self.root(), &[])
+        }
     }
 
     /// What the check found with `keepers` as the files that may keep the responsibility.
@@ -119,9 +134,9 @@ impl Tree {
         shown(check_with_keepers(self.root(), keepers))
     }
 
-    /// The error the check stopped at, as it is printed.
+    /// The error the check stopped at, as it is printed (keepers as for [`Tree::sites`]).
     pub fn error(&self) -> String {
-        printed(check(self.root()))
+        printed(self.check())
     }
 
     /// The error the check stopped at with `keepers`, as it is printed.

@@ -169,7 +169,13 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let held = grant::ask(grant::list(Path::new(grant::PRIVACY_DIR)));
     let _ = writeln!(out, "full disk access: {}", held.as_str());
     let config = settings.with_full_disk_access(held).config().clone();
-    let launcher = Arc::new(SystemLauncher);
+    let launcher = match SystemLauncher::current() {
+        Ok(launcher) => Arc::new(launcher),
+        Err(why) => {
+            let _ = writeln!(out, "the agent's own path: {why}");
+            return status::REFUSED;
+        }
+    };
     let mut runtime = match NativeRuntime::open(launcher, config, 1) {
         Ok(runtime) => runtime,
         Err(why) => {
