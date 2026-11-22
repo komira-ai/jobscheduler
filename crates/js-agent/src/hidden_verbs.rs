@@ -66,4 +66,19 @@ mod tests {
             assert_eq!((out, err), (Vec::new(), Vec::new()), "{args:?}");
         }
     }
+
+    /// Asserts that on Linux `image-pull` is answered here, before every other verb: a
+    /// command line with no image is refused by the verb itself, which names itself, and
+    /// nothing is pulled.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_pull_is_answered_here_on_linux() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let args = words(&["js-agent", crate::image::pull::VERB]);
+        let code = dispatch(&args, &mut out, &mut err);
+        assert!(code.is_some_and(|code| code != ExitCode::SUCCESS));
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.starts_with("js-agent image-pull: "), "{err}");
+        assert!(out.is_empty());
+    }
 }
