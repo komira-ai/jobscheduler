@@ -42,7 +42,7 @@ fn settle(client: &mut ProviderClient, call: &ProviderCall, guard: Duration) -> 
         let waited = u128::from(super::clock::micros_since(began)) > guard.as_micros();
         match answer {
             ProviderAnswer::Pending => {
-                client.wait_answered(NAME, call, guard);
+                let _ = client.wait_answered(NAME, call, guard);
             }
             ProviderAnswer::Unavailable(_) if !waited => {
                 std::thread::sleep(Duration::from_millis(50));
