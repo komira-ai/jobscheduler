@@ -31,15 +31,19 @@ pub fn ctl(dir: &Path, line: &str) -> Result<String, String> {
 /// answer line.
 fn ask(dir: &Path, request: Control) -> Result<(UnixStream, String), String> {
     let path = dir.join(control::SOCKET);
-    let mut stream =
-        UnixStream::connect(&path).map_err(|why| format!("connect {}: {why}", path.display()))?;
-    writeln!(stream, "{}", control::render(request))
-        .map_err(|why| format!("write to {}: {why}", path.display()))?;
+    let shown = path.display();
+    let mut stream = at(&format!("connect {shown}"), UnixStream::connect(&path))?;
+    let line = control::render(request);
+    at(&format!("write to {shown}"), writeln!(stream, "{line}"))?;
     let mut answer = String::new();
-    BufReader::new(&stream)
-        .read_line(&mut answer)
-        .map_err(|why| format!("read from {}: {why}", path.display()))?;
+    let read = BufReader::new(&stream).read_line(&mut answer);
+    at(&format!("read from {shown}"), read)?;
     Ok((stream, answer))
+}
+
+/// `result`, an I/O error turned into text that names `what`.
+fn at<T>(what: &str, result: std::io::Result<T>) -> Result<T, String> {
+    result.map_err(|why| format!("{what}: {why}"))
 }
 
 /// One request to the guest's `port`: the reply line, as the guest wrote it.
@@ -50,11 +54,10 @@ fn ask(dir: &Path, request: Control) -> Result<(UnixStream, String), String> {
 pub fn request(dir: &Path, port: u32, line: &str) -> Result<String, String> {
     let (mut stream, answer) = ask(dir, Control::Connect(port))?;
     control::answer(&answer).map_err(|why| format!("connect {port}: {why}"))?;
-    writeln!(stream, "{line}").map_err(|why| format!("send to port {port}: {why}"))?;
+    at(&format!("send to port {port}"), writeln!(stream, "{line}"))?;
     let mut reply = String::new();
-    BufReader::new(&stream)
-        .read_line(&mut reply)
-        .map_err(|why| format!("read from port {port}: {why}"))?;
+    let read = BufReader::new(&stream).read_line(&mut reply);
+    at(&format!("read from port {port}"), read)?;
     if reply.is_empty() {
         return Err(format!("port {port} closed without a reply"));
     }
@@ -123,20 +126,13 @@ pub fn time(
         match ran {
             Ok(output) if output.status.success() => {
                 taken.push(us);
-                writeln!(
-                    out,
-                    "sample {n} us={us} stdout={:?}",
-                    wire::tail(&output.stdout, 200)
-                )?;
+                let shown = wire::tail(&output.stdout, 200);
+                writeln!(out, "sample {n} us={us} stdout={shown:?}")?;
             }
             Ok(output) => {
                 failed += 1;
-                writeln!(
-                    out,
-                    "sample {n} FAILED {} stderr={:?}",
-                    output.status,
-                    wire::tail(&output.stderr, 400)
-                )?;
+                let (status, shown) = (output.status, wire::tail(&output.stderr, 400));
+                writeln!(out, "sample {n} FAILED {status} stderr={shown:?}")?;
             }
             Err(why) => {
                 failed += 1;

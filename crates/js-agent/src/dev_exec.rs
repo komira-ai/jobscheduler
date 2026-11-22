@@ -20,6 +20,7 @@
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use js_mac_session::full_disk_access::{self, PRIVACY_DIR};
@@ -32,38 +33,34 @@ const USAGE: u8 = 2;
 
 /// Runs the verb: `args` is the whole command line, `args[1]` the verb.
 pub fn run(args: &[OsString], err: &mut dyn Write) -> ExitCode {
+    let root = rustix::process::geteuid().is_root();
+    run_with(args, err, root, Path::new(PRIVACY_DIR))
+}
+
+/// [`run`] with whether this process is root and the privacy database's directory given.
+fn run_with(args: &[OsString], err: &mut dyn Write, root: bool, privacy: &Path) -> ExitCode {
     let rest = args.get(2..).unwrap_or_default();
     let Some((program, program_args)) = parse(rest) else {
         let _ = writeln!(err, "usage: js-agent {VERB} -- <program> [args...]");
         return ExitCode::from(USAGE);
     };
-    if !rustix::process::geteuid().is_root() {
+    if !root {
         let _ = writeln!(err, "js-agent: {VERB} runs as root only");
         return ExitCode::from(USAGE);
     }
-    let listed =
-        std::fs::read_dir(PRIVACY_DIR).and_then(|mut dir| dir.next().transpose().map(|_| ()));
+    let listed = std::fs::read_dir(privacy).and_then(|mut dir| dir.next().transpose().map(|_| ()));
     let (state, why) = full_disk_access::judge(listed);
-    match why {
-        None => {
-            let _ = writeln!(err, "full disk access: {}", state.as_str());
+    let note = why.map(|why| format!(" ({why})")).unwrap_or_default();
+    let _ = writeln!(err, "full disk access: {}{note}", state.as_str());
+    let started = js_mac_session::disclaim::spawn_undisclaimed_for_proof(program, program_args);
+    let mut child = match started {
+        Ok(child) => child,
+        Err(why) => {
+            let shown = program.to_string_lossy();
+            let _ = writeln!(err, "js-agent: {VERB}: cannot start {shown}: {why}");
+            return ExitCode::from(USAGE);
         }
-        Some(why) => {
-            let _ = writeln!(err, "full disk access: {} ({why})", state.as_str());
-        }
-    }
-    let mut child =
-        match js_mac_session::disclaim::spawn_undisclaimed_for_proof(program, program_args) {
-            Ok(child) => child,
-            Err(why) => {
-                let _ = writeln!(
-                    err,
-                    "js-agent: {VERB}: cannot start {}: {why}",
-                    program.to_string_lossy()
-                );
-                return ExitCode::from(USAGE);
-            }
-        };
+    };
     #[cfg(target_os = "macos")]
     match js_mac_session::disclaim::responsible_pid(child.id()) {
         Ok(pid) => {
@@ -78,13 +75,7 @@ pub fn run(args: &[OsString], err: &mut dyn Write) -> ExitCode {
         }
     }
     let _ = err.flush();
-    match child.wait() {
-        Ok(status) => ExitCode::from(exit_code(status)),
-        Err(why) => {
-            let _ = writeln!(err, "js-agent: {VERB}: waiting for the program: {why}");
-            ExitCode::from(USAGE)
-        }
-    }
+    ExitCode::from(child.wait().map_or(USAGE, exit_code))
 }
 
 /// The program and its arguments after `--`, or `None` when there is no `--` first or no
@@ -152,6 +143,84 @@ mod tests {
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "usage: js-agent __dev-exec -- <program> [args...]\n"
+        );
+    }
+
+    /// Asserts that a process that is not root is refused with status 2 before anything is
+    /// read or started. Catches a verb that starts a program without root.
+    #[test]
+    fn a_process_that_is_not_root_is_refused() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "dev-exec-not-root");
+        let mut err = Vec::new();
+        let code = run_with(
+            &os(&["js-agent", VERB, "--", "x"]),
+            &mut err,
+            false,
+            dir.path(),
+        );
+        assert_eq!(code, ExitCode::from(USAGE));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "js-agent: __dev-exec runs as root only\n"
+        );
+    }
+
+    /// Asserts that, as root, the verb prints the agent's own Full Disk Access check (granted
+    /// when the privacy directory can be listed, the error when it cannot), starts the program
+    /// and exits with its status, and refuses a program it cannot start. Catches a verb that
+    /// reports the grant wrongly or loses the child's status.
+    #[test]
+    fn as_root_it_checks_the_grant_and_runs_the_program() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "dev-exec-root");
+        let me = std::env::current_exe().unwrap();
+        let me = me.to_str().unwrap();
+        let mut err = Vec::new();
+        let line = os(&["js-agent", VERB, "--", me, "--exact", "no-such-test"]);
+        assert_eq!(
+            run_with(&line, &mut err, true, dir.path()),
+            ExitCode::SUCCESS
+        );
+        let text = String::from_utf8(err).unwrap();
+        assert!(text.starts_with("full disk access: granted\n"), "{text}");
+
+        let missing = dir.path().join("missing");
+        let mut err = Vec::new();
+        let line = os(&["js-agent", VERB, "--", missing.to_str().unwrap()]);
+        assert_eq!(
+            run_with(&line, &mut err, true, &missing),
+            ExitCode::from(USAGE)
+        );
+        let text = String::from_utf8(err).unwrap();
+        assert!(
+            text.contains("js-agent: __dev-exec: cannot start "),
+            "{text}"
+        );
+        assert!(text.starts_with("full disk access: "), "{text}");
+    }
+
+    /// Asserts that the agent's command line hands `__dev-exec` and `__linux-vm` to their verbs
+    /// before anything else runs: each answers its own usage with status 2.
+    #[test]
+    fn the_agent_dispatches_the_development_verbs() {
+        let install =
+            || -> std::io::Result<crate::SystemSleeper> { Err(std::io::Error::other("unused")) };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = crate::main_with(&install, os(&["js-agent", VERB]), &mut out, &mut err);
+        assert_eq!(code, ExitCode::from(USAGE));
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .starts_with("usage: js-agent __dev-exec")
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let line = os(&["js-agent", crate::linux_vm::VERB, "bogus"]);
+        assert_eq!(
+            crate::main_with(&install, line, &mut out, &mut err),
+            ExitCode::from(USAGE)
+        );
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "js-agent __linux-vm: unknown command \"bogus\"\n"
         );
     }
 }

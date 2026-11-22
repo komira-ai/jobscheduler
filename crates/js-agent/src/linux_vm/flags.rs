@@ -355,14 +355,21 @@ mod tests {
                 start_stopped: true,
             })
         );
-        let Command::Adopt(least) = parse(&words("adopt --dir /v")).unwrap() else {
-            panic!("adopt is not Adopt");
-        };
         assert_eq!(
-            (least.cpus, least.memory_mib, least.ready_port, least.detach),
-            (CPUS, MEMORY_MIB, READY_PORT, false)
+            parse(&words("adopt --dir /v")),
+            Ok(Command::Adopt(RunFlags {
+                dir: "/v".into(),
+                cpus: CPUS,
+                memory_mib: MEMORY_MIB,
+                shares: vec![],
+                forwards: vec![],
+                ready_port: READY_PORT,
+                detach: false,
+                exit_when_ready: false,
+                idle_stop_s: 0,
+                start_stopped: false,
+            }))
         );
-        assert_eq!((least.idle_stop_s, least.start_stopped), (0, false));
     }
 
     /// Asserts the refusal of each malformed `run`, by its exact message. Catches a VM booted
@@ -428,12 +435,16 @@ mod tests {
                 release: false
             })
         );
-        let Command::Place(p) =
-            parse(&words("place --release --socket /s --uid 7 --run r1")).unwrap()
-        else {
-            panic!("not Place");
-        };
-        assert!(p.release && p.reference.is_empty());
+        assert_eq!(
+            parse(&words("place --release --socket /s --uid 7 --run r1")),
+            Ok(Command::Place(crate::linux_vm::place::Place {
+                socket: "/s".into(),
+                uid: 7,
+                reference: String::new(),
+                run: "r1".into(),
+                release: true
+            }))
+        );
         for (line, why) in [
             ("place --uid 7 --run r", "--socket is required"),
             ("place --socket /s --run r", "--uid is required"),
@@ -499,6 +510,7 @@ mod tests {
         let cases = [
             ("ctl --dir /v", "ctl takes a request"),
             ("ctl state", "--dir D comes first"),
+            ("ctl --where /v state", "--dir D comes first"),
             ("call --dir /v --request {}", "--port is required"),
             ("call --dir /v --port 1", "--request is required"),
             ("call --dir /v --port", "--port takes a value"),

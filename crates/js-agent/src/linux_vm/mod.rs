@@ -226,6 +226,7 @@ mod tests {
             "no-such-test",
         ]);
         let mut err = Vec::new();
+        Refusing.flush().unwrap();
         assert_eq!(run(&args, &mut Refusing, &mut err), ExitCode::FAILURE);
         assert_eq!(
             String::from_utf8(err).unwrap(),
