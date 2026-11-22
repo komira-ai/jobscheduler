@@ -121,8 +121,6 @@ struct State {
     held: BTreeSet<u32>,
     /// Whether `pool-status` leaves out which lease holds which slot.
     status_names_none: bool,
-    /// What `full-disk-access` answers: the grant held unless a test says otherwise.
-    full_disk_access: Option<FullDiskAccess>,
 }
 
 struct Shared {
@@ -221,8 +219,8 @@ impl FakeHelper {
     /// The native backend over this helper, with its lease journal in `dir`: what an agent
     /// given this helper's socket and homes (`--native-helper-socket`, `--native-homes`) runs
     /// its jobs with.
-    /// The helper holds Full Disk Access unless [`FakeHelper::full_disk_access`] says
-    /// otherwise, and the backend carries the state the agent would have asked for.
+    /// The backend holds Full Disk Access, as the agent of a Mac the profile is in force on
+    /// finds at start; the helper is never asked.
     pub fn backend(&self, dir: &Scratch) -> js_agent::Backend {
         let flags = js_agent::native::NativeFlags {
             socket: Some(self.socket()),
@@ -236,18 +234,8 @@ impl FakeHelper {
         };
         let journal = dir.path("native-leases");
         let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
-        let state = self.shared.lock().full_disk_access;
         let settings = settings.unwrap().unwrap();
-        js_agent::Backend::Native(
-            settings.with_full_disk_access(state.unwrap_or(FullDiskAccess::Granted)),
-        )
-    }
-
-    /// From now on `full-disk-access` answers `state`. To make the helper refuse the verb
-    /// as an old helper does, [`FakeHelper::be_old`]; to make it fail, refuse the verb
-    /// with [`FakeHelper::refuse`].
-    pub fn full_disk_access(&self, state: FullDiskAccess) {
-        self.shared.lock().full_disk_access = Some(state);
+        js_agent::Backend::Native(settings.with_full_disk_access(FullDiskAccess::Granted))
     }
 
     /// The home of the pool user lent to `lease` (also once the lease is over).
@@ -525,11 +513,13 @@ fn serve(stream: &UnixStream, shared: &Shared) {
         },
         Request::FullDiskAccess => match shared.take(seen("full-disk-access", "")) {
             Some(reason) => refused(stream, reason),
-            None => {
-                let state = shared.lock().full_disk_access;
-                let state = state.unwrap_or(FullDiskAccess::Granted);
-                reply(stream, &Reply::FullDiskAccess { state });
-            }
+            // The helper holds no grant: the profile names the agent.
+            None => reply(
+                stream,
+                &Reply::FullDiskAccess {
+                    state: FullDiskAccess::NotGranted,
+                },
+            ),
         },
         Request::Scan => {
             let answer = {
