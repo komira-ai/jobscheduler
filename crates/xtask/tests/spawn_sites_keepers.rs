@@ -7,7 +7,7 @@
 //! The cases build small trees in a scratch directory (see `spawn_tree`), plus one copy of
 //! the real sources with one keep added. Nothing in the repository is edited.
 
-use xtask::spawn_sites::SPAWNER;
+use xtask::spawn_sites::{KEEPERS, SPAWNER};
 
 mod spawn_tree;
 use spawn_tree::{Tree, at};
@@ -177,6 +177,39 @@ fn a_keep_added_to_the_real_agent_is_found() {
         tree.sites(),
         at(
             "crates/js-agent/src/facts.rs",
+            &[
+                (last + 3, "Kept outside KEEPERS"),
+                (last + 3, "keep_responsibility outside KEEPERS"),
+            ]
+        )
+    );
+}
+
+/// The real list is the supervisor's two starts and nothing else: the copied real sources pass
+/// with the keeps of those two files, and a keep added to another file of the supervisor's own
+/// module is found, with its line. Catches a list that lets the whole module, or a third file
+/// of it, keep the responsibility.
+#[test]
+fn only_the_two_starts_of_the_supervisor_may_keep() {
+    let supervisor = "crates/js-agent/src/mac_supervisor";
+    assert_eq!(
+        KEEPERS,
+        [
+            format!("{supervisor}/launch.rs").as_str(),
+            format!("{supervisor}/run.rs").as_str(),
+        ]
+    );
+    let tree = Tree::real("keep-supervisor");
+    assert_eq!(tree.sites(), Vec::<String>::new());
+    let record = format!("{supervisor}/record.rs");
+    let last = tree.append(
+        &record,
+        "\nfn stray(p: &mut js_mac_session::disclaim::Program) {\n    p.keep_responsibility(js_mac_session::disclaim::Kept::Job);\n}\n",
+    );
+    assert_eq!(
+        tree.sites(),
+        at(
+            &record,
             &[
                 (last + 3, "Kept outside KEEPERS"),
                 (last + 3, "keep_responsibility outside KEEPERS"),
