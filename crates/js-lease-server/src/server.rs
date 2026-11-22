@@ -345,7 +345,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
     let ticking = Ticking(tokio::spawn(ticking));
     let (stop_polling, polling_stopped) = oneshot::channel();
     let polling = Polling {
-        stop: Some(stop_polling),
+        stop: stop_polling,
         task: Ticking(tokio::spawn(poll_loop(shared.clone(), polling_stopped))),
     };
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
@@ -629,7 +629,7 @@ struct Ticking(JoinHandle<()>);
 /// outlives the stop. Dropped, it is aborted.
 struct Polling {
     /// Sent to stop the poller once its pass under way, if any, has ended.
-    stop: Option<oneshot::Sender<()>>,
+    stop: oneshot::Sender<()>,
     task: Ticking,
 }
 
@@ -920,10 +920,9 @@ impl Running {
         let _ = (&mut self.ticking.0).await;
         // The poller ends after the pass it may be running, so that pass lets go of the state
         // before the last tick and before the stop returns.
-        if let Some(stop) = self.polling.stop.take() {
-            let _ = stop.send(());
-        }
-        let _ = (&mut self.polling.task.0).await;
+        let Polling { stop, mut task } = self.polling;
+        let _ = stop.send(());
+        let _ = (&mut task.0).await;
         final_tick(&self.shared).await;
         served
     }
