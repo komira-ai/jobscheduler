@@ -537,8 +537,8 @@ fn sweep_job(ids: &JobIds) -> Tally {
         if !tally.round(&found) {
             break;
         }
-        for (pid, _) in found {
-            sys::kill(pid);
+        for target in &found {
+            sys::kill(target.pid);
         }
         thread::sleep(SWEEP_PAUSE);
     }

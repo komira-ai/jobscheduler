@@ -178,22 +178,39 @@ pub(super) fn processes(asids: bool) -> io::Result<Vec<Proc>> {
     pids.truncate(usize::try_from(got).unwrap_or(0));
     let mut list = Vec::with_capacity(pids.len());
     for pid in pids {
-        let Some(uid) = live_uid(pid) else { continue };
+        let Some((uid, name)) = live_uid(pid) else {
+            continue;
+        };
         let asid = if asids { asid_of(pid) } else { None };
-        list.push(Proc { pid, uid, asid });
+        list.push(Proc {
+            pid,
+            uid,
+            asid,
+            name,
+        });
     }
     Ok(list)
 }
 
-/// The effective user of process `pid`, or `None` when it is gone or a zombie.
-fn live_uid(pid: c_int) -> Option<u32> {
+/// The effective user and the short command name of process `pid`, or `None` when it is gone
+/// or a zombie.
+fn live_uid(pid: c_int) -> Option<(u32, String)> {
     // SAFETY: an all-zero `proc_bsdinfo` is a valid value of the plain C struct.
     let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let len = c_len::<libc::proc_bsdinfo>();
     // SAFETY: `info` is ours and `len` bytes long; `proc_pidinfo` writes at most that many.
     let got =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), len) };
-    (got == len && info.pbi_status != libc::SZOMB).then_some(info.pbi_uid)
+    if got != len || info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    let comm: Vec<u8> = info
+        .pbi_comm
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c.cast_unsigned())
+        .collect();
+    Some((info.pbi_uid, String::from_utf8_lossy(&comm).into_owned()))
 }
 
 /// The audit session of process `pid`, or `None` when it cannot be read.

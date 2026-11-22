@@ -42,6 +42,7 @@ fn home_temp_and_caches_point_inside_the_job_folder_and_the_jobs_own_variables_s
             ("TMPDIR", "/r/j/tmp/"),
             ("USER", "kbf-lease-pool-80"),
             ("XDG_CACHE_HOME", "/r/j/cache"),
+            ("xcrun_db", "/r/j/tmp/xcrun_db"),
         ]
     );
 }

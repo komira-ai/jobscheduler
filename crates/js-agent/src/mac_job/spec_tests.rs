@@ -162,6 +162,7 @@ fn env_names_follow_their_rule_and_the_agents_own_are_refused() {
         "TMPDIR",
         "PATH",
         "CLANG_MODULE_CACHE_PATH",
+        "xcrun_db",
     ] {
         let extra = format!(r#","env":{{"{bad}":"v"}}"#);
         assert_eq!(parse(&extra), Err(SpecError::Env(bad.to_owned())), "{bad}");

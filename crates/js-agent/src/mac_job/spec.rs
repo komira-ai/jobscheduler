@@ -40,7 +40,7 @@ pub const WALL_LIMIT_MAX_SECS: u64 = 86_400;
 pub const ID_MAX: usize = 63;
 
 /// The environment variables the agent sets itself, which a job may not set.
-pub const RESERVED_ENV: [&str; 9] = [
+pub const RESERVED_ENV: [&str; 10] = [
     "HOME",
     "TMPDIR",
     "USER",
@@ -49,6 +49,7 @@ pub const RESERVED_ENV: [&str; 9] = [
     "XDG_CACHE_HOME",
     "CFFIXED_USER_HOME",
     "CLANG_MODULE_CACHE_PATH",
+    "xcrun_db",
     "PATH",
 ];
 

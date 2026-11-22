@@ -22,7 +22,7 @@ use serde::Serialize;
 pub const ROUNDS_MAX: usize = 50;
 
 /// A process, as the listing sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proc {
     /// Its id.
     pub pid: i32,
@@ -30,6 +30,28 @@ pub struct Proc {
     pub uid: u32,
     /// Its audit session, if it could be read.
     pub asid: Option<i32>,
+    /// Its name (the kernel's short command name).
+    pub name: String,
+}
+
+/// A process the sweep ends, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// Its id.
+    pub pid: i32,
+    /// Its name.
+    pub name: String,
+    /// The rule that found it.
+    pub why: Found,
+}
+
+/// A process the sweep ended, as the report names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Swept {
+    /// Its id.
+    pub pid: i32,
+    /// Its name.
+    pub name: String,
 }
 
 /// What the job's processes are known by.
@@ -56,18 +78,23 @@ pub enum Found {
 /// The processes of `procs` to end, and why: in the job's audit session, or the job's user's.
 /// Never the sweeping process, `launchd` or the kernel.
 #[must_use]
-pub fn targets(procs: &[Proc], job: &JobIds) -> Vec<(i32, Found)> {
+pub fn targets(procs: &[Proc], job: &JobIds) -> Vec<Target> {
     procs
         .iter()
         .filter(|p| p.pid > 1 && p.pid != job.own_pid)
         .filter_map(|p| {
-            if job.asid.is_some() && p.asid == job.asid {
-                Some((p.pid, Found::Session))
+            let why = if job.asid.is_some() && p.asid == job.asid {
+                Found::Session
             } else if p.uid == job.uid {
-                Some((p.pid, Found::UserOnly))
+                Found::UserOnly
             } else {
-                None
-            }
+                return None;
+            };
+            Some(Target {
+                pid: p.pid,
+                name: p.name.clone(),
+                why,
+            })
         })
         .collect()
 }
@@ -76,9 +103,10 @@ pub fn targets(procs: &[Proc], job: &JobIds) -> Vec<(i32, Found)> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Tally {
     /// Processes found by the audit session.
-    pub by_session: Vec<i32>,
-    /// Processes found by the user alone.
-    pub by_user_only: Vec<i32>,
+    pub by_session: Vec<Swept>,
+    /// Processes found by the user alone: on a Mac, the per-user daemons launchd starts for an
+    /// account (their audit session is launchd's, not the job's).
+    pub by_user_only: Vec<Swept>,
     /// The rounds that found something, and the one that found nothing.
     pub rounds: usize,
     /// Whether the last round found nothing.
@@ -90,15 +118,18 @@ pub struct Tally {
 
 impl Tally {
     /// Records one round's targets. Returns whether it found any.
-    pub fn round(&mut self, found: &[(i32, Found)]) -> bool {
+    pub fn round(&mut self, found: &[Target]) -> bool {
         self.rounds += 1;
-        for &(pid, why) in found {
-            let list = match why {
+        for target in found {
+            let list = match target.why {
                 Found::Session => &mut self.by_session,
                 Found::UserOnly => &mut self.by_user_only,
             };
-            if !list.contains(&pid) {
-                list.push(pid);
+            if !list.iter().any(|swept| swept.pid == target.pid) {
+                list.push(Swept {
+                    pid: target.pid,
+                    name: target.name.clone(),
+                });
             }
         }
         self.clean = found.is_empty();

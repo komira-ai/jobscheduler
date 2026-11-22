@@ -1,6 +1,6 @@
 //! Which processes the sweep ends, and its tally.
 
-use super::{Found, JobIds, Proc, Tally, targets};
+use super::{Found, JobIds, Proc, Swept, Tally, Target, targets};
 
 const JOB: JobIds = JobIds {
     uid: 680,
@@ -9,7 +9,29 @@ const JOB: JobIds = JobIds {
 };
 
 fn p(pid: i32, uid: u32, asid: Option<i32>) -> Proc {
-    Proc { pid, uid, asid }
+    Proc {
+        pid,
+        uid,
+        asid,
+        name: format!("p{pid}"),
+    }
+}
+
+/// The target `pid`, named as [`p`] names it, found by `why`.
+fn t(pid: i32, why: Found) -> Target {
+    Target {
+        pid,
+        name: format!("p{pid}"),
+        why,
+    }
+}
+
+/// The swept process `pid`, named as [`p`] names it.
+fn s(pid: i32) -> Swept {
+    Swept {
+        pid,
+        name: format!("p{pid}"),
+    }
 }
 
 #[test]
@@ -25,10 +47,10 @@ fn the_jobs_session_and_the_jobs_user_are_ended_and_nothing_else() {
     assert_eq!(
         targets(&procs, &JOB),
         [
-            (100, Found::Session),
-            (101, Found::Session),
-            (102, Found::UserOnly),
-            (103, Found::UserOnly),
+            t(100, Found::Session),
+            t(101, Found::Session),
+            t(102, Found::UserOnly),
+            t(103, Found::UserOnly),
         ]
     );
 }
@@ -43,21 +65,21 @@ fn launchd_the_kernel_and_the_sweeper_are_never_targets() {
 fn with_no_session_of_its_own_the_job_is_found_by_its_user_alone() {
     let job = JobIds { asid: None, ..JOB };
     let procs = [p(100, 680, None), p(101, 501, None), p(102, 501, Some(7))];
-    assert_eq!(targets(&procs, &job), [(100, Found::UserOnly)]);
+    assert_eq!(targets(&procs, &job), [t(100, Found::UserOnly)]);
 }
 
 #[test]
 fn the_tally_counts_each_pid_once_and_ends_clean_on_an_empty_round() {
     let mut tally = Tally::default();
-    assert!(tally.round(&[(100, Found::Session), (102, Found::UserOnly)]));
+    assert!(tally.round(&[t(100, Found::Session), t(102, Found::UserOnly)]));
     assert!(!tally.clean);
-    assert!(tally.round(&[(100, Found::Session), (103, Found::Session)]));
+    assert!(tally.round(&[t(100, Found::Session), t(103, Found::Session)]));
     assert!(!tally.round(&[]));
     assert_eq!(
         tally,
         Tally {
-            by_session: vec![100, 103],
-            by_user_only: vec![102],
+            by_session: vec![s(100), s(103)],
+            by_user_only: vec![s(102)],
             rounds: 3,
             clean: true,
             error: None,

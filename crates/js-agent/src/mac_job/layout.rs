@@ -6,11 +6,15 @@
 //!     home/             HOME and CFFIXED_USER_HOME
 //!     tmp/              TMPDIR
 //!     cache/            XDG_CACHE_HOME; cache/clang is CLANG_MODULE_CACHE_PATH
+//!                       (and tmp/xcrun_db is xcrun's cache, `xcrun_db`)
 //! ```
 //!
 //! Every place a build tool writes to by default (the home, the temporary folder, the caches,
-//! clang's module cache, which otherwise goes to the user's folder under `/var/folders`) is
-//! inside the job folder, so removing the folder removes it.
+//! clang's module cache and xcrun's cache, which otherwise go to the user's folder under
+//! `/var/folders`) is inside the job folder, so removing the folder removes it. Measured on
+//! macOS 27: without `xcrun_db`, every `cc`, `swiftc` and `otool` of a slot account printed
+//! "couldn't create cache file .../T/xcrun_db-..." (the profile refuses that folder); with it,
+//! the cache is made at the path it names.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,12 +81,14 @@ impl Layout {
         let tmp = format!("{}/", text(self.tmp()));
         let cache = text(self.cache());
         let clang = format!("{cache}/clang");
+        let xcrun = format!("{}/xcrun_db", text(self.tmp()));
         for (name, value) in [
             ("HOME", home.clone()),
             ("CFFIXED_USER_HOME", home),
             ("TMPDIR", tmp),
             ("XDG_CACHE_HOME", cache),
             ("CLANG_MODULE_CACHE_PATH", clang),
+            ("xcrun_db", xcrun),
             ("USER", user.to_owned()),
             ("LOGNAME", user.to_owned()),
             ("SHELL", SHELL.to_owned()),
