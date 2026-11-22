@@ -107,7 +107,7 @@ mod tests {
     use js_testkit::mount_provider::{FakeProvider, mount_path};
     use std::os::unix::fs::PermissionsExt as _;
 
-    fn fake(name: &str) -> (TestDir, FakeProvider, Place) {
+    fn rig(name: &str) -> (TestDir, FakeProvider, Place) {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let fake = FakeProvider::start(dir.path()).unwrap();
         std::fs::set_permissions(fake.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -132,7 +132,7 @@ mod tests {
     /// `released`. Catches a place that prints before the mount answers.
     #[test]
     fn a_tree_is_placed_retried_and_released() {
-        let (_dir, fake, mut place) = fake("linux-vm-place");
+        let (_dir, fake, mut place) = rig("linux-vm-place");
         fake.fail_mount(2);
         let (result, out) = placed(&place, Duration::from_secs(60));
         assert_eq!(result, Ok(()));
@@ -149,12 +149,12 @@ mod tests {
     /// exits 0 with no directory.
     #[test]
     fn a_refusal_and_a_provider_that_stays_down_are_errors() {
-        let (_dir, fake, place) = fake("linux-vm-place-refused");
+        let (_dir, fake, place) = rig("linux-vm-place-refused");
         fake.refuse("cas/l/ab");
         let (result, out) = placed(&place, Duration::from_secs(60));
         assert!(result.unwrap_err().starts_with("refused: "));
         assert_eq!(out, "");
-        let (_dir2, fake2, place2) = fake("linux-vm-place-down");
+        let (_dir2, fake2, place2) = rig("linux-vm-place-down");
         fake2.fail_mount(u32::MAX);
         let (result, _) = placed(&place2, Duration::from_millis(200));
         assert!(result.unwrap_err().starts_with("Unavailable("));
@@ -163,7 +163,7 @@ mod tests {
     /// Asserts that `run` (the default guard) places a tree, as the verb calls it.
     #[test]
     fn run_places_with_the_default_guard() {
-        let (_dir, _fake, place) = fake("linux-vm-place-run");
+        let (_dir, _fake, place) = rig("linux-vm-place-run");
         let mut out = Vec::new();
         assert_eq!(run(&place, &mut out), Ok(()));
         assert!(!out.is_empty());
