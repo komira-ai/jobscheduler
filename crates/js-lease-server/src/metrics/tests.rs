@@ -334,7 +334,7 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
 }
 
 /// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
-/// of `a-z`, `0-9` and `-`, and is counted as `other` otherwise (a capital, a space, a quote,
+/// of `a-z`, `0-9` and `-` (a code with a digit among them), and is counted as `other` otherwise (a capital, a space, a quote,
 /// no characters, 65 characters), and that with no refusal counted the family is only its HELP
 /// and TYPE lines. Catches a label value the agent's text chooses without bound.
 #[test]
@@ -352,6 +352,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
     let too_long = "a".repeat(65);
     for code in [
         "no-capacity",
+        "tree-v2",
         "No-capacity",
         "no capacity",
         "x\"y",
@@ -363,6 +364,7 @@ fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
     }
     let expected = BTreeMap::from([
         (("h".to_owned(), "no-capacity".to_owned()), 1),
+        (("h".to_owned(), "tree-v2".to_owned()), 1),
         (("h".to_owned(), "other".to_owned()), 5),
         (("h".to_owned(), longest), 1),
     ]);
