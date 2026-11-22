@@ -436,8 +436,8 @@ pub struct JobResult {
 /// What one job used while it ran, as its host read it from the job's control group once it
 /// ended. The first two numbers are measured; an agent that cannot read one of them sends no
 /// [`JobUsage`] at all, so a zero is a measured zero and never an unknown. The two that
-/// follow are optional: each is absent for an agent from before it and when the agent could
-/// not read that counter.
+/// follow and the CPU peak are optional: each is absent for an agent from before it and when
+/// the agent could not read that counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
     /// The most memory the job's group held at once, in bytes (`memory.peak`).
@@ -464,6 +464,27 @@ pub struct JobUsage {
         deserialize_with = "log_sink::lenient"
     )]
     pub cpu_pressure_some_usec: Option<u64>,
+    /// The most CPU the job's group used over any window of its run ([`CpuPeak`]). Absent for
+    /// an agent from before the field and when the agent could not measure it; a value that
+    /// does not decode reads as absent and leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub cpu_peak: Option<CpuPeak>,
+}
+
+/// The most CPU a job's group used over any window of `window_usec` of its run, in
+/// millicores: the largest `(usage_usec[i+k] - usage_usec[i]) * 1000 / elapsed` over the
+/// agent's one-second samples of `cpu.stat`, with a five-second window. A run shorter than
+/// the window reports its whole-run mean, with the window its wall time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuPeak {
+    /// The peak, in millicores (1000 is one CPU busy for the whole window).
+    pub millicores: u64,
+    /// The window it was measured over, in microseconds.
+    pub window_usec: u64,
 }
 
 /// The CPU throttle counters of a job's group: `nr_periods` and `nr_throttled` of its

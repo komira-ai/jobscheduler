@@ -282,6 +282,7 @@ pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
         cpu_usage_usec: counted.cpu_usage_micros?,
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
+        cpu_peak: None,
     })
 }
 

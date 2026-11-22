@@ -574,6 +574,7 @@ fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
         cpu_usage_usec: 1_234_567,
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
+        cpu_peak: None,
     };
     assert_eq!(runtime.usage(&id), Some(want));
     runtime.remove(&id).expect("removed");

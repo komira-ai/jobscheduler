@@ -746,6 +746,7 @@ pub(crate) fn output() -> Output {
             peak_memory_bytes: 64 << 20,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         logs: None,
     }

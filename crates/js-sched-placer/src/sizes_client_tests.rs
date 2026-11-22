@@ -24,6 +24,7 @@ fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Durat
                 peak_memory_bytes: GIB,
                 cpu_throttle: throttle,
                 cpu_pressure_some: pressure,
+                cpu_peak: None,
             }),
             ..Output::default()
         },

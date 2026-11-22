@@ -665,6 +665,7 @@ fn a_jobs_usage_reaches_its_result_and_an_unread_one_is_absent() {
         cpu_usage_usec: 4_500_000,
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
+        cpu_peak: None,
     };
     h.fake.report_usage("j1", counted);
     h.fake.exit("j1", 0);

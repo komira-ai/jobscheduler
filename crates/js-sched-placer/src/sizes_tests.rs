@@ -81,6 +81,7 @@ fn output(peak: u64, cpu: Duration) -> Output {
                 throttled_periods: 0,
             }),
             cpu_pressure_some: Some(Duration::ZERO),
+            cpu_peak: None,
         }),
         ..Output::default()
     }

@@ -47,8 +47,9 @@ use js_agent_wire::{
     Outcome, refusal,
 };
 use js_jobs::{
-    AllocationId, AllocationRecord, AllocationStep, Booked, CpuThrottle, DispatchKind, JobEnd,
-    JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage, StartFailure,
+    AllocationId, AllocationRecord, AllocationStep, Booked, CpuPeak, CpuThrottle, DispatchKind,
+    JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage,
+    StartFailure,
 };
 use js_types::{HostId, Resources};
 use tracing::warn;
@@ -414,7 +415,7 @@ fn advance(
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
 /// result's `usage`, what the job's control group counted, is kept as the output's resource
-/// usage, with the CPU periods, the throttled periods and the CPU pressure it reports; a
+/// usage, with the CPU periods, the throttled periods, the CPU pressure and the CPU peak it reports; a
 /// result with none records none, never a zero, and a counter it does not report is `None`.
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
@@ -439,6 +440,10 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             throttled_periods: throttle.throttled_periods,
         }),
         cpu_pressure_some: used.cpu_pressure_some_usec.map(Duration::from_micros),
+        cpu_peak: used.cpu_peak.map(|peak| CpuPeak {
+            millicores: peak.millicores,
+            window_usec: peak.window_usec,
+        }),
     });
     let output = Output {
         stdout: tail.stdout,

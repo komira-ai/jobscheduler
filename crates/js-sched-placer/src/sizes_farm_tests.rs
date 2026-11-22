@@ -86,6 +86,7 @@ fn ended(peak: u64, cores: u64, throttle: Option<CpuThrottle>, contention: Optio
                 peak_memory_bytes: peak,
                 cpu_throttle: throttle,
                 cpu_pressure_some: contention.map(|permille| Duration::from_millis(permille * 10)),
+                cpu_peak: None,
             }),
             ..Output::default()
         },

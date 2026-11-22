@@ -608,6 +608,7 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
             throttled_periods: 0,
         }),
         cpu_pressure_some_usec: Some(0),
+        cpu_peak: None,
     };
     let mut memory_of = Vec::new();
     for (class, usage) in [("measured", Some(counted)), ("bare", None)] {

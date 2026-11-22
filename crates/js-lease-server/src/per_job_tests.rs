@@ -6,12 +6,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_agent_wire::{
-    CpuThrottle as WireThrottle, HeartbeatReply, HeldJob, HeldState, JobResult, JobUsage,
-    NetworkCeiling, Outcome,
+    CpuPeak as WirePeak, CpuThrottle as WireThrottle, HeartbeatReply, HeldJob, HeldState,
+    JobResult, JobUsage, NetworkCeiling, Outcome,
 };
 use js_jobs::{
-    Booked, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResourceUsage,
-    ResultReason, StartFailure,
+    Booked, CpuPeak, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output,
+    ResourceUsage, ResultReason, StartFailure,
 };
 use js_state::StoreError;
 use js_types::{HostId, Resources};
@@ -562,12 +562,14 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         cpu_usage_usec: 4_500_001,
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
+        cpu_peak: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
         peak_memory_bytes: 3 << 30,
         cpu_throttle: None,
         cpu_pressure_some: None,
+        cpu_peak: None,
     };
     let mut measured = ended(Outcome::Succeeded, Some(0));
     measured.usage = Some(counted);
@@ -612,6 +614,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
             throttled_periods: 45,
         }),
         cpu_pressure_some_usec: Some(1_250_001),
+        cpu_peak: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &reported) else {
         panic!("a clean exit ends exited");
@@ -626,6 +629,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
                 throttled_periods: 45,
             }),
             cpu_pressure_some: Some(Duration::new(1, 250_001_000)),
+            cpu_peak: None,
         })
     );
     let mut older = ended(Outcome::Succeeded, Some(0));
@@ -634,6 +638,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
         cpu_usage_usec: 2_000_000,
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
+        cpu_peak: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &older) else {
         panic!("a clean exit ends exited");
@@ -645,6 +650,42 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
             peak_memory_bytes: 1 << 30,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         })
     );
+}
+
+/// A usage that reports a CPU peak stores its millicores and its window with the output, and
+/// a usage that does not stores `None`, not a zero. It catches a peak dropped on the way to the
+/// stored result, its two numbers swapped, and an absent peak made into a zero.
+#[test]
+fn the_cpu_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let usage = |cpu_peak| JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak,
+    };
+    let stored = |reported: JobUsage| {
+        let mut result = ended(Outcome::Succeeded, Some(0));
+        result.usage = Some(reported);
+        let Some(JobEnd::Exited { output, .. }) = end_of(&job, &result) else {
+            panic!("a clean exit ends exited");
+        };
+        output.usage.expect("a usage").cpu_peak
+    };
+    assert_eq!(
+        stored(usage(Some(WirePeak {
+            millicores: 3_500,
+            window_usec: 5_000_000,
+        }))),
+        Some(CpuPeak {
+            millicores: 3_500,
+            window_usec: 5_000_000,
+        })
+    );
+    assert_eq!(stored(usage(None)), None);
 }
