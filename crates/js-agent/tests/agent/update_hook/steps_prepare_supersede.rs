@@ -252,9 +252,11 @@ fn a_committed_first_install_whose_unit_cannot_be_read_is_kept() {
     );
 }
 
-/// An update to another target that has stopped the previous agent (its commit) is kept,
-/// whatever the unit shows: its `rollback` is what restores the previous agent, and the detail
-/// says to run it.
+/// An update to another target that has stopped the previous agent (its commit) and returns the
+/// host to another previous release than this order's is kept, whatever the unit shows, and
+/// nothing is read: only its own `rollback`, with the params it was written under, restores
+/// the agent it stopped, and the detail says so. (One that returns the host to this order's
+/// previous release is finished or kept as its rollback stands, see steps_stale_record.rs.)
 #[test]
 fn an_update_of_another_target_past_its_stop_is_kept_until_it_is_rolled_back() {
     let rig = Rig::new("hook-supersede-kept-stopped");
@@ -270,7 +272,8 @@ fn an_update_of_another_target_past_its_stop_is_kept_until_it_is_rolled_back() {
         &done,
         before.as_ref(),
         &kept(&format!(
-            "the update to {OLD} has stopped the previous agent: roll it back first"
+            "the update to {OLD} returns the host to 0.1.200 at {}, not to the previous release the params table names: run its rollback with the params it was written under",
+            rig.tmp.path().join("releases/0.1.200").display()
         )),
     );
     assert_eq!(spy.log(), Vec::<String>::new());
@@ -418,26 +421,53 @@ fn a_prepare_killed_at_or_after_the_set_aside_is_finished_by_its_rerun() {
     }
 }
 
-/// Only `prepare` supersedes: `cutover`, `verify`, `rollback` and `cleanup` of the new target
-/// on a record of another target that never took the host still refuse it, as before.
+/// Only `prepare` supersedes: `cutover`, `verify` and `cleanup` of the new target on a record
+/// of another target that never took the host still refuse it, as before. `rollback` rolls back
+/// the update on record only when it returns the host to this order's previous release; this one
+/// returns it to another, so it is refused too, and the detail says why.
 #[test]
 fn the_other_steps_still_refuse_a_record_of_another_target() {
     let rig = Rig::new("hook-supersede-other-steps");
     rig.put_record(&left_record(&rig));
     let before = rig.record_bytes();
     let spy = Spy::new(&rig);
-    for done in [
-        spy.cutover_as_is(&rig),
-        spy.verify(&rig),
-        spy.rollback_as_is(&rig),
-        spy.cleanup(&rig),
-    ] {
+    let invalid = "the record is not valid: target of the record is not what the params table says";
+    for done in [spy.cutover_as_is(&rig), spy.verify(&rig), spy.cleanup(&rig)] {
         assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{done:?}");
-        assert_eq!(
-            done.report.detail.as_deref(),
-            Some("the record is not valid: target of the record is not what the params table says")
-        );
+        assert_eq!(done.report.detail.as_deref(), Some(invalid));
     }
+    let done = spy.rollback_as_is(&rig);
+    assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{done:?}");
+    assert_eq!(
+        done.report.detail,
+        Some(kept(&format!(
+            "the update to {OLD} returns the host to 0.1.200, not to the previous release the params table names: run its rollback with the params it was written under"
+        )))
+    );
     assert_eq!(rig.record_bytes(), before);
     assert_eq!(state_files(&rig), ["record.json"]);
+}
+
+/// `rollback` of the new target on a record of another target that never took the host and
+/// returns it to this order's previous release rolls that update back: nothing to undo but the
+/// record, which is deleted, and the last line says whose update it was.
+#[test]
+fn rollback_finishes_a_record_of_another_target_that_never_took_the_host() {
+    let rig = Rig::new("hook-supersede-rollback-never-took");
+    let mut left = left_record(&rig);
+    left.update.previous = rig.params.previous_version.clone();
+    left.update.previous_target = rig.params.previous_release.clone();
+    rig.put_record(&left);
+    let spy = Spy::new(&rig);
+    let done = spy.rollback_as_is(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        done.report.detail,
+        Some(format!(
+            "the record is of the update to {OLD}, not 1.4.0: rolled back with its own target and releases"
+        ))
+    );
+    assert!(done.report.reversible);
+    assert_eq!(rig.record_bytes(), None);
+    assert_eq!(spy.act_names(), Vec::<String>::new());
 }
