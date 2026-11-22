@@ -789,7 +789,7 @@ impl SchedPlacer {
         }
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
         self.engine().take_refused().announce(metrics);
-        for (job, host, booked, mut placement) in decided {
+        for (job, host, booked, mut placement) in self.sized_from_of(queued, decided, now) {
             placement.queue = noted.placed(&job, &host);
             let capacity = capacity_of(hosts, &host);
             match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
@@ -858,9 +858,8 @@ impl SchedPlacer {
                     settings.map(|whole| Duration::from_millis(whole.prepare_timeout_ms));
                 let placement = Placement {
                     prepare_timeout,
-                    wall_limit_secs: None,
                     queue: noted.placed(job, host),
-                    start: None,
+                    ..Placement::default()
                 };
                 let capacity = capacity_of(hosts, host);
                 let placed = jobs.place_claimed(job, host, Booked::WholeHost, &placement, capacity);

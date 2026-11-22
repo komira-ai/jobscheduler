@@ -17,7 +17,7 @@ use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::record::{Exclusion, FileDigest, Isolation, JobFiles};
+use crate::record::{Exclusion, FileDigest, Isolation, JobFiles, SizedFrom};
 use crate::result::{CpuPeak, CpuThrottle};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
@@ -506,6 +506,12 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
         (
             proptest::option::of(store_time()),
             proptest::option::of(any::<u64>()),
+            proptest::option::of(prop::sample::select(vec![
+                SizedFrom::Class,
+                SizedFrom::Fallback,
+                SizedFrom::Cold,
+                SizedFrom::OverCap,
+            ])),
         ),
     )
         .prop_map(
@@ -513,7 +519,7 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                 (job, bits, host, booked),
                 ports,
                 (step, created_at, freed_at, end_reason),
-                (prepare_deadline, wall_limit_secs),
+                (prepare_deadline, wall_limit_secs, sized_from),
             )| {
                 AllocationRecord {
                     job: JobId::parse(&job).expect("an id"),
@@ -527,6 +533,7 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                     end_reason,
                     prepare_deadline,
                     wall_limit_secs,
+                    sized_from,
                     carried: Carried::default(),
                 }
             },

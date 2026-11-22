@@ -47,6 +47,7 @@ fn start(job_id: &str, bucket: &str, prefix: &str) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: None,
+        sizing: None,
     }
 }
 

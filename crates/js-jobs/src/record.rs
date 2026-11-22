@@ -450,6 +450,33 @@ pub enum Booked {
     WholeHost,
 }
 
+/// Which history sized a job that books nothing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizedFrom {
+    /// Its own class's estimate.
+    Class,
+    /// Its fallback class's estimate, in place of the cold size, raised by its own class's
+    /// runs and floor.
+    Fallback,
+    /// The cold size: neither its class nor a fallback class has an estimate.
+    Cold,
+    /// The whole of the most bookable memory a host has: its class's runs reach it.
+    OverCap,
+}
+
+impl SizedFrom {
+    /// The name a placement's log gives it: `class`, `fallback`, `cold` or `over-cap`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Fallback => "fallback",
+            Self::Cold => "cold",
+            Self::OverCap => "over-cap",
+        }
+    }
+}
+
 /// Where an allocation is (design section 6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationStep {
@@ -514,6 +541,10 @@ pub struct AllocationRecord {
     /// ([`JobSpec::wall_limit_secs`]), as [`crate::Placement::wall_limit_secs`] gives it. `None`:
     /// the job's own.
     pub wall_limit_secs: Option<u64>,
+    /// Which history sized the job's booking, as [`crate::Placement::sized_from`] gives it, when
+    /// the history sized it. `None`: the job named both its CPU and its memory, or the row was
+    /// written before the field.
+    pub sized_from: Option<SizedFrom>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }

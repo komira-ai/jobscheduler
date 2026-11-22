@@ -276,10 +276,11 @@ async fn the_containers_cgroup_kills_as_a_group_on_out_of_memory() {
     assert_eq!(lines, ["0::/", "1"], "{}", run.said);
 }
 
-/// Catches a job that reads `max` in its own `cpu.max` and `memory.max` while its lease holds
-/// it to the booking (tools that size themselves from those files then size themselves to
-/// the node): with the limits naming the lease's booking, 1 CPU and 512 MiB, the job reads
-/// `100000 100000` and `536870912` there, and its `pids.max` is the limit given.
+/// Catches a job that reads `max` in its own `memory.max` while its lease holds it to the
+/// memory booking (a tool that sizes itself from that file then sizes itself to the node),
+/// and one that reads a CPU ceiling: with the limits naming the lease's booking of 512 MiB,
+/// the job reads `536870912` there, `max 100000` in its `cpu.max` (the CPU booking is a
+/// share, so there is none), and its `pids.max` is the limit given.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn the_job_reads_its_booking_in_its_own_cgroup() {
@@ -295,7 +296,6 @@ async fn the_job_reads_its_booking_in_its_own_cgroup() {
         Shape {
             limits: ContainerLimits {
                 pids: 32_768,
-                cpu_millis: Some(1000),
                 memory_bytes: Some(shape.memory),
                 ..ContainerLimits::DEFAULT
             },
@@ -305,12 +305,7 @@ async fn the_job_reads_its_booking_in_its_own_cgroup() {
     let running = cell.start(&lease).await;
     let run = cell.finish(&lease, running).await;
     let lines: Vec<&str> = run.out().lines().collect();
-    assert_eq!(
-        lines,
-        ["100000 100000", "536870912", "32768"],
-        "{}",
-        run.said
-    );
+    assert_eq!(lines, ["max 100000", "536870912", "32768"], "{}", run.said);
 }
 
 /// Catches an exec-root overlay mounted without the pinned options, and one that can run

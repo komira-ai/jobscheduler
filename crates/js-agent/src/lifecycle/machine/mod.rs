@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
-    RunResult, Taint, limits, refusal,
+    RunResult, StartSizing, Taint, limits, refusal,
 };
 use js_types::JobNetwork;
 
@@ -43,7 +43,7 @@ pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::hold;
 use super::quota::QuotaHealth;
-use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
+use super::runtime::{ResolvedMount, Runtime, RuntimeError};
 use super::taint::TaintState;
 use super::{
     Capacity, CheckHook, Clock, Config, Event, Finding, Skip, StartTimeline, Wake, code, detail,
@@ -155,6 +155,10 @@ pub struct Lifecycle {
     wake: Wake,
     /// The timelines of the starts admitted and not yet started or ended (`timeline`).
     starting: BTreeMap<String, StartTimeline>,
+    /// What the booking of each of those starts came from, when its start said
+    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)): kept with its
+    /// timeline and given to its job when it starts or ends (`timeline`).
+    sizing: BTreeMap<String, StartSizing>,
     /// The removals of finished runs' directories, on the lifecycle's pool when it has one
     /// ([`Lifecycle::with_cleanup_threads`]).
     run_dirs: run_dirs::RunDirs,
@@ -487,7 +491,19 @@ impl Lifecycle {
 
     /// Whether a start may run now, and its mounts resolved when it may. `env` is the
     /// environment of a job start, empty for a run start.
-    fn admit(&self, spec: &JobSpec, given: &Given) -> Result<Vec<ResolvedMount>, Refusal> {
+    ///
+    /// A start must fit the machine (`limits-exceed-shape`) and what is free of it
+    /// (`no-capacity`). What is free is the offer less the bookings of the jobs held, in disk,
+    /// GPUs and slots for every start, and in CPU and memory for a run start only. A job start
+    /// (keyed by job id) was placed by the job service, which packs a host by measured load
+    /// within its CPU slack and books each job its peak: its CPU and memory are the job
+    /// service's to judge, one rule for both, and the agent sums neither. Its CPU is not
+    /// limited, and its memory is held to its booking by its lease's `memory.max`.
+    fn admit(
+        &self,
+        (spec, keyed): (&JobSpec, Keyed),
+        given: &Given,
+    ) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -563,9 +579,11 @@ impl Lifecycle {
             ));
         }
         let used = self.booked();
+        // The job service's placement judged a job start's CPU and memory.
+        let placed = keyed == Keyed::Job;
         let room = [
-            want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
-            want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            placed || want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
+            placed || want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
             disk <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
             self.slots.has_room(),
@@ -907,7 +925,7 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec, given)
+            .admit((spec, keyed), given)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
@@ -941,59 +959,10 @@ impl Lifecycle {
         // prepared, waits as `starting`, holding its booking, and costs the worker nothing
         // until it is ready (see `Runtime::prepare` and `prepare`).
         self.begin_timeline(run_id, (received, taken), given.placed_at_ms);
+        if let Some(sizing) = &given.sizing {
+            self.sizing.insert(run_id.clone(), sizing.clone());
+        }
         let made = (mounts, slot, booked);
         self.prepare_or_begin((spec, keyed), given, made, received, events);
-    }
-
-    /// Records how a start went: a running job (its wall-time limit begins now, after any
-    /// wait for the image, and ends no later than `cap`, the end of its lease), or a
-    /// `failed_to_start` result whose cleanup is owed. It takes the place of the job at
-    /// `replace` (a start that waited), or is added.
-    fn settle(
-        &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
-        started: Result<RunHandle, Failure>,
-        (slot, booked): (u32, u64),
-        (replace, cap): (Option<usize>, u64),
-        events: &mut Vec<Event>,
-    ) {
-        let run_id = &spec.run_id;
-        let mut job = match started {
-            Ok(id) => {
-                self.mark(run_id, "created");
-                let timeline = self.take_timeline(run_id, &id);
-                let now = self.clock.now_ms();
-                let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
-                let cgroup = self.runtime.cgroup(&id);
-                let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
-                job.started_at(now);
-                job.cgroup = cgroup;
-                events.push(Event::Started {
-                    run_id: run_id.clone(),
-                    timeline,
-                });
-                job
-            }
-            Err((why, finding, message, blind)) => {
-                self.drop_timeline(run_id);
-                let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
-                // A host the agent cannot see is not known to be checkable: tainted as
-                // unchecked, before the finding that follows from it.
-                if blind {
-                    job.taint(&mut self.taint, blind_taint(run_id), events);
-                }
-                job.result = Some(job.report(Outcome::FailedToStart, None, Some(why)));
-                job.note(finding, message, events);
-                events.push(Event::ResultReady {
-                    run_id: run_id.clone(),
-                });
-                job
-            }
-        };
-        job.keyed = keyed;
-        match replace {
-            Some(index) => self.jobs[index] = job,
-            None => self.jobs.push(job),
-        }
     }
 }

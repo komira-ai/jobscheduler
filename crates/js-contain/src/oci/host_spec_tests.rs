@@ -146,14 +146,13 @@ fn a_host_container_is_in_its_leases_cgroup_with_the_contained_limits() {
     assert_eq!(host["process"]["oomScoreAdj"], 0);
 }
 
-/// Catches a host job whose cgroup reads `max` for `cpu.max` and `memory.max` while a
-/// contained job's reads its booking: a host container's own cgroup gets the same files as
-/// a contained one's for the same limits (a host job has no cgroup namespace, but a tool
-/// that follows `/proc/self/cgroup` reads the `ctr` cgroup's files).
+/// Catches a host job whose cgroup reads `max` for `memory.max` while a contained job's
+/// reads its booking: a host container's own cgroup gets the same files as a contained
+/// one's for the same limits (a host job has no cgroup namespace, but a tool that follows
+/// `/proc/self/cgroup` reads the `ctr` cgroup's files). Neither gets a `cpu.max`.
 #[test]
 fn a_host_container_repeats_the_booking_like_a_contained_one() {
     let mut contained = contained();
-    contained.limits.cpu_millis = Some(2500);
     contained.limits.memory_bytes = Some(3 << 30);
     let host = ContainerSpec {
         isolation: Isolation::Host,
@@ -167,7 +166,6 @@ fn a_host_container_repeats_the_booking_like_a_contained_one() {
         unified(&host),
         json!({
             "memory.oom.group": "1",
-            "cpu.max": "250000 100000",
             "memory.max": (3u64 << 30).to_string(),
         })
     );

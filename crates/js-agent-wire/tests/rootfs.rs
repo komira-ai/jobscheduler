@@ -65,6 +65,7 @@ fn start() -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 

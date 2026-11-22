@@ -242,7 +242,7 @@ pub use record::{
     AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, DispatchKind,
     DispatchMessage, EndReason, Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint,
     Isolation, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, ScaleMark,
-    StartFailure,
+    SizedFrom, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, CpuPeak, CpuThrottle, JobEnd, JobResult, JobTiming, LogLengths, Output,
