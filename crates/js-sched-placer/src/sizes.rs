@@ -34,17 +34,18 @@
 //!   the cold size ([`ColdSize`]): the server's `cold_cpu_millis` and `cold_memory_bytes`, which
 //!   default to [`DEFAULT_COLD_CPU_MILLIS`] (22 cores) and [`DEFAULT_COLD_MEMORY_BYTES`] (4 GiB);
 //!   its CPU never more than a quarter of the most cores a known host has (the most any class
-//!   books, so that the first run of an unknown class has room to show its peak), its memory
+//!   books, so that the first run of an unknown class has room for the cores it uses), its memory
 //!   never more than the most a known host has ([`Bounds`] of [`bounds_of`]) and at least the
 //!   class's memory floor. The cold memory is also the estimator's default booking.
 //! - **Too large.** A class whose booking reaches the most bookable memory a host has books
 //!   all of that memory: it waits for a host with nothing else on it.
 //! - **CPU.** The learned CPU of the class, else of its fallback class, else of the client's
-//!   whole history (the first with a CPU sample): the 90th percentile of its runs' peaks (the
-//!   most cores a run used over five seconds, as its host measured it), rounded up to a quarter
-//!   core, and at most a quarter of the most cores a host has; the cold CPU when none has a
-//!   sample. A booking is a share of its host's CPU, not a ceiling, and placement packs these
-//!   peaks.
+//!   whole history (the first with a CPU sample): the median of its runs' mean CPU (CPU time
+//!   over wall time; the nearest-rank 50th percentile), rounded up to a quarter core, and at
+//!   most a quarter of the most cores a host has; the cold CPU when none has a sample. A booking is a share of its
+//!   host's CPU, not a ceiling. Placement packs these bookings within the CPU slack and admits
+//!   by the host's measured load, so a job's bursts above its mean are the load's to judge,
+//!   not its booking's.
 //!
 //! [`JobSizes::sized_from`] says which of these sized a job, and each placement of a job the
 //! history sized is logged with it.
@@ -94,10 +95,10 @@
 //!   its booking used to set), when its mean CPU came within 5% of its booked CPU. A held run's
 //!   CPU is a lower bound and may only raise its class's CPU: the history a server rebuilds
 //!   at its start from runs taken under a ceiling therefore never holds a class down at it;
-//! - its CPU sample is its peak, the most cores its group used over five seconds (`cpu_peak`,
-//!   as its host reported it). A run with no peak reported (an agent from before it, and every
-//!   run recorded before it) has only its mean, which is a lower bound of its peak: it counts
-//!   as held.
+//! - its CPU sample is its mean, its CPU time over its wall time. The most cores its group used
+//!   over five seconds (`cpu_peak`, as its host reported it) is kept in its usage and not
+//!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
+//!   left most of it idle.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -122,7 +123,7 @@ pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
 /// The CPU a class books unless the server sets another when neither it, its fallback class nor
 /// its client has a CPU sample: 22 cores, a quarter of the farm's 88-core hosts, and held at a
 /// quarter of the largest host the engine knows: the most any class books, so that the first
-/// run of an unknown class has the room to show its peak (`docs/design/sizing.md`, 7.9).
+/// run of an unknown class has the room for the cores it uses (`docs/design/sizing.md`, 7.9).
 pub const DEFAULT_COLD_CPU_MILLIS: u64 = 22_000;
 
 /// The memory a class books unless the server sets another when neither it, its fallback class
@@ -144,9 +145,9 @@ const AT_LIMIT_PERCENT: u64 = 95;
 const HELD_PERIODS: u64 = 20;
 
 /// A class books at most this share of the most cores a host has (one quarter, 22 of 88
-/// cores): no class's history books a host's CPU alone, four jobs bursting at their peaks at
-/// once fit a host, and a job that waits for that much room (the walk holds a host for the
-/// first job that waits on it) leaves at most a quarter of the host unbooked meanwhile.
+/// cores): no class's history books a host's CPU alone, and a job that waits for that much
+/// room (the walk holds a host for the first job that waits on it) leaves at most a quarter of
+/// the host unbooked meanwhile.
 const HOST_CPU_SHARE: u64 = 4;
 /// What a class with no estimate books ([`JobSizes::sized`]): the server's `cold_cpu_millis`
 /// and `cold_memory_bytes`, by default ([`ColdSize::default`]) 22 cores and 4 GiB. A CPU above a
@@ -461,14 +462,13 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         swap_peak_bytes: 0,
         cpu_usage_us: cpu,
         node_cpu_pressure_permille: result.usage.map(|usage| contention(usage, wall)),
-        // A run with no peak measured has only its mean, a lower bound of its peak.
         cpu_held: result
             .usage
-            .is_some_and(|usage| usage.cpu_peak.is_none() | held(usage, (cpu, wall), cpu_millis)),
-        cpu_peak_millis: result
-            .usage
-            .and_then(|usage| usage.cpu_peak)
-            .map(|peak| u32::try_from(peak.millicores).unwrap_or(u32::MAX)),
+            .is_some_and(|usage| held(usage, (cpu, wall), cpu_millis)),
+        // The sample is the run's mean CPU, not its five-second peak (kept in its usage):
+        // placement admits by measured load, and a booking of the peak would hold a host to
+        // a few jobs that each use a fraction of it.
+        cpu_peak_millis: None,
     };
     Some((run, day_of_millis(millis(ended.as_duration()))))
 }

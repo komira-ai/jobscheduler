@@ -236,31 +236,52 @@ updates replace it in place) and the program's designated requirement, which nam
 `com.komira.js-agent`, Apple's Developer ID chain and the team and no hash, so every release of
 the program meets it. That is why the release signs the programs (see Signing), and `cargo test -p
 xtask` holds the profile to the table the signing uses. The root helper `js-mac-session` and
-`js-mac-provision` need no grant. A grant given to the helper or the agent, by hand or by a
-profile, never reaches a job. macOS lets a
-process use the grants of its *responsible* process, which is whoever started it, unless
-the starter disclaims that responsibility as it starts it. Every process the helper
-starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
-a GUI session), and every program the agent starts itself (its probes, the `sandbox-exec`
-self-test, `pfctl`), is started with that responsibility disclaimed
-(`crates/js-mac-session/src/disclaim.rs`; the design is in
-`docs/design/spawn-disclaim.md`). A job's process therefore answers for itself, and the
-processes it starts answer for it: none of them holds the agent's or the helper's grants.
-What a job may do is then what its own program was granted. A grant that someone gave a
-job's program itself (an app the job runs, say) is that program's, and the disclaim does
-not take it away.
+`js-mac-provision` need no grant. A native job and its supervisor are started without the
+disclaim: they keep the responsibility, so they answer for `js-agent` and hold what `js-agent`
+holds, Full Disk Access included. macOS lets a process use the grants of its *responsible*
+process, which is whoever started it, unless the starter disclaims that responsibility as it
+starts it. Every process between `js-agent` and the job is started so, and a job's own children
+(compilers, shells, `buck2`) follow their parent and answer for the agent too. The reason is
+the build trees: tierstore serves them over a network file system (NFS) loopback mount, and a
+job started disclaimed is judged by its own code signature and is refused every read of that
+mount, Apple's own tools (`ls`, `cat`, `python3`, compilers) included. Measured on a Mac
+(macOS 27): disclaimed, the reads fail with `Operation not permitted` and the system log shows
+the network-volumes privacy service denied; started as ordinary children of the signed,
+profile-granted `js-agent`, the same reads as the same pool user succeed.
 
-The hosted CI runner has no grant to give, so CI checks the disclaim and not a refused
-read: on the macOS runner the agent's tests read back the responsible process of the
-processes the helper's `run` and the agent start, and see that each is the process itself.
-To check a host by hand that a grant does not reach a job: give `js-mac-session` Full
-Disk Access in Privacy & Security, run a native job whose program is `/bin/ls` with the
-argument `/Library/Application Support/com.apple.TCC`, and see it fail with `Operation not
-permitted`. A refusal is also what a grant that did not take effect gives, so check the
-grant the same way with a release from before the disclaim (one whose
-`crates/js-mac-session/src/disclaim.rs` does not exist): there the same job answers for
-the helper and lists the directory. Remove the grant afterwards. `sudo launchctl procinfo <pid>` of a running job's
-process shows its `responsible pid` equal to its own pid.
+What keeps a job from using the rest of the grant is the slot user it runs as (Unix
+permissions) and the Seatbelt profile applied in the job's child before its program runs.
+Measured on a Mac, the prototype's profile does not keep such a job out of three places only
+the privacy controls protect: the system privacy database's directory, the database, and
+`/Library/Preferences/com.apple.TimeMachine.plist`. How that is closed is not decided
+(`docs/design/spawn-disclaim.md`, "The fence, measured").
+
+Every other program `js-agent` starts stays disclaimed, which is the default of
+`js_mac_session::disclaim::Program` (`crates/js-mac-session/src/disclaim.rs`; the design is in
+`docs/design/spawn-disclaim.md`): its probes (`sw_vers`, `sysctl`), `pfctl`, `launchctl`,
+`ioreg`, `getconf` as the lease user (so a slot-user process the agent starts for itself never
+carries the grant), the `sandbox-exec` self-test, and the agent re-executing itself in place.
+Not decided: the VM launcher (`js-vmm lease`), which stays disclaimed for now, and the
+graphical-session start (`launchctl asuser`), which launchd starts in the user's session and
+which is not measured and stays disclaimed. After an unattended restart a Mac has no logged-in
+user, so a start that needs a user's graphical session cannot happen until someone logs in.
+
+Today the root helper starts every native job, disclaimed, and the helper holds no grant, so a
+job it starts holds none. The supervisor, whose starts keep the responsibility, is not in this
+tree yet. A call that keeps the responsibility (`Program::keep_responsibility`) is allowed only
+in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists, which no
+production file is yet.
+
+The hosted CI runner has no grant to give, so CI checks the starts and not a refused read: on
+the macOS runner the agent's tests read back the responsible process of the processes the
+helper's `run` and the agent start, and see that each disclaimed one is the process itself.
+To see by hand whose grants a process uses, run a native job and run `sudo launchctl procinfo
+<pid>` on its process. Today the helper starts the job disclaimed, so the `responsible pid`
+equals the job's own pid. Once the supervisor starts jobs, the `responsible pid` is the agent's
+pid. To see the effect, run a native job whose program is `/bin/ls` with the argument
+`/Library/Application Support/com.apple.TCC`: it fails with `Operation not permitted` today,
+and once the supervisor starts jobs it lists the directory unless the Seatbelt profile refuses
+the read, which the prototype's profile, measured, does not.
 
 ## Network
 

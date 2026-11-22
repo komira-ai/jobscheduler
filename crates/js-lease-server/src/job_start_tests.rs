@@ -664,9 +664,9 @@ fn bundle_digest() -> String {
     "b".repeat(64)
 }
 
-/// A job as kbf submits a macOS task: a bundle image named `image_name`, no command, the task
-/// flags as arguments, no network, `os=macos arch=arm64 exec=sandbox-exec`, and a read-only
-/// and a read-write host-path mount, both `no_exec`.
+/// A job as the build service submits a macOS task today: a bundle image named `image_name`, no
+/// command, the task flags as arguments, no network, `os=macos arch=arm64 exec=sandbox-exec`,
+/// and a read-only and a read-write host-path mount, both `no_exec`.
 fn native_records(image_name: &str) -> (JobRecord, AllocationRecord) {
     let (mut job, allocation) = records();
     job.spec.image =
@@ -801,29 +801,41 @@ fn a_native_start_leaves_out_a_system_or_architecture_it_cannot_parse() {
     assert_eq!((start.os, start.arch), (None, None));
 }
 
-/// A job that is not native is built as before: with `exec` unspecified or `container` it has
-/// no run, no system and no architecture, and its command then its arguments are the start's
-/// command, though its constraints name a system. A `sandbox-exec` job with no image (layers
-/// alone) is not a bundle and is built the same way. It catches the native form applied to a
-/// container job.
+/// A job that is not native is built as a container job, with no run and its command then its
+/// arguments as the start's command: a macOS job that names `container`, a Linux job and a job
+/// of no system that name no mode, and a job with no image (layers alone) that names
+/// `sandbox-exec` or names macOS and no mode, which is not a bundle. It catches the native form
+/// applied to a container job, or to a job with nothing to run as a bundle.
 #[test]
 fn a_job_that_is_not_native_has_no_run_and_its_command_then_args() {
-    for exec in [None, Some(ExecMode::Container)] {
+    let cases = [
+        (Some(ExecMode::Container), Some("macos")),
+        (None, Some("linux")),
+        (None, None),
+    ];
+    for (exec, os) in cases {
         let (mut job, allocation) = native_records("reg/kbf-task");
         job.spec.command = vec!["tool".to_owned()];
         job.spec.constraints.exec = exec;
+        job.spec.constraints.os = os.map(str::to_owned);
+        let start = native_start(&job, &allocation);
+        assert_eq!(start.run, None, "{exec:?} {os:?}");
+        assert_eq!(
+            start.command,
+            ["tool", "--task", "build"],
+            "{exec:?} {os:?}"
+        );
+    }
+    for exec in [Some(ExecMode::SandboxExec), None] {
+        let (mut job, allocation) = native_records("reg/kbf-task");
+        job.spec.image = None;
+        job.spec.layers = vec![host_layer("/opt/rootfs")];
+        job.spec.command = vec!["/bin/run".to_owned()];
+        job.spec.constraints.exec = exec;
         let start = native_start(&job, &allocation);
         assert_eq!(start.run, None, "{exec:?}");
-        assert_eq!(start.command, ["tool", "--task", "build"], "{exec:?}");
-        assert_eq!((start.os, start.arch), (None, None), "{exec:?}");
+        assert_eq!(start.command, ["/bin/run", "--task", "build"], "{exec:?}");
     }
-    let (mut job, allocation) = native_records("reg/kbf-task");
-    job.spec.image = None;
-    job.spec.layers = vec![host_layer("/opt/rootfs")];
-    job.spec.command = vec!["/bin/run".to_owned()];
-    let start = native_start(&job, &allocation);
-    assert_eq!(start.run, None);
-    assert_eq!(start.command, ["/bin/run", "--task", "build"]);
 }
 
 /// A native job whose program the wire's entrypoint grammar refuses (a space in the name) is
@@ -942,3 +954,6 @@ fn the_sizing_names_the_jobs_size_class() {
     );
     assert!(unlabelled.class.unwrap().starts_with("run-"));
 }
+
+#[path = "job_start_os_tests.rs"]
+mod os;
