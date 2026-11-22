@@ -361,7 +361,11 @@ fn the_put_flags_are_checked() {
     for (given, why) in refused {
         assert_eq!(put_of(&given, &users), Err(why));
     }
-    let named = put_of(&flags(Some(put.clone()), Some("_tierstore")), &users);
+    let named = put_of(
+        &flags(Some(put.clone()), Some("_tierstore")),
+        &roots,
+        &users,
+    );
     let want = |node| {
         Ok(Some(PutConfig {
             root: canonical.clone(),
