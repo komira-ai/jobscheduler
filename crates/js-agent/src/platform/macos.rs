@@ -725,6 +725,10 @@ mod tests {
             flag(js_agent_wire::DISPATCH_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(js_agent_wire::LOAD_ADMISSION_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(flag(js_caps::LAYERED_ROOTFS).as_deref(), Some(FLAG_SET));
         assert_eq!(native.validate(), Ok(()));
     }

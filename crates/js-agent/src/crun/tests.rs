@@ -154,8 +154,9 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 /// binds, read-write, `noexec`: no tmpfs in memory), then its mounts with the access they
 /// asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
-/// named none; the run's booked CPU and memory as its container cgroup's own limits (without
-/// them the job reads `max` in `/sys/fs/cgroup/cpu.max`); no program or environment (the
+/// named none; the run's booked memory as its container cgroup's own limit (without it the job
+/// reads `max` in `/sys/fs/cgroup/memory.max`) and no CPU limit on it (the CPU booking is the
+/// lease's `cpu.weight`, a share: the job reads `max` in its `cpu.max`); no program or environment (the
 /// image config gives them); and the job ports of its host ports, in order, as the ports its
 /// init waits to be listening (none without).
 #[test]
@@ -186,7 +187,6 @@ fn a_run_becomes_the_container_it_asked_for() {
         spec.limits,
         ContainerLimits {
             pids: 77,
-            cpu_millis: Some(1500),
             memory_bytes: Some(1 << 30),
             ..ContainerLimits::DEFAULT
         }
@@ -224,10 +224,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         "/c",
     );
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
-    assert_eq!(
-        (plain.limits.cpu_millis, plain.limits.memory_bytes),
-        (Some(1500), Some(1 << 30))
-    );
+    assert_eq!(plain.limits.memory_bytes, Some(1 << 30));
     // `/scratch`, `/tmp`, `/var/tmp` and the run's two mounts.
     assert_eq!(plain.mounts.len(), 5);
     assert!(
@@ -838,4 +835,51 @@ fn a_leases_usage_is_both_counters_or_none() {
     assert_eq!(usage_of(&fixture.lease()), None);
     fs::remove_dir_all(&dir).expect("remove the group");
     assert_eq!(usage_of(&fixture.lease()), None);
+}
+
+/// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both, and
+/// the `some` total of its `cpu.pressure` when it holds one:
+/// `nr_periods` and `nr_throttled` as they are (a group with no `cpu.max` counts 0 of each,
+/// a capped one counts its periods), and none when either is missing. Catches the counts
+/// left out, read from each other's line, or a missing count sent as a zero (which would
+/// read as a run its host never throttled).
+#[test]
+fn a_leases_usage_carries_its_throttle_counts_when_both_are_there() {
+    let fixture = Fixture::new("usage-throttle");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    fs::write(dir.join("memory.peak"), "1024\n").expect("peak");
+    let throttle = |stat: &str| {
+        fs::write(dir.join("cpu.stat"), stat).expect("stat");
+        usage_of(&fixture.lease()).expect("a usage").cpu_throttle
+    };
+    let counted = |periods, throttled_periods| {
+        Some(js_agent_wire::CpuThrottle {
+            periods,
+            throttled_periods,
+        })
+    };
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n"),
+        counted(0, 0)
+    );
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 5597\nnr_throttled 5585\nthrottled_usec 5730985614\n"),
+        counted(5597, 5585)
+    );
+    assert_eq!(throttle("usage_usec 9\nnr_periods 5597\n"), None);
+    assert_eq!(throttle("usage_usec 9\nnr_throttled 5585\n"), None);
+    let pressure = || {
+        usage_of(&fixture.lease())
+            .expect("a usage")
+            .cpu_pressure_some_usec
+    };
+    assert_eq!(pressure(), None, "no cpu.pressure: unknown, not 0");
+    let psi = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1250000\n\
+               full avg10=0.00 avg60=0.00 avg300=0.00 total=7\n";
+    fs::write(dir.join("cpu.pressure"), psi).expect("pressure");
+    assert_eq!(
+        pressure(),
+        Some(1_250_000),
+        "the some total, not the full one"
+    );
 }

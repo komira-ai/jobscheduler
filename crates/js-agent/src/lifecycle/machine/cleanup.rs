@@ -142,6 +142,8 @@ impl Lifecycle {
                     job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));
                     events.push(Event::ResultReady {
                         run_id: job.run_id.clone(),
+                        booked: job.booked(),
+                        usage: job.usage,
                     });
                 }
                 job.stage = Stage::Removing(id);

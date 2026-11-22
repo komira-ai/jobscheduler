@@ -438,6 +438,7 @@ fn host_start() -> crate::support::Reply {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: None,
+        sizing: None,
     };
     let beat = HeartbeatReply {
         commands: vec![Command::JobStart(Box::new(start))],

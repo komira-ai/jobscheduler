@@ -62,6 +62,11 @@
 //!   ([`js_agent_wire::DISPATCH_CAPABILITY`], [`crate::dispatch`]). A server that serves the poll
 //!   leaves them out of the heartbeat's reply only for a host that reports it. An operator
 //!   cannot set it.
+//! - `load-admission` is `true` wherever `per-job` is: the agent admits a job start by the job
+//!   service's placement and never refuses one for the summed CPU or memory bookings of the
+//!   jobs it holds; it still refuses one larger than the machine and still sums disk, GPUs and
+//!   slots ([`js_agent_wire::LOAD_ADMISSION_CAPABILITY`]). A server packs a host that reports it
+//!   by measured load, and one that does not by summed bookings. An operator cannot set it.
 //! - `host-jobs` is `true` for an agent started with `--allow-host-jobs`, which only
 //!   the crun runtime takes: its runtime launches a job with `isolation = host`
 //!   ([`js_agent_wire::HOST_JOBS_CAPABILITY`]). The server taints a host when it places such
@@ -78,7 +83,8 @@
 //!   host that reports it. An operator cannot set it (`js_caps::is_mount_provider_key`).
 
 use js_agent_wire::{
-    DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, Hello, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+    DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, Hello, LOAD_ADMISSION_CAPABILITY,
+    PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES};
 
@@ -92,7 +98,9 @@ pub(crate) use container::{
 /// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
 /// start whose fence it retired and stops its jobs after a silence), and that it beats again
 /// at once after a held reply (`held-beat`, the session's), and that it polls the dispatch
-/// route when its welcome says the server serves it (`dispatch-poll`, [`crate::dispatch`]):
+/// route when its welcome says the server serves it (`dispatch-poll`, [`crate::dispatch`]), and
+/// that it admits a job start by the job service's placement, never refusing one for the
+/// summed CPU or memory bookings it holds (`load-admission`, the lifecycle's admission):
 /// every agent does, the container runtime and the native one.
 pub(crate) fn report_per_job(hello: &mut Hello) {
     hello
@@ -107,6 +115,9 @@ pub(crate) fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(DISPATCH_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(LOAD_ADMISSION_CAPABILITY.to_owned(), FLAG_SET.to_owned());
 }
 
 /// Puts `layered-rootfs` into `hello` when the runtime gives jobs mounts of host paths

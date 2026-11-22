@@ -3,10 +3,12 @@
 //! the reply of an agent that speaks no per-job message unchanged.
 
 use js_agent_wire::{Ack, HeldState, Outcome};
-use js_jobs::{AllocationStep, EndReason, JobId, JobState, ResultReason, StartFailure};
+use js_jobs::{AllocationStep, EndReason, JobId, JobState, NewJob, ResultReason, StartFailure};
 use js_proto::v1;
+use js_types::{HostId, JobEventKind};
 
-use super::job_rig::{FakeAgent, rig, starts, stops};
+use super::job_rig::{FakeAgent, clocked_rig, rig, spec, starts, stops};
+use crate::job_expiry::JobLimits;
 use crate::per_job::NO_EXIT_CODE;
 
 /// A running job with a cancel intent is told to stop in every reply while its host lists it
@@ -349,4 +351,140 @@ async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
     );
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.beat(&agent).await.is_ok());
+}
+
+/// Under `--placement js-sched`, a start a host refused with `no-capacity` is not the end of the
+/// job: through the heartbeat route the job goes back to the queue with the refusing host in its
+/// capacity refusals and a `REQUEUED` event naming it, is placed on the other host, which is
+/// sent its start, and the job never reads failed to start. It catches a capacity refusal that
+/// fails the build, and a requeued job placed again on the host that refused it.
+#[tokio::test]
+async fn a_start_refused_for_capacity_is_placed_on_another_host_and_started_there() {
+    let mut rig = clocked_rig("capacity_requeue", true, JobLimits::default());
+    rig.register("host-a", true);
+    rig.register("host-b", true);
+    let mut agents = [FakeAgent::new("host-a"), FakeAgent::new("host-b")];
+    for agent in &agents {
+        rig.beat(agent).await.unwrap();
+    }
+    let new = NewJob {
+        id: Some(JobId::parse("job-c").unwrap()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    let id = rig.jobs.insert_queued(new).unwrap().record.id;
+    let mut refusing = None;
+    for round in 0..4 {
+        for agent in &mut agents {
+            let reply = rig.beat(agent).await.unwrap();
+            agent.take(&reply);
+            let state = rig.job(&id).state;
+            assert!(
+                !matches!(state, JobState::FailedToStart(_)),
+                "round {round}: the job reads {state:?}"
+            );
+            if refusing.is_none() && agent.holds("job-c") {
+                agent.end_naming(
+                    "job-c",
+                    (Outcome::FailedToStart, None),
+                    (Some("no-capacity"), None),
+                );
+                refusing = Some(HostId::new(&agent.host).unwrap());
+            }
+        }
+    }
+    let refusing = refusing.expect("a host was sent the job's start");
+    let job = rig.job(&id);
+    assert_eq!(job.capacity_refusals, std::slice::from_ref(&refusing));
+    assert_eq!(job.held_refusals, Vec::<HostId>::new());
+    let events = job.queue.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == JobEventKind::Requeued && e.host.as_ref() == Some(&refusing)),
+        "no REQUEUED event names {refusing}: {events:?}"
+    );
+    let other = rig.allocation(&id).host;
+    assert_ne!(
+        other, refusing,
+        "the job was placed on the refusing host again"
+    );
+    let started = agents
+        .iter()
+        .find(|agent| agent.host == other.as_str())
+        .unwrap();
+    assert!(started.holds("job-c"), "{other} was not sent the start");
+}
+
+/// Says hello for `host` through the hello route, as an agent that reports the `per-job`
+/// capability and each of `extra`, the way a real agent joins.
+async fn hello_through_the_route(
+    rig: &mut super::job_rig::Rig,
+    host: &str,
+    extra: &[(&str, &str)],
+) {
+    let mut capabilities = serde_json::json!({ "per-job": "true", "arch": "x86_64" });
+    for (key, value) in extra {
+        capabilities[*key] = serde_json::json!(value);
+    }
+    let hello = serde_json::json!({
+        "host_id": host,
+        "pool": "burst",
+        "agent_version": "0.1.0",
+        "shape": rig.shape(),
+        "capabilities": capabilities,
+        "phase": "serving",
+    });
+    let body = axum::body::Bytes::from(serde_json::to_vec(&hello).unwrap());
+    let welcome =
+        crate::agent_api::serve_hello(&rig.agents, rig.who.clone(), None, Ok(body), &|| ());
+    let axum::Json(welcome) = welcome.await.unwrap();
+    rig.sessions
+        .insert(host.to_owned(), (welcome.epoch, welcome.session));
+}
+
+/// Two hosts of eight cores join through the hello route: `old`, whose agent reports nothing
+/// about admission (every agent released before `load-admission`), and `new`, whose agent
+/// reports `load-admission` as `true`. Four queued jobs of 4400 millis each are placed by the
+/// heartbeats: `new`, packed by load with the 1.1x CPU slack (8800 millis), takes two; `old`,
+/// packed by the summed bookings its agent refuses past (8000 millis, no slack), takes one;
+/// the fourth waits. Catches a server that packs every host by load (two on `old`, which its
+/// agent would refuse with `no-capacity`), and a capability the hello route drops before
+/// placement reads it (one on `new`).
+#[tokio::test]
+async fn a_host_is_packed_by_load_only_when_its_hello_reports_load_admission() {
+    let mut rig = clocked_rig("load_admission_hello", true, JobLimits::default());
+    hello_through_the_route(&mut rig, "old", &[]).await;
+    hello_through_the_route(&mut rig, "new", &[("load-admission", "true")]).await;
+    let mut agents = [FakeAgent::new("old"), FakeAgent::new("new")];
+    let mut big = spec();
+    big.needs = js_jobs::Needs::Shape(js_types::Resources::new(4400, 1 << 30, 0, None).unwrap());
+    let ids: Vec<JobId> = (0..4)
+        .map(|n| {
+            let new = NewJob {
+                id: Some(JobId::parse(&format!("big-{n}")).unwrap()),
+                spec: big.clone(),
+                priority: 0,
+                client: None,
+            };
+            rig.jobs.insert_queued(new).unwrap().record.id
+        })
+        .collect();
+    for _ in 0..3 {
+        for agent in &mut agents {
+            let reply = rig.beat(agent).await.unwrap();
+            agent.take(&reply);
+        }
+    }
+    let on = |host: &str| {
+        ids.iter()
+            .filter(|id| rig.job(id).host.as_ref().map(HostId::as_str) == Some(host))
+            .count()
+    };
+    assert_eq!((on("new"), on("old")), (2, 1), "jobs on new and old");
+    let waiting = ids
+        .iter()
+        .filter(|id| rig.job(id).state == JobState::Queued);
+    assert_eq!(waiting.count(), 1, "the fourth job does not wait");
 }
