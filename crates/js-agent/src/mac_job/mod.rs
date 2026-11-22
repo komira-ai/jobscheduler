@@ -181,6 +181,13 @@ pub fn parse(args: &[OsString]) -> Result<Args, clap::Error> {
     Args::try_parse_from(args)
 }
 
+/// Runs the mode when `args` (the whole command line) names it second: its status, or `None`
+/// for any other command line.
+pub fn dispatch(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> Option<ExitCode> {
+    let named = args.get(1).is_some_and(|verb| verb.to_str() == Some(VERB));
+    named.then(|| run(args, out, err))
+}
+
 /// Runs the mode: `args` is the whole command line, the mode word second.
 pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     let args = match parse(args.get(2..).unwrap_or_default()) {

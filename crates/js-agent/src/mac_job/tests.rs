@@ -185,3 +185,11 @@ fn the_put_ingest_names_its_root_and_the_nodes_user() {
     );
     assert_eq!(args.put_user, "601");
 }
+
+#[test]
+fn only_the_mode_word_is_dispatched() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert!(super::dispatch(&words(&["js-agent", "cordon"]), &mut out, &mut err).is_none());
+    assert!(super::dispatch(&words(&["js-agent"]), &mut out, &mut err).is_none());
+    assert!(out.is_empty() && err.is_empty());
+}
