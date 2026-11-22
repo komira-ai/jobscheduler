@@ -356,6 +356,8 @@ fn made(
         "memory.oom.group",
         "cpu.max",
         "cpu.weight",
+        "cpuset.cpus",
+        "cpuset.mems",
         "cgroup.subtree_control",
     ]
     .iter()
@@ -390,7 +392,9 @@ fn a_tracked_memory_lease_has_no_memory_or_swap_limit_and_keeps_the_oom_group() 
 /// Catches a lease held to its CPU booking: a `cpu.max` makes the kernel throttle a job that
 /// booked half a core to half a core in every period while the node's other cores are idle.
 /// With no `cpu.max` the kernel's `max` stands (no quota, so no period is ever throttled)
-/// and the booking is the lease's `cpu.weight`, 100 a core: half a core is 50.
+/// and the booking is the lease's `cpu.weight`, 100 a core: half a core is 50. Nor is it held
+/// to a set of cores: a lease with no NUMA pin writes no `cpuset.cpus` or `cpuset.mems`, so a
+/// job bursts onto any core the host has free.
 #[test]
 fn a_lease_that_booked_half_a_core_has_no_cpu_ceiling_and_a_weight_of_half_a_core() {
     let read = made(
@@ -400,6 +404,8 @@ fn a_lease_that_booked_half_a_core_has_no_cpu_ceiling_and_a_weight_of_half_a_cor
     );
     assert_eq!(read("cpu.max"), None);
     assert_eq!(read("cpu.weight").as_deref(), Some("50"));
+    assert_eq!(read("cpuset.cpus"), None);
+    assert_eq!(read("cpuset.mems"), None);
 }
 
 /// Catches two leases that want every core not sharing the cores as they booked them: the

@@ -77,15 +77,15 @@ of its class gives (`crates/js-sched-placer/src/sizes.rs`). A dimension the job 
   or separators share a class. A build farm labels each action's job with its target's class and leaves the CPU and memory at 0.
 - **partition**: the client that submitted the job; **platform**: the job's `os` and `arch` as it names them; **basis**: cgroup.
 
-The estimator is `js-sizing`: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the 90th percentile of
-its runs' peaks (the most cores a run used over five seconds) rounded up to a quarter core. A class with five fresh runs books its own estimate. A class with
+The estimator is `js-sizing`: memory is `1.2 x` the largest recent peak plus 128 MiB (at least 1 GiB), CPU the median of
+its runs' mean CPU (CPU time over wall time) rounded up to a quarter core. A class with five fresh runs books its own estimate. A class with
 fewer books the memory its fallback's runs ask for (`Summaries::peak_memory`: `1.2 x` their largest recent peak plus 128 MiB, from
 one run on, whatever their spread): its fallback class's (7.8), else the whole history of its client on its platform (a third key
 every run of the client but a memory kill teaches), raised by its own runs' peak with the same margin and by its kill floor, so a class is never
 booked below a peak of its own. Only a client with no fresh run at all books the cold size: `server.cold_cpu_millis` and
 `server.cold_memory_bytes` (or their flags), each one left out its default: 22 cores and 4 GiB. The cold CPU is never more than a quarter of
-the most cores of the hosts the engine knows (the most any class books, so that the first run of an unknown class has room to
-show its peak), and the cold memory never more than the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and at
+the most cores of the hosts the engine knows (the most any class books, so that the first run of an unknown class has room for
+the cores it uses), and the cold memory never more than the most bookable memory (the pool's `memory_schedulable_percent` applied) of the hosts the engine knows, and at
 least the class's kill floor. The CPU is the class's own learned CPU, else its fallback class's, else its client's (the first
 with a CPU sample), at most a quarter of the most cores a host has (7.9); the cold CPU when none has a sample. A class whose
 booking reaches the largest host's bookable memory books all of it and waits for an empty host.
@@ -122,10 +122,9 @@ its start (`taught`) counts the runs that gave a class a sample, not the jobs it
 a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
 the job's own limit, which raises the class's floor to twice the booking it died at. A success whose peak came within 5% of its
 booking counts as having hit its limit (the estimator's own censoring rule assumes the build-host limit of 7.3), so it can hold the
-class at its booking but not lower it. A run's CPU sample is its peak: the most cores its group used over any five seconds of
-the run, which the agent measures from the group's `cpu.stat` every second and reports beside the CPU time (`cpu_peak`). A run
-with no peak reported (an agent from before the field, and every run recorded before it) has only its mean CPU, which is a lower
-bound of its peak: it counts as held (below). A run's sample is a measurement only when its own contention is low and nothing held it: its
+class at its booking but not lower it. A run's CPU sample is its mean: its CPU time over its wall time, which every run
+reports. The most cores its group used over any five seconds of the run, which the agent measures from the group's `cpu.stat` every
+second and reports beside the CPU time (`cpu_peak`), is kept in the job's usage and is not the sample: it is not booked (7.9). A run's sample is a measurement only when its own contention is low and nothing held it: its
 contention is how long some task of its group waited for a CPU (the `some` total of the group's `cpu.pressure`, which the agent
 reports beside the CPU time) per unit of wall time, and below a tenth the sample is kept as measured. At or above a tenth the run
 used less than it would have alone, and its CPU may only raise its class's CPU. A run with no pressure reported (an agent from
@@ -133,7 +132,7 @@ before the field, and every run recorded before it) counts as having waited for 
 group was throttled in at least one period in 20 (`nr_throttled` against `nr_periods` of its `cpu.stat`, reported beside the
 CPU time; a group with no `cpu.max` counts no periods), or, with no throttle counters reported, its mean CPU came within 5% of the
 CPU it was booked (every run recorded while the agent wrote the booking as `cpu.max`). So a class is never held at a ceiling it
-was given or at a mean below its peak: what it is booked rises with the runs that used more, and falls only on quiet, measured
+was given or at what a run that waited used: what it is booked rises with the runs that used more, and falls only on quiet, measured
 runs that used less.
 
 **Where the history lives.** Nowhere new: at its start the server teaches the estimator every ended job its job store still holds
@@ -188,64 +187,75 @@ of its booked CPU (0.25 to 1.25 cores) and was throttled almost all the time, an
 a job's booked CPU as its `cpu.weight`, a share of the host's CPU. Nor is a job's memory booking a limit: it is what placement
 counts, and the bound is the pool's `memory_schedulable_percent` per host.
 
-**What the CPU booking is: the peak.** A class books the 90th percentile of its recent runs' peaks: the most cores a run used over
-any five seconds of it. Five seconds is the window placement already measures hosts on (`placement-by-load.md`), longer than a
-scheduler tick or the spawn of a parallel build's processes, and short enough that a compile that runs 20 cores for 30 seconds
-reads as 20 cores. The 90th percentile books what nine runs in ten reach; the tenth bursts above its booking into what its host
-has idle or shares by weight, and one outlier run does not hold the class high for the next 32. A run that waited for a CPU
-(contention of a tenth or more), was held at a ceiling, or reported no peak (its mean is a lower bound) can only raise its class,
-never hold it down, so the floor of a quarter core absorbs nothing. A class books at most a quarter of the most cores a host has
-(22 of 88): no class's history books a host alone, four jobs of the largest class bursting at once fit a host within its slack,
-and a job of that class that waits for room (the walk holds a host for the first job that waits on it) leaves at most a quarter of
-the host unbooked meanwhile.
+**What the CPU booking is: the median of the runs' mean CPU.** A class books the median (the nearest-rank 50th percentile) of its
+recent runs' mean CPU: the CPU time of a run over its wall time, the cores it used on average. The mean is what placement needs.
+Placement admits a host by its measured load (`placement-by-load.md`), and the CPU slack (1.1x by default) bounds that measured load,
+not the sum of the bookings; so a booking that is a job's average, packed to the slack, fills a host with the work it does, where a
+booking of the burst held a host to a few jobs whose peaks fill it while their use left most of it idle. A job that bursts above its
+booking uses what its host has idle or shares by weight (`cpu.weight`, from the booking): it runs slower when the host is busy, it
+does not fail, and a host whose measured load reaches the slack takes no new job until it falls. The median books what half of the
+runs of a class use or less: half the runs burst above their booking, and one outlier run does not hold the class high for the next
+32. The most cores a run used over five seconds (`cpu_peak`) is still measured, stored with the run's usage and shown by `GetUsage`,
+and does not size anything. A run that waited for a CPU (contention of a tenth or more) or was held at a ceiling can only raise its
+class, never hold it down: its sample is kept only when it exceeds the class's current estimate, which is the median. So the floor of a
+quarter core absorbs nothing. A class books at most a quarter of the most cores a host has (22 of 88): no class's history books a host
+alone, and a job of that class that waits for room (the walk holds a host for the first job that waits on it) leaves at most a quarter
+of the host unbooked meanwhile.
 
-**Example.** A compile that needs 20 cores for 30 seconds is recorded with its CPU time (600 core-seconds) and its peak (20 cores
-over five seconds). The next run of its class books 20 cores. An 88-core host packs bookings up to 96.8 cores (the 1.1x slack),
-so it takes four such compiles (80 cores) and has 16.8 cores left for other jobs; a fifth would need 100. When all four burst at
-once they use 80 of the 88 cores; with the other jobs at their peaks as well the host is asked for 96.8 cores and each job gets
-its share by weight, 91% of its peak.
+**Example.** A compile uses 2 cores on average for 30 seconds and peaks at 20 over five of them: it is recorded with its CPU time (60
+core-seconds) and its peak (20 cores). The next run of its class books 2 cores. An 88-core host whose agent measures 10 cores busy
+takes twelve such compiles at once (24 cores booked, the measured 10 and the bookings placed since within the 96.8 cores of the 1.1x
+slack), where a booking of the peak took four (80 cores). When the host is measured at 95 cores busy, another compile waits, although
+the bookings on it sum to 24 cores: the slack bounds the measured load, and 95 + 2 is above 96.8. When several compiles burst at once
+they use up to what the host has and share it by weight, so each is slower, not killed.
 
-**What placement packs.** Placement packs these peaks with the load-based admission of `placement-by-load.md` and the CPU slack
-(default 1.1x), both unchanged. A host is charged the larger of its measured CPU and the peaks of the jobs it ran through the last
-reading, plus the peaks of the jobs placed since (covered leases, below). With the admission's floor at its default (1), a
-measurement below the peaks does not release room: a host whose jobs are between bursts is still booked by their peaks, and it is
-busy at the share of their peaks its jobs use on average. A measurement above them (a job bursting past its booking) blocks new
-jobs until it falls. The floor stays at 1: between-burst room is not released.
+**What placement packs.** Placement packs these bookings with the load-based admission of `placement-by-load.md` and the CPU slack
+(default 1.1x), both unchanged. A host is charged the larger of its measured CPU and the bookings of the jobs it ran through the last
+reading, plus the bookings of the jobs placed since (covered leases, below). With the admission's floor at its default (1), a
+measurement below the bookings does not release room: a host whose jobs are between bursts is still booked by their means, and it is
+busy at about those means. A measurement above them (a job bursting past its booking) blocks new jobs until it falls. The floor stays
+at 1: between-burst room is not released. With no measurement of a host yet, the bookings are all the host is charged, so a host
+takes up to its slack in bookings, which are means.
 
-**Unknown jobs.** A class with no CPU history books its kind's learned peak, else its client's, and only a client with no history
+**Unknown jobs.** A class with no CPU history books its kind's learned CPU, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
-therefore placed with room for the largest peak a class may book, and its share of a busy host is that large, so one run is
-enough to learn its peak. An unknown job's memory is its kind's or its client's peak with the margin, else the cold 4 GiB, a hard
-limit raised by a kill's floor.
+therefore placed with room for the most cores a class may use, and one run is enough to learn its mean. An unknown job's memory is
+its kind's or its client's peak with the margin, else the cold 4 GiB, a hard limit raised by a kill's floor.
 
-**The history from before.** Every run a server rebuilds at its first start after the change was taken under a `cpu.max` and has
-no peak: its mean is a lower bound, so it can only raise. A class whose runs were all held at a quarter core therefore has no CPU
-sample: its jobs book its fallback's or its client's learned peak, else the cold CPU, and its first run that reports a peak books
-it, even on a busy host. A new server beside agents from before the peak field never lowers a class from what those agents report,
-so it books high (its fallback's peak, its client's, or the cold CPU) until the agents report peaks.
+**The history from before.** Every run a server rebuilds at its first start after the change has a mean: its CPU time over its wall
+time, from its job record. A server re-derives each run's sample from its job record as the run's mean at the server's start; there
+is no conversion, and the `cpu_peak` an agent reported with a run, if any, is not read for it. The runs taken under a `cpu.max` stay
+what they were: a run whose mean came within 5% of its booked CPU (or throttled in at least one period in 20) was held at its ceiling
+and can only raise its class, so a class whose runs were all held at a quarter core has no CPU sample: its jobs book its fallback's or
+its client's learned CPU, else the cold CPU, and its first run that was not held books its mean, even on a busy host. Runs from before
+the `cpu_peak` field and runs after it are alike: every run is sampled by its mean, and what a run with no peak reported was, held
+or not, no longer depends on the peak.
 
 **Run time.** The estimator keeps the minutes each run lasted as it did. The job walk charges each job flat for its life, and the
 whole-host path waits on a job's wall limit, as before.
 
-**Memory.** A young class books its fallback's peaks with a margin, not the cold size (7.7, 7.8); memory is bounded by the pool's
-`memory_schedulable_percent` per host (a job's booking is no limit of its own), and the kill floor stays the safety net.
+**Memory.** A young class books its fallback's memory peaks with a margin, not the cold size (7.7, 7.8); memory is bounded by the
+pool's `memory_schedulable_percent` per host (a job's booking is no limit of its own), and the kill floor stays the safety net.
 
 **Proof on runs shaped like the farm's** (`crates/js-sched-placer/src/sizes_farm_tests.rs`, measured by the tests):
 
 - 120 targets of three kinds (peaks 0.6 to 2.0 GB, 1.0 to 3.2 GB, 0.6 to 1.2 GB), one to three runs each under a quarter-core
   to 1.25-core ceiling at 16 GiB: every target's next booking is at least its own largest peak and at most 4 GiB, from its kind;
   the bookings sum to 1.78 times the peaks, and 97 such jobs fit a host by memory where 15 did.
-- A class whose 32 runs were held at a quarter core and report no peak books the cold 22 cores at the first start (not the
-  250 m the old history held it at), 20 cores after one run that peaked at 20 on a busy host, and half a core after nine quiet
-  runs that peaked at 0.3 cores; runs of agents from before the peak field, held at their booking, never lower it.
-- A class whose runs peak at all 88 cores books 22; four of its jobs leave a host 8.8 of its 96.8 cores.
-- A compile that needs 20 cores for 30 seconds is stored with 600 s of CPU time and a 20-core peak, the next job of its class
-  books 20 cores, and one pass over an 88-core host with six of them queued places four (80 cores booked, 16.8 left).
-- One pass over a farm host from queued steps of the mix (compiles peaking at 20 cores and averaging 6, tests 4 and 2, genrules 1
-  and 0.5, and a step peaking at 88 and averaging 30 at the head of every ten) places 9 jobs of every kind, booked 77 of the 96.8
-  cores and 22 GiB of memory: the host is full by CPU peaks, not by memory (15 jobs at the old 16 GiB), and the next compile, which
-  needs 20, waits with 19.8 cores of room. Its jobs use about 49.5 cores on average (56% of the host, against 11% to 33%
-  before) and up to all 88 when they burst together; the gap between the two is the between-burst room the admission floor keeps.
+- A class whose 32 runs were held at a quarter core books the cold 22 cores at the first start (not the 250 m the old history held
+  it at), 6 cores after one run that used 6 on average (and peaked at 20) on a busy host, and half a core after the first quiet run
+  of 0.3 cores (the median of the two samples); runs of agents from before the peak field, held at their booking, never lower it.
+- A class whose runs use all 88 cores books 22; four of its jobs leave a host 8.8 of its 96.8 cores.
+- `a_compile_that_peaks_at_20_cores_books_its_mean_and_a_host_with_measured_room_takes_twelve`: a compile that used 2 cores on
+  average for 30 seconds and peaked at 20 is stored with 60 s of CPU time and a 20-core peak, the next job of its class books
+  2 cores, and one pass over an 88-core host measured at 10 cores busy places all twelve queued (where 4 were placed at the peak);
+  measured at 95 cores busy, the host is refused another compile.
+- One pass over a farm host with no measurement from queued steps of the mix (compiles averaging 6 cores, tests 2, genrules 0.5,
+  and a step averaging 30, booked the 22-core quarter of the host, at the head of every ten) places 19 jobs (two of the large step,
+  six compiles, five tests and six genrules), booked 93 of the 96.8 cores and 48.9 GB of memory (a host with no reading charges
+  each lease at least a core, so 96 are charged), and the next test, which needs 2, waits: the host is full by CPU bookings, not by
+  memory (15 jobs at the old 16 GiB). Its bookings are the jobs' means, so a host that is measured busy is refused by its load, not
+  by the sum of the bookings.
 
 **Covered leases.** The placer's engine used to drop the reading's list of leases the measurement covers, so admission charged a
 host's measured CPU and every job's booking again: a host of jobs that use their booking was refused at about half its cores. The
