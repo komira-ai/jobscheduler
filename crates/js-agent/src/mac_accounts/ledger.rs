@@ -176,6 +176,8 @@ pub(super) struct Ledger {
     #[cfg(test)]
     pub(super) inject: Inject,
     entries: BTreeMap<u64, Entry>,
+    /// The job each account that was ever lent was lent to.
+    jobs: BTreeMap<u64, String>,
     /// The uid of the last `made` record: the next uid is chosen after it.
     last_uid: Option<u32>,
 }
@@ -237,6 +239,7 @@ impl Ledger {
             #[cfg(test)]
             inject: Inject::default(),
             entries: BTreeMap::new(),
+            jobs: BTreeMap::new(),
             last_uid: None,
         };
         for (number, line) in text.lines().enumerate() {
@@ -287,7 +290,10 @@ impl Ledger {
                 self.last_uid = Some(*uid);
             }
             Record::Ready(n) => set(self, n, State::Ready),
-            Record::Lent(n, _) => set(self, n, State::Lent),
+            Record::Lent(n, job) => {
+                set(self, n, State::Lent);
+                self.jobs.insert(*n, job.clone());
+            }
             Record::Held(n, _) => set(self, n, State::Held),
             Record::Gone(n) => set(self, n, State::Gone),
         }
@@ -371,6 +377,11 @@ impl Ledger {
     /// The entry of account `n`.
     pub(super) fn get(&self, n: u64) -> Option<Entry> {
         self.entries.get(&n).copied()
+    }
+
+    /// The job account `n` was lent to; `None` when it never was.
+    pub(super) fn job(&self, n: u64) -> Option<&str> {
+        self.jobs.get(&n).map(String::as_str)
     }
 
     /// The uid of the last `made` record: the next uid is chosen after it.

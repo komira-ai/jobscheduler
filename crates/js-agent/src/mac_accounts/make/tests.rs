@@ -119,8 +119,9 @@ fn a_name_is_never_used_again_across_restarts() {
     assert_eq!(pool.ready_count(), 1);
 }
 
-/// Asserts that a uid is passed over when a record has it or a process runs as it, each for
-/// its own reason, and that the first free uid after the busy ones is taken.
+/// Asserts that a uid is passed over when a record has it or a process runs as it that the
+/// kill rounds do not end, each for its own reason (the process named by its pid), and that
+/// the first free uid after the busy ones is taken.
 #[test]
 fn a_uid_with_a_record_or_a_process_is_passed_over() {
     let rig = Rig::new("busy-host", 1, 0);
@@ -130,12 +131,20 @@ fn a_uid_with_a_record_or_a_process_is_passed_over() {
 
     let rig = rig.next("busy-process", 1, 0);
     rig.fake.add_process(me(), 500, "daemon");
+    rig.fake.state().immortal.insert(me());
     let pool = rig.open();
-    assert_eq!(reasons(&pool), [format!("{}: 1 processes run as it", me())]);
+    assert_eq!(
+        reasons(&pool),
+        [format!(
+            "{u}: 1 processes of uid {u} remain after 10 rounds: 500 (daemon)",
+            u = me()
+        )]
+    );
 
     let rig = rig.next("busy-then-free", 3, 0);
     rig.fake.add_user("someone", me(), 20, &rig.settings.homes);
     rig.fake.add_process(me() + 1, 500, "daemon");
+    rig.fake.state().immortal.insert(me() + 1);
     let pool = rig.open();
     assert_eq!(pool.lend("job-1").unwrap().account.uid, me() + 2);
 }
@@ -628,4 +637,118 @@ fn a_folder_that_cannot_be_emptied_before_the_making_stops_it_at_folder() {
             .iter()
             .all(|call| !call.starts_with("make_home") && !call.starts_with("create_account"))
     );
+}
+
+/// Asserts that a process of a free slot (no account of the ledger, no record), such as the
+/// `distnoted` macOS starts by itself for a uid, is ended by the kill rounds and the slot is
+/// then taken; the fake starts it again after the first kill, and the second round ends it.
+/// Catches a check that refuses the slot for it.
+#[test]
+fn a_stray_process_of_a_free_slot_is_ended_and_the_slot_taken() {
+    let rig = Rig::new("stray-free", 1, 0);
+    let pool = rig.open();
+    let u = me();
+    rig.fake.add_process(u, 5071, "distnoted");
+    let (fake, mut kills) = (Arc::clone(&rig.fake), 0);
+    rig.fake.on(&format!("kill_all {u}"), move || {
+        kills += 1;
+        if kills == 1 {
+            fake.add_process(u, 5072, "distnoted");
+        }
+    });
+    let lent = pool.lend("job-1").unwrap();
+    assert_eq!(lent.account.uid, u);
+    assert!(rig.fake.state().processes.is_empty());
+    assert_eq!(
+        rig.lines(),
+        [
+            format!("made kbf-acct-1 {u}"),
+            "lent kbf-acct-1 job-1".to_owned()
+        ]
+    );
+    let calls = rig.fake.take_calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| **c == format!("kill_all {u}"))
+            .count(),
+        2
+    );
+    let log = rig.log.text();
+    assert!(
+        log.contains("ended the processes of a free slot") && log.contains("killed=[5071, 5072]"),
+        "{log}"
+    );
+}
+
+/// Asserts that the free check never kills the processes of a slot an account of the ledger
+/// holds, while it does end those of a slot nobody holds: the held slot is refused as held and
+/// its job's process lives on; the other slot's process, which survives every round, is named
+/// by its pid.
+#[test]
+fn a_process_of_a_held_slot_is_never_killed_by_the_free_check() {
+    let rig = Rig::new("stray-held", 2, 0);
+    let pool = rig.open();
+    let (held, free) = (me(), me() + 1);
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, held);
+    rig.fake.add_process(held, 40, "build");
+    rig.fake.add_process(free, 41, "distnoted");
+    rig.fake.state().immortal.insert(free);
+    rig.fake.take_calls();
+    assert_eq!(
+        reasons(&pool),
+        [
+            format!("{free}: 1 processes of uid {free} remain after 10 rounds: 41 (distnoted)"),
+            format!("{held}: held by kbf-acct-1"),
+        ]
+    );
+    let calls = rig.fake.take_calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| **c == format!("kill_all {free}"))
+            .count(),
+        10
+    );
+    assert!(
+        calls.iter().all(|call| *call != format!("kill_all {held}")
+            && *call != format!("bootout gui/{held}")
+            && *call != format!("bootout user/{held}")),
+        "{calls:?}"
+    );
+    assert_eq!(rig.fake.state().processes[&held].len(), 1);
+}
+
+/// Asserts that a making that fails after its record was made, while a process macOS started
+/// for the new record runs as its uid, ends that process before it deletes what was made, and
+/// is shown gone: `gone`, not `held`. Catches a clean-up that deletes without killing first.
+#[test]
+fn a_failed_making_ends_a_stray_process_and_is_shown_gone() {
+    let rig = Rig::new("unmake-stray", 1, 0);
+    let pool = rig.open();
+    let u = me();
+    let fake = Arc::clone(&rig.fake);
+    rig.fake.on("create_account", move || {
+        fake.add_process(u, 5071, "distnoted");
+    });
+    let wrong = "00000000-0000-0000-0000-000000000001";
+    rig.fake.state().made_with_guid = Some(wrong.to_owned());
+    let AccountError::Make { account, step, why } = pool.lend("job-1").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Record));
+    assert_eq!(
+        why,
+        format!(
+            "the record's GeneratedUID is {wrong}, not the slot's {}; \
+             what was made was deleted and shown gone",
+            generated_uid(u)
+        )
+    );
+    assert_eq!(
+        rig.lines(),
+        [format!("made kbf-acct-1 {u}"), "gone kbf-acct-1".to_owned()]
+    );
+    assert!(rig.fake.state().processes.is_empty());
+    assert!(rig.fake.state().users.is_empty());
 }

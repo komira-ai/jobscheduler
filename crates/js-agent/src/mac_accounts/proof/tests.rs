@@ -87,6 +87,52 @@ fn a_record_that_remains_or_cannot_be_looked_up_fails_the_proof() {
         said(&held, Gone::Record),
         format!("looking up uid {uid}: uid_taken {uid} failed")
     );
+
+    let (_rig, _pool, held) = failing(&base, "directory-fails", "delete_account", |rig| {
+        let fake = rig.fake.clone();
+        Box::new(move || fake.fail("in_directory kbf-acct-1"))
+    });
+    assert_eq!(
+        said(&held, Gone::Record),
+        "looking up kbf-acct-1: in_directory kbf-acct-1 failed"
+    );
+
+    let (_rig, _pool, held) = failing(&base, "directory-uid-fails", "delete_account", |rig| {
+        let fake = rig.fake.clone();
+        Box::new(move || fake.fail(&format!("uid_in_directory {uid}")))
+    });
+    assert_eq!(
+        said(&held, Gone::Record),
+        format!("looking up uid {uid}: uid_in_directory {uid} failed")
+    );
+}
+
+/// Asserts that a record the directory deleted, which the lookup cache (`getpw*`) still
+/// answers for during the next two lookups (counted, not timed), does not hold the account:
+/// the directory decides, the retirement records `gone`, the proof spent both of those
+/// lookups (by name and by uid) and the log says the cache answered. Catches a proof that
+/// reads a cached answer as a record that remains.
+#[test]
+fn a_record_only_the_lookup_cache_still_answers_for_is_gone() {
+    let rig = Rig::new("proof-cache", 2, 0);
+    rig.fake.state().getpw_lingers = 2;
+    let pool = rig.open();
+    let account = pool.lend("job-1").unwrap().account;
+    let retired = pool.retire(account).unwrap();
+    assert!(retired.gone.record);
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    assert_eq!(rig.fake.state().cache_answers, 2);
+    assert!(
+        rig.fake.state().cached.is_empty(),
+        "both lookups were spent"
+    );
+    let log = rig.log.text();
+    assert!(
+        log.contains(
+            "the directory has no record of the account; a lookup still answers from its cache"
+        ),
+        "{log}"
+    );
 }
 
 /// Asserts the process item: a process that is there after the deletion, a process table

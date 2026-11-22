@@ -108,6 +108,7 @@ fn args_of(rig: &Rig) -> Args {
         state: rig.dir.join("state"),
         commands: default_commands(),
         range: slots(),
+        lookups: 0,
     }
 }
 
@@ -135,6 +136,7 @@ fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
                 ]),
             ],
             range: slots(),
+            lookups: 0,
         }
     );
     for form in ["--", "--command"] {
@@ -355,6 +357,7 @@ fn the_command_given_is_run_and_how_it_ended_is_printed() {
         state: rig.dir.join("state"),
         commands: vec![command(&["/bin/sh", "-c", "exit 3"])],
         range: slots(),
+        lookups: 0,
     };
     let runner = Script::new(vec![Ok(Ran {
         code: Some(3),
@@ -497,6 +500,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
         state: state.clone(),
         commands: vec![command(&["/bin/true"])],
         range: slots(),
+        lookups: 0,
     };
     let runner = Script::new(vec![Ok(ran(0, "", ""))]);
     let (status, _, err) = cycle(&rig, &args, &runner);
@@ -511,6 +515,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
             state: rig.dir.join(path),
             commands: vec![command(&["/bin/true"])],
             range: slots(),
+            lookups: 0,
         };
         let (status, out, err) = cycle(&rig, &args, &Script::new(vec![]));
         assert_eq!(status, status::REFUSED, "{path}");
@@ -620,6 +625,70 @@ fn a_listing_that_cannot_be_read_is_an_error() {
     } else {
         eprintln!("skipped: permission bits do not stop root");
     }
+}
+
+/// Asserts that `--lookups <n>` is optional, 0 when not given, and takes a count once; a
+/// missing value, one that is not a count and one given twice are refused in words.
+#[test]
+fn the_lookups_are_optional_and_take_a_count_once() {
+    let base = ["--state", "/s", "--range", "700-799"];
+    let with = |rest: &[&str]| parse(&words(&[&base[..], rest].concat()));
+    assert_eq!(with(&[]).unwrap().lookups, 0);
+    assert_eq!(with(&["--lookups", "20"]).unwrap().lookups, 20);
+    assert_eq!(
+        with(&["--lookups"]),
+        Err("--lookups needs a count".to_owned())
+    );
+    for wrong in ["x", "-1", ""] {
+        assert_eq!(
+            with(&["--lookups", wrong]),
+            Err(format!("--lookups {wrong:?} is not a count")),
+            "{wrong}"
+        );
+    }
+    assert_eq!(
+        with(&["--lookups", "1", "--lookups", "2"]),
+        Err("--lookups is given twice".to_owned())
+    );
+}
+
+/// Asserts that with `--lookups 2` the cycle prints the uid's processes after the loan (none)
+/// and after the commands (the job's), and after the retirement two rounds a pause apart, by
+/// the host's clock: the directory no longer has the record, the lookup cache answers for it
+/// once more (the proof spent two of its three lookups) and then no longer, and no process of
+/// the uid is left.
+#[test]
+fn the_lookups_after_the_retirement_are_printed_round_by_round() {
+    let rig = Rig::new("cycle-lookups", 3, 1);
+    rig.fake.state().getpw_lingers = 3;
+    let (uid, gid) = (me(), my_gid());
+    let mut runner = Script::new(default_answers());
+    let fake = rig.fake.clone();
+    runner.job = Box::new(move || {
+        if fake.state().processes.is_empty() {
+            fake.add_process(me(), 77, "sleep");
+        }
+    });
+    let args = Args {
+        lookups: 2,
+        ..args_of(&rig)
+    };
+    let (status, out, err) = cycle(&rig, &args, &runner);
+    assert_eq!((status, err.as_str()), (status::OK, ""));
+    for line in [
+        "processes after the loan: []".to_owned(),
+        "processes after the commands: [77]".to_owned(),
+        format!(
+            "lookup 1 at 0 ms: directory name=false uid=false; every lookup \
+             name=Some(UserRecord {{ uid: {uid}, gid: {gid} }}) uid=false; processes=[]"
+        ),
+        "lookup 2 at 100 ms: directory name=false uid=false; every lookup name=None uid=false; \
+         processes=[]"
+            .to_owned(),
+    ] {
+        assert!(out.lines().any(|said| said == line), "{line}\n{out}");
+    }
+    assert_eq!(rig.fake.state().pauses, 1);
 }
 
 /// Asserts that `--range <first>-<last>` is required and gives the slots' uids, both

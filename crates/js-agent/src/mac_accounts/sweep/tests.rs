@@ -142,8 +142,9 @@ fn a_ready_account_that_cannot_be_looked_at_is_not_intact() {
     );
 }
 
-/// Asserts that an account that was lent (its job died with the process) is ended: its
-/// processes killed, its record and home deleted, `gone` recorded.
+/// Asserts that an account that was lent to a job the restarted agent did not adopt (that
+/// job is over) is ended: its processes killed, its record and home deleted, `gone`
+/// recorded.
 #[test]
 fn a_lent_account_is_deleted_at_open() {
     let rig = Rig::new("crash-lent", 6, 0);
@@ -306,7 +307,7 @@ fn a_ledger_that_cannot_record_the_sweep_fails_it() {
     let pool = rig.open();
     pool.lend("job-1").unwrap();
     pool.ledger().fail_writes(&rig.dir.join("state/accounts"));
-    let why = pool.sweep().unwrap_err();
+    let why = pool.sweep(&BTreeSet::new()).unwrap_err();
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
     assert!(why.to_string().contains("recording gone: "), "{why}");
     assert!(rig.fake.state().users.is_empty(), "the account was deleted");
@@ -425,4 +426,167 @@ fn a_folder_of_a_uid_something_else_uses_is_not_emptied_at_open() {
             "{key}: emptied on a failed look"
         );
     }
+}
+
+/// The account `kbf-acct-1` of a test, with the test's uid.
+fn first_account() -> Account {
+    Account {
+        name: "kbf-acct-1".to_owned(),
+        uid: me(),
+        gid: my_gid(),
+        generated_uid: generated_uid(me()),
+    }
+}
+
+/// Asserts that an agent restarted while a job runs keeps the account lent to that job when
+/// the job is one it adopted: the record, the home, the live process and the slot's per-user
+/// folder are left as they are, nothing of the uid is killed, booted out or deleted, the
+/// ledger still says `lent` and the refill passes the uid over; `retire` afterwards ends the
+/// account and records `gone`. With the job not among the adopted ones, the same ledger is
+/// ended at open. Catches a sweep that ends every lent account.
+#[test]
+fn the_account_of_an_adopted_job_is_kept_at_open_and_retired_after() {
+    let rig = Rig::new("adopted-kept", 2, 1);
+    let ledger = line("made kbf-acct-1 {me}\nready kbf-acct-1\nlent kbf-acct-1 job-1\n");
+    rig.write_ledger(&ledger);
+    made(&rig, 1, me());
+    rig.fake.add_process(me(), 40, "node");
+    let folder = rig.folder("ab", "hash");
+    std::fs::write(folder.join("T/working"), "x").unwrap();
+    let pool = rig.open_adopting(&["job-1", "job-9"]);
+    assert!(rig.fake.state().users.contains_key("kbf-acct-1"));
+    assert!(rig.home(1).is_dir());
+    assert_eq!(rig.fake.state().processes[&me()].len(), 1);
+    assert!(
+        folder.join("T/working").is_file(),
+        "the job's folder was emptied"
+    );
+    let u = me();
+    let calls = rig.fake.take_calls();
+    for untouched in [
+        format!("kill_all {u}"),
+        format!("bootout gui/{u}"),
+        format!("bootout user/{u}"),
+        "delete_account kbf-acct-1".to_owned(),
+    ] {
+        assert!(!calls.contains(&untouched), "{untouched}: {calls:?}");
+    }
+    assert_eq!(
+        rig.lines(),
+        [
+            line("made kbf-acct-1 {me}"),
+            "ready kbf-acct-1".to_owned(),
+            "lent kbf-acct-1 job-1".to_owned(),
+            line("made kbf-acct-2 {me+1}"),
+            "ready kbf-acct-2".to_owned(),
+        ]
+    );
+    assert!(
+        rig.log
+            .text()
+            .contains("kept the account of an adopted job"),
+        "{}",
+        rig.log.text()
+    );
+
+    let retired = pool.retire(first_account()).unwrap();
+    assert_eq!(retired.killed, [40]);
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    assert!(!rig.fake.state().users.contains_key("kbf-acct-1"));
+    assert!(!rig.home(1).exists());
+    assert!(rig.fake.state().processes.is_empty());
+
+    let rig = rig.next("adopted-other", 2, 0);
+    rig.write_ledger(&ledger);
+    made(&rig, 1, me());
+    rig.fake.add_process(me(), 40, "node");
+    rig.open_adopting(&["job-2"]);
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    assert!(rig.fake.state().users.is_empty());
+    assert!(rig.fake.state().processes.is_empty());
+}
+
+/// Asserts that the account of an adopted job whose record or home is no longer there is
+/// not repaired but logged and ended at open, `gone` recorded: the job cannot be running
+/// without them.
+/// A named way to spoil an adopted job's account.
+type Spoil = (&'static str, fn(&Rig));
+
+#[test]
+fn the_account_of_an_adopted_job_that_lost_its_record_or_home_is_ended() {
+    let base = Rig::new("adopted-lost", 2, 0);
+    let spoils: [Spoil; 2] = [
+        ("adopted-no-home", |rig| {
+            std::fs::remove_dir(rig.home(1)).unwrap();
+        }),
+        ("adopted-no-record", |rig| {
+            rig.fake.state().users.remove("kbf-acct-1");
+        }),
+    ];
+    for (name, spoil) in spoils {
+        let rig = base.next(name, 2, 0);
+        rig.write_ledger(&line(
+            "made kbf-acct-1 {me}\nready kbf-acct-1\nlent kbf-acct-1 job-1\n",
+        ));
+        made(&rig, 1, me());
+        spoil(&rig);
+        let pool = rig.open_adopting(&["job-1"]);
+        assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1", "{name}");
+        assert!(rig.fake.state().users.is_empty(), "{name}");
+        assert!(!rig.home(1).exists(), "{name}");
+        assert!(pool.held().is_empty(), "{name}");
+    }
+    let log = base.log.text();
+    assert_eq!(
+        log.matches(
+            "the account of an adopted job has lost its record or its home, so it is deleted"
+        )
+        .count(),
+        2,
+        "{log}"
+    );
+}
+
+/// Asserts that the account of an adopted job whose record cannot be looked up, or whose home
+/// cannot be looked at (an error other than "not found"), is kept and logged with why: a
+/// failed look is no proof the job is over, and ending it would end a running job.
+#[test]
+fn the_account_of_an_adopted_job_that_cannot_be_looked_at_is_kept() {
+    let rig = Rig::new("adopted-unlookable", 2, 0);
+    let ledger = line("made kbf-acct-1 {me}\nready kbf-acct-1\nlent kbf-acct-1 job-1\n");
+    rig.write_ledger(&ledger);
+    made(&rig, 1, me());
+    rig.fake.fail("account kbf-acct-1");
+    let pool = rig.open_adopting(&["job-1"]);
+    assert_eq!(rig.ledger(), ledger);
+    assert!(rig.fake.state().users.contains_key("kbf-acct-1"));
+    assert!(pool.held().is_empty());
+    let log = rig.log.text();
+    assert!(
+        log.contains(
+            "kept the account of an adopted job that could not be looked at: \
+             looking up its record: account kbf-acct-1 failed"
+        ),
+        "{log}"
+    );
+
+    // The homes' directory is a file: looking at the home fails with "not a directory".
+    let rig = rig.next("adopted-home-unlookable", 2, 0);
+    rig.write_ledger(&ledger);
+    rig.fake
+        .add_user("kbf-acct-1", me(), my_gid(), &rig.settings.homes);
+    std::fs::remove_dir(&rig.settings.homes).unwrap();
+    std::fs::write(&rig.settings.homes, "").unwrap();
+    rig.open_adopting(&["job-1"]);
+    assert_eq!(rig.ledger(), ledger);
+    assert!(rig.fake.state().users.contains_key("kbf-acct-1"));
+    let home = rig.home(1);
+    let log = rig.log.text();
+    assert!(
+        log.contains(&format!(
+            "kept the account of an adopted job that could not be looked at: looking at {}: Not a directory",
+            home.display()
+        )),
+        "{log}"
+    );
 }

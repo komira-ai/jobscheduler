@@ -13,6 +13,10 @@ use super::super::cycle::{Ran, Runner};
 /// Runs programs as an account, started through the spawner every program of the agent goes
 /// through ([`Program`]), so that the program answers for itself to the privacy controls and
 /// holds none of the grant the agent holds.
+///
+/// This is the development verb's start only. The start of a native job is not this one and
+/// is not built here: a job's start is not disclaimed, and it is written with the native
+/// runtime, not in this module.
 pub(in super::super) struct AsAccount;
 
 impl Runner for AsAccount {

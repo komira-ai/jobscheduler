@@ -75,17 +75,35 @@ pub trait AccountHost: Send + Sync {
     /// The refusal or the failure above.
     fn full_disk_access(&self) -> io::Result<()>;
 
-    /// The record named `name`, `None` when there is none.
+    /// The record named `name`, `None` when there is none, as every lookup of the system
+    /// answers it together (on macOS the local directory node and `getpwnam`, which may
+    /// answer from a cache for a while after a record was deleted): present when any says so.
     ///
     /// # Errors
-    /// The lookup failed.
+    /// A lookup failed.
     fn account(&self, name: &str) -> io::Result<Option<UserRecord>>;
 
-    /// Whether a record has the uid `uid`.
+    /// Whether a record has the uid `uid`, as every lookup of the system answers it together
+    /// (on macOS the local directory node and `getpwuid`): taken when any says so.
     ///
     /// # Errors
-    /// The lookup failed.
+    /// A lookup failed.
     fn uid_taken(&self, uid: u32) -> io::Result<bool>;
+
+    /// Whether the directory node the pool makes and deletes its records in (on macOS
+    /// OpenDirectory's local node) holds a record named `name`: that node's own answer, never
+    /// a cache's. It is what decides whether a deleted record is gone.
+    ///
+    /// # Errors
+    /// The directory could not be queried.
+    fn in_directory(&self, name: &str) -> io::Result<bool>;
+
+    /// Whether the directory node of [`AccountHost::in_directory`] holds a record with the uid
+    /// `uid`.
+    ///
+    /// # Errors
+    /// The directory could not be queried.
+    fn uid_in_directory(&self, uid: u32) -> io::Result<bool>;
 
     /// Whether a record has the `GeneratedUID` `guid`.
     ///

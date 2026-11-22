@@ -99,7 +99,7 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
     };
     let pool = match (&args.accounts, args.account_range) {
         (Some(state), Some(slots)) => Some(make_private(state).and_then(|()| {
-            Pool::open(state, slots, args.ready)
+            Pool::open(state, slots, args.ready, &std::collections::BTreeSet::new())
                 .map_err(|why| Stop::Setup(format!("the account pool: {why}")))
         })?),
         (Some(_), None) => return Err(Stop::Usage("--accounts needs --account-range".to_owned())),

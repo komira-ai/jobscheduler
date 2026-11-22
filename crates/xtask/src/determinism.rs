@@ -762,7 +762,7 @@ pub const ALLOWED: &[Allowed] = &[
         item: "now_ms",
         token: Token::InstantNow,
         sites: 1,
-        reason: "the Mac account pool's clock, for the times a retirement reports; the cell never runs a Mac account pool",
+        reason: "the Mac account pool's own clock, for the times a retirement reports (how long the deletion and the refill took); no decision reads it, and the cell never runs a Mac account pool",
     },
     Allowed {
         file: "crates/js-agent/src/mac_job/macos/mod.rs",

@@ -9,8 +9,8 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 
 - `.github/workflows/js-agent-macos-pkg.yml` builds `js-agent-<version>-macos-arm64.pkg` on a hosted Apple silicon
   runner and signs it. Its `build` job stages the payload, reads the cdhash of the `js-agent` binary, builds the
-  component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs on main,
-  by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
+  component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs in the
+  release's call (`sign: true`) and in a signing run (by hand, `sign: true`, on a branch of this repository), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
   in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
@@ -150,7 +150,7 @@ as owner), any script, and another identifier or version.
    agent to a second package (the next patch version, built beside the first and never released); only
    `promote-macos` waits for it, never the deploy. A manual run of
    `js-agent-macos-pkg.yml` calls it too, so a branch's package can be tried before it merges.
-2. The `sign` job runs on main for that call (and for a manual run), in the environment `pkg-signing`, with the
+2. The `sign` job runs for that call (and for a signing run, by hand), in the environment `pkg-signing`, with the
    secrets `MACOS_INSTALLER_P12` (the "Developer ID Installer" certificate and key as a base64 PKCS#12 file) and
    `MACOS_INSTALLER_P12_PASSWORD`. It imports them into a temporary keychain for `productsign` alone, finds the
    identity in that keychain by its SHA-1 (`security find-identity -v -p basic`; no name or team id is written in the
@@ -276,11 +276,11 @@ place, and a first install on a Mac that already has the pool's users (an earlie
 that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
 users: a Mac that must lose them is reset by its administrator.
 
-The release signs the helper, and a management profile in the repository (a privacy-policy payload for the helper's
-installed path and its designated requirement, which needs device management) grants it Full Disk Access. With the grant
-the helper can delete a user's record and home, and the one deletion that is left, of a lease user from before the pool,
-would work. The helper's `full-disk-access` verb reports whether it holds the grant (it lists the privacy database's
-directory, which only a process with the grant may list), and the agent reports the answer as its capability
+The release signs the programs, and a management profile in the repository (a privacy-policy payload for the agent's
+installed path and its designated requirement, which needs device management) grants `js-agent` Full Disk Access, for
+deleting an account per job in the agent. The helper holds no grant, so the one deletion that is left to it, of a lease
+user from before the pool, still fails on macOS 27. The agent learns at start whether it holds the grant (it lists the
+privacy database's directory, which only a process with the grant may list) and reports the answer as its capability
 `full-disk-access`. The pool's reset described here is unchanged by the grant; deleting an account per job is the next
 step (`mac-account-per-job.md`).
 

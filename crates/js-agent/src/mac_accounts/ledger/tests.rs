@@ -65,14 +65,14 @@ fn records_survive_reopening() {
     assert_eq!(ledger.next(), 1);
     assert_eq!(ledger.last_uid(), None);
     for record in [
-        Record::Made(1, 600),
+        Record::Made(1, 700),
         Record::Ready(1),
         Record::Lent(1, "job-1".to_owned()),
-        Record::Made(2, 601),
+        Record::Made(2, 701),
         Record::Ready(2),
-        Record::Made(3, 602),
+        Record::Made(3, 702),
         Record::Held(1, "proof-home".to_owned()),
-        Record::Made(4, 603),
+        Record::Made(4, 703),
         Record::Gone(4),
     ] {
         ledger.append(&record).unwrap();
@@ -80,16 +80,16 @@ fn records_survive_reopening() {
     drop(ledger);
     let ledger = Ledger::open(&path).unwrap();
     let state = |n| ledger.get(n).map(|entry| (entry.uid, entry.state));
-    assert_eq!(state(1), Some((600, State::Held)));
-    assert_eq!(state(2), Some((601, State::Ready)));
-    assert_eq!(state(3), Some((602, State::Made)));
-    assert_eq!(state(4), Some((603, State::Gone)));
+    assert_eq!(state(1), Some((700, State::Held)));
+    assert_eq!(state(2), Some((701, State::Ready)));
+    assert_eq!(state(3), Some((702, State::Made)));
+    assert_eq!(state(4), Some((703, State::Gone)));
     assert_eq!(state(5), None);
     assert_eq!(ledger.next(), 5);
-    assert_eq!(ledger.last_uid(), Some(603));
-    assert_eq!(ledger.holding(602), Some(3));
-    assert_eq!(ledger.holding(603), None, "a gone account holds no uid");
-    assert_eq!(ledger.holding(699), None);
+    assert_eq!(ledger.last_uid(), Some(703));
+    assert_eq!(ledger.holding(702), Some(3));
+    assert_eq!(ledger.holding(703), None, "a gone account holds no uid");
+    assert_eq!(ledger.holding(799), None);
     assert_eq!(ledger.first_in(State::Ready).map(|(n, _)| n), Some(2));
     assert_eq!(ledger.first_in(State::Lent), None);
     assert_eq!(
@@ -99,9 +99,9 @@ fn records_survive_reopening() {
     assert_eq!(ledger.in_state(State::Gone).len(), 1);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready kbf-acct-1\nlent kbf-acct-1 job-1\nmade kbf-acct-2 601\n\
-         ready kbf-acct-2\nmade kbf-acct-3 602\nheld kbf-acct-1 proof-home\n\
-         made kbf-acct-4 603\ngone kbf-acct-4\n"
+        "made kbf-acct-1 700\nready kbf-acct-1\nlent kbf-acct-1 job-1\nmade kbf-acct-2 701\n\
+         ready kbf-acct-2\nmade kbf-acct-3 702\nheld kbf-acct-1 proof-home\n\
+         made kbf-acct-4 703\ngone kbf-acct-4\n"
     );
 }
 
@@ -114,11 +114,11 @@ fn a_record_that_does_not_follow_is_refused_and_not_written() {
     let dir = scratch("transitions");
     let path = dir.join("accounts");
     let mut ledger = Ledger::open(&path).unwrap();
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     let refused =
         |ledger: &mut Ledger, record: Record| ledger.append(&record).unwrap_err().to_string();
     assert_eq!(
-        refused(&mut ledger, Record::Made(1, 601)),
+        refused(&mut ledger, Record::Made(1, 701)),
         "kbf-acct-1 was made twice"
     );
     assert_eq!(
@@ -164,7 +164,7 @@ fn a_record_that_does_not_follow_is_refused_and_not_written() {
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready kbf-acct-1\nlent kbf-acct-1 job\nheld kbf-acct-1 kill\n\
+        "made kbf-acct-1 700\nready kbf-acct-1\nlent kbf-acct-1 job\nheld kbf-acct-1 kill\n\
          held kbf-acct-1 kill\ngone kbf-acct-1\n"
     );
 }
@@ -176,7 +176,7 @@ fn a_record_that_does_not_follow_is_refused_and_not_written() {
 fn a_torn_last_line_is_cut_and_a_bad_line_refused() {
     let dir = scratch("torn");
     let path = dir.join("accounts");
-    std::fs::write(&path, "made kbf-acct-1 600\nready kbf-").unwrap();
+    std::fs::write(&path, "made kbf-acct-1 700\nready kbf-").unwrap();
     let log = Log::default();
     let _capture = capture(log.clone(), tracing::Level::WARN);
     let mut ledger = Ledger::open(&path).unwrap();
@@ -192,14 +192,14 @@ fn a_torn_last_line_is_cut_and_a_bad_line_refused() {
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready kbf-acct-1\n"
+        "made kbf-acct-1 700\nready kbf-acct-1\n"
     );
 
     for (bad, line, why) in [
         ("made kbf-acct-1\n", 1, "unknown record \"made kbf-acct-1\""),
         ("made kbf-acct-1 six\n", 1, "bad uid \"six\""),
-        ("made kbf-acct-01 600\n", 1, "bad account \"kbf-acct-01\""),
-        ("made kbf-lease-1 600\n", 1, "bad account \"kbf-lease-1\""),
+        ("made kbf-acct-01 700\n", 1, "bad account \"kbf-acct-01\""),
+        ("made kbf-lease-1 700\n", 1, "bad account \"kbf-lease-1\""),
         (
             "removed kbf-acct-1\n",
             1,
@@ -211,22 +211,22 @@ fn a_torn_last_line_is_cut_and_a_bad_line_refused() {
             "kbf-acct-1 was never made, so it cannot be ready",
         ),
         (
-            "made kbf-acct-1 600\nmade kbf-acct-1 601\n",
+            "made kbf-acct-1 700\nmade kbf-acct-1 701\n",
             2,
             "kbf-acct-1 was made twice",
         ),
         (
-            "made kbf-acct-1 600\nready kbf-acct-1\nlent kbf-acct-1 Job\n",
+            "made kbf-acct-1 700\nready kbf-acct-1\nlent kbf-acct-1 Job\n",
             3,
             "bad job id \"Job\"",
         ),
         (
-            "made kbf-acct-1 600\nheld kbf-acct-1 Kill\n",
+            "made kbf-acct-1 700\nheld kbf-acct-1 Kill\n",
             2,
             "bad step \"Kill\"",
         ),
         (
-            "made kbf-acct-1 600\ngone kbf-acct-2\n",
+            "made kbf-acct-1 700\ngone kbf-acct-2\n",
             2,
             "kbf-acct-2 was never made, so it cannot be gone",
         ),
@@ -261,13 +261,13 @@ fn a_failed_write_changes_nothing() {
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     ledger.fail_writes(&path);
     assert!(ledger.append(&Record::Ready(1)).is_err());
     assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\n"
+        "made kbf-acct-1 700\n"
     );
 }
 
@@ -279,14 +279,14 @@ fn the_last_uid_and_the_next_number_follow_the_made_records() {
     let dir = scratch("last");
     let path = dir.join("accounts");
     let mut ledger = Ledger::open(&path).unwrap();
-    ledger.append(&Record::Made(5, 650)).unwrap();
-    ledger.append(&Record::Made(2, 610)).unwrap();
+    ledger.append(&Record::Made(5, 750)).unwrap();
+    ledger.append(&Record::Made(2, 710)).unwrap();
     ledger.append(&Record::Gone(5)).unwrap();
-    assert_eq!(ledger.last_uid(), Some(610));
+    assert_eq!(ledger.last_uid(), Some(710));
     assert_eq!(ledger.next(), 6);
     drop(ledger);
     let ledger = Ledger::open(&path).unwrap();
-    assert_eq!((ledger.last_uid(), ledger.next()), (Some(610), 6));
+    assert_eq!((ledger.last_uid(), ledger.next()), (Some(710), 6));
 }
 
 /// Asserts that a write that fails part way leaves the file exactly as it was (the fragment
@@ -297,19 +297,19 @@ fn a_failed_write_is_cut_back_and_the_next_append_reads_back() {
     let dir = scratch("cut");
     let path = dir.join("accounts");
     let mut ledger = Ledger::open(&path).unwrap();
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     ledger.inject.write = Some(5);
     assert!(ledger.append(&Record::Ready(1)).is_err());
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\n"
+        "made kbf-acct-1 700\n"
     );
     assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
     ledger.append(&Record::Ready(1)).unwrap();
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready kbf-acct-1\n"
+        "made kbf-acct-1 700\nready kbf-acct-1\n"
     );
     let ledger = Ledger::open(&path).unwrap();
     assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Ready));
@@ -322,13 +322,13 @@ fn a_failed_sync_leaves_no_record_in_memory_or_on_disk() {
     let dir = scratch("sync");
     let path = dir.join("accounts");
     let mut ledger = Ledger::open(&path).unwrap();
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     ledger.inject.sync = true;
     assert!(ledger.append(&Record::Ready(1)).is_err());
     assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\n"
+        "made kbf-acct-1 700\n"
     );
     drop(ledger);
     let ledger = Ledger::open(&path).unwrap();
@@ -343,7 +343,7 @@ fn a_failed_cut_back_poisons_the_ledger_until_it_is_reopened() {
     let dir = scratch("poison");
     let path = dir.join("accounts");
     let mut ledger = Ledger::open(&path).unwrap();
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     ledger.inject.write = Some(5);
     ledger.inject.roll_back = true;
     let first = ledger.append(&Record::Ready(1)).unwrap_err().to_string();
@@ -354,13 +354,13 @@ fn a_failed_cut_back_poisons_the_ledger_until_it_is_reopened() {
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready"
+        "made kbf-acct-1 700\nready"
     );
     let mut ledger = Ledger::open(&path).unwrap();
     ledger.append(&Record::Ready(1)).unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "made kbf-acct-1 600\nready kbf-acct-1\n"
+        "made kbf-acct-1 700\nready kbf-acct-1\n"
     );
 }
 
@@ -369,7 +369,7 @@ fn a_failed_cut_back_poisons_the_ledger_until_it_is_reopened() {
 fn a_made_account_may_be_lent_directly_but_only_once() {
     let dir = scratch("made-lent");
     let mut ledger = Ledger::open(&dir.join("accounts")).unwrap();
-    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Made(1, 700)).unwrap();
     ledger.append(&Record::Lent(1, "job-1".to_owned())).unwrap();
     assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Lent));
     assert!(ledger.append(&Record::Lent(1, "job-2".to_owned())).is_err());

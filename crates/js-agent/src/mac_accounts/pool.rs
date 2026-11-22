@@ -1,5 +1,6 @@
 //! The pool: its state, opening it, lending an account, retiring one, filling it.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -62,16 +63,33 @@ fn check_state(state: &Path, owner: Option<u32>) -> Result<(), String> {
 
 impl Pool {
     /// Opens the pool of a Mac: asks whether Full Disk Access is held, opens the ledger in
-    /// `state` (a directory root owns), sweeps what a crash left, and makes accounts until
-    /// `ready` are ready. The accounts take the uids of `slots`, which has no default.
+    /// `state` (a directory root owns), sweeps what a crash or a restart left, and makes
+    /// accounts until `ready` are ready. The accounts take the uids of `slots`, which has no
+    /// default; each ready account holds one uid of them while it waits for a job.
+    ///
+    /// `adopted` is the jobs the agent took back after its restart, still running under their
+    /// supervisors: the account lent to one of them is kept as it is (nothing killed, nothing
+    /// deleted, its uid still held) and [`Pool::retire`] ends it when its job is over. Every
+    /// other lent account belongs to a job that is over, and the sweep deletes it.
     ///
     /// # Errors
     /// [`AccountError::NoFullDiskAccess`] (nothing is made or deleted), a state directory or
     /// ledger that is unusable, an account the sweep could not delete, or an account that
     /// could not be made.
     #[cfg(target_os = "macos")]
-    pub fn open(state: &Path, slots: Slots, ready: usize) -> Result<Self, AccountError> {
-        Self::with_host(state, slots, ready, Arc::new(super::macos::MacHost))
+    pub fn open(
+        state: &Path,
+        slots: Slots,
+        ready: usize,
+        adopted: &BTreeSet<String>,
+    ) -> Result<Self, AccountError> {
+        Self::with_host(
+            state,
+            slots,
+            ready,
+            adopted,
+            Arc::new(super::macos::MacHost),
+        )
     }
 
     /// [`Pool::open`] over `host`, with a Mac's other settings.
@@ -83,9 +101,10 @@ impl Pool {
         state: &Path,
         slots: Slots,
         ready: usize,
+        adopted: &BTreeSet<String>,
         host: Arc<dyn AccountHost>,
     ) -> Result<Self, AccountError> {
-        Self::with_settings(state, Settings::macos(slots, ready), host)
+        Self::with_settings(state, Settings::macos(slots, ready), adopted, host)
     }
 
     /// [`Pool::open`] over `host` with `settings`: how the tests give their own paths and
@@ -97,9 +116,10 @@ impl Pool {
     pub fn with_settings(
         state: &Path,
         settings: Settings,
+        adopted: &BTreeSet<String>,
         host: Arc<dyn AccountHost>,
     ) -> Result<Self, AccountError> {
-        Self::with_os(state, settings, host, Box::new(System))
+        Self::with_os(state, settings, adopted, host, Box::new(System))
     }
 
     /// [`Pool::with_settings`] with the file calls of the removal of a per-user folder's
@@ -110,6 +130,7 @@ impl Pool {
     pub(super) fn with_os(
         state: &Path,
         settings: Settings,
+        adopted: &BTreeSet<String>,
         host: Arc<dyn AccountHost>,
         os: Box<dyn Os + Send + Sync>,
     ) -> Result<Self, AccountError> {
@@ -138,7 +159,7 @@ impl Pool {
             #[cfg(test)]
             before_record: Mutex::new(None),
         };
-        pool.sweep()?;
+        pool.sweep(adopted)?;
         pool.refill()?;
         Ok(pool)
     }

@@ -45,7 +45,10 @@
 //!
 //! A slot is free when it is in the range; no account of the ledger that is not gone has the
 //! uid; no record has the uid and none has the slot's `GeneratedUID`; no live process runs as
-//! the uid; every per-user folder the uid owns two levels down in `/private/var/folders` holds
+//! the uid once the kill rounds of a retirement have ended any that did (with no ledger
+//! account and no record, such a process is nobody's work: macOS starts per-user daemons such
+//! as `distnoted` by itself; one that survives the rounds keeps the slot busy, named by its
+//! pid); every per-user folder the uid owns two levels down in `/private/var/folders` holds
 //! nothing below its top-level directories (and nothing but directories at its top level);
 //! and nothing is owned by the uid in the shared places (`/Users/Shared`, `/private/tmp`,
 //! `/private/var/tmp`, `/private/var/at/jobs`, launchd's per-uid files). An error in looking
@@ -55,8 +58,9 @@
 //!
 //! 1. **Made.** The ledger records `made <name> <uid>` before anything exists; then the slot's
 //!    per-user folders are emptied again (a crash may have left something in them), and the
-//!    home, the record and `ready` follow. A failure after `made` deletes what was made as in
-//!    steps 3 to 6 below, and records `gone` when that is shown, `held` when it is not.
+//!    home, the record and `ready` follow. A failure after `made` ends the uid's processes as
+//!    in step 1 below and deletes what was made as in steps 3 to 6, and records `gone` when
+//!    that is shown, `held` when it is not.
 //! 2. **Lent.** [`Pool::lend`] takes the oldest ready account and records `lent` before it
 //!    returns: an account is lent once, ever. With none ready it makes one on the spot,
 //!    recorded `made` and then `lent`
@@ -76,7 +80,9 @@
 //!       removal is refused has its ACL stripped and is removed again, a directory is made
 //!       searchable before it is entered, and a tree of any depth is moved up and removed in
 //!       passes;
-//!    5. proves it gone: no record by name or uid, no process and no domain, no home, every
+//!    5. proves it gone: no record by name or uid in the directory node it was deleted from
+//!       (a lookup through the system's cache that fails also fails the proof, one that
+//!       still answers for the record does not), no process and no domain, no home, every
 //!       per-user folder of the uid emptied (the folders being there is no fault), nothing in
 //!       the shared places, no IPC object, each looked at again after the deletion (an item
 //!       that cannot be looked at does not hold);
@@ -95,10 +101,13 @@
 //! # Crash points
 //!
 //! The ledger (`<state>/accounts`, see `ledger`) is written before each action and
-//! `fsync`ed. [`Pool::open`] replays it and sweeps: an account `made` and not `ready`, a
-//! `lent` one (its job is over with the process), and a `held` one are deleted as above and
-//! recorded `gone` or `held`; a `ready` one is kept if its record and home are still there,
-//! deleted otherwise; a record named `kbf-acct-*` in the range that the ledger does not know
+//! `fsync`ed. [`Pool::open`] is given the jobs the restarted agent adopted (a job outlives a
+//! restart of the agent under its supervisor) and replays the ledger and sweeps: an account
+//! `lent` to one of those jobs is kept as it is, its uid still held, for [`Pool::retire`] to
+//! end when the job is over (unless its record or its home is gone, when it is deleted); an
+//! account `made` and not `ready`, one `lent` to any other job (that job is over), and a
+//! `held` one are deleted as above and recorded `gone` or `held`; a `ready` one is kept if its
+//! record and home are still there, deleted otherwise; a record named `kbf-acct-*` in the range that the ledger does not know
 //! (a lost ledger) is deleted by name, and if that fails the open fails naming it. Then the
 //! per-user folders of every uid of the range that no live account of the ledger holds are
 //! emptied (a crash between an account's deletion and the emptying of its folders leaves

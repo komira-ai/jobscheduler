@@ -5,10 +5,10 @@
 //! The pool's users are made once and are permanent: the helper never deletes a pool
 //! user's record, its home or a folder the system placed for it (macOS 27 refuses root
 //! all three, with System Integrity Protection on, unless it holds Full Disk Access;
-//! everything can be emptied). A slot is reused by being reset where it is. The release
-//! signs the helper and a privacy profile grants it Full Disk Access
-//! (`full-disk-access` tells whether it holds the grant), but the pool's reset is the same
-//! with and without it: deleting an account per job is the next step
+//! everything can be emptied). A slot is reused by being reset where it is. The privacy
+//! profile grants Full Disk Access to `js-agent`, not to the helper (`full-disk-access`
+//! tells whether the helper holds it), and the pool's reset is the same with and without
+//! it: deleting an account per job is the next step, in the agent
 //! (`docs/design/mac-account-per-job.md`).
 //!
 //! - `pool-create` makes each slot of the pool (`--pool-size`, slot `n` with the uid

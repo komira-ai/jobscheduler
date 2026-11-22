@@ -67,7 +67,7 @@ impl Pool {
 
     /// For at most [`KILL_ROUNDS`] rounds: kills every process of `uid`, boots out its
     /// domains, and looks at the outcome, until no process is left and no domain prints.
-    fn kill_rounds(&self, uid: u32, killed: &mut Vec<i32>) -> Result<(), Failure> {
+    pub(super) fn kill_rounds(&self, uid: u32, killed: &mut Vec<i32>) -> Result<(), Failure> {
         let domains = launchd::domains(uid);
         let mut seen = self.processes(uid)?;
         let mut stayed = Vec::new();

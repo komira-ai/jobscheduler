@@ -1,5 +1,9 @@
 //! A host kept in memory: users, processes, launchd domains and IPC objects, with a counter
 //! clock, a log of the calls made, failures to inject and hooks to run when a call is made.
+//!
+//! The users are the directory's. `account` and `uid_taken` answer as macOS's lookups do
+//! together: the directory, and `getpw*`'s cache, which can keep answering for a deleted
+//! record ([`State::getpw_lingers`]) a counted number of lookups, never by time.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -49,7 +53,7 @@ pub(in super::super) struct State {
     pub(in super::super) pauses: u64,
     /// The calls made, `<op> <argument>`.
     pub(in super::super) calls: Vec<String>,
-    /// Calls that fail: an operation (`kill_all`) or one call (`kill_all 600`).
+    /// Calls that fail: an operation (`kill_all`) or one call (`kill_all 700`).
     pub(in super::super) failing: BTreeSet<String>,
     /// How the grant answers: `None` is held.
     pub(in super::super) grant: Option<io::ErrorKind>,
@@ -62,6 +66,36 @@ pub(in super::super) struct State {
     pub(in super::super) ipcs_exits_nonzero: bool,
     /// How much each operation advances the clock.
     pub(in super::super) cost: BTreeMap<&'static str, u64>,
+    /// How many lookups `getpw*` keeps answering for a record after the directory deleted
+    /// it: each deletion leaves the record in [`State::cached`] for that many.
+    pub(in super::super) getpw_lingers: u32,
+    /// The deleted records `getpw*` still answers for, each with the lookups left.
+    pub(in super::super) cached: BTreeMap<String, (UserRecord, u32)>,
+    /// How many lookups the cache answered for a record the directory no longer has.
+    pub(in super::super) cache_answers: u32,
+}
+
+impl State {
+    /// Whether the cache answers for the deleted record `name` (or, with `name` `None`, for
+    /// one with `uid`): one lookup is spent when it does.
+    fn cached_record(&mut self, name: Option<&str>, uid: u32) -> Option<UserRecord> {
+        let key = self
+            .cached
+            .iter()
+            .find(|(cached, (record, _))| match name {
+                Some(name) => cached.as_str() == name,
+                None => record.uid == uid,
+            })
+            .map(|(cached, _)| cached.clone())?;
+        let (record, left) = self.cached.get_mut(&key)?;
+        let record = *record;
+        *left -= 1;
+        if *left == 0 {
+            self.cached.remove(&key);
+        }
+        self.cache_answers += 1;
+        Some(record)
+    }
 }
 
 type Hook = Arc<Mutex<dyn FnMut() + Send>>;
@@ -199,15 +233,35 @@ impl AccountHost for Fake {
 
     fn account(&self, name: &str) -> io::Result<Option<UserRecord>> {
         let hooks = self.enter("account", name)?;
-        let found = self.state().users.get(name).map(|user| UserRecord {
-            uid: user.uid,
-            gid: user.gid,
-        });
+        let mut state = self.state();
+        let found = match state.users.get(name) {
+            Some(user) => Some(UserRecord {
+                uid: user.uid,
+                gid: user.gid,
+            }),
+            None => state.cached_record(Some(name), 0),
+        };
+        drop(state);
         Self::after(hooks, found)
     }
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {
         let hooks = self.enter("uid_taken", &uid.to_string())?;
+        let mut state = self.state();
+        let taken = state.users.values().any(|user| user.uid == uid)
+            || state.cached_record(None, uid).is_some();
+        drop(state);
+        Self::after(hooks, taken)
+    }
+
+    fn in_directory(&self, name: &str) -> io::Result<bool> {
+        let hooks = self.enter("in_directory", name)?;
+        let found = self.state().users.contains_key(name);
+        Self::after(hooks, found)
+    }
+
+    fn uid_in_directory(&self, uid: u32) -> io::Result<bool> {
+        let hooks = self.enter("uid_in_directory", &uid.to_string())?;
         let taken = self.state().users.values().any(|user| user.uid == uid);
         Self::after(hooks, taken)
     }
@@ -268,8 +322,20 @@ impl AccountHost for Fake {
 
     fn delete_account(&self, name: &str) -> io::Result<bool> {
         let hooks = self.enter("delete_account", name)?;
-        let was = self.state().users.remove(name).is_some();
-        Self::after(hooks, was)
+        let mut state = self.state();
+        let was = state.users.remove(name);
+        let lingers = state.getpw_lingers;
+        if let Some(user) = &was
+            && lingers > 0
+        {
+            let record = UserRecord {
+                uid: user.uid,
+                gid: user.gid,
+            };
+            state.cached.insert(name.to_owned(), (record, lingers));
+        }
+        drop(state);
+        Self::after(hooks, was.is_some())
     }
 
     fn processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {

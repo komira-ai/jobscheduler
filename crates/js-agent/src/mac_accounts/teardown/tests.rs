@@ -53,6 +53,8 @@ fn a_deletion_makes_these_calls_in_this_order() {
         &[
             "command /usr/bin/ipcs -a".to_owned(),
             "delete_account kbf-acct-1".to_owned(),
+            "in_directory kbf-acct-1".to_owned(),
+            format!("uid_in_directory {u}"),
             "account kbf-acct-1".to_owned(),
             format!("uid_taken {u}"),
             format!("processes {u}"),

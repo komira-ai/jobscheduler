@@ -46,26 +46,37 @@ impl Pool {
         Ok(Proof::shown())
     }
 
-    /// No record by `name` and none with `uid`.
+    /// No record by `name` and none with `uid`, in the directory node the record was deleted
+    /// from: that node decides. The other lookups (`getpw*` on macOS) are asked too, and a
+    /// lookup of theirs that fails fails the proof, since an error in looking is never an
+    /// absence. A record they still answer for while the directory has none is not held
+    /// against the deletion, only logged: `getpw*` answers through the system's lookup cache,
+    /// which may keep a record for a while after the directory deleted it, and on the proof
+    /// Mac retirements were held at "a record named ... remains" while the directory listed
+    /// no such user.
     fn gone_record(&self, name: &str, uid: u32) -> Result<(), Failure> {
-        let found = self
-            .host
-            .account(name)
-            .map_err(|why| not_gone(Gone::Record, format!("looking up {name}: {why}")))?;
-        if found.is_some() {
+        let by_name = |why| not_gone(Gone::Record, format!("looking up {name}: {why}"));
+        let by_uid = |why| not_gone(Gone::Record, format!("looking up uid {uid}: {why}"));
+        if self.host.in_directory(name).map_err(by_name)? {
             return Err(not_gone(
                 Gone::Record,
                 format!("a record named {name} remains"),
             ));
         }
-        let taken = self
-            .host
-            .uid_taken(uid)
-            .map_err(|why| not_gone(Gone::Record, format!("looking up uid {uid}: {why}")))?;
-        match taken {
-            true => Err(not_gone(Gone::Record, format!("a record has uid {uid}"))),
-            false => Ok(()),
+        if self.host.uid_in_directory(uid).map_err(by_uid)? {
+            return Err(not_gone(Gone::Record, format!("a record has uid {uid}")));
         }
+        let cached_name = self.host.account(name).map_err(by_name)?.is_some();
+        let cached_uid = self.host.uid_taken(uid).map_err(by_uid)?;
+        // Both lookups are made and judged, whatever the first answered.
+        if cached_name | cached_uid {
+            tracing::info!(
+                account = %name,
+                uid,
+                "the directory has no record of the account; a lookup still answers from its cache"
+            );
+        }
+        Ok(())
     }
 
     /// No process of `uid`, and its launchd domains gone, as the kill rounds judge them.

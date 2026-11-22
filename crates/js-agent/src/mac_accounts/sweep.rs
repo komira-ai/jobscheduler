@@ -1,7 +1,7 @@
 //! What [`Pool::open`] does about what a crash, a restart or a lost ledger left: replays the
-//! ledger and ends every account it does not show gone, then looks for records of the pool
-//! that the ledger does not know, then empties the per-user folders of the slots no account
-//! holds.
+//! ledger, keeps the accounts of the jobs the agent adopted, and ends every other account it
+//! does not show gone; then looks for records of the pool that the ledger does not know; then
+//! empties the per-user folders of the slots no account holds.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -10,33 +10,54 @@ use super::ledger::{State, name, parse_name};
 use super::pool::{Pool, ledger_error};
 use super::{AccountError, PREFIX, Step, folder};
 
-/// Whether the account `name` has its record with `uid` and its home folder in `homes`: a
-/// ready account that has both is as it was made.
-fn intact(pool: &Pool, name: &str, uid: u32, homes: &Path) -> bool {
-    let record = pool.host.account(name);
-    let home = std::fs::symlink_metadata(homes.join(name));
-    matches!(record, Ok(Some(found)) if found.uid == uid) && home.is_ok_and(|meta| meta.is_dir())
+/// Whether the account `name` has its record with `uid` and its home folder in `homes`:
+/// `Ok(true)` when both are there as they were made, `Ok(false)` when either is missing or
+/// is not what was made, and `Err` naming what could not be looked at (which says neither).
+fn intact(pool: &Pool, name: &str, uid: u32, homes: &Path) -> Result<bool, String> {
+    let record = match pool.host.account(name) {
+        Ok(record) => record.is_some_and(|found| found.uid == uid),
+        Err(why) => return Err(format!("looking up its record: {why}")),
+    };
+    let home = homes.join(name);
+    let home = match std::fs::symlink_metadata(&home) {
+        Ok(meta) => meta.is_dir(),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => false,
+        Err(why) => return Err(format!("looking at {}: {why}", home.display())),
+    };
+    Ok(record && home)
 }
 
 impl Pool {
-    /// Replays the ledger: a `ready` account that is still as it was made stays ready;
-    /// every other account that is not gone (`made` and not `ready`, `lent`, `held`) is
-    /// deleted as [`Pool::retire`] does, with no refill, and recorded `gone` or `held`.
-    /// Then each record named `kbf-acct-*` in the range that the ledger does not know (or
-    /// knows as gone) is deleted by name the same way. Then the per-user folders of every uid
-    /// of the range that no live account of the ledger holds are emptied (a crash between an
-    /// account's deletion and the emptying of its folder leaves something in one); a folder
-    /// that cannot be emptied is logged, and its slot is not free until it is.
+    /// Replays the ledger. A `ready` account that is still as it was made stays ready. A
+    /// `lent` account whose job is in `adopted` (a job the restarted agent took back, still
+    /// running) is kept as it is: nothing of it is killed or deleted, and its uid stays held
+    /// until [`Pool::retire`] ends it; when its record or its home is no longer there it is
+    /// logged and deleted like any other, since its job cannot be running without them, and
+    /// when they cannot be looked at it is logged and kept, since a failed look is no proof
+    /// that the job is gone. Every other account that is not gone (`made` and not `ready`,
+    /// `lent` to a job that is over, `held`) is deleted as [`Pool::retire`] does, with no
+    /// refill, and recorded `gone` or `held`. Then each record named `kbf-acct-*` in the
+    /// range that the ledger does not know (or knows as gone) is deleted by name the same
+    /// way. Then the per-user folders of every uid of the range that no live account of the
+    /// ledger holds are emptied (a crash between an account's deletion and the emptying of
+    /// its folder leaves something in one); a folder that cannot be emptied is logged, and
+    /// its slot is not free until it is.
     ///
     /// # Errors
     /// The ledger could not record an outcome, the records could not be listed, or a record
     /// the ledger does not know could not be deleted (an account the ledger does not hold
     /// cannot be recorded held, so the open fails naming it and the next open tries again).
-    pub(super) fn sweep(&self) -> Result<(), AccountError> {
+    pub(super) fn sweep(&self, adopted: &BTreeSet<String>) -> Result<(), AccountError> {
         let todo = self.ledger().live();
         for (n, entry) in todo {
             let name = name(n);
-            if entry.state == State::Ready && intact(self, &name, entry.uid, &self.settings.homes) {
+            let homes = &self.settings.homes;
+            let keep = match entry.state {
+                State::Ready => intact(self, &name, entry.uid, homes) == Ok(true),
+                State::Lent => self.keeps_adopted(n, &name, entry.uid, adopted),
+                State::Made | State::Held | State::Gone => false,
+            };
+            if keep {
                 continue;
             }
             let done = self.teardown(&name, entry.uid, &mut Vec::new());
@@ -102,6 +123,39 @@ impl Pool {
 }
 
 impl Pool {
+    /// Whether the lent account `n`, named `name` with `uid`, is kept at open: its job is one
+    /// of `adopted`, and its record and home are there (or cannot be looked at).
+    fn keeps_adopted(&self, n: u64, name: &str, uid: u32, adopted: &BTreeSet<String>) -> bool {
+        let job = self.ledger().job(n).map(str::to_owned);
+        let Some(job) = job.filter(|job| adopted.contains(job)) else {
+            return false;
+        };
+        match intact(self, name, uid, &self.settings.homes) {
+            Ok(true) => {
+                tracing::info!(account = %name, uid, job = %job, "kept the account of an adopted job");
+                true
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    account = %name,
+                    uid,
+                    job = %job,
+                    "the account of an adopted job has lost its record or its home, so it is deleted"
+                );
+                false
+            }
+            Err(why) => {
+                tracing::warn!(
+                    account = %name,
+                    uid,
+                    job = %job,
+                    "kept the account of an adopted job that could not be looked at: {why}"
+                );
+                true
+            }
+        }
+    }
+
     /// Why `uid` is in use by something the pool does not hold, or `None` when nothing is:
     /// a user record has it, a process runs as it, or one of the two could not be asked.
     fn in_use(&self, uid: u32) -> Option<String> {

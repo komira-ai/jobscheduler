@@ -17,7 +17,7 @@ fn answer(code: Option<i32>, stdout: &str) -> PrintAnswer {
 /// Asserts that a uid's domains are its login session's and its user domain, in that order.
 #[test]
 fn the_domains_of_a_uid_are_its_session_and_its_user_domain() {
-    assert_eq!(domains(601), ["gui/601".to_owned(), "user/601".to_owned()]);
+    assert_eq!(domains(701), ["gui/701".to_owned(), "user/701".to_owned()]);
 }
 
 /// Asserts that a domain that holds nothing is told from one that holds a service or an
@@ -74,24 +74,24 @@ fn every_domain_is_booted_out_and_a_failure_is_returned_with_its_reason() {
     rig.fake
         .state()
         .print
-        .insert("user/601".to_owned(), Print::Stays);
-    let domains = ["gui/601".to_owned(), "user/601".to_owned()];
+        .insert("user/701".to_owned(), Print::Stays);
+    let domains = ["gui/701".to_owned(), "user/701".to_owned()];
     let refused = boot_out(&*rig.fake, &domains);
     assert_eq!(
         refused,
         [(
-            "gui/601".to_owned(),
+            "gui/701".to_owned(),
             "Boot-out failed: 5: Input/output error".to_owned()
         )]
     );
     assert_eq!(
         rig.fake.take_calls(),
-        ["bootout gui/601", "bootout user/601"]
+        ["bootout gui/701", "bootout user/701"]
     );
-    assert!(rig.fake.state().print.is_empty(), "user/601 was booted out");
+    assert!(rig.fake.state().print.is_empty(), "user/701 was booted out");
     let text = rig.log.text();
     assert!(
-        text.contains("launchctl bootout gui/601 (the outcome decides): Boot-out failed"),
+        text.contains("launchctl bootout gui/701 (the outcome decides): Boot-out failed"),
         "{text}"
     );
 }

@@ -22,16 +22,16 @@ fn scratch(name: &str) -> TestDir {
 fn the_record_has_the_attributes_of_a_hidden_account_that_cannot_log_in() {
     let user = NewUser {
         name: "kbf-acct-3".to_owned(),
-        uid: 612,
+        uid: 712,
         gid: 20,
         home: PathBuf::from("/Users/kbf-acct-3"),
-        generated_uid: generated_uid(612),
+        generated_uid: generated_uid(712),
     };
     let attributes = account_attributes(&user);
     assert_eq!(
         attributes,
         [
-            ("dsAttrTypeStandard:UniqueID", "612".to_owned()),
+            ("dsAttrTypeStandard:UniqueID", "712".to_owned()),
             ("dsAttrTypeStandard:PrimaryGroupID", "20".to_owned()),
             (
                 "dsAttrTypeStandard:NFSHomeDirectory",
@@ -56,21 +56,21 @@ fn the_record_has_the_attributes_of_a_hidden_account_that_cannot_log_in() {
 /// and that identifier, which the directory takes only at creation.
 #[test]
 fn a_slots_generated_uid_is_fixed_by_its_uid_and_given_at_creation() {
-    assert_eq!(generated_uid(612), "4B424641-4343-5400-8000-000000000612");
+    assert_eq!(generated_uid(712), "4B424641-4343-5400-8000-000000000712");
     assert_eq!(generated_uid(0), "4B424641-4343-5400-8000-000000000000");
     assert_eq!(
         generated_uid(u32::MAX),
         "4B424641-4343-5400-8000-004294967295"
     );
-    assert_ne!(generated_uid(612), generated_uid(613));
-    let lengths: Vec<usize> = generated_uid(612).split('-').map(str::len).collect();
+    assert_ne!(generated_uid(712), generated_uid(713));
+    let lengths: Vec<usize> = generated_uid(712).split('-').map(str::len).collect();
     assert_eq!(lengths, [8, 4, 4, 4, 12]);
     let user = |name: &str| NewUser {
         name: name.to_owned(),
-        uid: 612,
+        uid: 712,
         gid: 20,
         home: PathBuf::from("/Users").join(name),
-        generated_uid: generated_uid(612),
+        generated_uid: generated_uid(712),
     };
     for name in ["kbf-acct-3", "kbf-acct-9"] {
         assert_eq!(
@@ -79,7 +79,7 @@ fn a_slots_generated_uid_is_fixed_by_its_uid_and_given_at_creation() {
                 ("dsAttrTypeStandard:RecordName", name.to_owned()),
                 (
                     "dsAttrTypeStandard:GeneratedUID",
-                    "4B424641-4343-5400-8000-000000000612".to_owned()
+                    "4B424641-4343-5400-8000-000000000712".to_owned()
                 ),
             ]
         );

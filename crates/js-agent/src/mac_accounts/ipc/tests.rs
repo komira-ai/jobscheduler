@@ -14,10 +14,10 @@ fn only_the_uids_objects_are_listed() {
          q  65536 0x00000001 --rw-------  kbf-acct-3    staff\n\
          Shared Memory:\n\
          m  65537 0x00000002 --rw-------     root    wheel\n\
-         m  65538 0x00000003 --rw-------      601    staff\n\
+         m  65538 0x00000003 --rw-------      701    staff\n\
          m  65541 0x00000006 --rw-------   nobody   nobody kbf-acct-3 staff\n\
          m  65542 0x00000007 --rw-------   nobody   nobody     root  wheel\n\
-         m  bad   0x00000004 --rw-------      601    staff\n\
+         m  bad   0x00000004 --rw-------      701    staff\n\
          m  65540\n\
          Semaphores:\n\
          s  65539 0x00000005 --ra-------  kbf-acct-3    staff\n";
@@ -26,7 +26,7 @@ fn only_the_uids_objects_are_listed() {
         id: id.to_owned(),
     };
     assert_eq!(
-        owned(listing, "kbf-acct-3", 601),
+        owned(listing, "kbf-acct-3", 701),
         [
             object("-q", "65536"),
             object("-m", "65538"),
@@ -34,7 +34,7 @@ fn only_the_uids_objects_are_listed() {
             object("-s", "65539"),
         ]
     );
-    assert!(owned(listing, "kbf-acct-4", 602).is_empty());
+    assert!(owned(listing, "kbf-acct-4", 702).is_empty());
 }
 
 /// Asserts that a uid's objects are removed by kind and id, that nothing is removed or
@@ -43,9 +43,9 @@ fn only_the_uids_objects_are_listed() {
 fn the_uids_objects_are_removed_and_others_are_left() {
     let rig = Rig::new("ipc-remove", 1, 0);
     rig.fake.add_ipc('m', 100, "kbf-acct-3", "kbf-acct-3");
-    rig.fake.add_ipc('s', 101, "602", "602");
+    rig.fake.add_ipc('s', 101, "702", "702");
     rig.fake.add_ipc('q', 102, "root", "root");
-    remove(&*rig.fake, "kbf-acct-3", 601).unwrap();
+    remove(&*rig.fake, "kbf-acct-3", 701).unwrap();
     assert_eq!(
         rig.fake.take_calls(),
         [
@@ -57,7 +57,7 @@ fn the_uids_objects_are_removed_and_others_are_left() {
     let left: Vec<u64> = rig.fake.state().ipc.iter().map(|o| o.id).collect();
     assert_eq!(left, [101, 102]);
 
-    remove(&*rig.fake, "kbf-acct-3", 601).unwrap();
+    remove(&*rig.fake, "kbf-acct-3", 701).unwrap();
     assert_eq!(rig.fake.take_calls(), ["command /usr/bin/ipcs -a"]);
 }
 
@@ -69,10 +69,10 @@ fn an_ipcrm_that_fails_decides_nothing_and_the_listing_decides() {
     let rig = Rig::new("ipc-fail", 1, 0);
     rig.fake.add_ipc('m', 100, "kbf-acct-3", "kbf-acct-3");
     rig.fake.state().ipcrm_fails = true;
-    let why = remove(&*rig.fake, "kbf-acct-3", 601).unwrap_err();
+    let why = remove(&*rig.fake, "kbf-acct-3", 701).unwrap_err();
     assert_eq!(
         why,
-        "IPC objects of uid 601 remain after their removal: -m 100"
+        "IPC objects of uid 701 remain after their removal: -m 100"
     );
     let text = rig.log.text();
     assert!(
@@ -81,10 +81,10 @@ fn an_ipcrm_that_fails_decides_nothing_and_the_listing_decides() {
     );
 
     rig.fake.fail("command /usr/bin/ipcrm -m 100");
-    let why = remove(&*rig.fake, "kbf-acct-3", 601).unwrap_err();
+    let why = remove(&*rig.fake, "kbf-acct-3", 701).unwrap_err();
     assert_eq!(
         why,
-        "IPC objects of uid 601 remain after their removal: -m 100"
+        "IPC objects of uid 701 remain after their removal: -m 100"
     );
     let text = rig.log.text();
     assert!(
@@ -96,17 +96,17 @@ fn an_ipcrm_that_fails_decides_nothing_and_the_listing_decides() {
     rig.fake.state().ipcrm_fails = false;
     rig.fake.state().ipcs_exits_nonzero = true;
     assert_eq!(
-        remove(&*rig.fake, "kbf-acct-3", 601).unwrap_err(),
+        remove(&*rig.fake, "kbf-acct-3", 701).unwrap_err(),
         "ipcs failed: ipcs: kernel is not answering"
     );
     assert_eq!(
-        left(&*rig.fake, "kbf-acct-3", 601).unwrap_err(),
+        left(&*rig.fake, "kbf-acct-3", 701).unwrap_err(),
         "ipcs failed: ipcs: kernel is not answering"
     );
     rig.fake.state().ipcs_exits_nonzero = false;
     rig.fake.fail("command");
     assert_eq!(
-        left(&*rig.fake, "kbf-acct-3", 601).unwrap_err(),
+        left(&*rig.fake, "kbf-acct-3", 701).unwrap_err(),
         "running ipcs: command /usr/bin/ipcs -a failed"
     );
 }

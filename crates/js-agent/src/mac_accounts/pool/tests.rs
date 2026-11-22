@@ -11,7 +11,12 @@ use crate::mac_accounts::{Proof, generated_uid};
 
 /// The text of what an open refused for.
 fn refusal(rig: &Rig, state: &Path) -> String {
-    match Pool::with_settings(state, rig.settings.clone(), rig.fake.clone()) {
+    match Pool::with_settings(
+        state,
+        rig.settings.clone(),
+        &BTreeSet::new(),
+        rig.fake.clone(),
+    ) {
         Ok(_) => panic!("the open was not refused"),
         Err(why) => why.to_string(),
     }
@@ -81,6 +86,7 @@ fn an_open_without_full_disk_access_makes_nothing() {
         &rig.dir.join("state"),
         Slots::new(700, 100).unwrap(),
         2,
+        &BTreeSet::new(),
         rig.fake.clone(),
     );
     assert!(matches!(with_host, Err(AccountError::NoFullDiskAccess)));
@@ -123,9 +129,25 @@ fn the_state_directory_must_be_the_owners_and_closed_to_others() {
         named(&format!("owned by uid {}, not uid {}", me(), me() + 1))
     );
     rig.settings.state_owner = None;
-    assert!(Pool::with_settings(&state, rig.settings.clone(), rig.fake.clone()).is_ok());
+    assert!(
+        Pool::with_settings(
+            &state,
+            rig.settings.clone(),
+            &BTreeSet::new(),
+            rig.fake.clone()
+        )
+        .is_ok()
+    );
     rig.settings.state_owner = Some(me());
-    assert!(Pool::with_settings(&state, rig.settings.clone(), rig.fake.clone()).is_ok());
+    assert!(
+        Pool::with_settings(
+            &state,
+            rig.settings.clone(),
+            &BTreeSet::new(),
+            rig.fake.clone()
+        )
+        .is_ok()
+    );
     assert!(rig.fake.state().users.is_empty());
 }
 
@@ -134,7 +156,7 @@ fn the_state_directory_must_be_the_owners_and_closed_to_others() {
 #[test]
 fn a_ledger_that_cannot_be_read_refuses_the_open() {
     let rig = Rig::new("bad-ledger", 3, 2);
-    rig.write_ledger("made kbf-acct-1 600\nbogus line\n");
+    rig.write_ledger("made kbf-acct-1 700\nbogus line\n");
     let why = rig.refused();
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
     assert_eq!(

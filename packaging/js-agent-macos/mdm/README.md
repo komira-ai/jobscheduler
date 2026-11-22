@@ -1,14 +1,15 @@
 # The privacy profile
 
 `js-agent-full-disk-access.mobileconfig` grants Full Disk Access (the privacy service
-`SystemPolicyAllFiles`) to the root helper of js-agent, `js-mac-session`, and to nothing else.
+`SystemPolicyAllFiles`) to `js-agent` itself, and to nothing else: not the root helper
+`js-mac-session`, which holds no grant.
 It is one `com.apple.TCC.configuration-profile-policy` payload with one entry:
 
 | key | value |
 |---|---|
-| `Identifier` | `/Library/Application Support/js-agent/bin/js-mac-session`, where the package lays the program and updates replace it in place |
+| `Identifier` | `/Library/Application Support/js-agent/bin/js-agent`, where the package lays the program and updates replace it in place |
 | `IdentifierType` | `path` |
-| `CodeRequirement` | the helper's designated requirement: the identifier `com.komira.js-agent.session`, Apple's Developer ID chain and the team `U7RTX4XD3X`, and no code hash, so every release meets it |
+| `CodeRequirement` | the agent's designated requirement: the identifier `com.komira.js-agent`, Apple's Developer ID chain and the team `U7RTX4XD3X`, and no code hash, so every release meets it |
 | `Authorization` | `Allow` |
 | `StaticCode` | `false` |
 
@@ -29,8 +30,8 @@ hand cannot grant it.
    profile, scope System, and assign it to the group of Macs that run js-agent. It needs no
    change per release.
 3. After a release that signs the programs has been installed, the agent reports the capability
-   `full-disk-access` of its host: `granted` when the helper holds the grant. A host that reports
+   `full-disk-access` of its host: `granted` when the agent holds the grant. A host that reports
    anything else refuses native jobs, naming the profile.
 
-To check a Mac by hand, read the helper's log in `/Library/Application Support/js-agent/log/`: the
-helper writes `full disk access: <state>` each time it is asked.
+To check a Mac by hand, read the agent's log in `/Library/Application Support/js-agent/log/`: the
+agent writes `full disk access: <state>` once at each start.

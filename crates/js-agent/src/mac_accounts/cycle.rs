@@ -1,13 +1,16 @@
 //! `js-agent __account-cycle`: the account life cycle once, for proving it on a Mac.
 //!
 //! ```text
-//! js-agent __account-cycle --state <dir> --range <first>-<last> [-- <program> [args...]]
+//! js-agent __account-cycle --state <dir> --range <first>-<last> [--lookups <n>] [-- <program> [args...]]
 //! ```
 //!
 //! A development verb: it makes the pool's one account of the Mac it runs on, runs programs as
 //! that account, retires the account and shows what became of it, so that the life cycle of
 //! [`super`] can be seen working on a real Mac by the signed agent that holds Full Disk Access.
-//! It is removed before any release; no job is run this way.
+//! It runs no job: what it starts as the account are the commands of its own command line,
+//! and nothing of a job (no sandbox profile, no inputs, no outputs). It is removed once the
+//! native runtime has a step of its own that proves an account's life cycle on a Mac, which
+//! replaces it.
 //!
 //! `--range` is the slots' uids ([`super::Slots`], both ends included) and has no default: a
 //! proof on a Mac that an earlier release's accounts fill takes uids beside theirs.
@@ -30,6 +33,14 @@
 //!    were killed and how long the deletion and the refill took;
 //! 6. prints the slot's per-user folder again: emptied, and kept.
 //!
+//! With `--lookups <n>` it also prints the uid's live processes after the loan and after the
+//! commands, and after the retirement `n` rounds, one pause of the host apart, each with the
+//! milliseconds since the first by the host's clock: what the directory answers for the
+//! account's name and uid, what every lookup of the system answers together (on macOS
+//! `getpw*` too, through the system's lookup cache), and the uid's live processes. That shows
+//! how long a lookup still answers for a deleted record, and whether macOS starts a process
+//! for the uid again after it.
+//!
 //! Its statuses ([`status`]): 0 the account was retired and shown gone; 1 it was held (what
 //! stopped it is printed), or a command could not be started; 2 the pool refused to open or
 //! to lend, or the state directory could not be made; 64 the command line is wrong.
@@ -46,7 +57,7 @@ use std::process::ExitCode;
 use super::Slots;
 
 #[cfg(any(target_os = "macos", test))]
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 #[cfg(any(target_os = "macos", test))]
 use std::io;
 #[cfg(any(target_os = "macos", test))]
@@ -80,8 +91,8 @@ pub const LISTED: usize = 20;
 const JOB: &str = "account-cycle";
 
 /// How the command line reads.
-const USAGE: &str =
-    "usage: js-agent __account-cycle --state <dir> --range <first>-<last> [-- <program> [args...]]";
+const USAGE: &str = "usage: js-agent __account-cycle --state <dir> --range <first>-<last> \
+                     [--lookups <n>] [-- <program> [args...]]";
 
 /// The command line after the mode word.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +104,9 @@ pub struct Args {
     /// The uids the pool's slots take: a proof on a Mac whose uids an earlier release's
     /// accounts still fill runs beside them.
     pub range: Slots,
+    /// How many rounds of lookups are printed after the retirement; 0 prints none, and
+    /// none of the processes either.
+    pub lookups: u32,
 }
 
 /// The programs run when none is given: the one that makes the slot's per-user folder, and
@@ -115,14 +129,15 @@ fn default_commands() -> Vec<Vec<String>> {
 }
 
 /// Parses the command line after the mode word: `--state <dir>` and `--range <first>-<last>`
-/// once each, and optionally the one command to run instead of the defaults, as every word
-/// after `--` (or after `--command`).
+/// once each, optionally `--lookups <n>` once, and optionally the one command to run instead
+/// of the defaults, as every word after `--` (or after `--command`).
 ///
 /// # Errors
 /// What is wrong with it, in words.
 pub fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut state = None;
     let mut range = None;
+    let mut lookups = None;
     let mut command: Option<Vec<String>> = None;
     let mut words = args.iter();
     while let Some(word) = words.next() {
@@ -137,6 +152,14 @@ pub fn parse(args: &[OsString]) -> Result<Args, String> {
                 let value = words.next().ok_or("--range needs <first>-<last>")?;
                 if range.replace(slots_of(value)?).is_some() {
                     return Err("--range is given twice".to_owned());
+                }
+            }
+            Some("--lookups") => {
+                let value = words.next().ok_or("--lookups needs a count")?;
+                let count = value.to_str().and_then(|text| text.parse::<u32>().ok());
+                let count = count.ok_or_else(|| format!("--lookups {value:?} is not a count"))?;
+                if lookups.replace(count).is_some() {
+                    return Err("--lookups is given twice".to_owned());
                 }
             }
             Some("--" | "--command") => {
@@ -160,6 +183,7 @@ pub fn parse(args: &[OsString]) -> Result<Args, String> {
         state: state.ok_or("--state is required")?,
         commands: command.map_or_else(default_commands, |command| vec![command]),
         range: range.ok_or("--range is required")?,
+        lookups: lookups.unwrap_or(0),
     })
 }
 
@@ -255,7 +279,10 @@ pub(super) fn drive(
         let state = args.state.display();
         return refused(err, &format!("making the state directory {state}: {why}"));
     }
-    let pool = match Pool::with_settings(&args.state, settings.clone(), host) {
+    // The verb's own pool: no job of an agent was ever lent one of its accounts.
+    let adopted = BTreeSet::new();
+    let pool = match Pool::with_settings(&args.state, settings.clone(), &adopted, Arc::clone(&host))
+    {
         Ok(pool) => pool,
         Err(why) => return refused(err, &why),
     };
@@ -272,6 +299,10 @@ pub(super) fn drive(
         account.name, account.gid, account.generated_uid, lent.made_now
     );
     let _ = writeln!(out, "home: {}", home.display());
+    let watch = args.lookups > 0;
+    if watch {
+        print_processes(out, "after the loan", &*host, uid);
+    }
     let mut started = true;
     for command in &args.commands {
         let _ = writeln!(out, "command: {}", command.join(" "));
@@ -283,13 +314,20 @@ pub(super) fn drive(
             }
         }
     }
+    if watch {
+        print_processes(out, "after the commands", &*host, uid);
+    }
     print_folders(out, "before", &settings, uid);
+    let name = account.name.clone();
     let retired = pool.retire(account);
     match &retired {
         Ok(done) => print_retired(out, done),
         Err(held) => {
             let _ = writeln!(out, "retire: held: {held}");
         }
+    }
+    if watch {
+        print_lookups(out, &*host, &name, uid, args.lookups);
     }
     print_folders(out, "after", &settings, uid);
     match retired.is_ok() && started {
@@ -307,6 +345,49 @@ fn make_state(state: &Path) -> io::Result<()> {
         .recursive(true)
         .mode(0o755)
         .create(state)
+}
+
+/// What `answer` said: its value, or the error.
+#[cfg(any(target_os = "macos", test))]
+fn said<T: std::fmt::Debug>(answer: io::Result<T>) -> String {
+    answer.map_or_else(|why| format!("error: {why}"), |found| format!("{found:?}"))
+}
+
+/// The pids of the live processes of `uid`.
+#[cfg(any(target_os = "macos", test))]
+fn pids(host: &dyn AccountHost, uid: u32) -> io::Result<Vec<i32>> {
+    host.processes(uid)
+        .map(|found| found.iter().map(|process| process.pid).collect())
+}
+
+/// The live processes of `uid`, `when`.
+#[cfg(any(target_os = "macos", test))]
+fn print_processes(out: &mut dyn Write, when: &str, host: &dyn AccountHost, uid: u32) {
+    let _ = writeln!(out, "processes {when}: {}", said(pids(host, uid)));
+}
+
+/// `rounds` rounds (at least one), one pause of the host apart, of what the directory and
+/// every lookup of the system together answer for the account `name` with `uid`, and of the
+/// uid's live processes, each with the milliseconds since the first by the host's clock.
+#[cfg(any(target_os = "macos", test))]
+fn print_lookups(out: &mut dyn Write, host: &dyn AccountHost, name: &str, uid: u32, rounds: u32) {
+    let start = host.now_ms();
+    for round in 1..=rounds {
+        if round > 1 {
+            host.pause();
+        }
+        let at = host.now_ms().saturating_sub(start);
+        let _ = writeln!(
+            out,
+            "lookup {round} at {at} ms: directory name={} uid={}; every lookup name={} uid={}; \
+             processes={}",
+            said(host.in_directory(name)),
+            said(host.uid_in_directory(uid)),
+            said(host.account(name)),
+            said(host.uid_taken(uid)),
+            said(pids(host, uid)),
+        );
+    }
 }
 
 /// What a command printed and how it ended.

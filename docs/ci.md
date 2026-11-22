@@ -102,4 +102,6 @@ before it is queued, not on a merge group, and are not required. `farm.yml`, the
 
 The macOS checks keep their place: the beta stage of `release.yml` on the push to `main`
 (`beta.yml`, `js-agent-macos-pkg.yml` and `macos-probe.yml`), which holds back only the macOS
-archives of a release. A merge group, like a pull request, runs nothing on macOS.
+archives of a release. A merge group, like a pull request, runs nothing on macOS. A change
+whose macOS tests should be seen before it merges is tried by a manual run of `beta.yml` on its
+branch (`gh workflow run beta.yml --ref <branch>`), the same job on the same hosted runner.

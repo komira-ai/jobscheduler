@@ -41,9 +41,16 @@ impl Pool {
 
     /// Why the slot of `uid` is not free; `None` when it is. The first reason found: an
     /// account of the ledger that is not gone, a record with the uid, a record with the
-    /// slot's `GeneratedUID`, a live process, something in the slot's per-user folders below
-    /// their top-level directories, an entry in the shared places. An error in looking is a
-    /// reason.
+    /// slot's `GeneratedUID`, a live process that the kill rounds do not end, something in
+    /// the slot's per-user folders below their top-level directories, an entry in the shared
+    /// places. An error in looking is a reason.
+    ///
+    /// A process of a slot that no account of the ledger holds and that no record has is
+    /// nobody's work: macOS starts per-user daemons (`distnoted`) by itself for a uid whose
+    /// domain was touched. Such a process is ended with the rounds a retirement uses
+    /// ([`Pool::kill_rounds`]), and the slot is busy only when one survives them or they
+    /// cannot look. A slot an account of the ledger holds is never killed here: that is
+    /// [`Pool::retire`]'s.
     fn why_busy(&self, uid: u32) -> Option<String> {
         if let Some(n) = self.ledger().holding(uid) {
             return Some(format!("held by {}", name(n)));
@@ -60,8 +67,14 @@ impl Pool {
         }
         match self.host.processes(uid) {
             Err(why) => return Some(format!("listing its processes: {why}")),
-            Ok(left) if !left.is_empty() => {
-                return Some(format!("{} processes run as it", left.len()));
+            Ok(stray) if !stray.is_empty() => {
+                let mut killed = Vec::new();
+                if let Err(failed) = self.kill_rounds(uid, &mut killed) {
+                    return Some(failed.why);
+                }
+                killed.sort_unstable();
+                killed.dedup();
+                tracing::info!(uid, ?killed, "ended the processes of a free slot");
             }
             Ok(_) => {}
         }
@@ -178,12 +191,17 @@ impl Pool {
         }
     }
 
-    /// Deletes what a failed making left of account `n` (steps 3 to 6 of a deletion: nothing
-    /// of it ever ran), records `gone` when it is shown gone and `held` when it is not, and
-    /// the error that says what failed and how that ended.
+    /// Deletes what a failed making left of account `n`: ends the processes of its uid with
+    /// the kill rounds (no job ran as it, but macOS may have started a per-user daemon for a
+    /// record that existed), then steps 3 to 6 of a deletion; records `gone` when it is shown
+    /// gone and `held` when it is not, and returns the error that says what failed and how
+    /// that ended.
     fn unmake(&self, n: u64, uid: u32, failed: &Failure) -> AccountError {
         let name = name(n);
-        let ended = match self.settle(n, self.cleanup(&name, uid)) {
+        let done = self
+            .kill_rounds(uid, &mut Vec::new())
+            .and_then(|()| self.cleanup(&name, uid));
+        let ended = match self.settle(n, done) {
             Ok(_) => "what was made was deleted and shown gone".to_owned(),
             Err(held) => format!(
                 "deleting what was made did not complete, at {}: {}",

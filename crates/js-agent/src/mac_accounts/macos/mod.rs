@@ -40,6 +40,14 @@ impl AccountHost for MacHost {
         present_in_any(directory::uid_exists(uid), sys::uid_taken(uid))
     }
 
+    fn in_directory(&self, name: &str) -> io::Result<bool> {
+        directory::exists(name)
+    }
+
+    fn uid_in_directory(&self, uid: u32) -> io::Result<bool> {
+        directory::uid_exists(uid)
+    }
+
     fn guid_taken(&self, guid: &str) -> io::Result<bool> {
         directory::guid_exists(guid)
     }
@@ -60,19 +68,8 @@ impl AccountHost for MacHost {
         directory::create(user)
     }
 
-    /// Deletes the record, then flushes the user lookup cache: `getpwnam` answers from a cache
-    /// that keeps a deleted record for a while (measured on macOS 27: the proof's lookup by name
-    /// still found an account the directory no longer held), and the proof reads both sources.
     fn delete_account(&self, name: &str) -> io::Result<bool> {
-        let deleted = directory::delete(name)?;
-        let flushed = sys::run("/usr/bin/dscacheutil", &["-flushcache"])?;
-        if !flushed.success {
-            return Err(io::Error::other(format!(
-                "dscacheutil -flushcache: {}",
-                flushed.stderr.trim()
-            )));
-        }
-        Ok(deleted)
+        directory::delete(name)
     }
 
     fn processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {

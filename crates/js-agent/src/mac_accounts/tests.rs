@@ -67,15 +67,15 @@ fn the_errors_name_what_failed() {
         "making account kbf-acct-4: proof-home: the home exists"
     );
     let free = AccountError::NoFreeUid {
-        range: "600-601".to_owned(),
+        range: "700-701".to_owned(),
         reasons: vec![
-            "600: a user record has it".to_owned(),
-            "601: held by kbf-acct-2".to_owned(),
+            "700: a user record has it".to_owned(),
+            "701: held by kbf-acct-2".to_owned(),
         ],
     };
     assert_eq!(
         free.to_string(),
-        "no free uid in 600-601: 600: a user record has it; 601: held by kbf-acct-2"
+        "no free uid in 700-701: 700: a user record has it; 701: held by kbf-acct-2"
     );
     let host = AccountError::Host {
         what: "listing the accounts",
@@ -85,15 +85,15 @@ fn the_errors_name_what_failed() {
     let held = Held {
         account: Account {
             name: "kbf-acct-4".to_owned(),
-            uid: 604,
+            uid: 704,
             gid: 20,
-            generated_uid: super::generated_uid(604),
+            generated_uid: super::generated_uid(704),
         },
         step: Step::Folder,
         why: "stuck".to_owned(),
     };
     assert_eq!(
         held.to_string(),
-        "account kbf-acct-4 (uid 604) is held at folder: stuck"
+        "account kbf-acct-4 (uid 704) is held at folder: stuck"
     );
 }

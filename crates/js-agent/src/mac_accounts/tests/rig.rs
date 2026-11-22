@@ -1,5 +1,6 @@
 //! A pool over a fake host and a scratch directory of its own.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -122,17 +123,31 @@ impl Rig {
         Pool::with_os(
             &self.dir.join("state"),
             self.settings.clone(),
+            &BTreeSet::new(),
             self.fake.clone(),
             Box::new(os.clone()),
         )
         .unwrap_or_else(|why| panic!("open: {why}"))
     }
 
-    /// Opening the pool, whatever came of it.
+    /// Opening the pool, whatever came of it, by an agent that adopted no job.
     pub(in super::super) fn try_open(&self) -> Result<Pool, AccountError> {
+        self.try_open_adopting(&[])
+    }
+
+    /// The pool, opened over the rig by an agent that adopted the jobs `jobs` at its start.
+    pub(in super::super) fn open_adopting(&self, jobs: &[&str]) -> Pool {
+        self.try_open_adopting(jobs)
+            .unwrap_or_else(|why| panic!("open: {why}"))
+    }
+
+    /// Opening the pool by an agent that adopted the jobs `jobs`, whatever came of it.
+    fn try_open_adopting(&self, jobs: &[&str]) -> Result<Pool, AccountError> {
+        let adopted: BTreeSet<String> = jobs.iter().map(|job| (*job).to_owned()).collect();
         Pool::with_settings(
             &self.dir.join("state"),
             self.settings.clone(),
+            &adopted,
             self.fake.clone(),
         )
     }
