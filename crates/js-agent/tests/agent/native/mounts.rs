@@ -28,6 +28,7 @@ fn rig(name: &str) -> Rig {
             config.mount_roots.push(MountRoot {
                 path,
                 read_only: root == "ro",
+                trees: false,
             });
         }
     })
@@ -186,8 +187,9 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
 
 /// Asserts the refusals made from the text of a start, with no I/O, by code and by exact
 /// detail: a layer, a copy-on-write mount, a remapped host port, a target that is `/work`,
-/// outside it or below another mount's (in any case), and more mounts than the profile lists;
-/// and that what a Mac gives is admitted: a host port at its own number (equal, or its job
+/// outside it or below another mount's (in any case), a provider's tree mounted read-write,
+/// and more mounts than the profile lists; and that what a Mac gives is admitted: a
+/// provider's tree mounted read-only, a host port at its own number (equal, or its job
 /// port left out) is not refused here (the lifecycle's host-port admission refuses it, as this
 /// runtime offers none), and mounts at siblings and a nested directory. Catches a mount that
 /// would be linked over the working directory or inside another mount's host directory, a
@@ -218,7 +220,24 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
         )
     };
     let many: Vec<JobMount> = (0..65).map(|i| ro(&format!("/work/m{i}"))).collect();
+    let tree = |mode| JobMount {
+        source: MountSource::Provider {
+            provider: "tierstore".to_owned(),
+            reference: "cas/l/ab".to_owned(),
+        },
+        ..mount(&dir, "/work/.kbf-tree", mode, true)
+    };
     let cases: Vec<(JobFs, Vec<HostPort>, Result<(), NativeRefusal>)> = vec![
+        (fs_of(vec![tree(MountMode::ReadOnly)]), vec![], Ok(())),
+        (
+            fs_of(vec![tree(MountMode::ReadWrite)]),
+            vec![],
+            Err(refusal_of(
+                refusal::INPUT_NOT_ALLOWED,
+                "/work/.kbf-tree: a provider's tree is shared by every native job that names \
+                 it, so a native job mounts it read-only only",
+            )),
+        ),
         (
             layered,
             vec![],
@@ -288,9 +307,10 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
 /// is not there and one that is a file (`input-unavailable`), a link inside a root that leads
 /// outside every root and a read-write mount that resolves beneath the read-only root
 /// (`input-not-allowed`: the lifecycle's own check reads the text of the path only), a mount
-/// of a provider, a path the profile cannot name (`invalid-mount`) and a bad target. The first
-/// refusal wins and no plan is kept: a start after it makes no link. Catches a link that gets
-/// a job out of the roots, and a read-write grant over a read-only root.
+/// of a provider that has not answered, a path the profile cannot name (`invalid-mount`) and
+/// a bad target. The first refusal wins and no plan is kept: a start after it makes no link.
+/// Catches a link that gets a job out of the roots, and a read-write grant over a read-only
+/// root.
 #[test]
 fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
     let mut rig = rig("mounts-resolve");
@@ -358,7 +378,8 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
             provider,
             refusal_of(
                 refusal::INPUT_NOT_ALLOWED,
-                "/work/p: a Mac is given no mount provider",
+                "/work/p: a provider's tree is looked up once the provider has answered its \
+                 directory",
             ),
         ),
         (
@@ -500,6 +521,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let roots = vec![MountRoot {
         path: root.clone(),
         read_only: true,
+        trees: false,
     }];
     let settings = settings.with_mount_roots(roots.clone()).unwrap();
     let config = settings.config();
@@ -514,6 +536,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let bad = vec![MountRoot {
         path: PathBuf::from("/tmp/root"),
         read_only: false,
+        trees: false,
     }];
     let why = settings.with_mount_roots(bad).unwrap_err();
     assert_eq!(

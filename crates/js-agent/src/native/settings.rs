@@ -233,14 +233,21 @@ impl NativeSettings {
     }
 
     /// The same settings with `roots` (`--mount-root`, `--mount-root-ro`) as the roots a
-    /// job's mounts lie beneath, and each of them a read deny of every run: a run reads
-    /// only the mounts it was given, which its profile grants back.
+    /// job's mounts lie beneath, and each of them but the trees root a read deny of every run
+    /// ([`crate::native_fs::denied_roots`]): a run reads only the mounts it was given, which
+    /// its profile grants back. The trees root is left out: the profile denies reads below it
+    /// and grants back the run's own trees before its read denies, which a later deny of the
+    /// root would hide.
     ///
     /// # Errors
     ///
     /// A root the profile cannot name.
     pub fn with_mount_roots(mut self, roots: Vec<MountRoot>) -> Result<Self, String> {
         for root in &roots {
+            AbsPath::new(&root.path)
+                .map_err(|why| format!("--mount-root: {}: {why}", root.path.display()))?;
+        }
+        for root in crate::native_fs::denied_roots(&roots) {
             let denied = AbsPath::new(&root.path)
                 .map_err(|why| format!("--mount-root: {}: {why}", root.path.display()))?;
             if !self.config.read_denies.contains(&denied) {

@@ -77,23 +77,24 @@
 //!   [`crate::fuse_env`]); a flag whose probe fails is a warning naming what is missing and
 //!   reports neither. A server sends a start with `fuse` only to a host that reports
 //!   `fuse-jobs`. An operator cannot set either.
-//! - `mount-provider.<name>` is `true` for each node-local mount provider a crun agent was
-//!   given (`--mount-provider`), where the agent reports `layered-rootfs` (a provider's tree
-//!   is a layer or a mount of the job). A server sends a job that names a provider only to a
+//! - `mount-provider.<name>` is `true` for each node-local mount provider the agent was
+//!   given (`--mount-provider`), where it reports `layered-rootfs` (a provider's tree is a
+//!   layer or a mount of the job): a crun agent whose kernel has the calls, and a native
+//!   agent, which takes a provider's tree as a read-only mount only. A server sends a job that names a provider only to a
 //!   host that reports it. An operator cannot set it (`js_caps::is_mount_provider_key`).
 
 use js_agent_wire::{
     DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, Hello, LOAD_ADMISSION_CAPABILITY,
     PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
-use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES};
+use js_caps::{FLAG_SET, LAYERED_ROOTFS, RUN_FILES, mount_provider_key};
+
+use crate::lifecycle::MountProviders;
 
 #[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
-pub(crate) use container::{
-    ToolkitHook, report, report_fuse, report_host_jobs, report_mount_providers,
-};
+pub(crate) use container::{ToolkitHook, report, report_fuse, report_host_jobs};
 
 /// Says that the agent takes the job-keyed start and stop, that it fences them (it refuses a
 /// start whose fence it retired and stops its jobs after a silence), and that it beats again
@@ -128,6 +129,21 @@ pub(crate) fn report_layered(hello: &mut Hello, layered: bool) {
         hello
             .capabilities
             .insert(LAYERED_ROOTFS.to_owned(), FLAG_SET.to_owned());
+    }
+}
+
+/// Puts `mount-provider.<name>` into `hello` for each provider the agent was given
+/// (`--mount-provider`), where it reports `layered-rootfs` (`layered`: the crun runtime when
+/// the kernel has the calls, the native runtime always): a provider's tree is a layer or a
+/// mount of the job, which a host that gives neither cannot give, so a server never places a
+/// job that names the provider there.
+pub(crate) fn report_mount_providers(hello: &mut Hello, providers: &MountProviders, layered: bool) {
+    if layered {
+        for (name, _, _) in providers.sockets() {
+            hello
+                .capabilities
+                .insert(mount_provider_key(name), FLAG_SET.to_owned());
+        }
     }
 }
 

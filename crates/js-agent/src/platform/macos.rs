@@ -19,6 +19,7 @@
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids whose egress the anchor limits; both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
+//! | `--native-trees-root <path>` | (macOS build only) the mount point under which the `--mount-provider` serves every job's trees (tierstore's one NFS mount of the Mac); must be a `--mount-root-ro` that no `--mount-root` names, and needs `--mount-provider`; it is the one mount root that is not a read deny of every run: a run's profile denies reads below it and grants back the run's own trees; a job's mount below it must be read-only and `no_exec` (`input-not-allowed`) |
 //! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS build only; needs `--vm-store` and `--native-accounts` |
 //! | `--vm-store <dir>` | (macOS build only) the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | (macOS build only) a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-accounts` |
@@ -39,7 +40,9 @@ use crate::cli_runtime::Settings;
 use crate::contract;
 use crate::lifecycle::CheckHook;
 use crate::lifecycle::NoChecks;
-use crate::lifecycle::{Local, NATIVE_JOURNAL, Runtime, StateRoot, scratch_volume};
+use crate::lifecycle::{
+    Local, MountProviders, NATIVE_JOURNAL, Runtime, StateRoot, UserNames, scratch_volume,
+};
 use crate::mac_supervisor::{Launcher, SystemLauncher};
 use crate::native::Ceiling;
 use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags};
@@ -158,6 +161,14 @@ pub struct Flags {
     /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
     #[arg(long, value_name = "PATH")]
     pub native_pfctl: Option<PathBuf>,
+    /// The mount point under which the `--mount-provider` serves every job's trees (tierstore's
+    /// one NFS mount of the Mac). It must be a `--mount-root-ro` that no `--mount-root` names,
+    /// and needs a `--mount-provider`. It is the one mount root that is not a read deny of
+    /// every run: a run's profile denies reads below it and grants back the run's own trees.
+    /// A job's mount below it is one of its trees, mounted read-only and `no_exec`, or the
+    /// start is refused (`input-not-allowed`).
+    #[arg(long, value_name = "PATH")]
+    pub native_trees_root: Option<PathBuf>,
     /// Turns the VM backend on (macOS build only, beside `--native-accounts`): the
     /// absolute path of the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A
     /// VM start then runs in a fresh VM cloned from the base image and destroyed when it
@@ -176,7 +187,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 17] {
+    pub fn given(&self) -> [(&'static str, bool); 18] {
         [
             ("--native-accounts", self.native_accounts.is_some()),
             (
@@ -202,6 +213,7 @@ impl Flags {
             ("--native-pf-anchor", self.native_pf_anchor.is_some()),
             ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
             ("--native-pfctl", self.native_pfctl.is_some()),
+            ("--native-trees-root", self.native_trees_root.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
         ]
@@ -320,6 +332,7 @@ pub(crate) fn open(
     let given = os
         .given()
         .into_iter()
+        .chain(cli.providers.given())
         .find_map(|(flag, given)| given.then_some(flag));
     if cli.no_jobs {
         return match given {
@@ -406,37 +419,64 @@ pub(crate) struct Jobs {
     pub(crate) allow_host_jobs: bool,
     /// No FUSE device: only the crun runtime gives it.
     pub(crate) allow_fuse_jobs: bool,
+    /// The mount providers (`--mount-provider`): a job takes a provider's tree as a
+    /// read-only mount only.
+    providers: MountProviders,
 }
 
-/// The job flags of a macOS agent: nothing is checked until the roots are known
-/// ([`Jobs::finish`]). A macOS agent has no crun settings (`start`) and
-/// no egress, settle or taint re-check flags; it keeps the mount roots, which become read
-/// denies of every run and the roots a job's mounts lie beneath.
+/// The job flags of a macOS agent: the mount roots, which become read denies of every run
+/// (but the trees root, `--native-trees-root`, checked by [`crate::native_fs::trees_root`])
+/// and the roots a job's mounts lie beneath, and the mount providers, a user named by name
+/// looked up in the directory service. The native settings are checked once the roots are known
+/// ([`Jobs::finish`]). A macOS agent has no crun settings (`start`) and no egress, settle or
+/// taint re-check flags.
 ///
 /// # Errors
 ///
-/// None; the signature is the Linux build's.
+/// The text names the flag at fault.
 pub(crate) fn jobs(
-    _cli: &Cli,
+    cli: &Cli,
     _start: Option<Settings>,
     mounts: &crate::lifecycle::MountRoots,
 ) -> Result<Jobs, String> {
+    let flags = &cli.providers;
+    let providers = MountProviders::from_flags(
+        &flags.mount_providers,
+        &flags.mount_provider_users,
+        flags.mount_provider_wait,
+        UserNames::Directory(&uid_of_name),
+    )?;
+    let trees = crate::native_fs::trees_root(
+        cli.os.native_trees_root.as_deref(),
+        mounts,
+        !flags.mount_providers.is_empty(),
+    )?;
     Ok(Jobs {
         native: None,
-        mounts: crate::native::roots_of(mounts),
+        mounts: crate::native::roots_of(mounts, trees.as_deref()),
         layout: crate::lifecycle::DirLayout::Private,
         egress: crate::egress::Config::default(),
         settle: crate::lifecycle::DEFAULT_SETTLE,
         taint_recheck: crate::lifecycle::taint::DEFAULT_TAINT_RECHECK,
         allow_host_jobs: false,
         allow_fuse_jobs: false,
+        providers,
     })
 }
 
+/// The uid of the user `name` in the directory service (`getpwnam_r`): a Mac's service
+/// accounts, such as a provider's, are not in `/etc/passwd`, and their uids differ from Mac to
+/// Mac.
+fn uid_of_name(name: &str) -> std::io::Result<Option<u32>> {
+    use js_mac_session::helper::Host as _;
+    let account = js_mac_session::macos::MacHost.account(name)?;
+    Ok(account.map(|account| account.uid))
+}
+
 impl Jobs {
-    /// The mount providers the flags name: none, a macOS build has no such flag.
-    pub(crate) fn providers(&self) -> crate::lifecycle::MountProviders {
-        crate::lifecycle::MountProviders::default()
+    /// The mount providers the flags name.
+    pub(crate) fn providers(&self) -> MountProviders {
+        self.providers.clone()
     }
 
     /// The native settings of `cli`'s flags, checked: `denied` are the agent's own roots and
@@ -583,6 +623,7 @@ pub(crate) fn report(
         local.files.is_some(),
         config.network,
         config.full_disk_access,
+        &local.providers,
     );
     if local.vm.is_some() {
         crate::vm::report(hello);
@@ -676,7 +717,8 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// `open`), with no `egress-ports`, since a Mac forwards no port, `full-disk-access` (the state
 /// the agent found at start: [`native::grant::report`]), and `log-upload`, since the
 /// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
-/// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
+/// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]),
+/// and `mount-provider.<name>` for each of `providers`. The hello is sent only after
 /// the job half has started, which ran the runtime's self-test, so no hello names a mode the
 /// agent cannot serve. Returns the warnings the operator should read: none.
 fn report_native(
@@ -684,6 +726,7 @@ fn report_native(
     run_files: bool,
     ceiling: Ceiling,
     full_disk_access: FullDiskAccess,
+    providers: &MountProviders,
 ) -> Vec<String> {
     // `sandbox-exec` is the wire's name of "a program under a Seatbelt profile on a Mac":
     // the profile is applied in the job's own process by the supervisor now, and no
@@ -698,6 +741,7 @@ fn report_native(
         .insert(LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
     contract::report_native_jobs(hello);
     native::grant::report(&mut hello.capabilities, full_disk_access);
+    contract::report_mount_providers(hello, providers, true);
     ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
 }
@@ -709,7 +753,9 @@ mod tests {
     use js_agent_wire::{HeldRun, Hello, NetworkCeiling, Phase, ProtocolRange, WireShape};
     use js_caps::{EXEC, FLAG_SET};
 
-    use super::{Ceiling, FullDiskAccess, LOG_UPLOAD_CAPABILITY, report_native};
+    use super::{
+        Ceiling, FullDiskAccess, LOG_UPLOAD_CAPABILITY, MountProviders, UserNames, report_native,
+    };
 
     /// A hello of a host with no capabilities but its os.
     fn hello() -> Hello {
@@ -746,7 +792,17 @@ mod tests {
     #[test]
     fn a_native_agent_reports_log_upload_the_job_keys_and_the_dispatch_poll() {
         let mut native = hello();
-        assert!(report_native(&mut native, true, Ceiling::Off, FullDiskAccess::Granted).is_empty());
+        let none = MountProviders::default();
+        assert!(
+            report_native(
+                &mut native,
+                true,
+                Ceiling::Off,
+                FullDiskAccess::Granted,
+                &none
+            )
+            .is_empty()
+        );
         let flag = |key: &str| native.capabilities.get(key).cloned();
         assert_eq!(flag(LOG_UPLOAD_CAPABILITY).as_deref(), Some(FLAG_SET));
         assert_eq!(
@@ -770,6 +826,45 @@ mod tests {
             Some(FLAG_SET)
         );
         assert_eq!(flag(js_caps::LAYERED_ROOTFS).as_deref(), Some(FLAG_SET));
+        assert!(
+            !native
+                .capabilities
+                .keys()
+                .any(|key| key.starts_with("mount-provider.")),
+            "{native:?}"
+        );
+        assert_eq!(native.validate(), Ok(()));
+    }
+
+    /// Asserts that a native agent's hello reports `mount-provider.<name>` for each provider
+    /// it was given, beside `layered-rootfs`, and still validates. Catches a Mac given
+    /// tierstore that a server never places a provider's job on.
+    #[test]
+    fn a_native_hello_reports_each_provider_it_was_given() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "native-hello-providers");
+        let given = [("tierstore".to_owned(), dir.path().join("provider.sock"))];
+        let none = |_: &str| Ok(None);
+        let providers =
+            MountProviders::from_flags(&given, &[], None, UserNames::Directory(&none)).unwrap();
+        let mut native = hello();
+        assert!(
+            report_native(
+                &mut native,
+                false,
+                Ceiling::Off,
+                FullDiskAccess::Granted,
+                &providers
+            )
+            .is_empty()
+        );
+        let named: Vec<&String> = native
+            .capabilities
+            .keys()
+            .filter(|key| key.starts_with("mount-provider."))
+            .collect();
+        assert_eq!(named, ["mount-provider.tierstore"]);
+        assert_eq!(native.capabilities["mount-provider.tierstore"], FLAG_SET);
+        assert_eq!(native.capabilities[js_caps::LAYERED_ROOTFS], FLAG_SET);
         assert_eq!(native.validate(), Ok(()));
     }
 
@@ -788,7 +883,11 @@ mod tests {
         ];
         for (ceiling, level) in table {
             let mut hello = hello();
-            assert!(report_native(&mut hello, false, ceiling, FullDiskAccess::Granted).is_empty());
+            let none = MountProviders::default();
+            assert!(
+                report_native(&mut hello, false, ceiling, FullDiskAccess::Granted, &none)
+                    .is_empty()
+            );
             assert_eq!(hello.capabilities[EXEC], "sandbox-exec", "{ceiling}");
             assert_eq!(hello.capabilities["egress"], level.name(), "{ceiling}");
             assert!(
@@ -813,7 +912,16 @@ mod tests {
             (FullDiskAccess::Undetermined, "undetermined"),
         ] {
             let mut hello = hello();
-            assert!(report_native(&mut hello, false, Ceiling::Off, state).is_empty());
+            assert!(
+                report_native(
+                    &mut hello,
+                    false,
+                    Ceiling::Off,
+                    state,
+                    &MountProviders::default()
+                )
+                .is_empty()
+            );
             assert_eq!(hello.capabilities[js_caps::FULL_DISK_ACCESS], text);
             assert_eq!(hello.validate(), Ok(()), "{text}");
         }
