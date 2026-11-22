@@ -790,9 +790,9 @@ kept off the lifecycle worker, and what the bound means.
 ## 5. The agent on macOS
 
 Built for `READ_ONLY` and `READ_WRITE` mounts (`crates/js-agent/src/native/mounts.rs`, the `MountGrant` of `crates/js-mac-pool/src/seatbelt`): the links of 5.2, the profile items of 5.4, the refusals of 5.1, and the hello's `per-job`, `start-fence`, `held-beat` and `layered-rootfs`. Not built: copy-on-write mounts, mount providers, host sockets and the native runtime's `prepare` (the lookups here are metadata calls answered at once); a `COPY_ON_WRITE` mount is refused `rootfs-unsupported-here` and a provider's source `input-not-allowed` until they are.
-How a Mac gives a job a provider's tree is settled in `docs/design/mac-input-trees.md`, whose step 1 builds it: the link
-of 5.2 to a directory the provider has written whole on the Mac's local disk, since macOS refuses reads of a network
-volume to the programs a job runs. How a Mac would give a copy-on-write mount (13, Q1) is open for the owner: that
+How a Mac gives a job a provider's tree is proposed in `docs/design/mac-input-trees.md`, for the owner's decision (its
+D1 and D2): the link of 5.2 to a directory the provider has written whole on the Mac's local disk, since macOS refuses
+reads of a network volume to the programs a job runs. That document's step 1 builds it while the owner decides. How a Mac would give a copy-on-write mount (13, Q1) is open for the owner: that
 document recommends a private copy the agent makes in the run's home (its D5). This section fixes
 what the Mac agent does with each field of the same `JobStartSpec`, the Seatbelt view, and the three candidates 5.3
 compared. The wire and the server of sections 2 and 3 do not change.
@@ -803,7 +803,7 @@ compared. The wire and the server of sections 2 and 3 do not change.
 |---|---|
 | `layers` | refused `rootfs-unsupported-here`; placement never sends them (2.6: they require `exec=container`). A native job runs in its own directory of the host's file system; there is no root for layers to replace, under any of the mechanisms of 5.3. |
 | `mounts`, `COPY_ON_WRITE`, target `/work` or below it | refused `rootfs-unsupported-here`; if the owner takes `mac-input-trees.md` D5, a private copy of the tree in the run's `exec/` (its section 3) |
-| `mounts`, a provider's source | `READ_ONLY`: the link of 5.2 to the directory the provider answers (`mac-input-trees.md` 2.1 and section 5), being built in its step 1; until then refused `input-not-allowed`. `READ_WRITE`: refused `input-not-allowed` |
+| `mounts`, a provider's source | `READ_ONLY`: the link of 5.2 to the directory the provider answers (`mac-input-trees.md` 2.1 and section 5), proposed (its D1 and D2) and being built in its step 1; until then refused `input-not-allowed`. `READ_WRITE`: refused `input-not-allowed` |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2); built. A target below another mount's target is refused `mount-target-unsupported-here` (its link would be made inside the host directory the first points at), except, not built, below a `COPY_ON_WRITE` target, whose copy is a directory of the home (`mac-input-trees.md` 3.1) |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target exactly `/work` | refused `mount-target-unsupported-here`: the run's working directory is a directory of the run's home, which a link cannot replace |
 | `mounts`, any target outside `/work` | refused `mount-target-unsupported-here` |
@@ -831,8 +831,9 @@ the copy of each copy-on-write mount on a pool off the worker.
 Independent of 5.3:
 
 - **`READ_ONLY`**: a symbolic link `exec/<rest>` to the canonical host path, made by the agent before the job's first
-  process (tree-inputs.md 4.3 designed the same for its trees). Built for host paths. Not built: a provider's source,
-  whose tree on a Mac the provider writes whole on the local disk, not read lazily (`mac-input-trees.md` 2.1). The link is in the run's read-only list (`IN_i`), so the job cannot replace it; writes through it land outside
+  process (tree-inputs.md 4.3 designed the same for its trees). Built for host paths. Not built, and proposed
+  (`mac-input-trees.md` D1 and D2): a provider's source, whose tree on a Mac the provider writes whole on the local
+  disk, not read lazily. The link is in the run's read-only list (`IN_i`), so the job cannot replace it; writes through it land outside
   the run's home, where the profile's head denies them. A working directory at or below the link is refused
   `cwd-in-tree` (an existing code), since the working-directory check (`crates/js-agent/src/native/cwd.rs`) refuses a
   link out of `exec/`.
@@ -1268,7 +1269,7 @@ One subject per pull request, in this order; each names its tests from section 1
    adoption. The listener binds the job port and the forwarder connects to the host port, which differ only in the
    number each uses.
 7. **macOS** (`js-agent`, `js-mac-pool`): the links, the profile items of 5.4 and the refusals are built for `READ_ONLY`
-   and `READ_WRITE` mounts. Provider mounts are being built as step 1 of `mac-input-trees.md`. The copy of a
+   and `READ_WRITE` mounts. Provider mounts are proposed in `mac-input-trees.md` (D1, D2) and being built as its step 1. The copy of a
    copy-on-write mount, if the owner takes its D5, is a build item of its section 10.
 8. **An end-to-end run on one Linux node** with a FUSE file system as a layer's and a mount's source, a registry on
    `127.0.0.1`, and a service on a host port: the job reads lazily, writes copy up, the upload reaches the service, the
@@ -1302,7 +1303,8 @@ server and the agent, after items 2 to 6, with its own detected capability, its 
 
 ## 12. Decisions
 
-Each is decided here; the owner may overturn any.
+Each is decided here, and the owner may overturn any, except that LR10's provider tree and its copy-on-write are
+proposals (`mac-input-trees.md` D1, D2 and D5).
 
 - **LR1. The operator's allow-list of host paths is the existing mount-root table, read as prefixes.** A second list
   would be a second way to say the same thing; the table already has the canonicalisation and its tests, and only the
@@ -1327,9 +1329,10 @@ Each is decided here; the owner may overturn any.
 - **LR9. A host port is a message of a host port, a job port and a protocol**, named as `PortForward` names its ports.
   The job port defaults to the host port, which is all macOS can offer (5.4), so a job that gives none runs on both
   platforms; one that gives its own runs only in a container (2.6). The protocol is TCP now; UDP takes the next value.
-- **LR10. On macOS a read-only or read-write mount is a link, whatever its source; a copy-on-write mount is refused
-  until the owner decides Q1; no source is on a network volume** (5.3, `mac-input-trees.md`). The link to a provider's
-  tree is being built in that document's step 1. For copy-on-write it recommends a private copy the agent makes in the
+- **LR10. On macOS a read-only or read-write mount is a link; a copy-on-write mount is refused until the owner decides
+  Q1.** For a provider's source, the link to a tree the provider writes on the local disk, with no source on a network
+  volume, is proposed, not decided here: see `mac-input-trees.md` D1 and D2. It is being built in that document's step 1
+  while the owner decides. For copy-on-write, `mac-input-trees.md` recommends a private copy the agent makes in the
   run's home, and rejects union views and per-file links. Whichever the owner takes realises the same `COPY_ON_WRITE`
   mode, so the spec does not change.
 - **LR11. The agent checks a failed job's host paths once after it ends**, and nothing while it runs (section 8).
@@ -1375,8 +1378,8 @@ Each is decided here; the owner may overturn any.
 - **Q1. Open for the owner (`docs/design/mac-input-trees.md` D5).** How a copy-on-write mount is made on macOS. The
   recommendation is candidate (b), one clone of the whole tree into the job's own account's home. Until the owner
   decides, a Mac refuses copy-on-write.
-  - A provider's tree on a Mac is written whole on the local disk, not read through a network mount. This is built in
-    that document's step 1, read-only.
+  - A provider's tree on a Mac is written whole on the local disk, not read through a network mount. That is proposed
+    (its D1 and D2), and it is being built, read-only, in that document's step 1.
   - A stand-in measured about 6 s to write and 3.5 to 3.9 s to copy a warm tree of 46,362 files.
   - Past the bound of that document's section 11 (30 s), the recommendation would change. The real programs are
     measured in its build item 6.

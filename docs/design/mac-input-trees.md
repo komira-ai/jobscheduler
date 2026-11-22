@@ -1,10 +1,16 @@
 # Input trees on a Mac: provider mounts and copy-on-write mounts
 
-Status: **step 1 (read-only whole trees) is being built; the later steps (copy-on-write, laziness) are open for the
-owner's decision.** This document answers question Q1 of `docs/design/job-rootfs.md` (section 13), how a native macOS
-job could get a `COPY_ON_WRITE` mount, with a recommendation the owner has not yet decided. It also settles how the
-macOS agent takes a mount provider's tree at all, which step 1 builds. The wire, the proto, the server and placement do
-not change (section 6).
+Status: **proposed; every decision in it awaits the owner (D1 to D5).**
+
+- **Step 1 (read-only whole trees) is being built.** It rests on two of those proposals: D1's answer (i), that a job's
+  start waits for the whole tree, and D2, that the provider writes the tree on the local disk. Both await the owner,
+  like the rest.
+- **The later steps (copy-on-write, D5; the trees' space, D3) are proposals only.**
+
+This document answers question Q1 of `docs/design/job-rootfs.md` (section 13), how a native macOS job could get a
+`COPY_ON_WRITE` mount, with a recommendation the owner has not yet decided. It also proposes how the macOS agent takes
+a mount provider's tree at all, which step 1 builds. The wire, the proto, the server and placement do not change
+(section 6).
 
 ## The rulings, and what is built first
 
@@ -18,11 +24,12 @@ The design is written to three rulings of the owner.
 - **One agent program per Mac**, with a root supervisor per run and no helper. Its design is
   `docs/design/mac-one-program.md`, komira-ai/jobscheduler#991, merged.
 - **A new account per job**, deleted afterwards, in place of the pool of reused accounts.
-  - Its design is `docs/design/mac-account-per-job.md`, in komira-ai/jobscheduler#1004, in review.
-  - #1004 itself builds the step before it. It signs the macOS programs, grants the root helper Full Disk Access by a
-    profile, reports the grant per host, and refuses every native job on a Mac without the grant. It keeps the pool
-    reset as it is.
-  - The new account per job is the pull request after #1004.
+  - Its design is `docs/design/mac-account-per-job.md`, merged with komira-ai/jobscheduler#1004.
+  - #1004, merged, builds the step before it. It signs the macOS programs, grants the root helper alone Full Disk
+    Access by a profile, reports the grant per host, and refuses every native job on a Mac without the grant. It keeps
+    the pool reset as it is.
+  - The new account per job is a later change, which that design says lands once the grant has been seen in force on a
+    Mac.
 
 **What is built first, and why.**
 
@@ -31,7 +38,7 @@ The design is written to three rulings of the owner.
   - A read-only tree needs no account to own, copy or delete anything of it. The provider owns the files, and any pool
     user may read them.
   - So step 1 waits for neither the one-program switch nor the new account per job.
-  - It does not depend on #1004 either. But once #1004 is on a Mac, every native job there needs its grant, step 1's
+  - #1004 is merged. Once its release and profile are on a Mac, every native job there needs the grant, step 1's
     included.
 - **The copy-on-write step comes after both rulings are built.**
   - Its copy belongs to the job's own new account and goes when that account is deleted.
@@ -53,7 +60,7 @@ the one-program switch, with trees or without. Nothing in this design needs more
   - The unprivileged user `nobody` read the tree and ran its script, but could not write in it.
   - No partial directory was left.
 - **The macOS agent** takes `--mount-provider` and gives a job a provider's tree as a `READ_ONLY` mount, under the
-  local-volume rule of 2.1: komira-ai/jobscheduler#1006.
+  local-volume rule of 2.1: komira-ai/jobscheduler#1006, open.
   - The link is the one of job-rootfs.md 5.2.
   - A `READ_WRITE` mount of a provider is refused `input-not-allowed`.
   - A missing put directory, a `READ_WRITE` mount of a host path, is made at the start below its writable root.
@@ -68,11 +75,11 @@ the one-program switch, with trees or without. Nothing in this design needs more
 put directory, was not part of it.
 
 - In step 1 the provider ingests the outputs from a plain local directory after the job: komira-ai/tierstore#431
-  (`local_cache.put_ingest`).
+  (`local_cache.put_ingest`), merged.
 - That is designed and built apart from this document.
 
-**Later steps, open for the owner's decision**: copy-on-write mounts (D5), which come after both rulings are built, and
-laziness (D1).
+**Later steps, proposals only**: copy-on-write mounts (D5), which come after both rulings are built, and the trees'
+space (D3). D1 and D2 are step 1's own, and they also await the owner.
 
 ## The open decisions
 
@@ -311,13 +318,26 @@ every tree, never a clone (`EXDEV`).
 - A `READ_ONLY` mount is the link of job-rootfs.md 5.2 to it. Its files are `_tierstore`'s, modes 0644 and 0755, so a
   job reads and cannot write them. Seatbelt grants the run that one directory and denies it the rest of the root
   (job-rootfs.md 5.4).
-- No read of step 1 needs Full Disk Access (*trial*).
+- No read of step 1 needs Full Disk Access (*trial*, with the check below).
   - Every reader reads a local directory that the privacy control does not protect: the provider's `job-trees`.
   - **The job's read (step 1).** The job's account reads `job-trees/<hex>`, which is the provider's, 0644 and 0755.
     *Trial*: in komira-ai/tierstore#430's trial on a Mac Studio, the unprivileged user `nobody` listed and read the
     tree and ran its script.
-    - The trial installed no grant. #1004's profile was not yet in force, but that is *inferred*, not checked on the
-      Mac.
+    - The trial installed no grant, to be confirmed by the checks below. #1004's profile names the root helper
+      `js-mac-session` alone, by its path and signature, so even in force it could not cover tierstore or the programs
+      `nobody` ran.
+    - **The checks, run once on the trial's Mac, as root:**
+      - **Profiles.** `profiles show -type configuration`. Every privacy payload
+        (`com.apple.TCC.configuration-profile-policy`) must name only a specific program of ours, such as #1004's
+        `js-mac-session` or hostkeeper's own program. None may name tierstore, `/bin/sh`, `/bin/ls`, a terminal or
+        `sshd`, and none may use a wildcard or a broad identifier.
+      - **Grants approved by hand.** These live in the system privacy database, not in a profile. Run
+        `sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select client, auth_value from access where
+        service = 'kTCCServiceSystemPolicyAllFiles' or service = 'kTCCServiceSystemPolicyNetworkVolumes'"`. It must list
+        no row with `auth_value` 2 for tierstore, `sshd-keygen-wrapper` or `sshd`, a terminal, or the shell the trial
+        ran from.
+      - With both seen, the trial stands as evidence that a job's read of a local tree needs no grant, and nothing in
+        this bullet is inferred.
   - **The read under Seatbelt (step 1).** komira-ai/jobscheduler#1006 has a macOS test under the real `sandbox-exec`
     profile: the run reads a tree through the read-only link, is refused a write there, and writes its put directory.
   - **The provider's own reads and writes.** *Trial*: the #430 trial ran tierstore as `_tierstore`, and it wrote the
@@ -332,7 +352,8 @@ every tree, never a clone (`EXDEV`).
       into a scratch home with `clone_writable` and walk it. Expect no `EPERM`, and no privacy daemon log line.
     - It is build item 6's first check.
   - A copy-on-write source that an operator's root puts under a protected folder (Desktop, Documents) would need a
-    grant. Once komira-ai/jobscheduler#1004's profile is in force for the agent's program after the one-program switch,
+    grant. komira-ai/jobscheduler#1004's profile (merged) names the root helper. After the one-program switch it names
+    the agent's program, and once that profile is in force,
     that case needs nothing more.
   - Deleting an account's home and per-user folders does need the grant. That is komira-ai/jobscheduler#1004's grant,
     not this design's.
@@ -376,7 +397,7 @@ and goes with the run.
 ### 3.1 The flow of one run
 
 This flow is the later step's (D5). It assumes both rulings are built: one agent program, and the new account per job
-of the pull request after komira-ai/jobscheduler#1004.
+of the later change that `docs/design/mac-account-per-job.md` designs (it merged with komira-ai/jobscheduler#1004).
 
 Step 1 uses only these parts of it:
 
@@ -532,8 +553,8 @@ to build and test (build item 5).
      key. The package's `postinstall` makes `job-trees` (`_tierstore`, 0755) beside the directories it makes today. Its
      parents are 0755. The name keeps it apart from the cache's own `trees/`.
    - **How it is written:** from the cache, on the same volume.
-     - A file that the cache holds as a whole object is cloned from it (`clonefile`).
-     - A file that is a span of a pack is copied from the span.
+     - Step 1 (#430) copies every file from the cache through its span, with no platform-specific path.
+     - Cloning a file that the cache holds as a whole object (`clonefile`) is a later speed-up.
      - Either way the file ends `_tierstore`'s, 0644 or 0755, with no extended attribute. A tree list names files, not
        inodes, so the written tree has no hard links.
      - The tree is written into `job-trees/.partial-<key>` and renamed to `job-trees/<key>` when whole, so no reader
@@ -765,7 +786,7 @@ Step 1 is items 3 and 5 alone, and is being built:
 - item 3 is komira-ai/jobscheduler#1006, on the agent as it is today, before the one-program switch;
 - item 5, without its `COPY_ON_WRITE` change and its budget, is komira-ai/tierstore#430.
 
-The outputs, which are not this design's, are komira-ai/tierstore#431. The later step takes the rest.
+The outputs, which are not this design's, are komira-ai/tierstore#431, merged. The later step takes the rest.
 
 One subject per pull request, in this order. Item 4 comes after the one-program switch (the one-program design, section
 7) and after accounts per job (the account-per-job design, step 2), whose account it makes at assembly.
@@ -783,7 +804,7 @@ One subject per pull request, in this order. Item 4 comes after the one-program 
    - a missing put directory (a `READ_WRITE` host path) made at the start below its writable root;
    - the every-platform module `native_fs`.
 
-   This item is komira-ai/jobscheduler#1006, built as the PR describes.
+   This item is komira-ai/jobscheduler#1006, open, built as the PR describes.
 
    The "No provider reaches a Mac" text of `native/mounts.rs` goes. So do three phrases of `js-agent`'s rustdoc flag
    table: the three flags' "Linux build only", `--mount-provider`'s "taken with the crun runtime only", and
@@ -826,7 +847,8 @@ file in ten executable. The source was in the page cache. Three runs on each Mac
 - komira-ai/tierstore#430, on a Mac Studio: the darwin build ran as `_tierstore` and answered two sources of one tree
   the same `job-trees/<hex>`. The tree held what its list holds, with the modes of section 8. The unprivileged `nobody`
   read and ran it and could not write in it, and no partial directory was left.
-- komira-ai/tierstore#431, outside this design: its tests ran on a Mac with the real FSEvents watcher, and none failed.
+- komira-ai/tierstore#431, merged, outside this design: its tests ran on a Mac with the real FSEvents watcher, and none
+  failed.
   A by-hand trial on a Mac Studio, reported with that work but not in #431's text, stored and read back a pack that an
   unprivileged user committed. Its proof against a storage node waits for a write key.
 - komira-ai/jobscheduler#1006, on an idle Mac Studio: under the real `sandbox-exec` profile, a run read a tree through
