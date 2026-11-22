@@ -130,7 +130,7 @@ fn cores(milli: u64) -> String {
 pub fn summary(jobs: &[Job], farm: Farm) -> String {
     let span = jobs
         .iter()
-        .map(|job| job.arrive_ms + job.wait_ms + job.wall_ms)
+        .map(|job| job.arrive_ms + job.wait_ms + job.start_ms + job.wall_ms)
         .max()
         .unwrap_or(0);
     let cpu: u64 = jobs.iter().map(|job| job.cpu_ms).sum();
@@ -304,7 +304,9 @@ fn checks(text: &mut String, jobs: &[Job], farm: Farm) {
         text,
         "## Checks of the replay\n\n\
          Waits, recorded and replayed with the recorded bookings (seconds), of every job and of \
-         the jobs that arrived after the first hour:\n\n\
+         the jobs that arrived after the first hour. A replayed job is placed at the first \
+         one-second tick after it arrives, so a replayed wait is up to a second longer, and every \
+         wait here is rounded up to the second:\n\n\
          | | p50 | p90 | p99 | after 1 h: p50 | p90 | p99 |\n|---|---|---|---|---|---|---|"
     );
     let recorded: Vec<u64> = jobs.iter().map(|job| job.wait_ms).collect();
@@ -426,13 +428,19 @@ fn options(text: &mut String, jobs: &[Job], farm: Farm) {
              booking % | plan error % | host-time above plan % |\n\
              |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
+        let mut alone = 0;
         for arm in ARMS {
             for shape in SHAPES {
                 let outcome = replay(jobs, arm, Setup { farm, shape, speed });
+                alone += outcome.alone;
                 row(text, arm, shape, &outcome, (farm, cpu));
             }
         }
-        let _ = writeln!(text);
+        let _ = writeln!(
+            text,
+            "\nJobs no host admitted even with nothing on the farm, run alone on an empty host, \
+             over every row: {alone}.\n"
+        );
     }
 }
 

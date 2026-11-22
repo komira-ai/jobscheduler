@@ -206,7 +206,9 @@ fn the_reserve_is_the_bookings_plus_a_multiple_of_the_root_of_the_summed_varianc
     let rule = Rule::Reserve { z_tenths: 20 };
     assert_eq!(host.figure(rule, &new, 7000), Some(7000));
     assert_eq!(host.figure(rule, &new, 6999), None);
-    assert_eq!(host.planned(rule), 2000);
+    // What the rule holds the host to be using includes the reserve of its two jobs: 2 cores
+    // and twice the root of 2 square cores (1.414), 4.828 cores.
+    assert_eq!(host.planned(rule), 4828);
 }
 
 #[test]
@@ -419,4 +421,36 @@ fn each_jobs_wait_is_kept_by_its_index() {
     ];
     let outcome = replay(&jobs, BOOKED, flat(one(4000)));
     assert_eq!(outcome.waited, vec![0, 20_000]);
+}
+
+#[test]
+fn a_job_no_empty_host_admits_runs_alone_and_the_replay_ends() {
+    // Booked 300 GiB on hosts of 64 GiB, and 10 cores on a host of 4: it waits for an empty
+    // farm, then runs alone; the job behind it waits for it.
+    let big = Job {
+        booked_mib: 300 * 1024,
+        ..booked(job(0, 10_000, 10_000, 0), 10_000)
+    };
+    let jobs = [job(0, 5000, 5000, 0), big, job(0, 1000, 1000, 0)];
+    let outcome = replay(&jobs, BOOKED, flat(one(4000)));
+    assert_eq!(outcome.alone, 1);
+    // The first job ends at 5 s; the big one starts on the empty farm then and runs ten
+    // seconds; the last fits beside nothing it holds, so it starts at 15 s.
+    assert_eq!(outcome.waited[1], 5000);
+    assert_eq!(outcome.waited[2], 15_000);
+}
+
+#[test]
+fn a_jobs_start_holds_its_booking_asks_for_no_cpu_and_is_not_slowed() {
+    // Three seconds of start, then two seconds at the host's four cores, beside a job that
+    // asks for all four throughout: only the run is slowed.
+    let started = Job {
+        start_ms: 3000,
+        ..booked(job(0, 2000, 8000, 0), 0)
+    };
+    let busy = booked(job(0, 20_000, 80_000, 0), 0);
+    let outcome = replay(&[started, busy], BOOKED, flat(one(4000)));
+    // The run's two seconds at half speed take four: placed at 0, it ends at 7 s.
+    assert_eq!(outcome.slowed[0], 2000);
+    assert_eq!(outcome.own_ms, 5000 + 20_000);
 }

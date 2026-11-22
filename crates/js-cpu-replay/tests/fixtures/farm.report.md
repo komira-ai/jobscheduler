@@ -33,7 +33,7 @@
 
 ## Checks of the replay
 
-Waits, recorded and replayed with the recorded bookings (seconds), of every job and of the jobs that arrived after the first hour:
+Waits, recorded and replayed with the recorded bookings (seconds), of every job and of the jobs that arrived after the first hour. A replayed job is placed at the first one-second tick after it arrives, so a replayed wait is up to a second longer, and every wait here is rounded up to the second:
 
 | | p50 | p90 | p99 | after 1 h: p50 | p90 | p99 |
 |---|---|---|---|---|---|---|
@@ -58,8 +58,8 @@ The jobs as placed, by the contention they recorded (the time some task of the j
 | recorded bookings | burst | 2466 | 505 | 1088 | 2137 | 5.5 | 0.5 | 16.5 | 0.2 | 20.5 | 3.76 | 3.7 | 57.3 | 0.2 |
 | A median, 1.1 | blip | 2514 | 1 | 39 | 105 | 6.5 | 8.4 | 45.6 | 15.7 | 20.9 | 0.95 | 23.1 | 8.3 | 9.8 |
 | A median, 1.1 | burst | 2514 | 1 | 39 | 105 | 6.5 | 8.4 | 45.6 | 15.7 | 20.9 | 0.95 | 23.1 | 8.3 | 9.8 |
-| B reserve z=2, 1.1 | blip | 2514 | 1 | 42 | 106 | 6.2 | 6.8 | 34.9 | 10.4 | 20.9 | 0.94 | 22.8 | 8.2 | 34.9 |
-| B reserve z=2, 1.1 | burst | 2514 | 1 | 42 | 106 | 6.2 | 6.8 | 34.9 | 10.4 | 20.9 | 0.94 | 22.8 | 8.2 | 34.9 |
+| B reserve z=2, 1.1 | blip | 2514 | 1 | 42 | 106 | 6.2 | 6.8 | 34.9 | 10.4 | 20.9 | 0.94 | 22.8 | 8.3 | 16.6 |
+| B reserve z=2, 1.1 | burst | 2514 | 1 | 42 | 106 | 6.2 | 6.8 | 34.9 | 10.4 | 20.9 | 0.94 | 22.8 | 8.3 | 16.6 |
 | C measured, 1.0 | blip | 2514 | 1 | 43 | 117 | 6.6 | 8.6 | 49.4 | 17.8 | 20.9 | 0.98 | 23.9 | 7.9 | 12.5 |
 | C measured, 1.0 | burst | 2514 | 1 | 43 | 117 | 6.6 | 8.6 | 49.4 | 17.8 | 20.9 | 0.98 | 23.9 | 7.9 | 12.5 |
 | C measured, 1.1 | blip | 2514 | 1 | 16 | 89 | 7.2 | 10.9 | 60.6 | 28.0 | 20.9 | 1.04 | 23.5 | 9.9 | 14.3 |
@@ -69,6 +69,8 @@ The jobs as placed, by the contention they recorded (the time some task of the j
 | D curve, 1.1 | blip | 2514 | 1 | 35 | 102 | 5.7 | 7.4 | 5.1 | 1.7 | 20.9 | 1.02 | 25.0 | 0.0 | 0.0 |
 | D curve, 1.1 | burst | 2514 | 1 | 35 | 102 | 5.7 | 7.4 | 5.1 | 1.7 | 20.9 | 1.02 | 25.0 | 0.0 | 0.0 |
 
+Jobs no host admitted even with nothing on the farm, run alone on an empty host, over every row: 0.
+
 ## Options, arrivals at 4x
 
 | arm | shape | jobs/h | wait p50 s | p90 s | p99 s | jobs per host | host-time over cores % | asked past cores, mean | slowdown % | CPU used % | booked/used | used above booking % | plan error % | host-time above plan % |
@@ -77,8 +79,8 @@ The jobs as placed, by the contention they recorded (the time some task of the j
 | recorded bookings | burst | 3138 | 6106 | 10131 | 11098 | 7.0 | 0.5 | 20.9 | 0.2 | 26.1 | 3.76 | 3.7 | 72.8 | 0.3 |
 | A median, 1.1 | blip | 9192 | 369 | 520 | 570 | 24.5 | 50.8 | 31.0 | 19.7 | 76.6 | 1.06 | 20.1 | 22.3 | 41.1 |
 | A median, 1.1 | burst | 9192 | 369 | 520 | 570 | 24.5 | 50.8 | 31.0 | 19.7 | 76.6 | 1.06 | 20.1 | 22.3 | 41.1 |
-| B reserve z=2, 1.1 | blip | 9189 | 386 | 573 | 629 | 23.4 | 43.5 | 26.8 | 14.4 | 76.5 | 1.01 | 21.9 | 22.9 | 63.0 |
-| B reserve z=2, 1.1 | burst | 9189 | 386 | 573 | 629 | 23.4 | 43.5 | 26.8 | 14.4 | 76.5 | 1.01 | 21.9 | 22.9 | 63.0 |
+| B reserve z=2, 1.1 | blip | 9189 | 386 | 573 | 629 | 23.4 | 43.5 | 26.8 | 14.4 | 76.5 | 1.01 | 21.9 | 21.5 | 40.1 |
+| B reserve z=2, 1.1 | burst | 9189 | 386 | 573 | 629 | 23.4 | 43.5 | 26.8 | 14.4 | 76.5 | 1.01 | 21.9 | 21.5 | 40.1 |
 | C measured, 1.0 | blip | 9158 | 507 | 759 | 800 | 21.7 | 19.5 | 26.8 | 6.4 | 76.3 | 0.95 | 25.3 | 14.1 | 22.2 |
 | C measured, 1.0 | burst | 9158 | 507 | 759 | 800 | 21.7 | 19.5 | 26.8 | 6.4 | 76.3 | 0.95 | 25.3 | 14.1 | 22.2 |
 | C measured, 1.1 | blip | 9192 | 301 | 437 | 510 | 32.2 | 63.0 | 62.9 | 57.6 | 76.6 | 1.43 | 15.7 | 44.5 | 59.2 |
@@ -87,4 +89,6 @@ The jobs as placed, by the contention they recorded (the time some task of the j
 | D curve, 1.0 | burst | 9211 | 434 | 606 | 689 | 20.5 | 0.0 | - | 0.0 | 76.7 | 1.08 | 25.2 | 0.0 | 0.0 |
 | D curve, 1.1 | blip | 9217 | 380 | 535 | 624 | 21.6 | 61.4 | 5.9 | 4.9 | 76.8 | 1.08 | 25.6 | 0.0 | 0.0 |
 | D curve, 1.1 | burst | 9217 | 380 | 535 | 624 | 21.6 | 61.4 | 5.9 | 4.9 | 76.8 | 1.08 | 25.6 | 0.0 | 0.0 |
+
+Jobs no host admitted even with nothing on the farm, run alone on an empty host, over every row: 0.
 

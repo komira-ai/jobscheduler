@@ -9,8 +9,9 @@
 //! ([`shape`]) and a host's cores shared between its jobs as the kernel shares them
 //! ([`sim`]), and prints what each did ([`report`]).
 //!
-//! Nothing reads a clock, a random source or an environment variable: a trace gives the same
-//! report every time.
+//! The replay reads no clock, random source or environment variable: a trace gives the same
+//! report every time. Only `convert --rows` opens a scratch store, with the wall clock and the
+//! job store's random ids, and neither reaches the trace.
 
 #![forbid(unsafe_code)]
 

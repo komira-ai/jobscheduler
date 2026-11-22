@@ -130,6 +130,9 @@ pub struct Outcome {
     pub over_excess: u128,
     /// The CPU the jobs got, in millicore-ms.
     pub used: f64,
+    /// The jobs no host admitted even with nothing on the farm, each run alone on an empty
+    /// host.
+    pub alone: usize,
     /// The jobs on the hosts, summed over the host-time, in job-ms.
     pub held_ms: u128,
     /// The host-time the CPU asked for was above what the rule held the host to be using.
@@ -236,6 +239,14 @@ impl Host {
         self.measured() > self.split().0
     }
 
+    /// The bookings of its jobs and `milli` more, plus `z_tenths / 10` times the root of
+    /// their classes' variances and `var` more.
+    fn reserved(&self, z_tenths: u64, milli: u64, var: u64) -> u64 {
+        let booked: u64 = self.runs.iter().map(|run| run.booking.milli).sum();
+        let var: u64 = self.runs.iter().map(|run| run.var).sum::<u64>() + var;
+        booked + milli + z_tenths * var.isqrt() / 10
+    }
+
     /// The CPU `rule` holds it to be using.
     fn planned(&self, rule: Rule) -> u64 {
         match rule {
@@ -244,7 +255,7 @@ impl Host {
                 self.measured().max(covered) + not
             }
             Rule::Measured => self.measured() + self.split().1,
-            Rule::Reserve { .. } => self.runs.iter().map(|run| run.booking.milli).sum(),
+            Rule::Reserve { z_tenths } => self.reserved(z_tenths, 0, 0),
             Rule::Curve => self.runs.iter().map(Running::demand).sum(),
         }
     }
@@ -253,10 +264,7 @@ impl Host {
     fn figure(&self, rule: Rule, new: &Running, limit: u64) -> Option<u64> {
         let figure = match rule {
             Rule::Booked | Rule::Measured => self.planned(rule) + new.booking.milli,
-            Rule::Reserve { z_tenths } => {
-                let var: u64 = self.runs.iter().map(|run| run.var).sum::<u64>() + new.var;
-                self.planned(rule) + new.booking.milli + z_tenths * var.isqrt() / 10
-            }
+            Rule::Reserve { z_tenths } => self.reserved(z_tenths, new.booking.milli, new.var),
             Rule::Curve => self.peak_with(&new.phases),
         };
         (figure <= limit).then_some(figure)
@@ -510,12 +518,27 @@ impl<'a> World<'a> {
                     best = Some((key, at));
                 }
             }
-            let Some((_, at)) = best else {
-                return;
+            let at = match best {
+                Some((_, at)) => at,
+                // No host would take it even idle: once the farm is empty it takes an empty
+                // host alone, as a booking of a whole host waits for one, rather than holding
+                // the walk for ever.
+                None if self.never(&new, limit) && self.hosts.iter().all(|h| h.runs.is_empty()) => {
+                    self.outcome.alone += 1;
+                    0
+                }
+                None => return,
             };
             self.queue.pop_front();
             self.start(at, new, now);
         }
+    }
+
+    /// Whether no host would take `new` even idle and unread: its memory is more than a
+    /// host's, or the rule refuses it on an empty host.
+    fn never(&self, new: &Running, limit: u64) -> bool {
+        new.booking.bytes > self.setup.farm.bytes
+            || Host::default().figure(self.arm.rule, new, limit).is_none()
     }
 
     /// Starts every queued job on the host it ran on.
