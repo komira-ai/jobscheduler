@@ -112,9 +112,10 @@ pub fn run(child: &Child) -> ExitCode {
 
 /// This process's ids.
 fn own_hello() -> Hello {
-    // SAFETY: getpgrp, getsid(0) and getuid have no preconditions and cannot fail for the
-    // calling process.
-    let (pgid, sid, uid) = unsafe { (libc::getpgrp(), libc::getsid(0), libc::getuid()) };
+    let pgid = rustix::process::getpgrp().as_raw_nonzero().get();
+    // getsid of the calling process cannot fail; -1 would say it did.
+    let sid = rustix::process::getsid(None).map_or(-1, |sid| sid.as_raw_nonzero().get());
+    let uid = rustix::process::getuid().as_raw();
     Hello {
         pid: i32::try_from(std::process::id()).unwrap_or(-1),
         pgid,
@@ -124,9 +125,9 @@ fn own_hello() -> Hello {
 }
 
 fn hold(tag: &Path, setsid: bool, secs: u64, supervise: Option<Ids>) -> io::Result<String> {
-    // SAFETY: setsid has no preconditions; it fails only for a process group leader.
-    if setsid && unsafe { libc::setsid() } == -1 {
-        return Err(io::Error::last_os_error());
+    // setsid fails only for a process group leader.
+    if setsid {
+        rustix::process::setsid().map_err(io::Error::from)?;
     }
     // A supervisor's child is its own, in a group of its own, as a run's job is.
     let job = supervise.map(|ids| {

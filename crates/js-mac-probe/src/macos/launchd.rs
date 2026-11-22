@@ -82,8 +82,7 @@ fn domains(system: bool) -> Vec<String> {
     if system {
         return vec!["system".to_owned()];
     }
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
+    let uid = rustix::process::getuid().as_raw();
     vec![format!("gui/{uid}"), format!("user/{uid}")]
 }
 
