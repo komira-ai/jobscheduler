@@ -1,20 +1,20 @@
-//! Native jobs: the runtime that starts a program as a user of the root helper, under a
-//! Seatbelt profile, and the lifecycle that drives it. The helper is a fake that speaks the
-//! helper's real protocol on a socket (`fake_helper`), so everything but what the verbs do
-//! to a machine runs as in the agent. On a Mac, one test module applies the runtime's
-//! `sandbox-exec` command line for real, as the user running the tests (`mac`), and one
-//! reads back that what the helper starts answers to the privacy controls for itself
-//! (`disclaim`).
+//! Native jobs: the runtime that lends each run an account of the agent's pool and starts it
+//! through the supervisor, under a Seatbelt profile, and the lifecycle that drives it. The
+//! pool is the real one over a fake of the operating system (`fake_accounts`), so the pool's
+//! ledger and its file work run as on a Mac; the supervisor is a fake that starts the program
+//! itself as the test's own user (`fake_launcher`), so the runtime's request to it (the
+//! account, the profile, the environment, the limits) is read back by the tests, and the
+//! program's output and exit are real. One module reads back that what the agent starts
+//! answers to the privacy controls for itself (`disclaim`).
 
 mod adopt;
 pub(crate) mod agent;
-mod bound;
 mod bundle;
-mod checks;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod env;
-pub(crate) mod fake_helper;
+pub(crate) mod fake_accounts;
+pub(crate) mod fake_launcher;
 mod files;
 mod grant;
 mod inputs;
@@ -25,8 +25,6 @@ mod live_logs;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
-mod mac_agent;
-#[cfg(target_os = "macos")]
 mod mac_pf;
 mod mounts;
 mod network;
@@ -35,52 +33,108 @@ mod pf_gate;
 mod runtime;
 mod settings;
 mod silence;
+mod steps;
 mod worker;
 mod xcode;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
+use js_agent::mac_accounts::{Places, Pool, Settings, Slots};
+use js_agent::native::{Accounts, Ceiling, HandOver, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 pub use crate::support::Scratch;
-use fake_helper::FakeHelper;
+pub use fake_accounts::FakeAccounts;
+pub use fake_launcher::{Failing, FakeLauncher, Launched};
 
-/// The term of the runtimes made here: their leases are `7.0`, `7.1` and so on.
+/// The term of the runtimes made here: their leases are `7.0`, `7.1` and so on, lent under
+/// the job names `7-0`, `7-1`.
 pub const TERM: u64 = 7;
 
-/// The most polls a test makes for a run to end. The helper's answer comes from a thread,
-/// so a poll right after it was sent may still say the run goes on; this bounds the loop
-/// instead of a clock.
+/// The most polls a test makes for a run to end. The program runs as a real process, so a
+/// poll right after its start may still say it goes on; this bounds the loop instead of a
+/// clock.
 pub const POLLS: u32 = 50_000_000;
 
-/// A native runtime over a fake helper, with the directory they work in.
-pub struct Rig {
-    pub fake: FakeHelper,
-    pub rt: NativeRuntime,
-    pub dir: Scratch,
+/// This process's own uid: the first slot of every pool made here, so the directories the
+/// runtime gives a run's account are the test's own.
+pub fn me() -> u32 {
+    rustix::process::geteuid().as_raw()
 }
 
-/// The configuration of the runtimes made here: a loopback cap, the tool roots `/usr/bin`
-/// and `/bin`, and one path no run may read.
-pub fn config(fake: &FakeHelper) -> NativeConfig {
+/// This process's own group.
+pub fn my_gid() -> u32 {
+    rustix::process::getegid().as_raw()
+}
+
+/// The pool's directories below `dir`, laid out as a Mac's are: the state directory (the
+/// owner's alone to write in), the homes, the per-user folders and the places a sweep covers.
+/// `slots` uids from the test's own.
+pub fn pool_settings(dir: &Scratch, slots: u32) -> Settings {
+    for sub in [
+        "accounts", "Users", "folders", "at/tabs", "at/jobs", "Shared", "tmp", "launchd",
+    ] {
+        fs::create_dir_all(dir.path(sub)).unwrap();
+    }
+    fs::set_permissions(dir.path("accounts"), fs::Permissions::from_mode(0o755)).unwrap();
+    Settings {
+        range: me()..=me() + slots - 1,
+        gid: my_gid(),
+        homes: dir.path("Users"),
+        ready: 1,
+        user_folders: dir.path("folders"),
+        schedules: Places {
+            named: vec![format!("{}/{{name}}", dir.path("at/tabs").display())],
+            owned: vec![dir.path("at/jobs")],
+        },
+        shared: Places {
+            named: vec![format!(
+                "{}/disabled.{{uid}}.plist",
+                dir.path("launchd").display()
+            )],
+            owned: vec![dir.path("Shared"), dir.path("tmp")],
+        },
+        state_owner: Some(me()),
+    }
+}
+
+/// The pool of `settings` in `dir`'s `accounts` directory, over `host`, with no adopted job.
+pub fn open_pool(dir: &Scratch, settings: &Settings, host: &Arc<FakeAccounts>) -> Arc<Pool> {
+    let pool = Pool::with_settings(
+        &dir.path("accounts"),
+        settings.clone(),
+        &BTreeSet::new(),
+        host.clone(),
+    );
+    Arc::new(pool.unwrap_or_else(|why| panic!("the pool: {why}")))
+}
+
+/// The configuration of the runtimes made here, in `dir`: a loopback cap, the tool roots
+/// `/usr/bin` and `/bin`, one path no run may read, the pool's homes, and Full Disk Access
+/// held.
+pub fn config(dir: &Scratch, settings: &Settings) -> NativeConfig {
+    let first = *settings.range.start();
+    let last = *settings.range.end();
     NativeConfig {
-        homes: fake.homes().to_path_buf(),
+        accounts: Accounts {
+            state: dir.path("accounts"),
+            slots: format!("{first}-{last}").parse::<Slots>().unwrap(),
+            ready: settings.ready,
+        },
+        homes: settings.homes.clone(),
         network: Ceiling::Loopback,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         mount_roots: Vec::new(),
         read_model: ReadModel::Open,
-        journal: fake
-            .homes()
-            .parent()
-            .expect("the homes are below the test's directory")
-            .join("native-leases"),
+        journal: dir.path("native-leases"),
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
@@ -88,75 +142,94 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
     }
 }
 
+/// A hand-over that gives nothing away: the test's user cannot give a directory to a uid of
+/// its pool other than its own.
+pub fn keep_owner() -> HandOver {
+    Arc::new(|_: &Path, _: u32, _: u32| Ok(()))
+}
+
+/// A native runtime over a pool of a fake host and a fake launcher, with the directory they
+/// work in.
+pub struct Rig {
+    pub accounts: Arc<FakeAccounts>,
+    pub launcher: Arc<FakeLauncher>,
+    pub pool: Arc<Pool>,
+    pub settings: Settings,
+    pub rt: NativeRuntime,
+    pub dir: Scratch,
+}
+
 impl Rig {
+    /// A rig of one slot (the test's own uid).
     pub fn new(name: &str) -> Self {
         Self::with(name, |_| {})
     }
 
     /// A rig whose configuration `adjust` has changed.
     pub fn with(name: &str, adjust: impl FnOnce(&mut NativeConfig)) -> Self {
-        Self::in_dir(name, |config, _| adjust(config))
+        Self::in_dir(name, 1, |config, _| adjust(config))
     }
 
-    /// A rig whose configuration `adjust` has changed, knowing the directory the rig works
-    /// in (the runs' scratch directories are made below `scratch` there).
-    pub fn in_dir(name: &str, adjust: impl FnOnce(&mut NativeConfig, &Scratch)) -> Self {
+    /// A rig of `slots` slots whose configuration `adjust` has changed, knowing the
+    /// directory the rig works in (the runs' scratch directories are made below `scratch`
+    /// there). A rig of more than one slot gives nothing away ([`keep_owner`]).
+    pub fn in_dir(
+        name: &str,
+        slots: u32,
+        adjust: impl FnOnce(&mut NativeConfig, &Scratch),
+    ) -> Self {
         let dir = Scratch::new(&format!("native-{name}"));
-        let fake = FakeHelper::start(&dir);
-        let mut config = config(&fake);
+        let accounts = FakeAccounts::new();
+        let launcher = FakeLauncher::new();
+        let settings = pool_settings(&dir, slots);
+        let pool = open_pool(&dir, &settings, &accounts);
+        let mut config = config(&dir, &settings);
         adjust(&mut config, &dir);
-        let rt = NativeRuntime::open(fake.client(), config, TERM).unwrap();
-        Self { fake, rt, dir }
+        let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM).unwrap();
+        let rt = match slots {
+            1 => rt,
+            _ => rt.with_hand_over(keep_owner()),
+        };
+        Self {
+            accounts,
+            launcher,
+            pool,
+            settings,
+            rt,
+            dir,
+        }
     }
 
-    /// The same rig, its runtime giving a run's files to the run's user through
-    /// `hand_over`.
-    pub fn handing_over(self, hand_over: js_agent::native::HandOver) -> Self {
-        let Self { fake, rt, dir } = self;
-        let rt = rt.with_hand_over(hand_over);
-        Self { fake, rt, dir }
+    /// The same rig, its runtime giving a run's directories and files to the run's account
+    /// through `hand_over`.
+    pub fn handing_over(self, hand_over: HandOver) -> Self {
+        let rt = self.rt.with_hand_over(hand_over);
+        Self { rt, ..self }
     }
 
     /// The same rig, its runtime uploading the live logs of a run with a sink with `logs`.
     pub fn living(self, logs: js_agent::logs::LiveLogs) -> Self {
-        let Self { fake, rt, dir } = self;
-        let rt = rt.with_live_logs(logs);
-        Self { fake, rt, dir }
+        let rt = self.rt.with_live_logs(logs);
+        Self { rt, ..self }
     }
 
     /// The same rig, its runtime holding `xcodes`: a start may name the build of one.
     pub fn holding(self, xcodes: Vec<js_agent::xcode::Xcode>) -> Self {
-        let Self { fake, rt, dir } = self;
-        let rt = rt.with_xcodes(xcodes);
-        Self { fake, rt, dir }
+        let rt = self.rt.with_xcodes(xcodes);
+        Self { rt, ..self }
+    }
+
+    /// A second runtime over the same state, as an agent's next process opens it: the pool
+    /// is opened again over the same host with no adopted job, the journal is the same.
+    pub fn reopened(&self) -> NativeRuntime {
+        let pool = open_pool(&self.dir, &self.settings, &self.accounts);
+        let config = config(&self.dir, &self.settings);
+        NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1).unwrap()
     }
 
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.
     pub fn spec(&self, run_id: &str, native: NativeSpec) -> RunSpec {
-        let scratch = self.dir.path("scratch").join(run_id);
-        fs::create_dir_all(&scratch).unwrap();
-        RunSpec {
-            run_id: run_id.to_owned(),
-            body: Body::Native(native),
-            env: Vec::new(),
-            cpu_millis: 1000,
-            memory_bytes: 1 << 30,
-            pids: None,
-            gpu_indices: Vec::new(),
-            mounts: Vec::new(),
-            scratch,
-            files: None,
-            slot: 0,
-            isolation: Isolation::Contained,
-            fuse: false,
-            labels: BTreeMap::new(),
-            bundle: None,
-            network: Default::default(),
-            ports: Vec::new(),
-            host_ports: Vec::new(),
-            log_sink: None,
-            xcode: None,
-        }
+        spec_in(&self.dir, run_id, native)
     }
 
     /// Starts `program args` and returns its handle.
@@ -167,14 +240,53 @@ impl Rig {
 
     /// Polls until the run is no longer running.
     pub fn settle(&mut self, id: &RunHandle) -> Status {
-        for _ in 0..POLLS {
-            let status = self.rt.poll(id).unwrap();
-            if status != Status::Running {
-                return status;
-            }
-            std::thread::yield_now();
+        settle(&mut self.rt, id)
+    }
+
+    /// The home of the account named `name`.
+    pub fn home_of(&self, name: &str) -> PathBuf {
+        self.settings.homes.join(name)
+    }
+}
+
+/// Polls `rt` until the run `id` is no longer running.
+pub fn settle(rt: &mut NativeRuntime, id: &RunHandle) -> Status {
+    for _ in 0..POLLS {
+        let status = rt.poll(id).unwrap();
+        if status != Status::Running {
+            return status;
         }
-        panic!("the run did not end: the fake helper never reported its end");
+        std::thread::yield_now();
+    }
+    panic!("the run did not end");
+}
+
+/// A run of `native` whose scratch directory is made below `dir`, as the lifecycle makes it.
+pub fn spec_in(dir: &Scratch, run_id: &str, native: NativeSpec) -> RunSpec {
+    let scratch = dir.path("scratch").join(run_id);
+    fs::create_dir_all(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    RunSpec {
+        run_id: run_id.to_owned(),
+        body: Body::Native(native),
+        env: Vec::new(),
+        cpu_millis: 1000,
+        memory_bytes: 1 << 30,
+        pids: None,
+        gpu_indices: Vec::new(),
+        mounts: Vec::new(),
+        scratch,
+        files: None,
+        slot: 0,
+        isolation: Isolation::Contained,
+        fuse: false,
+        labels: BTreeMap::new(),
+        bundle: None,
+        network: Default::default(),
+        ports: Vec::new(),
+        host_ports: Vec::new(),
+        log_sink: None,
+        xcode: None,
     }
 }
 
@@ -192,39 +304,11 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
-/// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then `/usr/bin/env HOME=<job home>`, the program and its
-/// arguments. No shell stands between the profile and the program: the helper sets the
-/// run's limits, and `env` sets the job's `HOME` (the helper sets its own).
-pub struct Parsed {
-    pub params: Vec<(String, String)>,
-    pub profile: String,
-    /// The `HOME` the job gets, as `env` sets it.
-    pub home: String,
-    /// The program and its arguments.
-    pub tail: Vec<String>,
-}
-
-pub fn parse(argv: &[String]) -> Parsed {
-    assert_eq!(
-        argv[0], "/usr/bin/sandbox-exec",
-        "nothing runs before the profile"
-    );
-    let mut params = Vec::new();
-    let mut at = 1;
-    while argv[at] == "-D" {
-        let (name, value) = argv[at + 1].split_once('=').unwrap();
-        params.push((name.to_owned(), value.to_owned()));
-        at += 2;
-    }
-    assert_eq!(argv[at], "-p");
-    let profile = argv[at + 1].clone();
-    assert_eq!(argv[at + 2], "/usr/bin/env", "env sets the job's HOME");
-    let home = argv[at + 3].strip_prefix("HOME=").unwrap().to_owned();
-    Parsed {
-        params,
-        profile,
-        home,
-        tail: argv[at + 4..].to_vec(),
-    }
+/// The value of the profile parameter `name` of a launch.
+pub fn param<'a>(launched: &'a Launched, name: &str) -> Option<&'a str> {
+    launched
+        .params
+        .iter()
+        .find(|(given, _)| given == name)
+        .map(|(_, value)| value.as_str())
 }

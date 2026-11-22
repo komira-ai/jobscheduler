@@ -35,7 +35,8 @@
 //! Both are started through [`crate::disclaim::Program`]: on macOS the process the
 //! child executes (the action's program, or `launchctl`, whose `as-user` mode executes
 //! the program with [`crate::disclaim::exec`]) answers to the privacy controls (TCC) for
-//! itself, never for the helper, so no grant the helper holds reaches an action.
+//! itself, never for the helper, so a grant the helper held would not reach an action; the
+//! helper holds none.
 
 use std::ffi::{OsStr, OsString};
 use std::io;

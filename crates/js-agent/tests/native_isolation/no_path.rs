@@ -12,7 +12,7 @@
 //!   proves nothing), and none loaded it;
 //! - root's `launchctl print` of the domain shows it absent, or present without the agent.
 //!
-//! A pool uid has no login session, so launchd may refuse both the job and root; the test then
+//! A slot uid has no login session, so launchd may refuse both the job and root; the test then
 //! still proves the job has no way to leave the item. A job whose own bootstrap worked has
 //! seeded the agent: run B looks for it, and one that survives is a FAIL.
 

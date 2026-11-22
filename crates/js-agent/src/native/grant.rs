@@ -9,19 +9,22 @@
 //! device management installs (`packaging/js-agent-macos/mdm/`) gives Full Disk Access to it
 //! by its installed path and its designated requirement. The agent holds it for deleting a
 //! job's account, its home and its per-user folders (`docs/design/mac-account-per-job.md`),
-//! which root without it may not do. The root helper `js-mac-session` is granted nothing: the
-//! pool's reset in place, which it does, neither needs nor uses the grant.
+//! which root without it may not do.
 //!
-//! The grant never reaches a job. Every process of a run is started through
-//! `js_mac_session::disclaim`, which disclaims the responsibility, so the run's processes,
-//! and the processes they start, answer for the run's program and hold no grant of the
-//! helper's or the agent's; what the run may do is what its own program was granted, which
-//! this runtime neither gives nor takes away. The same holds for the programs the agent
-//! starts itself (its probes, the `sandbox-exec` self-test, and `pfctl` through
-//! `js_mac_provision`) and for the helper's own (`launchctl`, `getconf`). `cargo test -p xtask
-//! --test spawn_sites` fails when the agent, the helper or a crate built into them starts a
-//! program another way. On a Mac, the tests read the responsible process of what the helper's
-//! `run` and the agent start (`tests/agent/native/disclaim.rs`). The check by hand is in
+//! A native job's supervisor and the job are started without the disclaim
+//! (`js_mac_session::disclaim::Kept`, `crate::mac_supervisor`), so they answer for the agent
+//! and hold what the agent holds, Full Disk Access included, and so do the job's own children:
+//! a job started disclaimed is judged by its own code signature and is refused every read of
+//! the network file system mount its build trees are served from. What keeps a job from the
+//! rest of the grant is the slot account it runs as and the Seatbelt profile the supervisor
+//! applies before the program runs, whose read denies include the places only the privacy
+//! controls guard (`native/fence.rs`). Every other program the agent starts stays disclaimed,
+//! the default of `disclaim::Program`: its probes and `pfctl` through `js_mac_provision`.
+//! Whether the VM launcher and the GUI-session path keep the responsibility is not decided;
+//! both are disclaimed today. `cargo test -p xtask --test spawn_sites` fails when the agent or
+//! a crate built into it starts a program another way, or keeps the responsibility outside the
+//! listed files. On a Mac, the tests read the responsible process of what the agent starts
+//! (`tests/agent/native/disclaim.rs`). The check by hand is in
 //! `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the design.
 //!
 //! The agent finds out at start whether it holds the grant the way every program does
@@ -30,8 +33,6 @@
 //! answer in its hello as the capability `full-disk-access` ([`report`]): `granted`,
 //! `not-granted`, or `undetermined` (the listing failed for another reason). The job service
 //! shows the capability in its host listing, so an operator sees which Macs lack the grant.
-//! The helper's verb `full-disk-access` still answers for the helper, which holds no grant;
-//! the agent no longer asks it.
 //!
 //! There is one mode. Only `granted` runs native jobs: on any other state every start is
 //! refused first, `no-full-disk-access`, before a user, a journal line or a bundle pin is
