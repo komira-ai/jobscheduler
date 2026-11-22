@@ -1,6 +1,6 @@
 # One agent program on a Mac
 
-Status: accepted, 2026-11-22 (the owner's answers are in section 10); steps 4 and later wait for the root probe of section 4.3. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
+Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
 ## 1. What changes for an operator
 
