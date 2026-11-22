@@ -280,6 +280,8 @@ pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
     Some(JobUsage {
         peak_memory_bytes: counted.memory_peak_bytes?,
         cpu_usage_usec: counted.cpu_usage_micros?,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
     })
 }
 

@@ -245,8 +245,8 @@ pub use record::{
     StartFailure,
 };
 pub use result::{
-    BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,
-    Retention, RetentionError, SWEEP_BATCH, sweep,
+    BOOT_GRACE, CpuThrottle, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage,
+    ResultReason, Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,

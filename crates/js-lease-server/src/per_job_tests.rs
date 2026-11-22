@@ -6,11 +6,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_agent_wire::{
-    HeartbeatReply, HeldJob, HeldState, JobResult, JobUsage, NetworkCeiling, Outcome,
+    CpuThrottle as WireThrottle, HeartbeatReply, HeldJob, HeldState, JobResult, JobUsage,
+    NetworkCeiling, Outcome,
 };
 use js_jobs::{
-    Booked, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResourceUsage, ResultReason,
-    StartFailure,
+    Booked, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output, ResourceUsage,
+    ResultReason, StartFailure,
 };
 use js_state::StoreError;
 use js_types::{HostId, Resources};
@@ -559,10 +560,14 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
     let counted = JobUsage {
         peak_memory_bytes: 3 << 30,
         cpu_usage_usec: 4_500_001,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
         peak_memory_bytes: 3 << 30,
+        cpu_throttle: None,
+        cpu_pressure_some: None,
     };
     let mut measured = ended(Outcome::Succeeded, Some(0));
     measured.usage = Some(counted);
@@ -588,4 +593,58 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         panic!("a clean exit ends exited");
     };
     assert_eq!(output.usage, None);
+}
+
+/// A usage that reports the CPU periods, the throttled periods and the CPU pressure stores each
+/// with the output (the pressure in microseconds as a duration), and a usage that does not
+/// stores `None` for each, not a zero. It catches a counter dropped on the way to the stored
+/// result, a unit slip on the pressure, and a counter that is absent made into a zero.
+#[test]
+fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let mut reported = ended(Outcome::Succeeded, Some(0));
+    reported.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: Some(WireThrottle {
+            periods: 600,
+            throttled_periods: 45,
+        }),
+        cpu_pressure_some_usec: Some(1_250_001),
+    });
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &reported) else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(
+        output.usage,
+        Some(ResourceUsage {
+            cpu_time: Duration::from_secs(2),
+            peak_memory_bytes: 1 << 30,
+            cpu_throttle: Some(CpuThrottle {
+                periods: 600,
+                throttled_periods: 45,
+            }),
+            cpu_pressure_some: Some(Duration::new(1, 250_001_000)),
+        })
+    );
+    let mut older = ended(Outcome::Succeeded, Some(0));
+    older.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 30,
+        cpu_usage_usec: 2_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+    });
+    let Some(JobEnd::Exited { output, .. }) = end_of(&job, &older) else {
+        panic!("a clean exit ends exited");
+    };
+    assert_eq!(
+        output.usage,
+        Some(ResourceUsage {
+            cpu_time: Duration::from_secs(2),
+            peak_memory_bytes: 1 << 30,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
+        })
+    );
 }

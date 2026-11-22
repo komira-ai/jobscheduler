@@ -64,6 +64,8 @@ fn a_start_teaches_the_ended_jobs_and_a_failed_read_teaches_none() {
         Some(ResourceUsage {
             cpu_time: Duration::from_secs(40),
             peak_memory_bytes: 1 << 29,
+            cpu_throttle: None,
+            cpu_pressure_some: None,
         }),
     );
     assert_eq!(super::learn(&SchedPlacer::default(), &jobs), 1);
