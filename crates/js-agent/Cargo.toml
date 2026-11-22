@@ -101,7 +101,7 @@ js-contain = { path = "../js-contain" }
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError", "NSArray", "NSData", "NSObject"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError", "NSArray", "NSData", "NSObject", "NSEnumerator"] }
 objc2-virtualization.workspace = true
 
 [dev-dependencies]
