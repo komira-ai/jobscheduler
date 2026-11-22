@@ -621,7 +621,8 @@ fn held_and_capacity_refusals_are_counted_apart() {
 /// A listed refused start is told to the metrics once with its host and code: `no-capacity`
 /// on host-a and `input-not-allowed` on host-b, a held host's `host-held` that sends its job
 /// back to the queue, and a refusal that lists no code as `none`; a relisting of a result the
-/// server already took is answered a duplicate and not told again. Catches a refusal not
+/// server already took is answered a duplicate, and of one that sent its job back to the queue
+/// stale, and neither is told again. Catches a refusal not
 /// counted, counted twice, counted only when the job fails, or counted again when the agent
 /// lists it again.
 #[test]
@@ -653,8 +654,11 @@ fn each_accepted_refused_start_is_told_once_with_its_host_and_code() {
     ];
     assert_eq!(failures.refused_told(), once);
     assert_eq!(
-        refused(&jobs, &on_a, "no-capacity", &failures),
+        refused(&jobs, &on_b, "input-not-allowed", &failures),
         Ack::Duplicate
     );
     assert_eq!(failures.refused_told(), once, "a duplicate was counted");
+    // The capacity refusal sent its job back to the queue: its listing again is stale.
+    assert_eq!(refused(&jobs, &on_a, "no-capacity", &failures), Ack::Stale);
+    assert_eq!(failures.refused_told(), once, "a stale listing was counted");
 }
