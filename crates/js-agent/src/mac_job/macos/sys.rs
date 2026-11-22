@@ -4,7 +4,6 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io;
 use std::mem;
-use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::ptr;
 
 use crate::mac_job::sweep::Proc;
@@ -161,27 +160,6 @@ pub(super) fn groups(name: &str, gid: u32) -> io::Result<Vec<u32>> {
         .collect())
 }
 
-/// The number of threads of this process.
-pub(super) fn own_threads() -> io::Result<i32> {
-    // SAFETY: an all-zero `proc_taskinfo` is a valid value of the plain C struct.
-    let mut info: libc::proc_taskinfo = unsafe { mem::zeroed() };
-    let len = c_len::<libc::proc_taskinfo>();
-    // SAFETY: `info` is ours and `len` bytes long; `proc_pidinfo` writes at most that many.
-    let got = unsafe {
-        libc::proc_pidinfo(
-            std::process::id().cast_signed(),
-            libc::PROC_PIDTASKINFO,
-            0,
-            (&raw mut info).cast(),
-            len,
-        )
-    };
-    if got != len {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(info.pti_threadnum)
-}
-
 /// Every live process (zombies left out), with its audit session when `asids` is set.
 pub(super) fn processes(asids: bool) -> io::Result<Vec<Proc>> {
     // SAFETY: a null buffer of size 0 asks for the number of processes only.
@@ -255,113 +233,74 @@ pub(super) fn kill(pid: c_int) {
     let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
 }
 
-/// A pipe whose two ends close when this process executes a program: (read, write).
-pub(super) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as c_int; 2];
-    // SAFETY: `fds` is ours and holds the two entries `pipe` writes.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+/// Opens a new audit session for this process, with `auid` as its audit user: its id. Only
+/// root may.
+pub(super) fn new_audit_session(auid: u32) -> io::Result<i32> {
+    let mut info = AuditinfoAddr::default();
+    // SAFETY: `info` is ours and of the length given; the call writes it.
+    if unsafe { getaudit_addr(&mut info, c_len::<AuditinfoAddr>()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `pipe` succeeded, so both are open descriptors that nothing else owns.
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    for fd in fds {
-        // SAFETY: `fd` is open (owned above); `fcntl` with these commands takes plain values.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+    info.ai_asid = AU_ASSIGN_ASID;
+    info.ai_auid = auid;
+    // SAFETY: as above; the call only reads `info`.
+    if unsafe { setaudit_addr(&info, c_len::<AuditinfoAddr>()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as the first call.
+    if unsafe { getaudit_addr(&mut info, c_len::<AuditinfoAddr>()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.ai_asid)
+}
+
+/// Drops this process to `uid`, with `gid` its only group, for good: root cannot be regained.
+pub(super) fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
+    let groups = [gid];
+    // SAFETY: `groups` is ours and holds the 1 entry given; the other calls take plain values.
+    unsafe {
+        if libc::setgroups(1, groups.as_ptr()) != 0
+            || libc::setgid(gid) != 0
+            || libc::setuid(uid) != 0
+        {
             return Err(io::Error::last_os_error());
         }
+        if libc::setuid(0) == 0 {
+            return Err(io::Error::other("root could be regained after the drop"));
+        }
     }
-    Ok((read, write))
+    Ok(())
 }
 
-/// What the child does between `fork` and the program: everything is made before the fork.
-pub(super) struct ChildSteps {
-    /// Open a new audit session first.
-    pub new_session: bool,
-    /// Where the new session's id is written, as 4 bytes.
-    pub asid_out: RawFd,
-    /// The user and its primary group, its only group.
-    pub uid: u32,
-    /// The primary group.
-    pub gid: u32,
-    /// The profile text.
-    pub profile: CString,
-    /// The profile's parameters, by name.
-    pub params: Vec<(CString, CString)>,
-}
-
-impl ChildSteps {
-    /// Runs the steps in the child: opens the audit session, drops to the user for good, and
-    /// applies the profile. A profile the library refuses writes its error to standard error.
-    ///
-    /// # Safety
-    /// Only in the child of a `fork` of a process that had one thread (the caller checks
-    /// [`own_threads`]): `sandbox_init_with_parameters` allocates, and so does the array of its
-    /// parameters made here, which is safe after `fork` only when no other thread could have held
-    /// the allocator's lock.
-    pub(super) unsafe fn run(&self) -> io::Result<()> {
-        if self.new_session {
-            let mut info = AuditinfoAddr::default();
-            // SAFETY: `info` is ours and of the length given.
-            if unsafe { getaudit_addr(&mut info, c_len::<AuditinfoAddr>()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            info.ai_asid = AU_ASSIGN_ASID;
-            info.ai_auid = self.uid;
-            // SAFETY: as above; the call only reads `info`.
-            if unsafe { setaudit_addr(&info, c_len::<AuditinfoAddr>()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: as above.
-            if unsafe { getaudit_addr(&mut info, c_len::<AuditinfoAddr>()) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let bytes = info.ai_asid.to_ne_bytes();
-            // SAFETY: `bytes` is ours and 4 bytes long; `asid_out` is the write end of a pipe the
-            // parent keeps open until the start returns.
-            let _ = unsafe { libc::write(self.asid_out, bytes.as_ptr().cast(), bytes.len()) };
-        }
-        let groups = [self.gid];
-        // SAFETY: `groups` is ours and holds the 1 entry given; the other calls take plain values.
-        unsafe {
-            if libc::setgroups(1, groups.as_ptr()) != 0
-                || libc::setgid(self.gid) != 0
-                || libc::setuid(self.uid) != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::setuid(0) == 0 {
-                return Err(io::Error::from_raw_os_error(libc::EPERM));
-            }
-        }
-        // The NULL-ended array of name, value, name, value: made here, after the fork, which
-        // the single thread allows (see `# Safety`).
-        let mut params: Vec<*const c_char> = Vec::with_capacity(self.params.len() * 2 + 1);
-        for (name, value) in &self.params {
-            params.push(name.as_ptr());
-            params.push(value.as_ptr());
-        }
-        params.push(ptr::null());
-        let mut error: *mut c_char = ptr::null_mut();
-        // SAFETY: the text and the NULL-ended array point at strings of `self`, alive for the
-        // call; `error` is ours (see the FFI-BOUNDARY comment).
-        let rc = unsafe {
-            sandbox_init_with_parameters(self.profile.as_ptr(), 0, params.as_ptr(), &mut error)
-        };
-        if rc != 0 {
-            if !error.is_null() {
-                const LEAD: &[u8] = b"js-agent: the Seatbelt profile was refused: ";
-                // SAFETY: `error` is the NUL-ended string the library made; it is written to
-                // standard error, then freed once, the way the library says.
-                unsafe {
-                    let text = CStr::from_ptr(error).to_bytes();
-                    let _ = libc::write(2, LEAD.as_ptr().cast(), LEAD.len());
-                    let _ = libc::write(2, text.as_ptr().cast(), text.len());
-                    let _ = libc::write(2, b"\n".as_ptr().cast(), 1);
-                    sandbox_free_error(error);
-                }
-            }
-            return Err(io::Error::from_raw_os_error(libc::EINVAL));
-        }
-        Ok(())
+/// Applies the profile `text`, with its parameters `params`, to this process and every process
+/// it starts: the library's own message when it refuses the profile.
+pub(super) fn apply_profile(text: &str, params: &[(String, String)]) -> Result<(), String> {
+    let cstring = |s: &str| CString::new(s).map_err(|_| "a string with a NUL".to_owned());
+    let text = cstring(text)?;
+    let owned: Vec<CString> = params
+        .iter()
+        .flat_map(|(name, value)| [name, value])
+        .map(|s| cstring(s))
+        .collect::<Result<_, _>>()?;
+    let mut pointers: Vec<*const c_char> = owned.iter().map(|s| s.as_ptr()).collect();
+    pointers.push(ptr::null());
+    let mut error: *mut c_char = ptr::null_mut();
+    // SAFETY: the text and the NULL-ended array point at strings of `text` and `owned`, alive
+    // for the call; `error` is ours (see the FFI-BOUNDARY comment).
+    let rc =
+        unsafe { sandbox_init_with_parameters(text.as_ptr(), 0, pointers.as_ptr(), &mut error) };
+    if rc == 0 {
+        return Ok(());
     }
+    if error.is_null() {
+        return Err(format!("sandbox_init_with_parameters returned {rc}"));
+    }
+    // SAFETY: `error` is the NUL-ended string the library made; it is read once, then freed
+    // once, the way the library says.
+    let why = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: as above.
+    unsafe { sandbox_free_error(error) };
+    Err(why)
 }

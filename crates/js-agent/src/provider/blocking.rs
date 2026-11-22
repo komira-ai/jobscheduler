@@ -1,10 +1,10 @@
 //! The calls of one mount provider, each run to its answer while the caller waits, on a runtime
 //! of one thread that is gone when the call returns.
 //!
-//! For a program that must have one thread when it forks (`js-agent __mac-job`, whose child
-//! allocates between `fork` and `exec`): [`super::ProviderClient`] runs two worker threads and
-//! does not join them when it is dropped. Here nothing outlives the call: the runtime is a
-//! current-thread one, made for the call and dropped at its end.
+//! For a caller that asks one call at a time and waits for it (`js-agent __mac-job`):
+//! [`super::ProviderClient`] runs two worker threads and does not join them when it is dropped.
+//! Here nothing outlives the call: the runtime is a current-thread one, made for the call and
+//! dropped at its end.
 //!
 //! A tree is prepared, then mounted: `Prepare` is asked until the provider answers it (a
 //! provider that is unavailable is asked again after [`super::CallBounds::retry`]), then `Mount`

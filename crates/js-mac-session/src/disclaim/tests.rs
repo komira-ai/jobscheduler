@@ -657,3 +657,11 @@ fn an_exec_of_a_program_that_is_not_there_returns_the_error() {
     let why = super::exec(missing, &[OsString::from("--flag")]);
     assert_eq!(why.kind(), io::ErrorKind::NotFound, "{why}");
 }
+
+/// A program that cannot be executed in this process's place is an error, and the process goes
+/// on (a test cannot run the success, which replaces the test process).
+#[test]
+fn an_exec_kept_of_a_missing_program_returns_its_error() {
+    let why = super::exec_kept(OsStr::new("/nonexistent/program"), &[]);
+    assert_eq!(why.kind(), io::ErrorKind::NotFound);
+}

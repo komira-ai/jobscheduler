@@ -60,8 +60,19 @@ impl AccountHost for MacHost {
         directory::create(user)
     }
 
+    /// Deletes the record, then flushes the user lookup cache: `getpwnam` answers from a cache
+    /// that keeps a deleted record for a while (measured on macOS 27: the proof's lookup by name
+    /// still found an account the directory no longer held), and the proof reads both sources.
     fn delete_account(&self, name: &str) -> io::Result<bool> {
-        directory::delete(name)
+        let deleted = directory::delete(name)?;
+        let flushed = sys::run("/usr/bin/dscacheutil", &["-flushcache"])?;
+        if !flushed.success {
+            return Err(io::Error::other(format!(
+                "dscacheutil -flushcache: {}",
+                flushed.stderr.trim()
+            )));
+        }
+        Ok(deleted)
     }
 
     fn processes(&self, uid: u32) -> io::Result<Vec<LiveProcess>> {

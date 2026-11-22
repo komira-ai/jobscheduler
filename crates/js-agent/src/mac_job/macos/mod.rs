@@ -4,11 +4,11 @@ mod files;
 mod sys;
 mod trees;
 
-use std::ffi::CString;
 use std::fs::{self, File};
-use std::io::{Read as _, Write};
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::io::Write;
+use std::os::unix::fs::{
+    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -25,6 +25,7 @@ use super::profile::{self, JOB_PARAM};
 use super::put;
 use super::report::{self, AccountUse, Ended, Leftovers, Report};
 use super::spec::JobFile;
+use super::start::StartFile;
 use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
 use super::{Args, AuditSession, Spawn, status};
 
@@ -184,7 +185,7 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         params: &mount_params,
     };
     let started_job = start(&job, &layout, name, &user, &profile_of, new_session, args);
-    let (mut child, asid) = match started_job {
+    let mut child = match started_job {
         Ok(started) => started,
         Err(why) => {
             // Nothing ran: the trees and the folder go, and the stop says why.
@@ -196,6 +197,11 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     let deadline = started + Duration::from_secs(job.wall_limit_secs);
     let ended = wait(&mut child, deadline);
     let run_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let asid = if new_session {
+        read_asid(&args.out)
+    } else {
+        None
+    };
 
     let ids = JobIds {
         uid: user.uid,
@@ -373,8 +379,10 @@ fn fill_folder(
     Ok(())
 }
 
-/// Starts the program: the child opens the audit session, drops to the user and applies the
-/// profile. Returns the child and the session id it reported.
+/// Starts the job: this program again, in the start mode (`super::start`), with the job's
+/// environment, working directory and streams; that process opens the audit session, drops to the
+/// user, applies the profile and executes the job's program in its own place. Returns the child,
+/// whose pid is the job's program's.
 fn start(
     job: &JobFile,
     layout: &Layout,
@@ -383,49 +391,52 @@ fn start(
     profile: &Profile<'_>,
     new_session: bool,
     args: &Args,
-) -> Result<(std::process::Child, Option<i32>), String> {
+) -> Result<std::process::Child, String> {
     let out = args.out.as_path();
-    let threads =
-        sys::own_threads().map_err(|why| format!("counting this process's threads: {why}"))?;
-    if threads != 1 {
-        return Err(format!(
-            "this process has {threads} threads; the start allocates after fork and needs one"
-        ));
-    }
     let stream = |name: &str| {
         File::create(out.join(name)).map_err(|why| format!("{}: {why}", out.join(name).display()))
     };
     let (stdout, stderr) = (stream("stdout")?, stream("stderr")?);
-    let (asid_read, asid_write) = sys::pipe().map_err(|why| format!("a pipe: {why}"))?;
-    let cstring =
-        |what: &str, text: &str| CString::new(text).map_err(|_| format!("the {what} holds a NUL"));
-    let steps = sys::ChildSteps {
-        new_session,
-        asid_out: asid_write.as_raw_fd(),
+    let asid_file = out.join("asid");
+    let _ = fs::remove_file(&asid_file);
+    let start = StartFile {
         uid: user.uid,
         gid: user.gid,
-        profile: cstring("profile", profile.text)?,
+        new_session,
+        asid_file: asid_file.to_string_lossy().into_owned(),
+        profile: profile.text.to_owned(),
         params: std::iter::once((
             JOB_PARAM.to_owned(),
             layout.folder.to_string_lossy().into_owned(),
         ))
         .chain(profile.params.iter().cloned())
-        .map(|(name, value)| Ok((cstring("parameter", &name)?, cstring("parameter", &value)?)))
-        .collect::<Result<Vec<_>, String>>()?,
+        .collect(),
+        program: job.program.clone(),
+        args: job.args.clone(),
+        disclaim: args.spawn == Spawn::Disclaimed,
     };
-    let run_steps = move || {
-        // SAFETY: `Program` runs this in the child of a fork of this process, which has one
-        // thread (checked above), so the allocation inside `sandbox_init_with_parameters` cannot
-        // meet a lock another thread held (`ChildSteps::run`).
-        unsafe { steps.run() }
-    };
-    // SAFETY: as above: the steps allocate only because no other thread exists to hold a lock.
-    let mut program = unsafe { Program::with_steps(&job.program, &job.args, run_steps) };
-    if args.spawn == Spawn::Ordinary {
-        // The owner's decision (the module documentation of `super`): the job holds the agent's
-        // grants, and its profile keeps it on the mount to its own trees.
-        program.keep_responsibility();
-    }
+    let start_path = out.join("start.json");
+    let text = serde_json::to_string(&start).map_err(|why| format!("the start file: {why}"))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&start_path)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(|why| format!("{}: {why}", start_path.display()))?;
+    let me = std::env::current_exe().map_err(|why| format!("this program's path: {why}"))?;
+    let mut program = Program::new(
+        &me,
+        [
+            std::ffi::OsStr::new(super::start::VERB),
+            std::ffi::OsStr::new("--start"),
+            start_path.as_os_str(),
+        ],
+    );
+    // The start process answers for the agent; the job's program, executed in its place, does
+    // too unless the start file says to disclaim it (the owner's decision: a job is an ordinary
+    // child of the agent, and its profile keeps it on the mount to its own trees).
+    program.keep_responsibility();
     program
         .env_clear()
         .envs(layout.env(job, user_name))
@@ -434,20 +445,56 @@ fn start(
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
-    let child = program
+    program
         .spawn()
-        .map_err(|why| format!("starting {}: {why}", job.program))?;
-    drop(asid_write);
-    let asid = if new_session {
-        let mut bytes = [0u8; 4];
-        File::from(asid_read)
-            .read_exact(&mut bytes)
-            .ok()
-            .map(|()| i32::from_ne_bytes(bytes))
-    } else {
-        None
+        .map_err(|why| format!("starting {}: {why}", job.program))
+}
+
+/// The audit session the start process wrote, once the job has ended.
+fn read_asid(out: &Path) -> Option<i32> {
+    fs::read_to_string(out.join("asid"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The start mode (`super::start`): runs in a new process of this program, one thread, as root.
+/// Does not return when the job's program is executed.
+pub(super) fn start_job(file: &Path, err: &mut dyn Write) -> u8 {
+    let why = match start_steps(file) {
+        Ok(never) => match never {},
+        Err(why) => why,
     };
-    Ok((child, asid))
+    let _ = writeln!(err, "js-agent: the start of the job failed: {why}");
+    super::start::START_FAILED
+}
+
+/// The steps of the start; the error of the first that fails.
+fn start_steps(file: &Path) -> Result<std::convert::Infallible, String> {
+    let text = fs::read_to_string(file).map_err(|why| format!("{}: {why}", file.display()))?;
+    let _ = fs::remove_file(file);
+    let start = StartFile::parse(&text)?;
+    if start.new_session {
+        let asid = sys::new_audit_session(start.uid)
+            .map_err(|why| format!("a new audit session: {why}"))?;
+        fs::write(&start.asid_file, asid.to_string())
+            .map_err(|why| format!("{}: {why}", start.asid_file))?;
+    }
+    if rustix::process::geteuid().is_root() {
+        sys::drop_to(start.uid, start.gid)
+            .map_err(|why| format!("the drop to uid {}: {why}", start.uid))?;
+    }
+    sys::apply_profile(&start.profile, &start.params)
+        .map_err(|why| format!("the Seatbelt profile was refused: {why}"))?;
+    let program = std::ffi::OsStr::new(&start.program);
+    let program_args: Vec<std::ffi::OsString> = start.args.iter().map(Into::into).collect();
+    let why = if start.disclaim {
+        js_mac_session::disclaim::exec(program, &program_args)
+    } else {
+        js_mac_session::disclaim::exec_kept(program, &program_args)
+    };
+    Err(format!("executing {}: {why}", start.program))
 }
 
 /// Waits for the program until `deadline`; past it, kills the program (the sweep ends the rest).

@@ -23,10 +23,11 @@
 //!    root, not an administrator, and runs no process.
 //! 3. makes the job folder `<root>/<id>` ([`layout::Layout`]) owned by that user, copies the
 //!    inputs into its `work` folder, and points `HOME`, `TMPDIR` and the caches inside it.
-//! 4. starts the program through [`js_mac_session::disclaim::Program`]. In the child, before the
-//!    program executes, it opens a new audit session, drops to the user, and applies the
-//!    Seatbelt profile ([`profile::render`], of the kind `--profile` names) itself with
-//!    `sandbox_init_with_parameters`.
+//! 4. starts the job through [`js_mac_session::disclaim::Program`]: this program again, in the
+//!    start mode ([`start`]), a new process of one thread, which opens a new audit session, drops
+//!    to the user, applies the Seatbelt profile ([`profile::render`], of the kind `--profile`
+//!    names) itself with `sandbox_init_with_parameters`, and executes the job's program in its
+//!    place. Nothing runs between `fork` and `exec` in the agent, so the agent may have threads.
 //! 5. waits for the program or its wall limit, then ends every process the job started
 //!    ([`sweep`]): every process of the job's audit session, and every process of the user,
 //!    which may be killed because no other job runs as that user.
@@ -70,6 +71,7 @@ pub mod profile;
 pub mod put;
 pub mod report;
 pub mod spec;
+pub mod start;
 pub mod sweep;
 
 #[cfg(target_os = "macos")]
@@ -194,11 +196,41 @@ pub fn parse(args: &[OsString]) -> Result<Args, clap::Error> {
     Args::try_parse_from(args)
 }
 
-/// Runs the mode when `args` (the whole command line) names it second: its status, or `None`
-/// for any other command line.
+/// Runs the mode, or the start of its job ([`start`]), when `args` (the whole command line)
+/// names it second: its status, or `None` for any other command line.
 pub fn dispatch(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> Option<ExitCode> {
-    let named = args.get(1).is_some_and(|verb| verb.to_str() == Some(VERB));
-    named.then(|| run(args, out, err))
+    match args.get(1).and_then(|word| word.to_str()) {
+        Some(VERB) => Some(run(args, out, err)),
+        Some(start::VERB) => Some(run_start(args, err)),
+        _ => None,
+    }
+}
+
+/// Runs the start of a job: `js-agent __mac-job-start --start <file>`. On success it does not
+/// return: the job's program runs in this process.
+pub fn run_start(args: &[OsString], err: &mut dyn Write) -> ExitCode {
+    let Some([flag, file]) = args.get(2..) else {
+        let _ = writeln!(err, "usage: js-agent {} --start <file>", start::VERB);
+        return ExitCode::from(status::USAGE);
+    };
+    if flag != "--start" {
+        let _ = writeln!(err, "usage: js-agent {} --start <file>", start::VERB);
+        return ExitCode::from(status::USAGE);
+    }
+    ExitCode::from(start_parsed(std::path::Path::new(file), err))
+}
+
+/// Starts the job of the start file `file`, on this platform.
+#[cfg(target_os = "macos")]
+fn start_parsed(file: &std::path::Path, err: &mut dyn Write) -> u8 {
+    macos::start_job(file, err)
+}
+
+/// Refuses: only macOS starts native macOS jobs.
+#[cfg(not(target_os = "macos"))]
+fn start_parsed(_file: &std::path::Path, err: &mut dyn Write) -> u8 {
+    let _ = writeln!(err, "js-agent: {} runs on macOS only", start::VERB);
+    status::USAGE
 }
 
 /// Runs the mode: `args` is the whole command line, the mode word second.

@@ -534,7 +534,7 @@ pub fn main_with(
     {
         return dev_exec::run(&args, err);
     }
-    // Before anything starts a thread: the mode's start allocates between fork and exec.
+    // A native Mac job, and its start in a process of its own.
     if let Some(code) = mac_job::dispatch(&args, out, err) {
         return code;
     }
