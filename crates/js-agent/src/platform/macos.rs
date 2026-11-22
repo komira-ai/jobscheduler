@@ -77,9 +77,9 @@ pub struct Flags {
     /// The uids of the slot pool's slots, `<first>-<last>`.
     #[arg(long, value_name = "FIRST-LAST", requires = "native_accounts")]
     pub native_account_range: Option<crate::mac_accounts::Slots>,
-    /// How many accounts the slot pool keeps ready.
-    #[arg(long, value_name = "N", default_value_t = 1)]
-    pub native_account_ready: usize,
+    /// How many accounts the slot pool keeps ready; 1 when not given.
+    #[arg(long, value_name = "N", requires = "native_accounts")]
+    pub native_account_ready: Option<usize>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default
     /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
     #[arg(long, value_name = "PATH")]
@@ -163,7 +163,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 15] {
+    pub fn given(&self) -> [(&'static str, bool); 18] {
         [
             (
                 "--native-helper-socket",
@@ -186,6 +186,15 @@ impl Flags {
             ("--native-pfctl", self.native_pfctl.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
+            ("--native-accounts", self.native_accounts.is_some()),
+            (
+                "--native-account-range",
+                self.native_account_range.is_some(),
+            ),
+            (
+                "--native-account-ready",
+                self.native_account_ready.is_some(),
+            ),
         ]
     }
 
@@ -438,7 +447,7 @@ impl Jobs {
             (Some(state), Some(slots)) => Some(native::Accounts {
                 state: state.clone(),
                 slots: *slots,
-                ready: cli.os.native_account_ready,
+                ready: cli.os.native_account_ready.unwrap_or(1),
             }),
             _ => None,
         };
