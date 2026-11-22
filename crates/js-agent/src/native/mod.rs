@@ -76,9 +76,10 @@
 //!
 //! # Privacy grants (TCC)
 //!
-//! The agent holds Full Disk Access, which a profile grants it and no job (the helper holds
-//! none); a Mac agent without it refuses every native job, `no-full-disk-access`. See
-//! `native/grant.rs`.
+//! The agent holds Full Disk Access, which a profile grants it (the helper holds none); a
+//! native job and its supervisor are to keep the responsibility and answer for the agent,
+//! while the helper starts jobs disclaimed today. A Mac agent without the grant refuses every
+//! native job, `no-full-disk-access`. See `native/grant.rs`.
 //!
 //! A start named by its image runs when it carries a `run` and the runtime holds a bundle
 //! store: the image reference is the bundle's name (the bundle pin of the legacy form), the

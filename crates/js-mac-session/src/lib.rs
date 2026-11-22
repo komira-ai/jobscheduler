@@ -22,8 +22,8 @@
 //! - [`scan`]: the leak scan's items, its baseline and the baseline window.
 //! - [`spawn`]: starting a process as the lease user.
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
-//!   its privacy (TCC) responsibility disclaimed, so it never holds the helper's or the
-//!   agent's grants.
+//!   its privacy (TCC) responsibility disclaimed by default, so it does not hold the
+//!   starter's grants; only a call of `Program::keep_responsibility` keeps it.
 //! - [`full_disk_access`]: whether a process holds Full Disk Access, which `js-agent`
 //!   judges of itself at start and the `full-disk-access` verb answers for the helper.
 //! - [`proto`], [`server`], [`client`]: the socket, its wire format, the caller check.

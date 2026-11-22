@@ -1,7 +1,9 @@
 //! The spawn-site check: `js-agent` and `js-mac-session` start every program through one
 //! module, `js_mac_session::disclaim`, which on macOS starts it with its privacy (TCC)
-//! responsibility disclaimed (that module's documentation says why). The check is used by
-//! the `spawn_sites` test rather than a verb: `cargo test -p xtask --test spawn_sites`.
+//! responsibility disclaimed unless the start keeps it, which only a native job and its
+//! supervisor do (that module's documentation says why); and only the files of [`KEEPERS`]
+//! keep it. The check is used by the `spawn_sites` test rather than a verb: `cargo test -p
+//! xtask --test spawn_sites`, and `--test spawn_sites_keepers` for the second rule.
 //!
 //! **Which crates.** [`crates`] starts from [`START_CRATES`] and follows, through each
 //! `crates/<name>/Cargo.toml`, every `path` dependency of `[dependencies]` and of
@@ -50,13 +52,26 @@
 //!   another name: under it `Command`, `system` and `popen` would be named without the
 //!   words looked for (`use std::process as p; type C = p::Command;`).
 //!
+//! **Who keeps the responsibility.** Outside the files of [`KEEPERS`] (and the spawner),
+//! each of these is a [`Site`] too, a start that would leave the disclaim out:
+//!
+//! - the word `keep_responsibility`, as a method call, in a path (`Program::keep_responsibility`)
+//!   or in an import: `keep_responsibility outside KEEPERS`;
+//! - `disclaim` then `Kept`, which covers an import of the reason even under another name
+//!   (`use js_mac_session::disclaim::Kept as K`), and `Kept` then `Job`, `Supervisor` or `*`:
+//!   `Kept outside KEEPERS`.
+//!
+//! A method is called by its name, so no import or alias hides the call itself. A file of
+//! [`KEEPERS`] that the walk does not reach is an error, as a missing module is.
+//!
 //! The same sequences are looked for in the tokens of every macro call, which `syn` does
 //! not parse; a braced import list there is expanded with its prefix as in code. A `mod`
 //! declaration whose file is missing, a `#[path]` attribute on an inline module, inside
 //! an inline module or with a value that is not a string literal, a `#[cfg_attr(..)]`
 //! that may set a module's `path` (the file would depend on the target), an `include!`
-//! (the check follows none of these), a crate with no root and a spawner that no module
-//! declares are errors, never a part of the tree skipped in silence.
+//! (the check follows none of these), a crate with no root, a spawner that no module
+//! declares and a keeper the walk does not reach are errors, never a part of the tree
+//! skipped in silence.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -72,6 +87,24 @@ pub const START_CRATES: [&str; 2] = ["js-agent", "js-mac-session"];
 
 /// The one module that may start programs, from the repository root.
 pub const SPAWNER: &str = "crates/js-mac-session/src/disclaim.rs";
+
+/// The files, from the repository root, that may keep a program's responsibility
+/// (`Program::keep_responsibility`, `disclaim::Kept`): each starts a native job or the
+/// supervisor that starts one. None does yet: no production code keeps it.
+pub const KEEPERS: [&str; 0] = [];
+
+/// The word sequences that keep a program's responsibility, with the name a [`Site`] gives
+/// each, looked for outside the keepers.
+const KEEPS: [(&[&str], &str); 5] = [
+    (
+        &["keep_responsibility"],
+        "keep_responsibility outside KEEPERS",
+    ),
+    (&["disclaim", "Kept"], "Kept outside KEEPERS"),
+    (&["Kept", "Job"], "Kept outside KEEPERS"),
+    (&["Kept", "Supervisor"], "Kept outside KEEPERS"),
+    (&["Kept", "*"], "Kept outside KEEPERS"),
+];
 
 /// The C library's functions that execute a program.
 pub const EXECUTORS: [&str; 11] = [
@@ -135,7 +168,7 @@ const RENAMED: [&[&str]; 4] = [
 ];
 
 /// A place in the production code of the checked crates that starts a program without the
-/// spawner.
+/// spawner, or keeps a program's responsibility outside the keepers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Site {
     /// The file, from the repository root.
@@ -226,6 +259,12 @@ pub enum Error {
     /// No module of `js-mac-session` is [`SPAWNER`].
     #[error("no module of js-mac-session is {SPAWNER}, the one module that may start programs")]
     NoSpawner,
+    /// A file listed as a keeper is not a module of the checked crates.
+    #[error("{}: listed in KEEPERS, but no module of the checked crates is this file", .path.display())]
+    NoKeeper {
+        /// The listed file.
+        path: PathBuf,
+    },
 }
 
 /// A word of a path or of a macro's tokens, and where it is.
@@ -389,18 +428,30 @@ fn roots(root: &Path, name: &str, manifest: &toml::Table) -> Result<Vec<PathBuf>
     Ok(found.into_iter().collect())
 }
 
-/// Every [`Site`] of the tree at `root` (a repository checkout), in file and line order;
-/// none when every program is started through [`SPAWNER`].
+/// Every [`Site`] of the tree at `root` (a repository checkout), in file and line order,
+/// each file, line and name once; none when every program is started through [`SPAWNER`]
+/// and only the files of [`KEEPERS`] keep a program's responsibility.
+///
+/// # Errors
+/// As [`check_with_keepers`].
+pub fn check(root: &Path) -> Result<Vec<Site>, Error> {
+    check_with_keepers(root, &KEEPERS)
+}
+
+/// [`check`], with `keepers` (files from the repository root) as the files that may keep a
+/// program's responsibility.
 ///
 /// # Errors
 /// A manifest or a source file cannot be read or parsed, a module has no file or a
-/// `#[path]`, a file calls `include!`, a crate has no root, or no module is [`SPAWNER`].
-pub fn check(root: &Path) -> Result<Vec<Site>, Error> {
+/// `#[path]`, a file calls `include!`, a crate has no root, no module is [`SPAWNER`], or a
+/// keeper is not a module of the checked crates.
+pub fn check_with_keepers(root: &Path, keepers: &[&str]) -> Result<Vec<Site>, Error> {
     let mut walk = Walk {
         root,
         sites: Vec::new(),
         spawner: false,
         seen: BTreeSet::new(),
+        keepers: keepers.iter().map(|keeper| root.join(keeper)).collect(),
     };
     for (name, manifest) in closure(root)? {
         for path in roots(root, &name, &manifest)? {
@@ -411,7 +462,17 @@ pub fn check(root: &Path) -> Result<Vec<Site>, Error> {
     if !walk.spawner {
         return Err(Error::NoSpawner);
     }
+    if let Some(keeper) = keepers
+        .iter()
+        .find(|keeper| !walk.seen.contains(&root.join(keeper)))
+    {
+        return Err(Error::NoKeeper {
+            path: PathBuf::from(keeper),
+        });
+    }
     walk.sites.sort();
+    // `disclaim::Kept::Job` holds two of the sequences: one site.
+    walk.sites.dedup();
     Ok(walk.sites)
 }
 
@@ -422,6 +483,8 @@ struct Walk<'r> {
     spawner: bool,
     /// The files read already: a module two roots declare is read once.
     seen: BTreeSet<PathBuf>,
+    /// The files that may keep a program's responsibility.
+    keepers: BTreeSet<PathBuf>,
 }
 
 impl Walk<'_> {
@@ -443,8 +506,10 @@ impl Walk<'_> {
             path: file.clone(),
             source,
         })?;
+        let keeper = self.keepers.contains(path);
         let mut visitor = Visitor {
             walk: self,
+            keeper,
             file,
             here: path.parent().map_or_else(PathBuf::new, Path::to_path_buf),
             dirs: vec![children],
@@ -463,6 +528,8 @@ impl Walk<'_> {
 /// The visit of one file.
 struct Visitor<'w, 'r> {
     walk: &'w mut Walk<'r>,
+    /// Whether the file is one of the keepers.
+    keeper: bool,
     /// The file, from the repository root.
     file: PathBuf,
     /// The directory of the file, where a `#[path]` is relative to.
@@ -481,6 +548,11 @@ impl Visitor<'_, '_> {
         for at in 0..names.len() {
             for (sequence, what) in SEQUENCES {
                 if names[at..].starts_with(sequence) {
+                    found.push((at, what.to_owned()));
+                }
+            }
+            for (sequence, what) in KEEPS {
+                if !self.keeper && names[at..].starts_with(sequence) {
                     found.push((at, what.to_owned()));
                 }
             }
