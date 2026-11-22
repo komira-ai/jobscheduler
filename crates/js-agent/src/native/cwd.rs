@@ -1,13 +1,13 @@
 //! The working directory of a native run: `native.cwd`, a path relative to the run's
-//! `exec/` directory (empty for `exec/` itself), resolved there and handed to the helper as
-//! the open directory its `run` request carries.
+//! `exec/` directory (empty for `exec/` itself), resolved there to a canonical path, which the
+//! supervisor is started in.
 //!
 //! A path that leaves `exec/` is refused, by name, before anything starts: an absolute path
 //! or one with a `..` part at once (also at admission, [`check`]), and one that reaches
 //! outside through a link (an input may carry links) when it is resolved, after the inputs
-//! are staged and before the helper's `run`. No process of the run's user exists then, so
-//! nothing can swap a name between the resolution and the open. A part of the path that is
-//! not there is made, `0700` and the user's, as `exec/` is.
+//! are staged and before the supervisor starts. No process of the run's account exists then,
+//! so nothing can swap a name between the resolution and the start. A part of the path that
+//! is not there is made, `0700` and the account's, as `exec/` is.
 
 use std::fs;
 use std::io;

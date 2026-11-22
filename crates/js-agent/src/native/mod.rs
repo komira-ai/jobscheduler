@@ -101,7 +101,7 @@
 //! The runtime is built in the macOS build only; the decisions it makes that need no Mac
 //! (the account pool, the supervisor's steps) live in modules every build tests.
 
-pub mod accounts;
+mod accounts;
 mod adopt;
 mod bundle;
 mod cwd;
@@ -117,6 +117,7 @@ mod network;
 mod outputs;
 mod pf;
 mod profile;
+pub mod proof;
 mod remove;
 mod run;
 mod settings;
@@ -127,7 +128,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io;
-use std::os::unix::fs::{PermissionsExt as _, chown};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -225,6 +226,8 @@ pub struct NativeRuntime {
     /// The wall clock, in milliseconds since the Unix epoch: when a run started and each step
     /// of its start was done, and when a stop's grace ends.
     now_ms: Clock,
+    /// Whether each run's supervisor opens an audit session of its own (which needs root).
+    new_session: bool,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -306,6 +309,7 @@ impl NativeRuntime {
             hand_over: files::lchown(),
             logs: None,
             now_ms: system_clock(),
+            new_session: true,
         })
     }
 
@@ -321,6 +325,18 @@ impl NativeRuntime {
     #[must_use]
     pub fn with_clock(self, now_ms: Clock) -> Self {
         Self { now_ms, ..self }
+    }
+
+    /// The same runtime, its supervisors opening no audit session of their own, which only root
+    /// may: how a test runs the real supervisor as the user running the tests. An agent never
+    /// calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn without_new_session(self) -> Self {
+        Self {
+            new_session: false,
+            ..self
+        }
     }
 
     /// The same runtime, giving a run's files to its account through `hand_over` in place of
@@ -594,11 +610,13 @@ fn fail(what: &dyn Display, why: &dyn Display) -> RuntimeError {
     RuntimeError::new(format!("{what}: {why}"))
 }
 
-/// Makes the directory `path`, private to `uid`, and opens it. No process of that account
-/// exists yet, so nothing can race the steps.
-fn make_dir(path: &Path, uid: u32) -> io::Result<File> {
+/// Makes the directory `path`, private to `uid`, given to it through `hand_over` (its group
+/// unchanged), and opens it. No process of that account exists yet, so nothing can race the
+/// steps.
+fn make_dir(path: &Path, uid: u32, hand_over: &HandOver) -> io::Result<File> {
     fs::create_dir(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    chown(path, Some(uid), None)?;
+    let gid = fs::symlink_metadata(path)?.gid();
+    hand_over(path, uid, gid)?;
     File::open(path)
 }

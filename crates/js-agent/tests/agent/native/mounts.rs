@@ -1,6 +1,7 @@
 //! The mounts of a job-keyed start on a Mac (`docs/design/job-rootfs.md`, 5.1, 5.2, 5.4):
 //! what the runtime refuses at admission, what it resolves and refuses when it looks up the
-//! host paths, the links it makes in `exec/`, and the grants in the profile.
+//! host paths, the links it makes in `exec/`, and the grants in the profile the supervisor is
+//! asked to apply.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt as _, symlink};
@@ -13,13 +14,13 @@ use js_agent_wire::{
 };
 use js_mac_pool::seatbelt::AbsPath;
 
-use super::{Rig, native, parse};
+use super::{Rig, native};
 use crate::support::Scratch;
 
 /// A rig whose runtime holds the roots `roots/ro` (read-only) and `roots/rw`, both made, and
 /// every root a read deny of every run, as the agent's settings make them.
 fn rig(name: &str) -> Rig {
-    Rig::in_dir(name, |config, dir| {
+    Rig::in_dir(name, 1, |config, dir| {
         for root in ["ro", "rw"] {
             fs::create_dir_all(dir.path("roots").join(root)).unwrap();
             let path = fs::canonicalize(dir.path("roots").join(root)).unwrap();
@@ -67,7 +68,14 @@ fn refusal_of(code: &'static str, why: &str) -> NativeRefusal {
     }
 }
 
-/// The `-D` parameter whose value is `value`.
+/// The run directory `exec` of the account the `n`th launch (from 0) of `rig` ran as.
+fn exec_of(rig: &Rig, n: usize) -> PathBuf {
+    let launched = &rig.launcher.launched()[n];
+    rig.home_of(launched.var("USER").expect("the account"))
+        .join("exec")
+}
+
+/// The profile parameter whose value is `value`.
 fn param_for(params: &[(String, String)], value: &Path) -> String {
     let wanted = value.display().to_string();
     let found = params.iter().find(|(_, path)| *path == wanted);
@@ -88,8 +96,8 @@ fn at(profile: &str, line: &str) -> usize {
 /// Asserts a start of the kbf shape: a read-only no-exec mount at `/work/.kbf-tree` from the
 /// read-only root and a read-write no-exec mount at `/work/.kbf-out` from the writable one.
 /// Both are admitted and resolved at once, the links `exec/.kbf-tree` and `exec/.kbf-out`
-/// point at the canonical host directories before `run`, and the profile the helper received
-/// carries a `GR_` parameter for each: a read grant for both, a write grant for the read-write
+/// point at the canonical host directories once the start is done, and the profile the
+/// supervisor was asked to apply carries a `GR_` parameter for each: a read grant for both, a write grant for the read-write
 /// one only, an exec deny for both, the grants after the read denies of the two roots and the
 /// exec denies after the grants, and the read-only link is write-denied (an input) while the
 /// read-write one is not. Catches a mount that is linked but not granted (the root's read deny
@@ -111,7 +119,7 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
 
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(fs::read_link(exec.join(".kbf-tree")).unwrap(), tree);
     assert_eq!(fs::read_link(exec.join(".kbf-out")).unwrap(), out);
     assert_eq!(
@@ -119,13 +127,13 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
         "in"
     );
 
-    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    let parsed = rig.launcher.last();
     let (tree_gr, out_gr) = (
         param_for(&parsed.params, &tree),
         param_for(&parsed.params, &out),
     );
     assert!(tree_gr.starts_with("GR_") && out_gr.starts_with("GR_"));
-    let profile = parsed.profile;
+    let profile = parsed.profile.clone();
     let line = |rule: &str, name: &str| format!("({rule} (subpath (param \"{name}\")))");
     for name in [&tree_gr, &out_gr] {
         let read = line("allow file-read*", name);
@@ -398,7 +406,7 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
     rig.rt
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(visible(&exec), 0);
 }
 
@@ -423,7 +431,7 @@ fn a_sub_path_is_linked_and_a_nested_target_gets_its_parent_directory() {
     rig.rt
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(fs::read_link(exec.join("a/b")).unwrap(), rw);
     assert_eq!(fs::read_link(exec.join("c/d/e")).unwrap(), ro);
     for parent in ["a", "c", "c/d"] {
@@ -449,9 +457,9 @@ fn discarding_the_file_system_of_a_run_drops_its_plan_and_is_idempotent() {
     rig.rt
         .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
         .unwrap();
-    let exec = rig.fake.home_of("7.0").join("exec");
+    let exec = exec_of(&rig, 0);
     assert_eq!(visible(&exec), 0);
-    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    let parsed = rig.launcher.last();
     assert!(
         parsed
             .params
@@ -461,9 +469,9 @@ fn discarding_the_file_system_of_a_run_drops_its_plan_and_is_idempotent() {
 }
 
 /// A start whose link has a name taken (a staged input of the legacy form at the same `dest`)
-/// fails, naming the mount, and the user the start made is removed: the helper is asked to
-/// kill and delete it and never to run anything. Catches a link made through whatever was at
-/// the name, and a failed start that leaves its user.
+/// fails, naming the mount, and the account the start was lent is retired: its lease is
+/// done, nothing is held and the supervisor is never asked to run anything. Catches a link
+/// made through whatever was at the name, and a failed start that leaves its account.
 #[test]
 fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
     let mut rig = rig("mounts-taken");
@@ -479,16 +487,10 @@ fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
     }];
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.starts_with("a mount: /work/out: "), "{}", error.0);
-    assert_eq!(
-        rig.fake.verbs(),
-        [
-            "boot-reset",
-            "user-create 7.0",
-            "pool-status",
-            "kill-uid 7.0",
-            "user-delete 7.0"
-        ]
-    );
+    assert!(rig.launcher.launched().is_empty(), "no supervisor");
+    assert!(rig.pool.held().is_empty(), "{:?}", rig.pool.held());
+    let text = fs::read_to_string(rig.dir.path("native-leases")).unwrap();
+    assert_eq!(text.lines().collect::<Vec<_>>(), ["+ 7.0", "- 7.0"]);
 }
 
 /// Asserts that the mount roots of the agent's flags become read denies of every run and the
@@ -498,14 +500,14 @@ fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
 #[test]
 fn the_mount_roots_are_read_denies_of_every_run() {
     let dir = Scratch::new("native-mount-roots");
-    let homes = dir.path("homes");
-    fs::create_dir(&homes).unwrap();
     let root = dir.path("root");
     fs::create_dir(&root).unwrap();
     let root = fs::canonicalize(root).unwrap();
     let flags = NativeFlags {
-        socket: Some(Path::new("/run/js/helper")),
-        homes: Some(&homes),
+        accounts: Some(Path::new("/var/db/js-accounts")),
+        account_range: Some("501-510"),
+        account_ready: None,
+        homes: None,
         network: None,
         tool_roots: &[],
         deny_read: &[],

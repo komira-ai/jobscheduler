@@ -210,6 +210,66 @@ pub(super) trait Os {
     /// # Errors
     /// An ACL could not be stripped.
     fn strip_acl(&self, dir: &OwnedFd, name: &OsStr) -> io::Result<()>;
+
+    /// Whether root is refused the entry `name` of `dir` itself: examining or opening it
+    /// answers `EPERM`. macOS answers so for a data vault, which only the system daemon
+    /// entitled to it may open, root with Full Disk Access included.
+    fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool;
+
+    /// Whether the entry `name` of `dir` carries the system's no-unlink flag (`sunlnk`,
+    /// `SF_NOUNLINK`), which System Integrity Protection keeps root from clearing: root may
+    /// remove what is in it, never the entry itself.
+    fn pinned(&self, dir: &OwnedFd, name: &OsStr) -> bool;
+}
+
+/// What macOS's own per-user daemons make in a slot's per-user folder, as (top-level
+/// directory, name), that root may not remove: Launch Services' data vault (`lsd`), which root
+/// may not even examine ([`Os::sealed`]), and the trust daemon's folder (`trustd`, made when a
+/// job checks a TLS certificate), which carries the system's no-unlink flag ([`Os::pinned`]),
+/// as the folder's own directories do. A sealed one is kept whole: no job can open it, only
+/// the daemon. A pinned one is kept and emptied, as a top-level directory is. One of these that
+/// is neither is removed like anything else, and any other item root is refused holds the
+/// account.
+pub(super) const SYSTEM_KEPT: [(&str, &str); 2] = [
+    ("0", "com.apple.LaunchServices.dv"),
+    ("T", "com.apple.trustd"),
+];
+
+/// The entries of [`SYSTEM_KEPT`] in a top-level directory of a per-user folder that stay.
+#[derive(Default)]
+struct Kept {
+    /// Sealed: kept whole, never looked into.
+    whole: Vec<OsString>,
+    /// Pinned: kept, and what is in them goes.
+    emptied: Vec<OsString>,
+}
+
+impl Kept {
+    /// Whether the entry `name` stays.
+    fn holds(&self, name: &OsStr) -> bool {
+        self.whole
+            .iter()
+            .chain(&self.emptied)
+            .any(|kept| kept == name)
+    }
+}
+
+/// The entries of the top-level directory `top` (named `top_name`) of a per-user folder that
+/// stay: those of [`SYSTEM_KEPT`] for it that are there and sealed or pinned.
+fn kept_in(top: &OwnedFd, top_name: &OsStr, os: &dyn Os) -> Kept {
+    let mut kept = Kept::default();
+    for (_, name) in SYSTEM_KEPT
+        .iter()
+        .filter(|(dir, _)| OsStr::new(dir) == top_name)
+    {
+        let name = OsString::from(name);
+        if os.sealed(top, &name) {
+            kept.whole.push(name);
+        } else if os.pinned(top, &name) {
+            kept.emptied.push(name);
+        }
+    }
+    kept
 }
 
 /// The operating system itself. Off macOS there are no user flags to clear and no ACL to
@@ -239,6 +299,25 @@ impl Os for System {
     #[cfg(not(target_os = "macos"))]
     fn strip_acl(&self, _dir: &OwnedFd, _name: &OsStr) -> io::Result<()> {
         Ok(())
+    }
+
+    fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool {
+        let refused = |result: Result<(), Errno>| result == Err(Errno::PERM);
+        refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop))
+            || refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pinned(&self, dir: &OwnedFd, name: &OsStr) -> bool {
+        /// `SF_NOUNLINK` of `<sys/stat.h>`, shown as `sunlnk`.
+        const NO_UNLINK: u32 = 0x0010_0000;
+        rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| stat.st_flags & NO_UNLINK != 0)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pinned(&self, _dir: &OwnedFd, _name: &OsStr) -> bool {
+        false
     }
 }
 
@@ -458,8 +537,19 @@ fn empty(
     (uid, dev, depth): (u32, Dev, usize),
     park: &Park,
 ) -> io::Result<()> {
+    empty_but(dir, path, (uid, dev, depth), park, &[])
+}
+
+/// [`empty`], except the entries named in `keep`, which stay.
+fn empty_but(
+    dir: &OwnedFd,
+    path: &Path,
+    (uid, dev, depth): (u32, Dev, usize),
+    park: &Park,
+    keep: &[OsString],
+) -> io::Result<()> {
     let mut failed = Vec::new();
-    for entry in list(dir)? {
+    for entry in list(dir)?.into_iter().filter(|entry| !keep.contains(entry)) {
         let inner = path.join(&entry);
         let result = examine(dir, &entry).and_then(|found| {
             found.map_or(Ok(()), |stat| {
@@ -841,31 +931,50 @@ fn empty_top(
     os.clear_flags(folder, name, stat)?;
     searchable(folder, name, stat)?;
     let top = open_child(folder, name, stat)?;
+    let kept = kept_in(&top, name, os);
+    for item in kept.whole.iter().chain(&kept.emptied) {
+        tracing::info!(item = %path.join(item).display(), "kept: a system item root may not remove");
+    }
     let park = Park::lifting(&top, os);
     let mut failed = Vec::new();
+    let skip: Vec<OsString> = kept.whole.iter().chain(&kept.emptied).cloned().collect();
     failed.extend(
-        empty(&top, path, (uid, dev, 2), &park)
+        empty_but(&top, path, (uid, dev, 2), &park, &skip)
             .err()
             .map(|why| why.to_string()),
     );
+    for item in &kept.emptied {
+        let inner = path.join(item);
+        let emptied = examine(&top, item).and_then(|found| match found {
+            Some(stat) if is_dir(&stat) => {
+                searchable(&top, item, &stat)?;
+                let child = open_child(&top, item, &stat)?;
+                empty(&child, &inner, (uid, dev, 3), &park)
+            }
+            _ => Ok(()),
+        });
+        note(&mut failed, &inner, emptied);
+    }
     note(&mut failed, path, park.drain(uid, dev));
     joined(&failed)
 }
 
 /// What the per-user folder at `path` holds that an emptied one does not: each non-directory
 /// at its top level and each entry directly below its top-level directories (the entry
-/// itself, not what is in it); nothing for a `path` that does not exist.
+/// itself, not what is in it), except an item of [`SYSTEM_KEPT`] that stays: a sealed one is
+/// not counted, and of a pinned one what is directly in it is; nothing for a `path` that does
+/// not exist.
 ///
 /// # Errors
 /// The folder or one of its top-level directories could not be opened or listed: what was not
 /// looked at is never read as empty.
-pub(super) fn leftovers(path: &Path) -> io::Result<Vec<PathBuf>> {
+pub(super) fn leftovers(path: &Path, os: &dyn Os) -> io::Result<Vec<PathBuf>> {
     let Some(folder) = named(path, open_dir(path))? else {
         return Ok(Vec::new());
     };
     let mut left = Vec::new();
     for name in named(path, list(&folder))? {
-        top_leftovers(&folder, &name, &path.join(&name), &mut left)?;
+        top_leftovers(&folder, &name, &path.join(&name), &mut left, os)?;
     }
     Ok(left)
 }
@@ -877,6 +986,7 @@ fn top_leftovers(
     name: &OsStr,
     here: &Path,
     left: &mut Vec<PathBuf>,
+    os: &dyn Os,
 ) -> io::Result<()> {
     let Some(stat) = named(here, examine(folder, name))? else {
         return Ok(());
@@ -886,7 +996,23 @@ fn top_leftovers(
         return Ok(());
     }
     let top = named(here, open_child(folder, name, &stat))?;
+    let kept = kept_in(&top, name, os);
     for inner in named(here, list(&top))? {
+        if kept.emptied.contains(&inner) {
+            let at = here.join(&inner);
+            if let Some(stat) = named(&at, examine(&top, &inner))?.filter(is_dir) {
+                let pinned = named(&at, open_child(&top, &inner, &stat))?;
+                left.extend(
+                    named(&at, list(&pinned))?
+                        .iter()
+                        .map(|entry| at.join(entry)),
+                );
+            }
+            continue;
+        }
+        if kept.holds(&inner) {
+            continue;
+        }
         left.push(here.join(inner));
     }
     Ok(())

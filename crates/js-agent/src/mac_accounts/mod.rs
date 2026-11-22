@@ -28,7 +28,11 @@
 //! System Integrity Protection on, the folder and its four directories carry `sunlnk` and the
 //! `com.apple.rootless` attribute: `rmdir`, `chflags` and `xattr -d` are refused to root, and
 //! `sysadminctl -deleteUser` leaves the folder too. What is below the four directories can be
-//! removed. A record made with its `GeneratedUID` from the start (the directory service takes
+//! removed, except what macOS's own per-user daemons seal there: after a real build the
+//! folder held Launch Services' data vault (`0/com.apple.LaunchServices.dv`) and the trust
+//! daemon's folder (`T/com.apple.trustd`), which root may not remove, list or even examine.
+//! Those two, when sealed, are kept with the folder (`tree::SYSTEM_KEPT`): a job cannot open
+//! them, only the daemon can. A record made with its `GeneratedUID` from the start (the directory service takes
 //! it only at creation; root may not change it afterwards) and the same uid gets the same
 //! folder again, found empty once the last account's contents were removed. So the module
 //! makes the record with the slot's `GeneratedUID` among its first attributes
@@ -49,7 +53,8 @@
 //! account and no record, such a process is nobody's work: macOS starts per-user daemons such
 //! as `distnoted` by itself; one that survives the rounds keeps the slot busy, named by its
 //! pid); every per-user folder the uid owns two levels down in `/private/var/folders` holds
-//! nothing below its top-level directories (and nothing but directories at its top level);
+//! nothing below its top-level directories but the sealed system items (and nothing but
+//! directories at its top level);
 //! and nothing is owned by the uid in the shared places (`/Users/Shared`, `/private/tmp`,
 //! `/private/var/tmp`, `/private/var/at/jobs`, launchd's per-uid files). An error in looking
 //! is not "free": the slot is passed over and the refusal names why.
@@ -77,8 +82,8 @@
 //!    3. removes what it owns in the shared places and launchd's per-uid files;
 //!    4. deletes the record and the home, and empties every per-user folder the uid owns
 //!       (an older account of the same uid may have left another besides the slot's): each
-//!       folder and its top-level directories stay, everything below them goes and so does
-//!       any non-directory at the top level. The removal is root's way: no link is followed
+//!       folder and its top-level directories stay, everything below them goes (except the
+//!       sealed system items above) and so does any non-directory at the top level. The removal is root's way: no link is followed
 //!       (a link is removed, its target kept), no other filesystem is entered, user flags
 //!       (`uchg`, `uappnd`) are cleared on every entry before it is removed, an entry whose
 //!       removal is refused has its ACL stripped and is removed again, a directory is made

@@ -16,8 +16,8 @@
 //!    to the file it names, which must lie inside its tree and be a program.
 //!
 //! The pins end with the run: [`Pinned`] unpins when it is dropped, whichever way the start
-//! or the run ends. The clones are inside the user's home, which the helper sweeps when it
-//! deletes the user.
+//! or the run ends. The clones are inside the account's home, which the account's retirement
+//! deletes.
 //!
 //! The profile of a run that pins a bundle is the same as any native run's: reads are open
 //! (`ReadModel::Open`, the only model with a profile builder), so the store's trees need no
@@ -109,9 +109,10 @@ pub(super) fn prepare(
     native: &NativeSpec,
     home: &Path,
     (uid, tmp, developer_dir): (u32, &Path, Option<&Path>),
+    hand_over: &super::HandOver,
 ) -> Result<Prepared, Prepare> {
     let under = home.join(super::profile::JOB_TREES_DIR);
-    super::make_dir(&under, uid)?;
+    super::make_dir(&under, uid, hand_over)?;
     let gid = fs::metadata(home)?.gid();
     let owner = Owner::new(uid, gid).ok_or(Prepare::Owner)?;
     let writable = pinned.clone_writable(&under, owner)?;

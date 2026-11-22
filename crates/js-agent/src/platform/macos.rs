@@ -669,7 +669,9 @@ pub(crate) fn runtime(
     // may then share a name, which the journal tells apart only by order.
     let _ = getrandom::getrandom(&mut bytes);
     let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
-    let launcher: Arc<dyn Launcher> = Arc::new(SystemLauncher);
+    let launcher = SystemLauncher::current()
+        .map_err(|why| format!("--native-accounts: the agent's own path: {why}"))?;
+    let launcher: Arc<dyn Launcher> = Arc::new(launcher);
     let opened = NativeRuntime::open(launcher, native.config().clone(), term);
     let runtime = opened.map_err(|why| format!("--native-accounts: {why}"))?;
     let runtime = match native.bundles() {

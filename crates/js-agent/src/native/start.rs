@@ -30,7 +30,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, Isolation, NativeSpec, NetworkLevel};
@@ -177,14 +176,14 @@ impl NativeRuntime {
             exec.join(profile::JOB_HOME_DIR),
         );
         for dir in [&exec, &tmp, &job_home] {
-            make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
+            make_dir(dir, uid, &self.hand_over).map_err(|why| fail(&dir.display(), &why))?;
         }
         self.mark(marks, STEPS[3]);
         // The files and the inputs go to the account before any process of it exists.
         if let Some(dir) = &spec.files {
             files::hand_over(dir, uid, &self.hand_over).map_err(|why| fail(&"the files", &why))?;
         }
-        let make = |path: &Path| make_dir(path, uid).map(drop);
+        let make = |path: &Path| make_dir(path, uid, &self.hand_over).map(drop);
         files::stage_inputs(&exec, &spec.mounts, uid, (&self.hand_over, &make))
             .map_err(|why| fail(&"an input", &why))?;
         mounts::link_all(&plans, &exec, uid, (&self.hand_over, &make))
@@ -194,8 +193,9 @@ impl NativeRuntime {
         let dev = developer_dir.as_deref();
         let (native, base) = match &pinned {
             Some(pinned) => {
-                let prepared = bundle::prepare(pinned, native, &exec, (uid, &tmp, dev))
-                    .map_err(|why| fail(&"the bundle", &why))?;
+                let prepared =
+                    bundle::prepare(pinned, native, &exec, (uid, &tmp, dev), &self.hand_over)
+                        .map_err(|why| fail(&"the bundle", &why))?;
                 let body = NativeSpec {
                     program: prepared.program,
                     args: prepared.args,
@@ -233,6 +233,7 @@ impl NativeRuntime {
         // The job start's environment over the agent's (its values win), then the account's
         // names, which no job may set.
         let mut env = env::with_job(base, &spec.env);
+        env.retain(|(name, _)| !env::ACCOUNT_ENV.contains(&name.as_str()));
         env.extend(env::account(&job_home, &tmp, &account.name));
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
         let records = spec.scratch.join(RECORDS_DIR);
@@ -244,7 +245,7 @@ impl NativeRuntime {
             spec: SuperviseSpec {
                 uid,
                 gid: account.gid,
-                new_session: true,
+                new_session: self.new_session,
                 profile: built.text().to_owned(),
                 params: built.params().to_vec(),
                 program: native.program.clone(),

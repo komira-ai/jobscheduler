@@ -29,8 +29,6 @@ use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::vm::VmSettings;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
-#[cfg(target_os = "macos")]
-use js_mac_session::client::Client;
 use js_vm_lease::VmDriver;
 use js_vm_lease::fake::FakeDriver;
 
@@ -707,13 +705,13 @@ impl Machine for FakeMachine {
             Build::Fine | Build::HostNotSeen => {
                 // What opening the real runtime does for jobs mapped onto a range: the
                 // checks take the range from the settings (the fake engine maps nothing).
-                // A native agent's runtime (a macOS build's) is the real one, over whatever
-                // helper the flags name (the tests serve a fake one on that socket).
+                // A native agent's runtime (a macOS build's) is the real one, over a fake
+                // supervisor; its settings hold no Full Disk Access, so it opens no pool.
                 #[cfg(target_os = "macos")]
                 {
                     let Backend::Native(native) = build.backend;
-                    let helper = Client::new(native.socket());
-                    let opened = NativeRuntime::open(helper, native.config().clone(), 1);
+                    let launcher = crate::native::fake_launcher::FakeLauncher::new();
+                    let opened = NativeRuntime::open(launcher, native.config().clone(), 1);
                     let runtime = opened.map_err(|why| why.to_string())?;
                     self.bundles_seen
                         .lock()

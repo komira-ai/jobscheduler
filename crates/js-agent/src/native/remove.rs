@@ -6,8 +6,9 @@
 //!   128 and the signal. A supervisor that ended with no word of the job, or that cannot be
 //!   asked, leaves the run gone. Once a stop's grace has passed and the run has not ended,
 //!   each poll ends its processes ([`end::end_processes`]).
-//! - **Stop.** `SIGTERM` to the job's process group, so a job may flush; the lifecycle owns
-//!   the wall limit and calls the stop.
+//! - **Stop.** `SIGTERM` to the job's process group, so a job may flush (nothing for a run
+//!   that has ended: its job is reaped, and its pid may be another's); the lifecycle owns the
+//!   wall limit and calls the stop.
 //! - **Removal**, in this order: the run's processes are ended, its declared outputs copied
 //!   out of `exec/` into its scratch directory (once: a removal that is tried again does not
 //!   copy them again), its account retired (every process of the uid killed, the record and
@@ -60,8 +61,8 @@ impl NativeRuntime {
     /// at the first poll after `grace`.
     pub(super) fn stop_run(&mut self, id: &RunHandle, grace: Duration) {
         let now = (self.now_ms)();
-        let job = self.runs.get_mut(&id.0).and_then(|run| run.job.as_mut());
-        let Some(job) = job else {
+        let run = self.runs.get_mut(&id.0).filter(|run| run.ended.is_none());
+        let Some(job) = run.and_then(|run| run.job.as_mut()) else {
             return;
         };
         end::signal_group(job, Signal::TERM);
@@ -76,7 +77,9 @@ impl NativeRuntime {
             let _ = self.journal.done(&id.0);
             return Ok(());
         };
-        if let Some(job) = &run.job {
+        // A job whose end was read is reaped: its pid may name another process group by now.
+        // The account's retirement kills every process of the uid either way.
+        if let (Some(job), None) = (&run.job, run.ended) {
             end::end_processes(job);
         }
         run.collect(&id.0, max_file_bytes);

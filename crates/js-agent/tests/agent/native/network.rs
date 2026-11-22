@@ -2,7 +2,7 @@
 //! it is refused before anything is made, never run with less; the pf anchor is asked only
 //! for a filtered (`on`, `allow-list`) job on an agent whose ceiling is `on`; declared ports
 //! are refused. The runtime, the lifecycle and the pf check double are those of `pf_gate`,
-//! over the fake helper.
+//! over the real pool on a fake host and the fake launcher.
 
 use std::fs;
 
@@ -11,18 +11,17 @@ use js_agent::native::{Ceiling, NativeRuntime};
 use js_agent_wire::{NetworkLevel, refusal};
 use js_types::PortMap;
 
-use super::fake_helper::FakeHelper;
 use super::lifecycle::Native;
 use super::pf_gate::{Fake, Verdict, gated, job_at};
-use super::{TERM, config, native};
+use super::{FakeAccounts, FakeLauncher, Rig, TERM, config, native, open_pool, pool_settings};
 use crate::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use crate::support::Scratch;
 
-/// Asserts that a start was refused with `code` and made nothing: the helper heard of its
-/// boot reset only, the run's scratch directory does not exist, the booking is intact and
+/// Asserts that a start was refused with `code` and made nothing: no account was lent and no
+/// supervisor started, the run's scratch directory does not exist, the booking is intact and
 /// the result is a start that failed with that code.
 fn made_nothing(h: &Native, run_id: &str, code: &str) {
-    assert_eq!(h.fake.verbs(), ["boot-reset"], "no user, no run");
+    h.made_no_run();
     let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
     assert!(!scratch.join(run_id).exists(), "no scratch directory");
     assert_eq!(h.life.free().cpu_millis, 4000, "the booking is intact");
@@ -135,13 +134,12 @@ fn every_level_above_the_ceiling_is_refused_through_the_lifecycle() {
 
 /// Asserts that a start that declares one port is refused `ports-not-supported` with the text
 /// that says why, by the runtime's own check and through the lifecycle, before anything is
-/// made (the helper hears of its boot reset only). Catches a refusal moved after the user is
+/// made (no account is lent, no supervisor is started). Catches a refusal moved after the user is
 /// made, and a port that is ignored and the job run without it.
 #[test]
 fn ports_are_refused_on_macos() {
-    let dir = Scratch::new("net-ports-rt");
-    let fake = FakeHelper::start(&dir);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM).unwrap();
+    let rig = Rig::new("net-ports-rt");
+    let runtime = &rig.rt;
     let mut body = native("/bin/echo", &[]);
     body.ports = one_port();
     let refused = runtime.check_native(&body).expect_err("a port");
@@ -152,7 +150,7 @@ fn ports_are_refused_on_macos() {
             "declared ports are not supported on macOS yet"
         )
     );
-    assert_eq!(fake.verbs(), ["boot-reset"]);
+    assert!(rig.launcher.launched().is_empty());
 
     let check = Fake::new(Verdict::Enforced);
     let mut h = gated("net-ports", Ceiling::Open, &check);
@@ -166,9 +164,8 @@ fn ports_are_refused_on_macos() {
 /// starts. Catches a check that refuses on the presence of the field rather than on a port.
 #[test]
 fn no_ports_is_not_refused() {
-    let dir = Scratch::new("net-no-ports-rt");
-    let fake = FakeHelper::start(&dir);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM).unwrap();
+    let rig = Rig::new("net-no-ports-rt");
+    let runtime = &rig.rt;
     let body = native("/bin/echo", &[]);
     assert!(body.ports.is_empty());
     assert_eq!(runtime.check_native(&body).map_err(|why| why.code), Ok(()));
@@ -191,18 +188,24 @@ fn the_ceiling_is_checked_before_the_ports() {
     assert_eq!(h.start(spec), ["refused r1 network-above-ceiling"]);
 }
 
-/// Asserts that a runtime opens with a ceiling of `open` and no pf check, and still refuses
-/// to open with `on` and none. Catches `open` demanding the anchor's check at start, and an
-/// `on` that lost its gate.
+/// Asserts that a runtime opens (over a pool it is given) with a ceiling of `open` and no pf
+/// check, and still refuses to open with `on` and none, over a pool or as an agent's `open`
+/// does (which refuses before it touches the real pool). Catches `open` demanding the
+/// anchor's check at start, and an `on` that lost its gate.
 #[test]
 fn only_a_ceiling_of_on_needs_the_check_to_open() {
     let dir = Scratch::new("net-open-gate");
-    let fake = FakeHelper::start(&dir);
-    let mut cfg = config(&fake);
+    let settings = pool_settings(&dir, 1);
+    let accounts = FakeAccounts::new();
+    let pool = open_pool(&dir, &settings, &accounts);
+    let launcher = FakeLauncher::new();
+    let mut cfg = config(&dir, &settings);
     cfg.network = Ceiling::Open;
-    assert!(NativeRuntime::open(fake.client(), cfg.clone(), TERM).is_ok());
+    let over = |cfg| NativeRuntime::over(Some(pool.clone()), launcher.clone(), cfg, TERM);
+    assert!(over(cfg.clone()).is_ok());
     cfg.network = Ceiling::On;
-    assert!(NativeRuntime::open(fake.client(), cfg, TERM).is_err());
+    assert!(over(cfg.clone()).is_err());
+    assert!(NativeRuntime::open(launcher.clone(), cfg, TERM).is_err());
 }
 
 /// Asserts that a runtime that does not say how it limits a native job's network refuses an
