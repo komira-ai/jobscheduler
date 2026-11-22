@@ -280,10 +280,11 @@ fn none(root: &Path) -> Result<TreeRules, NativeRefusal> {
 }
 
 /// Asserts that no plan, and plans outside the root, give rules with no tree (the root still
-/// named); that two trees of the run, of the kbf shape (read-only, `no_exec`), are taken
+/// named), a directory outside the root that is not there yet (a put target) included; that two trees of the run, of the kbf shape (read-only, `no_exec`), are taken
 /// canonical and in order, one named through `..` and `.` and one through a link from outside
 /// the root; and that a plan beside the trees stays out of the rules. Catches refusing every
-/// real build action, which an inverted rule would do, a tree left out of the run's rules
+/// real build action, which an inverted rule would do (or a put target the build service never
+/// makes, refused as missing), a tree left out of the run's rules
 /// (unreadable to its job), and a run with no tree given no rules (every run's trees open to
 /// it).
 #[test]
@@ -291,6 +292,15 @@ fn trees_below_the_root_are_taken_canonical() {
     let t = trees("native-fs-tree-rules");
     assert_eq!(tree_rules(&t.root, OWN, &[]), none(&t.root));
     assert_eq!(tree_rules(&t.root, OWN, &[kbf(&t.outside)]), none(&t.root));
+    // A put target outside the root that the agent makes only at the commit.
+    let put = t.outside.join("put/cas/b/build-1/0123abcd");
+    assert_eq!(
+        tree_rules(&t.root, OWN, &[kbf(&t.a), (put, false, true)]),
+        Ok(TreeRules {
+            root: t.root.clone(),
+            trees: vec![t.a.clone()],
+        })
+    );
     let beside = (t.outside.clone(), false, false);
     assert_eq!(
         tree_rules(

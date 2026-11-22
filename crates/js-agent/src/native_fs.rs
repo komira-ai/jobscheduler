@@ -21,6 +21,7 @@
 //!   without a tree reads nothing below the root.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use js_agent_wire::{JobMount, MountMode, MountSource, refusal};
@@ -239,7 +240,8 @@ pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
 ///
 /// # Errors
 ///
-/// `input-unavailable` for a directory that cannot be resolved; `input-not-allowed` for a
+/// `input-unavailable` for a directory that cannot be resolved (one outside the root that
+/// is not there is passed over: it is no tree); `input-not-allowed` for a
 /// tree that is the root, one that resolves outside it, one that is not a tree the provider
 /// answered for this run, one mounted read-write or without `no_exec`, and a mount that holds
 /// the root. The text names the directory as given.
@@ -254,10 +256,20 @@ pub fn tree_rules(
     };
     let mut trees = Vec::new();
     for (dir, read_only, no_exec) in plans {
-        let canonical = fs::canonicalize(dir).map_err(|why| NativeRefusal {
-            code: refusal::INPUT_UNAVAILABLE,
-            why: format!("{}: {why}", dir.display()),
-        })?;
+        let canonical = match fs::canonicalize(dir) {
+            Ok(canonical) => canonical,
+            // A directory outside the root that is not there yet is no tree, and cannot hold
+            // the root: a put target, which the agent makes at the commit, is one.
+            Err(why) if why.kind() == io::ErrorKind::NotFound && !dir.starts_with(root) => {
+                continue;
+            }
+            Err(why) => {
+                return Err(NativeRefusal {
+                    code: refusal::INPUT_UNAVAILABLE,
+                    why: format!("{}: {why}", dir.display()),
+                });
+            }
+        };
         if !dir.starts_with(root) && !canonical.starts_with(root) {
             if root.starts_with(&canonical) {
                 return Err(refused(
