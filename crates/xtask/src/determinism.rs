@@ -758,6 +758,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the time in the name of the kept taint marker (`taint.json.cleared-<unix seconds>`, as an operator's clear names it); no decision reads it",
     },
     Allowed {
+        file: "crates/js-agent/src/mac_accounts/macos/sys.rs",
+        item: "now_ms",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "the Mac account pool's own clock, for the times a retirement reports (how long the deletion and the refill took); no decision reads it, and the cell never runs a Mac account pool",
+    },
+    Allowed {
         file: "crates/js-agent/src/native/mod.rs",
         item: "system_clock",
         token: Token::SystemTimeNow,

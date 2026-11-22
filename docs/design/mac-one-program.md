@@ -1,6 +1,6 @@
 # One agent program on a Mac
 
-Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
+Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Apart from the accounts of section 11, nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
 ## 1. What changes for an operator
 
@@ -336,6 +336,18 @@ The owner answered yes to all five questions of section 8:
 - **Q3.** Yes: delete `node-admin`.
 - **Q4.** Yes: keep the Mac rule that the supervisor holds a run's deadline while no agent runs, and leave Linux as it is.
 - **Q5.** Yes: accept one drain per Mac at the switch and across a rollback.
+
+## 11. Built: the slot accounts
+
+`crates/js-agent/src/mac_accounts` is library code of `js-agent`: no helper program, no socket. It makes and deletes the accounts native jobs are to run as, one per job, on *slots*. A slot is a fixed uid and a fixed `GeneratedUID` derived from it, so the slot keeps one per-user folder in `/private/var/folders` for good. For each job the module makes a fresh record (a new name, `kbf-acct-<n>`, never used again) and a fresh home. After the job it kills everything of the uid, deletes the record and the home, empties the slot's per-user folder and keeps it, and shows the account gone before the slot is free again. An fsynced, append-only ledger in the agent's state records every account (`made`, `ready`, `lent`, `held`, `gone`). The accounts are hidden, have shell `/usr/bin/false`, no password and the group `staff`, and are never administrators.
+
+- **Settings.** The slots (`Slots`, `<first>-<last>` or a first uid and a count) and the number of accounts made ahead of a job (`Settings::ready`) are settings of the agent and have no default. Each ready account holds one uid of the range while it waits. The range must not overlap the uids of the earlier release's reused accounts. Nothing of users or slots reaches the wire, the hello or the server.
+- **A restart of the agent.** `Pool::open` takes the jobs the restarted agent adopted. The account lent to one of them is kept as it is, with its uid still held, and `Pool::retire` ends it when its job is over. Every other lent account belongs to a job that is over, and is deleted. An adopted job's account whose record or home is gone is deleted, not repaired.
+- **A process nobody holds.** A slot that no ledger account holds and that no record has may still run a per-user daemon macOS started by itself (`distnoted`). The check that a slot is free ends such processes with the same kill rounds a retirement uses. Only a process that survives them keeps the slot busy. A failed making runs the kill rounds before it deletes what was made. A slot the ledger holds is never killed by this check.
+- **A record that is gone.** The proof that a deleted record is gone asks the directory node the record was deleted from. `getpw*`, which answers through the system's lookup cache, is asked as well. A lookup of its that fails still fails the proof, but one that still answers for the deleted record does not.
+- **A development verb.** `js-agent __account-cycle` runs one account's life cycle on a Mac, to prove it with the signed agent that holds Full Disk Access. It runs no job, and it goes once the native runtime proves the cycle itself.
+
+Not built yet: the start of a job as its account (the per-job supervisor of section 4, the Seatbelt profile, a start that is not disclaimed), the agent flag that fills the slots and the ready count, inputs, outputs, and the retirement of `js-mac-session`'s pool.
 
 ## Decisions
 
