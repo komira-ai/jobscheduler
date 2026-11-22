@@ -276,26 +276,17 @@ impl ChildOs for Os {
         // SAFETY: `groups` is a readable list of `groups.len()` ids for the call to copy;
         // the length is at most `MAX_GROUPS` ([`Ids`] come from `crate::groups`), which
         // the count's type (`int` on macOS, `size_t` elsewhere) holds.
-        match unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) } {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error()),
-        }
+        done(unsafe { libc::setgroups(groups.len() as _, groups.as_ptr()) })
     }
 
     fn set_gid(&mut self, gid: u32) -> io::Result<()> {
         // SAFETY: setgid takes a plain id.
-        match unsafe { libc::setgid(gid) } {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error()),
-        }
+        done(unsafe { libc::setgid(gid) })
     }
 
     fn set_uid(&mut self, uid: u32) -> io::Result<()> {
         // SAFETY: setuid takes a plain id.
-        match unsafe { libc::setuid(uid) } {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error()),
-        }
+        done(unsafe { libc::setuid(uid) })
     }
 
     fn fchdir(&mut self, fd: libc::c_int) -> io::Result<()> {
@@ -361,6 +352,15 @@ fn run_steps(
         os.set_limit(Resource::Processes, libc::rlim_t::from(limits.processes))?;
     }
     Ok(())
+}
+
+/// A system call's answer: 0 is done, anything else the error it left in `errno`.
+/// Async-signal-safe.
+fn done(answer: libc::c_int) -> io::Result<()> {
+    match answer {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
 }
 
 /// Sets `ids` in this order: the groups (when root; another process cannot change them),
@@ -953,8 +953,8 @@ mod tests {
         );
         let (uid, gid) = me();
         assert!(!Os.is_root());
-        Os.set_gid(gid).unwrap();
-        Os.set_uid(uid).unwrap();
+        // As the lookup run as a user drops: to its own gid and uid, the groups left alone.
+        primary_group_only(uid, gid)().unwrap();
         // Another group needs root.
         assert_eq!(
             Os.set_groups(&[gid]).unwrap_err().raw_os_error(),

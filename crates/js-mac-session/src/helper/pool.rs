@@ -445,24 +445,13 @@ impl Helper {
         }
     }
 
-    /// Resets the pool user `name`, with `uid`, for the next lease: see the module
-    /// documentation. Each step is judged by its outcome; the first that does not hold
+    /// Resets the pool user `name`, with `uid`, whose account exists, for the next lease:
+    /// see the module documentation. Each step is judged by its outcome; the first that does not hold
     /// fails the reset.
     pub(super) fn reset(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         self.kill_pool_user(name, uid)?;
-        if self
-            .host
-            .account(name)
-            .map_err(|source| TeardownError::Lookup {
-                name: name.to_owned(),
-                source,
-            })?
-            .is_none()
-        {
-            return Err(TeardownError::Missing {
-                name: name.to_owned(),
-            });
-        }
+        // The account is there: [`Self::reset_or_make`], the one caller, looked it up and
+        // made it when it was not.
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;
         Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
@@ -653,5 +642,7 @@ impl Helper {
 mod adopt_tests;
 #[cfg(test)]
 mod home_tests;
+#[cfg(test)]
+mod reset_tests;
 #[cfg(test)]
 mod tests;

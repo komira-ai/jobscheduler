@@ -397,20 +397,20 @@ fn skippable(why: &io::Error, dir: &OwnedFd, name: &OsStr) -> bool {
     refused(why) & !euid_is_root() & cannot_open(dir, name)
 }
 
-/// Whether this process is root. Off macOS a test may say it is
-/// ([`pretend_root`]), to see what the sweep does as the root helper does.
-#[cfg(any(not(test), target_os = "macos"))]
+/// Whether this process is root.
+#[cfg(target_os = "macos")]
 fn euid_is_root() -> bool {
     rustix::process::geteuid().is_root()
 }
 
-/// Whether this process is root, or a test on this thread said it is.
-#[cfg(all(test, not(target_os = "macos")))]
+/// Whether this process is root, or a test on this thread said it is ([`pretend_root`]),
+/// to see off macOS what the sweep does as the root helper does.
+#[cfg(not(target_os = "macos"))]
 fn euid_is_root() -> bool {
     PRETEND_ROOT.get() || rustix::process::geteuid().is_root()
 }
 
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 thread_local! {
     /// Whether a test on this thread says the process is root.
     static PRETEND_ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -418,8 +418,9 @@ thread_local! {
 
 /// For tests off macOS: from now on this thread's sweeps behave as root's (or, with
 /// `false`, as they are).
-#[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn pretend_root(root: bool) {
+#[cfg(not(target_os = "macos"))]
+#[doc(hidden)]
+pub fn pretend_root(root: bool) {
     PRETEND_ROOT.set(root);
 }
 

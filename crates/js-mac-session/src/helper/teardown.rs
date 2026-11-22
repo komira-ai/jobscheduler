@@ -115,9 +115,6 @@ pub(crate) enum TeardownError {
     /// The ledger could not record the deletion.
     #[error("recording the deletion of lease {lease}: {source}")]
     Record { lease: String, source: io::Error },
-    /// The pool user to reset has no record: there is no user left to reset.
-    #[error("user {name} has no record, so it cannot be reset")]
-    Missing { name: String },
     /// The uid's System V IPC objects could not be listed.
     #[error("listing the IPC objects of uid {uid}: {why}")]
     Ipc { uid: u32, why: String },

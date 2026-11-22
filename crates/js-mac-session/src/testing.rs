@@ -37,6 +37,9 @@ pub(crate) struct State {
     pub(crate) records: BTreeMap<String, UserRecord>,
     /// Uids some user record outside the helper's has.
     pub(crate) foreign: BTreeSet<u32>,
+    /// Names whose record the directory does not answer for, though the account is there
+    /// (a record that went between two looks).
+    pub(crate) recordless: BTreeSet<String>,
     /// Live processes per uid.
     pub(crate) procs: BTreeMap<u32, usize>,
     /// Answers `live_processes` gives, in order, before it reads `procs` again: a
@@ -152,12 +155,10 @@ impl State {
     /// administrator, else `no` and a failure, as `dseditgroup` answers.
     fn checkmember(&self, name: &str) -> CommandOutput {
         let admin = self.users.get(name).is_some_and(|user| user.admin);
+        let (word, not) = [("no", "NOT "), ("yes", "")][usize::from(admin)];
         CommandOutput {
             success: admin,
-            stdout: match admin {
-                true => format!("yes {name} is a member of admin\n"),
-                false => format!("no {name} is NOT a member of admin\n"),
-            },
+            stdout: format!("{word} {name} is {not}a member of admin\n"),
             stderr: String::new(),
         }
     }
@@ -349,6 +350,9 @@ impl Host for FakeHost {
     fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
         self.call("user_record", format!("user_record {name}"))?;
         let state = self.state();
+        if state.recordless.contains(name) {
+            return Ok(None);
+        }
         Ok(state.records.get(name).cloned().or_else(|| {
             state.users.get(name).map(|user| UserRecord {
                 uid: user.uid,
