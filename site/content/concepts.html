@@ -43,7 +43,7 @@ js job list [--states S ...] [--labels K=V ...]</pre></div>
 <div class="table-wrap"><table>
 <thead><tr><th>Resource</th><th>Estimate</th></tr></thead>
 <tbody>
-<tr><td>Memory</td><td><code>round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))</code>, where <code>M</code> is the largest uncensored sample of the last 256 or more runs, and at least 1 GiB</td></tr>
+<tr><td>Memory</td><td><code>round_up_256MiB(max(1.2 * max(M, held) + 128 MiB, oom_floor))</code>, where <code>M</code> is the largest measured (not held) sample of the last 256 or more runs, and at least 1 GiB</td></tr>
 <tr><td>CPU</td><td><code>round_up_250m(P90(sample))</code>, clamped to 250 m and the node's cores; 2000 m for a key with no CPU sample</td></tr>
 </tbody></table></div>
 <p>A booking at or above the memory of the largest matching live node owns the host: the estimate never reaches a whole host, and the caller books cold instead.</p>
