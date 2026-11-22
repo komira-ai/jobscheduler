@@ -267,10 +267,12 @@ which is not measured and stays disclaimed. After an unattended restart a Mac ha
 user, so a start that needs a user's graphical session cannot happen until someone logs in.
 
 Today the root helper starts every native job, disclaimed, and the helper holds no grant, so a
-job it starts holds none. The supervisor, whose starts keep the responsibility, is not in this
-tree yet. A call that keeps the responsibility (`Program::keep_responsibility`) is allowed only
-in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists, which no
-production file is yet.
+job it starts holds none. The supervisor, whose starts keep the responsibility
+(`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), is in the tree, and
+nothing starts it yet. A call that keeps the responsibility (`Program::keep_responsibility`) is
+allowed only in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists: the
+supervisor's `launch.rs` (the agent's start of the supervisor) and `run.rs` (its start of the
+job).
 
 The hosted CI runner has no grant to give, so CI checks the starts and not a refused read: on
 the macOS runner the agent's tests read back the responsible process of the processes the
