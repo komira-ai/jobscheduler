@@ -19,7 +19,7 @@
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids whose egress the anchor limits; both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
-//! | `--native-trees-root <path>` | (macOS build only) the mount point under which the `--mount-provider` serves every job's trees (tierstore's one NFS mount of the Mac); must be a `--mount-root-ro` that no `--mount-root` names, and needs `--mount-provider`; it is the one mount root that is not a read deny of every run: a run's profile denies reads below it and grants back the run's own trees; a job's mount below it must be read-only and `no_exec` (`input-not-allowed`) |
+//! | `--native-trees-root <path>` | (macOS build only) the mount point under which the `--mount-provider` serves every job's trees (tierstore's one NFS mount of the Mac); must be a `--mount-root-ro` that no `--mount-root` names, with no other mount root above or below it, and needs `--mount-provider`; it is the one mount root that is not a read deny of every run: a run's profile denies reads below it and grants back the run's own trees; a job's mount below it must be read-only and `no_exec` (`input-not-allowed`) |
 //! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS build only; needs `--vm-store` and `--native-accounts` |
 //! | `--vm-store <dir>` | (macOS build only) the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | (macOS build only) a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-accounts` |
@@ -163,7 +163,7 @@ pub struct Flags {
     pub native_pfctl: Option<PathBuf>,
     /// The mount point under which the `--mount-provider` serves every job's trees (tierstore's
     /// one NFS mount of the Mac). It must be a `--mount-root-ro` that no `--mount-root` names,
-    /// and needs a `--mount-provider`. It is the one mount root that is not a read deny of
+    /// with no other mount root above or below it, and needs a `--mount-provider`. It is the one mount root that is not a read deny of
     /// every run: a run's profile denies reads below it and grants back the run's own trees.
     /// A job's mount below it is one of its trees, mounted read-only and `no_exec`, or the
     /// start is refused (`input-not-allowed`).

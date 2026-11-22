@@ -878,7 +878,7 @@ The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever
   that overlaps a mount root at start.
 - Built. **Trees.** `--native-trees-root` names the one mount point below which the provider serves every run's trees
   (tierstore's NFS mount of the Mac). The agent does not start unless it is absolute, resolves to a `--mount-root-ro`
-  that no `--mount-root` names, and a `--mount-provider` is given (`crates/js-agent/src/native_fs.rs`, `trees_root`). A
+  that no `--mount-root` names, no other mount root lies above or below it, and a `--mount-provider` is given (`crates/js-agent/src/native_fs.rs`, `trees_root`). A
   mount whose directory is below it, as named or once resolved, is a tree of the run; the set is refused at the lookup
   (`input-not-allowed`, naming the path) when a tree is the root itself, resolves outside it (`..`, a link), is
   `READ_WRITE` or lacks `no_exec`, or a mount's directory holds the root (`tree_rules`). A tree gets no `GR_i`: the
