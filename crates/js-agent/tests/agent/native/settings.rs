@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use js_agent::native::{Ceiling, NativeFlags, NativeSettings, PfFlags, ProvisionError};
 use js_mac_pool::seatbelt::ReadModel;
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::support::Scratch;
 
@@ -639,4 +640,33 @@ fn on_without_pf_flags_still_fails_to_open() {
         "--native-pf-uid-start: required with --native-network on: the uids of the pool whose \
          egress the pf anchor limits"
     );
+}
+
+/// Asserts that settings made from the flags know nothing of Full Disk Access (it is
+/// `undetermined`, which refuses every native job) until the agent has listed the privacy
+/// database's directory and says so with `with_full_disk_access`, which changes that state and nothing else. Catches
+/// settings that start out granted (a Mac that runs jobs before it asked) and a builder that
+/// disturbs another setting.
+#[test]
+fn settings_are_undetermined_until_the_agent_has_looked() {
+    let dir = Scratch::new("native-set-grant");
+    let homes = dir.path("homes");
+    fs::create_dir(&homes).unwrap();
+    let socket = dir.path("k");
+    let flags = flags(Some(&socket), Some(&homes), None, &[]);
+    let made = NativeSettings::from_flags(&flags, &[], &dir.path("journal"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(made.config().full_disk_access, FullDiskAccess::Undetermined);
+    let max_processes = made.config().max_processes;
+    for state in [
+        FullDiskAccess::Granted,
+        FullDiskAccess::NotGranted,
+        FullDiskAccess::Undetermined,
+    ] {
+        let told = made.clone().with_full_disk_access(state);
+        assert_eq!(told.config().full_disk_access, state);
+        assert_eq!(told.config().max_processes, max_processes);
+        assert_eq!(told.socket(), socket);
+    }
 }

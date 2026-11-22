@@ -962,37 +962,37 @@ mod tests {
         );
     }
 
-    /// A process started through the real path as the caller's own user holds the
-    /// caller's groups and no other: `id -G` of the child is the caller's list. Catches a
-    /// child started with an emptied or invented list, or with the primary group alone.
+    /// A process started through the real path by a caller that is not root holds the
+    /// caller's groups and no other, as `id -G` lists them for the caller itself: the list
+    /// resolved for the user it names is applied only by root. Catches a child started with
+    /// an emptied or invented list, or with the primary group alone.
     #[test]
     fn the_process_holds_the_callers_own_groups() {
         let dir = std::env::temp_dir();
-        let (mut spawn, mut out) = base(&["/usr/bin/id", "-G"], &dir);
-        spawn.user = current_user_name();
+        let (spawn, mut out) = base(&["/usr/bin/id", "-G"], &dir);
         assert!(super::spawn(spawn).unwrap().wait().unwrap().success());
         let mut text = String::new();
         out.read_to_string(&mut text).unwrap();
-        let mut got: Vec<u32> = text
+        assert_eq!(groups_in(&text), groups_in(&callers_groups()));
+    }
+
+    /// The groups `id -G` printed, sorted, each once.
+    fn groups_in(text: &str) -> Vec<u32> {
+        let mut groups: Vec<u32> = text
             .split_whitespace()
             .map(|g| g.parse().unwrap())
             .collect();
-        got.sort_unstable();
-        got.dedup();
-        let mut mine = rustix::process::getgroups().unwrap();
-        mine.push(rustix::process::getegid());
-        let mut mine: Vec<u32> = mine.into_iter().map(|g| g.as_raw()).collect();
-        mine.sort_unstable();
-        mine.dedup();
-        assert_eq!(got, mine);
+        groups.sort_unstable();
+        groups.dedup();
+        groups
     }
 
-    /// The name of the user running the tests.
-    fn current_user_name() -> String {
+    /// What `id -G` prints for the caller, run directly.
+    fn callers_groups() -> String {
         let out = std::process::Command::new("/usr/bin/id")
-            .arg("-un")
+            .arg("-G")
             .output()
             .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        String::from_utf8(out.stdout).unwrap()
     }
 }

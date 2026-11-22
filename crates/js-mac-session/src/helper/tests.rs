@@ -946,6 +946,7 @@ fn only_launchds_not_found_answer_is_absence() {
 }
 
 mod bounds;
+mod full_disk_access;
 mod lease;
 mod obligation;
 mod outcome;

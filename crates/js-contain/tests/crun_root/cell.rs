@@ -22,9 +22,9 @@ use js_types::Resources;
 pub const MOUNT: &str = "/sys/fs/cgroup";
 
 /// The programs a job may run: each a link to the busybox of the image root.
-const APPLETS: [&str; 22] = [
+const APPLETS: [&str; 23] = [
     "sh", "cat", "grep", "id", "ls", "touch", "mkdir", "cp", "chmod", "tail", "head", "true",
-    "unshare", "mkfifo", "wc", "sed", "cut", "tr", "sort", "env", "stat", "readlink",
+    "unshare", "mkfifo", "wc", "sed", "cut", "tr", "sort", "env", "stat", "readlink", "nproc",
 ];
 
 /// The files that make a cgroup directory the job user's to manage (a unit's `Delegate=`
@@ -169,8 +169,10 @@ fn config(job: (u32, u32)) -> OciConfig {
 pub struct Shape {
     /// The limits written into the bundle.
     pub limits: ContainerLimits,
-    /// The lease's memory booking, which is its `memory.max` (the hard policy), in bytes.
+    /// The lease's memory booking, which is its `memory.max` (the agent's policy), in bytes.
     pub memory: u64,
+    /// The lease's CPU booking, in thousandths of a core: its `cpu.weight`, never a ceiling.
+    pub cpu_millis: u64,
     /// Host directories bound into the container.
     pub mounts: Vec<HostMount>,
 }
@@ -180,6 +182,7 @@ impl Default for Shape {
         Self {
             limits: ContainerLimits::DEFAULT,
             memory: 512 << 20,
+            cpu_millis: 1000,
             mounts: Vec::new(),
         }
     }
@@ -353,9 +356,9 @@ impl Cell {
             lchown(&path, Some(job_uid), Some(job_gid)).expect("give a directory to the job");
         }
         let cgroup = LeaseCgroup::at(Path::new(MOUNT), &self.cgroup, name);
-        let booking = Resources::new(1000, shape.memory, 0, None).expect("a booking");
+        let booking = Resources::new(shape.cpu_millis, shape.memory, 0, None).expect("a booking");
         cgroup
-            .create_with(&booking, None, LeasePolicy::Hard)
+            .create_with(&booking, None, LeasePolicy::HardMemory)
             .unwrap_or_else(|e| panic!("create the lease cgroup: {e}"));
         give_cgroup(cgroup.dir(), &OWNED_FILES, uid, gid);
         let spec = ContainerSpec {

@@ -27,6 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::lease::{Slot, parse_lease, pool_user_name, user_name};
 use js_mac_session::proto::{self, Call, Limits, PoolState, RUN_FDS, Reply, Request};
 
@@ -218,6 +219,8 @@ impl FakeHelper {
     /// The native backend over this helper, with its lease journal in `dir`: what an agent
     /// given this helper's socket and homes (`--native-helper-socket`, `--native-homes`) runs
     /// its jobs with.
+    /// The backend holds Full Disk Access, as the agent of a Mac the profile is in force on
+    /// finds at start; the helper is never asked.
     pub fn backend(&self, dir: &Scratch) -> js_agent::Backend {
         let flags = js_agent::native::NativeFlags {
             socket: Some(self.socket()),
@@ -231,7 +234,8 @@ impl FakeHelper {
         };
         let journal = dir.path("native-leases");
         let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
-        js_agent::Backend::Native(settings.unwrap().unwrap())
+        let settings = settings.unwrap().unwrap();
+        js_agent::Backend::Native(settings.with_full_disk_access(FullDiskAccess::Granted))
     }
 
     /// The home of the pool user lent to `lease` (also once the lease is over).
@@ -506,6 +510,16 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                     held && fs::remove_dir_all(shared.homes.join(shared.user_of(&lease))).is_ok();
                 reply(stream, &Reply::Deleted { existed });
             }
+        },
+        Request::FullDiskAccess => match shared.take(seen("full-disk-access", "")) {
+            Some(reason) => refused(stream, reason),
+            // The helper holds no grant: the profile names the agent.
+            None => reply(
+                stream,
+                &Reply::FullDiskAccess {
+                    state: FullDiskAccess::NotGranted,
+                },
+            ),
         },
         Request::Scan => {
             let answer = {

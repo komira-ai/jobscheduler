@@ -171,6 +171,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         host_jobs: false,
         host_ports: HostPorts::default(),
         fs: None,
+        cpu_ceiling: None,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));

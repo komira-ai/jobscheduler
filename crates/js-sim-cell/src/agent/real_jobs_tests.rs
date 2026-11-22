@@ -114,6 +114,7 @@ fn start_of(job: &str, allocation: &str) -> Command {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }))
 }
 

@@ -20,6 +20,8 @@ mod clear_taint;
 mod cli_runtime;
 mod container;
 mod cordon;
+#[cfg(target_os = "linux")]
+mod cpu_ceiling;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]

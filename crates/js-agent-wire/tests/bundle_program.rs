@@ -120,6 +120,7 @@ fn every_bundle_refusal_has_its_class() {
         refusal::BUNDLE_REGISTRY_NOT_ALLOWED,
         refusal::BUNDLE_FETCH_FAILED,
         refusal::IMAGE_NOT_ALLOWED,
+        refusal::NO_FULL_DISK_ACCESS,
     ];
     let request = [
         refusal::BUNDLE_DIGEST_REQUIRED,

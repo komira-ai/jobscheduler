@@ -8,8 +8,9 @@
 //! In this order, each before anything is written unless it says so:
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
 //!    is `state_invalid` (1), except a record of another target that never took the host, which
-//!    is superseded (see [`supersede`](super::supersede)): moved aside just before the new record
-//!    is first written (6), and named in the detail of the step's last line. The state
+//!    is superseded, and one of an update whose rollback is complete in effect, which is
+//!    finished (see [`supersede`](super::supersede)): either is moved aside just before the new
+//!    record is first written (6), and named in the detail of the step's last line. The state
 //!    directory is made, mode 0700, when it is not there, and so is every directory above it
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
@@ -96,7 +97,7 @@ use crate::update_hook::{
 };
 
 use super::host_setup::set_up;
-use super::supersede::{judge, set_aside};
+use super::supersede::{judge, noted, set_aside};
 use super::{Env, TokenFacts, check, failure, lease_failure, open_unchecked, save, success};
 
 /// The agent's name, the first word of its `--version`.
@@ -125,25 +126,25 @@ pub(super) const IN_PLACE_NOTE: &str = "the cutover hands the running jobs over 
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
     let mut superseded = None;
     let done = run(env, params, &mut superseded).unwrap_or_else(|done| done);
-    note_superseded(done, superseded)
+    noted(done, superseded, None)
 }
 
 fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Result<Done, Done> {
     let (held, loaded) = open_unchecked(env, params)?;
     let stale = match &loaded {
         Some(record) => judge(env, params, record)?,
-        None => false,
+        None => None,
     };
     // Before anything else is looked at or written: no version can repair a taint the agent
     // cannot clear itself. The owed checks are looked at once the update knows whether it
     // drains (below).
     refuse_taint(env)?;
-    let (fresh, aside, mut record) = match loaded {
-        Some(record) if !stale => (false, None, record),
-        aside => {
+    let (fresh, aside, mut record) = match (loaded, stale) {
+        (Some(record), None) => (false, None, record),
+        (loaded, how) => {
             let record = new_record(params);
             check(params, &record)?;
-            (true, aside, record)
+            (true, loaded.zip(how), record)
         }
     };
     check_agent(env, params)?;
@@ -178,8 +179,8 @@ fn run(env: &Env<'_>, params: &Params, superseded: &mut Option<String>) -> Resul
     set_up(env, params)?;
     // The record of another target goes aside only now, when the new one is about to be
     // written: a refusal before this point leaves the host as it found it.
-    if let Some(aside) = &aside {
-        *superseded = Some(set_aside(env, &held, aside)?);
+    if let Some((aside, how)) = &aside {
+        *superseded = Some(set_aside(env, &held, aside, *how)?);
     }
     if params.previous_version.is_none() {
         if fresh {
@@ -363,17 +364,6 @@ fn staged_unit(env: &Env<'_>, params: &Params) -> Result<Option<UnitRestart>, Do
         PlanError::Staged { .. } => bad_artifact(why),
         PlanError::Installed { .. } => failure(Reason::StateInvalid, why.to_string()),
     })
-}
-
-/// Any ending of a step that set a record of another target aside says so first.
-fn note_superseded(mut done: Done, superseded: Option<String>) -> Done {
-    if let Some(note) = superseded {
-        done.report.detail = Some(match done.report.detail.take() {
-            Some(detail) => format!("{note}; {detail}"),
-            None => note,
-        });
-    }
-    done
 }
 
 /// A success of a prepare that drains says why, and the unit that changes, and which keys; a
