@@ -9,7 +9,8 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 
 - `.github/workflows/js-agent-macos-pkg.yml` builds `js-agent-<version>-macos-arm64.pkg` on a hosted Apple silicon
   runner and signs it. Its `build` job signs `js-vmm` ad hoc with the virtualization entitlement (`cargo xtask pkg
-  entitle-macos`, `vm-launcher-signing.md`), stages the payload, reads the cdhash of the `js-agent` binary, builds the
+  entitle-macos`, `vm-launcher-signing.md`; the release's `sign-code` re-signs it with the Developer ID and keeps the
+  entitlement), stages the payload, reads the cdhash of the `js-agent` binary, builds the
   component with `pkgbuild` (no scripts) and checks it, signatures included, with `cargo xtask pkg check-macos`. Its `sign` job runs on main,
   by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
@@ -71,7 +72,7 @@ group wheel; directories are 0755 unless noted.
 | `/Library/Application Support/js-agent/bin/js-agent` | 0755 | the agent |
 | `/Library/Application Support/js-agent/bin/js-mac-session` | 0755 | the root helper |
 | `/Library/Application Support/js-agent/bin/js-mac-provision` | 0755 | the plist generator and the pf anchor's loader |
-| `/Library/Application Support/js-agent/bin/js-vmm` | 0755 | the VM launcher (`--vm-driver`), signed ad hoc with the hardened runtime and `com.apple.security.virtualization` |
+| `/Library/Application Support/js-agent/bin/js-vmm` | 0755 | the VM launcher (`--vm-driver`), signed with the hardened runtime and `com.apple.security.virtualization` (ad hoc in an unsigned package, the Developer ID in a release) |
 | `/Library/Application Support/js-agent/LICENSE` | 0644 | |
 | `/Library/Application Support/js-agent/log/` | dir | empty; the daemons' logs |
 | `/Library/Application Support/js-agent/update/` | dir 0700 | empty; the update hook's `state_dir` |
@@ -280,9 +281,13 @@ place, and a first install on a Mac that already has the pool's users (an earlie
 that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
 users: a Mac that must lose them is reset by its administrator.
 
-A management profile that grants Full Disk Access to the helper (a privacy-policy payload for its signed binary, which
-needs device management) would be an option, not a need: with it the helper could delete a user's record and home, and
-the one deletion that is left, of a lease user from before the pool, would work. Nothing here asks for it.
+The release signs the helper, and a management profile in the repository (a privacy-policy payload for the helper's
+installed path and its designated requirement, which needs device management) grants it Full Disk Access. With the grant
+the helper can delete a user's record and home, and the one deletion that is left, of a lease user from before the pool,
+would work. The helper's `full-disk-access` verb reports whether it holds the grant (it lists the privacy database's
+directory, which only a process with the grant may list), and the agent reports the answer as its capability
+`full-disk-access`. The pool's reset described here is unchanged by the grant; deleting an account per job is the next
+step (`mac-account-per-job.md`).
 
 ## Platform properties
 

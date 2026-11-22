@@ -187,8 +187,8 @@ fn each_way_of_leaving_the_update_build_shape_is_named() {
             "build-update does not upload dist/ as js-agent-macos-pkg-update-unsigned for a day",
         ),
         (
-            "  sign:\n    needs: [build]\n",
-            "  sign:\n    needs: [build, build-update]\n",
+            "  sign:\n    needs: [build, package]\n",
+            "  sign:\n    needs: [build, package, build-update]\n",
             "the update package reaches build or sign",
         ),
         (

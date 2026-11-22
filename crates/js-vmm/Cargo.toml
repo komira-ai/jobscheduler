@@ -11,9 +11,9 @@ publish.workspace = true
 # `probe-bench`), the base-image builder (`image base`) and the lifecycle of a lease's VM
 # (`src/lease_system.rs`), which js-agent drives as a child process (`js-vmm lease`). It is the one binary that
 # needs the virtualization entitlement; every Virtualization.framework call lives in
-# `src/vz/`, macOS only. The js-agent macOS package carries it, signed ad hoc with the hardened
-# runtime and that entitlement by `cargo xtask pkg entitle-macos`
-# (docs/design/vm-launcher-signing.md).
+# `src/vz/`, macOS only. The js-agent macOS package carries it: `cargo xtask pkg entitle-macos`
+# signs it ad hoc with the hardened runtime and that entitlement, and the release re-signs it with
+# the Developer ID, keeping the entitlement (docs/design/vm-launcher-signing.md).
 [[bin]]
 name = "js-vmm"
 path = "src/main.rs"

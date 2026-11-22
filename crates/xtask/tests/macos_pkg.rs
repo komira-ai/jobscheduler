@@ -569,6 +569,19 @@ fn reading_a_package_needs_a_mac() {
 
 // ---- signatures ----
 
+/// The programs the package lays down are the programs the release signs, in the same order.
+///
+/// Catches a program added to the package that `sign-code` would not sign (the package of the
+/// signed programs would then miss it), or one signed that the package does not carry.
+#[test]
+fn the_package_carries_exactly_the_programs_the_release_signs() {
+    let signed: Vec<&str> = xtask::release::mac_programs::PROGRAMS
+        .iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(signed, PROGRAMS);
+}
+
 #[test]
 fn js_vmm_alone_carries_an_entitlement_and_it_is_the_virtualization_one() {
     use xtask::macpkg::{VIRTUALIZATION, entitlements_of};

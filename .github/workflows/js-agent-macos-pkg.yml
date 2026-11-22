@@ -1,25 +1,20 @@
 # The js-agent installer package for macOS (packaging/js-agent-macos): built on a hosted
-# Apple silicon runner from the release build of js-agent, js-mac-session, js-mac-provision
-# and the VM launcher js-vmm, with pkgbuild and productbuild, and read back by the xtask
-# `pkg check-macos` verb, which refuses anything but the files, modes and owners the package
-# is meant to have, any script, and any program whose signature does not verify or carries
-# other entitlements than its own. It is a hostkeeper `macos-pkg` package
-# (docs/design/mac-hostkeeper-package.md): the file is `js-agent-<version>-macos-arm64.pkg`,
-# it carries no preinstall or postinstall script, and hostkeeper's coordinator orders it onto
-# the Macs of a host group. It publishes nothing
+# Apple silicon runner from the release build of js-agent, js-mac-session, js-mac-provision and
+# the VM launcher js-vmm, with pkgbuild and productbuild, and read back by the xtask
+# `pkg check-macos` verb, which refuses anything but the files, modes and owners the package is
+# meant to have, any script, and any program whose signature does not verify or carries other
+# entitlements than its own. It is a hostkeeper `macos-pkg` package (docs/design/mac-hostkeeper-package.md): the
+# file is `js-agent-<version>-macos-arm64.pkg`, it carries no preinstall or postinstall script,
+# and hostkeeper's coordinator orders it onto the Macs of a host group. It publishes nothing
 # itself: release.yml's `pkg-upload` job puts the signed package in the package repository.
 #
-# Four jobs. `build` runs in the beta stage of the release (release.yml's `beta-macos-pkg` calls
-# this file on a push to main) and by hand; no pull request runs it. It builds, checks and sums
-# the package unsigned (the steps are the local action .github/actions/js-agent-macos-pkg), and
-# no secret is named anywhere in it, so no code of a branch (a build script, a macro, xtask) can
-# see one. The root helper's plist names the agent by the cdhash of
-# the `js-agent` binary of this same package, which `build` reads from the binary on the macOS
-# runner (the linker signs an arm64 binary ad hoc), so the helper needs no flags file. js-vmm
-# starts virtual machines, which Virtualization.framework allows only to a process with the
-# entitlement com.apple.security.virtualization: `build` signs it ad hoc with the hardened
-# runtime and that entitlement (`pkg entitle-macos`), which needs no key, before staging. The
-# other programs keep the linker's signature.
+# `build`, `sign-code`, `package` and `sign` are the chain that makes the package that is
+# released; `build-update` and `first-install` are for the first-install test. `build` runs in the
+# beta stage of the release (release.yml's `beta-macos-pkg` calls this file on a push to main) and
+# by hand; no pull request runs it. It builds, checks and sums the package unsigned (the steps are
+# the local action .github/actions/js-agent-macos-pkg), sums the four programs it built and
+# uploads both, and no secret is named anywhere in it, so no code of a branch (a build script, a
+# macro, xtask) can see one.
 #
 # `build-update` builds a second package, of the next patch version, with the same action, beside
 # `build`: the first install updates the agent to it. It is uploaded as its own artifact and no
@@ -33,24 +28,42 @@
 # call (a push) skips it, since release.yml's `beta-macos-first-install` runs it in its own job
 # and `pkg-upload` waits for `beta-macos-pkg`, which it would lengthen.
 #
-# `sign` runs only on main: by hand, or in the release's call (`sign: true`, on a push, with
-# `secrets: inherit`, without which a called workflow reads every secret as empty). It runs
-# in the environment `pkg-signing`, which a repository administrator creates with its secrets
-# and a rule that only main may deploy to it. It does not build: it takes the checked unsigned
-# package and the checker from `build`, checks that the package is the one `build` summed,
-# signs it with `productsign --timestamp` (no notarization: hostkeeper reads the signature and
-# the signer's certificate, which each Mac lists, and does not need Apple's ticket), then checks
-# the signed package with the checker and sums it. Nothing built from the repository runs before
-# the signing step, and the system tools it calls are called by absolute path. It runs no cargo.
-# A secret is named only in the environment of the step that needs it. When the environment or
-# the secrets are not set up, `sign` says so in a notice, skips every step after the first and
-# the run succeeds.
+# `sign-code`, `package` and `sign` run only on main: by hand, or in the release's call (`sign:
+# true`, on a push, with `secrets: inherit`, without which a called workflow reads every secret as
+# empty). Between them the programs are signed first and the package is made of the signed
+# programs, so the package's own signature covers programs that carry theirs:
+#
+# - `sign-code` runs in the environment `pkg-signing`, which a repository administrator creates
+#   with its secrets and a rule that only main may deploy to it. It takes the four programs from
+#   `build`, checks them against the sums `build` wrote, and signs each with `codesign` under the
+#   Developer ID Application identity of the team, a fixed identifier, the hardened runtime and a
+#   secure timestamp (the identifiers and the identity are the table of
+#   crates/xtask/src/release/mac_programs.rs), keeping each program's entitlements: js-vmm comes
+#   from `build` signed ad hoc with the virtualization entitlement (`pkg entitle-macos`), which
+#   starting a virtual machine needs, and the others with none. The identity is found in a temporary keychain by
+#   its name; Apple's Developer ID intermediate is fetched over HTTPS and held to its SHA-256
+#   before it is imported; the job fails when the identity expires within 30 days. Nothing built
+#   from the repository runs in it: no checkout, no cargo, and the system tools it calls are called
+#   by absolute path. It fails, naming the secret, when a signing secret is not set.
+# - `package` holds no secret and has no environment. It checks the repository out, builds the
+#   package with the local action from the signed programs instead of building them (the action
+#   checks each staged program with `cargo xtask release check-code-signature`, so the package's
+#   cdhash pin of js-agent is read from the signed binary), and uploads the package.
+# - `sign` runs in the environment `pkg-signing`. It does not build: it takes the checked package
+#   from `package` and the checker from `build`, checks that the package is the one `package`
+#   summed, signs it with `productsign --timestamp` (no notarization: hostkeeper reads the
+#   signature and the signer's certificate, which each Mac lists, and does not need Apple's
+#   ticket), then checks the signed package with the checker and sums it. Nothing built from the
+#   repository runs before the signing step, and the system tools it calls are called by absolute
+#   path. It runs no cargo. A secret is named only in the environment of the step that needs it.
+#   When the environment or the secrets of the installer certificate are not set up, `sign` says
+#   so in a notice, skips every step after the first and the run succeeds.
 #
 # No command expands an expression: a script reads its environment. The version, which goes
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
 # The release's call builds the release's version; a manual run builds the version typed.
-# crates/xtask/tests/macos_pkg_workflow/ pins these rules.
+# crates/xtask/tests/macos_pkg_workflow/ and macos_code_signing.rs pin these rules.
 name: js-agent-macos-pkg
 
 on:
@@ -117,6 +130,23 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+      - name: Sum the programs
+        run: |
+          set -euo pipefail
+          cd target/release
+          shasum -a 256 js-agent js-mac-session js-mac-provision js-vmm > PROGRAMS.SHA256SUMS
+          shasum -a 256 --check PROGRAMS.SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-programs-unsigned
+          path: |
+            target/release/js-agent
+            target/release/js-mac-session
+            target/release/js-mac-provision
+            target/release/js-vmm
+            target/release/PROGRAMS.SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-macos-checker
@@ -154,8 +184,138 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  sign:
+  sign-code:
     needs: [build]
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+    environment: pkg-signing
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check the signing secrets
+        env:
+          MACOS_APPLICATION_P12: ${{ secrets.MACOS_APPLICATION_P12 }}
+          MACOS_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=false
+          for name in MACOS_APPLICATION_P12 MACOS_APPLICATION_P12_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::the secret $name is not set in the pkg-signing environment"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: js-agent-macos-programs-unsigned
+          path: programs
+      - name: The downloaded programs are the ones that were summed
+        run: |
+          set -euo pipefail
+          cd programs
+          /usr/bin/shasum -a 256 --check PROGRAMS.SHA256SUMS
+      - name: Sign the programs
+        env:
+          MACOS_APPLICATION_P12: ${{ secrets.MACOS_APPLICATION_P12 }}
+          MACOS_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
+          IDENTITY: "Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)"
+          # Apple's Developer ID G2 intermediate, https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          INTERMEDIATE_SHA256: f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/js-agent-code-signing.keychain-db"
+          password="$(/usr/bin/uuidgen)"
+          cleanup() {
+            /usr/bin/security delete-keychain "$keychain" || true
+            rm -f "$RUNNER_TEMP/application.p12" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          }
+          trap cleanup EXIT
+          /usr/bin/security create-keychain -p "$password" "$keychain"
+          /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
+          /usr/bin/security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_APPLICATION_P12" | /usr/bin/base64 --decode > "$RUNNER_TEMP/application.p12"
+          /usr/bin/security import "$RUNNER_TEMP/application.p12" -P "$MACOS_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          /usr/bin/curl --fail --silent --show-error --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "$INTERMEDIATE_SHA256  $RUNNER_TEMP/DeveloperIDG2CA.cer" | /usr/bin/shasum -a 256 --check
+          /usr/bin/security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -f x509 -k "$keychain"
+          # The identity is the one valid Developer ID Application identity of the temporary
+          # keychain that carries the team's name, found by its SHA-1.
+          identity="$(/usr/bin/security find-identity -v -p codesigning "$keychain" | /usr/bin/awk -v name="$IDENTITY" 'index($0, "\"" name "\"") { print $2 }')"
+          if ! [[ "$identity" =~ ^[0-9A-F]{40}$ ]]; then
+            echo "::error::the keychain does not hold exactly one valid $IDENTITY identity"
+            exit 1
+          fi
+          if ! /usr/bin/security find-certificate -c "$IDENTITY" -p "$keychain" | /usr/bin/openssl x509 -noout -checkend 2592000; then
+            echo "::error::the $IDENTITY certificate expires within 30 days: renew it"
+            exit 1
+          fi
+          while read -r program identifier; do
+            /usr/bin/codesign --force --sign "$identity" --keychain "$keychain" --identifier "$identifier" --options runtime --timestamp --preserve-metadata=entitlements "programs/$program"
+          done <<'TABLE'
+          js-agent com.komira.js-agent
+          js-mac-session com.komira.js-agent.session
+          js-mac-provision com.komira.js-agent.provision
+          js-vmm com.komira.js-agent.vmm
+          TABLE
+      - name: The signed programs verify
+        run: |
+          set -euo pipefail
+          for program in js-agent js-mac-session js-mac-provision js-vmm; do
+            /usr/bin/codesign --verify --strict --verbose=2 "programs/$program"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-programs-signed
+          path: |
+            programs/js-agent
+            programs/js-mac-session
+            programs/js-mac-provision
+            programs/js-vmm
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    needs: [build, sign-code]
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check the version
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::the version must be MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: js-agent-macos-programs-signed
+          path: signed-programs
+      - name: Build, check and sum the package of the signed programs
+        uses: ./.github/actions/js-agent-macos-pkg
+        with:
+          version: ${{ env.VERSION }}
+          programs: signed-programs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-macos-pkg-codesigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    needs: [build, package]
     if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
     environment: pkg-signing
     runs-on: macos-15
@@ -192,7 +352,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ steps.signing.outputs.state == 'present' }}
         with:
-          name: js-agent-macos-pkg-unsigned
+          name: js-agent-macos-pkg-codesigned
           path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ steps.signing.outputs.state == 'present' }}

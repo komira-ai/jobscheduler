@@ -99,9 +99,22 @@ fn step_jobs(text: &str) -> BTreeMap<String, Vec<&str>> {
 #[test]
 fn the_workflow_has_a_build_job_a_first_install_call_and_a_sign_job() {
     let names: Vec<String> = jobs(&read(WORKFLOW)).into_keys().collect();
-    assert_eq!(names, ["build", "build-update", "first-install", "sign"]);
+    assert_eq!(
+        names,
+        [
+            "build",
+            "build-update",
+            "first-install",
+            "package",
+            "sign",
+            "sign-code"
+        ]
+    );
     let steps: Vec<String> = step_jobs(&read(WORKFLOW)).into_keys().collect();
-    assert_eq!(steps, ["build", "build-update", "sign"]);
+    assert_eq!(
+        steps,
+        ["build", "build-update", "package", "sign", "sign-code"]
+    );
 }
 
 /// One line per way the job `first-install` of the workflow `text` is not the call of the
@@ -339,7 +352,7 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
         .filter(|l| l.contains("uses:"))
         .collect();
     // The calls that are not pinned are the local workflow and the local actions, which are this
-    // repository's own: the package action in the two jobs that build a package, and the action
+    // repository's own: the package action in the three jobs that build a package, and the action
     // that names the next version.
     let local: Vec<&str> = uses
         .iter()
@@ -351,6 +364,7 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
         [
             "uses: ./.github/actions/js-agent-macos-pkg",
             "uses: ./.github/actions/js-agent-next-version",
+            "uses: ./.github/actions/js-agent-macos-pkg",
             "uses: ./.github/actions/js-agent-macos-pkg",
             FIRST_INSTALL_USES,
         ]
@@ -484,7 +498,7 @@ fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protec
         .collect();
     assert!(at_four.contains(&SIGN_IF), "{at_four:?}");
     assert!(at_four.contains(&"environment: pkg-signing"), "{at_four:?}");
-    assert!(at_four.contains(&"needs: [build]"), "{at_four:?}");
+    assert!(at_four.contains(&"needs: [build, package]"), "{at_four:?}");
 }
 
 #[test]
@@ -713,6 +727,7 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
     let build = all.get("build").map_or(String::new(), |j| j.join("\n"));
     let build = format!("{build}\n{}", code(action).join("\n"));
     let sign = all.get("sign").map_or(String::new(), |j| j.join("\n"));
+    let package = all.get("package").map_or(String::new(), |j| j.join("\n"));
     let body = format!("{}\n{}", code(text).join("\n"), code(action).join("\n"));
     let mut problems = Vec::new();
     let mut want = |ok: bool, what: &str| {
@@ -764,19 +779,22 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
     );
     want(
         build.contains("cargo build --locked --release -p js-vmm --bin js-vmm")
-            && build.contains("for bin in js-agent js-mac-session js-mac-provision js-vmm; do"),
+            && build.contains(
+                "for bin in js-agent js-mac-session js-mac-provision js-vmm; do\n          printed=",
+            ),
         "js-vmm is not built for the package",
     );
-    let entitle = build.find("run: cargo xtask pkg entitle-macos --bin-dir target/release");
+    let entitle = build.find(ENTITLE);
     let built = build.find("-p js-vmm --bin js-vmm");
     let staged = build.find("cargo xtask pkg stage-macos");
     want(
         matches!((built, entitle, staged), (Some(b), Some(e), Some(s)) if b < e && e < s)
-            && build.matches("pkg entitle-macos").count() == 1,
+            && build.matches(ENTITLE).count() == 1,
         "js-vmm is not given its entitlement once, after it is built and before it is staged",
     );
+    // `sign-code` signs with the Developer ID; what builds the package signs nothing itself.
     want(
-        !body.contains("codesign --force") && !body.contains("codesign -f"),
+        !build.contains("codesign --force") && !build.contains("codesign -f"),
         "the workflow signs a program itself, not with pkg entitle-macos",
     );
     want(
@@ -799,10 +817,12 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
     );
     want(
         build.contains("name: js-agent-macos-pkg-unsigned")
-            && sign.contains("name: js-agent-macos-pkg-unsigned")
+            && package.contains("name: js-agent-macos-pkg-codesigned")
+            && sign.contains("name: js-agent-macos-pkg-codesigned")
+            && !sign.contains("name: js-agent-macos-pkg-unsigned")
             && sign.contains("name: js-agent-macos-pkg-signed")
             && !build.contains("js-agent-macos-pkg-signed"),
-        "the artifacts are not the unsigned one from build and the signed one from sign",
+        "the artifacts are not the unsigned one from build, the one of the signed programs from package and the signed one from sign",
     );
     problems
 }
@@ -831,8 +851,8 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "pkgbuild does not build the component",
         ),
         (
-            "\"dist/js-agent-$VERSION-macos-arm64.pkg\"\n    - name: The unsigned",
-            "\"dist/js-agent-$VERSION-aarch64-apple-darwin.pkg\"\n    - name: The unsigned",
+            "\"dist/js-agent-$VERSION-macos-arm64.pkg\"\n    - name: The package is the package",
+            "\"dist/js-agent-$VERSION-aarch64-apple-darwin.pkg\"\n    - name: The package is the package",
             "the package is not named js-agent-<version>-macos-arm64.pkg",
         ),
         (
@@ -891,12 +911,12 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "js-vmm is not built for the package",
         ),
         (
-            "js-mac-provision js-vmm; do",
-            "js-mac-provision; do",
+            "js-mac-provision js-vmm; do\n          printed=",
+            "js-mac-provision; do\n          printed=",
             "js-vmm is not built for the package",
         ),
         (
-            "    - name: Entitle js-vmm\n      shell: bash\n      run: cargo xtask pkg entitle-macos --bin-dir target/release\n",
+            "        cargo xtask pkg entitle-macos --bin-dir target/release\n",
             "",
             "js-vmm is not given its entitlement once",
         ),
@@ -923,7 +943,12 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
         (
             "name: js-agent-macos-pkg-signed",
             "name: js-agent-macos-pkg",
-            "the artifacts are not the unsigned one from build and the signed one from sign",
+            "the artifacts are not the unsigned one from build",
+        ),
+        (
+            "name: js-agent-macos-pkg-codesigned",
+            "name: js-agent-macos-pkg-other",
+            "the artifacts are not the unsigned one from build",
         ),
     ] {
         // The package's steps are the action's; the artifacts and the signing are the workflow's.
@@ -974,25 +999,29 @@ fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
 
 mod version_check;
 
-/// The one entitle step moved after the staging, or before the build of js-vmm: the count stays
-/// one, and the order alone is what the lint names.
+/// The line of the action's build step that gives js-vmm its entitlement.
+const ENTITLE: &str = "cargo xtask pkg entitle-macos --bin-dir target/release";
+
+/// A step of its own that gives js-vmm its entitlement, to put where it does not belong.
+const ENTITLE_STEP: &str = "    - name: Entitle js-vmm\n      shell: bash\n      run: cargo xtask pkg entitle-macos --bin-dir target/release\n";
+
+/// The one entitle call moved to a step after the staging, or before the build of js-vmm: the
+/// count stays one, and the order alone is what the lint names.
 #[test]
 fn an_entitle_step_out_of_order_is_named() {
     let text = read(WORKFLOW);
     let action = read(ACTION);
-    let step = "    - name: Entitle js-vmm\n      shell: bash\n      run: cargo xtask pkg entitle-macos --bin-dir target/release\n";
-    assert!(action.contains(step));
-    let without = action.replacen(step, "", 1);
+    let line = format!("        {ENTITLE}\n");
+    assert_eq!(action.matches(&line).count(), 1);
+    let without = action.replacen(&line, "", 1);
+    let step = ENTITLE_STEP;
     for anchor in [
         "    - name: Build the package\n",
         "    - name: Build the programs\n",
     ] {
         assert!(without.contains(anchor), "{anchor:?}");
         let moved = without.replacen(anchor, &format!("{step}{anchor}"), 1);
-        assert_eq!(
-            moved.matches("run: cargo xtask pkg entitle-macos").count(),
-            1
-        );
+        assert_eq!(moved.matches(ENTITLE).count(), 1);
         assert_eq!(
             package_problems(&text, &moved),
             ["js-vmm is not given its entitlement once, after it is built and before it is staged"],

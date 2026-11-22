@@ -10,35 +10,46 @@ later; the guest itself is not designed here.
 
 - `js-vmm` ships in the js-agent macOS package, at `/Library/Application Support/js-agent/bin/js-vmm`, mode 0755, the
   path js-agent's `--vm-driver` names.
-- The package's `build` job signs it **ad hoc, with the hardened runtime and the entitlement
-  `com.apple.security.virtualization`** (`cargo xtask pkg entitle-macos`), before staging. That needs no key, so the
-  job still names no secret.
-- The package is signed by the `sign` job with the release's **Developer ID Installer** identity, as before. That
-  signature is what hostkeeper checks before it installs anything; nothing on the Macs changes.
-- `cargo xtask pkg check-macos` reads every program's signature back from the built package, in `build` and again
-  after `productsign`, and refuses a program that `codesign --verify --strict` refuses, an entitlement set other than
-  the program's own (`js-vmm`: the virtualization entitlement and nothing else; every other program: none), or an
-  entitled program without the hardened runtime.
-- Experiments sign the same way: `codesign --force --sign - --options runtime --entitlements <plist>` with the one
-  key. vfkit is used as its maintainers release it, or re-signed that way; hostkeeper never installs it.
+- The action that builds the package's programs signs it **ad hoc, with the hardened runtime and the entitlement
+  `com.apple.security.virtualization`** (`cargo xtask pkg entitle-macos`), right after building it. That needs no key,
+  so the job still names no secret, and the `js-vmm` of an unsigned package (the first-install test's) starts virtual
+  machines.
+- The release's `sign-code` job then signs it like the other programs, with the team's **Developer ID Application**
+  identity, the identifier `com.komira.js-agent.vmm`, the hardened runtime and a secure timestamp, and with
+  `--preserve-metadata=entitlements`, which keeps the one entitlement `build` gave it (and gives the other programs,
+  which have none, none). `sign-code` runs nothing built from the repository, so it reads no entitlements file of
+  ours: the entitlement travels in the signature `build` made, and the checks below hold it to what it must be.
+- The package is signed by the `sign` job with the **Developer ID Installer** identity, as before. That signature is
+  what hostkeeper checks before it installs anything; nothing on the Macs changes.
+- `cargo xtask release check-code-signature` holds the released `js-vmm` to the table of
+  `crates/xtask/src/release/mac_programs.rs` like the other programs, and `cargo xtask pkg check-macos` reads every
+  program's signature back from the package and refuses a program that `codesign --verify --strict` refuses, an
+  entitlement set other than the program's own (`js-vmm`: the virtualization entitlement and nothing else; every other
+  program: none), or an entitled program without the hardened runtime.
+- Experiments sign ad hoc: `cargo xtask pkg entitle-macos --bin-dir <dir>`, or `codesign --force --sign - --options
+  runtime --entitlements <plist>` with the one key. vfkit is used as its maintainers release it, or re-signed that way;
+  hostkeeper never installs it.
 
-The other programs (`js-agent`, `js-mac-session`, `js-mac-provision`) keep the linker's ad hoc signature: the helper's
-plist names `js-agent` by the code directory hash of that signature, and re-signing it would break the pin.
+## Why the entitlement is kept rather than given in `sign-code`
 
-## Why not a Developer ID Application signature on the launcher
+`sign-code` checks nothing out and runs nothing built from the repository, so an entitlements plist would have to be
+written inline in the workflow, a second copy of what `entitlements_of` says. `--preserve-metadata=entitlements` keeps
+the entitlements of the signature being replaced instead. Measured on a Mac with an ad hoc identity standing in for the
+Developer ID: the release build of `js-vmm`, signed by `pkg entitle-macos` and re-signed under another identifier with
+`--preserve-metadata=entitlements`, kept exactly the virtualization entitlement and verified under
+`codesign --verify --strict`; `js-mac-provision`, as the linker signed it, re-signed the same way, carried no
+entitlement. A `build` that gave a program a wrong entitlement is refused by `check-macos` in the `package` job, before
+anything is signed for a release.
 
-The release holds one Apple identity, a "Developer ID Installer" certificate (`MACOS_INSTALLER_P12`; the `sign` job's
-import reads one private key from it). An installer certificate signs installer packages; `codesign` needs a
-"Developer ID Application" certificate, which the project does not have. Getting one is an account step, a new secret,
-and a signing step that runs before `pkgbuild` in a job that holds the key.
+## What an ad hoc signature can and cannot do
 
-It would buy nothing hostkeeper relies on. hostkeeper trusts a `macos-pkg` package when `pkgutil --check-signature`
-passes and the leaf certificate's SHA-256 is in the Mac's signers file (`/etc/hostkeeper/macos-pkg.toml`); a second
-package, or a changed package, from the same identity needs no change there. For the programs inside, it asks only that
-`codesign --verify --strict` passes and that no file carries `com.apple.quarantine`. An ad hoc signature passes both.
+hostkeeper trusts a `macos-pkg` package when `pkgutil --check-signature` passes and the leaf certificate's SHA-256 is in
+the Mac's signers file (`/etc/hostkeeper/macos-pkg.toml`); a second package, or a changed package, from the same
+identity needs no change there. For the programs inside, it asks only that `codesign --verify --strict` passes and that
+no file carries `com.apple.quarantine`. An ad hoc signature passes both, so an unsigned package's `js-vmm` works on a
+Mac; the release signs it with the Developer ID because the release signs every program of the package so.
 
-What a Developer ID Application signature changes is Gatekeeper on a quarantined copy, and privacy grants keyed to a
-signing identity:
+The difference shows on a quarantined copy:
 
 - Gatekeeper assesses a file that carries `com.apple.quarantine`. Measured: a quarantined ad hoc copy of the launcher
   does not start (the `exec` does not return), a quarantined copy signed with a Developer ID and notarized starts, and
@@ -47,9 +58,6 @@ signing identity:
   the first case. A launcher copied onto a Mac by a browser or a chat client would; experiments fetch with `curl` or
   `scp`, which set no attribute.
 - The launcher needs no privacy (TCC) grant.
-
-If a Developer ID Application identity is wanted later (to notarize, say), it replaces the `-` of `pkg entitle-macos`
-in a job that holds the key; `check-macos` and hostkeeper need no change.
 
 ## What the entitlement needs (measured)
 
@@ -102,13 +110,18 @@ with the hardened runtime, a timestamp and the virtualization entitlement, and i
 `vfkit-unsigned` asset is published beside it. For an experiment either is fetched by version and SHA-256 and used as
 is, or the unsigned one is re-signed ad hoc as above, which replaces the maintainers' signature; both were measured to
 run a VM. It is not shipped in any package of ours. If it ever were, it would be built from a pinned source and signed
-in the package's `build` job like `js-vmm`, with its own line in `entitlements_of` (`crates/xtask/src/macpkg.rs`).
+and signed like `js-vmm`, with its own line in `entitlements_of` (`crates/xtask/src/macpkg.rs`) and in the signing table
+(`crates/xtask/src/release/mac_programs.rs`).
 
 ## Not measured
 
 - A launcher started by launchd as a System-domain daemon, or as a dedicated user's agent with nobody logged in, and a
   run of 24 hours: the Linux guest experiment covers these.
-- An install by hostkeeper itself (root, `-target /`): it needs the first js-agent install on a Mac, which waits on
+- An install by hostkeeper on a farm Mac (root, `-target /`): it needs the first js-agent install there, which waits on
   the host setup of `mac-hostkeeper-package.md`. The user-domain install used here is the same `installer` with another
-  target.
+  target, and the release's first-install test installs the unsigned package, `js-vmm` included, through hostkeeper's
+  installer as root on a hosted runner; neither starts a virtual machine from the installed `js-vmm`.
+- Our own Developer ID signature on `js-vmm` starting a virtual machine: the vfkit maintainers' Developer ID signature
+  with the entitlement did, and the release's `package` job reads ours back (`check-code-signature`, `check-macos`),
+  but no job starts a VM from it.
 - Macs on macOS 26: the measurements are from macOS 27.0.1.
