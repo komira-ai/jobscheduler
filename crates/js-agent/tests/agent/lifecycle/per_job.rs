@@ -790,10 +790,14 @@ fn a_refused_starts_sizing_is_not_kept_for_a_later_start() {
     let booked = booked_in(&refused);
     assert_eq!(booked.len(), 1, "{refused:?}");
     assert_eq!(booked[0].1.sizing, Some(sizing));
-    ack_job(&mut h, "j1", "recorded");
-    while !h.life.held_jobs().is_empty() {
+    ack_job(&mut h, "j1", "ACCEPTED");
+    for _ in 0..20 {
+        if h.life.held_jobs().is_empty() {
+            break;
+        }
         h.life.step();
     }
+    assert!(h.life.held_jobs().is_empty(), "the refused job is let go");
     let again = h.apply(vec![job_start(JobStartSpec {
         allocation_id: "alloc-j1-again".to_owned(),
         ..start("j1")
