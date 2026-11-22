@@ -40,7 +40,7 @@ Labels used throughout:
 
 ### What the data says first (section 9 has the detail)
 - The jobs carry far more CPU than the history booking them saw.
-  - Runs of 30 s or more carry 96.2% of the CPU (REPLAY).
+  - Over the three days, runs of 30 s or more carry 96.2% of the CPU (REPLAY).
   - Over the three days their mean CPU had a median of 1.0 core (p25 0.7, p75 1.2) (REPLAY). Most of those runs
     were held by a `cpu.max` of their booking.
   - In the six hours with no limit the same runs had a median of 4.2 cores (p25 2.8, p75 5.0) (REPLAY).
@@ -110,8 +110,8 @@ Labels used throughout:
    learn whether jobs are phased. Cost of no: any later design is guesswork, and short-job timing stays wrong.
 2. **Success measure.** Recommend run time over uncontended run time (median and p90), time in system (queue wait
    plus run time), and the share of host-seconds above cores x 1.1. Throughput must not fall by more than 2%. Cost
-   of choosing jobs per hour instead: it barely moves at 99% busy (REPLAY: every rule finishes within 1% of the
-   same jobs per hour at 4x but one, the limit 0.9 at 7.7% fewer), so nothing would ever pass.
+   of choosing jobs per hour instead: it barely moves at 99% busy (REPLAY: every rule with learned bookings finishes
+   within 1% of the same jobs per hour at 4x but one, the limit 0.9 at 7.7% fewer), so nothing would ever pass.
 3. **Keep today's flat ceiling beside the curve rule** (the curve rule can only hold a job, never admit more).
    Recommend yes for step 4.
 4. **Hold bound: 30 s** (setting). A job can be held at most that long on the forecast. Recommend 30 s.
@@ -266,7 +266,7 @@ runs alone on an empty host (REPLAY: none did).
   them.
 - **Today's rule at a limit of 1.0 is the alternative to beat.** On flat data it reaches 3.3% slowdown against
   today's 19.7%, at 0.4% fewer jobs per hour. A curve rule earns its machinery only by beating that on recorded
-  shapes. (The owner keeps 1.1 tonight; this is a measurement, not a proposal.)
+  shapes. (The owner keeps 1.1 for now; this is a measurement, not a proposal.)
 
 ## 10. How it is proven
 
