@@ -96,12 +96,13 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
             .map_err(|why| Stop::Usage(format!("{}: {why}", path.display())))?,
         None => String::new(),
     };
-    let pool = match &args.accounts {
-        Some(state) => Some(make_private(state).and_then(|()| {
-            Pool::open(state, args.ready)
+    let pool = match (&args.accounts, args.account_uids) {
+        (Some(state), Some(slots)) => Some(make_private(state).and_then(|()| {
+            Pool::open(state, slots, args.ready)
                 .map_err(|why| Stop::Setup(format!("the account pool: {why}")))
         })?),
-        None => None,
+        (Some(_), None) => return Err(Stop::Usage("--accounts needs --account-uids".to_owned())),
+        (None, _) => None,
     };
     let Some(pool) = pool else {
         let Some(name) = &args.user else {

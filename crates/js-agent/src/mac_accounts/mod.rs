@@ -16,7 +16,7 @@
 //!
 //! # The slot
 //!
-//! A uid of the range [`UID_RANGE`] is a *slot*: a fixed pair of the uid and a `GeneratedUID`
+//! A uid of the range the agent is given ([`Slots`], a setting with no default) is a *slot*: a fixed pair of the uid and a `GeneratedUID`
 //! ([`generated_uid`]: a fixed prefix and the uid, so the same slot always gets the same
 //! identifier, and a lost ledger cannot lose it). For each job the module makes a *fresh*
 //! record (a new name, never used again) and a fresh home for a free slot; after the job it
@@ -140,7 +140,7 @@ pub use host::{AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, Us
 #[cfg(target_os = "macos")]
 pub use macos::MacHost;
 pub use pool::Pool;
-pub use settings::{Places, STAFF, Settings, UID_RANGE};
+pub use settings::{Places, STAFF, Settings, Slots};
 
 /// The prefix of every account's name; nothing outside it is ever made or deleted.
 pub const PREFIX: &str = "kbf-acct-";

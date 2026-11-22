@@ -77,7 +77,12 @@ fn an_open_without_full_disk_access_makes_nothing() {
     assert!(rig.fake.state().users.is_empty());
 
     rig.fake.state().grant = Some(io::ErrorKind::PermissionDenied);
-    let with_host = Pool::with_host(&rig.dir.join("state"), 2, rig.fake.clone());
+    let with_host = Pool::with_host(
+        &rig.dir.join("state"),
+        Slots::new(700, 100).unwrap(),
+        2,
+        rig.fake.clone(),
+    );
     assert!(matches!(with_host, Err(AccountError::NoFullDiskAccess)));
     assert!(rig.fake.state().users.is_empty());
 }
@@ -269,13 +274,13 @@ fn a_refill_makes_accounts_until_enough_are_ready() {
     assert_eq!(pool.ready_count(), 2);
 }
 
-/// Asserts that a Mac's settings are the numbers of the design: uids 600 to 699, group
+/// Asserts that a Mac's settings are the numbers of the design: the uids it is given, group
 /// staff, homes in /Users, the per-user folders, the places the sweep covers (the crontab and
 /// at jobs; the shared folders and launchd's per-uid files), and a state directory root owns.
 #[test]
 fn a_macs_settings_are_the_designs() {
-    let settings = Settings::macos(20);
-    assert_eq!((*settings.range.start(), *settings.range.end()), (600, 699));
+    let settings = Settings::macos(Slots::new(700, 100).unwrap(), 20);
+    assert_eq!((*settings.range.start(), *settings.range.end()), (700, 799));
     assert_eq!(settings.gid, 20);
     assert_eq!(settings.ready, 20);
     assert_eq!(settings.homes, Path::new("/Users"));

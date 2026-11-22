@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use super::profile::Kind;
 use super::{Args, AuditSession, Spawn, VERB, parse, run, status};
+use crate::mac_accounts::Slots;
 
 fn words(list: &[&str]) -> Vec<OsString> {
     list.iter().map(OsString::from).collect()
@@ -23,6 +24,7 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             job: Some(PathBuf::from("j.json")),
             job_inline: None,
             accounts: None,
+            account_uids: None,
             user: Some("u".to_owned()),
             ready: 1,
             spawn: Spawn::Ordinary,
@@ -131,14 +133,30 @@ fn the_job_may_come_inline_and_exactly_one_of_the_two_is_needed() {
 #[test]
 fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
     let rest = ["--job", "j.json", "--root", "/r", "--out", "/o"];
-    let mut pooled = vec!["--accounts", "/s", "--ready", "3", "--spawn", "disclaimed"];
+    let mut pooled = vec![
+        "--accounts",
+        "/s",
+        "--account-uids",
+        "700-799",
+        "--ready",
+        "3",
+        "--spawn",
+        "disclaimed",
+    ];
     pooled.extend(rest);
     let args = parse(&words(&pooled)).expect("parses");
     assert_eq!(args.accounts, Some(PathBuf::from("/s")));
     assert_eq!(args.user, None);
     assert_eq!(args.ready, 3);
     assert_eq!(args.spawn, Spawn::Disclaimed);
-    let mut both = vec!["--accounts", "/s", "--user", "u"];
+    let mut both = vec![
+        "--accounts",
+        "/s",
+        "--account-uids",
+        "700-799",
+        "--user",
+        "u",
+    ];
     both.extend(rest);
     assert!(parse(&words(&both)).is_err());
     assert!(parse(&words(&rest)).is_err());
@@ -192,4 +210,64 @@ fn only_the_mode_word_is_dispatched() {
     assert!(super::dispatch(&words(&["js-agent", "cordon"]), &mut out, &mut err).is_none());
     assert!(super::dispatch(&words(&["js-agent"]), &mut out, &mut err).is_none());
     assert!(out.is_empty() && err.is_empty());
+}
+
+const POOLED: [&str; 6] = ["--job", "j.json", "--root", "/r", "--out", "/o"];
+
+#[test]
+fn the_account_uids_are_the_slots_given_and_passed_to_the_pool() {
+    let mut list = vec!["--accounts", "/s", "--account-uids", "700-799"];
+    list.extend(POOLED);
+    let args = parse(&words(&list)).expect("parses");
+    assert_eq!(
+        args.account_uids,
+        Some(Slots::new(700, 100).expect("slots"))
+    );
+    assert_eq!(args.account_uids.expect("given").range(), 700..=799);
+}
+
+#[test]
+fn accounts_without_account_uids_is_a_usage_error_naming_the_flag() {
+    let mut list = vec!["js-agent", VERB, "--accounts", "/s"];
+    list.extend(POOLED);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(&words(&list), &mut out, &mut err);
+    assert_eq!(code, std::process::ExitCode::from(status::USAGE));
+    let err = String::from_utf8(err).expect("utf-8");
+    assert!(err.contains("--account-uids"), "{err}");
+    assert!(out.is_empty());
+}
+
+#[test]
+fn account_uids_that_are_not_a_range_slots_may_take_is_a_usage_error_naming_it() {
+    for (wrong, why) in [
+        ("700", "is not <first>-<last>, two uids"),
+        ("799-700", "the first uid, 799, is above the last, 700"),
+        ("500-600", "is below 501"),
+        ("700-60001", "is above 60000"),
+    ] {
+        let mut list = vec![
+            "js-agent",
+            VERB,
+            "--accounts",
+            "/s",
+            "--account-uids",
+            wrong,
+        ];
+        list.extend(POOLED);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(&words(&list), &mut out, &mut err);
+        assert_eq!(code, std::process::ExitCode::from(status::USAGE), "{wrong}");
+        let err = String::from_utf8(err).expect("utf-8");
+        assert!(err.contains("--account-uids"), "{err}");
+        assert!(err.contains(why), "{err}");
+        assert!(out.is_empty());
+    }
+}
+
+#[test]
+fn account_uids_are_for_a_pool_and_not_for_a_named_user() {
+    let mut list = MINIMAL.to_vec();
+    list.extend(["--account-uids", "700-799"]);
+    assert!(parse(&words(&list)).is_err());
 }

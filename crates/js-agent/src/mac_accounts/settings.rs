@@ -2,10 +2,105 @@
 
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+use std::str::FromStr;
 
-/// The uids accounts get, `600..=699`. The pool never touches a uid outside the range it is
-/// given. The egress rules of a Mac already cover this range.
-pub const UID_RANGE: RangeInclusive<u32> = 600..=699;
+use super::AccountError;
+
+/// The uids accounts get: a range the agent is given, with no default. The pool never
+/// touches a uid outside it, so the range must be one nothing else on the Mac uses (an earlier
+/// release's accounts, for one).
+///
+/// macOS gives the uids up to 500 to the system and to the first user, so a range starts at
+/// [`Slots::LOWEST`] or above; it ends at [`Slots::HIGHEST`] or below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slots {
+    first: u32,
+    last: u32,
+}
+
+impl Slots {
+    /// The lowest uid a range may start at: macOS gives the uids up to 500 to the system and
+    /// to the first user.
+    pub const LOWEST: u32 = 501;
+    /// The highest uid a range may end at.
+    pub const HIGHEST: u32 = 60_000;
+
+    /// The `count` uids from `first` on.
+    ///
+    /// # Errors
+    /// [`AccountError::BadSlots`]: `count` is 0, `first` is below [`Slots::LOWEST`], the last
+    /// uid is above [`Slots::HIGHEST`] or does not fit a uid at all.
+    pub fn new(first: u32, count: u32) -> Result<Self, AccountError> {
+        let Some(span) = count.checked_sub(1) else {
+            return Err(bad("the count is 0, so there is no slot".to_owned()));
+        };
+        let Some(last) = first.checked_add(span) else {
+            return Err(bad(format!(
+                "{count} slots from uid {first} go past the largest uid"
+            )));
+        };
+        Self::between(first, last)
+    }
+
+    /// The uids `first` to `last`, both included.
+    fn between(first: u32, last: u32) -> Result<Self, AccountError> {
+        if first > last {
+            return Err(bad(format!(
+                "the first uid, {first}, is above the last, {last}"
+            )));
+        }
+        if first < Self::LOWEST {
+            return Err(bad(format!(
+                "the first uid, {first}, is below {}: macOS keeps the uids up to 500 for the \
+                 system and the first user",
+                Self::LOWEST
+            )));
+        }
+        if last > Self::HIGHEST {
+            return Err(bad(format!(
+                "the last uid, {last}, is above {}",
+                Self::HIGHEST
+            )));
+        }
+        Ok(Self { first, last })
+    }
+
+    /// The uids, first to last.
+    #[must_use]
+    pub const fn range(self) -> RangeInclusive<u32> {
+        self.first..=self.last
+    }
+
+    /// How many uids there are, at least 1.
+    #[must_use]
+    pub const fn count(self) -> u32 {
+        self.last - self.first + 1
+    }
+}
+
+impl FromStr for Slots {
+    type Err = AccountError;
+
+    /// Reads `<first>-<last>`, both uids and both included: `700-799` is 100 slots.
+    ///
+    /// # Errors
+    /// [`AccountError::BadSlots`]: not two uids joined by `-`, or a range [`Slots::new`]
+    /// refuses.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let uids = text
+            .split_once('-')
+            .and_then(|(first, last)| Some((first.parse().ok()?, last.parse().ok()?)));
+        match uids {
+            Some((first, last)) => Self::between(first, last),
+            None => Err(bad(format!("{text:?} is not <first>-<last>, two uids"))),
+        }
+    }
+}
+
+/// The refusal of a range, saying `why`.
+fn bad(why: String) -> AccountError {
+    AccountError::BadSlots(why)
+}
 
 /// The primary group of every account: `staff`.
 pub const STAFF: u32 = 20;
@@ -61,11 +156,11 @@ impl Places {
     }
 }
 
-/// What the pool is configured with. [`Settings::macos`] is what a Mac runs with; the tests
-/// give their own paths and uids.
+/// What the pool is configured with. [`Settings::macos`] is what a Mac runs with, given its
+/// slots; the tests give their own paths and uids.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// The uids accounts get.
+    /// The uids accounts get ([`Slots::range`] on a Mac).
     pub range: RangeInclusive<u32>,
     /// The primary group of every account.
     pub gid: u32,
@@ -84,12 +179,12 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// A Mac's settings with `ready` accounts kept ready: uids 600 to 699, group staff,
+    /// A Mac's settings with `ready` accounts kept ready: the uids of `slots`, group staff,
     /// homes in `/Users`, a state directory root owns.
     #[must_use]
-    pub fn macos(ready: usize) -> Self {
+    pub fn macos(slots: Slots, ready: usize) -> Self {
         Self {
-            range: UID_RANGE,
+            range: slots.range(),
             gid: STAFF,
             homes: PathBuf::from("/Users"),
             ready,
@@ -106,3 +201,6 @@ impl Settings {
         self.schedules.with(&self.shared)
     }
 }
+
+#[cfg(test)]
+mod tests;

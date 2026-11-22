@@ -12,6 +12,11 @@ use super::*;
 use crate::mac_accounts::tests::rig::{Rig, me, my_gid};
 use crate::mac_accounts::{AccountError, generated_uid};
 
+/// The slots every test command line names; `drive` runs over the rig's own settings.
+fn slots() -> Slots {
+    Slots::new(700, 100).unwrap()
+}
+
 fn words(list: &[&str]) -> Vec<OsString> {
     list.iter().map(OsString::from).collect()
 }
@@ -102,7 +107,7 @@ fn args_of(rig: &Rig) -> Args {
     Args {
         state: rig.dir.join("state"),
         commands: default_commands(),
-        range: None,
+        range: slots(),
     }
 }
 
@@ -113,7 +118,7 @@ fn args_of(rig: &Rig) -> Args {
 /// are each refused in words.
 #[test]
 fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
-    let args = parse(&words(&["--state", "/s"])).unwrap();
+    let args = parse(&words(&["--state", "/s", "--range", "700-799"])).unwrap();
     assert_eq!(
         args,
         Args {
@@ -129,13 +134,15 @@ fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
                     "yes"
                 ]),
             ],
-            range: None,
+            range: slots(),
         }
     );
     for form in ["--", "--command"] {
         let args = parse(&words(&[
             "--state",
             "/s",
+            "--range",
+            "700-799",
             form,
             "/bin/echo",
             "--state",
@@ -147,10 +154,18 @@ fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
     }
     let refused = |list: &[&str]| parse(&words(list)).unwrap_err();
     assert_eq!(refused(&[]), "--state is required");
-    assert_eq!(refused(&["--", "/bin/true"]), "--state is required");
     assert_eq!(
-        refused(&["--", "/bin/true", "--state", "/s"]),
+        refused(&["--", "/bin/true", "--range", "700-799"]),
+        "--state is required"
+    );
+    assert_eq!(
+        refused(&["--range", "700-799", "--", "/bin/true", "--state", "/s"]),
         "--state is required",
+        "what comes after the separator is the command's"
+    );
+    assert_eq!(
+        refused(&["--state", "/s", "--", "/bin/true", "--range", "700-799"]),
+        "--range is required",
         "what comes after the separator is the command's"
     );
     assert_eq!(refused(&["--state"]), "--state needs a directory");
@@ -158,20 +173,19 @@ fn the_command_line_takes_a_state_directory_and_optionally_one_command() {
         refused(&["--state", "/a", "--state", "/b"]),
         "--state is given twice"
     );
-    assert_eq!(refused(&["--state", "/s", "--"]), "-- needs a program");
-    assert_eq!(
-        refused(&["--state", "/s", "--command"]),
-        "--command needs a program"
-    );
-    assert_eq!(
-        refused(&["--state", "/s", "--verbose"]),
-        "unknown argument \"--verbose\""
-    );
+    let with = |rest: &[&str]| {
+        let mut list = vec!["--state", "/s", "--range", "700-799"];
+        list.extend(rest);
+        refused(&list)
+    };
+    assert_eq!(with(&["--"]), "-- needs a program");
+    assert_eq!(with(&["--command"]), "--command needs a program");
+    assert_eq!(with(&["--verbose"]), "unknown argument \"--verbose\"");
     let bad = vec![OsString::from_vec(vec![0xff, b'x'])];
-    let mut list = words(&["--state", "/s", "--"]);
+    let mut list = words(&["--state", "/s", "--range", "700-799", "--"]);
     list.extend(bad);
     assert_eq!(parse(&list).unwrap_err(), "\"\\xFFx\" is not UTF-8");
-    let mut list = words(&["--state"]);
+    let mut list = words(&["--range", "700-799", "--state"]);
     list.push(OsString::from_vec(vec![0xff]));
     assert_eq!(
         parse(&list).unwrap().state,
@@ -224,7 +238,16 @@ fn a_wrong_command_line_is_a_usage_error() {
 fn off_macos_a_well_formed_command_line_is_refused() {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(
-        &words(&["js-agent", VERB, "--state", "/s", "--", "/bin/true"]),
+        &words(&[
+            "js-agent",
+            VERB,
+            "--state",
+            "/s",
+            "--range",
+            "700-799",
+            "--",
+            "/bin/true",
+        ]),
         &mut out,
         &mut err,
     );
@@ -331,7 +354,7 @@ fn the_command_given_is_run_and_how_it_ended_is_printed() {
     let args = Args {
         state: rig.dir.join("state"),
         commands: vec![command(&["/bin/sh", "-c", "exit 3"])],
-        range: None,
+        range: slots(),
     };
     let runner = Script::new(vec![Ok(Ran {
         code: Some(3),
@@ -473,7 +496,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
     let args = Args {
         state: state.clone(),
         commands: vec![command(&["/bin/true"])],
-        range: None,
+        range: slots(),
     };
     let runner = Script::new(vec![Ok(ran(0, "", ""))]);
     let (status, _, err) = cycle(&rig, &args, &runner);
@@ -487,7 +510,7 @@ fn a_missing_state_directory_is_made_and_one_that_cannot_be_is_refused() {
         let args = Args {
             state: rig.dir.join(path),
             commands: vec![command(&["/bin/true"])],
-            range: None,
+            range: slots(),
         };
         let (status, out, err) = cycle(&rig, &args, &Script::new(vec![]));
         assert_eq!(status, status::REFUSED, "{path}");
@@ -599,22 +622,28 @@ fn a_listing_that_cannot_be_read_is_an_error() {
     }
 }
 
-/// Asserts that `--range <first>-<last>` gives the slots' uids, and that a range given twice,
-/// with no value, not two uids, or reversed is a usage error naming what is wrong.
+/// Asserts that `--range <first>-<last>` is required and gives the slots' uids, both
+/// included, and that a range given twice, with no value, not two uids, one a range may not
+/// take (reversed, below 501, above 60000) or not UTF-8 is a usage error naming what is wrong.
 #[test]
-fn a_range_is_two_uids_the_first_not_above_the_last() {
+fn the_range_is_required_and_is_the_slots_the_pool_takes() {
     let parsed = parse(&words(&["--state", "/s", "--range", "700-709"])).unwrap();
-    assert_eq!(parsed.range, Some(700..=709));
+    assert_eq!(parsed.range, Slots::new(700, 10).unwrap());
+    assert_eq!(parsed.range.range(), 700..=709);
     assert_eq!(
-        parse(&words(&["--state", "/s", "--range", "7-7"]))
+        parse(&words(&["--state", "/s", "--range", "501-501"]))
             .unwrap()
-            .range,
-        Some(7..=7)
+            .range
+            .count(),
+        1
     );
-    assert_eq!(parse(&words(&["--state", "/s"])).unwrap().range, None);
+    assert_eq!(
+        parse(&words(&["--state", "/s"])),
+        Err("--range is required".to_owned())
+    );
     assert_eq!(
         parse(&words(&[
-            "--state", "/s", "--range", "700-709", "--range", "1-2"
+            "--state", "/s", "--range", "700-709", "--range", "800-809"
         ])),
         Err("--range is given twice".to_owned())
     );
@@ -622,13 +651,47 @@ fn a_range_is_two_uids_the_first_not_above_the_last() {
         parse(&words(&["--state", "/s", "--range"])),
         Err("--range needs <first>-<last>".to_owned())
     );
-    for wrong in ["709-700", "700", "a-b", "700-", "-700"] {
+    for (wrong, why) in [
+        ("700", "\"700\" is not <first>-<last>, two uids"),
+        ("a-b", "\"a-b\" is not <first>-<last>, two uids"),
+        ("700-", "\"700-\" is not <first>-<last>, two uids"),
+        ("-700", "\"-700\" is not <first>-<last>, two uids"),
+        ("709-700", "the first uid, 709, is above the last, 700"),
+        (
+            "500-700",
+            "the first uid, 500, is below 501: macOS keeps the uids up to 500 for the system \
+             and the first user",
+        ),
+        ("700-60001", "the last uid, 60001, is above 60000"),
+    ] {
         assert_eq!(
             parse(&words(&["--state", "/s", "--range", wrong])),
-            Err(format!(
-                "--range {wrong:?}: not <first>-<last>, two uids, the first not above the last"
-            )),
+            Err(format!("--range {wrong:?}: the account uid range: {why}")),
             "{wrong}"
         );
     }
+    let mut list = words(&["--state", "/s", "--range"]);
+    list.push(OsString::from_vec(vec![0xff]));
+    assert_eq!(
+        parse(&list),
+        Err("--range \"\\xFF\" is not UTF-8".to_owned())
+    );
+}
+
+/// Asserts that a command line with no `--range` ends with status 64, naming the flag and the
+/// usage, and prints nothing else.
+#[test]
+fn a_missing_range_is_a_usage_error_naming_it() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(
+        &words(&["js-agent", VERB, "--state", "/s"]),
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, ExitCode::from(status::USAGE));
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        format!("js-agent: {VERB}: --range is required\n{USAGE}\n")
+    );
+    assert!(out.is_empty());
 }

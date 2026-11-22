@@ -154,6 +154,9 @@ pub enum AccountError {
         /// Why each uid is not free, for the first few, then how many more.
         reasons: Vec<String>,
     },
+    /// The uid range the agent was given is not one slots may take.
+    #[error("the account uid range: {0}")]
+    BadSlots(String),
     /// The job id is not one to 63 of `a-z`, `0-9` and `-`.
     #[error("job id {0:?} is not 1 to 63 characters of a-z, 0-9 and -")]
     BadJob(String),

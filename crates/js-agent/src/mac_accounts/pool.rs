@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use super::error::Failure;
 use super::host::AccountHost;
 use super::ledger::{self, Ledger, Record, State, name, parse_name, valid_job};
-use super::settings::Settings;
+use super::settings::{Settings, Slots};
 use super::tree::{Os, System};
 use super::{Account, AccountError, Held, Lent, Retired, Step, generated_uid};
 
@@ -63,15 +63,15 @@ fn check_state(state: &Path, owner: Option<u32>) -> Result<(), String> {
 impl Pool {
     /// Opens the pool of a Mac: asks whether Full Disk Access is held, opens the ledger in
     /// `state` (a directory root owns), sweeps what a crash left, and makes accounts until
-    /// `ready` are ready.
+    /// `ready` are ready. The accounts take the uids of `slots`, which has no default.
     ///
     /// # Errors
     /// [`AccountError::NoFullDiskAccess`] (nothing is made or deleted), a state directory or
     /// ledger that is unusable, an account the sweep could not delete, or an account that
     /// could not be made.
     #[cfg(target_os = "macos")]
-    pub fn open(state: &Path, ready: usize) -> Result<Self, AccountError> {
-        Self::with_host(state, ready, Arc::new(super::macos::MacHost))
+    pub fn open(state: &Path, slots: Slots, ready: usize) -> Result<Self, AccountError> {
+        Self::with_host(state, slots, ready, Arc::new(super::macos::MacHost))
     }
 
     /// [`Pool::open`] over `host`, with a Mac's other settings.
@@ -81,10 +81,11 @@ impl Pool {
     #[doc(hidden)]
     pub fn with_host(
         state: &Path,
+        slots: Slots,
         ready: usize,
         host: Arc<dyn AccountHost>,
     ) -> Result<Self, AccountError> {
-        Self::with_settings(state, Settings::macos(ready), host)
+        Self::with_settings(state, Settings::macos(slots, ready), host)
     }
 
     /// [`Pool::open`] over `host` with `settings`: how the tests give their own paths and
