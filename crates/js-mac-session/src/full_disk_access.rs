@@ -1,12 +1,13 @@
-//! Whether the helper holds Full Disk Access, the privacy (TCC) service
-//! `SystemPolicyAllFiles`.
+//! Whether a process holds Full Disk Access, the privacy (TCC) service
+//! `SystemPolicyAllFiles`: the judgement `js-agent` makes of its own listing at start, and
+//! the helper of its own for the verb `full-disk-access`.
 //!
 //! macOS gives the grant to a program by a privacy profile that device management
-//! installs, and gives no call to ask whether a program has it. The helper finds out the
+//! installs, and gives no call to ask whether a program has it. A program finds out the
 //! way every program does: it lists the directory of the privacy database, which only a
 //! process with Full Disk Access may list. The listing opens no file and reads no
-//! database. The helper is the only program of the agent that holds the grant, and
-//! everything it starts is started with its privacy responsibility disclaimed
+//! database. The profile grants it to `js-agent` alone, not to the helper, and everything
+//! either starts is started with its privacy responsibility disclaimed
 //! ([`crate::disclaim`]), so the grant never reaches a job.
 
 use std::io;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// list.
 pub const PRIVACY_DIR: &str = "/Library/Application Support/com.apple.TCC";
 
-/// Whether the helper holds Full Disk Access (the privacy service `SystemPolicyAllFiles`).
+/// Whether a process holds Full Disk Access (the privacy service `SystemPolicyAllFiles`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FullDiskAccess {

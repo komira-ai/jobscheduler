@@ -17,7 +17,7 @@
 //! | [`BUNDLE`] | the held bundle manifest digests, `sha256:<hex>`, comma-separated | the agent has a bundle store and holds at least one bundle |
 //! | [`BUNDLE_ROOT`] | the absolute path of the bundle store | the agent has a bundle store |
 //! | [`LAYERED_ROOTFS`] | [`FLAG_SET`] | the agent reads a job start's layers, mounts and host ports, and its runtime and kernel can make them (or refuse by name what they cannot) |
-//! | [`FULL_DISK_ACCESS`] | `granted`, `not-granted` or `undetermined` | the agent runs native jobs on a Mac and asked its root helper whether it holds Full Disk Access; only `granted` runs native jobs |
+//! | [`FULL_DISK_ACCESS`] | `granted`, `not-granted` or `undetermined` | the agent runs native jobs on a Mac and found at start whether it holds Full Disk Access; only `granted` runs native jobs |
 //! | [`FUSE_JOBS`] | [`FLAG_SET`] | the agent runs contained jobs that ask for FUSE (`--allow-fuse-jobs`), its kernel is at least 6.14, and `/dev/fuse` is the kernel's FUSE device (char 10:229) |
 //! | [`FUSE_URING`] | [`FLAG_SET`] | as [`FUSE_JOBS`], and the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0, so FUSE over io_uring is usable; reported only together with [`FUSE_JOBS`] |
 //! | [`OS_VERSION`] | the major version of the host's operating system, a decimal number such as `26` | the agent runs on macOS and could read the version |
@@ -61,10 +61,10 @@ pub const OS_VERSION: &str = js_types::OS_VERSION_KEY;
 /// that build is among its builds (membership, not equality).
 pub const XCODE: &str = "xcode";
 
-/// The capability key of whether the Mac's root helper `js-mac-session` holds Full Disk Access
-/// (the privacy service `SystemPolicyAllFiles`), which a native job needs of the host: the
-/// agent asks the helper at start. Its value is `granted`, `not-granted` or `undetermined`
-/// (the helper could not tell, or is older than the question); an agent whose value is not
+/// The capability key of whether the Mac's agent holds Full Disk Access (the privacy service
+/// `SystemPolicyAllFiles`), which a native job needs of the host: the agent lists the privacy
+/// database's directory at start. Its value is `granted`, `not-granted` or `undetermined`
+/// (the listing failed for a reason other than a refusal); an agent whose value is not
 /// `granted` refuses every native job (`no-full-disk-access`). A host's listing shows the value
 /// as reported. An operator cannot set it with a flag, and a request cannot name it.
 pub const FULL_DISK_ACCESS: &str = "full-disk-access";
