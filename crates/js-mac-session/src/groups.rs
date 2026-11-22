@@ -91,14 +91,39 @@ mod tests {
         (name, rustix::process::getgid().as_raw())
     }
 
-    /// The list of a real account holds its primary group and fits the kernel's list.
-    /// Catches a list that drops the primary group.
+    /// Every group the directory lists `user` (primary group `gid`) in, with room for far
+    /// more than any kernel's list: what [`of_user`] must give whole or refuse.
+    fn every_group_of(user: &str, gid: u32) -> Vec<u32> {
+        let name = CString::new(user).unwrap();
+        let mut count: libc::c_int = 1 << 17;
+        let mut list: Vec<Raw> = vec![0; count.unsigned_abs() as usize];
+        // SAFETY: as in `of_user`: `name` is NUL-terminated and `list` has room for
+        // `count` entries, which the call updates to the number it wrote.
+        unsafe {
+            libc::getgrouplist(
+                name.as_ptr(),
+                Raw::from_ne_bytes(gid.to_ne_bytes()),
+                list.as_mut_ptr(),
+                &raw mut count,
+            );
+        }
+        list.iter()
+            .take(count.unsigned_abs() as usize)
+            .map(|g| u32::from_ne_bytes(g.to_ne_bytes()))
+            .collect()
+    }
+
+    /// The list of a real account (the one running the tests) holds its primary group, and
+    /// is the account's whole list when that fits the kernel's, or else the refusal by its
+    /// name: a machine's test account may be in more groups than a process can hold (a
+    /// hosted macOS runner's administrator is in more than 16). Catches a list that drops
+    /// the primary group, one cut short to fit, and a long list the room given lets through.
     #[test]
-    fn a_real_user_has_its_primary_group_in_the_list() {
+    fn a_real_user_is_listed_whole_with_its_primary_group_or_refused_by_name() {
         let (name, gid) = me();
-        let groups = of_user(&name, gid).unwrap();
-        assert!(groups.contains(&gid), "{groups:?}");
-        assert!(groups.len() <= MAX_GROUPS);
+        let every = every_group_of(&name, gid);
+        assert!(every.contains(&gid), "{every:?}");
+        assert_eq!(of_user(&name, gid), fits(&name, every));
     }
 
     /// A name the directory does not have is listed with its primary group first, and
