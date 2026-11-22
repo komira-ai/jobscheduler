@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The root helper that lends every Mac lease a user of its pool. It builds everywhere
-# so its logic is tested on every CI runner; the binary serves only on macOS.
+# The root helper that makes every Mac lease an account of its own and deletes it
+# afterwards. It builds everywhere so its logic is tested on every CI runner; the binary
+# serves only on macOS.
 [[bin]]
 name = "js-mac-session"
 path = "src/main.rs"
@@ -27,7 +28,7 @@ time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Security.framework for the caller's code signature, OpenDirectory for the lease users.
+# Security.framework for the caller's code signature, OpenDirectory for the lease accounts.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
 objc2.workspace = true
@@ -36,6 +37,7 @@ objc2-open-directory = { workspace = true, features = [
     "CFOpenDirectory",
     "CFOpenDirectoryConstants",
     "ODNode",
+    "ODQuery",
     "ODRecord",
     "ODSession",
 ] }

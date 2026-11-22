@@ -8,8 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::helper::POOL_EXHAUSTED;
-use crate::proto::{self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session};
+use crate::proto::{self, Call, FullDiskAccess, Limits, Reply, Request, Session};
 
 /// Why a call did not succeed.
 #[derive(Debug)]
@@ -18,9 +17,6 @@ pub enum ClientError {
     Io(io::Error),
     /// The helper refused or failed, and said why.
     Refused(String),
-    /// `user-create` found no free user in the pool (the reason, which starts with
-    /// [`POOL_EXHAUSTED`]); the call may be repeated once a lease ends.
-    Exhausted(String),
     /// The helper answered something the request does not expect.
     Unexpected(Reply),
 }
@@ -29,9 +25,7 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(why) => write!(f, "kbf-mac-session: {why}"),
-            Self::Refused(why) | Self::Exhausted(why) => {
-                write!(f, "kbf-mac-session refused: {why}")
-            }
+            Self::Refused(why) => write!(f, "kbf-mac-session refused: {why}"),
             Self::Unexpected(reply) => write!(f, "kbf-mac-session answered {reply:?}"),
         }
     }
@@ -72,6 +66,18 @@ pub struct Running {
     pub pid: u32,
 }
 
+/// What the boot reset did ([`Client::boot_reset`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Booted {
+    /// The lease whose session was kept, as `<term>.<seq>`.
+    pub kept: Option<String>,
+    /// The leases whose accounts were deleted and shown gone.
+    pub deleted: Vec<String>,
+    /// The leases whose accounts were not shown gone: each stays live in the helper's
+    /// ledger with its uid held, and `kill-uid` and `user-delete` repeat the delete.
+    pub held: Vec<String>,
+}
+
 /// How a process ended: its exit code, or the signal that ended it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exit {
@@ -98,11 +104,13 @@ impl Client {
         call_on(UnixStream::connect(&self.socket)?, request, fds)
     }
 
-    /// `user-create`: returns the uid of the pool user the lease got.
+    /// `user-create`: makes the lease an account of its own, `kbf-lease-<term>-<seq>`, and
+    /// returns its uid.
     ///
     /// # Errors
-    /// The call failed or was refused; [`ClientError::Exhausted`] when the pool had no
-    /// free user.
+    /// The call failed or was refused: the lease id was used before, no uid of the helper's
+    /// range is free (the refusal says why each is not), or the account could not be made
+    /// (the lease then stays live, and `kill-uid` and `user-delete` end it).
     pub fn user_create(&self, lease: &str) -> Result<u32, ClientError> {
         let request = Request::UserCreate {
             lease: lease.to_owned(),
@@ -110,28 +118,8 @@ impl Client {
         };
         match self.call(&request, &[])?.1 {
             Reply::Created { uid } => Ok(uid),
-            Reply::Refused { reason } if reason.starts_with(POOL_EXHAUSTED) => {
-                Err(ClientError::Exhausted(reason))
-            }
             other => Err(unexpected(other)),
         }
-    }
-
-    /// `pool-create`: makes the pool's missing users and replaces its broken ones, and
-    /// returns the pool's state.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn pool_create(&self) -> Result<PoolState, ClientError> {
-        self.pool_call(&Request::PoolCreate)
-    }
-
-    /// `pool-status`: the pool's state.
-    ///
-    /// # Errors
-    /// The call failed or was refused.
-    pub fn pool_status(&self) -> Result<PoolState, ClientError> {
-        self.pool_call(&Request::PoolStatus)
     }
 
     /// `full-disk-access`: whether the helper holds Full Disk Access. A helper from
@@ -142,13 +130,6 @@ impl Client {
     pub fn full_disk_access(&self) -> Result<FullDiskAccess, ClientError> {
         match self.call(&Request::FullDiskAccess, &[])?.1 {
             Reply::FullDiskAccess { state } => Ok(state),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    fn pool_call(&self, request: &Request) -> Result<PoolState, ClientError> {
-        match self.call(request, &[])?.1 {
-            Reply::Pool(state) => Ok(*state),
             other => Err(unexpected(other)),
         }
     }
@@ -382,10 +363,13 @@ impl Client {
         }
     }
 
-    /// `user-delete`: returns whether a user record was there to delete.
+    /// `user-delete`: deletes the lease's account and shows it gone, and returns whether a
+    /// user record was there to delete.
     ///
     /// # Errors
-    /// The call failed or was refused.
+    /// The call failed or was refused. A refusal names the step that did not hold (a
+    /// deletion that failed, or an item of the proof that the account is gone): the lease
+    /// stays live and its uid held, and the call may be repeated.
     pub fn user_delete(&self, lease: &str) -> Result<bool, ClientError> {
         let request = Request::UserDelete {
             lease: lease.to_owned(),
@@ -397,19 +381,25 @@ impl Client {
     }
 
     /// `boot-reset`, naming the leases the server still holds for this node: returns
-    /// the lease whose session was kept and the leases whose users were deleted.
+    /// the lease whose session was kept, the leases whose accounts were deleted, and the
+    /// leases whose accounts were not shown gone ([`Booted`]).
     ///
     /// # Errors
     /// The call failed or was refused.
-    pub fn boot_reset(
-        &self,
-        held: &[String],
-    ) -> Result<(Option<String>, Vec<String>), ClientError> {
+    pub fn boot_reset(&self, held: &[String]) -> Result<Booted, ClientError> {
         let request = Request::BootReset {
             held: held.to_vec(),
         };
         match self.call(&request, &[])?.1 {
-            Reply::Reset { kept, deleted } => Ok((kept, deleted)),
+            Reply::Reset {
+                kept,
+                deleted,
+                held,
+            } => Ok(Booted {
+                kept,
+                deleted,
+                held,
+            }),
             other => Err(unexpected(other)),
         }
     }

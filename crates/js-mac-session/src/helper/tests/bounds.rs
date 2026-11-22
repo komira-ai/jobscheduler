@@ -9,10 +9,10 @@ use std::path::PathBuf;
 
 use super::*;
 
-/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
-/// the uid only once its user is deleted and the pool's slot made.
+/// A rig of ONE uid holding `lease` ([`one_uid`]): a later lease gets
+/// the uid only once its user is deleted.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    legacy(name, lease)
+    one_uid(name, lease)
 }
 
 /// How many logged calls are exactly `call`.
@@ -240,10 +240,10 @@ fn restarted(rig: Rig, name: &str, uid: u32) -> Rig {
 }
 
 /// Catches a quarantine kept only in memory: after a failed `user-delete` (a domain that
-/// stays; and the end of a pool user's lease whose ledger write failed) the reopened
-/// ledger still holds the uid, a boot reset that cannot end the user fails and keeps
-/// holding it, and the reset repeated once nothing stops it completes the delete and
-/// frees the uid.
+/// stays; and the end of a lease whose ledger write failed) the reopened ledger still holds
+/// the uid, a boot reset that cannot end the user does not fail but returns the lease as
+/// held and keeps holding the uid, and the delete repeated once nothing stops it completes
+/// and frees the uid.
 #[test]
 fn a_held_uid_stays_held_across_a_restart_until_a_delete_completes() {
     let (rig, uid) = one("bounds-restart", "46.1");
@@ -253,25 +253,26 @@ fn a_held_uid_stays_held_across_a_restart_until_a_delete_completes() {
     let rig = restarted(rig, "bounds-restart", uid);
     rig.host.state().domains.insert(format!("user/{uid}"));
     rig.host.state().fail.insert("bootout user");
-    let got = rig.helper.boot_reset(&[]).unwrap_err();
-    assert!(
-        got.starts_with("the boot reset is incomplete: lease 46.1: "),
-        "{got}"
-    );
-    assert!(rig.helper.lock().held_uids().contains(&uid));
-    rig.host.state().fail.clear();
     let reset = rig.helper.boot_reset(&[]).unwrap();
-    assert_eq!(reset.deleted.len(), 1);
+    assert_eq!(reset.deleted, Vec::<LeaseId>::new());
+    assert_eq!(reset.held, [LeaseId::new(46, 1)]);
+    assert!(rig.helper.lock().held_uids().contains(&uid));
+    uid_held(&rig);
+    rig.host.state().fail.clear();
+    rig.helper.kill_uid("46.1").unwrap();
+    // The restarted host has no record of it any more.
+    assert_eq!(rig.helper.user_delete("46.1"), Ok(false));
     assert_eq!(rig.helper.user_create("46.2"), Ok(uid));
 
-    // A pool user's lease ends, and the ledger cannot say so: nothing is reset, and the
-    // slot stays the lease's, its uid held, across the restart until the reset ends it.
-    rig.helper
-        .lock()
-        .fail_writes(&rig.dir.join("ledger"), false);
+    // A lease's delete completes, and the ledger cannot say so: the account is gone, but the
+    // lease stays live, its uid held, across the restart until the boot reset records it.
+    rig.helper.lock().fail_writes(&rig.dir.join("ledger"));
     let got = rig.helper.user_delete("46.2").unwrap_err();
-    assert!(got.starts_with("recording the end of lease 46.2"), "{got}");
-    assert!(rig.host.state().users.contains_key("kbf-lease-pool-0"));
+    assert!(
+        got.starts_with("recording the deletion of lease 46.2"),
+        "{got}"
+    );
+    assert!(!rig.host.state().users.contains_key("kbf-lease-46-2"));
     uid_held(&rig);
     let rig = restarted(rig, "bounds-restart", uid);
     rig.helper.boot_reset(&[]).unwrap();

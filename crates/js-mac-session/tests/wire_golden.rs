@@ -10,12 +10,9 @@
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 
-use js_mac_session::lease::{Dotted, Slot, parse_lease, pool_user_name, user_name};
+use js_mac_session::lease::{Dotted, parse_lease, parse_pool_user, user_name};
 use js_mac_session::ledger::Ledger;
-use js_mac_session::ledger::pool::SlotState;
-use js_mac_session::proto::{
-    self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session,
-};
+use js_mac_session::proto::{self, Call, FullDiskAccess, Limits, Reply, Request, Session};
 use js_testkit::dir::TestDir;
 use js_types::LeaseId;
 
@@ -152,8 +149,6 @@ fn requests() -> Vec<(Request, &'static str)> {
         (Request::Scan, r#"{"verb":"scan"}"#),
         (Request::Baseline, r#"{"verb":"baseline"}"#),
         (Request::RebootDirty, r#"{"verb":"reboot-dirty"}"#),
-        (Request::PoolCreate, r#"{"verb":"pool-create"}"#),
-        (Request::PoolStatus, r#"{"verb":"pool-status"}"#),
         (Request::FullDiskAccess, r#"{"verb":"full-disk-access"}"#),
     ]
 }
@@ -196,6 +191,7 @@ fn replies() -> Vec<(Reply, &'static str)> {
             Reply::Reset {
                 kept: Some(s("1.1")),
                 deleted: vec![s("1.2")],
+                held: Vec::new(),
             },
             r#"{"reset":{"kept":"1.1","deleted":["1.2"]}}"#,
         ),
@@ -203,8 +199,17 @@ fn replies() -> Vec<(Reply, &'static str)> {
             Reply::Reset {
                 kept: None,
                 deleted: Vec::new(),
+                held: Vec::new(),
             },
             r#"{"reset":{"kept":null,"deleted":[]}}"#,
+        ),
+        (
+            Reply::Reset {
+                kept: Some(s("1.1")),
+                deleted: vec![s("1.2")],
+                held: vec![s("1.3"), s("1.4")],
+            },
+            r#"{"reset":{"kept":"1.1","deleted":["1.2"],"held":["1.3","1.4"]}}"#,
         ),
         (
             Reply::Scanned {
@@ -246,18 +251,6 @@ fn replies() -> Vec<(Reply, &'static str)> {
                 state: FullDiskAccess::Undetermined,
             },
             r#"{"full-disk-access":{"state":"undetermined"}}"#,
-        ),
-        (
-            Reply::Pool(Box::new(PoolState {
-                size: 4,
-                free: vec![1],
-                leased: vec![(0, s("3.7"))],
-                resetting: vec![2],
-                broken: vec![3],
-                missing: Vec::new(),
-                errors: vec![s("slot 3: why")],
-            })),
-            r#"{"pool":{"size":4,"free":[1],"leased":[[0,"3.7"]],"resetting":[2],"broken":[3],"missing":[],"errors":["slot 3: why"]}}"#,
         ),
     ]
 }
@@ -334,7 +327,7 @@ fn a_lease_id_is_spelled_term_dot_sequence() {
     assert!(parse_lease("3-41").is_err());
     assert!(parse_lease("03.41").is_err());
     assert_eq!(user_name(lease), "kbf-lease-3-41");
-    assert_eq!(pool_user_name(Slot::new(41)), "kbf-lease-pool-41");
+    assert_eq!(parse_pool_user("kbf-lease-pool-41"), Some(41));
     assert_eq!(
         Dotted(LeaseId::new(u64::MAX, 0)).to_string(),
         "18446744073709551615.0"
@@ -373,37 +366,23 @@ fn a_ledger_written_before_the_move_is_read() {
     assert_eq!(ledger.held_uids(), std::collections::BTreeSet::from([651]));
 }
 
-/// Catches: a pool file line that is not one of its records, in the order a lease's life
-/// writes them, which a later release would then fail to read; and a pool file of a
-/// release that made administrators (`leased <slot> <lease> admin`, ended by `resetting
-/// <slot> replace`) that this one cannot read.
+/// Catches: a ledger that reads or writes the file a release with a pool kept beside it (its
+/// lines are that release's own format, and a line this release did not know would stop the
+/// helper from starting), or one that changes it: it is left as it was until the boot reset
+/// removes it.
 #[test]
-fn the_pool_file_is_one_line_per_slot_record() {
-    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "wire-golden-pool");
+fn the_pool_file_of_a_release_with_a_pool_is_neither_read_nor_written() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "wire-golden-pool-file");
     let path = dir.join("ledger");
+    let pool = "made 0 650\nfree 0\nleased 0 3.7 admin\nnot a record\n";
+    std::fs::write(dir.join("pool"), pool).unwrap();
     let mut ledger = Ledger::open(&path).unwrap();
-    let lease = LeaseId::new(3, 7);
-    ledger.record_slot(Slot::new(0), 650).unwrap();
-    ledger.record_free(Slot::new(0)).unwrap();
-    ledger.record_leased(Slot::new(0), lease).unwrap();
-    ledger.record_released(Slot::new(0), lease).unwrap();
-    ledger.record_broken(Slot::new(0)).unwrap();
-    ledger.record_free(Slot::new(0)).unwrap();
+    ledger.record_created(LeaseId::new(3, 7), 650).unwrap();
+    ledger.record_deleted(LeaseId::new(3, 7)).unwrap();
     drop(ledger);
-    assert_eq!(
-        std::fs::read_to_string(dir.join("pool")).unwrap(),
-        "made 0 650\nfree 0\nleased 0 3.7\nresetting 0\nbroken 0\nfree 0\n"
-    );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "created 3.7 650\ndeleted 3.7\n"
     );
-    std::fs::write(
-        dir.join("pool"),
-        "made 0 650\nfree 0\nleased 0 3.7 admin\nresetting 0 replace\nfree 0\n",
-    )
-    .unwrap();
-    let again = Ledger::open(&path).unwrap();
-    assert_eq!(again.slots().len(), 1);
-    assert_eq!(again.slots()[0].1.state, SlotState::Free);
+    assert_eq!(std::fs::read_to_string(dir.join("pool")).unwrap(), pool);
 }

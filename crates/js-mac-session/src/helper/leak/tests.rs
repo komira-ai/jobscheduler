@@ -5,7 +5,7 @@ use super::*;
 use crate::autologin::CommandOutput;
 use crate::helper::Outcome;
 use crate::helper::tests::{Rig, log, me, rig_with};
-use crate::lease::{PoolSize, UidRange};
+use crate::lease::UidRange;
 use crate::proto::Request;
 
 const REBOOT: &str = "/bin/launchctl reboot system";
@@ -49,11 +49,9 @@ fn open_window(rig: &Rig) {
 /// A Mac with something in every class but auto-login (off at rest): a launch agent,
 /// a launch daemon, a login items file (and launchd's `disabled` overrides, which
 /// the login items class leaves out), a background task, a foreign user record in the
-/// lease range; and a pool of four free users, which are no scan items, in a range of
-/// six uids.
+/// lease range, in a range of six uids.
 fn furnished(name: &str) -> Rig {
-    let mut rig = rig_with(name, UidRange::new(me(), me() + 5).unwrap(), None);
-    rig.helper.settings.pool = PoolSize::new(4).unwrap();
+    let rig = rig_with(name, UidRange::new(me(), me() + 5).unwrap(), None);
     rig.helper.boot_reset(&[]).unwrap();
     log(&rig);
     for folder in ["LaunchAgents", "LaunchDaemons", "launchd"] {
@@ -150,25 +148,23 @@ fn an_unset_auto_login_scans_clean_in_the_words_of_macos_26_and_27() {
     }
 }
 
-/// Makes the next reset fail, and the replacement after it fail to delete the user, so
-/// the slot breaks with its user still there.
-fn break_the_reset(rig: &Rig) {
-    let mut state = rig.host.state();
-    state.fail_script.insert("make_home", [true].into());
-    state.fail.insert("delete_user");
+/// Ends the lease `lease`, which holds `uid`, and puts a user record with that uid back, as
+/// an account that came back after its deletion, or one made by hand, would be.
+fn account_comes_back(rig: &Rig, lease: &str, uid: u32) {
+    rig.helper.user_delete(lease).unwrap();
+    rig.host.state().foreign.insert(uid);
 }
 
 /// Catches: the user of a live lease reported as a leak, so that a scan while a lease
-/// runs comes back dirty though nothing leaked; or the user of a lease that ended and
-/// whose slot broke passed over as if its lease were still live.
+/// runs comes back dirty though nothing leaked; or the user of a lease that ended, and
+/// whose uid has a record again, passed over as if its lease were still live.
 #[test]
 fn a_live_lease_s_user_is_no_item_and_is_one_once_its_lease_ended() {
     let rig = baselined("leak-live-lease");
     let uid = rig.helper.user_create("5.1").unwrap();
     rig.helper.user_create("5.2").unwrap();
     assert_eq!(rig.helper.scan().unwrap(), ScanReport::default());
-    break_the_reset(&rig);
-    rig.helper.user_delete("5.1").unwrap_err();
+    account_comes_back(&rig, "5.1", uid);
     let report = rig.helper.scan().unwrap();
     assert_eq!(report.diff.added, [format!("lease-users uid {uid}")]);
     assert_eq!(report.diff.removed, Vec::<String>::new());
@@ -211,11 +207,10 @@ const PLANTS: [(&str, Plant, &str); 11] = [
         "lease-users uid ",
     ),
     (
-        "the user of a slot broken at the end of its lease",
+        "an account that came back after its lease ended",
         |rig| {
-            rig.helper.user_create("5.1").unwrap();
-            break_the_reset(rig);
-            rig.helper.user_delete("5.1").unwrap_err();
+            let uid = rig.helper.user_create("5.1").unwrap();
+            account_comes_back(rig, "5.1", uid);
         },
         "lease-users uid ",
     ),
@@ -508,9 +503,9 @@ fn the_first_lease_user_closes_the_window() {
     std::fs::create_dir_all(rig.dir.join("baseline-window/x")).unwrap();
     let error = rig.helper.user_create("1.2").unwrap_err().to_string();
     assert!(error.contains("closing "), "{error}");
-    assert!(rig.helper.pool_status().leased.is_empty());
+    assert_eq!(rig.helper.lock().get(js_types::LeaseId::new(1, 2)), None);
     std::fs::remove_dir_all(rig.dir.join("baseline-window")).unwrap();
-    assert_eq!(rig.helper.user_create("1.2"), Ok(me()));
+    assert_eq!(rig.helper.user_create("1.2"), Ok(me() + 1));
 }
 
 /// Catches: a baseline that cannot be written reported as recorded.

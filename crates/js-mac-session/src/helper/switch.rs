@@ -27,14 +27,27 @@
 //!   lease session never survives, and the Mac then sits at the login window until
 //!   `session-idle` rests it at the VM user. The VM user is never deleted or killed
 //!   here: the leases whose users are deleted are those the ledger holds, and a lease
-//!   user's name cannot be the VM user's ([`crate::lease::VmUser`]). Then every
-//!   other live lease is ended as `user-delete` ends it (its pool user reset, or replaced;
-//!   the user of a lease from before the pool killed and deleted): a Mac that lost power
-//!   mid-lease never stays logged in as a dead lease user. Then every pool slot that is
-//!   resetting, or leased to a lease that is not live, is reset, and last `pool-create`
-//!   makes the slots that are missing and replaces the broken ones. A reset that fails
-//!   part-way can be repeated; a pool user left broken, or a slot that could not be made,
-//!   does not fail it.
+//!   user's name cannot be the VM user's ([`crate::lease::VmUser`]). Then, when the helper
+//!   holds Full Disk Access ([`Helper::full_disk_access`]; without it nothing of this
+//!   paragraph's account deletions can work, and native jobs are refused anyway), every
+//!   account named `kbf-lease-*` with a uid of the lease range that the ledger holds no
+//!   live lease for is found in the directory ([`super::Host::lease_accounts`]) and ended:
+//!   one named for a lease the ledger has not seen (a lost ledger) is recorded as
+//!   `created` and ended with the ledger's leases below; an account of the pool a release
+//!   before this one kept (`kbf-lease-pool-<n>`) is deleted by its name, after the pool's
+//!   file is removed and the removal made durable (so a rollback finds no pool, and makes
+//!   its own afresh); any other (a lease the ledger has as deleted, a name that is not a
+//!   lease's, a uid the ledger holds for another lease) is deleted by its name. Those
+//!   deletions are the ones of `user-delete` (the processes killed, the sweeps, the proof
+//!   that the account is gone), with no lease to record. The account of the lease whose
+//!   session is kept is never one of them. A deletion by name that fails fails the boot
+//!   reset, naming the account and the step: a Mac where the grant does not let the helper
+//!   delete must not start serving per-job accounts. Then every other live lease is ended as
+//!   `user-delete` ends it (its processes killed, its account deleted and shown gone): a
+//!   Mac that lost power mid-lease never stays logged in as a dead lease user. A lease
+//!   whose account is not shown gone does not fail the boot reset: it stays live, its uid
+//!   held, is logged, and is named in the reply ([`Reset::held`]), and the caller repeats
+//!   its delete.
 //!
 //! The restart ends the daemon's connection, and the helper with it, so the reply to a
 //! switch may never arrive; the daemon learns of the switch from its own restart.
@@ -45,21 +58,37 @@ use std::sync::atomic::Ordering;
 use js_types::LeaseId;
 
 use super::Helper;
-use super::pool::Settled;
 use super::role::{Gui, Role};
 use crate::autologin::{
     self, Intent, ensure_kcpassword, read_intent, remove, write_intent, write_kcpassword,
 };
-use crate::lease::{Dotted, parse_lease};
-use crate::ledger::Ledger;
+use crate::full_disk_access::FullDiskAccess;
+use crate::lease::{Dotted, parse_lease, parse_lease_user, parse_pool_user};
+use crate::ledger::{Entry, Ledger};
 
 /// What the boot reset did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reset {
     /// The lease whose session was kept.
     pub kept: Option<LeaseId>,
-    /// The leases whose users were deleted.
+    /// The leases whose accounts were deleted and shown gone.
     pub deleted: Vec<LeaseId>,
+    /// The leases whose accounts were not shown gone: each stays live in the ledger with
+    /// its uid held.
+    pub held: Vec<LeaseId>,
+}
+
+/// What the boot reset does with a `kbf-lease-*` account of the lease range.
+#[derive(Debug, PartialEq, Eq)]
+enum Leftover {
+    /// A live lease the ledger holds with this uid has it: the ledger's leases below end it.
+    Held,
+    /// Named for a lease the ledger has not seen: recorded as `created`, then ended with the
+    /// ledger's leases.
+    Unknown(LeaseId),
+    /// Deleted by its name, with no lease to record; `pool` for an account of the pool a
+    /// release before this one kept.
+    ByName { pool: bool },
 }
 
 impl Helper {
@@ -208,8 +237,10 @@ impl Helper {
     /// `boot-reset [held]`: see the module documentation.
     ///
     /// # Errors
-    /// It ran before, a held lease id does not parse, or clearing auto-login, killing or
-    /// deleting a leftover user failed (each failure is named; the rest still ran).
+    /// It ran before, a held lease id does not parse, clearing auto-login failed, or an
+    /// account that no lease of the ledger names could not be deleted and shown gone (each
+    /// failure is named; the rest still ran). A lease of the ledger whose account is not
+    /// shown gone is no error: it is in [`Reset::held`].
     pub fn boot_reset(&self, held: &[String]) -> Result<Reset, String> {
         let held: BTreeSet<LeaseId> = held
             .iter()
@@ -237,48 +268,115 @@ impl Helper {
         if kept.is_none() && !self.keeps_vm_rest(intent) {
             self.clear_session()?;
         }
-        let mut deleted = Vec::new();
+        let kept_uid = kept
+            .and_then(|lease| ledger.get(lease))
+            .map(|entry| entry.uid);
         let mut errors = Vec::new();
+        if self.full_disk_access() == FullDiskAccess::Granted {
+            errors.extend(self.end_unknown_accounts(&mut ledger, kept_uid));
+        }
+        let mut deleted = Vec::new();
+        let mut holding = Vec::new();
         for lease in ledger.live_leases() {
             if Some(lease) == kept {
                 continue;
             }
             match self.remove_leftover(&mut ledger, lease) {
                 Ok(()) => deleted.push(lease),
-                Err(why) => errors.push(format!("lease {}: {why}", Dotted(lease))),
+                Err(why) => {
+                    tracing::warn!(lease = %Dotted(lease), "the account is not shown gone, and its uid stays held: {why}");
+                    holding.push(lease);
+                }
             }
         }
-        errors.extend(self.reset_orphans(&mut ledger));
         if !errors.is_empty() {
             return Err(format!(
                 "the boot reset is incomplete: {}",
                 errors.join("; ")
             ));
         }
-        // A slot that could not be made is named in the log and in `pool-status`; it
-        // does not stop the Mac from serving with the rest of the pool.
-        self.make_pool(&mut ledger);
         self.reset_done.store(true, Ordering::Release);
-        tracing::info!(kept = ?kept, deleted = deleted.len(), "boot reset done");
-        Ok(Reset { kept, deleted })
+        tracing::info!(kept = ?kept, deleted = deleted.len(), held = holding.len(), "boot reset done");
+        Ok(Reset {
+            kept,
+            deleted,
+            held: holding,
+        })
     }
 
-    /// Ends a lease left from before this start: its pool user is reset (or replaced),
-    /// the user of a lease from before the pool killed and deleted. A pool user left
-    /// broken does not stop the reset: it is lent to no one, and `pool-create` replaces it.
+    /// Ends a lease left from before this start: its processes killed, its account deleted
+    /// and shown gone, the lease recorded over.
     fn remove_leftover(&self, ledger: &mut Ledger, lease: LeaseId) -> Result<(), String> {
-        let user = self.lease_user(ledger, lease)?;
-        if let Some(slot) = user.slot {
-            return match self.release(ledger, lease, slot)? {
-                Settled::Free => Ok(()),
-                Settled::Broken(why) => {
-                    tracing::warn!(lease = %Dotted(lease), "{why}");
-                    Ok(())
-                }
-            };
-        }
         self.kill_locked(ledger, lease)?;
         Ok(self.end_locked(ledger, lease).map(drop)?)
+    }
+
+    /// The boot reset's account step (see the module documentation): finds every
+    /// `kbf-lease-*` account of the lease range, records those named for a lease the ledger
+    /// has not seen, and deletes by name those no live lease of the ledger names. `kept_uid`
+    /// is the uid of the lease whose session is kept: its account is never touched. What
+    /// failed, account by account.
+    fn end_unknown_accounts(&self, ledger: &mut Ledger, kept_uid: Option<u32>) -> Vec<String> {
+        let accounts = match self.host.lease_accounts() {
+            Ok(accounts) => accounts,
+            Err(why) => return vec![format!("listing the lease accounts: {why}")],
+        };
+        let mut errors = Vec::new();
+        let mut pool_file_removed = false;
+        for (name, uid) in accounts {
+            if !self.settings.range.contains(uid) || kept_uid == Some(uid) {
+                continue;
+            }
+            let pool = match leftover(ledger, &name, uid) {
+                Leftover::Held => continue,
+                Leftover::Unknown(lease) => {
+                    match ledger.record_created(lease, uid) {
+                        Ok(()) => tracing::warn!(
+                            lease = %Dotted(lease), uid,
+                            "the ledger did not know {name}; it is recorded and ended"
+                        ),
+                        Err(why) => errors.push(format!("{name}: recording it: {why}")),
+                    }
+                    continue;
+                }
+                Leftover::ByName { pool } => pool,
+            };
+            if pool && !pool_file_removed {
+                // Before the first of the pool's accounts goes, so a rollback to the release
+                // with the pool finds no pool and makes its own afresh.
+                match ledger.remove_pool_file() {
+                    Ok(_) => pool_file_removed = true,
+                    Err(why) => {
+                        errors.push(format!("{name}: removing the pool file: {why}"));
+                        continue;
+                    }
+                }
+            }
+            match self.delete_leftover(&name, uid) {
+                Ok(()) => tracing::warn!(uid, "deleted {name}, which no lease of the ledger names"),
+                Err(why) => errors.push(format!("{name}: {why}")),
+            }
+        }
+        errors
+    }
+}
+
+/// What the boot reset does with the account `name`, with `uid`, which no one asked about:
+/// see [`Leftover`].
+fn leftover(ledger: &Ledger, name: &str, uid: u32) -> Leftover {
+    if parse_pool_user(name).is_some() {
+        return Leftover::ByName { pool: true };
+    }
+    match parse_lease_user(name) {
+        Some(lease) => match ledger.get(lease) {
+            Some(Entry {
+                uid: held,
+                deleted: false,
+            }) if held == uid => Leftover::Held,
+            None => Leftover::Unknown(lease),
+            Some(_) => Leftover::ByName { pool: false },
+        },
+        None => Leftover::ByName { pool: false },
     }
 }
 

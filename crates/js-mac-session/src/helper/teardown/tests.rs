@@ -49,11 +49,11 @@ fn the_gui_domain_is_judged_only_with_a_gui_session() {
 }
 
 /// Asserts that the text `launchctl print user/<uid>` prints on macOS 27 for a user
-/// domain that holds nothing (the exact text of an idle pool user, of a uid after its
+/// domain that holds nothing (the exact text of an idle lease user, of a uid after its
 /// lease, and of a uid with no account) is read as holding nothing, and that exit 0
 /// with it is a domain that is gone, while the same text with any other exit status is
 /// too, and a signal is still no answer. Catches the judgement that a domain printing
-/// at exit 0 always stays, which never let a pool user's lease end.
+/// at exit 0 always stays, which never let a lease end.
 #[test]
 fn an_empty_user_domain_printed_at_exit_0_is_gone() {
     assert!(holds_nothing(EMPTY_DOMAIN));

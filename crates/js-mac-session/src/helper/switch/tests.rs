@@ -1,7 +1,7 @@
 use crate::autologin::{CommandOutput, Intent, kcpassword, read_intent};
-use crate::helper::tests::{Rig, add_legacy, fds, log, me, rig, rig_with};
-use crate::helper::{DSEDITGROUP, IPCS, Outcome, Reset};
-use crate::lease::{Slot, UidRange};
+use crate::helper::tests::{Rig, add_lease, fds, log, me, rig, rig_with};
+use crate::helper::{IPCS, Outcome, Reset};
+use crate::lease::UidRange;
 use crate::proto::{Reply, Request};
 
 use js_types::LeaseId;
@@ -42,13 +42,8 @@ fn session_login_needs_a_live_lease_user() {
     assert!(error.contains("was deleted"), "{error}");
     assert!(rig.helper.session_login("1.x").is_err());
     let calls = log(&rig);
-    // Only the reset of 1.2's pool user ran programs: `ipcs`, for its IPC objects, and
-    // `dseditgroup`, to see it is no administrator.
-    let ran = |call: &String| {
-        [IPCS, DSEDITGROUP]
-            .iter()
-            .any(|program| call.starts_with(&format!("command {program} ")))
-    };
+    // Only the deletion of 1.2's account ran programs: `ipcs`, for its IPC objects.
+    let ran = |call: &String| call.starts_with(&format!("command {IPCS} "));
     assert!(
         calls
             .iter()
@@ -76,9 +71,9 @@ fn session_login_writes_the_intent_before_anything_and_restarts_last() {
         calls,
         [
             "command /usr/bin/fdesetup isactive (no intent)".to_owned(),
-            "reset_password kbf-lease-pool-0".to_owned(),
+            "reset_password kbf-lease-1-1".to_owned(),
             format!(
-                "command /usr/bin/defaults write {domain} autoLoginUser -string kbf-lease-pool-0 (intent 1.1)"
+                "command /usr/bin/defaults write {domain} autoLoginUser -string kbf-lease-1-1 (intent 1.1)"
             ),
             format!("command {RESTART} (intent 1.1)"),
         ]
@@ -86,7 +81,7 @@ fn session_login_writes_the_intent_before_anything_and_restarts_last() {
     assert_eq!(intent(&rig), Some(Intent::Lease(LeaseId::new(1, 1))));
     assert_eq!(
         std::fs::read(rig.dir.join("kcpassword")).unwrap(),
-        kcpassword(b"pw-kbf-lease-pool-0")
+        kcpassword(b"pw-kbf-lease-1-1")
     );
     // Repeated for the same lease (a retry after a lost reply): the same switch.
     rig.helper.session_login("1.1").unwrap();
@@ -128,10 +123,10 @@ fn session_login_is_refused_for_a_second_lease_and_with_filevault_on() {
     rig.helper.kill_uid("1.1").unwrap();
     let error = rig.helper.user_delete("1.1").unwrap_err();
     assert!(error.contains("holds the GUI session"), "{error}");
-    assert!(rig.host.state().users.contains_key("kbf-lease-pool-0"));
+    assert!(rig.host.state().users.contains_key("kbf-lease-1-1"));
     assert_eq!(
-        rig.helper.pool_status().leased[0],
-        (Slot::new(0), LeaseId::new(1, 1))
+        rig.helper.lock().get(LeaseId::new(1, 1)).map(|e| e.deleted),
+        Some(false)
     );
 }
 
@@ -207,11 +202,11 @@ fn rebooted(rig: &Rig, name: &str) -> Rig {
 }
 
 /// Catches: a boot reset that keeps auto-login for a lease the server no longer holds
-/// (the Mac stays logged in as a dead lease user), skips resetting the leftover leases'
-/// pool users (or resets one before its GUI session is torn down), or leaves
+/// (the Mac stays logged in as a dead lease user), skips deleting the leftover leases'
+/// accounts (or deletes one before its GUI session is torn down), or leaves
 /// `/etc/kcpassword` or the record behind.
 #[test]
-fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
+fn the_boot_reset_clears_a_stale_intent_and_deletes_its_user() {
     let rig = switch_rig("reset-stale");
     rig.helper.user_create("1.1").unwrap();
     rig.helper.user_create("1.2").unwrap();
@@ -227,6 +222,7 @@ fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
         Reset {
             kept: None,
             deleted: vec![LeaseId::new(1, 1), LeaseId::new(1, 2)],
+            held: Vec::new(),
         }
     );
     let calls = log(&booted);
@@ -236,16 +232,11 @@ fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
         &format!("command /usr/bin/defaults delete {domain}"),
     );
     let killed = position(&calls, &format!("bootout gui/{}", me()));
-    let home = booted.dir.join("Users/kbf-lease-pool-0");
-    let reset = position(&calls, &format!("make_home {}", home.display()));
-    assert!(cleared < killed && killed < reset, "{calls:#?}");
-    assert!(
-        calls.iter().all(|call| !call.starts_with("delete_user")),
-        "reset, not replaced: {calls:#?}"
-    );
-    assert_eq!(booted.host.state().users, rig.host.state().users);
-    let free = (0..4).map(Slot::new).collect::<Vec<_>>();
-    assert_eq!(booted.helper.pool_status().free, free);
+    let deleted = position(&calls, "delete_user kbf-lease-1-1");
+    assert!(cleared < killed && killed < deleted, "{calls:#?}");
+    assert!(booted.host.state().users.is_empty());
+    assert!(!booted.dir.join("Users/kbf-lease-1-1").exists());
+    assert!(booted.helper.lock().live_leases().is_empty());
     assert!(!booted.dir.join("kcpassword").exists());
     assert_eq!(intent(&booted), None);
     assert!(
@@ -256,7 +247,8 @@ fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
 
 /// Catches: a boot reset that clears the session of a lease the server still holds
 /// (the GUI test it was prepared for would find no session), deletes its user, or
-/// keeps other leftover users with it.
+/// keeps other leftover users with it. The kept lease's account is not looked at, its uid
+/// stays held, and the other lease's account goes.
 #[test]
 fn the_boot_reset_keeps_a_live_intent() {
     let rig = switch_rig("reset-live");
@@ -272,6 +264,7 @@ fn the_boot_reset_keeps_a_live_intent() {
         Reset {
             kept: Some(LeaseId::new(1, 1)),
             deleted: vec![LeaseId::new(1, 2)],
+            held: Vec::new(),
         }
     );
     let calls = log(&booted);
@@ -279,14 +272,13 @@ fn the_boot_reset_keeps_a_live_intent() {
         calls.iter().all(|call| !call.contains("defaults")),
         "{calls:#?}"
     );
-    let status = booted.helper.pool_status();
-    assert_eq!(status.leased, [(Slot::new(0), LeaseId::new(1, 1))]);
-    assert!(status.free.contains(&Slot::new(1)), "{status:?}");
-    let pool0 = booted.dir.join("Users/kbf-lease-pool-0");
+    assert_eq!(booted.helper.lock().live_leases(), [LeaseId::new(1, 1)]);
+    assert_eq!(
+        booted.host.state().users.keys().collect::<Vec<_>>(),
+        ["kbf-lease-1-1"]
+    );
     assert!(
-        calls
-            .iter()
-            .all(|call| !call.contains(&pool0.display().to_string())),
+        calls.iter().all(|call| !call.contains("kbf-lease-1-1")),
         "the kept lease's user is left alone: {calls:#?}"
     );
     assert_eq!(
@@ -320,24 +312,37 @@ fn the_boot_reset_treats_a_broken_record_as_stale() {
     assert_eq!(intent(&booted), None);
 }
 
-/// Catches: a boot reset that fails part-way yet lets the other verbs in, or one that
-/// can run twice (a second one would end the leases started since). The user that
-/// cannot be ended is a lease's from before the pool, whose kill fails.
+/// Catches: a boot reset that fails because a lease's account could not be deleted (the
+/// helper would then serve nothing, and the caller could not end the lease), one that
+/// forgets the lease (its uid would be free), or one that can run twice (a second one would
+/// end the leases started since). The lease whose process cannot be killed is returned as
+/// held, its uid held, and its delete is repeated by the caller once nothing stops it.
 #[test]
-fn the_boot_reset_runs_once_and_must_succeed() {
+fn a_lease_that_cannot_be_ended_is_held_and_the_boot_reset_runs_once() {
     let rig = switch_rig("reset-once");
-    add_legacy(&rig, "1.1");
+    add_lease(&rig, "1.1");
     let booted = rebooted(&rig, "reset-once");
     booted.host.state().stubborn.insert(me(), 100);
     booted.host.state().procs.insert(me(), 1);
-    let error = booted.helper.boot_reset(&[]).unwrap_err();
-    assert!(error.contains("lease 1.1:"), "{error}");
-    assert!(!booted.helper.reset_done());
-    booted.host.state().stubborn.clear();
-    booted.helper.boot_reset(&[]).unwrap();
+    let reset = booted.helper.boot_reset(&[]).unwrap();
+    assert_eq!(
+        reset,
+        Reset {
+            kept: None,
+            deleted: Vec::new(),
+            held: vec![LeaseId::new(1, 1)],
+        }
+    );
     assert!(booted.helper.reset_done());
+    assert!(booted.helper.lock().held_uids().contains(&me()));
+    assert!(booted.host.state().users.contains_key("kbf-lease-1-1"));
     let again = booted.helper.boot_reset(&[]).unwrap_err();
     assert!(again.contains("runs once"), "{again}");
+    // The caller repeats the delete once nothing stops it.
+    booted.host.state().stubborn.clear();
+    booted.helper.kill_uid("1.1").unwrap();
+    assert_eq!(booted.helper.user_delete("1.1"), Ok(true));
+    assert!(booted.helper.lock().held_uids().is_empty());
 }
 
 /// Catches: a verb served before the boot reset (the daemon could start a lease on a
@@ -403,7 +408,8 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
         reply(booted.helper.handle(reset, Vec::new())),
         Reply::Reset {
             kept: None,
-            deleted: Vec::new()
+            deleted: Vec::new(),
+            held: Vec::new()
         }
     );
     assert_eq!(
@@ -429,7 +435,8 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
         reply(booted_again.helper.handle(held(), Vec::new())),
         Reply::Reset {
             kept: Some(lease()),
-            deleted: Vec::new()
+            deleted: Vec::new(),
+            held: Vec::new()
         }
     );
     // Booted once more, the lease no longer held: its user goes.
@@ -439,7 +446,8 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
         reply(last.helper.handle(reset, Vec::new())),
         Reply::Reset {
             kept: None,
-            deleted: vec![lease()]
+            deleted: vec![lease()],
+            held: Vec::new()
         }
     );
 }
@@ -470,7 +478,7 @@ fn a_switch_stops_at_the_first_write_that_fails() {
     rig.host.state().fail.insert("reset_password");
     let error = rig.helper.session_login("1.1").unwrap_err();
     assert!(
-        error.contains("setting the password of kbf-lease-pool-0"),
+        error.contains("setting the password of kbf-lease-1-1"),
         "{error}"
     );
     no_defaults(&rig);

@@ -7,10 +7,10 @@
 use super::*;
 use crate::testing::found;
 
-/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
-/// the uid only once its user is deleted and the pool's slot made.
+/// A rig of ONE uid holding `lease` ([`one_uid`]): a later lease gets
+/// the uid only once its user is deleted.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    legacy(name, lease)
+    one_uid(name, lease)
 }
 
 /// The calls of one attempt of `kill-uid` that ends with nothing left: the kill, the
@@ -68,7 +68,7 @@ fn never_asked_about_gui(uid: u32, calls: &[String]) {
     assert!(!calls.iter().any(|c| c.contains(&gui)), "{calls:#?}");
 }
 
-/// Catches the refusal a Mac's two-run isolation test hit: a pool user never logs in,
+/// Catches the refusal a Mac's two-run isolation test hit: a lease user never logs in,
 /// and `launchctl print gui/<uid>` for it answers 112, 113 or 125 from run to run, so a
 /// teardown that asks about `gui/<uid>` and matches exit statuses fails on the one it
 /// does not know. A uid with no login session is never asked about `gui/<uid>`, and
@@ -219,7 +219,6 @@ fn a_process_that_never_goes_away_fails_after_the_last_attempt_and_quarantines_t
     rig.host.state().stubborn.clear();
     assert_eq!(rig.helper.kill_uid("55.1"), Ok(()));
     assert_eq!(rig.helper.user_delete("55.1"), Ok(true));
-    assert!(rig.helper.pool_create().errors.is_empty());
     assert_eq!(rig.helper.user_create("55.2"), Ok(uid));
 }
 

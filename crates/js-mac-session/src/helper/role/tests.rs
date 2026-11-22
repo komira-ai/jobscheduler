@@ -500,7 +500,7 @@ fn whole_machine_leases_still_switch_through_the_vm_user() {
     assert_eq!(intent(&rig), Some(Intent::Lease(LeaseId::new(1, 1))));
     assert_eq!(
         std::fs::read(rig.dir.join("kcpassword")).unwrap(),
-        kcpassword(b"pw-kbf-lease-pool-0")
+        kcpassword(b"pw-kbf-lease-1-1")
     );
     let error = rig.helper.session_login("1.2").unwrap_err();
     assert!(error.contains("belongs to lease 1.1"), "{error}");
@@ -620,7 +620,7 @@ fn session_idle_at_the_vm_user_stops_at_the_first_step_that_fails() {
 
 /// Catches: a boot reset that deletes or kills the VM user (it ends every lease the
 /// ledger holds and touches no other user), clears the VM user's auto-login, or leaves a
-/// leftover lease's pool user leased beside it.
+/// leftover lease's account beside it.
 #[test]
 fn the_boot_reset_ends_the_leases_and_never_touches_the_vm_user() {
     let rig = vm_rig("reset-vm");
@@ -644,6 +644,7 @@ fn the_boot_reset_ends_the_leases_and_never_touches_the_vm_user() {
         Reset {
             kept: None,
             deleted: vec![LeaseId::new(1, 1), LeaseId::new(1, 2)],
+            held: Vec::new(),
         }
     );
     let calls = log(&booted);
@@ -669,11 +670,9 @@ fn the_boot_reset_ends_the_leases_and_never_touches_the_vm_user() {
             .all(|call| !call.contains("defaults write") && !call.contains("defaults delete"))
     );
     assert_eq!(booted.host.state().procs[&vm_uid()], 4);
+    // The leases' accounts are gone; the VM user's is what is left.
     let users = booted.host.state().users.clone();
-    let mut names = vec![VM.to_owned()];
-    names.splice(0..0, (0..4).map(|n| format!("kbf-lease-pool-{n}")));
-    assert_eq!(users.keys().cloned().collect::<Vec<_>>(), names);
-    assert!(booted.helper.pool_status().leased.is_empty());
+    assert_eq!(users.keys().cloned().collect::<Vec<_>>(), [VM]);
     assert_eq!(intent(&booted), Some(Intent::Vm));
     assert_eq!(
         std::fs::read(booted.dir.join("kcpassword")).unwrap(),

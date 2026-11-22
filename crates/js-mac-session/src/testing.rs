@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::autologin::CommandOutput;
-use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord};
+use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
+use crate::lease::USER_PREFIX;
 
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
@@ -25,24 +26,20 @@ const PAUSES: usize = 10_000;
 /// What runs on the fake host between two of the helper's steps.
 pub(crate) type Hook = Box<dyn Fn(&str) + Send>;
 
+/// What runs on the fake host's state just after a user record is deleted: something that
+/// shows up after the deletion (a process, a domain, a file) for the proof to find.
+pub(crate) type AfterDelete = Box<dyn Fn(&mut State) + Send>;
+
 #[derive(Default)]
 pub(crate) struct State {
     /// Every call, in order, as text.
     pub(crate) log: Vec<String>,
     /// Users by name.
     pub(crate) users: BTreeMap<String, NewUser>,
-    /// The names the directory says are in `admin`: put there by something other than the
-    /// helper, which never makes an administrator.
-    pub(crate) admins: BTreeSet<String>,
-    /// The pool-owned attributes of a record, where they are not what a new user has
-    /// (hidden, the shell, the group and home of its [`NewUser`]): a record someone
-    /// changed, or one that is not the pool's.
-    pub(crate) records: BTreeMap<String, UserRecord>,
     /// Uids some user record outside the helper's has.
     pub(crate) foreign: BTreeSet<u32>,
-    /// Names whose record the directory does not answer for, though the account is there
-    /// (a record that went between two looks).
-    pub(crate) recordless: BTreeSet<String>,
+    /// Runs on the state each time `delete_user` has deleted a record that was there.
+    pub(crate) after_delete: Option<AfterDelete>,
     /// Live processes per uid.
     pub(crate) procs: BTreeMap<u32, usize>,
     /// Answers `live_processes` gives, in order, before it reads `procs` again: a
@@ -56,8 +53,8 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "user_record", "restore_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
-    /// "kill_all", "live_processes",
+    /// "delete_user", "lease_accounts", "launchctl print", "bootout gui", "bootout user",
+    /// "user_dir", "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
     /// "term_group").
     pub(crate) fail: BTreeSet<&'static str>,
@@ -157,18 +154,6 @@ impl State {
         text
     }
 
-    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a name in
-    /// `admins`, else `no` and a failure, as `dseditgroup` answers.
-    fn checkmember(&self, name: &str) -> CommandOutput {
-        let admin = self.admins.contains(name);
-        let (word, not) = [("no", "NOT "), ("yes", "")][usize::from(admin)];
-        CommandOutput {
-            success: admin,
-            stdout: format!("{word} {name} is {not}a member of admin\n"),
-            stderr: String::new(),
-        }
-    }
-
     /// `ipcrm -<kind> <id>`: removes the object, unless it is stuck.
     fn ipcrm(&mut self, args: &[&str]) -> CommandOutput {
         let id: u64 = args[1].parse().unwrap();
@@ -215,11 +200,6 @@ impl State {
     }
 }
 
-/// A pool with one user for each uid of `range`.
-pub(crate) fn pool_of(range: crate::lease::UidRange) -> crate::lease::PoolSize {
-    crate::lease::PoolSize::new(u32::try_from(range.uids().count()).unwrap()).unwrap()
-}
-
 /// `launchctl print`'s answer for a domain launchd has and that holds something: exit 0
 /// and a domain with a service in it.
 pub(crate) fn found() -> PrintAnswer {
@@ -233,7 +213,7 @@ pub(crate) fn found() -> PrintAnswer {
 }
 
 /// `launchctl print user/<uid>`'s answer for a uid whose user domain holds nothing, as
-/// macOS 27 prints it for an idle pool user, for a uid after its lease, and for a uid
+/// macOS 27 prints it for an idle lease user, for a uid after its lease, and for a uid
 /// with no account (the print makes the domain): exit 0 and a domain with no service
 /// and no unmanaged process.
 pub(crate) fn empty_domain(uid: u32) -> PrintAnswer {
@@ -329,56 +309,43 @@ impl Host for FakeHost {
         Ok(state.foreign.contains(&uid) || state.users.values().any(|u| u.uid == uid))
     }
 
+    /// Makes the directory `<homes>/<name>` (mode 0700, owned by the test, not `uid`), and
+    /// refuses one that is there, as the real host does.
     fn make_home(&self, homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()> {
         self.call(
             "make_home",
             format!("make_home {} {uid}:{gid}", homes.join(name).display()),
-        )
+        )?;
+        std::fs::create_dir(homes.join(name))
     }
 
     fn create_user(&self, user: &NewUser) -> io::Result<()> {
         self.call("create_user", format!("create_user {}", user.name))?;
-        let mut state = self.state();
-        state.records.remove(&user.name);
-        state.users.insert(user.name.clone(), user.clone());
+        self.state().users.insert(user.name.clone(), user.clone());
         Ok(())
     }
 
     fn delete_user(&self, name: &str) -> io::Result<bool> {
         self.call("delete_user", format!("delete_user {name}"))?;
         let mut state = self.state();
-        state.records.remove(name);
-        state.admins.remove(name);
-        Ok(state.users.remove(name).is_some())
-    }
-
-    /// The record `records` holds for `name`, else what a pool user made for its
-    /// [`NewUser`] has.
-    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
-        self.call("user_record", format!("user_record {name}"))?;
-        let state = self.state();
-        if state.recordless.contains(name) {
-            return Ok(None);
+        let existed = state.users.remove(name).is_some();
+        if existed && let Some(after) = state.after_delete.take() {
+            after(&mut state);
+            state.after_delete = Some(after);
         }
-        Ok(state.records.get(name).cloned().or_else(|| {
-            state.users.get(name).map(|user| UserRecord {
-                uid: user.uid,
-                gid: user.gid,
-                home: user.home.clone(),
-                hidden: true,
-                shell: SHELL.to_owned(),
-            })
-        }))
+        Ok(existed)
     }
 
-    /// Gives the record `user.name` the attributes of a new user, whatever `records`
-    /// held; its membership of `admin` stays.
-    fn restore_user(&self, user: &NewUser) -> io::Result<()> {
-        self.call("restore_user", format!("restore_user {}", user.name))?;
-        let mut state = self.state();
-        state.records.remove(&user.name);
-        state.users.insert(user.name.clone(), user.clone());
-        Ok(())
+    /// The users whose name starts with the lease users' prefix, by name.
+    fn lease_accounts(&self) -> io::Result<Vec<(String, u32)>> {
+        self.call("lease_accounts", "lease_accounts".to_owned())?;
+        Ok(self
+            .state()
+            .users
+            .values()
+            .filter(|user| user.name.starts_with(USER_PREFIX))
+            .map(|user| (user.name.clone(), user.uid))
+            .collect())
     }
 
     /// The next answer of `print_script`, or launchd's: exit 0 for a domain in
@@ -536,8 +503,6 @@ impl Host for FakeHost {
                 stderr: String::new(),
             },
             None if program == crate::helper::IPCRM => state.ipcrm(args),
-            // The helper runs it only as `-o checkmember -m <name> admin`.
-            None if program == crate::helper::DSEDITGROUP => state.checkmember(args[3]),
             None if text == "/usr/bin/fdesetup isactive" => CommandOutput {
                 success: false,
                 stdout: "false\n".to_owned(),

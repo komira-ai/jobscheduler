@@ -6,7 +6,7 @@
 //! The table holds, for each lease, the last process `run` started for it: its pid (which
 //! leads a process group of its own, so it is the group's id), how it ended once it has,
 //! and its deadline, if it has one. It lives in the helper's memory: a helper that restarts
-//! starts with an empty table, and its boot reset ends every lease and resets its pool user
+//! starts with an empty table, and its boot reset ends every lease and deletes its account
 //! (killing what runs as it), so a run of an earlier helper is never found again. An entry is
 //! dropped when its lease ends.
 //!

@@ -1,5 +1,5 @@
 //! Clearing the user flags and restoring the owner's mode on what a lease left in a
-//! place the sweep does not remove (a home, a `/var/folders` entry): the walk of
+//! place a caller that is not root cleans (a home, a `/var/folders` entry): the walk of
 //! [`clear_flags`] and [`clear_flags_within`], on the sweep's own primitives.
 
 use std::ffi::OsStr;
@@ -18,7 +18,7 @@ use super::{
 /// `hidden`, as the bits of `st_flags` (`UF_IMMUTABLE`, `UF_APPEND`, `UF_NODUMP`,
 /// `UF_OPAQUE`, `UF_HIDDEN`), never spelled as `chflags` words: `nodump` there is the flag
 /// itself, and its opposite is `dump`. The flags only root may change (`schg`,
-/// `restricted`) are not in it: they are not the pool user's to set.
+/// `restricted`) are not in it: they are not a lease user's to set.
 pub const CLEARED_FLAGS: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x8000;
 
 /// Clears [`CLEARED_FLAGS`] on the directory `dir` itself, whoever owns it (the caller

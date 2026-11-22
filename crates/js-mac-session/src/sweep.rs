@@ -1,8 +1,11 @@
 //! What `user-delete` removes besides the user record: everything keyed by the lease
-//! user's name or uid that would outlive the account (S4.2, "Sweep on delete"); and what
-//! a pool user's reset removes between two leases, with the same walk ([`sweep`] for the
-//! places it sweeps, [`empty_keeping`] for its `DARWIN_USER_DIR` entry). Each sweep's
-//! [`Swept::errors`] is its verdict: the helper takes a sweep with any error as not done.
+//! user's name or uid that would outlive the account (S4.2, "Sweep on delete"): the places
+//! of a [`SweepPlan`] ([`sweep`]) and the uid's entry under the per-user folders
+//! ([`remove_owned`]), each removed whole. Each sweep's [`Swept::errors`] is its verdict:
+//! the helper takes a sweep with any error as not done. A directory the system refuses
+//! the removal of is an error naming it, never a directory left emptied: the deletion then
+//! does not complete, and the lease stays live. What a sweep did is then looked at again,
+//! read-only, by [`owned_left`].
 //!
 //! Root walks places other lease users can write while their leases run, so the walk
 //! never follows a symbolic link: every directory is opened relative to its parent
@@ -16,7 +19,7 @@
 //! deep tree can stop a deletion). A tree of the departing uid of any depth is removed:
 //! below a fixed depth the walk moves the subtree up under the directory it is
 //! emptying (a rename on one filesystem, nothing followed) and removes it from there,
-//! so a lease that builds a deep tree cannot leave its slot dirty for good.
+//! so a lease that builds a deep tree cannot stop its account's deletion.
 //!
 //! Callers must have ended every process of the uid first (`user-delete` refuses
 //! otherwise; `kill-uid` sweeps the crontab and `at` jobs only after its kill), so
@@ -69,7 +72,7 @@ impl SweepPlan {
     /// macOS's other places besides the home folder (which the helper adds from where
     /// it made it) and the uid's own entry under `/private/var/folders` (which the
     /// helper names from the uid's `DARWIN_USER_DIR` and removes whole with
-    /// [`remove_owned`], or empties and keeps where the system placed it): launchd's per-uid overrides and login items, the shared user
+    /// [`remove_owned`]): launchd's per-uid overrides and login items, the shared user
     /// folder and the temporary folders.
     #[must_use]
     pub fn macos() -> Self {
@@ -97,9 +100,6 @@ pub struct Swept {
     pub removed: usize,
     /// Each place that could not be swept, and why. Empty when the sweep is complete.
     pub errors: Vec<String>,
-    /// The empty directories the system would not let the pool user remove, which the
-    /// sweep kept ([`remove_present`]): the baseline of what a check may find left empty.
-    pub kept: Vec<PathBuf>,
 }
 
 /// Sweeps `plan` for the user `user` with uid `uid`.
@@ -122,108 +122,11 @@ pub fn sweep(plan: &SweepPlan, user: &str, uid: u32) -> Swept {
     swept
 }
 
-/// Removes every entry of the directory `dir`, whoever owns it, as [`sweep`] removes the
-/// uid's own: never through a link, never past `dir`'s filesystem, with the user flags
-/// cleared only on entries `uid` owns (another owner's locked entry stays, and is an
-/// error). For a directory that is the uid's alone, such as its home: `dir` itself
-/// stays, and a `dir` that does not exist holds nothing.
-#[must_use]
-pub fn empty(dir: &Path, uid: u32) -> Swept {
-    empty_keeping(dir, uid, &[])
-}
-
-/// [`empty`], but a directory of `dir` named in `keep` is emptied and kept, not removed
-/// (a `/var/folders` entry keeps its `0`, `C` and `T`; anything else in it, a file or a
-/// directory of another name, goes whole). A `keep` name that is not a directory of
-/// `dir`'s own filesystem (a file, a link, a mount point) is removed like any other
-/// entry.
-#[must_use]
-pub fn empty_keeping(dir: &Path, uid: u32, keep: &[&str]) -> Swept {
-    let mut swept = Swept::default();
-    let result = empty_base(dir, uid, keep, &mut swept);
-    note(&mut swept, dir, result);
-    swept
-}
-
-/// [`empty_keeping`]: every entry of `path` removed, each error recorded and the rest
-/// gone on with.
-fn empty_base(path: &Path, uid: u32, keep: &[&str], swept: &mut Swept) -> io::Result<()> {
-    let Some(dir) = open_base(path)? else {
-        return Ok(());
-    };
-    let dev = rustix::fs::fstat(&dir)?.st_dev;
-    let park = Park::new(&dir);
-    for name in listed(&dir)? {
-        let here = path.join(&name);
-        // An entry gone since the listing is neither removed nor an error.
-        let skipped = &park.skipped;
-        let result = tolerate(examine(&dir, &name), (&dir, &name, &here), skipped).and_then(
-            |stat| match stat {
-                Some(stat) if is_kept(&name, keep, &stat, dev) => {
-                    empty_kept(&dir, &name, &here, &stat, uid, dev, swept).map(|()| 0)
-                }
-                Some(stat) => {
-                    unlock_own(&dir, &name, &stat, rustix::process::geteuid().as_raw());
-                    tolerate(
-                        remove_entry(&dir, &name, &here, &stat, (uid, dev, 1), &park).map(|()| 1),
-                        (&dir, &name, &here),
-                        skipped,
-                    )
-                }
-                None => Ok(0),
-            },
-        );
-        swept.removed += *result.as_ref().unwrap_or(&0);
-        note(swept, &here, result.map(drop));
-    }
-    note(swept, path, park.drain(uid, dev));
-    swept.kept.extend(park.kept.take());
-    Ok(())
-}
-
 /// Whether `name`, examined as `stat` in a directory on `dev`, is a directory
-/// [`empty_keeping`] keeps.
+/// [`clear_flags_within`] leaves its own flags on (one of `keep`).
 fn is_kept(name: &OsStr, keep: &[&str], stat: &Stat, dev: StDev) -> bool {
     // Without short-circuits: all three are read.
     is_dir(stat) & (stat.st_dev == dev) & keep.iter().any(|k| OsStr::new(k) == name)
-}
-
-/// Empties the kept directory `name` of `dir`, examined as `stat`: each entry removed,
-/// each error recorded against its path.
-fn empty_kept(
-    dir: &OwnedFd,
-    name: &OsStr,
-    here: &Path,
-    stat: &Stat,
-    uid: u32,
-    dev: StDev,
-    swept: &mut Swept,
-) -> io::Result<()> {
-    let child = match open_child(dir, name, stat) {
-        Ok(child) => child,
-        // Gone since it was examined: it holds nothing.
-        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(why) => return Err(why),
-    };
-    let park = Park::new(&child);
-    for entry in listed(&child)? {
-        let there = here.join(&entry);
-        let result = tolerate(
-            examine_inner(&child, &entry).and_then(|inner| match inner {
-                Some(inner) => {
-                    remove_entry(&child, &entry, &there, &inner, (uid, dev, 2), &park).map(|()| 1)
-                }
-                None => Ok(0),
-            }),
-            (&child, &entry, &there),
-            &park.skipped,
-        );
-        swept.removed += *result.as_ref().unwrap_or(&0);
-        note(swept, &here.join(&entry), result.map(drop));
-    }
-    note(swept, here, park.drain(uid, dev));
-    swept.kept.extend(park.kept.take());
-    Ok(())
 }
 
 /// Records `result`'s error, if any, against `path`. Every error counts: the sweep is
@@ -367,7 +270,7 @@ fn refused(why: &io::Error) -> bool {
 /// Whether the entry `name` of `dir` cannot be opened by this process, because the system
 /// refuses it ("operation not permitted" or "permission denied"; a link is not followed).
 /// Such an entry is a protected store of the system (an Apple daemon's data vault made for
-/// the pool user): not the pool user's to read, and so not the lease's to carry.
+/// the user): not the user's to read, and so not anything a lease could carry.
 pub(crate) fn cannot_open(dir: &OwnedFd, name: &OsStr) -> bool {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     matches!(
@@ -426,9 +329,10 @@ pub fn pretend_root(root: bool) {
 
 /// `result`, with a refusal of the system taken as a success for the entry `name` of `dir`
 /// (at `here`) that this process cannot open, when the process is not root: it is skipped
-/// with one warning per path, and counted in `skipped`, so that a directory it keeps is no
-/// error. The next lease runs as the same user and is refused the entry as well, so it
-/// carries nothing from one lease to the next. An entry that can be opened still fails.
+/// with one warning per path, and counted in `skipped`, so that a directory that holds it
+/// is no error: the system refuses such an entry to this process and to every other of its
+/// uid, so nothing of it can pass from one user to another. An entry that can be opened
+/// still fails.
 fn tolerate<T: Default>(
     result: io::Result<T>,
     (dir, name, here): (&OwnedFd, &OsStr, &Path),
@@ -477,7 +381,7 @@ fn warn_once(path: &Path) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if first_time(&mut seen, path) {
-        tracing::warn!(path = %path.display(), "not swept: the system refuses this entry, and the pool user cannot open it");
+        tracing::warn!(path = %path.display(), "not swept: the system refuses this entry, and this process cannot open it");
     }
 }
 
@@ -525,8 +429,7 @@ fn remove_present(
             "another filesystem is mounted here; not crossed",
         ));
     }
-    let placed = is_placed(dir, name, stat);
-    if (stat.st_uid == uid) & !placed {
+    if stat.st_uid == uid {
         unlock(dir, name, stat)?;
     }
     if !is_dir(stat) {
@@ -567,127 +470,21 @@ fn remove_present(
         let all: Vec<&str> = failed.iter().map(|(_, text)| text.as_str()).collect();
         return Err(io::Error::new(*kind, all.join("; ")));
     }
-    if placed | (park.skipped.get() > skipped_before) {
-        // This directory was placed by the system (emptied, never removed), or something
-        // the pool user may not open is inside and stays with it, and so does this one
-        // (counted, for the one above it). What a lease set on a placed one is taken off.
-        if placed {
-            scrub_kept(&child)?;
-        }
+    if park.skipped.get() > skipped_before {
+        // Something this process may not open is inside and stays with it, and so does
+        // this directory (counted, for the one above it).
         park.skipped.set(park.skipped.get() + 1);
         return Ok(());
     }
-    match rmdir_at(dir, name) {
-        // The system refuses the removal of this directory, to the pool user and to root
-        // alike (a folder it guards in the home, such as `Library/Preferences`, which root
-        // without Full Disk Access is refused too): kept while it is empty, which it is
-        // here, unless something was made in it since.
-        Err(Errno::PERM) if keepable(&child)? => {
-            warn_once(here);
-            scrub_kept(&child)?;
-            park.kept.borrow_mut().push(here.to_owned());
-            park.skipped.set(park.skipped.get() + 1);
-            Ok(())
-        }
-        other => Ok(other?),
-    }
-}
-
-/// The attribute SIP puts on what it protects: the one extended attribute a kept directory
-/// keeps. Off macOS a test names its own.
-#[cfg(target_os = "macos")]
-const KEEP_XATTR: &str = "com.apple.rootless";
-#[cfg(not(target_os = "macos"))]
-const KEEP_XATTR: &str = "user.kbf.rootless";
-
-/// Takes off a directory the sweep keeps (one the system placed, or will not let the pool
-/// user remove) what a lease can set on it: the user flags, and every extended attribute
-/// but [`KEEP_XATTR`] that the system lets the pool user remove (the system's own are
-/// protected and stay). A refusal to clear the flags fails.
-fn scrub_kept(dir: &OwnedFd) -> io::Result<()> {
-    clear_root(dir)?;
-    strip_xattrs_except(dir, KEEP_XATTR)
-}
-
-/// Gives a home that stays (emptied, never removed) back as the system makes one: its user
-/// flags cleared, its ACL removed and its extended attributes but [`KEEP_XATTR`]
-/// stripped, as for any directory the sweep keeps.
-///
-/// # Errors
-/// A refusal to clear the flags or the ACL, or to list or remove an attribute.
-pub(crate) fn scrub_home(dir: &OwnedFd) -> io::Result<()> {
-    scrub_kept(dir)?;
-    crate::xattr::clear_acl(dir)
-}
-
-/// The names of `names` that [`strip_xattrs_except`] removes: all but `keep`.
-fn xattrs_to_remove<'a>(names: &'a [String], keep: &str) -> Vec<&'a str> {
-    names
-        .iter()
-        .map(String::as_str)
-        .filter(|n| *n != keep)
-        .collect()
-}
-
-/// Removes the extended attributes of the open directory `dir` but `keep`. One that went
-/// since the listing, or that the system protects from its owner (`EPERM`), stays.
-fn strip_xattrs_except(dir: &OwnedFd, keep: &str) -> io::Result<()> {
-    let names = crate::xattr::list(dir)?;
-    strip_named(&names, keep, &mut |name| crate::xattr::remove(dir, name))
-}
-
-/// [`strip_xattrs_except`] over the `names` listed, through `remove`.
-fn strip_named(
-    names: &[String],
-    keep: &str,
-    remove: &mut dyn FnMut(&str) -> io::Result<()>,
-) -> io::Result<()> {
-    for name in xattrs_to_remove(names, keep) {
-        match remove(name) {
-            Ok(()) => {}
-            Err(why) if crate::xattr::left(&why) => {}
-            Err(why) => return Err(why),
-        }
-    }
-    Ok(())
-}
-
-/// Whether a directory the system refused to remove is kept: it is empty (nothing was made
-/// in it since). Whoever runs the sweep, root included: macOS refuses root the removal of
-/// an account's `~/Library/Preferences`, which only a process with Full Disk Access may
-/// remove, and a directory with something in it that stays is still an error.
-fn keepable(child: &OwnedFd) -> io::Result<bool> {
-    Ok(listed(child)?.is_empty())
+    // A directory the system refuses the removal of (`Library/Preferences` in a home, an
+    // entry it placed under `/private/var/folders`) is an error naming it, as any other
+    // refusal: the deletion then does not complete.
+    Ok(rmdir_at(dir, name)?)
 }
 
 /// Removes the empty directory `name` of `dir`.
-#[cfg(target_os = "macos")]
 fn rmdir_at(dir: &OwnedFd, name: &OsStr) -> Result<(), Errno> {
     rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)
-}
-
-/// Removes the empty directory `name` of `dir`; off macOS a test names the ones the system
-/// refuses ([`pretend_unremovable`]).
-#[cfg(not(target_os = "macos"))]
-fn rmdir_at(dir: &OwnedFd, name: &OsStr) -> Result<(), Errno> {
-    if UNREMOVABLE.with_borrow(|names| names.iter().any(|n| n == name)) {
-        return Err(Errno::PERM);
-    }
-    rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)
-}
-
-#[cfg(not(target_os = "macos"))]
-thread_local! {
-    /// The names a test says the system will not let the pool user remove.
-    static UNREMOVABLE: std::cell::RefCell<Vec<OsString>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// For tests off macOS: the empty directories of these names, on this thread, are refused
-/// removal as the system refuses a pool user's `Library/Preferences`.
-#[cfg(not(target_os = "macos"))]
-#[doc(hidden)]
-pub fn pretend_unremovable(names: &[&str]) {
-    UNREMOVABLE.with_borrow_mut(|n| *n = names.iter().map(Into::into).collect());
 }
 
 /// How deep the removal recurses before it moves what is below up to the top: it holds one
@@ -701,16 +498,14 @@ const PARK_NAMES: usize = 4096;
 /// being emptied (same filesystem, so a rename, and the subtree is only moved, never
 /// copied or followed). The moved subtree is removed from there by [`Park::drain`]; it is
 /// [`PARK_DEPTH`] levels shallower, so a tree of any depth is gone after as many passes
-/// as it has multiples of that. A lease that builds a deep tree cannot make its slot
-/// fail, and no depth of recursion is unbounded.
+/// as it has multiples of that. A lease that builds a deep tree cannot make its account's
+/// deletion fail, and no depth of recursion is unbounded.
 struct Park<'a> {
     dir: &'a OwnedFd,
     names: std::cell::RefCell<Vec<OsString>>,
     next: std::cell::Cell<u32>,
-    /// How many entries the removal left because the pool user may not open them.
+    /// How many entries the removal left because the process may not open them.
     skipped: std::cell::Cell<usize>,
-    /// The empty directories kept because the system refused their removal.
-    kept: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl<'a> Park<'a> {
@@ -720,7 +515,6 @@ impl<'a> Park<'a> {
             names: std::cell::RefCell::default(),
             next: std::cell::Cell::new(0),
             skipped: std::cell::Cell::new(0),
-            kept: std::cell::RefCell::default(),
         }
     }
 
@@ -845,7 +639,7 @@ fn examine(dir: &OwnedFd, name: &OsStr) -> io::Result<Option<Stat>> {
     stat
 }
 
-/// [`examine`] of an entry below a folder the sweep keeps, after [`unlock_own`].
+/// [`examine`] of an entry below a folder being removed or cleared, after [`unlock_own`].
 fn examine_inner(dir: &OwnedFd, name: &OsStr) -> io::Result<Option<Stat>> {
     let stat = examine(dir, name);
     if let Ok(Some(found)) = &stat {
@@ -896,11 +690,10 @@ pub(crate) fn placed(flags: u32, rootless: bool) -> bool {
 }
 
 /// Whether the directory `name` of `dir`, examined as `stat`, was placed by the system
-/// (see [`placed`]): its system flags are no process's to change, root's included (with SIP
-/// on, macOS refuses root the removal of a directory that carries `sunlnk`, as it does the
-/// per-user folders' `<xx>/<hash>` entries and their `0`, `C`, `T` and `X`), and it is never
-/// removed; what is in it is the lease's, and goes. The same for root (the helper) as for the
-/// pool user's own sweeps.
+/// (see [`placed`]): its system flags are no process's to change (with SIP on, macOS refuses
+/// the change of a directory that carries `sunlnk`, as it does the per-user folders'
+/// `<xx>/<hash>` entries and their `0`, `C`, `T` and `X`), so [`clear_flags`] leaves its
+/// flags and ACL as they are and clears what is in it.
 fn is_placed(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> bool {
     is_dir(stat) & system_placed(dir, name, stat)
 }
@@ -977,13 +770,15 @@ fn unlock(_dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
 
 mod entry;
 mod flags;
+mod owned;
 #[cfg(all(test, not(target_os = "macos")))]
 pub(crate) use entry::pretend_mounted;
 pub(crate) use entry::{owned_entries, remove_owned};
 #[cfg(test)]
 use flags::clear_below;
+use flags::owner_rwx;
 pub use flags::{CLEARED_FLAGS, clear_flags, clear_flags_within};
-use flags::{clear_root, owner_rwx};
+pub(crate) use owned::owned_left;
 
 #[cfg(test)]
 mod tests;

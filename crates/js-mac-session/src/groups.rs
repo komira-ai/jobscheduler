@@ -123,9 +123,9 @@ mod tests {
     fn a_list_longer_than_the_kernels_is_refused_by_name() {
         let long: Vec<u32> = (1..=u32::try_from(MAX_GROUPS + 1).unwrap()).collect();
         assert_eq!(
-            fits("kbf-lease-pool-4", long).unwrap_err(),
+            fits("kbf-lease-3-4", long).unwrap_err(),
             format!(
-                "kbf-lease-pool-4 is in more than {MAX_GROUPS} groups, which a process cannot hold"
+                "kbf-lease-3-4 is in more than {MAX_GROUPS} groups, which a process cannot hold"
             )
         );
         let full: Vec<u32> = (1..=u32::try_from(MAX_GROUPS).unwrap()).collect();

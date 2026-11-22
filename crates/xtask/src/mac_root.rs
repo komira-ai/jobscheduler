@@ -5,20 +5,21 @@
 //! - the safety check comes first: the Mac's user list (`dscl . -list /Users UniqueID`,
 //!   read as this user) must hold no lease user ([`check_users`]): no uid of the agent's
 //!   pool range [`PRODUCTION_UIDS`] or of the tests' own [`TEST_UIDS`], and no name that
-//!   starts `kbf-lease-`. The tests make and delete users named `kbf-lease-pool-<n>`, so they
-//!   run only on a Mac whose agent has not made its pool;
+//!   starts `kbf-lease-`. The tests make and delete users named `kbf-lease-<term>-<seq>` (an
+//!   account per lease; `kbf-lease-pool-<n>` for a helper from before it), so they run only
+//!   on a Mac with no lease user;
 //! - every target ([`TARGETS`]) and the `js-mac-provision` program are built as this user
 //!   ([`test_build::build`], [`test_build::build_bin`]), before anything runs as root;
 //! - through `sudo -n`: the work directory `--work` (which must not exist) and a directory
 //!   of each target's are made root-owned, mode 0755, and the binaries are copied into
-//!   `<work>/bin`, mode 0755. The tests' pool users run the test binary itself, and the
+//!   `<work>/bin`, mode 0755. The tests' lease users run the test binary itself, and the
 //!   build's directory below this user's home is closed to them;
 //! - each target's binary runs as root ([`run_args`]): `/usr/bin/env` with the variables the
 //!   target reads ([`env_for`]), `--ignored --test-threads=1`, from its package's directory,
 //!   its output in `target/mac-root-tests/<target>.log`;
 //! - after each `js-agent` target, pass or fail, the users it made are deleted
-//!   ([`to_delete`]): only those named `kbf-lease-pool-<n>` with a uid the tests use. A user
-//!   still there afterwards is a failure;
+//!   ([`to_delete`]): only those named `kbf-lease-<term>-<seq>` or `kbf-lease-pool-<n>` with a
+//!   uid the tests use. A user still there afterwards is a failure;
 //! - the output of every binary is read into one row per test ([`judge`]): `pass`, `FAIL`
 //!   with the line its panic printed, or `not-run` with the reason. A binary that reports no
 //!   test, or exits with a failure and names no failed test, is a failure (never a silent
@@ -52,7 +53,7 @@ pub const INBOUND_UID: u32 = 4311;
 pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4311;
 /// The unprivileged uid and gid of `js-mac-pool` and `js-treestore`: no account is needed.
 pub const PLAIN_UID: u32 = 4320;
-/// The prefix of the users the `js-agent` targets' helpers make.
+/// The prefix of the users a helper from before the per-job account made, one per uid.
 pub const POOL_USER_PREFIX: &str = "kbf-lease-pool-";
 /// The prefix of every lease user's name, of any release.
 pub const LEASE_USER_PREFIX: &str = "kbf-lease-";
@@ -280,19 +281,38 @@ pub fn check_users(users: &[(String, i64)]) -> Result<(), Error> {
     }
     Err(Error::Failed(format!(
         "refused: the root tests run only on a Mac with no lease users, because they make and \
-         delete users named {POOL_USER_PREFIX}<n> (uids {}-{}); this Mac has {}",
+         delete users named {LEASE_USER_PREFIX}<term>-<seq> or {POOL_USER_PREFIX}<n> (uids {}-{}); \
+         this Mac has {}",
         TEST_UIDS.start(),
         TEST_UIDS.end(),
         found.join(", ")
     )))
 }
 
-/// The users a `js-agent` target left that the verb deletes: named
-/// `kbf-lease-pool-<n>`, with a uid of [`MADE_UIDS`]. No other user is ever deleted.
+/// Whether `name` is one a `js-agent` target's helper makes: `kbf-lease-<term>-<seq>`, one
+/// account per lease (two numbers), or `kbf-lease-pool-<n>`, one per uid of a helper from
+/// before the per-job account (one number). Nothing else is ever one of them: not a name
+/// with another prefix, not a number that is empty or is not all digits, not a third field.
+fn is_made_user(name: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let Some(rest) = name.strip_prefix(LEASE_USER_PREFIX) else {
+        return false;
+    };
+    match rest.strip_prefix("pool-") {
+        Some(number) => digits(number),
+        None => rest
+            .split_once('-')
+            .is_some_and(|(term, sequence)| digits(term) && digits(sequence)),
+    }
+}
+
+/// The users a `js-agent` target left that the verb deletes: named `kbf-lease-<term>-<seq>`
+/// (an account per lease) or `kbf-lease-pool-<n>` (a helper from before it), with a uid of
+/// [`MADE_UIDS`]. No other user is ever deleted.
 pub fn to_delete(users: &[(String, i64)]) -> Vec<String> {
     users
         .iter()
-        .filter(|(name, uid)| name.starts_with(POOL_USER_PREFIX) & MADE_UIDS.contains(uid))
+        .filter(|(name, uid)| is_made_user(name) & MADE_UIDS.contains(uid))
         .map(|(name, _)| name.clone())
         .collect()
 }

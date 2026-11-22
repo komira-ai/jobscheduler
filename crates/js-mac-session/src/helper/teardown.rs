@@ -1,14 +1,10 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
-//! fail with ([`TeardownError`], worded for the refusal at the protocol boundary). The
-//! kill, the looks and the sweeps here are also the steps of a pool user's reset in place
-//! (`super::pool`); `user-delete` of a pool user's lease goes there, and deletes nothing.
-//! The deletion of a user record here is only for a lease user from before the pool; a
-//! pool user is never deleted, and on macOS 27 root is refused the deletion of a record
-//! and of a home, so that path fails there (the lease stays live, its uid held) unless the
-//! helper holds Full Disk Access. The release signs the helper and a privacy profile grants
-//! it that access (`full-disk-access` reports whether it holds it); this module is the same
-//! with and without the grant, and deleting an account per job is the next step
-//! (`docs/design/mac-account-per-job.md`).
+//! fail with ([`TeardownError`], worded for the refusal at the protocol boundary).
+//! `user-delete` deletes the lease's account and shows it gone ([`super::proof`]) before
+//! the ledger records the lease over; on macOS 27 root is refused the deletion of a record,
+//! of a home and of the per-user folders the system placed unless the helper holds Full
+//! Disk Access (`full-disk-access` reports whether it does), so a refused step fails the
+//! delete there, the lease stays live and its uid held.
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
 //! process of the uid is left, and the uid's launchd domains are gone. A
@@ -22,7 +18,8 @@
 //! The order the helper's header describes: `kill-uid` decides whether the uid may have
 //! a GUI login session (the intent record names it, it owns a `loginwindow` process or
 //! one whose name cannot be read, or an earlier teardown left its GUI domain owed; a
-//! pool user has none of these), then kills and boots out its user domain (and its GUI
+//! lease user that never logged in has none of these), then kills and boots out its user
+//! domain (and its GUI
 //! domain, only with a session), until neither a process nor a domain is left. A GUI
 //! domain is owed, in a record in the helper's state directory, from the first look
 //! that sees the session until a teardown judges the domain gone, so neither a retry
@@ -30,22 +27,23 @@
 //! helper forgets it. `user-delete` asks for the uid's `DARWIN_USER_DIR` while the
 //! record is there, settles (no process, the user domain, and the GUI domain while
 //! owed, booted out and no longer printing, and still no process after the bootout),
-//! sweeps, removes the uid's entry under the per-user folders, settles again, and only
-//! then deletes the record. A step that fails leaves the lease live in the ledger, so
-//! its uid is held (quarantined: handed to no other lease until a delete succeeds).
+//! sweeps, removes the uid's entry under the per-user folders, settles again, deletes the
+//! record, and then proves the account gone. A step that fails leaves the lease live in the
+//! ledger, so its uid is held (quarantined: handed to no other lease until a delete
+//! succeeds).
 
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
 use js_types::LeaseId;
 
 use super::folders::{self, NotAnEntry};
-use super::pool::Settled;
 use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
 use crate::autologin::{Intent, read_intent};
 use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
-use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
+use crate::sweep::{SweepPlan, Swept, owned_entries, remove_owned, sweep};
 
 /// Why a step of `kill-uid` or `user-delete` failed. Its text is the refusal the caller
 /// reads.
@@ -130,12 +128,41 @@ pub(crate) enum TeardownError {
     /// A user record could not be made.
     #[error("creating user {name}: {source}")]
     Create { name: String, source: io::Error },
-    /// The attributes of a pool user's record could not be set back.
-    #[error("setting back the record of user {name}: {source}")]
-    Restore { name: String, source: io::Error },
-    /// The user may be in the `admin` group: the directory says so, or could not say.
-    #[error("user {name} may be an administrator: {why}")]
-    Admin { name: String, why: String },
+    /// The account was deleted but one item of the proof that it is gone did not hold:
+    /// `what` names the item, `detail` what was found (or why it could not be looked at).
+    #[error("not shown gone ({what}): {detail}")]
+    NotGone { what: Gone, detail: String },
+}
+
+/// The items of the proof that a deleted account is gone ([`super::proof`]), in the order
+/// they are looked at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gone {
+    /// No user record by the account's name, and none by its uid.
+    Record,
+    /// No process of the uid, and its launchd domains gone.
+    Processes,
+    /// The home folder's path does not exist.
+    Home,
+    /// No entry of the per-user folders is owned by the uid.
+    Folders,
+    /// None of the places the sweep covers holds an entry owned by the uid.
+    Places,
+    /// No System V IPC object of the uid.
+    Ipc,
+}
+
+impl fmt::Display for Gone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Record => "record",
+            Self::Processes => "processes",
+            Self::Home => "home",
+            Self::Folders => "per-user folders",
+            Self::Places => "swept places",
+            Self::Ipc => "IPC",
+        })
+    }
 }
 
 impl From<TeardownError> for String {
@@ -146,7 +173,7 @@ impl From<TeardownError> for String {
 
 /// `<count> processes of uid <uid> remain <when>: <pid> (<command>), ...`, naming at
 /// most [`NAMED`].
-fn remaining(uid: u32, when: &str, left: &[LiveProcess]) -> String {
+pub(super) fn remaining(uid: u32, when: &str, left: &[LiveProcess]) -> String {
     let mut named: Vec<String> = left
         .iter()
         .take(NAMED)
@@ -240,7 +267,7 @@ fn printed(answer: &PrintAnswer) -> io::Result<bool> {
 
 /// The launchd domains of `uid` its teardown boots out and judges, in order: the GUI
 /// domain only when the uid has a GUI login session (`gui`), then the user domain.
-fn domains(uid: u32, gui: bool) -> Vec<String> {
+pub(super) fn domains(uid: u32, gui: bool) -> Vec<String> {
     let user = format!("user/{uid}");
     match gui {
         true => vec![format!("gui/{uid}"), user],
@@ -264,8 +291,8 @@ impl Helper {
     /// GUI login session: the session switch's intent record names the lease (the login
     /// window logs in only the user it names), the uid owns a `loginwindow` process (or
     /// one whose name cannot be read), or an earlier teardown left its GUI domain owed
-    /// ([`Self::gui_owed`]). A pool user has none of these, so its `gui/<uid>` is never
-    /// asked about. A session seen at a later look of the processes counts from the next
+    /// ([`Self::gui_owed`]). A lease user that never logged in has none of these, so its
+    /// `gui/<uid>` is never asked about. A session seen at a later look of the processes counts from the next
     /// attempt on. Then, for at most
     /// [`KILL_ROUNDS`] attempts, kills every process of the uid and boots out its user
     /// domain (and its GUI domain, if it has the session), so launchd restarts none of
@@ -297,7 +324,21 @@ impl Helper {
         let intended = read_intent(&self.settings.session.intent)
             .map_err(TeardownError::Refused)?
             == Some(Intent::Lease(lease));
-        self.kill_account(&user.name, uid, intended)
+        self.kill_lease_account(&user.name, uid, intended)
+            .inspect_err(|why| kept(lease, uid, why))?;
+        tracing::info!(lease = %Dotted(lease), uid, "no process of the lease user is left");
+        Ok(())
+    }
+
+    /// [`Self::kill_account`] of a lease user's account: a uid whose processes or domains
+    /// outlive it is quarantined, as `kill-uid` words it.
+    pub(super) fn kill_lease_account(
+        &self,
+        name: &str,
+        uid: u32,
+        intended: bool,
+    ) -> Result<(), TeardownError> {
+        self.kill_account(name, uid, intended)
             .map_err(|why| match why {
                 TeardownError::Outlived {
                     uid, left, stayed, ..
@@ -309,9 +350,6 @@ impl Helper {
                 },
                 other => other,
             })
-            .inspect_err(|why| kept(lease, uid, why))?;
-        tracing::info!(lease = %Dotted(lease), uid, "no process of the lease user is left");
-        Ok(())
     }
 
     /// Kills every process of `uid` and boots out its domains, as [`Self::kill_uid`]
@@ -391,7 +429,7 @@ impl Helper {
     /// uid did not end in its domain judged gone (its `loginwindow` may be gone, so the
     /// session is not seen again).
     /// The record is opened, never through a link: one there is an error.
-    fn gui_owed(&self, uid: u32) -> Result<bool, TeardownError> {
+    pub(super) fn gui_owed(&self, uid: u32) -> Result<bool, TeardownError> {
         use rustix::fs::{CWD, Mode, OFlags};
         let path = self.gui_record(uid);
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -426,7 +464,7 @@ impl Helper {
     }
 
     /// The live processes of `uid`.
-    fn processes(&self, uid: u32) -> Result<Vec<LiveProcess>, TeardownError> {
+    pub(super) fn processes(&self, uid: u32) -> Result<Vec<LiveProcess>, TeardownError> {
         self.host
             .live_processes(uid)
             .map_err(|source| TeardownError::Listing { uid, source })
@@ -461,7 +499,11 @@ impl Helper {
     /// Those of `domains` that are not known to be gone: each that `launchctl print`
     /// printed (with why its bootout failed, from `refused`, if it did), or that it gave
     /// no answer for (with why).
-    fn still_printing(&self, domains: &[String], refused: &[(String, String)]) -> Vec<String> {
+    pub(super) fn still_printing(
+        &self,
+        domains: &[String],
+        refused: &[(String, String)],
+    ) -> Vec<String> {
         let mut left = Vec::new();
         for domain in domains {
             match self.domain_prints(domain) {
@@ -476,17 +518,17 @@ impl Helper {
         left
     }
 
-    /// `user-delete <lease>`: ends the lease. A pool user's lease is recorded over and
-    /// its user reset in place (`super::pool`), returning `true`, or refused naming
-    /// what blocked the reset when the slot broke. For a lease from before the pool: sweeps what the user
-    /// leaves, deletes its record and records the deletion, returning whether a record
-    /// was there to delete. A lease already over returns `false` and touches nothing.
+    /// `user-delete <lease>`: ends the lease. Sweeps what the user leaves, deletes its record,
+    /// shows the account gone ([`super::proof`]) and only then records the lease over,
+    /// returning whether a record was there to delete (`false` for a delete repeated after the
+    /// record went, or made for a lease whose account was never made). A lease already over
+    /// returns `false` and touches nothing.
     ///
     /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
     /// asked first, while the record is there ([`super::Host::user_dir`]); an answer that
     /// is not an entry of [`super::Settings::user_folders`] is refused, never guessed at,
-    /// and the entry is removed whole with the rest of the sweep (emptied and kept where
-    /// the system placed it). When the record is gone
+    /// and the entry is removed whole with the rest of the sweep, though the system placed
+    /// it. When the record is gone
     /// already (a delete repeated after it went, or a record removed by someone else),
     /// there is no `DARWIN_USER_DIR` of the uid's own to ask for: every entry of the
     /// per-user folders that the uid owns is removed instead.
@@ -515,8 +557,8 @@ impl Helper {
     /// Why it was refused: the intent record names the lease or cannot be read, the
     /// uid's `DARWIN_USER_DIR` could not be asked or is not an entry of the per-user
     /// folders, a process or a domain of the uid remains, the GUI teardown record could not
-    /// be read or removed, or the sweep or the deletion failed (the lease stays live, its uid held, so the delete can be
-    /// repeated).
+    /// be read or removed, the sweep or the deletion failed, or the account was not shown
+    /// gone (the lease stays live, its uid held, so the delete can be repeated).
     pub fn user_delete(&self, lease: &str) -> Result<bool, String> {
         let lease = parse_lease(lease)?;
         let mut ledger = self.lock();
@@ -532,8 +574,8 @@ impl Helper {
         Ok(self.end_locked(&mut ledger, lease)?)
     }
 
-    /// [`Self::user_delete`] of a live lease, with the ledger's lock held: a pool user
-    /// is released ([`Self::release`]), the user of a lease from before the pool deleted.
+    /// [`Self::user_delete`] of a live lease, with the ledger's lock held: its account is
+    /// deleted and shown gone, and then the lease is recorded over.
     pub(super) fn end_locked(
         &self,
         ledger: &mut Ledger,
@@ -542,19 +584,13 @@ impl Helper {
         let user = self
             .lease_user(ledger, lease)
             .map_err(TeardownError::Refused)?;
-        match user.slot {
-            Some(slot) => match self.release(ledger, lease, slot) {
-                Ok(Settled::Free) => Ok(true),
-                Ok(Settled::Broken(why)) | Err(why) => Err(TeardownError::Refused(why)),
-            },
-            None => self
-                .delete_steps(ledger, lease, &user.name, user.uid)
-                .inspect_err(|why| kept(lease, user.uid, why)),
-        }
+        self.delete_steps(ledger, lease, &user.name, user.uid)
+            .inspect_err(|why| kept(lease, user.uid, why))
     }
 
-    /// The steps of [`Self::user_delete`] for the live lease `lease` from before the pool,
-    /// whose user is `name` with `uid`.
+    /// The steps of [`Self::user_delete`] for the live lease `lease`, whose user is `name`
+    /// with `uid`: the deletion, the proof that it is gone, and only then the record that
+    /// the lease is over.
     fn delete_steps(
         &self,
         ledger: &mut Ledger,
@@ -563,6 +599,7 @@ impl Helper {
         uid: u32,
     ) -> Result<bool, TeardownError> {
         let existed = self.remove_account(name, uid)?;
+        self.prove_gone(name, uid)?;
         ledger
             .record_deleted(lease)
             .map_err(|source| TeardownError::Record {
@@ -574,13 +611,13 @@ impl Helper {
     }
 
     /// Deletes the user `name`, with `uid`, and sweeps what it leaves, in the order of
-    /// [`Self::user_delete`]. Returns whether a record was there to delete.
-    /// The home is removed whole. This is the one path that deletes a user record, and
-    /// only for a lease user from before the pool, which `user-create` no longer makes: a
-    /// pool user is never passed here. On macOS 27 and later, root is refused the removal
-    /// of a local user record, of an account's home and of the per-user folders the
-    /// system placed, so this delete fails there (the lease stays live, its uid held)
-    /// unless the helper holds Full Disk Access.
+    /// [`Self::user_delete`]. Returns whether a record was there to delete. The home and the
+    /// uid's entry under the per-user folders are removed whole. This is the one path that
+    /// deletes a user record: for a lease's account, and (the boot reset) for an account the
+    /// ledger has no lease for. On macOS 27 and later, root is refused the removal of a local
+    /// user record, of an account's home and of the per-user folders the system placed unless
+    /// the helper holds Full Disk Access, so this delete fails there without it. Whether the
+    /// account is gone is [`Self::prove_gone`]'s to say, not this function's.
     pub(super) fn remove_account(&self, name: &str, uid: u32) -> Result<bool, TeardownError> {
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;
@@ -669,6 +706,33 @@ impl Helper {
             true => Ok(()),
             false => Err(TeardownError::StillRunning { uid, left }),
         }
+    }
+
+    /// What `user-delete` sweeps, with the home folder of each user.
+    pub(super) fn with_home(&self) -> SweepPlan {
+        let mut plan = self.settings.sweep.clone();
+        plan.named
+            .push(format!("{}/{{user}}", self.settings.homes.display()));
+        plan
+    }
+
+    /// Every place the sweep covers but the home folder: the crontab and `at` jobs, and the
+    /// rest of [`super::Settings::sweep`].
+    pub(super) fn swept_places(&self) -> SweepPlan {
+        let mut plan = self.settings.schedules.clone();
+        plan.named.extend(self.settings.sweep.named.iter().cloned());
+        plan.owned.extend(self.settings.sweep.owned.iter().cloned());
+        plan
+    }
+
+    /// Ends the account `name`, with `uid`, which no live lease of the ledger names (the
+    /// boot reset's leftover: an account of a lost ledger, one made by hand, one a release
+    /// with a pool made): its processes killed, its account deleted as [`Self::user_delete`]
+    /// deletes a lease's, and shown gone. There is no lease to record.
+    pub(super) fn delete_leftover(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        self.kill_lease_account(name, uid, false)?;
+        self.remove_account(name, uid)?;
+        self.prove_gone(name, uid)
     }
 
     /// What the sweep `swept` for the user `name` removed, or why it is incomplete.

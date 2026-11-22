@@ -4,7 +4,7 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 
-use js_mac_session::sweep::{clear_flags, clear_flags_within, empty, empty_keeping};
+use js_mac_session::sweep::{SweepPlan, clear_flags, clear_flags_within, sweep};
 use js_testkit::dir::TestDir;
 
 fn me() -> u32 {
@@ -42,19 +42,19 @@ fn clearing_flags_changes_nothing_that_is_not_a_flag() {
     }
 }
 
-/// Catches: an empty that leaves what the uid owns, removes the folder it empties, or
-/// removes a kept folder (it must be emptied and left).
+/// Catches: a sweep that leaves what the uid owns in a place of its plan (a named entry or
+/// an owned place), or removes the owned place itself.
 #[test]
-fn empty_removes_the_contents_and_keeps_the_folder_and_the_kept_folders() {
-    let dir = tree("sweep-public-empty");
+fn a_sweep_removes_what_the_uid_owns_and_keeps_the_place() {
+    let dir = tree("sweep-public-sweep");
     let entry = dir.join("entry");
-    let swept = empty_keeping(&entry, me(), &["T"]);
-    assert_eq!(swept.errors, Vec::<String>::new(), "{swept:?}");
-    assert!(entry.join("T").is_dir());
-    assert!(!entry.join("T/inner").exists());
-    assert!(!entry.join("loose").exists());
-    let swept = empty(&entry, me());
+    let plan = SweepPlan {
+        named: vec![format!("{}/loose", entry.display())],
+        owned: vec![entry.clone()],
+    };
+    let swept = sweep(&plan, "u", me());
     assert_eq!(swept.errors, Vec::<String>::new(), "{swept:?}");
     assert!(entry.is_dir());
     assert!(!entry.join("T").exists());
+    assert!(!entry.join("loose").exists());
 }

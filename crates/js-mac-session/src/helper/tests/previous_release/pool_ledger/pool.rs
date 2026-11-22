@@ -28,7 +28,7 @@ use std::path::Path;
 use js_types::LeaseId;
 
 use super::{bad_line, open_records, refused, write_record};
-use crate::lease::{Dotted, Slot, parse_lease};
+use crate::helper::tests::previous_release::lease::{Dotted, Slot, parse_lease};
 
 /// What a slot's user is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +254,3 @@ impl Pool {
         self.writes_left = Some(writes);
     }
 }
-
-#[cfg(test)]
-mod tests;

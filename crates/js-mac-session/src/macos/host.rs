@@ -8,17 +8,22 @@ use std::time::{Duration, SystemTime};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2_foundation::{NSError, NSString};
-use objc2_open_directory::{ODNode, ODRecord, ODSession, kODNodeTypeLocalNodes};
+use objc2_foundation::{NSArray, NSError, NSString};
+use objc2_open_directory::{
+    ODNode, ODQuery, ODRecord, ODSession, kODMatchBeginsWith, kODNodeTypeLocalNodes,
+};
 use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
 use crate::disclaim::Program;
-use crate::helper::{
-    self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process, SHELL, UserRecord,
-};
+use crate::helper::{self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
+use crate::lease::USER_PREFIX;
 
 const USERS: &str = "dsRecTypeStandard:Users";
+/// The attribute that names a record.
+const RECORD_NAME: &str = "dsAttrTypeStandard:RecordName";
+/// The attribute that holds a user's uid.
+const UNIQUE_ID: &str = "dsAttrTypeStandard:UniqueID";
 const GROUPS: &str = "dsRecTypeStandard:Groups";
 /// The group whose members are administrators.
 const ADMIN_GROUP: &str = "admin";
@@ -105,52 +110,61 @@ impl Host for MacHost {
                 )
             }
             .ok_or_else(|| od_error("creating the record", error))?;
-            set_pool_attributes(&record, user)?;
-            // A random password nobody is told: the account cannot be logged into with
-            // a password, and macOS gives it no secure token.
-            random_password(&record)?;
-            Ok(())
+            // No password: the record has no `ShadowHash` in its authentication authority,
+            // so nothing can log in as it and macOS gives it no secure token.
+            set_attributes(&record, user)
         })
     }
 
-    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>> {
+    fn lease_accounts(&self) -> io::Result<Vec<(String, u32)>> {
         autoreleasepool(|_| {
             let node = local_node()?;
-            let Some(record) = find(&node, name)? else {
-                return Ok(None);
-            };
-            let number = |attribute: &str| -> io::Result<u32> {
-                let value = first_value(&record, attribute)?;
-                value.parse().map_err(|_| {
-                    io::Error::other(format!("{attribute} of {name} is not a number: {value}"))
-                })
-            };
-            Ok(Some(UserRecord {
-                uid: number("dsAttrTypeStandard:UniqueID")?,
-                gid: number("dsAttrTypeStandard:PrimaryGroupID")?,
-                home: PathBuf::from(first_value(&record, "dsAttrTypeStandard:NFSHomeDirectory")?),
-                hidden: first_value(&record, "dsAttrTypeNative:IsHidden")? == "1",
-                shell: first_value(&record, "dsAttrTypeStandard:UserShell")?,
-            }))
-        })
-    }
-
-    fn restore_user(&self, user: &NewUser) -> io::Result<()> {
-        autoreleasepool(|_| {
-            let node = local_node()?;
-            let record = find(&node, &user.name)?
-                .ok_or_else(|| io::Error::other(format!("no user record {}", user.name)))?;
-            // Only what root may write on an existing account (measured on macOS 27 with
-            // SIP on: the shell, the hidden flag and the primary group may be set, the home
-            // attribute may not, nor may the account be deleted).
-            for (attribute, value) in [
-                ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
-                ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
-                ("dsAttrTypeNative:IsHidden", "1".to_owned()),
-            ] {
-                set(&record, attribute, &value)?;
+            let kinds = NSString::from_str(USERS);
+            let kinds: &AnyObject = &kinds;
+            let attribute = NSString::from_str(RECORD_NAME);
+            let prefix = NSString::from_str(USER_PREFIX);
+            let prefix: &AnyObject = &prefix;
+            let wanted = [
+                NSString::from_str(RECORD_NAME),
+                NSString::from_str(UNIQUE_ID),
+            ];
+            let wanted = NSArray::from_slice(&[&*wanted[0], &*wanted[1]]);
+            let wanted: &AnyObject = &wanted;
+            let mut error = None;
+            // SAFETY: the node, the record type, the attribute, the value and the list of
+            // attributes to return are live objects of the types the query takes; no
+            // limit on the number of results (0).
+            let query = unsafe {
+                ODQuery::queryWithNode_forRecordTypes_attribute_matchType_queryValues_returnAttributes_maximumResults_error(
+                    Some(&node),
+                    Some(kinds),
+                    Some(&attribute),
+                    kODMatchBeginsWith,
+                    Some(prefix),
+                    Some(wanted),
+                    0,
+                    Some(&mut error),
+                )
             }
-            Ok(())
+            .ok_or_else(|| od_error("querying the lease users", error))?;
+            let mut error = None;
+            // SAFETY: a query just made; all its results, none partial.
+            let results = unsafe { query.resultsAllowingPartial_error(false, Some(&mut error)) }
+                .ok_or_else(|| od_error("listing the lease users", error))?;
+            let mut accounts = Vec::new();
+            for index in 0..results.count() {
+                let item = results.objectAtIndex(index);
+                let record = item
+                    .downcast_ref::<ODRecord>()
+                    .ok_or_else(|| io::Error::other("a result of the query is not a record"))?;
+                let name = first_value(record, RECORD_NAME)?;
+                let uid = first_value(record, UNIQUE_ID)?;
+                let uid = uid.parse().map_err(|_| {
+                    io::Error::other(format!("the uid of {name} is not a number: {uid}"))
+                })?;
+                accounts.push((name, uid));
+            }
+            Ok(accounts)
         })
     }
 
@@ -179,26 +193,14 @@ impl Host for MacHost {
     fn delete_user(&self, name: &str) -> io::Result<bool> {
         autoreleasepool(|_| {
             let node = local_node()?;
-            let mut error = None;
-            // SAFETY: the record type and name are NSStrings; no attributes needed.
-            let record = unsafe {
-                node.recordWithRecordType_name_attributes_error(
-                    Some(&NSString::from_str(USERS)),
-                    Some(&NSString::from_str(name)),
-                    None,
-                    Some(&mut error),
-                )
-            };
-            let Some(record) = record else {
-                return match error {
-                    None => Ok(false),
-                    error => Err(od_error("looking the user up", error)),
-                };
+            let Some(record) = find(&node, name)? else {
+                return Ok(false);
             };
             // A stale membership would make the next holder of the name an
             // administrator, so the group is cleaned first. A removal that fails is not
-            // judged here. Only a lease user from before the pool is deleted (a pool
-            // user is permanent), and macOS 27 refuses root the deletion of a record.
+            // judged here. macOS 27 refuses root the deletion of a record unless the
+            // process holds Full Disk Access; the deletion is judged by its outcome, and
+            // the account by the proof that follows it.
             let admin = group(&node, ADMIN_GROUP)?;
             let mut ignored = None;
             // SAFETY: both are records of the local node. Not a member is an error
@@ -486,19 +488,10 @@ fn first_value(record: &ODRecord, attribute: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::other(format!("{attribute} is not text")))
 }
 
-/// Sets on `record` the attributes the pool owns, as [`Host::create_user`] gives a new
-/// user and a reset gives them back.
-fn set_pool_attributes(record: &ODRecord, user: &NewUser) -> io::Result<()> {
-    let home = user.home.to_string_lossy();
-    for (attribute, value) in [
-        ("dsAttrTypeStandard:UniqueID", user.uid.to_string()),
-        ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
-        ("dsAttrTypeStandard:NFSHomeDirectory", home.into_owned()),
-        ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
-        ("dsAttrTypeStandard:RealName", user.name.clone()),
-        // Kept off the login window's list of users.
-        ("dsAttrTypeNative:IsHidden", "1".to_owned()),
-    ] {
+/// Sets on `record` the attributes [`Host::create_user`] gives a new user
+/// ([`helper::account_attributes`]).
+fn set_attributes(record: &ODRecord, user: &NewUser) -> io::Result<()> {
+    for (attribute, value) in helper::account_attributes(user) {
         set(record, attribute, &value)?;
     }
     Ok(())

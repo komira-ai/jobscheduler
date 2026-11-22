@@ -76,6 +76,12 @@ fn remove(path: &Path) {
     let _ = fs::remove_file(path).or_else(|_| fs::remove_dir_all(path));
 }
 
+/// What `sweep` removes below `dir` for `uid`: every entry of it that `uid` owns, at any
+/// depth, with `dir` itself kept (an owned place of a plan).
+fn empty(dir: &Path, uid: u32) -> Swept {
+    sweep(&owned_plan(dir), "u", uid)
+}
+
 fn me() -> u32 {
     rustix::process::geteuid().as_raw()
 }
@@ -137,7 +143,6 @@ fn everything_the_uid_owns_goes_and_the_folder_stays() {
         Swept {
             removed: 3,
             errors: Vec::new(),
-            ..Swept::default()
         }
     );
     assert!(names(&base).is_empty());
@@ -180,7 +185,6 @@ fn a_planted_link_is_removed_and_its_target_kept() {
         Swept {
             removed: 3,
             errors: Vec::new(),
-            ..Swept::default()
         }
     );
     assert!(names(&base).is_empty());
@@ -224,7 +228,6 @@ fn named_entries_go_whole_and_absent_ones_are_fine() {
         Swept {
             removed: 3,
             errors: Vec::new(),
-            ..Swept::default()
         }
     );
     assert_eq!(names(&dir.join("Users")), ["kbf-lease-2-8"]);
@@ -341,32 +344,28 @@ fn build_deep(top: &Path, levels: usize) {
 
 /// Catches a removal that cannot take a tree deeper than its recursion bound and one that
 /// loses part of it: a tree 1000 directories
-/// deep, with a file at every hundredth level, is removed by `empty`, by `sweep`, by a
-/// named entry, and by a kept folder, leaving nothing and nothing parked behind.
+/// deep, with a file at every hundredth level, is removed by an owned walk and by a
+/// named entry, leaving nothing and nothing parked behind.
 #[test]
 fn a_tree_a_thousand_deep_is_removed_by_every_walk() {
-    for how in ["empty", "sweep", "named", "kept"] {
+    for how in ["sweep", "named"] {
         let dir = scratch(&format!("thousand-{how}"));
         let top = dir.join("top");
         fs::create_dir(&top).unwrap();
         build_deep(&top, 1000);
         let swept = match how {
-            "empty" => empty(&top, me()),
             "sweep" => sweep(&owned_plan(&dir), "u", me()),
-            "named" => {
+            _ => {
                 let plan = SweepPlan {
                     named: vec![format!("{}/d", top.display())],
                     owned: Vec::new(),
                 };
                 sweep(&plan, "u", me())
             }
-            _ => empty_keeping(&dir, me(), &["top"]),
         };
         assert_eq!(swept.errors, Vec::<String>::new(), "{how}");
         let left = match how {
-            "named" => names(&top),
             "sweep" => names(&dir),
-            "kept" => names(&top),
             _ => names(&top),
         };
         assert_eq!(
@@ -440,51 +439,6 @@ fn the_macos_plan_names_the_places_of_the_design() {
     assert!(!plan.owned.contains(&PathBuf::from("/private/var/folders")));
 }
 
-/// Catches: an emptied folder that keeps an entry because the uid does not own it (a
-/// reused user's home would keep what root or another uid left in it), one that
-/// removes the folder itself or follows a link out of it, an absent folder taken for
-/// an error, and an entry that cannot be removed swallowed or stopping the rest.
-#[test]
-fn empty_removes_every_entry_whoever_owns_it_and_keeps_the_folder() {
-    let dir = scratch("empty");
-    let home = dir.join("home");
-    fs::create_dir(&home).unwrap();
-    populate(&home);
-    let outside = dir.join("outside");
-    fs::create_dir(&outside).unwrap();
-    fs::write(outside.join("kept"), "x").unwrap();
-    symlink(&outside, home.join("link")).unwrap();
-    // The entries are the test's, not `other()`'s: what is emptied goes whoever owns it.
-    let swept = empty(&home, other());
-    assert_eq!(
-        swept,
-        Swept {
-            removed: 4,
-            errors: Vec::new(),
-            ..Swept::default()
-        }
-    );
-    assert!(names(&home).is_empty());
-    assert!(home.is_dir());
-    assert!(outside.join("kept").exists(), "the link was followed");
-    assert_eq!(empty(&dir.join("absent"), me()), Swept::default());
-    if root() {
-        eprintln!("skipped the error half: permission bits do not stop root");
-        return;
-    }
-    fs::create_dir(home.join("locked")).unwrap();
-    fs::write(home.join("locked/f"), "x").unwrap();
-    fs::write(home.join("file"), "x").unwrap();
-    // Open to the user, but nothing in it can be removed.
-    chmod(&home.join("locked"), 0o500);
-    let swept = empty(&home, me());
-    chmod(&home.join("locked"), 0o700);
-    assert_eq!(swept.removed, 1, "{swept:?}");
-    assert_eq!(swept.errors.len(), 1, "{swept:?}");
-    assert!(swept.errors[0].contains("home/locked:"), "{swept:?}");
-    assert_eq!(names(&home), ["locked"]);
-}
-
 /// Catches (kbf#652): a sweep that records an error for an entry which
 /// vanished between the listing of its folder and its examination, so `user-delete`
 /// refused with "the sweep for ... is incomplete: ...: No such file or directory".
@@ -527,62 +481,26 @@ fn an_entry_that_vanishes_after_the_listing_is_not_an_error() {
 
 /// Catches (kbf#652): a directory being emptied whose entries vanish
 /// between its listing and their examination (the same daemon, one level down) that
-/// fails the sweep, or one that leaves the directory behind because of it; and the
-/// same for `empty`, which clears the lease user's home. The vanished entries are the
-/// second listing's, the one of the directory being removed.
+/// fails the sweep, or one that leaves the directory behind because of it. The vanished
+/// entries are the second listing's, the one of the directory being removed.
 #[test]
 fn entries_that_vanish_while_a_directory_is_emptied_are_not_an_error() {
     let _base_own = scratch("vanish-emptied");
     let base = _base_own.join("Shared");
     let tree = base.join("tree");
-    for (run, uid) in [("sweep", me()), ("empty", other())] {
-        fs::create_dir_all(tree.join("sub")).unwrap();
-        fs::write(tree.join("sub/f"), "x").unwrap();
-        fs::write(tree.join("g"), "x").unwrap();
-        let gone = tree.clone();
-        // Both list `Shared` (1), then `tree` (2): the entries go in between.
-        let hook = after_listing(2, move || {
-            remove(&gone.join("g"));
-            remove(&gone.join("sub"));
-        });
-        let swept = vanishing(hook, || {
-            if run == "sweep" {
-                sweep(&owned_plan(&base), "u", uid)
-            } else {
-                empty(&base, uid)
-            }
-        });
-        assert_eq!(swept.errors, Vec::<String>::new(), "{run}");
-        assert_eq!(swept.removed, 1, "{run}: {swept:?}");
-        assert!(
-            names(&base).is_empty(),
-            "{run}: the emptied directory stayed"
-        );
-    }
-}
-
-/// Catches (kbf#652): `empty` (the home folder) recording an error for an
-/// entry gone since the listing, or counting it as removed.
-#[test]
-fn empty_passes_over_an_entry_gone_since_the_listing() {
-    let _home_own = scratch("vanish-home");
-    let home = _home_own.join("home");
-    fs::create_dir(&home).unwrap();
-    fs::write(home.join("gone"), "x").unwrap();
-    fs::write(home.join("file"), "x").unwrap();
-    let gone = home.join("gone");
-    let swept = vanishing(after_listing(1, move || remove(&gone)), || {
-        empty(&home, other())
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    fs::write(tree.join("sub/f"), "x").unwrap();
+    fs::write(tree.join("g"), "x").unwrap();
+    let gone = tree.clone();
+    // `Shared` is listing 1, then `tree` (2): the entries go in between.
+    let hook = after_listing(2, move || {
+        remove(&gone.join("g"));
+        remove(&gone.join("sub"));
     });
-    assert_eq!(
-        swept,
-        Swept {
-            removed: 1,
-            errors: Vec::new(),
-            ..Swept::default()
-        }
-    );
-    assert!(names(&home).is_empty());
+    let swept = vanishing(hook, || sweep(&owned_plan(&base), "u", me()));
+    assert_eq!(swept.errors, Vec::<String>::new());
+    assert_eq!(swept.removed, 1, "{swept:?}");
+    assert!(names(&base).is_empty(), "the emptied directory stayed");
 }
 
 /// Catches (kbf#652): a directory gone between its examination and its
@@ -672,88 +590,6 @@ fn a_vanished_entry_does_not_hide_a_real_error() {
     assert!(!swept.errors[0].contains("No such file"), "{swept:?}");
 }
 
-/// A `/var/folders` entry as macOS makes it: the kept folders `0`, `C`, `T` and `X`,
-/// each holding a file and a tree, and the stray `junk` file, `stray` directory and
-/// `T`-named link the entry root must not keep.
-fn entry_root(dir: &Path) -> PathBuf {
-    let entry = dir.join("entry");
-    fs::create_dir(&entry).unwrap();
-    for kept in ["0", "C", "T", "X"] {
-        fs::create_dir_all(entry.join(kept).join("sub/deeper")).unwrap();
-        fs::write(entry.join(kept).join("file"), "x").unwrap();
-        fs::write(entry.join(kept).join("sub/deeper/leaf"), "x").unwrap();
-    }
-    fs::write(entry.join("junk"), "x").unwrap();
-    fs::create_dir_all(entry.join("stray/inside")).unwrap();
-    fs::write(entry.join("stray/inside/f"), "x").unwrap();
-    entry
-}
-
-/// Catches the entry sweep that removes the kept folders themselves (the next lease's
-/// `getconf DARWIN_USER_TEMP_DIR` would name a folder that is gone), the one that
-/// empties only the kept folders and leaves a file or folder of another name in the
-/// entry root (a pool user's file there survived the clean: `junk` and `stray` here), one that keeps a folder that is
-/// not named, and one that walks through a link planted under a kept name.
-#[test]
-fn empty_keeping_empties_the_named_folders_and_removes_everything_else() {
-    let dir = scratch("keeping");
-    let entry = entry_root(&dir);
-    let outside = dir.join("outside");
-    fs::create_dir(&outside).unwrap();
-    fs::write(outside.join("kept"), "x").unwrap();
-    // `Y` is not named: a link under a kept name is not a folder either.
-    fs::remove_dir_all(entry.join("X")).unwrap();
-    symlink(&outside, entry.join("X")).unwrap();
-    let swept = empty_keeping(&entry, me(), &["0", "C", "T", "X"]);
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert_eq!(names(&entry), ["0", "C", "T"]);
-    for kept in ["0", "C", "T"] {
-        assert_eq!(names(&entry.join(kept)), Vec::<String>::new(), "{kept}");
-    }
-    assert!(outside.join("kept").exists(), "the link was followed");
-    // Nothing named: the entry is emptied whole.
-    let swept = empty_keeping(&entry, me(), &[]);
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert!(names(&entry).is_empty());
-}
-
-/// Catches a kept folder whose contents the sweep cannot remove hiding behind the
-/// removal of the rest: the error names the kept folder's entry and the other entries
-/// still go.
-#[test]
-fn a_kept_folder_that_cannot_be_emptied_is_an_error_and_the_rest_goes() {
-    if root() {
-        eprintln!("skipped: permission bits do not stop root");
-        return;
-    }
-    let dir = scratch("keeping-error");
-    let entry = entry_root(&dir);
-    fs::create_dir(entry.join("T/locked")).unwrap();
-    fs::write(entry.join("T/locked/f"), "x").unwrap();
-    chmod(&entry.join("T/locked"), 0o500);
-    let swept = empty_keeping(&entry, me(), &["0", "C", "T", "X"]);
-    chmod(&entry.join("T/locked"), 0o700);
-    assert_eq!(swept.errors.len(), 1, "{swept:?}");
-    assert!(swept.errors[0].contains("entry/T/locked:"), "{swept:?}");
-    assert_eq!(names(&entry), ["0", "C", "T", "X"]);
-    assert_eq!(names(&entry.join("T")), ["locked"]);
-    assert!(names(&entry.join("C")).is_empty());
-}
-
-/// Catches a kept folder removed under the sweep (gone since it was examined) read as an
-/// error, as the plain walk treats a vanished entry.
-#[test]
-fn a_kept_folder_gone_since_it_was_examined_holds_nothing() {
-    let dir = scratch("keeping-gone");
-    let entry = entry_root(&dir);
-    let gone = entry.join("C");
-    let swept = vanishing(after_examining("C", gone), || {
-        empty_keeping(&entry, me(), &["C"])
-    });
-    assert_eq!(swept.errors, Vec::<String>::new(), "{swept:?}");
-    assert!(names(&entry).is_empty());
-}
-
 /// Catches a mode that stays 0 (the owner's `u+rwx` is not set on what the departing
 /// uid owns, so the removal that follows could not enter it as that uid), a clear that
 /// changes what another uid owns (a hard link to a system file keeps its mode: here an
@@ -838,49 +674,6 @@ fn clear_flags_stops_at_its_depth_limit_without_an_error() {
     assert_eq!(swept.errors, Vec::<String>::new(), "{swept:?}");
     // Another owner's deep tree is nobody's to fail on: searched to the limit, no error.
     assert_eq!(clear_flags(&home, other()), Swept::default());
-}
-
-/// Catches a kept folder that another process swaps for a link between the examination and
-/// the open being followed, or passing as emptied: the open refuses the link (it is
-/// opened without following) and the entry is an error naming the folder, the link's
-/// target untouched.
-#[test]
-fn a_kept_folder_swapped_for_a_link_since_it_was_examined_is_an_error() {
-    let dir = scratch("kept-swap");
-    let entry = dir.join("entry");
-    fs::create_dir_all(entry.join("C")).unwrap();
-    let outside = dir.join("outside");
-    fs::create_dir(&outside).unwrap();
-    fs::write(outside.join("kept"), "x").unwrap();
-    let (c, target) = (entry.join("C"), outside.clone());
-    let done = std::cell::Cell::new(false);
-    let swept = vanishing(
-        move |point, _| {
-            if matches!(point, Point::Examined(n) if *n == "C") && !done.replace(true) {
-                remove(&c);
-                symlink(&target, &c).unwrap();
-            }
-        },
-        || empty_keeping(&entry, me(), &["C"]),
-    );
-    assert_eq!(swept.errors.len(), 1, "{swept:?}");
-    assert!(swept.errors[0].contains("entry/C:"), "{swept:?}");
-    assert!(outside.join("kept").exists(), "the link was followed");
-}
-
-/// Catches an entry of a kept folder that vanishes between the listing and its examination
-/// read as an error: it is removed already, and the folder is emptied without one.
-#[test]
-fn an_entry_of_a_kept_folder_gone_since_the_listing_is_no_error() {
-    let dir = scratch("kept-gone-entry");
-    let entry = dir.join("entry");
-    fs::create_dir_all(entry.join("C")).unwrap();
-    fs::write(entry.join("C/only"), "x").unwrap();
-    let only = entry.join("C/only");
-    let swept = vanishing(after_listing(2, move || remove(&only)), || {
-        empty_keeping(&entry, me(), &["C"])
-    });
-    assert_eq!(swept.errors, Vec::<String>::new(), "{swept:?}");
 }
 
 /// Catches a flag clear that errors on an entry gone since the listing, and one that enters
@@ -1170,7 +963,7 @@ fn only_the_systems_refusal_of_a_top_level_entry_is_skipped_and_said_once() {
 
 /// Catches a skip of what the process can open (a leftover it could remove must still
 /// fail), a refusal other than the system's counted as one, and a root process that skips
-/// (root is refused for want of a grant, which says nothing of the pool user).
+/// (root is refused for want of a grant, which says nothing of the lease user).
 #[test]
 fn a_refusal_is_skipped_only_for_an_entry_the_process_cannot_open() {
     if root() {
@@ -1215,11 +1008,11 @@ fn a_refusal_is_skipped_only_for_an_entry_the_process_cannot_open() {
     chmod(&dir.join("closed"), 0o700);
 }
 
-/// The sweep of a `/var/folders` folder and of a home: what the pool user cannot open
-/// stays, with the directories that hold it, and is no error; what it can open is removed
-/// or fails with its path.
+/// The sweep of a `/var/folders` folder and of a home by a process that is not root: what
+/// it cannot open stays, with the directories that hold it, and is no error; what it can
+/// open is removed or fails with its path.
 #[test]
-fn the_empty_leaves_what_the_user_cannot_open_and_removes_the_rest() {
+fn the_sweep_leaves_what_the_user_cannot_open_and_removes_the_rest() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
@@ -1234,7 +1027,7 @@ fn the_empty_leaves_what_the_user_cannot_open_and_removes_the_rest() {
     chmod(&entry.join("Library/Preferences"), 0o000);
     // The owner's unlock is refused (a store of the system), as it is for a vault.
     UNLOCKING.with(|u| u.set(false));
-    let swept = empty_keeping(&entry, me(), &["T"]);
+    let swept = empty(&entry, me());
     UNLOCKING.with(|u| u.set(true));
     chmod(&entry.join("T/vault"), 0o700);
     chmod(&entry.join("Library/Preferences"), 0o700);
@@ -1246,7 +1039,7 @@ fn the_empty_leaves_what_the_user_cannot_open_and_removes_the_rest() {
 }
 
 #[test]
-fn the_empty_still_fails_naming_what_the_user_can_open_and_cannot_remove() {
+fn the_sweep_still_fails_naming_what_the_user_can_open_and_cannot_remove() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
@@ -1298,9 +1091,9 @@ fn a_directory_the_user_owns_with_no_permission_is_emptied() {
     fs::write(entry.join("T/hidden/deeper/secret"), "x").unwrap();
     chmod(&entry.join("T/hidden/deeper"), 0o000);
     chmod(&entry.join("T/hidden"), 0o000);
-    let swept = empty_keeping(&entry, me(), &["T"]);
+    let swept = empty(&entry, me());
     assert_eq!(swept.errors, Vec::<String>::new());
-    assert!(names(&entry.join("T")).is_empty());
+    assert!(names(&entry).is_empty());
     // Cleared the same way before the removal.
     fs::create_dir_all(entry.join("T/closed")).unwrap();
     chmod(&entry.join("T/closed"), 0o000);
@@ -1344,11 +1137,13 @@ fn the_unlock_is_for_the_owner_and_a_refused_one_is_skipped_with_the_warning() {
     assert!(dir.join("home/Library/Preferences").exists());
 }
 
-/// A directory the system placed (`sunlnk`, `com.apple.rootless`) below a kept folder
-/// keeps its flags and mode, stays, and is emptied; what is in it goes.
+/// A directory the system placed (`sunlnk`, `com.apple.rootless`) below a kept folder keeps
+/// its flags and mode through the clear of flags, which clears what is in it; and the sweep
+/// removes it whole, as it removes any other directory (the system's refusal, if there is
+/// one, is an error naming it).
 #[cfg(not(target_os = "macos"))]
 #[test]
-fn a_directory_the_system_placed_is_kept_and_emptied() {
+fn a_directory_the_system_placed_keeps_its_mode_in_the_clear_and_is_removed_by_the_sweep() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
@@ -1368,21 +1163,16 @@ fn a_directory_the_system_placed_is_kept_and_emptied() {
     let mode = |p: &str| fs::metadata(entry.join(p)).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode("T/com.apple.trustd"), 0o500);
     assert_eq!(mode("T/com.apple.trustd/TemporaryItems"), 0o700);
-    // The empty removes everything but the placed directories themselves.
-    chmod(&entry.join("T/com.apple.trustd"), 0o700);
-    let swept = empty_keeping(&entry, me(), &["T"]);
-    place(&[]);
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert!(entry.join("T/com.apple.trustd").is_dir());
-    assert!(names(&entry.join("T/com.apple.trustd")).is_empty());
-    // The one nested in a plain directory stays with it.
-    assert!(entry.join("T/plain/com.apple.trustd").is_dir());
-    assert!(!path_is_system_placed(&entry.join("T/absent")));
-    place(&["com.apple.trustd"]);
     assert!(path_is_system_placed(&entry.join("T/com.apple.trustd")));
     assert!(!path_is_system_placed(&entry.join("T/plain")));
+    assert!(!path_is_system_placed(&entry.join("T/absent")));
     assert!(!path_is_system_placed(Path::new("/")));
+    // The sweep removes it whole, the placed directories included.
+    chmod(&entry.join("T/com.apple.trustd"), 0o700);
+    let swept = empty(&entry, me());
     place(&[]);
+    assert_eq!(swept.errors, Vec::<String>::new());
+    assert!(names(&entry).is_empty());
 }
 
 #[test]
@@ -1421,44 +1211,21 @@ fn a_refusal_in_the_walk_does_not_stop_the_rest() {
     assert_eq!(names(&home.join("Library")), ["locked"]);
 }
 
-/// Rule 2: an empty directory the system will not let the pool user remove is kept, with
-/// the directory that holds it, and is no error; what was in it went.
-#[cfg(not(target_os = "macos"))]
+/// Rule 2: a directory that cannot be removed (here, one something was made in after its
+/// entries were removed, which the system's refusal of an empty one, `Library/Preferences`
+/// for a process without Full Disk Access, answers as well) fails the sweep, naming it, and
+/// is never kept: the deletion does not complete.
 #[test]
-fn an_empty_directory_the_system_will_not_remove_is_kept_and_the_rest_goes() {
+fn a_directory_that_cannot_be_removed_fails_the_sweep_naming_it() {
     if root() {
         eprintln!("skipped: permission bits do not stop root");
         return;
     }
-    let dir = scratch("kept-empty");
-    let home = dir.join("home");
-    fs::create_dir_all(home.join("Library/Preferences")).unwrap();
-    fs::write(home.join("Library/Preferences/x"), "x").unwrap();
-    fs::write(home.join("Library/y"), "x").unwrap();
-    fs::create_dir_all(home.join("other")).unwrap();
-    pretend_unremovable(&["Preferences"]);
-    let swept = empty(&home, me());
-    pretend_unremovable(&[]);
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert_eq!(names(&home), ["Library"]);
-    assert_eq!(names(&home.join("Library")), ["Preferences"]);
-    assert!(names(&home.join("Library/Preferences")).is_empty());
-}
-
-/// Rule 2: a refused removal of a directory that is not empty fails, naming it.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a_directory_the_system_will_not_remove_fails_when_it_is_not_empty() {
-    if root() {
-        eprintln!("skipped: permission bits do not stop root");
-        return;
-    }
-    let dir = scratch("kept-not-empty");
+    let dir = scratch("not-removed");
     let home = dir.join("home");
     fs::create_dir_all(home.join("Preferences")).unwrap();
     fs::write(home.join("Preferences/x"), "x").unwrap();
     let late = home.join("Preferences/late");
-    pretend_unremovable(&["Preferences"]);
     // Something is made in it after its entries were removed.
     let swept = vanishing(
         move |point, _| {
@@ -1468,114 +1235,13 @@ fn a_directory_the_system_will_not_remove_fails_when_it_is_not_empty() {
         },
         || empty(&home, me()),
     );
-    pretend_unremovable(&[]);
     assert_eq!(swept.errors.len(), 1, "{:?}", swept.errors);
     assert!(
         swept.errors[0].contains("Preferences"),
         "{:?}",
         swept.errors
     );
-}
-
-#[test]
-fn a_kept_directory_loses_every_attribute_but_the_one_it_keeps() {
-    let names: Vec<String> = ["user.lease", KEEP_XATTR, "user.other"]
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
-    assert_eq!(
-        xattrs_to_remove(&names, KEEP_XATTR),
-        ["user.lease", "user.other"]
-    );
-    assert!(xattrs_to_remove(&[], KEEP_XATTR).is_empty());
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_attr(path: &Path, name: &str) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    let c_name = std::ffi::CString::new(name).unwrap();
-    // SAFETY: NUL-terminated strings and a 1-byte value.
-    unsafe { libc::setxattr(c_path.as_ptr(), c_name.as_ptr(), b"x".as_ptr().cast(), 1, 0) == 0 }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn attrs_of(path: &Path) -> Vec<String> {
-    let fd = open_base(path).unwrap().unwrap();
-    crate::xattr::list(&fd).unwrap()
-}
-
-/// A directory the system placed keeps its own attribute and loses the lease's; so does one
-/// the system will not let the pool user remove, which is also recorded as kept.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn what_a_lease_set_on_a_kept_directory_is_taken_off() {
-    if root() {
-        eprintln!("skipped: permission bits do not stop root");
-        return;
-    }
-    let dir = scratch("scrub");
-    let home = dir.join("home");
-    fs::create_dir_all(home.join("placed")).unwrap();
-    fs::create_dir_all(home.join("Library/Preferences")).unwrap();
-    if !set_attr(&home.join("placed"), "user.lease") {
-        eprintln!("skipped: this file system keeps no extended attributes");
-        return;
-    }
-    assert!(set_attr(&home.join("placed"), KEEP_XATTR));
-    assert!(set_attr(&home.join("Library/Preferences"), "user.lease"));
-    assert!(set_attr(&home.join("Library/Preferences"), KEEP_XATTR));
-    place(&["placed"]);
-    pretend_unremovable(&["Preferences"]);
-    let swept = empty(&home, me());
-    place(&[]);
-    pretend_unremovable(&[]);
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert_eq!(attrs_of(&home.join("placed")), [KEEP_XATTR]);
-    assert_eq!(attrs_of(&home.join("Library/Preferences")), [KEEP_XATTR]);
-    assert_eq!(swept.kept, vec![home.join("Library/Preferences")]);
-}
-
-#[test]
-fn an_attribute_that_went_or_is_the_systems_is_left_and_any_other_refusal_fails() {
-    let gone = io::Error::from_raw_os_error(libc::EPERM);
-    assert!(crate::xattr::left(&gone));
-    #[cfg(target_os = "macos")]
-    let none = io::Error::from_raw_os_error(libc::ENOATTR);
-    #[cfg(not(target_os = "macos"))]
-    let none = io::Error::from_raw_os_error(libc::ENODATA);
-    assert!(crate::xattr::left(&none));
-    assert!(!crate::xattr::left(&io::Error::from_raw_os_error(
-        libc::EIO
-    )));
-    let dir = scratch("xattr-fail");
-    let fd = open_base(&dir).unwrap().unwrap();
-    let why = crate::xattr::remove(&fd, "user.absent").expect_err("no such attribute");
-    assert!(crate::xattr::left(&why));
-    let why = crate::xattr::remove(&fd, "a\0b").expect_err("bad name");
-    assert!(!crate::xattr::left(&why));
-}
-
-#[test]
-fn a_refused_removal_of_an_attribute_fails_unless_it_is_the_systems_own_or_gone() {
-    let names: Vec<String> = ["user.a", KEEP_XATTR, "user.b", "user.c"]
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
-    let mut asked = Vec::new();
-    let mut remove = |name: &str| {
-        asked.push(name.to_owned());
-        match name {
-            "user.a" => Err(io::Error::from_raw_os_error(libc::EPERM)),
-            "user.b" => Err(io::Error::from_raw_os_error(libc::EIO)),
-            _ => Ok(()),
-        }
-    };
-    let why = strip_named(&names, KEEP_XATTR, &mut remove).expect_err("EIO fails");
-    assert_eq!(why.raw_os_error(), Some(libc::EIO));
-    // The system's own (EPERM) was let go and the walk went on to the next; the kept
-    // one was never asked for; the failure stopped it.
-    assert_eq!(asked, ["user.a", "user.b"]);
+    assert!(home.join("Preferences/late").exists());
 }
 
 #[test]
@@ -1618,3 +1284,4 @@ fn a_path_below_a_missing_directory_is_not_the_systems() {
     assert!(!path_is_system_placed(&dir.join("absent/child")));
 }
 mod edges;
+mod owned;

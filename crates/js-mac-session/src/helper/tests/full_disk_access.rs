@@ -37,7 +37,7 @@ fn each_way_a_listing_ends_has_its_answer() {
 }
 
 /// Asserts that the verb is answered on a helper whose boot reset has not run, and that
-/// it touches nothing but the privacy directory (no pool user is made, no ledger line
+/// it touches nothing but the privacy directory (no lease user is made, no ledger line
 /// written). Catches: the verb refused as `RESET_NEEDED`, which would leave the agent's
 /// start-up question unanswered on a Mac that has just restarted.
 #[test]
@@ -61,7 +61,7 @@ fn the_verb_is_answered_before_the_boot_reset() {
     ));
 }
 
-/// Asserts that a request carrying descriptors is refused as any pool verb is. Catches:
+/// Asserts that a request carrying descriptors is refused as any other verb is. Catches:
 /// the verb answering a request that smuggles descriptors in (only `run` and `role-run`
 /// take them).
 #[test]

@@ -1,8 +1,8 @@
 //! Edges of the sweep the larger tests above do not reach: a path whose parent is not
 //! there, an entry that goes between a listing and its examination, a park that has
-//! no free name or cannot be written, a folder the owner must be given back by name,
-//! a directory with no extended attributes, and a per-user folders entry (or one of its
-//! entries) that goes while it is searched for or removed.
+//! no free name or cannot be written, a folder the owner must be given back by name, and
+//! a per-user folders entry (or one of its entries) that goes while it is searched for or
+//! removed.
 
 use super::*;
 use crate::sweep::flags::make_owner_rwx;
@@ -124,37 +124,6 @@ fn the_owner_is_given_back_rwx_by_name_on_a_folder_it_cannot_open() {
     assert_eq!(mode & 0o777, 0o700);
 }
 
-/// Catches: a directory with no extended attributes listed as having some, or as an
-/// error (the size answer is zero and no second call is made).
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a_directory_without_user_attributes_lists_none() {
-    let dir = scratch("xattr-none");
-    let fd = open_base(&dir).unwrap().unwrap();
-    let names = crate::xattr::list(&fd).unwrap();
-    assert!(
-        names.iter().all(|name| !name.starts_with("user.")),
-        "{names:?}"
-    );
-}
-
-/// Catches: a refused listing (a descriptor opened only to name the directory, which the
-/// system will not list the attributes of) taken as an empty list: the system's error
-/// must be returned, so a sweep never strips nothing and reports success.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a_listing_the_system_refuses_is_an_error() {
-    let dir = scratch("xattr-refused");
-    let fd = rustix::fs::openat(
-        rustix::fs::CWD,
-        dir.path(),
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .unwrap();
-    assert!(crate::xattr::list(&fd).is_err());
-}
-
 /// Gives the owner `rwx` on every directory of the chain of `d`s below `fd` and on `fd`.
 fn reopen_chain(mut fd: OwnedFd) {
     loop {
@@ -249,71 +218,57 @@ fn something_gone_from_the_entry_during_its_removal_is_no_error() {
     assert!(!dir.join("ab/cdef").exists());
 }
 
-/// Runs `run` as the root helper runs a sweep (off macOS, on this thread, with the
-/// directories named `unremovable` refused removal by the system, as macOS refuses root an
-/// account's `Library/Preferences`).
+/// Asserts that a process that is root never skips the refusal of an entry it cannot open:
+/// root is refused for want of a grant, which says nothing of what the entry holds, so the
+/// refusal stays an error. A test says it is root (off macOS, on this thread).
+///
+/// Catches: a root helper that passes over what the system refuses it, and so reports a
+/// deletion complete that is not.
 #[cfg(not(target_os = "macos"))]
-fn as_root<T>(unremovable: &[&str], run: impl FnOnce() -> T) -> T {
+#[test]
+fn a_root_process_does_not_skip_a_refusal() {
+    if root() {
+        eprintln!("skipped: permission bits do not stop root");
+        return;
+    }
+    let dir = scratch("tolerate-root");
+    fs::create_dir_all(dir.join("closed")).unwrap();
+    chmod(&dir.join("closed"), 0o000);
+    let fd = open_base(&dir).unwrap().unwrap();
+    let denied = || Err::<usize, _>(io::Error::from_raw_os_error(Errno::PERM.raw_os_error()));
+    let closed = dir.join("closed");
+    let at = (&fd, OsStr::new("closed"), closed.as_path());
+    let skipped = std::cell::Cell::new(0);
+    assert!(tolerate(denied(), at, &skipped).is_ok());
     pretend_root(true);
-    pretend_unremovable(unremovable);
-    let out = run();
-    pretend_unremovable(&[]);
+    let got = tolerate(denied(), at, &skipped);
     pretend_root(false);
-    out
+    chmod(&dir.join("closed"), 0o700);
+    assert!(got.is_err());
+    assert_eq!(skipped.get(), 1);
 }
 
-/// Asserts that an empty directory the system refuses root the removal of (the
-/// `~/Library/Preferences` a job made before jobs lost the write to their home, which no
-/// process without Full Disk Access can remove) is kept and named in `kept`, and is no
-/// error, when the sweep runs as root; what was in it and around it went.
+/// Asserts that an entry whose folder cannot be removed (something is made in it after its
+/// entries were removed; on macOS the system's refusal of a `sunlnk` folder answers so too) is
+/// an error naming the folder, and is not removed, never reported as removed or as kept
+/// emptied: the deletion does not complete, and the proof judges what is left.
 ///
-/// Catches: a root reset that fails the slot over a folder it can neither remove nor
-/// empty further, leaving the host tainted `cleanup-failed`.
-#[cfg(not(target_os = "macos"))]
+/// Catches: a removal that takes a refusal for done, and frees a uid that still owns the
+/// entry.
 #[test]
-fn an_empty_directory_the_system_refuses_root_is_kept_and_named() {
-    let dir = scratch("kept-as-root");
-    let home = dir.join("home");
-    fs::create_dir_all(home.join("Library/Preferences")).unwrap();
-    fs::write(home.join("Library/Preferences/x"), "x").unwrap();
-    fs::write(home.join("Library/y"), "x").unwrap();
-    fs::create_dir_all(home.join("other")).unwrap();
-    let swept = as_root(&["Preferences"], || empty(&home, me()));
-    assert_eq!(swept.errors, Vec::<String>::new());
-    assert_eq!(swept.kept, vec![home.join("Library/Preferences")]);
-    assert_eq!(names(&home), ["Library"]);
-    assert_eq!(names(&home.join("Library")), ["Preferences"]);
-    assert!(names(&home.join("Library/Preferences")).is_empty());
-}
-
-/// Asserts that a directory the system refuses root the removal of, with something made in
-/// it after its entries were removed, still fails the sweep, naming it, and is not kept.
-///
-/// Catches: a keep rule that spares a refused folder that is not empty, which would leave
-/// a job's files for the next lease.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a_directory_the_system_refuses_root_fails_the_sweep_when_it_is_not_empty() {
-    let dir = scratch("kept-as-root-full");
-    let home = dir.join("home");
-    fs::create_dir_all(home.join("Preferences")).unwrap();
-    fs::write(home.join("Preferences/x"), "x").unwrap();
-    let late = home.join("Preferences/late");
-    let swept = as_root(&["Preferences"], || {
-        vanishing(
-            move |point, _| {
-                if matches!(point, Point::Examined(seen) if *seen == "x") {
-                    fs::write(&late, "x").unwrap();
-                }
-            },
-            || empty(&home, me()),
-        )
-    });
-    assert_eq!(swept.errors.len(), 1, "{:?}", swept.errors);
-    assert!(
-        swept.errors[0].contains("Preferences"),
-        "{:?}",
-        swept.errors
+fn an_entry_with_a_folder_that_cannot_be_removed_is_an_error_and_stays() {
+    let dir = scratch("entry-refused");
+    let entry = dir.join("ab/cdef");
+    fs::create_dir_all(entry.join("X")).unwrap();
+    fs::write(entry.join("X/left"), "x").unwrap();
+    let late = entry.join("X/late");
+    // `cdef` is listing 1, `X` listing 2: a file appears in `X` after its listing.
+    let swept = vanishing(
+        after_listing(2, move || fs::write(&late, "x").unwrap()),
+        || crate::sweep::remove_owned(&entry, me()),
     );
-    assert!(swept.kept.is_empty(), "{:?}", swept.kept);
+    assert_eq!(swept.errors.len(), 1, "{swept:?}");
+    assert!(swept.errors[0].contains("cdef/X"), "{swept:?}");
+    assert_eq!(swept.removed, 0);
+    assert!(dir.join("ab/cdef/X/late").exists());
 }

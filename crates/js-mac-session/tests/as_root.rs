@@ -23,14 +23,14 @@
 //! is served, the baseline before any lease user exists) is done then and kept for the
 //! tests that read it. Every other test makes its own leases (term = a number of its
 //! own), ends them, and ends them also when it fails, so one red test does not fail the
-//! others. The helper's pool holds one user per uid of the range (`kbf-lease-pool-<n>`,
-//! uid [`FIRST_UID`] + n), made by its first boot reset; every lease gets a pool user's
-//! uid: [`Mac::create`] checks it.
-//!
-//! Some tests here still expect `user-delete` to delete the lease's user and to refuse
-//! while a process of it runs, as it did before the pool; with the pool it resets the
-//! user (killing what runs), and only replaces it when the reset is not clean. Those
-//! expectations wait for a run on a Mac to be rewritten.
+//! others. Every lease gets an account of its own, `kbf-lease-<term>-<seq>`, made by
+//! `user-create` with a uid of the range [`FIRST_UID`]-[`LAST_UID`] (the next after the
+//! last one given; [`Mac::create`] checks it), and `user-delete` deletes it and shows it
+//! gone. Deleting a local user record, a home and the per-user folders the system placed
+//! needs Full Disk Access for the helper (a privacy profile grants it): the tests that end
+//! a lease expect it, and fail on a Mac whose helper does not hold it. Some expectations
+//! here are still those of a helper from before the pool and have not been run against the
+//! per-job account on a Mac with the grant; the first run there rewrites what differs.
 //!
 //! Every test is `#[ignore]`: each needs root and changes this machine. Build the test
 //! binary as an ordinary user (`cargo test -p js-mac-session --test as_root --no-run`) and
@@ -459,8 +459,6 @@ impl Mac {
         args.extend([
             "--uid-range".to_owned(),
             format!("{FIRST_UID}-{LAST_UID}"),
-            "--pool-size".to_owned(),
-            (LAST_UID - FIRST_UID + 1).to_string(),
             "--daemon-requirement".to_owned(),
             format!("cdhash H\"{}\"", self.genuine),
             "--kcpassword".to_owned(),
@@ -563,7 +561,7 @@ impl Mac {
         };
         assert!(
             (FIRST_UID..=LAST_UID).contains(&uid),
-            "lease {lease}: uid {uid} is not a pool user's ({FIRST_UID}-{LAST_UID})"
+            "lease {lease}: uid {uid} is not in the helper's range ({FIRST_UID}-{LAST_UID})"
         );
         made
     }
@@ -686,9 +684,9 @@ struct Lease<'a> {
 }
 
 impl Lease<'_> {
-    /// The lease's pool user: the slot is the uid's place in the range.
+    /// The lease's own account: `kbf-lease-<term>-<seq>`.
     fn name(&self) -> String {
-        format!("kbf-lease-pool-{}", self.uid - FIRST_UID)
+        format!("kbf-lease-{}", self.id.replace('.', "-"))
     }
 
     fn uid(&self) -> String {

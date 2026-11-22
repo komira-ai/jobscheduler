@@ -14,9 +14,8 @@
 //! - `background-tasks`: each entry `sfltool dumpbtm` prints, by the uid its record
 //!   is under, its identifier, type, URL, executable and disposition.
 //! - `lease-users`: each uid of the lease range that a user record has, except the uids
-//!   of the pool's free users and of the live leases: a free pool user is the clean
-//!   node's own and a live lease's user is its lease's, while a resetting or broken one,
-//!   one leased to a lease that is over, or a user the pool does not hold is reported.
+//!   of the live leases: a live lease's user is its lease's, while the user of a lease that
+//!   is over, or one no lease of the ledger names, is reported.
 //! - `auto-login`: the login window's `autoLoginUser`, whether `/etc/kcpassword` is
 //!   there, and the session switch's intent record.
 //!
@@ -186,8 +185,8 @@ pub fn diff(baseline: &BTreeSet<String>, now: &BTreeSet<String>) -> Diff {
     }
 }
 
-/// Collects every item of the minimal set; `own` are the uids of the pool's free users
-/// and of the live leases, which are not items.
+/// Collects every item of the minimal set; `own` are the uids of the live leases, whose
+/// users are not items.
 #[must_use]
 pub fn collect(host: &dyn Host, settings: &Settings, own: &BTreeSet<u32>) -> Snapshot {
     let mut snapshot = Snapshot::default();

@@ -373,12 +373,10 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     );
 
     says(&lease.call("delete"), "existed", "user-delete");
-    // A pool user is permanent: macOS refuses root the deletion of its record and home.
-    assert!(user_exists(&name), "the pool user's record was deleted");
-    assert!(
-        root("/bin/ls", &["-A", &home(&name)]).said().is_empty(),
-        "the pool user's home was not emptied"
-    );
+    // The account is deleted, its home gone, and shown gone (the helper holds Full Disk
+    // Access, which macOS asks of root for the record, the home and the system's folders).
+    assert!(!user_exists(&name), "the account's record was not deleted");
+    assert!(!exists(&home(&name)), "the account's home was not removed");
     let mut gone = vec![
         tabs,
         format!("{shared}/kbf-ci-owned"),
@@ -577,10 +575,10 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         user_exists(&held.name()),
         "the held session's user was deleted"
     );
-    // The pool's users are permanent: the leftover lease is over, its user stays, reset.
+    // The leftover lease is over: its account is deleted.
     assert!(
-        user_exists(&leftover.name()),
-        "the leftover pool user was deleted"
+        !user_exists(&leftover.name()),
+        "the leftover lease's account was not deleted"
     );
     says(
         &root(
@@ -603,8 +601,8 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "reset, nothing held"
     );
     assert!(
-        user_exists(&held.name()),
-        "the held session's pool user was deleted by the reset"
+        !user_exists(&held.name()),
+        "the held session's account was not deleted by the reset"
     );
     let auto_login = root(
         "/usr/bin/defaults",

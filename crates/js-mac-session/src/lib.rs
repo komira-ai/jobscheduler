@@ -1,23 +1,22 @@
-//! `js-mac-session`: the root helper that lends every Mac lease a user of its pool: the
-//! verbs `user-create` (a free pool user for the lease), `run` (in the background, or in
-//! the lease user's GUI session), `kill-uid` and `user-delete` (the lease ends: its user
-//! is reset in place for the next lease), `pool-create` and `pool-status`, the GUI
-//! session switch (`session-login`, `session-ready`, `session-idle`), the boot reset
-//! (which also makes the pool), and the leak scan's `scan`, `baseline` and
-//! `reboot-dirty` over a minimal item set.
+//! `js-mac-session`: the root helper that makes every Mac lease an account of its own: the
+//! verbs `user-create` (a new account for the lease, with a uid from the helper's range),
+//! `run` (in the background, or in the lease user's GUI session), `kill-uid` and
+//! `user-delete` (the lease ends: its account is deleted and shown gone before its uid
+//! is free again), the GUI session switch (`session-login`, `session-ready`,
+//! `session-idle`), the boot reset (which also deletes the accounts no live lease names,
+//! those of the pool a release before this one kept among them), and the leak scan's
+//! `scan`, `baseline` and `reboot-dirty` over a minimal item set.
 //!
-//! - [`lease`]: lease ids, the pool's slots, user names (`kbf-lease-pool-<slot>`) and the
-//!   uid range.
-//! - [`ledger`]: lease ids used and the state of each pool slot (free, leased,
-//!   resetting, broken), kept across reboots, so a lease id is used once and a user is
-//!   lent to one lease at a time.
+//! - [`lease`]: lease ids, account names (`kbf-lease-<term>-<seq>`) and the uid range.
+//! - [`ledger`]: lease ids used and the uid each got, kept across reboots, so a lease id
+//!   is used once and a uid is held until its account is shown gone.
 //! - [`groups`]: the group list a process started as a lease user holds.
 //! - [`limits`]: the file-size and process limits a `run` asks the helper to set.
 //! - [`helper`]: the verbs' rules, over a [`helper::Host`] that does the OS's part.
 //! - [`autologin`]: the session switch's intent record, `/etc/kcpassword`, the login
 //!   window's preference and the restart.
-//! - [`sweep`]: what `user-delete` and a pool user's reset remove, never following a
-//!   link.
+//! - [`sweep`]: what `user-delete` removes, and the look at what is left, never following
+//!   a link.
 //! - [`scan`]: the leak scan's items, its baseline and the baseline window.
 //! - [`spawn`]: starting a process as the lease user.
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
@@ -38,8 +37,7 @@
 //!
 //! The crate was moved here from the kbf repository (`kbf-mac-session`) without a change
 //! to what goes over its socket or onto its disk: the protocol, the ledger, the account
-//! names (`kbf-lease-<term>-<seq>` for a lease from before the pool, the role account
-//! `_kbf`), the default paths and the
+//! names (`kbf-lease-<term>-<seq>`, the role account `_kbf`), the default paths and the
 //! scan-baseline header keep the names they had, because the daemons and
 //! installers that use them name them. The program name in the diagnostics (`kbf-mac-session`)
 //! is kept too, although the binary file, and so the usage text, is now named
@@ -62,7 +60,6 @@ pub mod server;
 pub mod spawn;
 pub mod start;
 pub mod sweep;
-mod xattr;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

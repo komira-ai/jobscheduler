@@ -13,7 +13,7 @@ use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, Stat};
 
 use crate::autologin::SessionPaths;
 use crate::helper::{Helper, Host, ImageSettings, Settings};
-use crate::lease::{PoolSize, UidRange, VmUser};
+use crate::lease::{UidRange, VmUser};
 use crate::ledger::Ledger;
 use crate::scan::{ScanFolder, ScanSettings};
 use crate::server;
@@ -27,7 +27,7 @@ pub const STAFF_GID: u32 = 20;
 #[command(
     name = "kbf-mac-session",
     version,
-    about = "The root helper that lends each Mac lease a user of its pool"
+    about = "The root helper that makes each Mac lease an account of its own and deletes it afterwards"
 )]
 pub struct Args {
     /// The Unix socket the daemon connects to. Its directory is made mode 0750.
@@ -44,11 +44,11 @@ pub struct Args {
     /// The uids lease users get, `<first>-<last>`.
     #[arg(long, default_value = "600-699")]
     pub uid_range: UidRange,
-    /// How many users the pool holds: slot `n`'s user, `kbf-lease-pool-<n>`, has the
-    /// range's first uid plus `n`, so the range must hold at least this many uids. The
-    /// boot reset makes the pool.
-    #[arg(long, default_value_t = PoolSize::default())]
-    pub pool_size: PoolSize,
+    /// Accepted and ignored: the pool of lease users it sized is gone (each lease gets an
+    /// account of its own, deleted when it ends), and a flags file that still names it must
+    /// still start the helper. Kept for one release.
+    #[arg(long, hide = true)]
+    pub pool_size: Option<u32>,
     /// Every lease user's primary group id (`staff` by default).
     #[arg(long, default_value_t = STAFF_GID)]
     pub lease_gid: u32,
@@ -127,7 +127,6 @@ pub fn prepare(
     sweep: SweepPlan,
     scan: Vec<ScanFolder>,
 ) -> Result<Ready, String> {
-    args.uid_range.fits(args.pool_size)?;
     let gid = group_gid(&args.socket_group).map_err(|why| why.to_string())?;
     if gid == STAFF_GID || gid == args.lease_gid {
         return Err(format!(
@@ -149,7 +148,6 @@ pub fn prepare(
         .map_err(|why| format!("{}: {why}", args.socket.display()))?;
     let settings = Settings {
         range: args.uid_range,
-        pool: args.pool_size,
         gid: args.lease_gid,
         homes: args.homes.clone(),
         schedules,
@@ -169,7 +167,6 @@ pub fn prepare(
     tracing::info!(
         socket = %args.socket.display(),
         range = %args.uid_range,
-        pool = %args.pool_size,
         "kbf-mac-session ready"
     );
     Ok(Ready {

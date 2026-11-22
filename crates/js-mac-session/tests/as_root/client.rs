@@ -14,7 +14,8 @@
 //! client session-ready <socket> <lease>    prints "true" or "false"
 //! client kill <socket> <lease>
 //! client delete <socket> <lease>           prints "existed" or "absent"
-//! client reset <socket> [held lease]...     prints "kept <lease|none> deleted <leases>"
+//! client reset <socket> [held lease]...     prints "kept <lease|none> deleted <leases>", and
+//!                                           " held <leases>" when some account is not gone
 //! client scan <socket>                     prints "clean" or "dirty", then "+ <added>",
 //!                                                      "- <removed>" and "! <error>" lines
 //! client baseline <socket>                 prints "<class> <items>" lines
@@ -134,9 +135,13 @@ mod macos {
             }
             ["reset", socket, held @ ..] => {
                 let held: Vec<String> = held.iter().map(|&a| a.to_owned()).collect();
-                let (kept, deleted) = Client::new(socket).boot_reset(&held)?;
-                let kept = kept.as_deref().unwrap_or("none");
-                println!("kept {kept} deleted {}", deleted.join(","));
+                let booted = Client::new(socket).boot_reset(&held)?;
+                let kept = booted.kept.as_deref().unwrap_or("none");
+                let held = match booted.held.is_empty() {
+                    true => String::new(),
+                    false => format!(" held {}", booted.held.join(",")),
+                };
+                println!("kept {kept} deleted {}{held}", booted.deleted.join(","));
             }
             ["scan", socket] => {
                 let scanned = Client::new(socket).scan()?;

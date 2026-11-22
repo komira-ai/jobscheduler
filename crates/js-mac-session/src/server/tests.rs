@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::autologin::SessionPaths;
-use crate::client::{Client, ClientError, Exit};
-use crate::helper::{POOL_EXHAUSTED, Settings};
+use crate::client::{Booted, Client, ClientError, Exit};
+use crate::helper::Settings;
 use crate::lease::UidRange;
 use crate::ledger::Ledger;
-use crate::proto::{PoolState, Request};
+use crate::proto::Request;
 use crate::sweep::SweepPlan;
-use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
+use crate::testing::{FakeHost, act_argv, scratch, trace};
 
 fn me() -> u32 {
     rustix::process::getuid().as_raw()
@@ -120,7 +120,6 @@ fn served_in(
     }
     let settings = Settings {
         range,
-        pool: pool_of(range),
         gid: my_gid(),
         homes: dir.join("Users"),
         schedules: SweepPlan {
@@ -198,7 +197,7 @@ fn a_linked_or_missing_directory_is_refused() {
 fn the_switch_and_the_reset_work_over_the_socket() {
     let served = served_from("switch", Scripted::fixed(Ok(())), false);
     let client = &served.client;
-    assert_eq!(client.boot_reset(&[]).unwrap(), (None, Vec::new()));
+    assert_eq!(client.boot_reset(&[]).unwrap(), Booted::default());
     match client.boot_reset(&[]) {
         Err(ClientError::Refused(why)) => assert!(why.contains("runs once"), "{why}"),
         other => panic!("a second reset: {other:?}"),
@@ -750,17 +749,16 @@ fn the_client_reports_unexpected_replies_and_hangups() {
             code: Some(3),
             signal: None,
         }),
-        // The pool: an exhausted pool, a state, and a reply of the wrong kind.
+        // A refusal for want of a free uid; the boot reset's account of what it did,
+        // and a reply of the wrong kind.
         Some(Reply::Refused {
-            reason: format!("{POOL_EXHAUSTED}: of 1 slots"),
+            reason: "no free uid in 600-601: 600: held by a live lease".to_owned(),
         }),
-        Some(Reply::Refused {
-            reason: "the pool has no free userX".replace('X', ""),
+        Some(Reply::Reset {
+            kept: Some("1.1".to_owned()),
+            deleted: vec!["1.2".to_owned()],
+            held: vec!["1.3".to_owned()],
         }),
-        Some(Reply::Pool(Box::new(PoolState {
-            size: 1,
-            ..PoolState::default()
-        }))),
         Some(Reply::Killed),
     ];
     std::thread::spawn(move || {
@@ -816,19 +814,21 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     assert_eq!(running.pid, 9);
     assert_eq!(running.wait().unwrap().code, Some(3));
     match client.user_create("1.1") {
-        Err(error @ ClientError::Exhausted(_)) => assert_eq!(
+        Err(error @ ClientError::Refused(_)) => assert_eq!(
             error.to_string(),
-            format!("kbf-mac-session refused: {POOL_EXHAUSTED}: of 1 slots")
+            "kbf-mac-session refused: no free uid in 600-601: 600: held by a live lease"
         ),
         other => panic!("{other:?}"),
     }
-    // Exactly the words, with nothing after them, are the exhausted pool too.
-    assert!(matches!(
-        client.user_create("1.1"),
-        Err(ClientError::Exhausted(_))
-    ));
-    assert_eq!(client.pool_status().unwrap().size, 1);
-    assert!(unexpected(client.pool_create().map(drop)).contains("Killed"));
+    assert_eq!(
+        client.boot_reset(&["1.1".to_owned()]).unwrap(),
+        Booted {
+            kept: Some("1.1".to_owned()),
+            deleted: vec!["1.2".to_owned()],
+            held: vec!["1.3".to_owned()],
+        }
+    );
+    assert!(unexpected(client.boot_reset(&[]).map(drop)).contains("Killed"));
     let refused = ClientError::Refused("why".to_owned());
     assert_eq!(refused.to_string(), "kbf-mac-session refused: why");
     let gone = Client::new(dir.join("no-socket"));
@@ -913,7 +913,6 @@ fn serve_returns_when_accept_fails() {
         let ledger = Ledger::open(&dir.join("ledger")).unwrap();
         let settings = Settings {
             range: UidRange::new(600, 601).unwrap(),
-            pool: crate::lease::PoolSize::new(2).unwrap(),
             gid: 20,
             homes: dir.to_path_buf(),
             schedules: SweepPlan {
@@ -969,7 +968,6 @@ fn quiet_helper(dir: &Path) -> Helper {
     let ledger = Ledger::open(&dir.join("ledger")).unwrap();
     let settings = Settings {
         range: UidRange::new(600, 601).unwrap(),
-        pool: crate::lease::PoolSize::new(2).unwrap(),
         gid: 20,
         homes: dir.to_path_buf(),
         schedules: SweepPlan {

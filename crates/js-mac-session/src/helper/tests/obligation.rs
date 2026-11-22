@@ -10,10 +10,10 @@ use std::collections::VecDeque;
 use super::*;
 use crate::autologin::{Intent, write_intent};
 
-/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
-/// the uid only once its user is deleted and the pool's slot made.
+/// A rig of ONE uid holding `lease` ([`one_uid`]): a later lease gets
+/// the uid only once its user is deleted.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    legacy(name, lease)
+    one_uid(name, lease)
 }
 
 /// How many logged calls are exactly `call`.
@@ -79,7 +79,6 @@ fn a_failed_gui_teardown_stays_owed_across_a_retry_and_a_direct_delete() {
     assert_eq!(count(&calls, &format!("bootout {gui}")), 3, "{calls:#?}");
     assert!(!owed(&rig, uid));
     assert!(rig.host.state().domains.is_empty());
-    assert!(rig.helper.pool_create().errors.is_empty());
     assert_eq!(rig.helper.user_create("61.2"), Ok(uid));
 }
 
@@ -101,17 +100,14 @@ fn a_failed_gui_teardown_stays_owed_across_a_restart() {
         state.domains.insert(format!("gui/{uid}"));
         state.fail.insert("bootout gui");
     }
-    let got = rig.helper.boot_reset(&[]).unwrap_err();
-    assert_eq!(
-        got,
-        format!(
-            "the boot reset is incomplete: lease 62.1: {}",
-            gui_stayed(uid)
-        )
-    );
+    let reset = rig.helper.boot_reset(&[]).unwrap();
+    assert_eq!(reset.deleted, Vec::<LeaseId>::new());
+    assert_eq!(reset.held, [LeaseId::new(62, 1)]);
     assert!(owed(&rig, uid));
     rig.host.state().fail.clear();
-    assert_eq!(rig.helper.boot_reset(&[]).unwrap().deleted.len(), 1);
+    assert_eq!(rig.helper.kill_uid("62.1"), Ok(()));
+    // The restarted host has no record of it any more.
+    assert_eq!(rig.helper.user_delete("62.1"), Ok(false));
     assert!(!owed(&rig, uid));
     assert!(rig.host.state().domains.is_empty());
 }

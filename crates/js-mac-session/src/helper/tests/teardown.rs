@@ -16,10 +16,10 @@ fn quarantined(uid: u32) -> String {
     format!("uid {uid} is quarantined: no other lease gets it until a delete succeeds")
 }
 
-/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
-/// the uid only once its user is deleted and the pool's slot made.
+/// A rig of ONE uid holding `lease` ([`one_uid`]): a later lease gets
+/// the uid only once its user is deleted.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    legacy(name, lease)
+    one_uid(name, lease)
 }
 
 /// Asserts what a failed step must leave: the user's record, the lease live (its uid
@@ -223,23 +223,38 @@ fn entry(folders: &Path, xx: &str, hash: &str) -> PathBuf {
 
 /// Catches a `user-delete` that leaves the uid's per-user folders entry (the Mac's run
 /// found a `com.apple.ScreenTimeAgent` folder under `C` that the sweep left), one that
-/// removes only the `0` its `DARWIN_USER_DIR` names, and one that removes another user's
-/// entry beside it. Red when the entry is not removed.
+/// removes only the `0` its `DARWIN_USER_DIR` names, one that removes another entry beside
+/// it (it removes only the entry its answer names), and one that frees the uid while
+/// another entry of it is left in the folders: the proof names that entry, and the lease
+/// stays live until it is gone.
 #[test]
 fn user_delete_removes_the_entry_its_darwin_user_dir_names() {
     let (rig, uid) = one("teardown-folders", "25.1");
     let folders = rig.dir.join("folders");
     let mine = entry(&folders, "ab", "cdef0123");
+    // An entry the test makes is the uid's (every file the test makes is its own), though
+    // its `DARWIN_USER_DIR` does not name it: it is not removed, and is not shown gone.
     let theirs = entry(&folders, "ab", "other");
     rig.host
         .state()
         .user_dirs
         .insert(uid, PathBuf::from("/var/folders/ab/cdef0123/0/"));
-    assert_eq!(rig.helper.user_delete("25.1"), Ok(true));
+    assert_eq!(
+        rig.helper.user_delete("25.1"),
+        Err(format!(
+            "not shown gone (per-user folders): owned by uid {uid}: {}",
+            theirs.display()
+        ))
+    );
     assert!(!mine.exists(), "the uid's entry is left");
     assert!(theirs.join("C/com.apple.ScreenTimeAgent/db").exists());
     assert!(folders.join("ab").exists());
-    // Asked once, before anything was removed, with the user's ids.
+    uid_held(&rig);
+    // The record is gone now, so the delete repeated removes every entry the uid owns in the
+    // folders, and completes.
+    assert_eq!(rig.helper.user_delete("25.1"), Ok(false));
+    assert!(!theirs.exists());
+    // Asked once, by the first, before anything was removed, with the user's ids.
     let calls = log(&rig);
     assert_eq!(calls[1], format!("user_dir {uid}:{}", my_gid()));
     assert_eq!(
@@ -381,7 +396,6 @@ fn a_delete_repeated_after_the_record_went_completes_without_the_darwin_user_dir
     rig.host.state().users.clear();
     assert_eq!(rig.helper.user_delete("30.1"), Ok(false));
     assert!(!log(&rig).iter().any(|c| c.starts_with("user_dir")));
-    assert!(rig.helper.pool_create().errors.is_empty());
     assert_eq!(
         rig.helper.user_create("30.2"),
         Ok(uid),
@@ -400,7 +414,7 @@ fn a_delete_repeated_after_the_record_went_completes_without_the_darwin_user_dir
     assert!(rig.host.state().users.values().any(|u| u.uid == uid));
 }
 
-/// Catches the refusal that left every Mac job's user behind: a pool user whose agents
+/// Catches the refusal that left every Mac job's user behind: a lease user whose agents
 /// are gone has no launchd domain at all, so each bootout of `user/<uid>` fails ("no such
 /// domain"). The failure decides nothing: `kill-uid` succeeds after one attempt in each
 /// pass.

@@ -1,24 +1,27 @@
-//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in [`pool`] the
-//! pool of lease users (`pool-create`, `pool-status`, and what `user-create` and
-//! `user-delete` do with it), in [`runs`] `watch` and `stop` and the deadline of a `run`,
-//! in [`switch`] the session switch and the boot reset, and in [`leak`] the leak scan's
+//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in [`account`]
+//! the lease's account and the choice of its uid, in [`proof`] the proof that a deleted
+//! account is gone, in [`runs`] `watch` and `stop` and the deadline of a `run`, in
+//! [`switch`] the session switch and the boot reset, and in [`leak`] the leak scan's
 //! `scan`, `baseline` and `reboot-dirty`, over a [`Host`] that does what only the OS can
 //! (user records, launchd, processes, the programs the switch and the scan run), so the
 //! rules here are tested on any platform.
 //!
 //! Rules every verb keeps:
 //! - A lease id is parsed strictly and is used once.
-//! - A lease's user is a pool user, `kbf-lease-pool-<slot>`, lent for the lease and
-//!   reset in place when it ends ([`pool`]; the pool's users are permanent, never
-//!   deleted); or, for a lease a release before the pool created, its own
-//!   `kbf-lease-<term>-<seq>`, deleted when it ends (which macOS 27 refuses root).
+//! - A lease's user is its own account, `kbf-lease-<term>-<seq>`, made when the lease
+//!   starts and deleted, and shown gone, when it ends ([`account`], [`teardown`]); no
+//!   account is ever reused.
 //! - The uid comes from the ledger, never from a lookup, and must be in the lease
 //!   range; a uid outside it is never touched.
-//! - `user-create` is refused for a lease id used before, takes only a free pool user
-//!   (never making one: a full pool is [`LeaseError::Exhausted`]) and never makes an
-//!   administrator: a job that needs administrator rights runs in a VM, not as a pool
-//!   user. A request that carries a grant (a field of the protocol from when a gate's
-//!   signed grant could make one) is refused, and no user is taken.
+//! - `user-create` is refused for a lease id used before and for a lease whose account
+//!   name would be longer than 31 bytes. It chooses the first free uid of the range after the
+//!   one it gave last, records the lease with it (`created`, before anything is made), then
+//!   makes the home and the account. A uid is free when no live lease holds it, no
+//!   record has it, no process runs as it, and nothing owned by it is left under the
+//!   per-user folders or in the places the sweep covers; with none free the refusal names
+//!   why each is not. It never makes an administrator: a job that needs administrator
+//!   rights runs in a VM. A request that carries a grant (a field of the protocol from when
+//!   a gate's signed grant could make one) is refused, and nothing is made.
 //! - `run`, `kill-uid`, `stop` and `user-delete` act only on a lease the ledger holds;
 //!   `run`, `kill-uid` and `stop` refuse one that is over (its uid may be another
 //!   lease's now). `stop` kills only as `kill-uid` does, after a `SIGTERM` to the run's
@@ -32,9 +35,9 @@
 //!   decides, before the kill, whether the uid may have a GUI login session: the session
 //!   switch's intent record names it, it owns a `loginwindow` process (or one whose name
 //!   cannot be read), or an earlier teardown left its GUI domain owed (a record in the
-//!   state directory, kept until a teardown judges the domain gone). A pool user has none
-//!   of these, so its `gui/<uid>` is never asked about. Then, for at most
-//!   [`KILL_ROUNDS`] attempts, it kills every process of the
+//!   state directory, kept until a teardown judges the domain gone). A lease user that
+//!   never logged in has none of these, so its `gui/<uid>` is never asked about. Then, for
+//!   at most [`KILL_ROUNDS`] attempts, it kills every process of the
 //!   uid and boots out `user/<uid>` (and `gui/<uid>`, only with the session), the
 //!   bootout's own failure only logged, and looks again: done once no process of the
 //!   uid is left and none of those domains prints (`launchctl print` exits non-zero).
@@ -43,26 +46,26 @@
 //!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
 //!   user starts after it returns. An outcome that does not hold after the last attempt
 //!   fails, naming what remains, and the lease stays live: its uid is quarantined.
-//! - `user-delete` of a pool user's lease records the lease over and resets the user in
-//!   place (its home and per-user folder emptied and kept, its record's pool-owned
-//!   attributes set back, and the directory asked that it is not in `admin`, a member
-//!   being a broken slot); a reset that is not clean breaks the slot, naming what
-//!   blocked it ([`pool`]). Nothing of a pool user is deleted. The deletion of a lease's user from before the pool refuses while any
-//!   process of the uid remains. It first asks for the
+//! - `user-delete` refuses while any process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
 //!   any answer that is not such an entry; then it looks (and boots out the domains),
 //!   removes what can start a process (crontab, `at` jobs), looks again, removes the
-//!   uid's System V IPC objects, sweeps the rest and that entry whole, looks a last time
-//!   (and boots out the domains), and deletes the record. For a lease from before the
-//!   pool it records the deletion last, and a failure at any step leaves the lease live
-//!   in the ledger, so its uid is held and never handed to another lease, and the
-//!   refusal says why; the delete is simply repeated. At each look it waits, bounded, for
-//!   processes of the uid to exit (a cron job that started after `kill-uid`), and names
-//!   those still alive when it refuses. `user-delete` is refused for the lease the
+//!   uid's System V IPC objects, sweeps the rest, the home and that entry whole, looks a
+//!   last time (and boots out the domains), and deletes the record. Then it shows the
+//!   account gone ([`proof`]): no record by the name or by the uid, no process of the
+//!   uid and no launchd domain that prints, no home, no entry of the per-user folders
+//!   or of the places swept that the uid owns, no System V IPC object of the uid. The
+//!   deletion is recorded last, and only after the proof; a failure at any step or any item
+//!   of the proof leaves the lease live in the ledger, so its uid is held and never handed
+//!   to another lease, and the refusal names the step; the delete is simply repeated. At
+//!   each look it waits, bounded, for processes of the uid to exit (a cron job that
+//!   started after `kill-uid`), and names those still alive when it refuses. A record
+//!   that is not there to delete is no error (a delete repeated after it went, or made
+//!   after a crash before the account was). `user-delete` is refused for the lease the
 //!   session switch's intent record names (`session-idle` first).
 //! - The first `user-create` closes the baseline window, and makes a dirty scan's
-//!   verdict stale (`reboot-dirty` then needs a new scan). Making the pool does not.
+//!   verdict stale (`reboot-dirty` then needs a new scan).
 //! - The standing VM user ([`role`], `--vm-user`) is the one account besides lease users
 //!   the helper acts on. Its verbs (`role-run`, `role-session-ready`, `role-kill-uid`)
 //!   take no lease: the account is looked up by its configured name, and its uid must be
@@ -77,7 +80,7 @@
 //!   process group of such a run, found again by pid, start time and boot ([`reap`]).
 //! - Every verb but `boot-reset` and `full-disk-access` is refused until the boot reset
 //!   has succeeded. `full-disk-access` lists the privacy database's directory
-//!   ([`Host::list_privacy_dir`]) and reads nothing of the pool.
+//!   ([`Host::list_privacy_dir`]) and reads no lease state.
 //!
 //! The mutating verbs run one at a time (one lock around the ledger), and `run` holds
 //! it while it starts the process, so no process starts for a lease being deleted.
@@ -95,18 +98,19 @@ use rustix::fs::{CWD, Gid, Mode, OFlags, Uid};
 
 use crate::autologin::{CommandOutput, Intent, SessionPaths, read_intent};
 use crate::full_disk_access::{self, FullDiskAccess};
-use crate::lease::{Dotted, PoolSize, Slot, UidRange, VmUser, parse_lease};
+use crate::lease::{Dotted, UidRange, VmUser, parse_lease};
 use crate::ledger::{Entry, Ledger};
-use crate::proto::{Limits, PoolState, Reply, Request, Session};
+use crate::proto::{Limits, Reply, Request, Session};
 use crate::scan::ScanSettings;
 use crate::spawn::{self, Spawn};
 use crate::sweep::SweepPlan;
 
+mod account;
 pub(crate) mod folders;
 mod image;
 mod ipc;
 mod leak;
-mod pool;
+mod proof;
 mod reap;
 mod role;
 mod runs;
@@ -116,11 +120,10 @@ mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
 pub use ipc::{IPCRM, IPCS};
-pub use pool::{DSEDITGROUP, LeaseError, POOL_EXHAUSTED, PoolExhausted, PoolStatus};
 pub use runs::{Ended, MAX_WAIT, NO_RUN};
 pub use switch::Reset;
 
-use pool::LeaseUser;
+use account::LeaseUser;
 
 /// How many attempts `kill-uid` makes (kill, boot out the uid's launchd domains, look at
 /// the outcome) before it gives up.
@@ -171,45 +174,35 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The directory could not be asked.
     fn uid_taken(&self, uid: u32) -> io::Result<bool>;
-    /// Makes the user's home folder, or takes the one that is there ([`make_home`] on a
-    /// real host): owned by the user, mode 0700, with no flag, ACL or extended attribute
-    /// of what the last user set on it. The caller has emptied it.
+    /// Makes the new user's home folder ([`make_home`] on a real host): owned by the user,
+    /// mode 0700. The folder must not exist: one that does is an error, never taken over,
+    /// so an account never starts with what another left.
     ///
     /// # Errors
-    /// The folder could not be made, or an existing one could not be given back.
+    /// The folder exists, or could not be made or given to the user.
     fn make_home(&self, homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()>;
-    /// Creates the user record.
+    /// Creates the user record: hidden, shell [`SHELL`], the primary group `user.gid` and no
+    /// other, and no password (no login and no secure token).
     ///
     /// # Errors
     /// The record could not be created.
     fn create_user(&self, user: &NewUser) -> io::Result<()>;
     /// Deletes the user record `name` (and any group membership it has); `false` when
-    /// there is none. Only a lease user from before the pool is ever deleted: the pool's
-    /// users are permanent, and macOS refuses root the deletion of a local user record
-    /// unless the helper holds Full Disk Access. The release signs the helper and a
-    /// privacy profile grants it that access ([`Host::list_privacy_dir`] shows whether it
-    /// holds it), but the pool's reset does not use the grant yet:
-    /// `docs/design/mac-account-per-job.md` deletes an account per job.
+    /// there is none. macOS 27 refuses root the deletion of a local user record unless the
+    /// helper holds Full Disk Access ([`Host::list_privacy_dir`] shows whether it holds
+    /// it); a refusal is an error, and the lease stays live.
     ///
     /// # Errors
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
-    /// The attributes of the record `name` that the pool owns ([`UserRecord`]); `None`
-    /// when there is no such record.
+    /// The name and uid of every user record whose name starts with
+    /// [`USER_PREFIX`](crate::lease::USER_PREFIX), whoever made it: the boot reset finds
+    /// what the ledger does not know (a lost ledger, an account made by hand, the accounts of
+    /// a release with a pool).
     ///
     /// # Errors
     /// The directory could not be asked.
-    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>>;
-    /// Sets the pool-owned attributes of the existing record `user.name` that macOS lets
-    /// root write on an existing account to what [`Host::create_user`] gives a new one:
-    /// its primary group, shell and hidden flag. Its uid, home path, real name, password
-    /// and group memberships are left alone (macOS 27 refuses root a write of an existing
-    /// account's home attribute; the caller compares the uid and home first, and asks the
-    /// directory that the user is not in `admin`).
-    ///
-    /// # Errors
-    /// The record could not be found or an attribute could not be set.
-    fn restore_user(&self, user: &NewUser) -> io::Result<()>;
+    fn lease_accounts(&self) -> io::Result<Vec<(String, u32)>>;
     /// How `launchctl print <domain>` ended: its exit code and its standard output
     /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
     /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
@@ -350,23 +343,29 @@ pub struct LiveProcess {
     pub command: String,
 }
 
-/// The login shell of every pool user.
-pub const SHELL: &str = "/bin/zsh";
+/// The login shell of every lease account: none can log in.
+pub const SHELL: &str = "/usr/bin/false";
 
-/// The attributes of a user record that the pool owns: what `pool-create` makes and
-/// every reset sets back.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UserRecord {
-    /// The uid.
-    pub uid: u32,
-    /// The primary group.
-    pub gid: u32,
-    /// The home folder's path.
-    pub home: PathBuf,
-    /// Whether the record is kept off the login window's list of users.
-    pub hidden: bool,
-    /// The login shell.
-    pub shell: String,
+/// The attributes of the directory record [`Host::create_user`] gives a new lease account,
+/// as OpenDirectory names them, each with its value: the uid, the primary group (the only
+/// group), the home, the login shell ([`SHELL`]), the real name (the account's name) and
+/// the hidden flag (kept off the login window's list of users). No password and no
+/// authentication authority is among them, so the account has no `ShadowHash`: nothing can
+/// log in as it and it has no secure token. It is in no group but its primary group, and
+/// never in `admin`.
+#[must_use]
+pub fn account_attributes(user: &NewUser) -> [(&'static str, String); 6] {
+    [
+        ("dsAttrTypeStandard:UniqueID", user.uid.to_string()),
+        ("dsAttrTypeStandard:PrimaryGroupID", user.gid.to_string()),
+        (
+            "dsAttrTypeStandard:NFSHomeDirectory",
+            user.home.to_string_lossy().into_owned(),
+        ),
+        ("dsAttrTypeStandard:UserShell", SHELL.to_owned()),
+        ("dsAttrTypeStandard:RealName", user.name.clone()),
+        ("dsAttrTypeNative:IsHidden", "1".to_owned()),
+    ]
 }
 
 /// A user record to create.
@@ -387,9 +386,6 @@ pub struct NewUser {
 pub struct Settings {
     /// The uids lease users may have.
     pub range: UidRange,
-    /// How many users the pool holds (`--pool-size`); slot `n`'s user has the range's
-    /// first uid plus `n`.
-    pub pool: PoolSize,
     /// Every lease user's primary group.
     pub gid: u32,
     /// Where home folders are made (`/Users` on macOS).
@@ -401,9 +397,9 @@ pub struct Settings {
     /// [`Self::user_folders`].
     pub sweep: SweepPlan,
     /// Where macOS keeps each user's `DARWIN_USER_DIR` entry (`/private/var/folders`): the
-    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is emptied and kept (a pool
-    /// user's reset) or, for a lease from before the pool, removed whole by `user-delete`
-    /// (emptied and kept where the system placed it, `sunlnk`).
+    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is removed whole by
+    /// `user-delete`, and no entry of it that the uid owns may be left for the account to
+    /// be shown gone.
     pub user_folders: PathBuf,
     /// Where the session switch keeps its state.
     pub session: SessionPaths,
@@ -502,12 +498,9 @@ impl Helper {
             }
             _ if !fds.is_empty() => Err("only run and role-run take descriptors".to_owned()),
             Request::UserCreate { grant: Some(_), .. } => Err(NO_ADMINISTRATOR.to_owned()),
-            Request::UserCreate { lease, grant: None } => self
-                .user_create(&lease)
-                .map(|uid| Reply::Created { uid })
-                .map_err(|why| why.to_string()),
-            Request::PoolCreate => Ok(pool_reply(self.pool_create())),
-            Request::PoolStatus => Ok(pool_reply(self.pool_status())),
+            Request::UserCreate { lease, grant: None } => {
+                self.user_create(&lease).map(|uid| Reply::Created { uid })
+            }
             Request::FullDiskAccess => Ok(Reply::FullDiskAccess {
                 state: self.full_disk_access(),
             }),
@@ -541,11 +534,8 @@ impl Helper {
                 .map(|ready| Reply::SessionReady { ready }),
             Request::BootReset { held } => self.boot_reset(&held).map(|reset| Reply::Reset {
                 kept: reset.kept.map(|lease| Dotted(lease).to_string()),
-                deleted: reset
-                    .deleted
-                    .iter()
-                    .map(|lease| Dotted(*lease).to_string())
-                    .collect(),
+                deleted: dotted(&reset.deleted),
+                held: dotted(&reset.held),
             }),
             Request::Scan => self.scan().map(leak::scanned),
             Request::Baseline => self.baseline().map(|classes| Reply::Baselined { classes }),
@@ -566,37 +556,12 @@ impl Helper {
         state
     }
 
-    /// `user-create <lease>`: the lease takes a free pool user, never an administrator,
-    /// whose home folder is empty and only it can enter. Returns its uid.
-    ///
-    /// # Errors
-    /// [`LeaseError::Exhausted`] when no pool user is free (retry once a lease ends);
-    /// otherwise why it was refused or failed.
-    pub fn user_create(&self, lease: &str) -> Result<u32, LeaseError> {
-        let lease = parse_lease(lease)?;
-        let mut ledger = self.lock();
-        if ledger.get(lease).is_some() {
-            return Err(format!(
-                "lease {} was used before; a lease id is used once",
-                Dotted(lease)
-            )
-            .into());
-        }
-        self.take_slot(&mut ledger, lease)
-    }
-
-    fn live(&self, uid: u32) -> Result<Vec<LiveProcess>, String> {
-        self.host
-            .live_processes(uid)
-            .map_err(|why| format!("listing the processes of uid {uid}: {why}"))
-    }
-
     /// The uid of a live lease, in range.
     pub(super) fn live_uid(&self, ledger: &Ledger, lease: LeaseId) -> Result<u32, String> {
         match ledger.get(lease) {
             None => Err(format!("lease {} has no user", Dotted(lease))),
             Some(Entry { deleted: true, .. }) => Err(format!(
-                "lease {} is over: its user was deleted or returned to the pool",
+                "lease {} is over: its user was deleted",
                 Dotted(lease)
             )),
             Some(Entry { uid, .. }) if !self.settings.range.contains(uid) => Err(format!(
@@ -739,7 +704,7 @@ const NO_DOMAIN_TEXT: &str = "Could not find domain";
 
 /// The exit statuses of `launchctl print` that, with [`NO_DOMAIN_TEXT`], mean launchd
 /// does not have the domain. 112 is launchd's "Could not find specified domain": on
-/// macOS 26 `launchctl print gui/<uid>` for a pool user, which never logs in and so has
+/// macOS 26 `launchctl print gui/<uid>` for a lease user that never logs in and so has
 /// no GUI domain, exits 112 and writes "Bad request." and "Could not find domain for
 /// user gui: <uid>". 113 with the same words is read as absence too.
 const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
@@ -774,46 +739,38 @@ fn launchctl_print_answer(answer: &PrintAnswer) -> io::Result<bool> {
     }
 }
 
-/// The reply to `pool-create` and `pool-status`.
-fn pool_reply(status: PoolStatus) -> Reply {
-    let indexes = |slots: Vec<Slot>| slots.into_iter().map(Slot::index).collect();
-    Reply::Pool(Box::new(PoolState {
-        size: status.size,
-        free: indexes(status.free),
-        leased: status
-            .leased
-            .into_iter()
-            .map(|(slot, lease)| (slot.index(), Dotted(lease).to_string()))
-            .collect(),
-        resetting: indexes(status.resetting),
-        broken: indexes(status.broken),
-        missing: indexes(status.missing),
-        errors: status.errors,
-    }))
+/// The dotted text of each of `leases`.
+fn dotted(leases: &[LeaseId]) -> Vec<String> {
+    leases
+        .iter()
+        .map(|lease| Dotted(*lease).to_string())
+        .collect()
 }
 
-/// Makes the home folder `name` in `homes` if it is not there, and gives it (made now or
-/// found) to the user: owner `uid`, group `gid`, mode 0700, and the user flags, ACL and
-/// extended attributes a lease set on it taken off (the system's own, which it protects,
-/// stay). An existing home is kept, never removed: macOS refuses the removal of a folder
-/// of `/Users` to a process without Full Disk Access, so the pool's homes are emptied
-/// and kept (the caller empties it first). Never through a link. `homes` is root's to
-/// write, so the directory just made is still the one opened.
+/// Makes the new home folder `name` in `homes`, owned by `uid` and `gid`, mode 0700. It
+/// must not exist: a folder that does is an error (the account is new, and takes nothing
+/// of what was there). Never through a link. `homes` is root's to write, so the directory
+/// just made is still the one opened.
 ///
 /// # Errors
-/// `homes` cannot be opened, the folder could not be made or is not a directory, or it
-/// could not be given away or scrubbed.
+/// `homes` cannot be opened, the folder exists or could not be made, or it could not be
+/// given away.
 pub fn make_home(homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let parent = rustix::fs::openat(CWD, homes, flags, Mode::empty())?;
     match rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Ok(()) => {}
+        Err(rustix::io::Errno::EXIST) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("the home {} exists", homes.join(name).display()),
+            ));
+        }
         Err(why) => return Err(why.into()),
     }
     let home = rustix::fs::openat(&parent, name, flags, Mode::empty())?;
     rustix::fs::fchown(&home, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))?;
-    rustix::fs::fchmod(&home, Mode::from_raw_mode(0o700))?;
-    crate::sweep::scrub_home(&home)
+    Ok(rustix::fs::fchmod(&home, Mode::from_raw_mode(0o700))?)
 }
 
 #[cfg(test)]

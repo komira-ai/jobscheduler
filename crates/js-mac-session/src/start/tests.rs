@@ -75,7 +75,7 @@ fn the_flags_default_to_the_design() {
     );
     assert_eq!(args.socket_group, "_kbf");
     assert_eq!(args.uid_range.to_string(), "600-699");
-    assert_eq!(args.pool_size, crate::lease::PoolSize::new(100).unwrap());
+    assert_eq!(args.pool_size, None);
     assert_eq!(args.lease_gid, STAFF_GID);
     assert_eq!(args.homes, PathBuf::from("/Users"));
     assert_eq!(args.images_dir, PathBuf::from("/var/db/kbf-vm/images"));
@@ -308,16 +308,24 @@ fn main_serves_only_on_macos() {
     assert_eq!(main(&args(&dir, "g")), ExitCode::from(2));
 }
 
-/// Catches: a pool started that holds more users than the uid range has uids (two slots
-/// would share a uid, or one would have none), before anything is made.
+/// Catches: a flags file that still names `--pool-size` (a release before this one took it)
+/// that no longer starts the helper, or a value of it that changes anything: it is accepted
+/// and ignored, whatever it is, for one release.
 #[test]
-fn a_pool_larger_than_the_uid_range_stops_the_start() {
-    let dir = scratch("start-pool-fits");
+fn the_flag_of_the_pool_that_is_gone_is_accepted_and_ignored() {
+    let flags = |extra: &[&str]| {
+        let mut all = vec!["kbf-mac-session", "--daemon-requirement", "r"];
+        all.extend_from_slice(extra);
+        Args::try_parse_from(all)
+    };
+    assert_eq!(flags(&[]).unwrap().pool_size, None);
+    assert_eq!(flags(&["--pool-size", "4"]).unwrap().pool_size, Some(4));
+    assert!(flags(&["--pool-size", "x"]).is_err());
+    // A helper started with it (`args` names it, 10, over a range of 10) starts, and so
+    // does one whose value does not fit the range: nothing reads it.
+    let dir = scratch("start-pool-size");
     let mut args = args(&dir, &my_group().0);
-    args.pool_size = crate::lease::PoolSize::new(11).unwrap();
-    assert_eq!(
-        prepared(&args).err(),
-        Some("a pool of 11 users does not fit the uid range 700-709, which holds 10".to_owned())
-    );
-    assert!(!dir.join("state").exists());
+    assert_eq!(args.pool_size, Some(10));
+    args.pool_size = Some(11);
+    assert!(prepared(&args).is_ok());
 }

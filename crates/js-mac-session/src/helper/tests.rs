@@ -3,7 +3,7 @@ use std::os::fd::OwnedFd;
 
 use super::*;
 use crate::autologin::SessionPaths;
-use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
+use crate::testing::{FakeHost, act_argv, scratch, trace};
 
 pub(super) fn me() -> u32 {
     rustix::process::getuid().as_raw()
@@ -53,7 +53,6 @@ pub(super) fn rig_vm_with(
     let host = FakeHost::default();
     let settings = Settings {
         range,
-        pool: pool_of(range),
         gid: my_gid(),
         homes,
         schedules: SweepPlan {
@@ -75,26 +74,22 @@ pub(super) fn rig_vm_with(
     Rig { host, helper, dir }
 }
 
-/// A rig of ONE uid, the test's own, holding `lease` as a release before the pool left
-/// it: the ledger records the lease with the uid and the lease's own user
-/// (`kbf-lease-<term>-<seq>`) exists, so the pool's one slot could not be made (its uid
-/// has a record the ledger does not hold). `kill-uid` and `user-delete` act on that user
-/// with the teardown and the deletion a pool user's replacement runs too; no other lease
-/// gets the uid until a delete succeeds and `pool-create` makes the slot.
-pub(super) fn legacy(name: &str, lease: &str) -> (Rig, u32) {
+/// A rig of ONE uid, the test's own, holding `lease`: the ledger records the lease with the
+/// uid and the lease's own account (`kbf-lease-<term>-<seq>`) exists, as `user-create` leaves
+/// them. `kill-uid` and `user-delete` act on that account; no other lease gets the uid until
+/// a delete succeeds.
+pub(super) fn one_uid(name: &str, lease: &str) -> (Rig, u32) {
     let uid = me();
     let rig = rig_with(name, UidRange::new(uid, uid).unwrap(), None);
-    rig.host.state().foreign.insert(uid);
     rig.helper.boot_reset(&[]).unwrap();
-    rig.host.state().foreign.remove(&uid);
-    add_legacy(&rig, lease);
+    add_lease(&rig, lease);
     log(&rig);
     (rig, uid)
 }
 
-/// Records `lease` from before the pool in `rig`, with the range's first uid and its own
-/// user, as [`legacy`] does. Returns the uid.
-pub(super) fn add_legacy(rig: &Rig, lease: &str) -> u32 {
+/// Records `lease` in `rig`, with the range's first uid and its own account (no home
+/// folder), as `user-create` leaves it. Returns the uid.
+pub(super) fn add_lease(rig: &Rig, lease: &str) -> u32 {
     let uid = rig.helper.settings.range.uids().next().unwrap();
     let id = parse_lease(lease).unwrap();
     rig.helper.lock().record_created(id, uid).unwrap();
@@ -108,27 +103,13 @@ pub(super) fn add_legacy(rig: &Rig, lease: &str) -> u32 {
     uid
 }
 
-/// Asserts that no other lease can get the range's first uid (the rig's one slot): no
-/// lease finds a free user, and `pool-create` frees none. When the slot was never made
-/// (its uid a lease's from before the pool), `pool-create` refuses it because a live
-/// lease holds the uid.
+/// Asserts that no other lease can get the range's first uid (the rig's only one): a
+/// `user-create` is refused for want of a free uid, which is held by a live lease.
 pub(super) fn uid_held(rig: &Rig) {
-    let created = rig.helper.pool_create();
-    assert!(created.free.is_empty(), "{created:?}");
-    if created.missing.contains(&Slot::new(0)) {
-        let uid = rig.helper.settings.range.uids().next().unwrap();
-        let held = format!("slot 0: uid {uid} is held by a live lease");
-        assert!(created.errors.contains(&held), "{created:?}");
-    }
-    exhausted(rig.helper.user_create("99.1"));
-}
-
-/// Asserts that `created` is the pool's exhaustion: no slot was free for the lease.
-pub(super) fn exhausted(created: Result<u32, LeaseError>) {
-    match created {
-        Err(LeaseError::Exhausted(_)) => {}
-        other => panic!("not exhausted: {other:?}"),
-    }
+    let uid = rig.helper.settings.range.uids().next().unwrap();
+    let range = rig.helper.settings.range;
+    let want = format!("no free uid in {range}: {uid}: held by a live lease");
+    assert_eq!(rig.helper.user_create("99.1"), Err(want));
 }
 
 pub(super) fn log(rig: &Rig) -> Vec<String> {
@@ -289,7 +270,7 @@ fn run_starts_the_process_as_the_lease_user_in_the_lease_directory() {
         "{}\n{}\n{}\n",
         me(),
         std::fs::canonicalize(rig.dir.path()).unwrap().display(),
-        rig.dir.join("Users/kbf-lease-pool-0").display()
+        rig.dir.join("Users/kbf-lease-7-1").display()
     );
     assert_eq!(text, want);
 }
@@ -382,7 +363,7 @@ fn run_refuses_bad_limits_and_starts_a_limited_run() {
 /// failed sweep or deletion reported as done.
 #[test]
 fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
-    let (rig, uid) = legacy("delete", "9.1");
+    let (rig, uid) = one_uid("delete", "9.1");
     // One process is enough to refuse (`> 0`, not `> 1`).
     rig.host.state().procs.insert(uid, 1);
     let error = rig.helper.user_delete("9.1").unwrap_err();
@@ -437,7 +418,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
     assert!(log(&rig).is_empty());
 
     // A record already gone (a delete that crashed after it) still completes.
-    add_legacy(&rig, "9.2");
+    add_lease(&rig, "9.2");
     rig.host.state().users.clear();
     log(&rig);
     assert_eq!(rig.helper.user_delete("9.2"), Ok(false));
@@ -450,7 +431,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
             .contains("was deleted")
     );
 
-    add_legacy(&rig, "9.3");
+    add_lease(&rig, "9.3");
     rig.host.state().fail.insert("live_processes");
     assert!(
         rig.helper
@@ -467,7 +448,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
 /// rest, turns this red.
 #[test]
 fn a_process_started_during_user_delete_stops_it() {
-    let (rig, uid) = legacy("delete-race", "11.1");
+    let (rig, uid) = one_uid("delete-race", "11.1");
     let home = rig.dir.join("Users/kbf-lease-11-1");
     let tab = rig.dir.join("tabs/kbf-lease-11-1");
     std::fs::create_dir_all(&home).unwrap();
@@ -528,11 +509,19 @@ fn a_process_started_during_user_delete_stops_it() {
     want.push(format!("command {IPCS} -a"));
     want.extend(settle);
     want.push("delete_user kbf-lease-11-1".to_owned());
+    // Then the proof that the account is gone.
+    want.extend([
+        "account kbf-lease-11-1".to_owned(),
+        format!("uid_taken {uid}"),
+        format!("live_processes {uid}"),
+        format!("launchctl print user/{uid}"),
+        format!("command {IPCS} -a"),
+    ]);
     assert_eq!(log(&rig), want);
 
     // An incomplete sweep of the schedules stops the delete too.
     if me() != 0 {
-        add_legacy(&rig, "11.2");
+        add_lease(&rig, "11.2");
         let tabs = rig.dir.join("tabs");
         std::fs::set_permissions(&tabs, std::os::unix::fs::PermissionsExt::from_mode(0o000))
             .unwrap();
@@ -590,79 +579,12 @@ fn requests_are_routed_and_stray_descriptors_refused() {
     assert_eq!(deleted, Reply::Deleted { existed: true });
 }
 
-/// The portable home-folder maker, on the test's own uid.
-#[test]
-fn a_home_folder_is_made_private_and_the_users() {
-    let dir = scratch("make-home");
-    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
-    let meta = std::fs::metadata(dir.join("kbf-lease-1-1")).unwrap();
-    assert_eq!(
-        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
-        0o700
-    );
-    assert_eq!(std::os::unix::fs::MetadataExt::uid(&meta), me());
-    std::os::unix::fs::symlink(&dir, dir.join("linked")).unwrap();
-    assert!(make_home(&dir.join("linked"), "x", me(), my_gid()).is_err());
-    std::fs::write(dir.join("file"), "x").unwrap();
-    assert!(make_home(&dir, "file", me(), my_gid()).is_err());
-    assert!(make_home(&dir, "no/such", me(), my_gid()).is_err());
-}
-
-/// Catches a home that is refused when it is there already, or that comes back with the
-/// mode a lease left: a home that exists is kept (the same folder, never removed and
-/// made again, which macOS refuses in `/Users`), given back mode 0700 and the user's, and
-/// what is in it stays for the caller to have emptied.
-#[test]
-fn a_home_folder_that_is_there_is_kept_and_given_back() {
-    let dir = scratch("keep-home");
-    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
-    let home = dir.join("kbf-lease-1-1");
-    std::fs::write(home.join("left"), "x").unwrap();
-    std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&home).unwrap());
-    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
-    let meta = std::fs::metadata(&home).unwrap();
-    assert_eq!(std::os::unix::fs::MetadataExt::ino(&meta), before);
-    assert_eq!(
-        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
-        0o700
-    );
-    assert!(home.join("left").exists());
-}
-
-/// Catches an ACL a lease put on a home that stays: after the home is made again it has no
-/// access control entry (the real `ls -le` and `chmod +a` of the Mac).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_home_folder_that_is_there_loses_its_acl() {
-    let dir = scratch("home-acl");
-    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
-    let home = dir.join("kbf-lease-1-1");
-    let chmod = std::process::Command::new("/bin/chmod")
-        .args(["+a", "everyone allow list"])
-        .arg(&home)
-        .status()
-        .unwrap();
-    assert!(chmod.success());
-    let listing = |path: &std::path::Path| {
-        let out = std::process::Command::new("/bin/ls")
-            .arg("-lde")
-            .arg(path)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().lines().count()
-    };
-    assert_eq!(listing(&home), 2, "the ACL is set");
-    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
-    assert_eq!(listing(&home), 1, "the ACL is gone");
-}
-
 /// Catches the race of issue #195: a process of the uid (a cron job) that starts after
 /// `kill-uid` and exits by itself a moment later. `user-delete` waits for it at each
 /// look instead of refusing at once. Red with a single listing per look (no wait).
 #[test]
 fn user_delete_waits_for_a_process_that_exits() {
-    let (rig, uid) = legacy("delete-wait", "12.1");
+    let (rig, uid) = one_uid("delete-wait", "12.1");
     log(&rig);
     // Alive at the first two listings of the first look, gone at the third.
     rig.host.state().live_script.extend([1, 1]);
@@ -688,10 +610,19 @@ fn user_delete_waits_for_a_process_that_exits() {
     want.extend(domains);
     want.push(look);
     want.push("delete_user kbf-lease-12-1".to_owned());
+    // The proof: the record by name and by uid, the processes and the domain, and a fresh
+    // listing of the IPC objects.
+    want.extend([
+        "account kbf-lease-12-1".to_owned(),
+        format!("uid_taken {uid}"),
+        format!("live_processes {uid}"),
+        format!("launchctl print user/{uid}"),
+        format!("command {IPCS} -a"),
+    ]);
     assert_eq!(log(&rig), want);
 
     // One that exits during the last look, after the sweep: waited for too.
-    let uid = add_legacy(&rig, "12.2");
+    let uid = add_lease(&rig, "12.2");
     log(&rig);
     let mut script = vec![0, 0, 0];
     script.extend(std::iter::repeat_n(3, EXIT_LOOKS - 1));
@@ -703,7 +634,11 @@ fn user_delete_waits_for_a_process_that_exits() {
         EXIT_LOOKS - 1,
         "{uid}: {calls:?}"
     );
-    assert_eq!(calls.last().unwrap(), "delete_user kbf-lease-12-2");
+    assert_eq!(
+        calls.iter().rev().nth(5).unwrap(),
+        "delete_user kbf-lease-12-2"
+    );
+    assert_eq!(calls.last().unwrap(), &format!("command {IPCS} -a"));
 }
 
 /// Catches: a wait without a bound (the fake host panics past its pause limit), a
@@ -711,7 +646,7 @@ fn user_delete_waits_for_a_process_that_exits() {
 /// are left. More than [`NAMED`] are counted, not listed.
 #[test]
 fn user_delete_gives_up_naming_what_is_left() {
-    let (rig, uid) = legacy("delete-give-up", "13.1");
+    let (rig, uid) = one_uid("delete-give-up", "13.1");
     log(&rig);
     rig.host.state().procs.insert(uid, 2);
     let error = rig.helper.user_delete("13.1").unwrap_err();
@@ -750,7 +685,7 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
     let rig = rig("kill-schedules", 2);
     rig.helper.user_create("14.1").unwrap();
     let tabs = rig.dir.join("tabs");
-    let tab = tabs.join("kbf-lease-pool-0");
+    let tab = tabs.join("kbf-lease-14-1");
     std::fs::create_dir_all(&tabs).unwrap();
     std::fs::write(&tab, "* * * * * job").unwrap();
     log(&rig);
@@ -766,7 +701,7 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
         .collect();
     // The crontab goes after the first kill and before the second: a sweep after
     // both kills leaves a window in which its job starts a process nothing kills.
-    let uid = rig.host.state().users["kbf-lease-pool-0"].uid;
+    let uid = rig.host.state().users["kbf-lease-14-1"].uid;
     assert_eq!(
         kills,
         [
@@ -938,10 +873,13 @@ fn only_launchds_not_found_answer_is_absence() {
     }
 }
 
+mod boot;
 mod bounds;
 mod full_disk_access;
+mod ipc;
 mod lease;
 mod obligation;
 mod outcome;
 mod previous_release;
+mod steps;
 mod teardown;

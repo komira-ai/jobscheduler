@@ -1,55 +1,54 @@
-//! The ledger: every lease id the helper ever gave a user to, and the state of each
-//! user of the pool, kept across reboots.
+//! The ledger: every lease id the helper ever made an account for, kept across reboots.
 //!
-//! Two append-only text files in the helper's state directory, one record per line, each
-//! written with a single `write` and then `fsync`ed before the helper acts on it.
-//!
-//! `ledger`, the lease ids. An id is used once: a second `user-create` for it is
-//! refused. It holds the uid each
-//! lease got, so `run`, `kill-uid` and `user-delete` act on the uid the ledger names
-//! rather than on whatever a directory lookup says:
+//! One append-only text file in the helper's state directory, one record per line, each
+//! written with a single `write` and then `fsync`ed before the helper acts on it. An id is
+//! used once: a second `user-create` for it is refused. The ledger holds the uid each
+//! lease got, so `run`, `kill-uid` and `user-delete` act on the uid it names rather than on
+//! whatever a directory lookup says:
 //!
 //! ```text
 //! created <term>.<seq> <uid>
 //! deleted <term>.<seq>
 //! ```
 //!
-//! `deleted` records that the lease is over: its pool user went back to the pool (reset
-//! in place), or, for a lease a release before the pool created, its own user was
-//! deleted. This file's format is the one releases before the pool wrote and read, so
-//! they can still read it.
+//! `created` is written before the lease's account is made, so a crash after it leaves a
+//! lease the next boot reset deletes (a lease with no account is deleted as one with
+//! none left to delete). `deleted` is written once the account was deleted and shown gone
+//! (`user-delete`): the lease's uid is free from then on, and not before. A lease that is
+//! created and not deleted holds its uid, which is how a deletion that did not complete
+//! keeps its uid out of use. This is the format every release since the first wrote and
+//! read, so each of them still reads this file.
 //!
-//! `pool` (the [`pool`] module), the state of each slot of the pool: free, leased (to
-//! which lease), resetting or broken.
+//! The uid of the last `created` record is the one the next lease's uid is chosen after
+//! ([`Ledger::last_uid`]), so a uid comes back as late as the range allows and no state
+//! beyond this file is kept for it.
 //!
 //! A crash can leave a last line without its newline. That record's action never
 //! started (it follows the `fsync`), so on opening the fragment is cut off. Any other
 //! line that does not parse stops the helper from starting: the ledger is root's own
-//! file, and guessing past corruption could reuse a lease id or hand out a user twice.
+//! file, and guessing past corruption could reuse a lease id or hand out a uid twice.
 //!
-//! When a lease takes a slot, the slot's `leased` record is written before the lease's
-//! `created`; when it ends, `deleted` is written before the slot's `resetting`. So a crash
-//! between the two never leaves a live lease without its slot: it leaves a slot leased
-//! to a lease that is not live, which the boot reset resets.
+//! The file grows by about 30 bytes per lease and is not compacted (a later change can
+//! drop records of ended leases once lease ids are known to grow).
 //!
-//! `ledger` grows by about 30 bytes per lease and `pool` by about 40, and neither is
-//! compacted (a later change can drop records of ended leases once lease ids are known to
-//! grow).
-
-pub mod pool;
+//! Beside it a release that kept a pool of lease users wrote a second file, [`POOL_FILE`].
+//! This release neither reads nor writes it; the boot reset removes it once, before it
+//! deletes the pool's accounts ([`Ledger::remove_pool_file`]), so a rollback to that release
+//! finds no pool and makes its own afresh.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use rustix::fs::{AtFlags, CWD, Mode, OFlags};
 
 use js_types::LeaseId;
 
-use crate::lease::{Dotted, Slot, parse_lease};
-use pool::{Pool, SlotEntry, SlotState};
+use crate::lease::{Dotted, parse_lease};
 
-/// The pool's file name, beside the ledger's.
+/// The name of the file a release with a pool kept beside the ledger.
 pub const POOL_FILE: &str = "pool";
 
 /// One lease's record.
@@ -57,17 +56,19 @@ pub const POOL_FILE: &str = "pool";
 pub struct Entry {
     /// The uid the lease's user had.
     pub uid: u32,
-    /// Whether the lease is over (its user returned to the pool, or deleted);
-    /// a lease id that is over is never used again.
+    /// Whether the lease is over (its account was deleted and shown gone); a lease id
+    /// that is over is never used again.
     pub deleted: bool,
 }
 
-/// The ledger's two files and what they say.
+/// The ledger file and what it says.
 #[derive(Debug)]
 pub struct Ledger {
     file: File,
+    dir: PathBuf,
     leases: BTreeMap<LeaseId, Entry>,
-    pool: Pool,
+    /// The uid of the last `created` record: the next uid is chosen after it.
+    last_uid: Option<u32>,
 }
 
 /// Opens (creating, mode 0600, never through a link) the record file at `path` and
@@ -116,18 +117,18 @@ fn refused(why: String) -> io::Error {
 }
 
 impl Ledger {
-    /// Opens (creating, mode 0600) and reads the ledger at `path`, and the pool's file
-    /// ([`POOL_FILE`]) beside it.
+    /// Opens (creating, mode 0600) and reads the ledger at `path`.
     ///
     /// # Errors
-    /// A file cannot be opened, read or trimmed, or a complete line does not parse or
+    /// The file cannot be opened, read or trimmed, or a complete line does not parse or
     /// does not follow from the lines before it.
     pub fn open(path: &Path) -> io::Result<Self> {
         let (file, text) = open_records(path)?;
         let mut ledger = Self {
             file,
+            dir: path.parent().unwrap_or(Path::new(".")).to_owned(),
             leases: BTreeMap::new(),
-            pool: Pool::open(&path.with_file_name(POOL_FILE))?,
+            last_uid: None,
         };
         for (number, line) in text.lines().enumerate() {
             let record = Record::parse(line)
@@ -159,6 +160,7 @@ impl Ledger {
                     deleted: false,
                 };
                 self.leases.insert(lease, entry);
+                self.last_uid = Some(uid);
             }
             Record::Deleted(lease) => {
                 // Admitted, so the lease is live.
@@ -203,20 +205,17 @@ impl Ledger {
             .collect()
     }
 
-    /// Makes every later write fail, as a full or failing disk would: of the ledger's
-    /// file, and of the pool's when `pool`.
-    #[cfg(test)]
-    pub(crate) fn fail_writes(&mut self, path: &Path, pool: bool) {
-        self.file = File::open(path).unwrap();
-        if pool {
-            self.pool.fail_writes(&path.with_file_name(POOL_FILE));
-        }
+    /// The uid of the last `created` record read or written: the next lease's uid is chosen
+    /// after it. `None` for a ledger with no record.
+    #[must_use]
+    pub fn last_uid(&self) -> Option<u32> {
+        self.last_uid
     }
 
-    /// Makes every write to the pool's file after the next `writes` fail.
+    /// Makes every later write fail, as a full or failing disk would.
     #[cfg(test)]
-    pub(crate) fn fail_pool_after(&mut self, writes: usize) {
-        self.pool.fail_after(writes);
+    pub(crate) fn fail_writes(&mut self, path: &Path) {
+        self.file = File::open(path).unwrap();
     }
 
     /// Records that `lease` got `uid`, durably.
@@ -235,119 +234,22 @@ impl Ledger {
         self.append(Record::Deleted(lease))
     }
 
-    /// The slot's record, if the slot was ever made.
-    #[must_use]
-    pub fn slot(&self, slot: Slot) -> Option<SlotEntry> {
-        self.pool.get(slot)
-    }
-
-    /// Every slot that was made, in order, with its record.
-    #[must_use]
-    pub fn slots(&self) -> Vec<(Slot, SlotEntry)> {
-        self.pool.all()
-    }
-
-    /// The slot `lease` holds: the one leased to it.
-    #[must_use]
-    pub fn slot_of(&self, lease: LeaseId) -> Option<Slot> {
-        self.pool.leased_to(lease)
-    }
-
-    /// Records, durably, that the user of `slot`, with `uid`, is being made: the slot is
-    /// resetting until [`Self::record_free`] (or broken, [`Self::record_broken`]).
+    /// Removes the file ([`POOL_FILE`]) a release that kept a pool of lease users wrote
+    /// beside the ledger, if it is there, and makes the removal durable (an `fsync` of the
+    /// state directory, whether or not a file was there). Returns whether a file was removed.
     ///
     /// # Errors
-    /// The slot was made before, another slot has `uid`, or the write failed.
-    pub fn record_slot(&mut self, slot: Slot, uid: u32) -> io::Result<()> {
-        self.pool.append(pool::Record::Made(slot, uid))
-    }
-
-    /// Records, durably, that `lease` takes the free `slot`: first the slot's `leased`,
-    /// then the lease's `created` with the slot's uid.
-    ///
-    /// # Errors
-    /// The lease was created before, the slot is not free, or a write failed (a failed
-    /// `created` leaves the slot leased to a lease that is not live, which the boot reset
-    /// resets).
-    pub fn record_leased(&mut self, slot: Slot, lease: LeaseId) -> io::Result<()> {
-        let Some(SlotEntry {
-            uid,
-            state: SlotState::Free,
-        }) = self.slot(slot)
-        else {
-            return Err(refused(format!("slot {slot} is not free")));
+    /// The removal or the `fsync` failed.
+    pub fn remove_pool_file(&self) -> io::Result<bool> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let dir = rustix::fs::openat(CWD, &self.dir, flags, Mode::empty())?;
+        let removed = match rustix::fs::unlinkat(&dir, POOL_FILE, AtFlags::empty()) {
+            Ok(()) => true,
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(why) => return Err(why.into()),
         };
-        self.admit(Record::Created(lease, uid)).map_err(refused)?;
-        self.pool.append(pool::Record::Leased(slot, lease, false))?;
-        self.append(Record::Created(lease, uid))
-    }
-
-    /// Records, durably, that `lease`, which holds `slot`, is over: first the lease's
-    /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for a slot a
-    /// release that made administrators recorded as an administrator's: the word is kept
-    /// for the format's sake, and the helper resets that slot in place like any other).
-    ///
-    /// # Errors
-    /// The lease is not live, `slot` is not leased to it, or a write failed (a failed
-    /// `resetting` leaves the slot leased to a lease that is not live, which the boot
-    /// reset resets).
-    pub fn record_released(&mut self, slot: Slot, lease: LeaseId) -> io::Result<()> {
-        self.admit(Record::Deleted(lease)).map_err(refused)?;
-        self.pool.admit_reset(slot, Some(lease)).map_err(refused)?;
-        let replace = self.leased_admin(slot);
-        self.append(Record::Deleted(lease))?;
-        self.pool.append(pool::Record::Resetting(slot, replace))
-    }
-
-    /// Records, durably, that `slot`, leased to a lease that is not live, is resetting.
-    ///
-    /// # Errors
-    /// The slot is not leased, or is leased to a live lease, or the write failed.
-    pub fn record_orphan_reset(&mut self, slot: Slot) -> io::Result<()> {
-        if let Some(SlotEntry {
-            state: SlotState::Leased { lease, .. },
-            ..
-        }) = self.slot(slot)
-            && self.get(lease).is_some_and(|entry| !entry.deleted)
-        {
-            return Err(refused(format!(
-                "slot {slot} is leased to lease {}, which is live",
-                Dotted(lease)
-            )));
-        }
-        self.pool.admit_reset(slot, None).map_err(refused)?;
-        let replace = self.leased_admin(slot);
-        self.pool.append(pool::Record::Resetting(slot, replace))
-    }
-
-    /// Whether `slot` is leased to an administrator's lease, which only a ledger written by
-    /// a release that made administrators holds: its `resetting` says so (the helper resets
-    /// it in place all the same).
-    fn leased_admin(&self, slot: Slot) -> bool {
-        matches!(
-            self.slot(slot),
-            Some(SlotEntry {
-                state: SlotState::Leased { admin: true, .. },
-                ..
-            })
-        )
-    }
-
-    /// Records, durably, that `slot`'s user is clean (or new): the slot is free.
-    ///
-    /// # Errors
-    /// The slot is neither resetting nor broken, or the write failed.
-    pub fn record_free(&mut self, slot: Slot) -> io::Result<()> {
-        self.pool.append(pool::Record::Free(slot))
-    }
-
-    /// Records, durably, that `slot`'s user could not be reset in place: the slot
-    /// is broken, and leased to no one.
-    ///
-    /// # Errors
-    /// The slot is not resetting, or the write failed.
-    pub fn record_broken(&mut self, slot: Slot) -> io::Result<()> {
-        self.pool.append(pool::Record::Broken(slot))
+        rustix::fs::fsync(&dir)?;
+        Ok(removed)
     }
 }
 
@@ -452,6 +354,7 @@ mod tests {
             })
         );
         assert_eq!(ledger.get(LeaseId::new(1, 3)), None);
+        assert_eq!(ledger.last_uid(), Some(601));
         assert_eq!(ledger.held_uids(), BTreeSet::from([601]));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "created 1.1 600\ncreated 1.2 601\ndeleted 1.1\n");
@@ -474,6 +377,7 @@ mod tests {
         assert!(never.to_string().contains("not live"), "{never}");
         // The refused records were not written, and nothing changed in memory.
         assert!(ledger.live_leases().is_empty());
+        assert_eq!(ledger.last_uid(), Some(600));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "created 2.1 600\ndeleted 2.1\n");
     }
@@ -535,9 +439,59 @@ mod tests {
         let path = _path_own.join("ledger");
         let mut ledger = Ledger::open(&path).unwrap();
         ledger.record_created(LeaseId::new(5, 1), 600).unwrap();
-        ledger.fail_writes(&path, false);
+        ledger.fail_writes(&path);
         assert!(ledger.record_created(LeaseId::new(5, 2), 601).is_err());
         assert_eq!(ledger.get(LeaseId::new(5, 2)), None);
+        assert_eq!(ledger.last_uid(), Some(600));
         assert_eq!(ledger.held_uids(), BTreeSet::from([600]));
+    }
+
+    /// Catches: the next uid chosen after the wrong record: the last `created` record
+    /// is the one, in the order written (not the highest uid, not the highest lease id),
+    /// and a `deleted` record moves nothing; none in a ledger with no record.
+    #[test]
+    fn the_last_uid_is_that_of_the_last_created_record() {
+        let _path_own = dir("last");
+        let path = _path_own.join("ledger");
+        let mut ledger = Ledger::open(&path).unwrap();
+        assert_eq!(ledger.last_uid(), None);
+        ledger.record_created(LeaseId::new(9, 5), 650).unwrap();
+        ledger.record_created(LeaseId::new(1, 1), 610).unwrap();
+        ledger.record_deleted(LeaseId::new(9, 5)).unwrap();
+        assert_eq!(ledger.last_uid(), Some(610));
+        drop(ledger);
+        assert_eq!(Ledger::open(&path).unwrap().last_uid(), Some(610));
+    }
+
+    /// Catches: a removal of the pool file that is not durable or that fails for a file
+    /// that is not there (the boot reset would then stop), or one that leaves the file.
+    #[test]
+    fn the_pool_file_is_removed_once() {
+        let state = dir("pool-file");
+        let path = state.join("ledger");
+        let ledger = Ledger::open(&path).unwrap();
+        assert!(!ledger.remove_pool_file().unwrap());
+        std::fs::write(state.join(POOL_FILE), "made 0 600\nfree 0\n").unwrap();
+        assert!(ledger.remove_pool_file().unwrap());
+        assert!(!state.join(POOL_FILE).exists());
+        assert!(path.exists(), "the ledger stays");
+        assert!(!ledger.remove_pool_file().unwrap());
+        // Something that cannot be unlinked as a file is an error, and stays.
+        std::fs::create_dir(state.join(POOL_FILE)).unwrap();
+        assert!(ledger.remove_pool_file().is_err());
+        assert!(state.join(POOL_FILE).is_dir());
+    }
+
+    /// Catches: a removal that reports success when the state directory is not there to
+    /// be opened.
+    #[test]
+    fn the_pool_file_of_a_missing_state_directory_is_an_error() {
+        let state = dir("pool-file-missing");
+        let inner = state.join("state");
+        std::fs::create_dir(&inner).unwrap();
+        let ledger = Ledger::open(&inner.join("ledger")).unwrap();
+        std::fs::remove_file(inner.join("ledger")).unwrap();
+        std::fs::remove_dir(&inner).unwrap();
+        assert!(ledger.remove_pool_file().is_err());
     }
 }

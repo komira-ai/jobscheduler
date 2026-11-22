@@ -1,7 +1,8 @@
 //! The System V IPC objects of a uid (shared memory, semaphores, message queues): they
-//! outlive every process of the uid, and the user too, so the reset and the deletion of
-//! a pool user remove them and judge by the outcome: `ipcs` lists none of the uid's
-//! afterwards.
+//! outlive every process of the uid, and the user too, so the deletion of a lease's
+//! account removes them and judges by the outcome: `ipcs` lists none of the uid's
+//! afterwards (and a fresh listing after the account's record is gone, which names an
+//! object's owner by the uid's number, shows the same).
 //!
 //! `ipcs -a` prints one object per line, `<kind> <id> <key> <mode> <owner> <group>
 //! <creator> <creator's group> ...`, with the kind `q`, `m` or `s`; owner and creator are
@@ -10,10 +11,10 @@
 //! (`IPC_SET`), so an object given to another owner is removed too.
 //!
 //! POSIX shared memory objects and named semaphores are listed by no interface of macOS
-//! (they have names but no directory), so the reset cannot find one to remove, and one
+//! (they have names but no directory), so the deletion cannot find one to remove, and one
 //! lasts until it is unlinked or the Mac restarts. A run cannot create shared memory:
 //! the job profile's floor denies it (`js_mac_pool::seatbelt`). A named semaphore a run
-//! left stays, and the next run of the same uid can open it by its name; it holds a
+//! left stays, and a later run of the same uid can open it by its name; it holds a
 //! count, not data.
 
 use super::Helper;
@@ -98,17 +99,21 @@ impl Helper {
                 }
             }
         }
-        let left = self.ipc_objects(name, uid)?;
+        let left = self.ipc_left(name, uid)?;
         match left.is_empty() {
             true => Ok(()),
-            false => Err(TeardownError::IpcLeft {
-                uid,
-                left: left
-                    .iter()
-                    .map(|o| format!("{} {}", o.kind, o.id))
-                    .collect(),
-            }),
+            false => Err(TeardownError::IpcLeft { uid, left }),
         }
+    }
+
+    /// The IPC objects `name` (with `uid`) owns in a fresh listing, each as its `ipcrm` kind
+    /// flag and id (`-m 65538`).
+    pub(super) fn ipc_left(&self, name: &str, uid: u32) -> Result<Vec<String>, TeardownError> {
+        Ok(self
+            .ipc_objects(name, uid)?
+            .iter()
+            .map(|o| format!("{} {}", o.kind, o.id))
+            .collect())
     }
 }
 
@@ -124,18 +129,18 @@ mod tests {
         let listing = "IPC status from <running system> as of Thu Nov  5 10:00:00 2026\n\
              T     ID     KEY        MODE       OWNER    GROUP\n\
              Message Queues:\n\
-             q  65536 0x00000001 --rw-------  kbf-lease-pool-0    staff\n\
+             q  65536 0x00000001 --rw-------  kbf-lease-3-1    staff\n\
              Shared Memory:\n\
              m  65537 0x00000002 --rw-------     root    wheel\n\
              m  65538 0x00000003 --rw-------      601    staff\n\
-             m  65541 0x00000006 --rw-------   nobody   nobody kbf-lease-pool-0 staff\n\
+             m  65541 0x00000006 --rw-------   nobody   nobody kbf-lease-3-1 staff\n\
              m  65542 0x00000007 --rw-------   nobody   nobody     root  wheel\n\
              m  bad   0x00000004 --rw-------      601    staff\n\
              m  65540\n\
              Semaphores:\n\
-             s  65539 0x00000005 --ra-------  kbf-lease-pool-0    staff\n";
+             s  65539 0x00000005 --ra-------  kbf-lease-3-1    staff\n";
         assert_eq!(
-            owned(listing, "kbf-lease-pool-0", 601),
+            owned(listing, "kbf-lease-3-1", 601),
             [
                 Object {
                     kind: "-q",
@@ -155,6 +160,6 @@ mod tests {
                 },
             ]
         );
-        assert!(owned(listing, "kbf-lease-pool-1", 602).is_empty());
+        assert!(owned(listing, "kbf-lease-3-2", 602).is_empty());
     }
 }

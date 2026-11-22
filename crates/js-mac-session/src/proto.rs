@@ -65,7 +65,9 @@ pub struct Call {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
-    /// Lend the lease a free user of the pool, never an administrator.
+    /// Make the lease a new account of its own, `kbf-lease-<term>-<seq>`, with a uid chosen
+    /// from the helper's range and a new home, never an administrator. The account is
+    /// deleted, and shown gone, by [`Request::UserDelete`].
     UserCreate {
         /// The lease, as `<term>.<seq>`.
         lease: String,
@@ -128,9 +130,11 @@ pub enum Request {
         /// The lease, as `<term>.<seq>`.
         lease: String,
     },
-    /// End the lease: reset its pool user for the next lease (or replace it when the reset
-    /// is not clean), or delete the user of a lease from before the pool and sweep what
-    /// it leaves.
+    /// End the lease: delete its account and sweep what it leaves, then show the account
+    /// gone (no record by name or uid, no process, no home, nothing owned by the uid in the
+    /// folders and places swept, no System V IPC object). Only then is the lease over and
+    /// its uid free: a deletion that did not complete is refused, naming the step, and the
+    /// lease stays live with its uid held.
     UserDelete {
         /// The lease, as `<term>.<seq>`.
         lease: String,
@@ -204,14 +208,9 @@ pub enum Request {
     Baseline,
     /// Reboot, after the helper's own scan came back dirty.
     RebootDirty,
-    /// Make the pool's missing users and replace its broken ones; the users the ledger
-    /// holds are kept as they are.
-    PoolCreate,
-    /// The state of the pool.
-    PoolStatus,
     /// Whether the helper holds Full Disk Access ([`crate::full_disk_access`]). Answered
-    /// before the boot reset, as it reads nothing of the pool; a helper from before the
-    /// verb refuses it as unknown.
+    /// before the boot reset, as it reads no lease state; a helper from before the verb
+    /// refuses it as unknown.
     FullDiskAccess,
 }
 
@@ -244,7 +243,7 @@ pub enum Reply {
         /// The nonce the request must carry.
         nonce: String,
     },
-    /// The lease has its user, with this uid.
+    /// The lease has its account, with this uid.
     Created {
         /// The lease user's uid.
         uid: u32,
@@ -263,8 +262,8 @@ pub enum Reply {
     },
     /// No process of the uid remains.
     Killed,
-    /// The user is gone and its state swept; `existed` is false when there was no
-    /// user record left to delete (a repeated or resumed delete).
+    /// The account is gone, its state swept, and shown gone; `existed` is false when there
+    /// was no user record left to delete (a repeated or resumed delete).
     Deleted {
         /// Whether there was a user record to delete.
         existed: bool,
@@ -277,13 +276,20 @@ pub enum Reply {
         /// Whether the GUI session is up.
         ready: bool,
     },
-    /// The boot reset is done: the lease whose session it kept, and the leases whose
-    /// users it deleted.
+    /// The boot reset is done: the lease whose session it kept, the leases whose accounts
+    /// it deleted, and the leases whose accounts it could not show gone.
     Reset {
         /// The lease whose session was kept, as `<term>.<seq>`.
         kept: Option<String>,
-        /// The leases whose users were deleted.
+        /// The leases whose accounts were deleted and shown gone.
         deleted: Vec<String>,
+        /// The leases whose accounts were not shown gone: each stays live in the ledger,
+        /// its uid held, and the delete is repeated by `kill-uid` and `user-delete`. Left
+        /// out of the reply when there is none, so the reply is the text it was before the
+        /// field. A caller from before the field refuses a reply that carries it (`unknown
+        /// field`), as it refuses any boot reset that failed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        held: Vec<String>,
     },
     /// The scan ran: `clean` when nothing was added to or removed from the baseline
     /// and every item could be read. Each list names at most
@@ -309,8 +315,6 @@ pub enum Reply {
         /// The report, as the VMM printed it.
         report: String,
     },
-    /// The state of the pool, after `pool-create` or for `pool-status`.
-    Pool(Box<PoolState>),
     /// Whether the helper holds Full Disk Access.
     FullDiskAccess {
         /// What a listing of the privacy database's directory showed.
@@ -321,26 +325,6 @@ pub enum Reply {
         /// Why.
         reason: String,
     },
-}
-
-/// The state of the pool, as [`Reply::Pool`] carries it: each list holds slot indexes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PoolState {
-    /// How many slots the pool has.
-    pub size: u32,
-    /// The free slots.
-    pub free: Vec<u32>,
-    /// The leased slots, each with its lease as `<term>.<seq>`.
-    pub leased: Vec<(u32, String)>,
-    /// The slots being made, reset or replaced.
-    pub resetting: Vec<u32>,
-    /// The slots whose user could be neither reset nor replaced: lent to no one.
-    pub broken: Vec<u32>,
-    /// The slots never made.
-    pub missing: Vec<u32>,
-    /// What `pool-create` could not do, slot by slot.
-    pub errors: Vec<String>,
 }
 
 /// Sends `message` as one frame, with `fds` attached.

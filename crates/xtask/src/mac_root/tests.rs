@@ -488,7 +488,8 @@ fn a_lease_user_is_refused_at_every_edge() {
             e,
             format!(
                 "refused: the root tests run only on a Mac with no lease users, because they \
-                 make and delete users named kbf-lease-pool-<n> (uids 4300-4320); this Mac has \
+                 make and delete users named kbf-lease-<term>-<seq> or kbf-lease-pool-<n> (uids 4300-4320); \
+                 this Mac has \
                  {name} ({uid})"
             )
         );
@@ -523,6 +524,48 @@ fn only_the_tests_pool_users_are_deleted() {
     .map(|(n, u)| ((*n).to_owned(), *u))
     .collect();
     assert_eq!(to_delete(&users), ["kbf-lease-pool-0", "kbf-lease-pool-1"]);
+}
+
+/// Catches a cleanup that cannot delete the account a helper makes for each lease
+/// (`kbf-lease-<term>-<seq>`), or one that goes beyond it: it names those with a uid of the
+/// tests' made range, at both edges, and no name that only looks like one (a third field, a
+/// number that is empty or not all digits, another prefix, the pool's name without its
+/// number, a name that merely contains one).
+#[test]
+fn the_tests_per_lease_accounts_are_deleted_and_nothing_that_looks_like_one() {
+    let users: Vec<(String, i64)> = [
+        ("kbf-lease-12345-1", 4300),
+        ("kbf-lease-1099511627775-9", 4311),
+        ("kbf-lease-7-2", 4299),
+        ("kbf-lease-7-3", 4312),
+        ("kbf-lease-7-4", 650),
+        ("kbf-lease-pool-5", 4305),
+        ("kbf-lease-pool-", 4306),
+        ("kbf-lease-pool-x", 4306),
+        ("kbf-lease-pool-5-6", 4306),
+        ("kbf-lease-", 4306),
+        ("kbf-lease-7", 4306),
+        ("kbf-lease--7", 4306),
+        ("kbf-lease-7-", 4306),
+        ("kbf-lease-a-7", 4306),
+        ("kbf-lease-7-b", 4306),
+        ("kbf-lease-7-8-9", 4306),
+        ("kbf-lease-+7-8", 4306),
+        ("xkbf-lease-7-8", 4306),
+        ("kbf-vm-7-8", 4306),
+        ("kbf-lease", 4306),
+    ]
+    .iter()
+    .map(|(n, u)| ((*n).to_owned(), *u))
+    .collect();
+    assert_eq!(
+        to_delete(&users),
+        [
+            "kbf-lease-12345-1",
+            "kbf-lease-1099511627775-9",
+            "kbf-lease-pool-5"
+        ]
+    );
 }
 
 /// Catches a target given another target's variables or directories, a missing filter or

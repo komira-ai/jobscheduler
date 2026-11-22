@@ -449,6 +449,74 @@ mod old {
             lease: String,
         },
     }
+
+    /// The boot reset's reply as a caller from before the `held` field reads it: unknown
+    /// fields refused, as this crate's own type does.
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub(super) enum Reply {
+        Reset {
+            kept: Option<String>,
+            deleted: Vec<String>,
+        },
+    }
+}
+
+/// Catches: the field that names the leases whose accounts were not shown gone changing the
+/// reply of a boot reset that has none (a caller from before the field must read every such
+/// reply as it did), or a reply that has some read as if it had none (a caller that does
+/// not know the field refuses it, as it refuses any boot reset that failed, and never takes
+/// a held lease for a deleted one); the new type reads both, and a reply from before the
+/// field as no held lease.
+#[test]
+fn the_held_leases_of_a_reset_reach_only_a_decoder_that_knows_them() {
+    let none = Reply::Reset {
+        kept: Some("1.1".to_owned()),
+        deleted: vec!["1.2".to_owned()],
+        held: Vec::new(),
+    };
+    let text = serde_json::to_string(&none).unwrap();
+    assert_eq!(text, r#"{"reset":{"kept":"1.1","deleted":["1.2"]}}"#);
+    assert_eq!(
+        serde_json::from_str::<old::Reply>(&text).unwrap(),
+        old::Reply::Reset {
+            kept: Some("1.1".to_owned()),
+            deleted: vec!["1.2".to_owned()],
+        }
+    );
+    assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), none);
+
+    let some = Reply::Reset {
+        kept: None,
+        deleted: Vec::new(),
+        held: vec!["1.3".to_owned()],
+    };
+    let text = serde_json::to_string(&some).unwrap();
+    assert_eq!(
+        text,
+        r#"{"reset":{"kept":null,"deleted":[],"held":["1.3"]}}"#
+    );
+    let why = serde_json::from_str::<old::Reply>(&text).unwrap_err();
+    assert!(why.to_string().contains("unknown field `held`"), "{why}");
+    assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), some);
+}
+
+/// Catches: a pool verb that this helper still reads (the pool is gone, so it would answer
+/// with a state that is not there), or whose refusal an older agent cannot tell from any
+/// other: the old agent asks `pool-status` to find its lease's user, and falls back to the
+/// per-job name `kbf-lease-<term>-<seq>` only on a helper that refuses the verb as unknown,
+/// which is the name the account now has.
+#[test]
+fn the_pool_verbs_are_unknown_and_an_old_agent_falls_back_to_the_per_job_name() {
+    for verb in ["pool-status", "pool-create"] {
+        let text = format!(r#"{{"verb":"{verb}"}}"#);
+        let why = serde_json::from_str::<Request>(&text).unwrap_err();
+        assert!(why.to_string().contains("unknown variant"), "{why}");
+        assert!(refusal_of(&why).unknown_to_helper(), "{text}: {why}");
+    }
+    // The pool's reply has no variant either.
+    let state = r#"{"pool":{"size":4,"free":[1],"leased":[],"resetting":[],"broken":[],"missing":[],"errors":[]}}"#;
+    assert!(serde_json::from_str::<Reply>(state).is_err());
 }
 
 /// The refusal a helper's server gives a request it cannot read, as a client sees it.
