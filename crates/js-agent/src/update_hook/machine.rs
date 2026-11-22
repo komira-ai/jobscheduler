@@ -524,6 +524,10 @@ impl StateView for Root {
     fn withdraw_handover(&self) -> Result<(), PortError> {
         self.open().map_or(Ok(()), StateView::withdraw_handover)
     }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        self.open().map_or(Ok(false), StateView::handover_pending)
+    }
 }
 
 /// The unit manager of this platform: on a Mac, [`launch_units`], gated on `token_file`.
@@ -900,5 +904,31 @@ mod tests {
         open.withdraw_handover().unwrap();
         assert!(!file.exists());
         open.withdraw_handover().unwrap();
+    }
+
+    /// Asserts the look at the request through the hook's state root: with no state root it is
+    /// not pending; with one it is pending exactly while the handover file is there; and a root
+    /// whose directory cannot be looked into is an error, not an answer. It catches an agent
+    /// that has taken the request read as one that has not (the wait would run to its bound),
+    /// and an unreadable root read as a taken request.
+    #[test]
+    fn a_pending_request_is_the_handover_file_and_an_unreadable_root_is_an_error() {
+        assert!(!Root::Absent.handover_pending().unwrap());
+
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hook-root-pending");
+        let path = dir.path().join("state");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let open = Root::Open(crate::lifecycle::StateRoot::open(&path).unwrap());
+        assert!(!open.handover_pending().unwrap());
+        open.request_handover().unwrap();
+        assert!(open.handover_pending().unwrap());
+        open.withdraw_handover().unwrap();
+        assert!(!open.handover_pending().unwrap());
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "not a directory").unwrap();
+        assert!(open.handover_pending().is_err());
     }
 }

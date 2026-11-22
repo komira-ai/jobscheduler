@@ -809,3 +809,60 @@ fn a_supervisor_is_known_by_the_lease_its_command_line_names() {
     child.wait().expect("the child ends");
     assert!(!id.supervises(&lease));
 }
+
+/// A child of this process that has ended and is not collected: waited for without taking its
+/// status, so it stays a zombie until the test collects it.
+fn an_ended_child_not_collected() -> (std::process::Child, SupervisorId) {
+    let child = Command::new("true").spawn().expect("spawn true");
+    let pid = rustix::process::Pid::from_child(&child);
+    let options = rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
+    rustix::process::waitid(rustix::process::WaitId::Pid(pid), options).expect("it ended");
+    let id = SupervisorId::of(child.id()).expect("a zombie has a /proc entry");
+    (child, id)
+}
+
+/// Asserts that an ended process of this one's own that nothing waits for is collected: it is
+/// a zombie (not alive) before the call and has no `/proc` entry after it. It catches an
+/// adopted supervisor that stays a zombie until the next restart.
+#[test]
+fn an_ended_supervisor_that_nothing_waits_for_is_collected() {
+    let (_child, id) = an_ended_child_not_collected();
+    assert!(!id.alive());
+    assert_eq!(stat_of(id.pid).map(|(state, _)| state), Some('Z'));
+    id.reap();
+    assert_eq!(stat_of(id.pid), None);
+}
+
+/// Asserts that a zombie of another start time (a reused pid) and a pid that is no `i32` are
+/// left alone: the zombie stays until its own identity collects it. It catches a collect that
+/// takes the status of a process that is not the supervisor.
+#[test]
+fn a_process_that_is_not_the_ended_supervisor_is_not_collected() {
+    let (_child, id) = an_ended_child_not_collected();
+    let reused = SupervisorId {
+        pid: id.pid,
+        start: id.start + 1,
+    };
+    reused.reap();
+    assert_eq!(stat_of(id.pid).map(|(state, _)| state), Some('Z'));
+    SupervisorId {
+        pid: u32::MAX,
+        start: 0,
+    }
+    .reap();
+    id.reap();
+    assert_eq!(stat_of(id.pid), None);
+}
+
+/// Asserts that the handle collects the supervisor it finds ended when it looks at the run.
+#[test]
+fn looking_at_a_run_whose_supervisor_ended_collects_the_supervisor() {
+    let lease = dir("reaped");
+    let (_child, id) = an_ended_child_not_collected();
+    let run = Supervised {
+        id,
+        lease: lease.to_path_buf(),
+    };
+    assert_eq!(run.try_end(), Some(RunEnd::Failed(GONE.to_owned())));
+    assert_eq!(stat_of(id.pid), None);
+}

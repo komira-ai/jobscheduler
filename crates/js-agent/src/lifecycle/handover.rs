@@ -24,6 +24,12 @@
 //! run's member and forwards, takes over each adopted run's wiring from its record, and
 //! removes the wiring and records no run claimed (see the crate's `egress` module).
 //!
+//! The same file also asks for a handover in place: SIGHUP to the main process, which the update
+//! hook sends when both agents list `in-place`, hands the runs over as a stop does and then runs
+//! the program again in the same process instead of exiting (see the crate's `run` module), so the
+//! unit is never stopped. The process that starts that way removes the file at its start, which
+//! is how the hook learns that the request was taken.
+//!
 //! The file is looked at once, when the stop request is taken; one written later changes
 //! nothing for that stop. The agent removes one it finds at its start, after the adoption: a
 //! request is for the process that is running when it is made, never for a later one.
