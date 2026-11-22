@@ -99,7 +99,6 @@ fn run_on(
         read: &read_file,
         write: &write_file,
         list: &list_dirs,
-        systemctl: "systemctl",
         version: &|_| printed.clone(),
         pause: &|_| tree.kernel(&seen),
         mount: &tree.mount,
@@ -274,7 +273,6 @@ fn a_cgroup_that_stays_populated_is_reported() {
         read: &read_file,
         write: &write_file,
         list: &list_dirs,
-        systemctl: "systemctl",
         version: &|_| Ok("systemd 258\n".to_owned()),
         pause: &|_| *pauses.borrow_mut() += 1,
         mount: &tree.mount,
@@ -315,7 +313,6 @@ fn a_cgroup_that_empties_at_the_last_look_is_ended() {
         read: &read,
         write: &write_file,
         list: &list_dirs,
-        systemctl: "systemctl",
         version: &|_| Ok("systemd 258\n".to_owned()),
         pause: &|_| {},
         mount: &tree.mount,
@@ -432,7 +429,6 @@ fn the_system_adapters_work_on_files_and_programs() {
     (system.pause)(std::time::Duration::ZERO);
     assert_eq!(system.mount, Path::new("/sys/fs/cgroup"));
     assert_eq!(system.self_cgroup, Path::new("/proc/self/cgroup"));
-    assert_eq!(system.systemctl, "/usr/bin/systemctl");
     assert_eq!(
         (system.version)(program.to_str().unwrap()).unwrap(),
         "systemd 259 (259.5)\n"
@@ -449,4 +445,35 @@ fn only_the_verb_is_dispatched() {
     let code = dispatch(&args("success"), &mut out, &mut err).expect("the verb is named");
     assert!(same(code, 0));
     assert_eq!((out, err), (Vec::new(), Vec::new()));
+}
+
+/// The program asked for systemd's version is `/usr/bin/systemctl`, or the one `--systemctl`
+/// names. Catches a flag that is parsed and not used, which would read another program's
+/// version.
+#[test]
+fn the_version_is_asked_of_the_program_the_command_line_names() {
+    let tree = Tree::new("start-refused-systemctl");
+    let asked = RefCell::new(Vec::new());
+    let host = Host {
+        read: &read_file,
+        write: &write_file,
+        list: &list_dirs,
+        version: &|program: &str| {
+            asked.borrow_mut().push(program.to_owned());
+            Ok("systemd 257\n".to_owned())
+        },
+        pause: &|_| {},
+        mount: &tree.mount,
+        self_cgroup: &tree.own,
+    };
+    for extra in [&[][..], &["--systemctl", "/opt/bin/systemctl"][..]] {
+        let mut argv = args("resources");
+        argv.extend(extra.iter().map(OsString::from));
+        let code = run(&argv, &mut Vec::new(), &mut Vec::new(), &host);
+        assert!(same(code, 0));
+    }
+    assert_eq!(
+        *asked.borrow(),
+        ["/usr/bin/systemctl", "/opt/bin/systemctl"]
+    );
 }

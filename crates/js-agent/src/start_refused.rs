@@ -1,5 +1,6 @@
-//! `js-agent crun-start-refused --result <word>`: ends the runs a stop or a crash left in the
-//! crun unit's cgroup when systemd refused to start the unit because of them.
+//! `js-agent crun-start-refused --result <word> [--systemctl PATH]`: ends the runs a stop or a
+//! crash left in the crun unit's cgroup when systemd refused to start the unit because of them.
+//! `--systemctl` names the program that prints systemd's version (`/usr/bin/systemctl`).
 //!
 //! The unit (`js-agent-crun.service`) runs it as `ExecStopPost=` with systemd's `SERVICE_RESULT`
 //! as the word, so it runs after every stop of the unit and does nothing unless the result is
@@ -70,6 +71,9 @@ struct Args {
     /// The result of the unit's stop (systemd's `SERVICE_RESULT`).
     #[arg(long)]
     result: String,
+    /// The program that prints systemd's version.
+    #[arg(long, default_value = SYSTEMCTL)]
+    systemctl: String,
 }
 
 /// What the verb reads and writes the host through.
@@ -80,8 +84,6 @@ pub struct Host<'a> {
     pub write: &'a dyn Fn(&Path, &str) -> io::Result<()>,
     /// The names of the directories in a directory, sorted.
     pub list: &'a dyn Fn(&Path) -> io::Result<Vec<String>>,
-    /// The program that prints systemd's version (`/usr/bin/systemctl`).
-    pub systemctl: &'a str,
     /// What a program run with `--version` prints.
     pub version: &'a dyn Fn(&str) -> Result<String, String>,
     /// Waits for the duration.
@@ -100,7 +102,6 @@ impl Host<'static> {
             read: &read_file,
             write: &write_file,
             list: &list_dirs,
-            systemctl: SYSTEMCTL,
             version: &systemctl_version,
             pause: &std::thread::sleep,
             mount: Path::new("/sys/fs/cgroup"),
@@ -143,9 +144,12 @@ fn systemctl_version(program: &str) -> Result<String, String> {
 /// # Errors
 /// The command line has no `--result`, or has a flag the verb does not take.
 pub fn result_word(args: &[OsString]) -> Result<String, String> {
-    Args::try_parse_from(args.iter().skip(1))
-        .map(|args| args.result)
-        .map_err(|why| why.to_string())
+    parse(args).map(|args| args.result)
+}
+
+/// The verb's flags in the command line `args` (the program name, then the verb).
+fn parse(args: &[OsString]) -> Result<Args, String> {
+    Args::try_parse_from(args.iter().skip(1)).map_err(|why| why.to_string())
 }
 
 /// Runs the verb when `args` (the program name, then the verb) name it; `None` for any other
@@ -166,17 +170,17 @@ pub fn run(
     err: &mut dyn Write,
     host: &Host<'_>,
 ) -> ExitCode {
-    let result = match result_word(args) {
-        Ok(result) => result,
+    let args = match parse(args) {
+        Ok(args) => args,
         Err(why) => {
             let _ = write!(err, "{why}");
             return ExitCode::from(2);
         }
     };
-    if result != REFUSED {
+    if args.result != REFUSED {
         return ExitCode::SUCCESS;
     }
-    match end_runs(host) {
+    match end_runs(host, &args.systemctl) {
         Ok(said) => {
             let _ = writeln!(out, "{PREFIX}{said}");
             ExitCode::SUCCESS
@@ -189,8 +193,9 @@ pub fn run(
 }
 
 /// Ends the runs left, or says why there is nothing to end; an error is what could not be done.
-fn end_runs(host: &Host<'_>) -> Result<String, String> {
-    let found = match (host.version)(host.systemctl) {
+/// `systemctl` is the program that prints systemd's version.
+fn end_runs(host: &Host<'_>, systemctl: &str) -> Result<String, String> {
+    let found = match (host.version)(systemctl) {
         Ok(printed) => {
             version(&printed).ok_or("`systemctl --version` printed no version".to_owned())
         }
