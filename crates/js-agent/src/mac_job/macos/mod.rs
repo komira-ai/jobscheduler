@@ -421,7 +421,7 @@ fn start(
 }
 
 /// The audit session the start process wrote, once the job has ended.
-fn read_asid(out: &Path) -> Option<i32> {
+pub(crate) fn read_asid(out: &Path) -> Option<i32> {
     fs::read_to_string(out.join("asid"))
         .ok()?
         .trim()
@@ -493,7 +493,7 @@ fn ended(status: std::process::ExitStatus) -> Ended {
 
 /// Ends every process of the job, in rounds, until a round finds none. A process table that
 /// cannot be read stops the sweep, not clean, and the cleanup after it goes on.
-fn sweep_job(ids: &JobIds) -> Tally {
+pub(crate) fn sweep_job(ids: &JobIds) -> Tally {
     let mut tally = Tally::default();
     for _ in 0..ROUNDS_MAX {
         let procs = match sys::processes(ids.asid.is_some()) {

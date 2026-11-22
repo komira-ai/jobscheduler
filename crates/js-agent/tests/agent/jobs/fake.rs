@@ -713,7 +713,11 @@ impl Machine for FakeMachine {
                 {
                     let Backend::Native(native) = build.backend;
                     let helper = Client::new(native.socket());
-                    let opened = NativeRuntime::open(helper, native.config().clone(), 1);
+                    let opened = NativeRuntime::open(
+                        js_agent::native::Backend::Helper(helper),
+                        native.config().clone(),
+                        1,
+                    );
                     let runtime = opened.map_err(|why| why.to_string())?;
                     self.bundles_seen
                         .lock()

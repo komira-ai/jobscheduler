@@ -77,7 +77,7 @@ pub mod start;
 pub mod sweep;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 
 use std::ffi::OsString;
 use std::io::Write;

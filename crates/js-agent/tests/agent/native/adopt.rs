@@ -46,7 +46,12 @@ fn labels(run_id: &str) -> BTreeMap<String, String> {
 /// reset already (it did not restart: the agent did).
 fn next(fake: &FakeHelper, wall: &Wall, term: u64) -> NativeRuntime {
     fake.refuse("boot-reset", RESET_ALREADY);
-    let opened = NativeRuntime::open(fake.client(), config(fake), term).unwrap();
+    let opened = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(fake),
+        term,
+    )
+    .unwrap();
     opened.with_clock(wall.clock())
 }
 
@@ -69,7 +74,12 @@ fn started_and_dropped(name: &str) -> (FakeHelper, super::Scratch, Wall) {
     let mut rig = Rig::new(name);
     rig.rt = std::mem::replace(
         &mut rig.rt,
-        NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 9).unwrap(),
+        NativeRuntime::open(
+            js_agent::native::Backend::Helper(rig.fake.client()),
+            config(&rig.fake),
+            TERM + 9,
+        )
+        .unwrap(),
     )
     .with_clock(wall.clock());
     let mut spec = rig.spec("r1", native("/bin/true", &[]));
@@ -238,7 +248,12 @@ fn a_restarted_lifecycle_adopts_a_native_job_and_reports_its_result() {
     } = h;
     drop(life);
     fake.refuse("boot-reset", RESET_ALREADY);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM + 1).unwrap();
+    let runtime = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(&fake),
+        TERM + 1,
+    )
+    .unwrap();
     let (mut life, events) = Lifecycle::adopt(
         reopened(&dir),
         Box::new(runtime),

@@ -67,8 +67,12 @@ fn a_stop_terms_first_and_kills_only_after_the_grace() {
 
 /// A runtime over the same fake, to hold the rig's place while its own is rebuilt.
 fn dummy(fake: &FakeHelper) -> js_agent::native::NativeRuntime {
-    js_agent::native::NativeRuntime::open(fake.client(), super::config(fake), super::TERM + 50)
-        .unwrap()
+    js_agent::native::NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        super::config(fake),
+        super::TERM + 50,
+    )
+    .unwrap()
 }
 
 /// Asserts that a job that exits on its `SIGTERM` is never killed: the stop returns once it

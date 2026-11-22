@@ -109,8 +109,16 @@ impl Native {
         runtime_config.read_denies = vec![canonical(&dir, "state"), canonical(&dir, "scratch")];
         adjust(&mut runtime_config);
         let opened = match gated {
-            true => NativeRuntime::open(fake.client(), runtime_config, TERM),
-            false => NativeRuntime::open_ungated(fake.client(), runtime_config, TERM),
+            true => NativeRuntime::open(
+                js_agent::native::Backend::Helper(fake.client()),
+                runtime_config,
+                TERM,
+            ),
+            false => NativeRuntime::open_ungated(
+                js_agent::native::Backend::Helper(fake.client()),
+                runtime_config,
+                TERM,
+            ),
         };
         let mut runtime = opened.unwrap();
         if let Some(hand_over) = hand_over {

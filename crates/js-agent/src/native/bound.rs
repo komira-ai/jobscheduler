@@ -16,13 +16,15 @@
 //! for a stop.
 
 use std::os::fd::BorrowedFd;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use js_mac_session::client::{ClientError, Running};
-use js_mac_session::proto::Session;
+use js_mac_pool::seatbelt::Profile;
+use js_mac_session::client::ClientError;
 
 use super::NativeRuntime;
+use super::one_program::Started;
 use crate::lifecycle::{RunHandle, RunSpec, RuntimeError, label};
 
 impl NativeRuntime {
@@ -33,23 +35,26 @@ impl NativeRuntime {
         Some(Duration::from_millis(wall).saturating_add(self.stop_grace))
     }
 
-    /// Starts the run of `lease` (`argv`, `env`, the four descriptors) through the helper,
-    /// with the deadline of `spec` when it has one and the helper knows deadlines. Returns
-    /// the running process and the deadline the helper holds, in milliseconds.
+    /// Starts the run of `lease` (`profile` over `command`, `env`, the four descriptors, in
+    /// `cwd`) through the backend, with the deadline of `spec` when it has one and the helper
+    /// knows deadlines. Returns the running process and the deadline the helper holds, in
+    /// milliseconds.
     pub(super) fn start(
         &self,
-        (spec, lease): (&RunSpec, &str),
-        (argv, env): (&[String], &[(String, String)]),
+        (spec, lease, cwd): (&RunSpec, &str, &Path),
+        (profile, command, env): (&Profile, &[String], &[(String, String)]),
         fds: [BorrowedFd<'_>; 4],
-    ) -> Result<(Running, Option<u64>), ClientError> {
+    ) -> Result<(Started, Option<u64>), ClientError> {
         let limits = Some(self.limits);
         let deadline = self
             .deadline_of(spec)
             .filter(|_| !self.old_helper.load(Ordering::Relaxed));
+        let places = (cwd, spec.scratch.as_path());
         if let Some(deadline) = deadline {
+            let run = (profile, command);
             match self
-                .helper
-                .run_bounded(lease, (argv, env), fds, limits, deadline)
+                .backend
+                .run(lease, run, env, fds, (limits, Some(deadline)), places)
             {
                 Err(why) if why.unknown_to_helper() => {
                     tracing::warn!(%why, "the helper holds no run deadline: the wall limit alone");
@@ -62,20 +67,20 @@ impl NativeRuntime {
             }
         }
         let running =
-            self.helper
-                .run_limited(lease, argv, env, fds, Session::Background, limits)?;
+            self.backend
+                .run(lease, (profile, command), env, fds, (limits, None), places)?;
         Ok((running, None))
     }
 
-    /// Stops the run `id`: the helper's `stop` with `grace`, or `kill-uid` at once on a helper
-    /// that has no `stop`.
+    /// Stops the run `id`: the backend's `stop` with `grace`, or `kill-uid` at once on a
+    /// helper that has no `stop`.
     pub(super) fn soft_stop(
         &mut self,
         id: &RunHandle,
         grace: Duration,
     ) -> Result<(), RuntimeError> {
         if !self.old_helper.load(Ordering::Relaxed) {
-            match self.helper.stop(&id.0, grace) {
+            match self.backend.stop(&id.0, grace) {
                 Err(why) if why.unknown_to_helper() => {
                     tracing::warn!("the helper has no soft stop ({why}); killing at once");
                     self.old_helper.store(true, Ordering::Relaxed);
@@ -83,7 +88,7 @@ impl NativeRuntime {
                 stopped => return self.ended(stopped, "stop"),
             }
         }
-        let killed = self.helper.kill_uid(&id.0);
+        let killed = self.backend.kill_uid(&id.0);
         self.ended(killed, "kill-uid")
     }
 }

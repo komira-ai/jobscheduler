@@ -203,7 +203,12 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
     };
     adjust(&mut config);
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
-    NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
+    NativeRuntime::open(
+        js_agent::native::Backend::Helper(Client::new(&fixture.socket)),
+        config,
+        term,
+    )
+    .unwrap()
 }
 
 /// A run of `program args` whose scratch directory (the log files) is made here.

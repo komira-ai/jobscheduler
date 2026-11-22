@@ -168,7 +168,12 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
     };
-    NativeRuntime::open_ungated(Client::new(&fixture.socket), config, 1).unwrap()
+    NativeRuntime::open_ungated(
+        js_agent::native::Backend::Helper(Client::new(&fixture.socket)),
+        config,
+        1,
+    )
+    .unwrap()
 }
 
 /// The run of this binary's `child_of_the_runs` in the role `listen`; its scratch directory

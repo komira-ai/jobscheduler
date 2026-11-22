@@ -141,7 +141,12 @@ fn every_level_above_the_ceiling_is_refused_through_the_lifecycle() {
 fn ports_are_refused_on_macos() {
     let dir = Scratch::new("net-ports-rt");
     let fake = FakeHelper::start(&dir);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM).unwrap();
+    let runtime = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(&fake),
+        TERM,
+    )
+    .unwrap();
     let mut body = native("/bin/echo", &[]);
     body.ports = one_port();
     let refused = runtime.check_native(&body).expect_err("a port");
@@ -168,7 +173,12 @@ fn ports_are_refused_on_macos() {
 fn no_ports_is_not_refused() {
     let dir = Scratch::new("net-no-ports-rt");
     let fake = FakeHelper::start(&dir);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM).unwrap();
+    let runtime = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(&fake),
+        TERM,
+    )
+    .unwrap();
     let body = native("/bin/echo", &[]);
     assert!(body.ports.is_empty());
     assert_eq!(runtime.check_native(&body).map_err(|why| why.code), Ok(()));
@@ -200,9 +210,18 @@ fn only_a_ceiling_of_on_needs_the_check_to_open() {
     let fake = FakeHelper::start(&dir);
     let mut cfg = config(&fake);
     cfg.network = Ceiling::Open;
-    assert!(NativeRuntime::open(fake.client(), cfg.clone(), TERM).is_ok());
+    assert!(
+        NativeRuntime::open(
+            js_agent::native::Backend::Helper(fake.client()),
+            cfg.clone(),
+            TERM
+        )
+        .is_ok()
+    );
     cfg.network = Ceiling::On;
-    assert!(NativeRuntime::open(fake.client(), cfg, TERM).is_err());
+    assert!(
+        NativeRuntime::open(js_agent::native::Backend::Helper(fake.client()), cfg, TERM).is_err()
+    );
 }
 
 /// Asserts that a runtime that does not say how it limits a native job's network refuses an
