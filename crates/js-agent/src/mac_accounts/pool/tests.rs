@@ -511,7 +511,7 @@ fn an_account_made_for_a_lend_is_never_ready_to_another_lend() {
     let lines = rig.lines();
     for (lent, job) in [(&first, "job-1"), (&second, "job-2")] {
         let line = format!("lent {} {job}", lent.account.name);
-        assert!(lines.contains(&line), "{line} in {lines:?}");
+        assert!(lines.contains(&line), "a loan is not in the ledger");
     }
     assert!(lines.iter().all(|line| !line.starts_with("gone")));
     assert!(lines.iter().all(|line| !line.starts_with("ready")));

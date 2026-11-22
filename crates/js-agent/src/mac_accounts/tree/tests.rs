@@ -166,7 +166,7 @@ fn a_named_entry_goes_whole_and_an_absent_one_is_fine() {
     for uid in [me(), other()] {
         assert!(
             remove_named(&dir.join("Users/kbf-acct-2"), uid).unwrap(),
-            "{uid}"
+            "the named entry was not removed"
         );
         assert!(!dir.join("Users/kbf-acct-2").exists());
         fs::create_dir_all(dir.join("Users/kbf-acct-2/inner")).unwrap();
