@@ -1,5 +1,5 @@
 //! A small HTTP/1.1 client for a registry: one connection per request over rustls,
-//! every connection to an address the policy allows, redirects followed without
+//! every connection to an address the policy allows, redirects of a GET followed without
 //! credentials, every wait bounded.
 //!
 //! Written over hyper's connection API rather than a client crate: a program that links
@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http_body_util::{BodyExt as _, Empty};
+use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONNECTION, HOST, HeaderName, LOCATION, USER_AGENT};
-use hyper::{Request, Response, Uri};
+use hyper::{Method, Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -270,7 +270,9 @@ impl Http {
         let mut url = url.to_owned();
         let mut headers = headers.to_vec();
         for _ in 0..=MAX_REDIRECTS {
-            let response = self.get_once(&url, &headers, reach).await?;
+            let response = self
+                .once(Method::GET, &url, &headers, Bytes::new(), reach)
+                .await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -291,10 +293,15 @@ impl Http {
         })
     }
 
-    async fn get_once(
+    /// Sends one `method` request for `url` with `headers` and `body`, and returns the
+    /// response whatever its status: a redirect is not followed (a write is never sent on to
+    /// another URL), and `reach` checks where the request goes as [`Http::get`] says.
+    pub(crate) async fn once(
         &self,
+        method: Method,
         url: &str,
         headers: &[(HeaderName, String)],
+        body: Bytes,
         reach: Reach<'_>,
     ) -> Result<Response<Incoming>, Error> {
         // What an error may say of the URL: no query, fragment or userinfo.
@@ -335,7 +342,9 @@ impl Http {
         let mut sender = tokio::time::timeout(self.timeouts.connect, connect)
             .await
             .map_err(|_| transport("connecting timed out".to_owned()))??;
-        let mut request = Request::get(uri.path_and_query().map_or("/", |p| p.as_str()))
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri.path_and_query().map_or("/", |p| p.as_str()))
             .header(
                 HOST,
                 authority.header_or(match reach {
@@ -349,7 +358,7 @@ impl Http {
             request = request.header(name, value);
         }
         let request = request
-            .body(Empty::<Bytes>::new())
+            .body(Full::new(body))
             .map_err(|e| transport(e.to_string()))?;
         tokio::time::timeout(self.timeouts.head, sender.send_request(request))
             .await
@@ -421,7 +430,7 @@ impl Http {
 }
 
 /// Runs the HTTP/1 handshake over `io`, the connection's driver on a task of its own.
-async fn send<I>(io: TokioIo<I>) -> hyper::client::conn::http1::SendRequest<Empty<Bytes>>
+async fn send<I>(io: TokioIo<I>) -> hyper::client::conn::http1::SendRequest<Full<Bytes>>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -443,7 +452,7 @@ where
 /// absolute path, a relative path, or a bare query. The fragment is dropped (it is not
 /// sent), and dot segments are removed. Whether the result is https and where it points
 /// is for the caller's checks.
-fn resolve(from: &str, location: &str) -> Result<String, Error> {
+pub(crate) fn resolve(from: &str, location: &str) -> Result<String, Error> {
     let location = location.split('#').next().unwrap_or_default();
     let uri: Uri = from.parse().map_err(|e| Error::Transport {
         what: text::url(from),

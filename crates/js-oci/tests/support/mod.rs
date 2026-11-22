@@ -1,6 +1,8 @@
 //! A registry in this process: HTTP/1.1 over TLS on a loopback socket, serving the
 //! manifests and blobs a test publishes, with the behaviours the client must survive: a
-//! token challenge, redirects, tampered bytes, stalls.
+//! token challenge, redirects, tampered bytes, stalls. It also takes pushes: a monolithic
+//! blob upload (`POST .../blobs/uploads/`, then `PUT` with `digest=`) and a manifest `PUT`
+//! under a tag, which it then serves under the tag and under its digest.
 //!
 //! A [`Network`] serves the same registries with no socket at all: a client given its
 //! connector reaches each fixture started on it at its port over an in-memory stream, and
@@ -152,6 +154,14 @@ pub struct Behaviour {
     pub trailers: bool,
     /// Read a request for a redirect target (`/cdn/...`) and close without answering.
     pub hang_up_cdn: bool,
+    /// The `Location` of an upload's start: the registry's own upload path if `None`, no
+    /// `Location` at all if empty.
+    pub upload_location: Option<String>,
+    /// Status for every `POST` and `PUT` that passed the token check.
+    pub write_status: Option<u16>,
+    /// The `Docker-Content-Digest` of a stored manifest: the digest of its bytes if `None`,
+    /// no header at all if empty.
+    pub stored_digest: Option<String>,
 }
 
 #[derive(Default)]
@@ -474,6 +484,27 @@ impl Fixture {
         self.state.lock().expect("lock").log.clone()
     }
 
+    /// The manifest the registry holds under `reference` (a tag or a digest), with the media
+    /// type it was stored with.
+    pub fn manifest(&self, reference: &str) -> Option<(String, Vec<u8>)> {
+        self.state
+            .lock()
+            .expect("lock")
+            .manifests
+            .get(reference)
+            .cloned()
+    }
+
+    /// The blob the registry holds as `digest`.
+    pub fn blob(&self, digest: &Digest) -> Option<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("lock")
+            .blobs
+            .get(digest.as_str())
+            .cloned()
+    }
+
     /// The `Accept` header (if any) of every request so far, with the path it was sent to.
     pub fn accepts(&self) -> Vec<(String, Option<String>)> {
         self.state.lock().expect("lock").accepts.clone()
@@ -481,10 +512,13 @@ impl Fixture {
 }
 
 struct Request {
+    method: String,
     path: String,
     authorization: Option<String>,
     accept: Option<String>,
+    content_type: Option<String>,
     host: String,
+    body: Vec<u8>,
 }
 
 async fn read_request<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Option<Request> {
@@ -497,9 +531,12 @@ async fn read_request<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Option
         }
         buf.extend_from_slice(&chunk[..n]);
     }
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let text = String::from_utf8_lossy(&buf[..end]).into_owned();
     let mut lines = text.lines();
-    let path = lines.next()?.split(' ').nth(1)?.to_owned();
+    let mut first = lines.next()?.split(' ');
+    let method = first.next()?.to_owned();
+    let path = first.next()?.to_owned();
     let headers: Vec<(&str, &str)> = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k, v.trim()))
@@ -510,11 +547,25 @@ async fn read_request<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Option
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| (*v).to_owned())
     };
+    let length: usize = header("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut body = buf[end..].to_vec();
+    while body.len() < length {
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
     Some(Request {
+        method,
         path,
         authorization: header("authorization"),
         accept: header("accept"),
+        content_type: header("content-type"),
         host: header("host").unwrap_or_default(),
+        body,
     })
 }
 
@@ -542,11 +593,16 @@ async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     let answer = {
         let mut s = state.lock().expect("lock");
         let auth = request.authorization.clone().unwrap_or_default();
-        s.log
-            .push(format!("{} GET {} [{auth}]", request.host, request.path));
+        s.log.push(format!(
+            "{} {} {} [{auth}]",
+            request.host, request.method, request.path
+        ));
         s.accepts
             .push((request.path.clone(), request.accept.clone()));
-        answer(&s, &request)
+        match answer(&s, &request) {
+            Answer::Store => store(&mut s, &request),
+            other => other,
+        }
     };
     match answer {
         Answer::Bytes(bytes) => {
@@ -559,7 +615,7 @@ async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             std::future::pending::<()>().await;
         }
         Answer::StallHead => std::future::pending::<()>().await,
-        Answer::HangUp => {}
+        Answer::HangUp | Answer::Store => {}
     }
 }
 
@@ -580,6 +636,8 @@ enum Answer {
     HangUp,
     StallBody(Vec<u8>),
     StallHead,
+    /// A `POST` or `PUT` that passed the token check: [`store`] answers it.
+    Store,
 }
 
 fn answer(s: &State, request: &Request) -> Answer {
@@ -637,6 +695,9 @@ fn answer(s: &State, request: &Request) -> Answer {
             return Answer::Bytes(challenge(b, request, s.plain));
         }
     }
+    if request.method == "POST" || request.method == "PUT" {
+        return Answer::Store;
+    }
     if let Some((_, rest)) = path.split_once("/manifests/") {
         return match s.manifests.get(rest) {
             Some((_, bytes)) if b.trailers => Answer::Bytes(chunked(bytes)),
@@ -669,6 +730,57 @@ fn answer(s: &State, request: &Request) -> Answer {
         };
     }
     Answer::Bytes(response(404, &[], b""))
+}
+
+/// The answer to a write that passed the token check: an upload's start, a blob's `PUT`
+/// (stored when its bytes hash to its `digest=`, 400 otherwise) or a manifest's `PUT`
+/// (stored under its reference and its digest).
+fn store(s: &mut State, request: &Request) -> Answer {
+    let b = &s.behaviour;
+    if let Some(status) = b.write_status {
+        return Answer::Bytes(response(status, &[], b"no writes"));
+    }
+    let path = request.path.as_str();
+    if request.method == "POST" && path.ends_with("/blobs/uploads/") {
+        let location = b
+            .upload_location
+            .clone()
+            .unwrap_or_else(|| format!("{path}{}", s.log.len()));
+        let headers: Vec<(&str, String)> = if location.is_empty() {
+            Vec::new()
+        } else {
+            vec![("Location", location)]
+        };
+        return Answer::Bytes(response(202, &headers, b""));
+    }
+    if request.method == "PUT" && path.contains("/blobs/uploads/") {
+        let wanted = path
+            .split_once("digest=")
+            .map(|(_, d)| d.split('&').next().unwrap_or_default().replace("%3A", ":"))
+            .unwrap_or_default();
+        let got = Digest::of(&request.body).to_string();
+        if wanted != got {
+            return Answer::Bytes(response(400, &[], b"digest invalid"));
+        }
+        s.blobs.insert(got, request.body.clone());
+        return Answer::Bytes(response(201, &[], b""));
+    }
+    if let (Some((_, reference)), "PUT") = (path.split_once("/manifests/"), request.method.as_str())
+    {
+        let digest = Digest::of(&request.body).to_string();
+        let media = request.content_type.clone().unwrap_or_default();
+        let stored = b.stored_digest.clone().unwrap_or_else(|| digest.clone());
+        let headers: Vec<(&str, String)> = if stored.is_empty() {
+            Vec::new()
+        } else {
+            vec![("Docker-Content-Digest", stored)]
+        };
+        let entry = (media, request.body.clone());
+        s.manifests.insert(reference.to_owned(), entry.clone());
+        s.manifests.insert(digest, entry);
+        return Answer::Bytes(response(201, &headers, b""));
+    }
+    Answer::Bytes(response(405, &[], b""))
 }
 
 /// The 401 that asks for a token.
