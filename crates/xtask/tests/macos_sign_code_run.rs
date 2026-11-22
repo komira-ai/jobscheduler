@@ -186,7 +186,7 @@ fn run(name: &str, answers: &Answers) -> Ran {
         ok(
             "security",
             &format!(
-                "import {} -P {P12_PASSWORD} -T /usr/bin/codesign -t cert -f pkcs12 -k {keychain}",
+                "import {} -P {P12_PASSWORD} -T /usr/bin/codesign -f pkcs12 -k {keychain}",
                 t("application.p12")
             ),
             "1 identity imported.\n",
@@ -196,6 +196,11 @@ fn run(name: &str, answers: &Answers) -> Ran {
             &format!(
                 "set-key-partition-list -S apple-tool:,apple: -s -k {KEYCHAIN_PASSWORD} {keychain}"
             ),
+            "",
+        ),
+        ok(
+            "security",
+            &format!("list-keychains -d user -s {keychain}"),
             "",
         ),
         rule(
@@ -316,12 +321,13 @@ fn calls_to_the_import(temp: &Path) -> Vec<String> {
         format!("security unlock-keychain -p {KEYCHAIN_PASSWORD} {keychain}"),
         "base64 --decode".to_owned(),
         format!(
-            "security import {} -P {P12_PASSWORD} -T /usr/bin/codesign -t cert -f pkcs12 -k {keychain}",
+            "security import {} -P {P12_PASSWORD} -T /usr/bin/codesign -f pkcs12 -k {keychain}",
             t("application.p12")
         ),
         format!(
             "security set-key-partition-list -S apple-tool:,apple: -s -k {KEYCHAIN_PASSWORD} {keychain}"
         ),
+        format!("security list-keychains -d user -s {keychain}"),
         format!(
             "curl --fail --silent --show-error --proto =https --tlsv1.2 --output {} https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer",
             t("DeveloperIDG2CA.cer")

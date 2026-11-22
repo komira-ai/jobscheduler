@@ -241,6 +241,12 @@ fn signing_problems(text: &str, action: &str) -> Vec<String> {
         "Apple's intermediate is not fetched over HTTPS and held to its SHA-256",
     );
     want(
+        sign_text.contains(
+            "/usr/bin/security list-keychains -d user -s \"$keychain\"\n          /usr/bin/curl ",
+        ),
+        "the job's keychain is not made the user's only keychain before the lookups by name",
+    );
+    want(
         sign_text.contains(&format!("          {ALREADY_EXISTS}\n"))
             && sign_text.contains(IMPORT)
             && sign_text.matches("security import").count() == 2,
@@ -345,7 +351,12 @@ fn the_programs_are_signed_in_a_keyed_job_and_packaged_in_a_keyless_one() {
 fn each_way_of_leaving_the_signing_shape_is_named() {
     let text = read(WORKFLOW);
     let action = read(ACTION);
-    let cases: [(&str, &str, &str); 28] = [
+    let cases: [(&str, &str, &str); 29] = [
+        (
+            "          /usr/bin/security list-keychains -d user -s \"$keychain\"\n",
+            "",
+            "not made the user's only keychain",
+        ),
         (
             // The import as it was on the first signing run on main: the duplicate fails the job.
             "          imported=true\n          /usr/bin/security import \"$RUNNER_TEMP/DeveloperIDG2CA.cer\" -t cert -f x509 -k \"$keychain\" > \"$RUNNER_TEMP/import-intermediate.txt\" 2>&1 || imported=false\n",

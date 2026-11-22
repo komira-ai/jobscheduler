@@ -256,8 +256,11 @@ jobs:
           /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
           /usr/bin/security unlock-keychain -p "$password" "$keychain"
           printf '%s' "$MACOS_APPLICATION_P12" | /usr/bin/base64 --decode > "$RUNNER_TEMP/application.p12"
-          /usr/bin/security import "$RUNNER_TEMP/application.p12" -P "$MACOS_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
+          /usr/bin/security import "$RUNNER_TEMP/application.p12" -P "$MACOS_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12 -k "$keychain"
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          # The job's keychain is the user's only keychain, so a lookup by name (the certificate
+          # of the identity, below) finds the identity there and nowhere else.
+          /usr/bin/security list-keychains -d user -s "$keychain"
           /usr/bin/curl --fail --silent --show-error --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
           echo "$INTERMEDIATE_SHA256  $RUNNER_TEMP/DeveloperIDG2CA.cer" | /usr/bin/shasum -a 256 --check
           # A hosted runner may hold the intermediate already, outside this keychain, and then the
