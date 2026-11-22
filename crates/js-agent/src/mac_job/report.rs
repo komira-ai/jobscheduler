@@ -69,6 +69,8 @@ pub struct Report {
     /// The job's put directories, and what was in each when the job's cleanup ended (the node
     /// stores a committed object and removes it).
     pub put_dirs: Vec<PutUse>,
+    /// The outputs the agent committed to the put ingest, or why it could not, when it was to.
+    pub put: Option<Result<super::put::Committed, String>>,
     /// The trees the job read, where they were mounted, and their release.
     pub trees: Vec<TreeUse>,
     /// The lent account and what its retirement did, when the pool lent one.
@@ -150,6 +152,7 @@ impl Report {
         } else if self.ended == Ended::Exited(0)
             && self.outputs.missing.is_empty()
             && self.put_dirs.iter().all(|dir| dir.error.is_none())
+            && !self.put.as_ref().is_some_and(Result::is_err)
         {
             status::OK
         } else {

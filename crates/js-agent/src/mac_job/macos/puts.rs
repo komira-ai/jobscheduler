@@ -19,7 +19,7 @@ use crate::mac_job::report::PutUse;
 use crate::mac_job::spec::JobFile;
 
 /// The uid and gid the put ingest's node runs as: `--put-user`, a name or `uid:gid`.
-fn node_user(args: &Args) -> Result<(u32, u32), String> {
+pub(super) fn node_user(args: &Args) -> Result<(u32, u32), String> {
     let given = &args.put_user;
     match given.split_once(':') {
         Some((uid, gid)) => match (uid.parse::<u32>(), gid.parse::<u32>()) {

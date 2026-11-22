@@ -223,6 +223,10 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     let trees = trees::release(args, &job, mounted);
     let put_dirs = puts::report(&job, &put_dirs);
     let outputs = files::collect(&layout.work(), &job.outputs, &args.out.join("outputs"));
+    let put = match (&args.put_ingest, job.put_dirs.is_empty()) {
+        (Some(root), true) => Some(commit_outputs(args, root, &job, &outputs)),
+        _ => None,
+    };
     let folder = files::remove_folder(&layout.folder)
         .err()
         .map(|why| format!("{}: {why}", layout.folder.display()));
@@ -254,12 +258,44 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         outputs,
         leftovers,
         put_dirs,
+        put,
         trees,
         account: None,
         spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
+}
+
+/// Commits the outputs the agent copied to `<out>/outputs` to the put ingest at `root`, its
+/// directories given to the node's user as the node needs them: the key's folders its, the
+/// job's put directory root's with the node's group able to write it (the node removes the file
+/// and the directory). An output that was not copied is not committed: the commit fails.
+fn commit_outputs(
+    args: &Args,
+    root: &Path,
+    job: &JobFile,
+    copied: &super::report::Outputs,
+) -> Result<super::put::Committed, String> {
+    if !copied.missing.is_empty() {
+        return Err(format!("outputs missing: {}", copied.missing.join("; ")));
+    }
+    let node = puts::node_user(args)?;
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).map_err(|why| format!("a nonce: {why}"))?;
+    let nonce = hex::encode(nonce);
+    let ready = |dir: &Path| -> std::io::Result<()> {
+        let mut at = root.to_owned();
+        for part in ["cas", "b", job.id.as_str()] {
+            at.push(part);
+            std::os::unix::fs::chown(&at, Some(node.0), Some(node.1))?;
+        }
+        std::os::unix::fs::chown(dir, Some(0), Some(node.1))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o770))
+    };
+    let collected = args.out.join("outputs");
+    super::put::commit(&collected, &job.outputs, root, &job.id, &nonce, &ready)
+        .map_err(|why| why.to_string())
 }
 
 /// Makes `state`, root's and closed to everyone else, when it is missing.

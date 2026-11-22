@@ -21,6 +21,7 @@ fn report() -> Report {
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
         put_dirs: Vec::new(),
+        put: None,
         trees: Vec::new(),
         account: None,
         spawn: "ordinary".to_owned(),
@@ -175,6 +176,32 @@ fn a_put_directory_that_cannot_be_read_is_a_job_failure_and_one_with_entries_is_
     );
     let failed = Report {
         put_dirs: vec![dir(Some("gone"))],
+        ..report()
+    };
+    assert_eq!(failed.status(), status::JOB_FAILED);
+}
+
+/// Asserts that an agent's commit that failed is a job failure, one that was made is not, and
+/// that the key and the digest it reports are written into the report.
+#[test]
+fn a_failed_commit_of_the_outputs_is_a_job_failure_and_a_made_one_is_reported() {
+    let committed = crate::mac_job::put::Committed {
+        key: "cas/b/job/0011/pack".to_owned(),
+        sha256: "ab".repeat(32),
+        bytes: 10_240,
+    };
+    let made = Report {
+        put: Some(Ok(committed)),
+        ..report()
+    };
+    assert_eq!(made.status(), status::OK);
+    let text = serde_json::to_string(&made).unwrap();
+    assert!(
+        text.contains(r#""put":{"Ok":{"key":"cas/b/job/0011/pack","sha256":"abab"#),
+        "{text}"
+    );
+    let failed = Report {
+        put: Some(Err("outputs missing: out: gone".to_owned())),
         ..report()
     };
     assert_eq!(failed.status(), status::JOB_FAILED);

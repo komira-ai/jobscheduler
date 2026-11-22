@@ -59,6 +59,13 @@
 //! commits its objects itself (`pack.part`, renamed to `pack.sha256-<hex>.part`, renamed to
 //! `pack`), and the node stores and removes them. The report lists what is left in each.
 //!
+//! A job that names no `put_dirs`, run with `--put-ingest`, has its declared outputs committed by
+//! the agent instead: after the sweep and the copy of the outputs to `<out>/outputs`, the agent
+//! writes one tar of that copy to `<put ingest>/cas/b/<job id>/<nonce>` ([`put`]), the key's
+//! folders given to `--put-user` and the directory to its group, as the node needs them. The
+//! report's `put` names the key and the digest, or why there is none; a failed commit is a failed
+//! job.
+//!
 //! `--job-inline` takes the job's JSON as the argument itself, for a run that can pass arguments
 //! to the program but no file; the job then fetches its own inputs. `--root` is made (root's,
 //! mode 0755) when it is missing.
@@ -71,6 +78,7 @@
 
 pub mod layout;
 pub mod profile;
+pub mod put;
 pub mod report;
 pub mod spec;
 pub mod start;
@@ -185,7 +193,8 @@ pub struct Args {
     /// The id the provider calls carry as the agent's.
     #[arg(long, default_value = "mac-job")]
     pub agent_id: String,
-    /// The put ingest's root, beneath which the job's put directories lie.
+    /// The put ingest's root, beneath which the job's put directories lie, and to which the
+    /// agent commits the outputs of a job that names none.
     #[arg(long)]
     pub put_ingest: Option<PathBuf>,
     /// The user the put ingest's node runs as: a name, or `uid:gid`.

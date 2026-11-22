@@ -766,6 +766,13 @@ pub const ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/js-agent/src/mac_job/macos/mod.rs",
+        item: "commit_outputs",
+        token: Token::Getrandom,
+        sites: 1,
+        reason: "the nonce of a native Mac job's put directory in the one-shot `__mac-job` mode, which the cell never runs",
+    },
+    Allowed {
+        file: "crates/js-agent/src/mac_job/macos/mod.rs",
         item: "run_as",
         token: Token::InstantNow,
         sites: 1,
