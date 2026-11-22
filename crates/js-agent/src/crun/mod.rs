@@ -212,6 +212,7 @@ mod make;
 mod net;
 #[cfg(test)]
 mod net_tests;
+mod peak;
 mod pull;
 mod remove;
 mod rootfs;
@@ -321,6 +322,9 @@ struct Run {
     fs: Option<rootfs::RunFs>,
     /// The steps of its start, until [`Runtime::start_steps`] takes them.
     marks: make::Marks,
+    /// Its CPU over time, for its peak: sampled from its start (or, for an adopted run, from
+    /// its first poll) each time it is polled ([`peak::PeakWindow`]).
+    peak: peak::PeakWindow,
 }
 
 /// A container runtime over `crun`. Dropping it leaves its runs as they are, their network
@@ -586,7 +590,17 @@ impl CrunRuntime {
             State::Created => return Status::Running,
             State::Ended(exit, _) => return Status::Exited(*exit),
             State::Running { run: running, .. } => match running.try_end() {
-                None => return Status::Running,
+                None => {
+                    let used = std::fs::read_to_string(run.cgroup.dir().join("cpu.stat"));
+                    let used = used
+                        .ok()
+                        .as_deref()
+                        .and_then(crate::usage::parse_usage_usec);
+                    if let Some(used) = used {
+                        run.peak.observe((self.hooks.mono_us)(), used);
+                    }
+                    return Status::Running;
+                }
                 // The drain of the streams is over once the supervisor wrote its record:
                 // what it kept is all the run wrote.
                 Some(end) => (rt.block_on(oci.ended_as(&run.spec, end)), running.tail()),
@@ -803,8 +817,15 @@ impl Runtime for CrunRuntime {
 
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         // The lease's group, so that everything the job ran in it is counted; it is removed
-        // with the container, after this is read.
-        self.runs.get(&id.0).and_then(|run| usage_of(&run.cgroup))
+        // with the container, after this is read. Its peak ends with this reading.
+        let now = (self.hooks.mono_us)();
+        let run = self.runs.get(&id.0)?;
+        let usage = usage_of(&run.cgroup)?;
+        let peak = run.peak.clone().finish(now, usage.cpu_usage_usec);
+        Some(JobUsage {
+            cpu_peak: peak,
+            ..usage
+        })
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

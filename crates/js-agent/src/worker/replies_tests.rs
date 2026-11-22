@@ -108,7 +108,10 @@ fn a_result_is_one_line_of_its_booking_its_sizing_its_usage_and_its_throttled_sh
             throttled_periods: 5585,
         }),
         cpu_pressure_some_usec: Some(9_000_000),
-        cpu_peak: None,
+        cpu_peak: Some(js_agent_wire::CpuPeak {
+            millicores: 20_000,
+            window_usec: 5_000_000,
+        }),
     };
     let event = Event::ResultReady {
         run_id: "k1-344439-0".to_owned(),
@@ -121,7 +124,8 @@ fn a_result_is_one_line_of_its_booking_its_sizing_its_usage_and_its_throttled_sh
             "job: result run=k1-344439-0 cpu_millis=250 memory_bytes=17179869184 \
              class=root.crates.js-sched.js-sched cpu_from=class memory_from=cold \
              cpu_usage_usec=12300000 peak_memory_bytes=3221225472 cpu_periods=5597 \
-             cpu_throttled_periods=5585 throttled_permille=997 cpu_pressure_some_usec=9000000"
+             cpu_throttled_periods=5585 throttled_permille=997 cpu_pressure_some_usec=9000000 \
+             cpu_peak_millicores=20000"
         ]
     );
 }
@@ -153,10 +157,10 @@ fn what_a_result_does_not_know_is_a_dash() {
         [
             "job: result run=r1 cpu_millis=250 memory_bytes=17179869184 class=- cpu_from=- \
              memory_from=- cpu_usage_usec=- peak_memory_bytes=- cpu_periods=- \
-             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=-",
+             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=-",
             "job: result run=r2 cpu_millis=250 memory_bytes=17179869184 class=- cpu_from=- \
              memory_from=- cpu_usage_usec=2 peak_memory_bytes=1 cpu_periods=- \
-             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=-",
+             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=-",
         ]
     );
 }

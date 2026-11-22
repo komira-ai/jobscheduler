@@ -616,3 +616,48 @@ fn an_operators_ceiling_holds_the_lease_and_the_job_reads_it() {
         json!("300000 100000")
     );
 }
+
+/// The monotonic clock of [`a_running_jobs_cpu_peak_is_its_busiest_five_seconds`] alone: each
+/// read is one second after the last.
+fn ticking_mono_us() -> u64 {
+    static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    (TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1) * 1_000_000
+}
+
+/// Proves a job's CPU peak comes from its lease's `cpu.stat` read while it runs: the runtime
+/// takes the CPU it has used at each poll of the running job, at most once a second, and its
+/// usage reports the largest rise over five seconds as millicores. A job that has used 20 CPU
+/// seconds more at each of six polls a second apart reports 20 000 m over 5 s, though its mean
+/// over its life is lower. Catches a peak read from the end alone (the mean), and one that is
+/// not carried in the usage.
+#[test]
+fn a_running_jobs_cpu_peak_is_its_busiest_five_seconds() {
+    let node = Node::new("run-peak");
+    let hooks = js_agent::crun::Hooks {
+        mono_us: ticking_mono_us,
+        ..Node::hooks(LONG, LONG)
+    };
+    let mut runtime = node.open_with(hooks, std::sync::Arc::new(crate::node::NoImages));
+    let id = runtime
+        .create_and_start(&node.spec("r9-hold"))
+        .expect("started");
+    let cgroup = node.cgroup_of(&id.0);
+    for used in 1..=6_u64 {
+        let stat = format!("usage_usec {}\n", used * 20_000_000);
+        std::fs::write(cgroup.join("cpu.stat"), stat).expect("cpu.stat");
+        assert_eq!(runtime.poll(&id), Ok(Status::Running));
+    }
+    runtime.stop(&id, LONG).expect("stopped");
+    runtime.wait_ended(&id);
+    std::fs::write(cgroup.join("memory.peak"), "1024\n").expect("memory.peak");
+    let usage = runtime.usage(&id).expect("a usage");
+    assert_eq!(usage.cpu_usage_usec, 120_000_000);
+    assert_eq!(
+        usage.cpu_peak,
+        Some(js_agent_wire::CpuPeak {
+            millicores: 20_000,
+            window_usec: 5_000_000,
+        })
+    );
+    runtime.remove(&id).expect("removed");
+}

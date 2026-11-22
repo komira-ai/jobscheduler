@@ -77,7 +77,8 @@ pub(super) fn describe(events: &[Event]) -> Vec<String> {
 /// `job: result run=<id> cpu_millis=<booked> memory_bytes=<booked> class=<size class>
 /// cpu_from=<source> memory_from=<source> cpu_usage_usec=<used> peak_memory_bytes=<peak>
 /// cpu_periods=<nr_periods> cpu_throttled_periods=<nr_throttled> throttled_permille=<share>
-/// cpu_pressure_some_usec=<the group's cpu.pressure some total>`
+/// cpu_pressure_some_usec=<the group's cpu.pressure some total>
+/// cpu_peak_millicores=<the most CPU over five seconds>`
 ///
 /// The sources are [`BookedFrom::as_str`](js_agent_wire::BookedFrom::as_str)'s names. The run
 /// id and the class are ids of the wire's grammar, so the line is one line of words.
@@ -124,6 +125,14 @@ fn result_line(run_id: &str, booked: &JobBooking, usage: Option<&JobUsage>) -> S
                 usage
                     .and_then(|u| u.cpu_pressure_some_usec)
                     .map(|p| p.to_string()),
+            ),
+        ),
+        (
+            "cpu_peak_millicores",
+            known(
+                usage
+                    .and_then(|u| u.cpu_peak)
+                    .map(|p| p.millicores.to_string()),
             ),
         ),
     ];

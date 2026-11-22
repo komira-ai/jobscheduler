@@ -357,12 +357,14 @@ impl Node {
         }
     }
 
-    /// The hooks: nothing is given away, the clock reads 5000, the waits are as given, and
-    /// the `/proc` of the node is [`elsewhere`]'s.
+    /// The hooks: nothing is given away, the clock reads 5000, the monotonic clock stands still
+    /// (so a run's CPU has no peak: no time passes), the waits are as given, and the `/proc` of
+    /// the node is [`elsewhere`]'s.
     pub fn hooks(kill_wait: Duration, pull_limit: Duration) -> Hooks {
         Hooks {
             chown: note,
             now_ms: clock,
+            mono_us: || 7_000_000,
             kill_wait,
             pull_limit,
             call_limit: LONG,

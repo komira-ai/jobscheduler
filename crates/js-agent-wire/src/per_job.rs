@@ -469,8 +469,13 @@ pub struct JobUsage {
     pub cpu_throttle: Option<CpuThrottle>,
     /// The time, in microseconds, some task of the job's group waited for a CPU (the `some`
     /// total of the group's `cpu.pressure`). Absent for an agent from before the field and
-    /// when the counter could not be read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// when the counter could not be read. A value that does not decode reads as absent and
+    /// leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
     pub cpu_pressure_some_usec: Option<u64>,
     /// The most CPU the job's group used over any window of its run ([`CpuPeak`]). Absent for
     /// an agent from before the field and when the agent could not measure it; a value that

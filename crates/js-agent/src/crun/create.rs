@@ -406,6 +406,7 @@ impl Maker {
             logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
             fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
             marks,
+            peak: super::peak::PeakWindow::default(),
         })
     }
 
@@ -415,6 +416,8 @@ impl Maker {
     fn start(&self, run: &mut Run) -> Result<(), RuntimeError> {
         let _entered = self.rt.enter();
         let now = (self.hooks.now_ms)();
+        // The lease's group is new: its CPU is 0 when its container starts.
+        run.peak.observe((self.hooks.mono_us)(), 0);
         let started = self
             .oci
             .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))

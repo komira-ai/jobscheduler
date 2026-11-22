@@ -485,6 +485,8 @@ impl CrunRuntime {
             fs: self.run_fs_of(&entry.name),
             // An adopted run was started by an earlier process: no step of its start is here.
             marks: Vec::new(),
+            // Its peak counts from its first poll here: what it used before is not known.
+            peak: super::peak::PeakWindow::default(),
         }
     }
 
