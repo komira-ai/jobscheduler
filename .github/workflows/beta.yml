@@ -102,3 +102,12 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # The native runtime's root tests (crates/js-agent/tests/native_privileged.rs, each
+      # `#[ignore]` by name in the run above): a real account pool over the Mac's directory and
+      # processes, the real supervisor, the run directories given to the slot account, a stop
+      # signalling the job's group, the account retired. They run after the cache is saved, as
+      # they leave root-owned files in target. The VM test needs a signed js-vmm and a base image.
+      - name: Make the native root tests' directory, root-owned and searchable
+        run: sudo install -d -o root -g wheel -m 0755 /private/var/js-native-priv
+      - name: Run the native runtime's root tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_NATIVE_PRIV_ROOT=/private/var/js-native-priv cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm

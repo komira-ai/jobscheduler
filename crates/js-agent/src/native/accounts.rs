@@ -11,7 +11,10 @@
 //! run, so every account a run of an earlier process held is retired by the open.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_mac_session::full_disk_access::FullDiskAccess;
@@ -39,11 +42,12 @@ pub(super) fn job_of(lease: &str) -> String {
 }
 
 /// Opens the pool of `accounts` on this Mac when `held` is [`FullDiskAccess::Granted`], with
-/// no adopted job; `None` otherwise (nothing is made or deleted).
+/// no adopted job; `None` otherwise (nothing is made or deleted). A state directory that is
+/// not there is made first, mode 0700 (the agent's, root's); its parent must exist.
 ///
 /// # Errors
 ///
-/// The pool refused to open, naming why.
+/// The state directory cannot be made, or the pool refused to open, naming why.
 pub(super) fn open(
     accounts: &Accounts,
     held: FullDiskAccess,
@@ -51,6 +55,7 @@ pub(super) fn open(
     if held != FullDiskAccess::Granted {
         return Ok(None);
     }
+    make_state(&accounts.state).map_err(|why| fail(&accounts.state.display(), &why))?;
     let pool = Pool::open(
         &accounts.state,
         accounts.slots,
@@ -59,6 +64,15 @@ pub(super) fn open(
     );
     pool.map(|pool| Some(Arc::new(pool)))
         .map_err(|why: AccountError| fail(&"the account pool", &why))
+}
+
+/// Makes the directory `state`, mode 0700, unless it is there (the pool then checks it).
+fn make_state(state: &Path) -> io::Result<()> {
+    match fs::create_dir(state) {
+        Ok(()) => fs::set_permissions(state, fs::Permissions::from_mode(0o700)),
+        Err(why) if why.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(why) => Err(why),
+    }
 }
 
 /// Retires `account` from `pool` after its run: what it did, or a [`RuntimeError`] that
