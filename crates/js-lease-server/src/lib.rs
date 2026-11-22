@@ -365,8 +365,8 @@
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
-//! over the registered hosts and the pool's catalog, committed before it answers, and placed in
-//! the call when no queued job of its priority or above is ahead; its wall
+//! over the registered hosts and the pool's catalog, committed before it answers, answered queued, and placed by the server's placement
+//! poller, which the call pokes; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
 //! `CordonHost`, `UncordonHost`, `ClearHostTaint`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
 //! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
@@ -799,6 +799,7 @@ pub mod network;
 mod node_rows;
 mod per_job;
 mod platform;
+mod poller;
 mod pool;
 mod program;
 mod rate;

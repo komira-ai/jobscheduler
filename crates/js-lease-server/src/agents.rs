@@ -47,6 +47,7 @@ use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::logs::{self, LogGrants};
 use crate::metrics::Meter;
+use crate::poller::Poller;
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::sched::rank::static_then;
@@ -128,6 +129,8 @@ pub(crate) struct Agents {
     /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
     /// at a time, from its read of the open hosts to its last taint.
     pub(crate) placing: Mutex<()>,
+    /// The placement poller's wake signal ([`crate::poller`]), which each submit pokes.
+    pub(crate) poller: Poller,
     /// The heartbeats held open for a start ([`crate::held_beat`]), which every placement the
     /// pass commits wakes.
     pub(crate) wakes: Wakes,
@@ -346,6 +349,7 @@ fn placed_in(
         duty_period_ms: AtomicU64::new(0),
         meter: OnceLock::new(),
         placing: Mutex::default(),
+        poller: Poller::default(),
         wakes: Wakes::default(),
         dispatching: DispatchState::new(dispatch),
         draining: Drain::default(),
@@ -421,6 +425,7 @@ impl Agents {
             duty_period_ms: AtomicU64::new(0),
             meter: OnceLock::new(),
             placing: Mutex::default(),
+            poller: Poller::default(),
             wakes: Wakes::default(),
             dispatching: DispatchState::new(Default::default()),
             draining: Drain::default(),

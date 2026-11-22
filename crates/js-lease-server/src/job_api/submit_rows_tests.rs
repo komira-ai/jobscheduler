@@ -18,7 +18,7 @@ use crate::job_api::roles::Caller;
 use crate::job_api::writes_rig::{CEILING, id, wire};
 
 /// The job service over `rig`'s tables, admitting over its registry's hosts and the rows, its
-/// submit placing with `rig`'s pass.
+/// submit poking `rig`'s placement poller.
 fn api(rig: &Rig) -> JobApi {
     let admission = JobAdmission::new(
         Admit::default(),
@@ -26,7 +26,7 @@ fn api(rig: &Rig) -> JobApi {
         Arc::clone(&rig.jobs),
     );
     let ctx = Ctx::served(CEILING, Arc::new(admission));
-    let ctx = ctx.placing(Arc::clone(&rig.agents));
+    let ctx = ctx.poking(Arc::clone(&rig.agents));
     JobApi::new(Arc::clone(&rig.jobs), rig.shared.clone()).with_submit(ctx)
 }
 
@@ -43,8 +43,8 @@ async fn submit(api: &JobApi, spec: v1::JobSpec) -> Result<v1::Job, tonic::Statu
 
 /// Asserts the regression: a host says hello to server A, which writes its row; a job
 /// submitted to server B, whose registry holds no host, is admitted (it is refused
-/// `no-capable-host` before the hello, with nothing recorded), and B's pass places it on A's
-/// host in the call. Catches the `no-capable-host` refusal of a submit that reaches an
+/// `no-capable-host` before the hello, with nothing recorded) and answered `queued`, and the
+/// pass of B's placement poller, which the submit poked, places it on A's host. Catches the `no-capable-host` refusal of a submit that reaches an
 /// instance before its hosts said hello there, and a pass that offers only the hosts of its
 /// own registry.
 #[tokio::test]
@@ -62,7 +62,8 @@ async fn a_submit_to_a_server_that_took_no_hello_is_admitted_and_placed_on_the_h
     let made = submit(&api, wire("job-r")).await.unwrap();
     assert_eq!(
         (made.state(), made.host_id.as_str()),
-        (v1::JobState::Placed, "host-a")
+        (v1::JobState::Queued, "")
     );
+    crate::poller::pass(&second.agents).await;
     assert_eq!(second.job(&id("job-r")).state, JobState::Placed);
 }

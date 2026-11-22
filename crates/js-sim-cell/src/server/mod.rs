@@ -360,7 +360,11 @@ impl ServerNode {
             return down();
         };
         let router = up.router_for(request.uri().path());
-        self.runtime.block_on(call(router, request))
+        let answer = self.runtime.block_on(call(router, request));
+        // The server's placement poller runs on a task of its own right after a submit; in
+        // process it runs here, after the call it was poked by, at the same virtual time.
+        self.runtime.block_on(up.server.poll());
+        answer
     }
 
     /// Every cloud of the server, first to last: the elastic pool's, for a server of

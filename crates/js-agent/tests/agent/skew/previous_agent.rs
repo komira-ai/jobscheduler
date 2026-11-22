@@ -6,9 +6,10 @@
 //! the values this server draws afresh (session, job and allocation ids) are put in their
 //! place ([`Minted`]).
 //!
-//! One answer differs by design: this server places a job in the submit call, so the first
-//! heartbeat after it already carries the job's start, where the previous server's carried
-//! none and its next one the start. The previous agent starts a job from any reply, so the
+//! One answer may differ by design: this server's placement poller, which a submit pokes,
+//! places the job at once, so the first heartbeat after the submit can already carry the job's
+//! start, where the previous server's carried none and its next one the start (when the beat
+//! comes before the poller's pass, the answers are the previous server's). The previous agent starts a job from any reply, so the
 //! replay accepts that start ([`take_early_start`]) when it is the only command, the previous
 //! server sent none, and the transcript has the start at a later step; it is compared there
 //! field by field with the start the transcript has, and this server sends it again at that

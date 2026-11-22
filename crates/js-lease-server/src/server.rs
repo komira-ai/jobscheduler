@@ -55,6 +55,8 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    /// The placement poller ([`crate::poller`]), which each submit pokes.
+    polling: Ticking,
     _checking: Checking,
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
@@ -341,6 +343,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         scaler.clone().map(|scaler| (scaler, cached)),
     ));
     let ticking = Ticking(tokio::spawn(ticking));
+    let polling = Ticking(tokio::spawn(poll_loop(shared.clone())));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     gate.set(Phase::Ready);
     Ok(Running {
@@ -355,6 +358,7 @@ pub async fn start_waiting<T: Ticker, C: Ticker, R: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        polling,
         _checking: checking,
         scaler,
         tls,
@@ -612,8 +616,8 @@ pub(crate) fn open(prepared: Prepared, clock: &SharedClock) -> Result<Opened, St
     })
 }
 
-/// The tick task, ended when it is dropped: a server that is dropped must not go on
-/// ticking.
+/// The tick task or the placement poller, ended when it is dropped: a server that is dropped
+/// must not go on ticking or placing.
 struct Ticking(JoinHandle<()>);
 
 impl Drop for Ticking {
@@ -663,6 +667,18 @@ async fn tick_loop<T: Ticker>(
     loop {
         let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
+    }
+}
+
+/// The placement poller of `shared`'s agent side: one pass over the queued jobs after each
+/// poke ([`crate::poller::pass`]), forever; the caller aborts it. A panic in a pass ends it as
+/// one in the tick ends the tick loop: `/healthz` then answers that the server is not ticking,
+/// and the supervisor of the process must restart it.
+async fn poll_loop(shared: Arc<Shared>) {
+    let _alive = Alive(shared.clone());
+    let agents = Arc::clone(shared.agents());
+    loop {
+        crate::poller::pass(&agents).await;
     }
 }
 
@@ -881,8 +897,10 @@ impl Running {
         for serving in others {
             served = served.and(serving.await.map_err(io::Error::other));
         }
-        self.ticking.0.abort();
-        let _ = (&mut self.ticking.0).await;
+        for task in [&mut self.ticking.0, &mut self.polling.0] {
+            task.abort();
+            let _ = task.await;
+        }
         final_tick(&self.shared).await;
         served
     }
