@@ -13,6 +13,9 @@ use super::run::tests::Fake;
 use super::spec::tests::spec;
 use super::{VERB, run_over, spec_path, status};
 
+/// A change to a spec's JSON.
+type Change = fn(&mut serde_json::Value);
+
 /// `js-agent __supervise-native` followed by `rest`.
 fn words(rest: &[&str]) -> Vec<OsString> {
     ["js-agent", VERB]
@@ -75,8 +78,7 @@ fn the_command_line_is_the_spec_alone() {
 /// spec another user could have changed.
 #[test]
 fn a_spec_that_is_wrong_exits_2_and_writes_nothing() {
-    type Change = (&'static str, fn(&mut serde_json::Value));
-    let changes: [Change; 7] = [
+    let changes: [(&str, Change); 7] = [
         ("unknown field", |v| v["extra"] = true.into()),
         ("NUL in program", |v| v["program"] = "/bin/s\0h".into()),
         ("NUL in args", |v| {
