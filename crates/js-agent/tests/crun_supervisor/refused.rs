@@ -25,6 +25,9 @@ use super::unit::{PROBE_DIR, alive, end_all, fifo, heard, idle, packaged, run, s
 /// The cgroup v2 mount.
 const MOUNT: &str = "/sys/fs/cgroup";
 
+/// What every line of the step starts with.
+const PREFIX: &str = "crun-start-refused: ";
+
 /// The lease cgroup the probe makes.
 const LEASE: &str = "lease-refused";
 
@@ -80,12 +83,12 @@ fn probe_of_the_unit_with_a_refused_start() {
     }
 }
 
-/// The lines the step wrote to the unit's output file `log`, with its prefix.
+/// The lines the step wrote to the unit's output file `log`, from its prefix on: the probe's
+/// own libtest line (`test <name> ... `) never ends, so the step's first line follows it.
 fn step_lines(log: &Path) -> String {
-    fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.starts_with("crun-start-refused: "))
+    let text = fs::read_to_string(log).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| line.find(PREFIX).map(|at| &line[at..]))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -157,9 +160,10 @@ fn systemd_runs_the_recovery_step_after_the_stop_and_the_next_start_brings_the_a
         .args(["reset-failed", &unit])
         .status();
 
+    let whole = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         said.contains(LEASE) && said.contains("systemd 259"),
-        "the step said: {said:?}"
+        "the step said: {said:?}; the unit's output: {whole}"
     );
     assert!(
         left.is_empty(),
