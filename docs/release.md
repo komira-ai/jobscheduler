@@ -111,7 +111,7 @@ next push that ships code. Nothing runs on a timer.
    `stable` lists the release and `pkg-upload` has ended; that workflow sets the release as
    hostkeeper's desired version of `js-agent` ([Deploying through
    hostkeeper](#deploying-through-hostkeeper)). Then `deployed` ends the run's turn.
-11. When any job of the run failed (the deploy path, the beta stage), `release-red`
+11. When any job of the run failed (the deploy path, the beta stage, the smoke bundle), `release-red`
    opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
    with the label `main-red`, its body a `Run:`, a `Head:` and up to five `Failing:` lines, or
    comments those lines on the RELEASE-RED issue that is open. When a run that released had no job
@@ -119,19 +119,19 @@ next push that ships code. Nothing runs on a timer.
    run. Both hold `issues: write` and `actions: read` and run `gh` alone.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
-verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
+verify, the apt index jobs, `check-apt`, `smoke-bundle-pack` and `smoke-bundle-check` (plus `attestations: read` for verify), `id-token` and
 `attestations` write for `attest`, `actions: read` and
 `contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
 `actions: read` for `release-red` and `release-green`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
 write jobs (the token is exchanged for the apt publish role), `id-token` write alone for `gamma`
-and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), nothing for
-`cp-deploy-digest`.
+and for `cp-deploy` (the call of docker-swarm-updater's deploy workflow), `packages: write` alone
+for `smoke-bundle-push` (the push of the smoke bundle), nothing for `cp-deploy-digest`.
 The `artifacts` job of release.yml grants `contents: read` and the two writes of `attest`, since a
 called workflow's jobs can hold no more than the calling job grants; each job of artifacts.yml then
 asks for its own. No job
 that holds a write permission or the signing key compiles this repository's code: `gamma`,
-`cp-deploy-digest` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
+`cp-deploy-digest`, `smoke-bundle-push` and the apt read, index and write jobs run the `xtask` binary that `deploy-tool` built in a job with no token and no secret, so
 the build, whose scripts run code from the locked dependency set, never shares a job with the token
 service's address, the cloud role or the key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest`, the apt read and write jobs,
@@ -151,7 +151,9 @@ so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything 
 Linux `js-lease-server` archives carry as they are, and the files the Debian package of `js-agent`
 is made of, which `release deb` compiles in: those under `packaging/js-agent/deb/` (markdown aside)
 and `packaging/js-agent/js-agent.service`, `packaging/js-agent/tmpfiles.conf` and
-`packaging/js-agent/crun_host_setup.sh` (`DEB_DIRS` and `DEB_FILES` in `crates/xtask/src/release.rs`).
+`packaging/js-agent/crun_host_setup.sh` (`DEB_DIRS` and `DEB_FILES` in `crates/xtask/src/release.rs`),
+and the smoke bundle's tree and recipe under `packaging/js-smoke-bundle/` (its README aside), which
+the release publishes ([The smoke bundle](#the-smoke-bundle)).
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -206,7 +208,7 @@ For version `X.Y.Z`:
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
-| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
+| `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints, verifies and pushes darwin bundles) and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
 | `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-lease-server.toml`, as in the x86_64 archive |
 | `js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js` binary for arm64 Linux hosts and `LICENSE` |
@@ -720,6 +722,11 @@ until it is set.
   release, step 6a), so remove them from the required checks, or every pull request waits for a
   check that never reports. A change that breaks the Mac build or package is found by the beta
   stage after the merge and fixed forward.
+- **The smoke bundle's package public, once**: the first release that publishes the smoke bundle
+  creates the package `js/smoke` of the organisation on GitHub's container registry, and GitHub
+  makes a new package private, with no API to change that. In the package's settings, set its
+  visibility to public (once; later pushes keep it). Until then `smoke-bundle-check` fails with the
+  registry's refusal, and the release run is red ([The smoke bundle](#the-smoke-bundle)).
 - **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
   secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
   doing nothing, and the release ends with the GitHub release published and no package in the
@@ -734,6 +741,39 @@ Not proven until the first real run on `main`, and fixed there if it differs:
   before anything is published if they differ);
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
+
+## The smoke bundle
+
+A darwin bundle of one program that prints the host name, the user and uid it runs as, the macOS
+version and its arguments, so that a Mac host is proven with one job
+([docs/runbooks/mac-smoke-bundle.md](runbooks/mac-smoke-bundle.md)). Its tree and its recipe are
+committed under `packaging/js-smoke-bundle/`; the recipe (`bundle.toml`) names the repository and tag
+it is published under and the manifest digest the tree packs to, which
+`cargo test -p xtask --test smoke_bundle` holds it to. Each release publishes it, in three jobs after
+`deploy-tool`, none of which the deploy path waits for:
+
+1. `smoke-bundle-pack` (`contents: read`) checks out the commit and runs `xtask release smoke-bundle
+   pack`, which packs the tree with `js-bundle pack` and the recipe's fields, and fails unless the
+   manifest digest is the recipe's. The layout goes to the next job as the artifact `smoke-bundle`.
+2. `smoke-bundle-push` (`packages: write` alone; no checkout, no build) runs `xtask release
+   smoke-bundle push`, which is `js-bundle push` of that digest to `ghcr.io/komira-ai/js/smoke`
+   under the recipe's tag, with the job's own token given on standard input. The push first asks
+   the registry what the tag names: the same digest ends it with nothing sent (`unchanged`);
+   another digest is refused and the tag left as it is (a new bundle comes with a new tag); no
+   tag yet uploads the config and the layer and puts the manifest under the tag (`pushed`). The
+   package is linked to this repository by the manifest's `org.opencontainers.image.source`
+   annotation.
+3. `smoke-bundle-check` (`contents: read`) runs `xtask release smoke-bundle check`: it pulls the
+   bundle by digest from the registry with the agent's registry client and no credentials, checks
+   it as an agent does (the manifest against the digest, the bundle kind, every blob's length and
+   digest, the config's rules), extracts its layer with the agent's extractor, and compares every
+   entry with the committed tree: paths, kinds, execute bits, link targets and bytes. It fails while
+   the package is not public ([Configuration the project owner must
+   set](#configuration-the-project-owner-must-set)).
+
+A failure of any of them makes the run red (`release-red` counts `smoke-bundle-check`, and so the
+two before it); the release itself is published and deployed as without them. The bundle is not a
+release asset and not in `SHA256SUMS`: its pin is its manifest digest.
 
 ## The gamma step
 

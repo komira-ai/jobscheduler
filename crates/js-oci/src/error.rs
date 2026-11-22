@@ -1,11 +1,11 @@
-//! What can go wrong pulling an artifact.
+//! What can go wrong pulling or publishing an artifact.
 
 use std::net::IpAddr;
 
 use crate::layout::LayoutFault;
 use crate::policy::AddressClass;
 
-/// Why an artifact could not be pulled.
+/// Why an artifact could not be pulled or published.
 ///
 /// Text a registry supplied (a realm, a media type, a digest, a redirect target) is
 /// clipped to 128 bytes and, where it is shown unquoted, escaped; a URL carries no
@@ -179,4 +179,30 @@ pub enum Error {
     /// The sink a blob was written to failed.
     #[error("writing the blob: {0}")]
     Sink(#[source] std::io::Error),
+    /// A tag that the distribution spec does not allow ([`crate::Tag::parse`]).
+    #[error(
+        "{0} is not a tag: ASCII letters, digits, `_`, `.` and `-`, not starting with `.` or `-`, at most 128 characters"
+    )]
+    Tag(String),
+    /// A publish found the tag naming another manifest, and wrote nothing over it.
+    #[error(
+        "the tag {tag} names {held}, not {wanted}: a tag is never moved to another manifest; publish under a new tag"
+    )]
+    TagHeld {
+        /// The tag.
+        tag: String,
+        /// The manifest digest the registry holds under it.
+        held: String,
+        /// The manifest digest the publish was for.
+        wanted: String,
+    },
+    /// A registry's answer to an upload that a publish cannot go on from: no `Location`, a
+    /// `Location` on another host, or a manifest stored as another digest.
+    #[error("{what}: {why}")]
+    Upload {
+        /// The request, as a URL with no query.
+        what: String,
+        /// What was wrong with the answer.
+        why: String,
+    },
 }
