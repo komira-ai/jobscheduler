@@ -110,7 +110,7 @@ with the hardened runtime, a timestamp and the virtualization entitlement, and i
 `vfkit-unsigned` asset is published beside it. For an experiment either is fetched by version and SHA-256 and used as
 is, or the unsigned one is re-signed ad hoc as above, which replaces the maintainers' signature; both were measured to
 run a VM. It is not shipped in any package of ours. If it ever were, it would be built from a pinned source and signed
-and signed like `js-vmm`, with its own line in `entitlements_of` (`crates/xtask/src/macpkg.rs`) and in the signing table
+like `js-vmm`, with its own line in `entitlements_of` (`crates/xtask/src/macpkg.rs`) and in the signing table
 (`crates/xtask/src/release/mac_programs.rs`).
 
 ## Not measured

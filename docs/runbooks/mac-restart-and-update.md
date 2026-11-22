@@ -211,8 +211,9 @@ switched off ("Allow in the Background" off) is not loaded at boot. On a Mac wit
 management a newly installed item is expected to be allowed (the drill below confirms it for
 this package); only a person at the Mac's console can switch it back on (System Settings, General,
 Login Items & Extensions), and only a device management profile (Apple's Managed Login Items
-payload) can allow it in advance. The package is signed; its programs are signed ad hoc by the
-linker ([packaging/js-agent-macos/README.md](../../packaging/js-agent-macos/README.md)).
+payload) can allow it in advance. The package is signed, and a release's programs are signed with
+the team's Developer ID (an unsigned package's are ad hoc, `js-vmm` with its virtualization
+entitlement; [packaging/js-agent-macos/README.md](../../packaging/js-agent-macos/README.md), Signing).
 
 Read the state as root:
 
