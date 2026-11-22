@@ -13,7 +13,8 @@
 //!   provider is called included) and each that failed over (a `capacity` or `quota` refusal,
 //!   after which the next pass tries another offer), and each refusal of a host to a queued
 //!   job by the placement, by host and by the predicate that refused (`cpu`,
-//!   `predicted-memory`, `booked-memory`, `cold-cap`). A start failure or a loss is counted as
+//!   `predicted-memory`, `booked-memory`, `cold-cap`), and each job start a host's agent refused,
+//!   by host and refusal code. A start failure or a loss is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
 //!   [`NoMetrics`], which counts nothing.
@@ -65,6 +66,24 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     /// The placement refused `host` a queued job for `reason`, one of the names of
     /// `js_sched::RefusalKind::as_str`; by default, nothing is counted.
     fn placement_refused(&self, _host: &HostId, _reason: &'static str) {}
+    /// The agent of `host` refused a job's start with the refusal code `code`, or with none
+    /// (`code` is then `none`); by default, nothing is counted. The recorder counts it under
+    /// the code when it is 1 to 64 characters of `a-z`, `0-9` and `-`, and under `other`
+    /// otherwise, so an agent's text never makes a label value of its own choosing.
+    fn start_refused(&self, _host: &HostId, _code: &str) {}
+}
+
+/// The longest refusal code of an agent that is kept as a metric label value.
+const CODE_LABEL_MAX: usize = 64;
+
+/// The label value an agent's refusal `code` is counted under: the code itself when it is 1 to
+/// [`CODE_LABEL_MAX`] characters of `a-z`, `0-9` and `-`, and `other` otherwise.
+fn code_label(code: &str) -> &str {
+    let plain = (1..=CODE_LABEL_MAX).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if plain { code } else { "other" }
 }
 
 /// Counts nothing, and reads a clock that never moves: the sink and the clock of a server
@@ -344,6 +363,7 @@ pub(crate) struct Recorder {
     job_tables: [AtomicU64; 3],
     acquires: Mutex<BTreeMap<String, Acquires>>,
     refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
+    start_refusals: Mutex<BTreeMap<(String, String), u64>>,
 }
 
 impl Default for Recorder {
@@ -358,6 +378,7 @@ impl Default for Recorder {
             job_tables: Default::default(),
             acquires: Mutex::default(),
             refusals: Mutex::default(),
+            start_refusals: Mutex::default(),
         }
     }
 }
@@ -402,9 +423,28 @@ impl MetricsSink for Recorder {
             .or_default();
         *seen += 1;
     }
+
+    fn start_refused(&self, host: &HostId, code: &str) {
+        let mut refused = self
+            .start_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let seen = refused
+            .entry((host.as_str().to_owned(), code_label(code).to_owned()))
+            .or_default();
+        *seen += 1;
+    }
 }
 
 impl Recorder {
+    /// The starts an agent refused, by host and refusal code label.
+    fn start_refusals(&self) -> BTreeMap<(String, String), u64> {
+        self.start_refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// The refusals counted, by host and reason.
     fn refusals(&self) -> BTreeMap<(String, &'static str), u64> {
         self.refusals

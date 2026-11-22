@@ -418,13 +418,17 @@ pub struct JobRecord {
     pub failed_prepares: u32,
     /// The hosts the job is kept off, each with until when: those its failed prepares bar,
     /// written with the count by [`crate::JobStore::fail_prepare_with`], and those that refused
-    /// its start as held, written by [`crate::JobStore::requeue_held`]. Kept while the job is
+    /// its start as held or for capacity, written by [`crate::JobStore::requeue_held`]. Kept while the job is
     /// queued, so the bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
     /// The host of each start of the job that a held host refused (the agent's code
     /// `host-held`) and that sent the job back to the queue, in order: appended by
     /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
     pub held_refusals: Vec<HostId>,
+    /// The host of each start of the job that a host refused for capacity (the agent's code
+    /// `no-capacity`) and that sent the job back to the queue, in order: appended by
+    /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
+    pub capacity_refusals: Vec<HostId>,
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,
