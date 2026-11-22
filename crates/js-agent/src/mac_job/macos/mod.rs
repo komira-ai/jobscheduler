@@ -89,10 +89,10 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         None => String::new(),
     };
     let pool = match &args.accounts {
-        Some(state) => Some(
+        Some(state) => Some(make_private(state).and_then(|()| {
             Pool::open(state, args.ready)
-                .map_err(|why| Stop::Setup(format!("the account pool: {why}")))?,
-        ),
+                .map_err(|why| Stop::Setup(format!("the account pool: {why}")))
+        })?),
         None => None,
     };
     let Some(pool) = pool else {
@@ -205,6 +205,18 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
+}
+
+/// Makes `state`, root's and closed to everyone else, when it is missing.
+fn make_private(state: &Path) -> Result<(), Stop> {
+    if state.exists() {
+        return Ok(());
+    }
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(state)
+        .map_err(|why| Stop::Setup(format!("{}: {why}", state.display())))
 }
 
 /// The pids of `uid`'s live processes.
