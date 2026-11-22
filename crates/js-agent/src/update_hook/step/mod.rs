@@ -18,6 +18,7 @@ mod drain;
 mod held;
 mod helper;
 mod host_setup;
+mod in_place;
 mod pf;
 mod prepare;
 mod resume;

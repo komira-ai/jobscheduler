@@ -75,7 +75,7 @@ pub(crate) fn login(cli: &Cli) -> Result<Login, Failure> {
 ///
 /// [`Failure::Usage`] naming `--token-file` when there is neither, and the path of the
 /// credential file when it is there and cannot be used.
-fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
+pub(crate) fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
     if let Some(token_file) = &cli.token_file {
         return Ok(token_file.clone());
     }

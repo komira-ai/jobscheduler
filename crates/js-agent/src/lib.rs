@@ -333,6 +333,7 @@ pub mod host_ports;
 mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
+pub mod in_place;
 pub mod integrity;
 mod jobs;
 pub mod leak_scan;
@@ -353,7 +354,10 @@ mod registry_credentials;
 mod run;
 mod session;
 mod signals;
+#[cfg(target_os = "linux")]
+pub mod start_refused;
 mod system;
+pub mod systemd;
 #[cfg(test)]
 mod test_tracing;
 mod transport;
@@ -549,6 +553,10 @@ pub fn main_with(
         };
         return gpu_dropin::run(&args, out, err, &host);
     }
+    #[cfg(target_os = "linux")]
+    if let Some(code) = start_refused::dispatch(&args, out, err) {
+        return code;
+    }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
     // step of another program, and installs no signal handler. hostkeeper runs an update step as
     // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
@@ -566,7 +574,7 @@ pub fn main_with(
     {
         return cordon::run_system(install, &args, out, err);
     }
-    match install() {
+    match install().and_then(|sleeper| sleeper.replace_on_hangup().map(|()| sleeper)) {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {
             let services = &mut Services {
@@ -592,22 +600,48 @@ pub fn main_with(
     }
 }
 
-/// Runs the agent on `args` (the program name first) until it is stopped or refused.
+/// Runs the agent on `args` (the program name first) until it is stopped or refused. After a
+/// handover in place (see `in_place`) it runs `args[0]` again over this process.
 pub fn run_with(
     args: Vec<OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> ExitCode {
-    let result = execute(args, err, services);
-    finish(result, out, err)
+    run_with_exec(args, out, err, services, &in_place::exec)
+}
+
+/// [`run_with`], with the program that runs the command line again after a handover in place
+/// given (it returns only when it failed), so a test can end the run in that way.
+pub fn run_with_exec(
+    args: Vec<OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: &mut Services<'_>,
+    exec: &dyn Fn(&[OsString]) -> std::io::Error,
+) -> ExitCode {
+    let original = args.clone();
+    match execute(args, err, services) {
+        Ok(Ended::Replaced) if services.sleeper.ready_to_run_again() => {
+            in_place::run_again(&original, exec, err)
+        }
+        result => finish(result.map(|_| ()), out, err),
+    }
+}
+
+/// How the agent ended without a failure.
+enum Ended {
+    /// A stop request: the host announced it, or drained.
+    Stopped,
+    /// A replace request handed the runs over: the command line runs again over this process.
+    Replaced,
 }
 
 fn execute(
     args: Vec<OsString>,
     err: &mut dyn Write,
     services: &mut Services<'_>,
-) -> Result<(), Failure> {
+) -> Result<Ended, Failure> {
     // `--flags-file PATH` is replaced by the file's words before anything else reads the
     // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
     let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
@@ -636,10 +670,8 @@ fn execute(
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    // The bundle flags are checked before the host registers, so a store that cannot work
-    // stops the agent now and not at the first job.
+    // Checked before registering, so a bad store stops the agent now; a Mac mounts its volume first.
     let host = &services.bundle;
-    // A Mac's scratch volume is mounted first: the bundle store is made on it and checked there.
     platform::mount_scratch(&cli, services)?;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
     let bundle = bundle.map(|settings| settings.with_credentials(credentials.clone()));
@@ -937,7 +969,8 @@ fn execute(
         exit
     });
     match exit {
-        Exit::Stopped => Ok(()),
+        Exit::Stopped => Ok(Ended::Stopped),
+        Exit::Replaced => Ok(Ended::Replaced),
         Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         Exit::Failed(why) => Err(Failure::Worker(why)),
     }

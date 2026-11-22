@@ -17,7 +17,7 @@ use js_agent::CommandRunner;
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::step::{self, Env, LookFn, PathFacts, TokenFacts, TokenFn};
 use js_agent::update_hook::{
-    Clock, Cordoned, DirStat, Done, Gate, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
+    Clock, Cordoned, DirStat, Done, HostReading, LAUNCHCTL, Lease, LeaseError, Link, Manager,
     Params, PortError, Ports, Record, SYSTEMCTL, StateView, Uncordoned, UnitState, Units,
     UpdateInfo, agent_in,
 };
@@ -61,58 +61,11 @@ pub const PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>x</string></d
 /// See [`PLIST_TEXT`].
 pub const NEW_PLIST_TEXT: &str = "<plist><dict><key>Label</key><string>y</string></dict></plist>\n";
 
-/// A state directory that is as the hook requires, whoever runs the test.
-pub fn as_root(_: &Path, _: BorrowedFd<'_>) -> io::Result<DirStat> {
-    Ok(DirStat {
-        is_symlink: false,
-        is_dir: true,
-        uid: 0,
-        gid: 0,
-        mode: 0o700,
-    })
-}
-
-/// The kill points: counts them, and panics at the one it is armed for (a process killed
-/// there, from the point of view of the step: nothing after it runs).
-#[derive(Default)]
-pub struct Kill {
-    points: Cell<u32>,
-    at: Cell<Option<u32>>,
-}
-
-impl Kill {
-    pub fn points(&self) -> u32 {
-        self.points.get()
-    }
-
-    /// Counts from zero again and dies at the `n`th point of the next run.
-    pub fn arm(&self, n: u32) {
-        self.points.set(0);
-        self.at.set(Some(n));
-    }
-
-    /// Counts from zero again and never dies.
-    pub fn disarm(&self) {
-        self.points.set(0);
-        self.at.set(None);
-    }
-}
-
-impl Gate for Kill {
-    fn point(&self) {
-        let n = self.points.get() + 1;
-        self.points.set(n);
-        assert!(self.at.get() != Some(n), "killed at kill point {n}");
-    }
-}
-
-struct Shared(Rc<Kill>);
-
-impl Gate for Shared {
-    fn point(&self) {
-        self.0.point();
-    }
-}
+mod kill;
+mod systemctl;
+use kill::Shared;
+pub use kill::{Kill, as_root};
+pub use systemctl::{OnSignal, SYSTEMD_257, SYSTEMD_258};
 
 /// The tree of one test.
 pub struct Rig {
@@ -520,6 +473,10 @@ pub struct Spy<'a> {
     /// What `systemctl show --property=TasksCurrent` prints for the next calls, in order; once
     /// they are used up it prints `0`.
     pub tasks: RefCell<VecDeque<Result<String, String>>>,
+    /// What `systemctl --version` prints; [`SYSTEMD_257`] by default.
+    pub systemd: RefCell<Result<String, String>>,
+    /// What the agent does when the signal of the in-place request reaches it.
+    pub on_signal: Cell<OnSignal>,
     record_path: PathBuf,
     /// The Mac the host setup's commands and looks go to, once [`Spy::on_mac`] names one; until
     /// then a look is at the file system as it is.
@@ -603,6 +560,8 @@ impl<'a> Spy<'a> {
                 }
             }),
             tasks: RefCell::new(VecDeque::new()),
+            systemd: RefCell::new(Ok(SYSTEMD_257.to_owned())),
+            on_signal: Cell::new(OnSignal::Takes),
             world: &rig.world,
             kill: &rig.kill,
             state: rig.world.state_root(),
@@ -896,6 +855,11 @@ impl StateView for Spy<'_> {
         self.port_check("withdraw")?;
         StateView::withdraw_handover(&self.state)
     }
+
+    fn handover_pending(&self) -> Result<bool, PortError> {
+        self.port_check("pending")?;
+        StateView::handover_pending(&self.state)
+    }
 }
 
 impl Clock for Spy<'_> {
@@ -947,11 +911,7 @@ impl CommandRunner for Spy<'_> {
             return Ok("installed com.apple/com.komira.js.pool for uids 600-699\n".to_owned());
         }
         if program == SYSTEMCTL {
-            return self
-                .tasks
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or_else(|| Ok("0\n".to_owned()));
+            return self.systemctl(args);
         }
         let previous = self.previous_version.borrow();
         if let (Some(answer), true) = (

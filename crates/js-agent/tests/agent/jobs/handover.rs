@@ -602,3 +602,5 @@ fn a_park_asked_of_a_worker_stuck_in_a_call_answers_busy_and_parks_once_it_is_ou
     assert_eq!(worker.snapshot().held[0].state, HeldState::Running);
     assert_eq!(worker.park(ANSWER), Parked::Parked);
 }
+
+mod in_place;

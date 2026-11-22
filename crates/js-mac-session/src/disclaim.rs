@@ -293,6 +293,14 @@ pub fn exec(program: &OsStr, args: &[OsString]) -> io::Error {
     }
 }
 
+/// Executes `program` with `args` in this process's place, in its environment, as `execvp`
+/// does: off macOS there is no responsibility to disclaim. Returns only when it could not.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn exec(program: &OsStr, args: &[OsString]) -> io::Error {
+    Command::new(program).args(args).exec()
+}
+
 /// The pid of the process that `pid` answers to for the privacy controls: its own pid
 /// when its starter disclaimed the responsibility, or launchd started it.
 ///

@@ -279,6 +279,20 @@ impl World {
         Ok(true)
     }
 
+    /// The agent of a unit that stays active runs its program again in place: it says hello as
+    /// a new session, with the version of the release the link names.
+    ///
+    /// # Errors
+    /// The link names a release the params never did, or the server's file cannot be written.
+    pub fn hello_again(&self) -> Result<(), PortError> {
+        match self.linked_version()? {
+            Some(version) => self
+                .hello(&version)
+                .map_err(|why| PortError::Io(why.to_string())),
+            None => Ok(()),
+        }
+    }
+
     /// The server restarts: it forgets the host's session, and the next hello makes it live
     /// again. Until then the host is `awaiting` (epoch 0, no session) and a cordon, an uncordon
     /// and a reading work on it. The cordon and the taint were saved with the host's binding and

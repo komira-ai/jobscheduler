@@ -20,8 +20,6 @@ const GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
 const GPU_UNIT_NAME: &str = "js-agent-crun-gpu.service";
 /// Where the setup script installs the crun unit, which the GPU oneshot extends.
 const INSTALLED_UNIT: &str = "/etc/systemd/system/js-agent-crun.service";
-/// Where the setup script installs the tmpfiles file, which the unit's `ExecStartPre` reads.
-const INSTALLED_TMPFILES: &str = "/etc/tmpfiles.d/js-agent-crun.conf";
 
 fn read(path: &str) -> String {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
@@ -241,7 +239,7 @@ fn the_unit_sets_only_the_settings_listed_here() {
         ("Service", "Delegate"),
         ("Service", "DelegateSubgroup"),
         ("Service", "ExecStart"),
-        ("Service", "ExecStartPre"),
+        ("Service", "ExecStopPost"),
         ("Service", "KillMode"),
         ("Service", "Restart"),
         ("Service", "RestartSec"),
@@ -259,17 +257,57 @@ fn the_unit_sets_only_the_settings_listed_here() {
     assert_eq!(found, want);
 }
 
-/// The unit makes its directories from the file the setup script installs, before every start, and
-/// waits for the scratch disk by its mount, `/var/lib/js-agent/scratch`, the parent of the
-/// `--scratch-root` flag's path (`.../scratch/runs`).
+/// The unit runs no tmpfiles step at start (the agent makes its state root and scratch root
+/// itself), so no process is spawned into its cgroup before the agent's own, and it waits for the
+/// scratch disk by its mount, `/var/lib/js-agent/scratch`, the parent of the `--scratch-root`
+/// flag's path (`.../scratch/runs`).
+///
+/// Catches an `ExecStartPre` that runs `systemd-tmpfiles` again, which systemd 258 or newer
+/// refuses to spawn while runs are left in the unit's cgroup.
 #[test]
-fn the_unit_makes_its_directories_and_waits_for_the_scratch_disk() {
-    assert_eq!(
-        value("ExecStartPre"),
-        format!("+systemd-tmpfiles --create {INSTALLED_TMPFILES}")
+fn the_unit_runs_no_tmpfiles_step_and_waits_for_the_scratch_disk() {
+    assert!(
+        !settings().iter().any(|(_, key, _)| key == "ExecStartPre"),
+        "an ExecStartPre in the unit"
+    );
+    assert!(
+        !code(&read(UNIT))
+            .iter()
+            .any(|line| line.contains("tmpfiles"))
     );
     assert_eq!(value("RequiresMountsFor"), js_elastic::SCRATCH_ROOT);
     assert_eq!(value("ConditionPathIsMountPoint"), js_elastic::SCRATCH_ROOT);
+}
+
+/// After every stop the unit runs the agent's recovery of a refused start, with the stop's result
+/// as the word; the program is the one `ExecStart` runs, and the agent's own verb accepts the
+/// command line (with `resources` for the result systemd fills in).
+///
+/// Catches a unit whose `ExecStopPost` names another program than `ExecStart`'s, drops the result,
+/// or passes a flag the verb does not take.
+#[test]
+fn the_unit_recovers_a_refused_start_with_a_command_line_the_agent_accepts() {
+    let line = value("ExecStopPost");
+    let program = value("ExecStart")
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_eq!(program, "/opt/js-agent/link/current/js-agent");
+    assert_eq!(
+        line,
+        format!("{program} crun-start-refused --result ${{SERVICE_RESULT}}")
+    );
+    let words: Vec<std::ffi::OsString> = line
+        .replace("${SERVICE_RESULT}", "resources")
+        .split_whitespace()
+        .map(Into::into)
+        .collect();
+    assert_eq!(words[1], js_agent::start_refused::VERB);
+    assert_eq!(
+        js_agent::start_refused::result_word(&words),
+        Ok("resources".to_owned())
+    );
 }
 
 /// The modes of the directories are the ones the agent and the job's ids need: the scratch root is
