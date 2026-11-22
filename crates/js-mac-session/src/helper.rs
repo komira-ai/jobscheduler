@@ -9,8 +9,9 @@
 //! Rules every verb keeps:
 //! - A lease id is parsed strictly and is used once.
 //! - A lease's user is a pool user, `kbf-lease-pool-<slot>`, lent for the lease and
-//!   reset (or replaced) when it ends ([`pool`]); or, for a lease a release before the
-//!   pool created, its own `kbf-lease-<term>-<seq>`, deleted when it ends.
+//!   reset in place when it ends ([`pool`]; the pool's users are permanent, never
+//!   deleted); or, for a lease a release before the pool created, its own
+//!   `kbf-lease-<term>-<seq>`, deleted when it ends (which macOS 27 refuses root).
 //! - The uid comes from the ledger, never from a lookup, and must be in the lease
 //!   range; a uid outside it is never touched.
 //! - `user-create` is refused for a lease id used before (so a grant is single-use),
@@ -40,10 +41,12 @@
 //!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
 //!   user starts after it returns. An outcome that does not hold after the last attempt
 //!   fails, naming what remains, and the lease stays live: its uid is quarantined.
-//! - `user-delete` of a pool user's lease records the lease over and resets the user;
-//!   a reset that is not clean replaces it, and a replacement that fails breaks the slot
-//!   ([`pool`]). The deletion of a user (a lease's from before the pool, or a pool user
-//!   being replaced) refuses while any process of the uid remains. It first asks for the
+//! - `user-delete` of a pool user's lease records the lease over and resets the user in
+//!   place (its home and per-user folder emptied and kept, its record's pool-owned
+//!   attributes set back, its membership of `admin` removed); a reset that is not clean
+//!   breaks the slot, naming what blocked it ([`pool`]). Nothing of a pool user is
+//!   deleted. The deletion of a lease's user from before the pool refuses while any
+//!   process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
 //!   any answer that is not such an entry; then it looks (and boots out the domains),
@@ -144,6 +147,8 @@ const NAMED: usize = 8;
 pub struct PrintAnswer {
     /// Its exit code; `None` when a signal ended it.
     pub code: Option<i32>,
+    /// What it wrote to standard output (the domain, as launchd prints it).
+    pub stdout: String,
     /// What it wrote to standard error.
     pub stderr: String,
 }
@@ -157,10 +162,12 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The directory could not be asked.
     fn uid_taken(&self, uid: u32) -> io::Result<bool>;
-    /// Makes the user's home folder ([`make_home`] on a real host).
+    /// Makes the user's home folder, or takes the one that is there ([`make_home`] on a
+    /// real host): owned by the user, mode 0700, with no flag, ACL or extended attribute
+    /// of what the last user set on it. The caller has emptied it.
     ///
     /// # Errors
-    /// The folder exists or could not be made.
+    /// The folder could not be made, or an existing one could not be given back.
     fn make_home(&self, homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()>;
     /// Creates the user record.
     ///
@@ -168,14 +175,38 @@ pub trait Host: Send + Sync {
     /// The record could not be created.
     fn create_user(&self, user: &NewUser) -> io::Result<()>;
     /// Deletes the user record `name` (and any group membership it has); `false` when
-    /// there is none.
+    /// there is none. Only a lease user from before the pool is ever deleted: the pool's
+    /// users are permanent, and macOS refuses root the deletion of a local user record
+    /// unless the helper holds Full Disk Access.
     ///
     /// # Errors
     /// The record could not be deleted.
     fn delete_user(&self, name: &str) -> io::Result<bool>;
-    /// How `launchctl print <domain>` ended: its exit code and its standard error. The
-    /// teardown reads exit 0 as a domain launchd has and any other exit status as one it
-    /// does not print; the readiness checks take only launchd's not-found answer as
+    /// The attributes of the record `name` that the pool owns ([`UserRecord`]); `None`
+    /// when there is no such record.
+    ///
+    /// # Errors
+    /// The directory could not be asked.
+    fn user_record(&self, name: &str) -> io::Result<Option<UserRecord>>;
+    /// Sets the pool-owned attributes of the existing record `user.name` that macOS lets
+    /// root write on an existing account to what [`Host::create_user`] gives a new one:
+    /// its primary group, shell and hidden flag. Its uid, home path, real name, password
+    /// and membership of `admin` are left alone (macOS 27 refuses root a write of an
+    /// existing account's home attribute; the caller compares the uid and home first).
+    ///
+    /// # Errors
+    /// The record could not be found or an attribute could not be set.
+    fn restore_user(&self, user: &NewUser) -> io::Result<()>;
+    /// Puts the user `name` in the `admin` group (`admin`) or takes it out. Taking out a
+    /// user that is not a member is not an error; whether it worked is read back from
+    /// the directory.
+    ///
+    /// # Errors
+    /// The user could not be found or added (or, on a host that can tell, removed).
+    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()>;
+    /// How `launchctl print <domain>` ended: its exit code and its standard output
+    /// and error. The teardown reads any exit status but 0, and an exit 0 that printed a
+    /// domain holding nothing, as a domain that is gone; the readiness checks take only launchd's not-found answer as
     /// absence.
     ///
     /// # Errors
@@ -305,6 +336,25 @@ pub struct LiveProcess {
     pub command: String,
 }
 
+/// The login shell of every pool user.
+pub const SHELL: &str = "/bin/zsh";
+
+/// The attributes of a user record that the pool owns: what `pool-create` makes and
+/// every reset sets back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRecord {
+    /// The uid.
+    pub uid: u32,
+    /// The primary group.
+    pub gid: u32,
+    /// The home folder's path.
+    pub home: PathBuf,
+    /// Whether the record is kept off the login window's list of users.
+    pub hidden: bool,
+    /// The login shell.
+    pub shell: String,
+}
+
 /// A user record to create.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewUser {
@@ -339,8 +389,9 @@ pub struct Settings {
     /// [`Self::user_folders`].
     pub sweep: SweepPlan,
     /// Where macOS keeps each user's `DARWIN_USER_DIR` entry (`/private/var/folders`): the
-    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is removed whole by
-    /// `user-delete`.
+    /// uid's own entry here, named by its `DARWIN_USER_DIR`, is emptied and kept (a pool
+    /// user's reset) or, for a lease from before the pool, removed whole by `user-delete`
+    /// (emptied and kept where the system placed it, `sunlnk`).
     pub user_folders: PathBuf,
     /// The gate's grant keys; without them no administrator is ever made.
     pub grant_keys: Option<GrantKeys>,
@@ -490,7 +541,7 @@ impl Helper {
     }
 
     /// `user-create <lease> [grant]`: the lease takes a free pool user (an administrator,
-    /// replaced for the lease, with a valid grant), whose home folder is empty and only it
+    /// added to `admin` for the lease, with a valid grant), whose home folder is empty and only it
     /// can enter. Returns its uid.
     ///
     /// # Errors
@@ -687,7 +738,9 @@ const NO_DOMAIN_CODES: [i32; 2] = [112, 113];
 /// (`session-ready`, `role-session-ready`, `role-run`, the session switch's rest at the
 /// VM user): whether launchd has the domain. A "no" there has effects (the switch logs
 /// the VM user in again), so it is read strictly; the teardown reads `launchctl print`
-/// by whether it printed, in `teardown`. Exit 0 is a domain that exists; only launchd's answer for a missing domain
+/// by whether it printed a domain that holds something, in `teardown`. Exit 0 is a
+/// domain that exists (the readiness checks ask for a `gui/<uid>` domain, which launchd does not make by printing it, so an empty print is
+/// not read there); only launchd's answer for a missing domain
 /// (an exit status in [`NO_DOMAIN_CODES`] together with [`NO_DOMAIN_TEXT`] on standard
 /// error, never the words alone) is absence. Any other failure (refused, another exit,
 /// killed, launchd not answering) is an error, so it is never read as a domain that is
@@ -729,20 +782,28 @@ fn pool_reply(status: PoolStatus) -> Reply {
     }))
 }
 
-/// Makes the home folder `name` in `homes`: new (an existing one is an error), owned
-/// by the user, mode 0700. Never through a link. `homes` is root's to write, so the
-/// directory just made is still the one opened.
+/// Makes the home folder `name` in `homes` if it is not there, and gives it (made now or
+/// found) to the user: owner `uid`, group `gid`, mode 0700, and the user flags, ACL and
+/// extended attributes a lease set on it taken off (the system's own, which it protects,
+/// stay). An existing home is kept, never removed: macOS refuses the removal of a folder
+/// of `/Users` to a process without Full Disk Access, so the pool's homes are emptied
+/// and kept (the caller empties it first). Never through a link. `homes` is root's to
+/// write, so the directory just made is still the one opened.
 ///
 /// # Errors
-/// `homes` cannot be opened, the folder exists, or it could not be given away.
+/// `homes` cannot be opened, the folder could not be made or is not a directory, or it
+/// could not be given away or scrubbed.
 pub fn make_home(homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let parent = rustix::fs::openat(CWD, homes, flags, Mode::empty())?;
-    rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700))?;
+    match rustix::fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(why) => return Err(why.into()),
+    }
     let home = rustix::fs::openat(&parent, name, flags, Mode::empty())?;
     rustix::fs::fchown(&home, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))?;
     rustix::fs::fchmod(&home, Mode::from_raw_mode(0o700))?;
-    Ok(())
+    crate::sweep::scrub_home(&home)
 }
 
 #[cfg(test)]

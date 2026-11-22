@@ -280,6 +280,20 @@ fn verify_without_start_issued_is_state_invalid() {
     assert_eq!(rig.store.probed.get(), 0);
 }
 
+/// Asserts that a link whose target is the staged release spelt through a symbolic link on the
+/// way (macOS `/var` against `/private/var`) is on the staged release: verify succeeds.
+///
+/// Catches a comparison of the target with the staged path by name, which ends `verify`
+/// `state_invalid` on a Mac.
+#[test]
+fn verify_with_the_link_on_the_staged_release_by_another_spelling_succeeds() {
+    let rig = after_cutover("uvr-verify-link-aliased");
+    *rig.link.target.borrow_mut() = Some(rig.aliased("2.0.0"));
+    let done = rig.run(Step::Verify);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().expect("a record").verify_ok);
+}
+
 /// Asserts that `verify` refuses a release link that is not on the staged release (here the
 /// previous one) as `state_invalid`, and a link that cannot be read as `link_failed`.
 #[test]
@@ -510,6 +524,45 @@ fn rollback_stops_a_unit_that_is_moving_or_crashed_on_the_staged_release() {
             ]
         );
     }
+}
+
+/// Asserts that a unit that is up while the link is on the previous release spelt another way
+/// (through a symbolic link on the way) is on the previous release: no call, as when the link is
+/// spelt as the params spell it.
+///
+/// Catches a comparison by name, which would take the link for foreign and halt, or stop the
+/// restored server.
+#[test]
+fn rollback_with_the_unit_up_on_the_previous_release_by_another_spelling_makes_no_act() {
+    let rig = after_cutover("uvr-rb-up-prev-aliased");
+    *rig.link.target.borrow_mut() = Some(rig.aliased("1.0.0"));
+    rig.store.answer([free(), free(), held("whoever")]);
+    let done = rig.run(Step::Rollback);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(rig.calls(), Vec::<String>::new());
+    assert_eq!(rig.record(), None);
+}
+
+/// Asserts that a unit that is up with the link on the staged release spelt another way is on the
+/// staged release: stopped, the link put back to the previous release, started.
+///
+/// Catches a comparison by name, which takes the staged release for a foreign one and halts the
+/// rollback `state_invalid`.
+#[test]
+fn rollback_with_the_link_on_the_staged_release_by_another_spelling_goes_back() {
+    let rig = after_cutover("uvr-rb-staged-aliased");
+    *rig.link.target.borrow_mut() = Some(rig.aliased("2.0.0"));
+    rig.store.answer([held("new"), free(), held("prev")]);
+    let done = rig.run(Step::Rollback);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        rig.calls(),
+        [
+            "stop".to_owned(),
+            rig.relink_to(&rig.previous()),
+            "start".to_owned()
+        ]
+    );
 }
 
 /// Asserts that a record without `stop_begun` is deleted with no call at all and no probe:

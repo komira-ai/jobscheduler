@@ -670,9 +670,9 @@ fn execute(
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    // The bundle flags are checked before the host registers, so a store that cannot work
-    // stops the agent now and not at the first job.
+    // Checked before registering: a bad store stops the agent now. A Mac mounts its volume first.
     let host = &services.bundle;
+    platform::mount_scratch(&cli, services)?;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
     let bundle = bundle.map(|settings| settings.with_credentials(credentials.clone()));
     // The runtime's checks that come before the host is described (a macOS build's bundle

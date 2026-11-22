@@ -15,6 +15,7 @@ mod private;
 mod registry;
 mod settings;
 mod start;
+mod store_layout;
 mod system;
 #[cfg(target_os = "macos")]
 pub mod wired;

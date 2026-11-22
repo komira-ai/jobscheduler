@@ -525,7 +525,7 @@ fn a_second_job_reuses_the_pinned_bundle() {
         let run = s.h.fake.run_of(lease);
         assert_eq!(parse(&run.argv).tail[0], tool, "{lease} runs the same tree");
         let home = s.h.fake.home_of(lease);
-        let work = home.join("trees/work");
+        let work = home.join("exec/.trees/work");
         let copy = ("WORKROOT".to_owned(), work.display().to_string());
         assert!(run.env.contains(&copy), "{:?}", run.env);
         assert!(work.join("run.sh").is_file(), "{lease} has its own copy");

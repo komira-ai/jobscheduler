@@ -1,5 +1,6 @@
 //! The scratch root's own APFS volume on a Mac, [`SCRATCH_VOLUME`], in the container of the
-//! Data volume ([`DATA_VOLUME`]): how it is found and how it is mounted on the scratch root.
+//! Data volume ([`DATA_VOLUME`]): how it is found and how it is mounted on the scratch root's
+//! parent.
 //! The update hook's host setup (`prepare` on a Mac) makes the volume and mounts it; the agent's
 //! own start mounts it again ([`mount_at_start`]), because nothing else does after a boot.
 //!
@@ -7,7 +8,7 @@
 //! only a process with Full Disk Access (a privacy grant of TCC, which root does not imply)
 //! write `/etc/fstab` and answers any other with `EPERM`, and a launchd daemon on a Mac with no
 //! device management has no way to be given that grant. So the volume is mounted by its device
-//! with `diskutil mount nobrowse -mountPoint <scratch root> <device>`, which asks DiskArbitration
+//! with `diskutil mount nobrowse -mountPoint <mount point> <device>`, which asks DiskArbitration
 //! to mount it: that takes root and no grant.
 //!
 //! Every command is `diskutil` ([`DISKUTIL`]) with a `-plist` form where one is read, run
@@ -167,7 +168,7 @@ pub fn listed(runner: &dyn CommandRunner, reference: &str) -> Result<Container, 
     })
 }
 
-/// Mounts `volume` on `scratch`, unmounting it first when it is mounted anywhere (macOS may have
+/// Mounts `volume` on `mount`, unmounting it first when it is mounted anywhere (macOS may have
 /// mounted it in `/Volumes` by itself, at a boot or when it was made without `-nomount`). It is
 /// mounted `nobrowse`, as the table line of an earlier release named it, so that the Finder does
 /// not show it as a disk. `point` is called before each change: the hook's kill points.
@@ -179,7 +180,7 @@ pub fn mount_on(
     runner: &dyn CommandRunner,
     point: &dyn Fn(),
     volume: &Volume,
-    scratch: &Path,
+    mount: &Path,
 ) -> Result<(), VolumeError> {
     let info = dictionary(runner, &["info", "-plist", &volume.device])?;
     if info
@@ -191,7 +192,7 @@ pub fn mount_on(
         diskutil(runner, &["unmount", &volume.device])?;
     }
     point();
-    let at = scratch.to_string_lossy();
+    let at = mount.to_string_lossy();
     diskutil(
         runner,
         &["mount", "nobrowse", "-mountPoint", &at, &volume.device],
@@ -199,9 +200,11 @@ pub fn mount_on(
     Ok(())
 }
 
-/// The scratch volume mounted on `scratch` at the agent's start, while the scratch root is on
-/// the file system of the state root `state`: what a boot leaves undone, since nothing names
-/// the volume in the file system table. A root on a file system of its own already, or one
+/// The scratch volume mounted at the agent's start on the parent of `scratch` (the scratch
+/// volume's mount point, which is the volume's root: the scratch root is a directory on the
+/// volume, so that the bundle store can be another, beside it), while the mount point is on the
+/// file system of the state root `state`: what a boot leaves undone, since nothing names the
+/// volume in the file system table. A mount point on a file system of its own already, or one
 /// that cannot be looked at, is left to the agent's check of its file systems, which follows.
 /// The volume must be there: the update hook's `prepare` makes it, and this makes nothing.
 ///
@@ -215,8 +218,9 @@ pub fn mount_at_start(
     state: &Path,
     scratch: &Path,
 ) -> Result<(), String> {
+    let mount = scratch.parent().unwrap_or(scratch);
     let shared = matches!(
-        (files.device(state), files.device(scratch)),
+        (files.device(state), files.device(mount)),
         (Ok(own), Ok(found)) if own == found
     );
     if !shared {
@@ -226,12 +230,12 @@ pub fn mount_at_start(
     let container = find(runner).map_err(flagged)?;
     let Some(volume) = container.volume else {
         return Err(format!(
-            "--scratch-root: {} is on the file system of the --state-root and {DISKUTIL} lists \
-             no {SCRATCH_VOLUME} in {}, the Data volume's container: the update hook's prepare \
-             makes it",
-            scratch.display(),
+            "--scratch-root: {}, the directory above it, is on the file system of the \
+             --state-root and {DISKUTIL} lists no {SCRATCH_VOLUME} in {}, the Data volume's \
+             container: the update hook's prepare makes it",
+            mount.display(),
             container.reference
         ));
     };
-    mount_on(runner, &|| {}, &volume, scratch).map_err(flagged)
+    mount_on(runner, &|| {}, &volume, mount).map_err(flagged)
 }

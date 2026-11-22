@@ -27,8 +27,11 @@
 //! gives a new directory its parent's group (`admin` under `/Library/Application Support`),
 //! which the state directory's `root:root` check refuses. [`Held::open`] makes nothing.
 //!
-//! The directory is opened once, walking down from `/` one component at a time without
-//! following a link, and checked through the descriptor it was opened as. The lock, the
+//! The directory is opened once, at its real location (the links above it resolved first, so
+//! that a Mac's `/var` and `/etc`, links into `/private`, are walked through; the state
+//! directory itself must not be a link), walking down from `/` one component at a time without
+//! following a link, every real directory on the way held to the rules above, and checked
+//! through the descriptor it was opened as. The lock, the
 //! record and the temporary file are opened, renamed and synced relative to that descriptor,
 //! never by path again, so a path swapped for a link after the open redirects nothing.
 //!
@@ -376,8 +379,31 @@ fn enter_dir_at(
     }
 }
 
-/// Opens `dir` by walking down from `/`, one component at a time and without following a
-/// link, holding each ancestor to [`check_ancestor`] before going into it and the last
+/// The real location of `dir`: the directories above it with every link of theirs resolved, the
+/// last component as it is (so a link as the state directory itself stays a link, and is
+/// refused). A system's own links at the root (a Mac's `/var`, `/etc` and `/tmp`, each a link
+/// into `/private`) are therefore walked through; what the walk then checks is every real
+/// directory on the way, so a link put in the path by someone else gets no further than the
+/// first real directory that is not root's and closed to others. The part of the path that is
+/// not there yet has no links and is kept as it is, for [`Held::open_or_make`] to make. A path
+/// that cannot be resolved for any other reason (a file where a directory should be) is left as
+/// it is, so that the walk names what is wrong.
+fn real_location(dir: &Path) -> PathBuf {
+    dir.ancestors()
+        .skip(1)
+        .find_map(|above| match std::fs::canonicalize(above) {
+            Ok(real) => Some(Some(
+                real.join(dir.strip_prefix(above).unwrap_or(Path::new(""))),
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => Some(None),
+        })
+        .flatten()
+        .unwrap_or_else(|| dir.to_owned())
+}
+
+/// Opens `dir` (at its [`real_location`]) by walking down from `/`, one component at a time and
+/// without following a link, holding each ancestor to [`check_ancestor`] before going into it and the last
 /// directory to [`check_dir`]. Every look is at an open descriptor, never at a path, so what
 /// is checked is what is returned. With `make`, a directory of the path that is not there is
 /// made in its checked parent ([`make_dir_at`]), then opened and checked as one that was.
@@ -392,6 +418,8 @@ fn open_checked<D: Document>(
             problem: DirProblem::NotPlain,
         });
     }
+    let dir = real_location(dir);
+    let dir = dir.as_path();
     let mut here = PathBuf::from("/");
     let mut fd = openat(rustix::fs::CWD, "/", DIR_FLAGS, Mode::empty())
         .map_err(io::Error::from)

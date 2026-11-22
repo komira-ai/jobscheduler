@@ -247,6 +247,25 @@ impl Start {
     }
 }
 
+/// Mounts the scratch volume, which nothing mounts after a boot, on the scratch root's parent
+/// ([`scratch_volume::mount_at_start`]), before anything opens the scratch root or looks at the
+/// bundle store beside it (the store is made and checked on that volume). An agent that runs no
+/// job, or has no helper socket (which [`open`] refuses), mounts nothing.
+///
+/// # Errors
+///
+/// [`Failure::Usage`] naming `--scratch-root` and the command or the answer at fault.
+pub(crate) fn mount_scratch(cli: &Cli, services: &Services<'_>) -> Result<(), Failure> {
+    if cli.no_jobs || cli.os.native_helper_socket.is_none() {
+        return Ok(());
+    }
+    if let (Some(state), Some(scratch)) = (&cli.state_root, &cli.scratch_root) {
+        let (commands, files) = (services.commands, services.files);
+        scratch_volume::mount_at_start(commands, files, state, scratch).map_err(Failure::Usage)?;
+    }
+    Ok(())
+}
+
 /// Checks this build's runtime and the flags that belong to it, before the host is described:
 /// the runtime is native, over the root helper of `--native-helper-socket`, unless the agent
 /// runs no job (`--no-jobs`, which takes no flag of [`Flags`]). The VM flags are checked, and
@@ -285,12 +304,6 @@ pub(crate) fn open(
              root helper (give --no-jobs for an agent that runs no job)"
                 .to_owned(),
         ));
-    }
-    // The scratch root's own volume, which nothing mounts after a boot, is mounted before
-    // anything opens the scratch root or the bundle store beside it.
-    if let (Some(state), Some(scratch)) = (&cli.state_root, &cli.scratch_root) {
-        let (commands, files) = (services.commands, services.files);
-        scratch_volume::mount_at_start(commands, files, state, scratch).map_err(usage)?;
     }
     let bundles = match bundle {
         Some(settings) => services

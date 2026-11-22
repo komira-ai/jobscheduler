@@ -33,10 +33,11 @@ fn exited(code: i32) -> Status {
 }
 
 /// Asserts that a start asks the helper for a user named for the run's lease, makes the run
-/// directory (`exec`, the working directory, and `tmp`) private to that user before the
-/// program starts, hands the helper a working directory and an empty standard input, and
-/// runs the program under `sandbox-exec` with a profile that grants writes to the home and
-/// not to the user's folder entry, with `TMPDIR` inside the home. It catches a program
+/// directory (`exec`, the working directory, with `.home` and `.tmp` inside it) private to
+/// that user before the program starts, hands the helper a working directory and an empty
+/// standard input, and runs the program under `sandbox-exec` with a profile that grants
+/// writes to the run directory (not to the home, nor to the user's folder entry), with
+/// `TMPDIR` and `CFFIXED_USER_HOME` inside the run directory. It catches a program
 /// started without its profile, a working directory that is not a directory, a run
 /// directory the user cannot use, and a start that skips the helper's reset.
 #[test]
@@ -52,17 +53,22 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
         ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
     );
     let home = rig.fake.home_of("7.0");
-    for dir in ["exec", "tmp"] {
+    for dir in ["exec", "exec/.tmp", "exec/.home"] {
         let mode = fs::metadata(home.join(dir)).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o700, "{dir}");
     }
     let run = rig.fake.run_of("7.0");
     assert!(run.cwd_is_dir, "the working directory is a directory");
     assert_eq!(run.stdin_bytes, 0, "standard input is empty");
-    let tmp = home.join("tmp").display().to_string();
+    let tmp = home.join("exec/.tmp").display().to_string();
+    let job_home = home.join("exec/.home").display().to_string();
     assert_eq!(
         run.env,
-        [("A".to_owned(), "b".to_owned()), ("TMPDIR".to_owned(), tmp)]
+        [
+            ("A".to_owned(), "b".to_owned()),
+            ("TMPDIR".to_owned(), tmp),
+            ("CFFIXED_USER_HOME".to_owned(), job_home),
+        ]
     );
     let parsed = parse(&run.argv);
     assert_eq!(parsed.tail, ["/usr/bin/id", "-u"]);
@@ -76,7 +82,7 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     );
     assert_eq!(
         parsed.params[0],
-        ("RUN".to_owned(), home.display().to_string())
+        ("RUN".to_owned(), home.join("exec").display().to_string())
     );
     assert!(
         parsed
@@ -126,7 +132,7 @@ fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
         let ran = parse(&rig.fake.run_of(lease).argv);
         assert_eq!(
             ran.params[0],
-            ("RUN".to_owned(), home.display().to_string())
+            ("RUN".to_owned(), home.join("exec").display().to_string())
         );
     }
     for name in ["kbf-lease-7-0", "kbf-lease-pool-0", "kbf-lease-pool-1"] {
@@ -599,9 +605,14 @@ fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
     }
     let profile_at = argv.iter().position(|word| word == "-p").unwrap();
     assert_eq!(
-        &argv[profile_at + 2..],
+        argv[profile_at + 2],
+        "/usr/bin/env",
+        "env, which sets the job's HOME, follows the profile"
+    );
+    assert_eq!(
+        &argv[profile_at + 4..],
         ["/usr/bin/id", "-u"],
-        "the program follows the profile"
+        "the program follows"
     );
     assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
 

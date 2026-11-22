@@ -289,6 +289,23 @@ fn a_rollback_with_the_link_not_on_the_previous_release_fails_and_nothing_is_don
     }
 }
 
+/// The link already back on the previous release, reached through a symlinked directory
+/// (`/var` against `/private/var`), is on the previous release: rollback does not call it
+/// off, starts the previous agent and ends restored.
+///
+/// Catches a comparison by name, which fails the rollback with `link_failed` on a Mac.
+#[test]
+fn a_rollback_with_the_link_on_the_previous_release_through_a_symlinked_directory_succeeds() {
+    let rig = link_moved("hook-rollback-link-aliased");
+    rig.link_through_an_alias("1.3.0");
+    let spy = Spy::new(&rig);
+    let done = spy.rollback_as_is(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(spy.act_names(), [start()]);
+    assert_eq!(rig.record(), None);
+    assert_eq!(unit_state(&rig), "active running");
+}
+
 // The previous agent's hello is the proof, not the unit being active.
 
 #[test]

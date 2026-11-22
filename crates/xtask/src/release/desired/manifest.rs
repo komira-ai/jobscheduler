@@ -139,7 +139,7 @@ pub const MAC_PARAMS: [(&str, Param); 21] = [
     ("helper_unit", Param::Text("js-agent.session")),
     ("pf_unit", Param::Text("js-agent.pf-pool")),
     ("socket_group", Param::Text("_jsagent")),
-    ("scratch_root", Param::Text("/var/db/js-agent/scratch")),
+    ("scratch_root", Param::Text("/var/db/js-agent/scratch/runs")),
     (
         "state_dir",
         Param::Text("/Library/Application Support/js-agent/update"),

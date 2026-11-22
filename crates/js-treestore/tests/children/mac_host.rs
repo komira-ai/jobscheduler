@@ -7,10 +7,13 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
+use js_bundle::{Limits, pack_layer};
 use js_testkit::dir::TestDir;
-use js_treestore::Sealer as _;
 use js_treestore::mac::{
     Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, UserFlags as _, start_checks,
+};
+use js_treestore::{
+    BlobRef, BlobSink, Config, Digest, FetchError, LayerSource, Sealer as _, TreeStore, TreeWanted,
 };
 
 fn flags_of(path: &Path) -> u32 {
@@ -253,4 +256,69 @@ fn the_acl_entry_built_for_a_user_is_accepted_by_chmod_and_inherited_by_what_is_
     let fresh = lease.join("fresh");
     std::fs::write(&fresh, b"x").unwrap();
     assert!(has_acl(&fresh));
+}
+
+/// A source that serves one blob from memory.
+struct OneBlob(Vec<u8>);
+
+impl LayerSource for OneBlob {
+    fn fetch(&self, _blob: &BlobRef, sink: &mut dyn BlobSink) -> Result<(), FetchError> {
+        sink.write(&self.0).map_err(|e| FetchError(e.to_string()))
+    }
+}
+
+/// A real tree store over a scratch directory on the volume, with the real macOS sealer,
+/// ensures one small tree from a layer: the tree is placed in `trees/` (macOS refuses to
+/// rename the immutable stage, so the store unseals, moves and seals it in place), sealed
+/// (`uchg` on its root and on its file), readable, and counted.
+///
+/// Catches a tree store that can never place a tree on a Mac: the move of the sealed stage
+/// into `trees/` fails with "Operation not permitted".
+#[test]
+fn a_real_store_places_a_tree_through_the_real_sealer_and_counts_it_sealed() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let src = dir.path().join("layer-src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+    let packed = pack_layer(&src).unwrap();
+    let want = TreeWanted {
+        diff_id: packed.diff_id.clone(),
+        blob: BlobRef {
+            digest: Digest::parse(&packed.blob_digest).unwrap(),
+            size: packed.blob.len() as u64,
+        },
+        encoding: js_bundle::media::LayerEncoding::TarZstd,
+        limits: Limits {
+            entries: 1000,
+            bytes: 1 << 24,
+            model_bytes: 1 << 28,
+        },
+        expected_bytes: None,
+    };
+    let sealer = || MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    let store = TreeStore::open(
+        &dir.path().join("ts"),
+        OneBlob(packed.blob.clone()),
+        sealer(),
+        Config::default(),
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
+    let ready = store.ensure(&want).unwrap();
+    assert_eq!(
+        ready.path,
+        dir.path().join("ts/trees").join(packed.diff_id.hex())
+    );
+    assert_eq!(std::fs::read(ready.path.join("a.txt")).unwrap(), b"alpha");
+    for path in ["", "a.txt"] {
+        assert_eq!(
+            flags_of(&ready.path.join(path)) & IMMUTABLE,
+            IMMUTABLE,
+            "{path}"
+        );
+    }
+    assert_eq!(store.stats().trees, 1);
+    assert!(store.stats().used >= 5);
+    // Let the scratch directory be removed.
+    sealer().unseal_for_delete(&ready.path).unwrap();
 }
