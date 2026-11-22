@@ -18,10 +18,10 @@
 //! none or [`ROUNDS_MAX`] rounds have run: a fork between a listing and its kill is found in
 //! the next round. It reads no clock; the pause between rounds is the table's
 //! ([`ProcessTable::pause`]). It refuses ids that could turn it on the agent, tierstore or a
-//! console user: a uid of 0, below [`FIRST_SLOT_UID`] or the agent's own ends nothing and
-//! says so in the [`Tally`], and a session that is the agent's own, or is not a session
-//! number at all, is dropped so the uid rule runs alone ([`job_ids`], and again in
-//! [`sweep`] from the listing).
+//! system account: a uid below the lowest slot uid (`mac_accounts::Slots::LOWEST`, so 0
+//! too) or the agent's own ends nothing and says so in the [`Tally`], and a session that is
+//! the agent's own, or is not a session number at all, is dropped so the uid rule runs
+//! alone ([`job_ids`], and again in [`sweep`] from the listing).
 //!
 //! The decisions are here, on every platform, and are tested over a fake table; the macOS
 //! table (`libproc` for the listing, the supervisor's `asid_of` for the session, `SIGKILL`)
@@ -34,9 +34,7 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-pub use decide::{
-    FIRST_SLOT_UID, Found, JobIds, Proc, ROUNDS_MAX, Swept, Tally, Target, job_ids, sweep, targets,
-};
+pub use decide::{Found, JobIds, Proc, ROUNDS_MAX, Swept, Tally, Target, job_ids, sweep, targets};
 #[cfg(target_os = "macos")]
 pub use macos::MacTable;
 pub use table::ProcessTable;

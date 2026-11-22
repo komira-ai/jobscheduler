@@ -3,16 +3,12 @@
 use serde::Serialize;
 
 use super::ProcessTable;
+use crate::mac_accounts::Slots;
 
 /// The most rounds a sweep runs: each lists every process again, so a fork between a
 /// listing and its kill is found in the next one, and a process that never dies ends the
 /// sweep, not clean, instead of holding it for good.
 pub const ROUNDS_MAX: usize = 50;
-
-/// The lowest uid a slot account may have (the slot range of `mac_accounts::Slots` starts
-/// at it or above). Below it are root and the system's own accounts: a sweep for such a uid
-/// ends nothing.
-pub const FIRST_SLOT_UID: u32 = 501;
 
 /// A process, as the listing sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +183,7 @@ fn swept(target: &Target) -> Swept {
 /// clean, the processes still found named in [`Tally::remaining`]). Reads no clock.
 ///
 /// Kills nothing, and says why in [`Tally::error`], when the uid is below
-/// [`FIRST_SLOT_UID`] or is the sweeper's own (effective or real, as the listing shows the
+/// [`Slots::LOWEST`] or is the sweeper's own (effective or real, as the listing shows the
 /// process `ids.own_pid`), or when the listing does not show the sweeper at all (its own
 /// uid could not be told). A session that is not a session number, or is the sweeper's own
 /// as the listing shows it, or that the sweeper's own cannot be told apart from, is dropped
@@ -196,10 +192,11 @@ fn swept(target: &Target) -> Swept {
 #[must_use]
 pub fn sweep(table: &dyn ProcessTable, ids: &JobIds) -> Tally {
     let mut tally = Tally::default();
-    if ids.uid < FIRST_SLOT_UID {
+    if ids.uid < Slots::LOWEST {
         tally.failed(format!(
-            "uid {} is not a slot's (slots are {FIRST_SLOT_UID} and up): nothing was ended",
-            ids.uid
+            "uid {} is not a slot's (slots are {} and up): nothing was ended",
+            ids.uid,
+            Slots::LOWEST
         ));
         return tally;
     }
