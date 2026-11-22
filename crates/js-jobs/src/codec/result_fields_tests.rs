@@ -1,4 +1,4 @@
-//! The CPU throttle counters and the CPU pressure of a usage (tags 60 and 61): each is stored
+//! The CPU throttle counters, the CPU pressure and the CPU peak of a usage (tags 60 to 62): each is stored
 //! under its own tag when the usage has it, a usage from before them reads with
 //! `None`, and the tags are read only beside tag 40.
 
@@ -8,12 +8,13 @@ use crate::codec::result_fields::job_result_tag;
 use crate::codec::tests::{full_job, full_result, job_row, without};
 use crate::codec::{Carried, decode_job, field_of, job_tag};
 use crate::record::JobRecord;
-use crate::result::{CpuThrottle, JobResult, ResourceUsage};
+use crate::result::{CpuPeak, CpuThrottle, JobResult, ResourceUsage};
 
 /// The tags of the CPU throttle counters and the CPU pressure of a usage.
-const CPU_TAGS: [u16; 2] = [
+const CPU_TAGS: [u16; 3] = [
     job_result_tag::RESULT_CPU_THROTTLE,
     job_result_tag::RESULT_CPU_PRESSURE_SOME,
+    job_result_tag::RESULT_CPU_PEAK,
 ];
 
 /// A job whose usage has the given CPU counters.
@@ -23,6 +24,7 @@ fn job_with(cpu_throttle: Option<CpuThrottle>, cpu_pressure_some: Option<Duratio
             usage: Some(ResourceUsage {
                 cpu_throttle,
                 cpu_pressure_some,
+                cpu_peak: None,
                 ..full_result().usage.expect("a usage")
             }),
             ..full_result()
@@ -71,7 +73,7 @@ fn the_cpu_counters_of_a_usage_are_stored_under_their_own_tags() {
     assert_eq!(decode_job(&row).expect("reads").result, job.result);
 
     for (job, written) in [
-        (job_with(None, None), [false; 2]),
+        (job_with(None, None), [false; 3]),
         (
             job_with(
                 Some(CpuThrottle {
@@ -80,9 +82,9 @@ fn the_cpu_counters_of_a_usage_are_stored_under_their_own_tags() {
                 }),
                 None,
             ),
-            [true, false],
+            [true, false, false],
         ),
-        (job_with(None, Some(Duration::ZERO)), [false, true]),
+        (job_with(None, Some(Duration::ZERO)), [false, true, false]),
     ] {
         let row = job_row(&job);
         for (tag, written) in CPU_TAGS.into_iter().zip(written) {
@@ -114,10 +116,77 @@ fn a_usage_row_without_the_cpu_tags_reads_with_none() {
             peak_memory_bytes: 4096,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         })
     );
 
     let no_usage = without(&job_row(&counted()), job_tag::RESULT_USAGE);
+    let read = decode_job(&no_usage).expect("reads");
+    assert_eq!(read.result.expect("a result").usage, None);
+    assert_eq!(read.carried, Carried::default());
+}
+
+/// A job whose usage has the given CPU peak.
+fn peaked(cpu_peak: Option<CpuPeak>) -> JobRecord {
+    JobRecord {
+        result: Some(JobResult {
+            usage: Some(ResourceUsage {
+                cpu_peak,
+                ..full_result().usage.expect("a usage")
+            }),
+            ..full_result()
+        }),
+        ..full_job()
+    }
+}
+
+// Asserts the CPU peak of a usage is stored under tag 62 as 16 bytes (the millicores, then the
+// window in microseconds, each a u64 big-endian), that a usage without it writes no tag 62, that
+// tag 40 keeps its 20 bytes either way, and that the peak reads back exactly. Catches a value
+// written under another tag, the two numbers swapped, and a tag written for a `None`.
+#[test]
+fn the_cpu_peak_of_a_usage_is_stored_under_tag_62_when_reported() {
+    let job = peaked(Some(CpuPeak {
+        millicores: 3_500,
+        window_usec: 5_000_000,
+    }));
+    let row = job_row(&job);
+    assert_eq!(
+        field_of(&row, 62),
+        Some(
+            [
+                3_500u64.to_be_bytes().to_vec(),
+                5_000_000u64.to_be_bytes().to_vec()
+            ]
+            .concat()
+        )
+    );
+    assert_eq!(
+        field_of(&row, job_tag::RESULT_USAGE).map(|v| v.len()),
+        Some(20)
+    );
+    assert_eq!(decode_job(&row).expect("reads").result, job.result);
+
+    let none = peaked(None);
+    let row = job_row(&none);
+    assert_eq!(field_of(&row, 62), None);
+    assert_eq!(decode_job(&row).expect("reads").result, none.result);
+}
+
+// Asserts a usage row without tag 62, as every row before it, reads with no CPU peak and keeps
+// the rest of its usage, and that tag 62 without tag 40 reads with no usage and is not carried.
+// Catches a reader that refuses an older row and one that invents a usage from tag 62 alone.
+#[test]
+fn a_usage_row_without_tag_62_reads_with_no_cpu_peak() {
+    let job = peaked(Some(CpuPeak {
+        millicores: 1,
+        window_usec: 2,
+    }));
+    let older = without(&job_row(&job), 62);
+    let read = decode_job(&older).expect("reads").result.expect("a result");
+    assert_eq!(read.usage, peaked(None).result.expect("a result").usage);
+
+    let no_usage = without(&job_row(&job), job_tag::RESULT_USAGE);
     let read = decode_job(&no_usage).expect("reads");
     assert_eq!(read.result.expect("a result").usage, None);
     assert_eq!(read.carried, Carried::default());

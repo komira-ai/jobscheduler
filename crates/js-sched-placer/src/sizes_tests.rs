@@ -77,6 +77,7 @@ fn output(peak: u64, cpu: Duration) -> Output {
             peak_memory_bytes: peak,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         ..Output::default()
     }

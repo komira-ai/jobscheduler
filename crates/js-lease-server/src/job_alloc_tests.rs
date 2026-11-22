@@ -422,6 +422,7 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
         peak_memory_bytes: 3 << 30,
         cpu_throttle: None,
         cpu_pressure_some: None,
+        cpu_peak: None,
     };
     let output = Output {
         usage: Some(usage),
@@ -508,6 +509,7 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
             peak_memory_bytes: peak,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         };
         let output = Output {
             usage: Some(usage),

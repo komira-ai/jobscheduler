@@ -1,23 +1,25 @@
 //! The result fields of a job row, tags 31 (the reason) to 40 (the usage), 43 (the stream
-//! lengths), 58 (the code of an input that failed, `rootfs_fields`) and 60 and 61 (the CPU
-//! throttle counters and the CPU pressure of the usage). They are written only when the job has
+//! lengths), 58 (the code of an input that failed, `rootfs_fields`) and 60 to 62 (the CPU
+//! throttle counters, the CPU pressure and the CPU peak of the usage). They are written only when the job has
 //! a result, and the reason is what says it has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
 //! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
-//! it back unchanged. Tags 60 and 61 are written only for a usage that has the value, and read
+//! it back unchanged. Tags 60 to 62 are written only for a usage that has the value, and read
 //! only beside tag 40: a row with one of them and no tag 40 reads with no usage. A usage
 //! without them, as every one written before them, reads with `None`; a build from before
 //! them keeps them as fields it does not know and writes them back unchanged.
 
 use js_state::StoreTime;
 
-use self::job_result_tag::{RESULT_CPU_PRESSURE_SOME, RESULT_CPU_THROTTLE};
+use self::job_result_tag::{RESULT_CPU_PEAK, RESULT_CPU_PRESSURE_SOME, RESULT_CPU_THROTTLE};
 use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
     DecodeError, Fields, Writer, bool_of, byte_of, i32_of, job_tag as t, text, text_of, time,
     time_of, u64_of,
 };
-use crate::result::{CpuThrottle, JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
+use crate::result::{
+    CpuPeak, CpuThrottle, JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason,
+};
 
 /// The bytes of a time value: whole seconds (`u64`) and nanoseconds (`u32`).
 const TIME_LEN: usize = 12;
@@ -35,6 +37,10 @@ pub(crate) mod job_result_tag {
     /// The time some task of the group waited for a CPU (time), written beside
     /// [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent reported it. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
     pub const RESULT_CPU_PRESSURE_SOME: u16 = 61;
+    /// The most CPU the group used over a window of its run (16 bytes: the millicores, then the
+    /// window in microseconds, each a u64), written beside
+    /// [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE) when the agent reported it. Read only beside [`RESULT_USAGE`](crate::codec::job_tag::RESULT_USAGE).
+    pub const RESULT_CPU_PEAK: u16 = 62;
 }
 
 /// Puts the fields of `result`, when there is one, in `row`.
@@ -63,6 +69,7 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
             used.cpu_pressure_some
                 .map(|waited| time(StoreTime::from_duration(waited))),
         );
+        row.put_opt(RESULT_CPU_PEAK, used.cpu_peak.map(peak));
     }
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));
     row.put_opt(INPUT_FAILURE, result.input_failure.as_deref().map(text));
@@ -75,6 +82,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
     };
     let usage = fields.opt(t::RESULT_USAGE, usage_of)?;
     let cpu_throttle = fields.opt(RESULT_CPU_THROTTLE, throttle_of)?;
+    let cpu_peak = fields.opt(RESULT_CPU_PEAK, peak_of)?;
     let cpu_pressure_some = fields
         .opt(RESULT_CPU_PRESSURE_SOME, time_of)?
         .map(StoreTime::as_duration);
@@ -93,6 +101,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
         usage: usage.map(|used| ResourceUsage {
             cpu_throttle,
             cpu_pressure_some,
+            cpu_peak,
             ..used
         }),
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
@@ -155,6 +164,23 @@ fn throttle_of(tag: u16, value: Vec<u8>) -> Result<CpuThrottle, DecodeError> {
     })
 }
 
+/// A peak value: the millicores, then the window in microseconds, each a `u64`.
+fn peak(peak: CpuPeak) -> Vec<u8> {
+    let mut out = peak.millicores.to_be_bytes().to_vec();
+    out.extend_from_slice(&peak.window_usec.to_be_bytes());
+    out
+}
+
+fn peak_of(tag: u16, value: Vec<u8>) -> Result<CpuPeak, DecodeError> {
+    let (millicores, window) = value
+        .split_at_checked(8)
+        .ok_or(DecodeError::BadLength { tag })?;
+    Ok(CpuPeak {
+        millicores: u64_of(tag, millicores.to_vec())?,
+        window_usec: u64_of(tag, window.to_vec())?,
+    })
+}
+
 fn usage_of(tag: u16, value: Vec<u8>) -> Result<ResourceUsage, DecodeError> {
     let (cpu, peak) = value
         .split_at_checked(TIME_LEN)
@@ -164,6 +190,7 @@ fn usage_of(tag: u16, value: Vec<u8>) -> Result<ResourceUsage, DecodeError> {
         peak_memory_bytes: u64_of(tag, peak.to_vec())?,
         cpu_throttle: None,
         cpu_pressure_some: None,
+        cpu_peak: None,
     })
 }
 

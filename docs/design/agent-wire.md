@@ -51,7 +51,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
   absent, so a log field never refuses a start or a heartbeat.
-- `JobResult.usage` (`JobUsage`: `peak_memory_bytes` and `cpu_usage_usec`, and the optional `cpu_throttle` (`CpuThrottle`: `periods` and `throttled_periods`, the `nr_periods` and `nr_throttled` of `cpu.stat`; `periods` 0 means the group had no `cpu.max`) and `cpu_pressure_some_usec` (the `some` total of `cpu.pressure`), absent for an agent from before them; a `cpu_throttle` that does not decode reads as absent and leaves the rest of the usage), what the job's control group counted, read by the agent
+- `JobResult.usage` (`JobUsage`: `peak_memory_bytes` and `cpu_usage_usec`, and the optional `cpu_throttle` (`CpuThrottle`: `periods` and `throttled_periods`, the `nr_periods` and `nr_throttled` of `cpu.stat`; `periods` 0 means the group had no `cpu.max`) `cpu_pressure_some_usec` (the `some` total of `cpu.pressure`) and `cpu_peak` (`CpuPeak`: `millicores` and `window_usec`, the most CPU the job's group used over any window of `window_usec` of its run: the largest `(usage_usec[i+k] - usage_usec[i]) * 1000 / elapsed` over the agent's one-second samples of `cpu.stat` with a five-second window; a run shorter than the window reports its whole-run mean with the window its wall time), absent for an agent from before them; a `cpu_throttle` or `cpu_peak` that does not decode reads as absent and leaves the rest of the usage), what the job's control group counted, read by the agent
   from `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease group once the job ended and before the group is
   removed. It is absent, never zero, when either file cannot be read (cgroup version 1, a kernel without `memory.peak`) and for
   a result an agent read back from its state root after a restart. It is decoded as `logs` is: a malformed value reads as absent
@@ -288,8 +288,8 @@ digits), with the comma that joins it to the message. Derived, and measured by t
   1 + 11 + 1 + (11 + 514) + 1 + (9 + 66) + 1 + (9 + 65) + 1 + (9 + 579) + 1 + (13 + 5) + 1 = **1,298** bytes.
 
 - `usage` in a job's result, `,"usage":{"peak_memory_bytes":N,"cpu_usage_usec":N}`: 1 + 7 + 1 + 1 + (20 + 20) + 1 + (17 + 20) + 1 =
-  **89** bytes per result. The two optional counters, `,"cpu_throttle":{"periods":N,"throttled_periods":N}` and
-  `,"cpu_pressure_some_usec":N`, add 89 + 46 = 135 more at 20 digits each, so **224** bytes in all (both figures measured by
+  **89** bytes per result. The three optional counters, `,"cpu_throttle":{"periods":N,"throttled_periods":N}`,
+  `,"cpu_pressure_some_usec":N` and `,"cpu_peak":{"millicores":N,"window_usec":N}`, add 89 + 46 + 82 = 217 more at 20 digits each, so **306** bytes in all (both figures measured by
   `usage_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one

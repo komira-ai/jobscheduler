@@ -108,6 +108,7 @@ fn a_result_is_one_line_of_its_booking_its_sizing_its_usage_and_its_throttled_sh
             throttled_periods: 5585,
         }),
         cpu_pressure_some_usec: Some(9_000_000),
+        cpu_peak: None,
     };
     let event = Event::ResultReady {
         run_id: "k1-344439-0".to_owned(),
@@ -144,6 +145,7 @@ fn what_a_result_does_not_know_is_a_dash() {
             cpu_usage_usec: 2,
             cpu_throttle: None,
             cpu_pressure_some_usec: None,
+            cpu_peak: None,
         }),
     };
     assert_eq!(

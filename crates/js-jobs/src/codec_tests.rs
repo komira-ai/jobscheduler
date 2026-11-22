@@ -37,6 +37,7 @@ pub(super) fn full_result() -> JobResult {
             peak_memory_bytes: 4096,
             cpu_throttle: None,
             cpu_pressure_some: None,
+            cpu_peak: None,
         }),
         logs: Some(LogLengths {
             stdout_bytes: 2_621_440,
@@ -475,6 +476,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_USAGE,
         job_result_tag::RESULT_CPU_THROTTLE,
         job_result_tag::RESULT_CPU_PRESSURE_SOME,
+        job_result_tag::RESULT_CPU_PEAK,
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
         job_tag::RESULT_LOGS,
@@ -820,6 +822,20 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             .concat(),
             BadValue {
                 tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PEAK,
+            vec![0; 15],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PEAK,
+            },
+        ),
+        (
+            job_result_tag::RESULT_CPU_PEAK,
+            vec![0; 17],
+            BadLength {
+                tag: job_result_tag::RESULT_CPU_PEAK,
             },
         ),
         (

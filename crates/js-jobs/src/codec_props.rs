@@ -18,7 +18,7 @@ use proptest::test_runner::RngSeed;
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
 use crate::record::{Exclusion, FileDigest, Isolation, JobFiles, SizedFrom};
-use crate::result::CpuThrottle;
+use crate::result::{CpuPeak, CpuThrottle};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
@@ -285,6 +285,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                 (0..u64::MAX, 0..NANOS_PER_SEC, any::<u64>()),
                 proptest::option::of((any::<u64>(), any::<u64>())),
                 proptest::option::of((0..u64::MAX, 0..NANOS_PER_SEC)),
+                proptest::option::of((any::<u64>(), any::<u64>())),
             )),
             proptest::option::of(any::<[u64; 4]>()),
         ),
@@ -306,14 +307,23 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                         started_at: s,
                         ended_at: e,
                     },
-                    usage: usage.map(|((secs, nanos, peak), throttle, pressure)| ResourceUsage {
-                        cpu_time: Duration::new(secs, nanos),
-                        peak_memory_bytes: peak,
-                        cpu_throttle: throttle.map(|(periods, throttled_periods)| CpuThrottle {
-                            periods,
-                            throttled_periods,
-                        }),
-                        cpu_pressure_some: pressure.map(|(secs, nanos)| Duration::new(secs, nanos)),
+                    usage: usage.map(|((secs, nanos, peak), throttle, pressure, cpu_peak)| {
+                        ResourceUsage {
+                            cpu_time: Duration::new(secs, nanos),
+                            peak_memory_bytes: peak,
+                            cpu_throttle: throttle.map(|(periods, throttled_periods)| {
+                                CpuThrottle {
+                                    periods,
+                                    throttled_periods,
+                                }
+                            }),
+                            cpu_pressure_some: pressure
+                                .map(|(secs, nanos)| Duration::new(secs, nanos)),
+                            cpu_peak: cpu_peak.map(|(millicores, window_usec)| CpuPeak {
+                                millicores,
+                                window_usec,
+                            }),
+                        }
                     }),
                     logs: logs.map(
                         |[stdout_bytes, stderr_bytes, stdout_dropped, stderr_dropped]| LogLengths {

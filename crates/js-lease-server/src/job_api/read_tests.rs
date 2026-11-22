@@ -407,6 +407,7 @@ fn used() -> ResourceUsage {
         peak_memory_bytes: BIG,
         cpu_throttle: None,
         cpu_pressure_some: None,
+        cpu_peak: None,
     }
 }
 

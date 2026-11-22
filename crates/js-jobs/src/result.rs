@@ -72,6 +72,17 @@ pub struct CpuThrottle {
     pub throttled_periods: u64,
 }
 
+/// The most CPU a job's control group used over any window of its run, as the agent measured
+/// it from its one-second samples of `cpu.stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuPeak {
+    /// The peak, in millicores (1000 is one CPU busy for the whole window).
+    pub millicores: u64,
+    /// The window it was measured over, in microseconds; a run shorter than the agent's
+    /// window reports its whole-run mean with its wall time as the window.
+    pub window_usec: u64,
+}
+
 /// What a job used, as the agent reported it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceUsage {
@@ -85,6 +96,9 @@ pub struct ResourceUsage {
     /// The time some task of its group waited for a CPU (the `some` total of `cpu.pressure`).
     /// `None` when the agent did not report it.
     pub cpu_pressure_some: Option<Duration>,
+    /// The most CPU its group used over a window of its run. `None` when the agent did not
+    /// report it.
+    pub cpu_peak: Option<CpuPeak>,
 }
 
 /// The length of each output stream of a job and the bytes of each that the host's capture
@@ -487,6 +501,7 @@ mod tests {
                 peak_memory_bytes: 4096,
                 cpu_throttle: None,
                 cpu_pressure_some: None,
+                cpu_peak: None,
             }),
             logs: Some(LENGTHS),
         }
@@ -583,6 +598,7 @@ mod tests {
                             peak_memory_bytes: 4096,
                             cpu_throttle: None,
                             cpu_pressure_some: None,
+                            cpu_peak: None,
                         }),
                         logs: Some(LENGTHS),
                         input_failure: None,
