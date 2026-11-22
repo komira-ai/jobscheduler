@@ -371,19 +371,21 @@ fn tree_mount(dir: &std::path::Path) -> js_agent::lifecycle::JobFs {
 }
 
 /// What a job prints about the trees root `root`: its own tree read through the link, run
-/// B's tree, a listing of the root, and a write into its own tree.
+/// B's tree, a listing of the root, a write into its own tree, and a run of a script there.
 const TREE_CHECKS: &str = r#"cat .kbf-tree/data.txt
 cat "$1/data.txt" >/dev/null 2>&1 && echo other-read || echo other-refused
 ls "$2" >/dev/null 2>&1 && echo root-listed || echo root-refused
-(echo x > .kbf-tree/new) 2>/dev/null && echo wrote || echo write-refused"#;
+(echo x > .kbf-tree/new) 2>/dev/null && echo wrote || echo write-refused
+./.kbf-tree/run.sh 2>/dev/null || echo exec-refused"#;
 
 /// Asserts under the real profile, with the trees root the one mount root that is no read
 /// deny (as `native_fs::denied_roots` makes the denies), that a job reads its own tree
 /// through its link `exec/.kbf-tree`, is refused run B's tree beside it and the listing of the
-/// root, and cannot write its tree although the file modes allow it; and that with the trees
-/// root among the read denies (what the agent did before), the same job cannot read its own
-/// tree. Catches a profile that opens every run's trees, one that lets a job write a tree,
-/// and the deny of the root after the trees' grants, which hides every tree.
+/// root, and can neither write its tree nor run a script in it, though the file modes allow
+/// both; and that with the trees root among the read denies (what the agent did before), the
+/// same job cannot read its own tree. Catches a profile that opens every run's trees, one that
+/// lets a job write or run a tree, and the deny of the root after the trees' grants, which
+/// hides every tree.
 #[test]
 fn a_job_reads_its_own_tree_and_nothing_else_below_the_trees_root() {
     use js_agent::lifecycle::FsPrepared;
@@ -407,12 +409,16 @@ fn a_job_reads_its_own_tree_and_nothing_else_below_the_trees_root() {
         });
         let root = fs::canonicalize(rig.dir.path("trees")).unwrap();
         let (own, other) = (
-            root.join("mount-provider/aa/r1/0"),
-            root.join("mount-provider/aa/r2/0"),
+            root.join("mount-provider/aa/6a732e7231/0"),
+            root.join("mount-provider/aa/6a732e7232/0"),
         );
         for (tree, text) in [(&own, "tree one\n"), (&other, "tree two\n")] {
             fs::create_dir_all(tree).unwrap();
             fs::write(tree.join("data.txt"), text).unwrap();
+            let script = tree.join("run.sh");
+            fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
+            fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
         }
         let mounts = tree_mount(&own);
         assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
@@ -436,7 +442,7 @@ fn a_job_reads_its_own_tree_and_nothing_else_below_the_trees_root() {
         run(false),
         (
             exited(0),
-            "tree one\nother-refused\nroot-refused\nwrite-refused\n".to_owned()
+            "tree one\nother-refused\nroot-refused\nwrite-refused\nexec-refused\n".to_owned()
         )
     );
     let (_, denied_root) = run(true);

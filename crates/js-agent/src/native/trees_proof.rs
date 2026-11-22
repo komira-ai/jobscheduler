@@ -9,7 +9,8 @@
 //! read-only, `no_exec` mount at `/work/.kbf-tree` that the build service sends, so the
 //! runtime checks, resolves, links and profiles it as it does a lifecycle's start. The job is
 //! `<program> <args>... <other run's tree> <trees root>`. After both runs it releases both
-//! sources and sweeps the agent id's placements. Each step is printed; real seconds are fine
+//! sources, sweeps the agent id's placements and asks for each source's directory again, which
+//! the provider must no longer answer. Each step is printed; real seconds are fine
 //! here: it is not the agent.
 //!
 //! `--without-tree-rules` builds the runs' profiles as an agent without a trees root would:
@@ -309,8 +310,9 @@ fn tree_of(
     }
 }
 
-/// Releases both runs' sources and sweeps this agent's placements; whether every call was
-/// answered done.
+/// Releases both runs' sources and sweeps this agent's placements, then asks the provider to
+/// mount each again; whether every release and the sweep were answered done and no source is
+/// mounted any more.
 fn release_all(client: &mut ProviderClient, name: &str, out: &mut dyn Write) -> bool {
     let mut done = true;
     let calls = RUNS
@@ -324,6 +326,23 @@ fn release_all(client: &mut ProviderClient, name: &str, out: &mut dyn Write) -> 
         let answer = ask(client, name, &call);
         let _ = writeln!(out, "{call:?}: {answer:?}");
         done &= matches!(answer, ProviderAnswer::Done(_));
+    }
+    // The provider's own word that it holds no placement: a released source is mounted no
+    // more (an NFS client may show its directory for a while after).
+    for run_id in RUNS {
+        let mount = ProviderCall::Mount {
+            run_id: run_id.to_owned(),
+            index: 0,
+        };
+        let answer = ask(client, name, &mount);
+        let held = matches!(answer, ProviderAnswer::Done(Some(_)));
+        let _ = writeln!(out, "after release, mount {run_id}: {answer:?}");
+        let _ = writeln!(
+            out,
+            "placement {run_id}: {}",
+            if held { "held" } else { "released" }
+        );
+        done &= !held;
     }
     done
 }

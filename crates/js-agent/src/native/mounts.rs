@@ -193,7 +193,7 @@ pub(super) fn resolve(
         .iter()
         .map(|mount| plan_of(roots, put_root, mount))
         .collect::<Result<Vec<_>, _>>()
-        .and_then(|list| with_trees(roots, list))
+        .and_then(|list| with_trees(roots, run_id, list))
     {
         Ok(list) => {
             plans.insert(run_id.to_owned(), list);
@@ -328,10 +328,11 @@ fn put_plan(
 }
 
 /// `list` with each tree marked by the trees root (the root of `roots` that is one), once
-/// the set is held to its rules ([`native_fs::tree_rules`]); `list` as it is when the agent
-/// has no trees root.
+/// the set is held to its rules for the run `run_id` ([`native_fs::tree_rules`]); `list` as
+/// it is when the agent has no trees root.
 fn with_trees(
     roots: &[MountRoot],
+    run_id: &str,
     mut list: Vec<MountPlan>,
 ) -> Result<Vec<MountPlan>, NativeRefusal> {
     let Some(root) = roots.iter().find(|root| root.trees) else {
@@ -343,15 +344,14 @@ fn with_trees(
         .filter(|plan| plan.put.is_none())
         .map(|plan| (PathBuf::from(plan.host.as_str()), !plan.write, plan.no_exec))
         .collect();
-    if let Some(rules) = native_fs::tree_rules(&root.path, &dirs)? {
-        for plan in &mut list {
-            if rules
-                .trees
-                .iter()
-                .any(|tree| tree.as_os_str() == plan.host.as_str())
-            {
-                plan.trees_root = Some(root.path.clone());
-            }
+    let rules = native_fs::tree_rules(&root.path, run_id, &dirs)?;
+    for plan in &mut list {
+        if rules
+            .trees
+            .iter()
+            .any(|tree| tree.as_os_str() == plan.host.as_str())
+        {
+            plan.trees_root = Some(root.path.clone());
         }
     }
     Ok(list)
@@ -399,10 +399,11 @@ pub(super) fn grants(plans: &[MountPlan]) -> Vec<MountGrant> {
         .collect()
 }
 
-/// The run's trees below the trees root, in the order of the mounts, or `None` when no plan
-/// is a tree.
-pub(super) fn trees_of(plans: &[MountPlan]) -> Option<TreeRules> {
-    let root = plans.iter().find_map(|plan| plan.trees_root.clone())?;
+/// The run's trees below the trees root of `roots`, in the order of the mounts (none when
+/// the run mounts no tree: its profile still denies everything below the root), or `None`
+/// when the agent has no trees root.
+pub(super) fn trees_of(roots: &[MountRoot], plans: &[MountPlan]) -> Option<TreeRules> {
+    let root = roots.iter().find(|root| root.trees)?.path.clone();
     let trees = plans
         .iter()
         .filter(|plan| plan.trees_root.is_some())
@@ -591,12 +592,13 @@ mod tests {
 
     /// Asserts that the grants carry each plan's path and modes but leave the trees out,
     /// that the trees are the tree plans' directories below their root in order, and that
-    /// every read-only plan, a tree included, has a link to protect; and that plans with no
-    /// tree have no trees.
+    /// every read-only plan, a tree included, has a link to protect; that a run with no tree
+    /// still gets the trees root's rules, with no tree; and that an agent with no trees root
+    /// gives none.
     ///
     /// Catches a grant that widens a read-only mount, a grant of a tree (the builder refuses
-    /// it as reopening the trees root), and a read-write link that the profile would deny
-    /// writes through.
+    /// it as reopening the trees root), a run without a tree whose profile leaves every run's
+    /// trees readable, and a read-write link that the profile would deny writes through.
     #[test]
     fn grants_leave_the_trees_out_and_protected_links_follow_the_plans() {
         let mut writable = plan("out", "/Volumes/data/out");
@@ -618,8 +620,20 @@ mod tests {
         assert_eq!((granted[0].write, granted[0].no_exec), (false, true));
         assert_eq!((granted[1].write, granted[1].no_exec), (true, false));
         assert_eq!(granted[1].path.as_str(), "/Volumes/data/out");
+        let roots = [
+            MountRoot {
+                path: PathBuf::from("/Volumes/data"),
+                read_only: false,
+                trees: false,
+            },
+            MountRoot {
+                path: PathBuf::from("/Volumes/tierstore"),
+                read_only: true,
+                trees: true,
+            },
+        ];
         assert_eq!(
-            trees_of(&plans),
+            trees_of(&roots, &plans),
             Some(TreeRules {
                 root: PathBuf::from("/Volumes/tierstore"),
                 trees: vec![
@@ -628,7 +642,15 @@ mod tests {
                 ],
             })
         );
-        assert_eq!(trees_of(&plans[..1]), None);
+        // A run with no tree still gets the root's rules; an agent with no trees root none.
+        assert_eq!(
+            trees_of(&roots, &plans[..1]),
+            Some(TreeRules {
+                root: PathBuf::from("/Volumes/tierstore"),
+                trees: Vec::new(),
+            })
+        );
+        assert_eq!(trees_of(&roots[..1], &plans), None);
         let links: Vec<_> = read_only_links(&plans, Path::new("/h/exec")).collect();
         assert_eq!(
             links,

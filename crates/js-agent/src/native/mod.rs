@@ -71,7 +71,8 @@
 //! A job start's mounts of host paths (`docs/design/job-rootfs.md` 5.1, 5.2, 5.4; `native/mounts.rs`)
 //! are links `exec/<rest>` for a target `/work/<rest>`, made before the run's first process,
 //! with a read grant (and a write grant when read-write) of the canonical host path in its profile,
-//! an exec deny for a `no_exec` mount, and every mount root a read deny of every run. Layers,
+//! an exec deny for a `no_exec` mount, and every mount root but the trees root a read deny of
+//! every run (a tree's link is read through the trees' rules instead, `mounts::trees_of`). Layers,
 //! copy-on-write mounts, targets outside or at `/work` and a remapped host port are refused at
 //! admission; a host port at its own number is refused by the lifecycle (this runtime offers none).
 //! A `cwd` at or below a mount's link leaves `exec/` and fails the start (`native/cwd.rs`).

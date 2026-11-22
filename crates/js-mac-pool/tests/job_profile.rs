@@ -157,6 +157,29 @@ fn a_job_reads_its_own_tree_and_not_another_on_the_same_mount() {
     assert!(!values.contains(&TREE_B));
 }
 
+/// Nothing below the mount's root is run or mapped executable, the job's own trees included:
+/// the exec and executable-mapping denies of the root come before the trees' read grants, and
+/// no rule of the profile allows either again.
+///
+/// Catches a tree a job can execute because it may read it (the profile allows by default,
+/// and a tree gets no mount grant that would carry a `no_exec` deny).
+#[test]
+fn nothing_below_the_mount_is_executable_even_the_jobs_own_tree() {
+    let profile = profile(job(Some(trees(&[TREE_A, TREE_B])), vec![]), Net::Off);
+    let text = profile.text();
+    let at = |line: &str| {
+        text.lines()
+            .position(|one| one == line)
+            .unwrap_or_else(|| panic!("no {line:?} in\n{text}"))
+    };
+    let exec = at("(deny process-exec* (subpath (param \"MOUNT\")))");
+    let map = at("(deny file-map-executable (subpath (param \"MOUNT\")))");
+    let grant = at("(allow file-read* (subpath (param \"MT_0\")))");
+    assert!(exec < grant && map < grant, "{text}");
+    assert!(!text.contains("(allow process-exec"), "{text}");
+    assert!(!text.contains("(allow file-map-executable"), "{text}");
+}
+
 /// A job on a host with a mount and no trees of its own reads nothing below the mount.
 ///
 /// Catches a deny that is left out when the tree list is empty.
