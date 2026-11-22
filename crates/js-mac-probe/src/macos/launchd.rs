@@ -2,7 +2,9 @@
 //! section 4.3). For each [`Case`], it bootstraps a `KeepAlive` job that starts one child
 //! of each [`Kind`], ends the job the case's way, waits until launchd has dealt with that
 //! end, and reads with `ps` which children run on and with which parent. Asserted: every
-//! child but the one in the job's own group runs on with parent pid 1. Each case removes
+//! child but the one in the job's own group runs on, the job's own with parent pid 1 and the
+//! supervisor's child with the supervisor as its parent. Reported with it: each child's state
+//! just before the stop, and how each child the job reaped ended. Each case removes
 //! its job and ends its children, whatever happened.
 //!
 //! Unprivileged it runs in the user's `gui/<uid>` domain (`user/<uid>` when the runner has
@@ -201,6 +203,14 @@ impl Ctx<'_> {
             };
             facts.add(&format!("{}_at_start", child.kind.name()), start);
         }
+        // Whether each child still ran just before the stop, and any child the job reaped.
+        let before = ps(&children);
+        let fates = launchd::fates(&children, state, &before);
+        let started = children.iter().filter(|child| child.outcome.is_ok());
+        for (child, fate) in started.zip(fates) {
+            facts.add(&format!("{}_before_stop", child.kind.name()), fate);
+        }
+        facts.add("ended_before_stop", read_ends(state));
         facts.add("print_before", print(service, "before the stop"));
 
         let stop = match case.stop {
@@ -238,6 +248,7 @@ impl Ctx<'_> {
             instances(state).last().copied().unwrap_or(0),
         );
         facts.add("print_after", print(service, "after the stop"));
+        facts.add("ended_after_stop", read_ends(state));
         let judgement = judge(&expected, &children, state, &rows);
         for (kind, text) in judgement.facts {
             facts.add(&kind, text);
@@ -300,6 +311,12 @@ fn read_children(state: &Path) -> Option<Vec<Spawned>> {
 fn instances(state: &Path) -> Vec<i32> {
     let text = fs::read_to_string(state.join(launchd::INSTANCES)).unwrap_or_default();
     parse_instances(&text)
+}
+
+/// The ends file, a child per ` | `: how each child the job reaped ended.
+fn read_ends(state: &Path) -> String {
+    let text = fs::read_to_string(state.join(launchd::ENDS)).unwrap_or_default();
+    text.trim().replace('\n', " | ")
 }
 
 fn read_log(state: &Path) -> String {

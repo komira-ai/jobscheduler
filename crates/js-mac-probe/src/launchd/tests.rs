@@ -24,18 +24,32 @@ fn only_a_bootout_leaves_the_job_unstarted() {
 }
 
 #[test]
-fn the_dropped_child_is_started_only_with_ids_to_drop_to() {
+fn the_children_of_another_uid_are_started_only_with_ids_to_drop_to() {
     assert_eq!(
         Kind::started(false),
         [Kind::SameGroup, Kind::OwnGroup, Kind::OwnSession]
     );
+    assert_eq!(Kind::launched(false), Kind::started(false));
     assert_eq!(
         Kind::started(true),
         [
             Kind::SameGroup,
             Kind::OwnGroup,
             Kind::OwnSession,
-            Kind::Dropped
+            Kind::Dropped,
+            Kind::Supervisor,
+            Kind::SupervisedJob
+        ]
+    );
+    // The supervisor starts its own child; the job does not.
+    assert_eq!(
+        Kind::launched(true),
+        [
+            Kind::SameGroup,
+            Kind::OwnGroup,
+            Kind::OwnSession,
+            Kind::Dropped,
+            Kind::Supervisor
         ]
     );
 }
@@ -54,12 +68,12 @@ fn only_the_same_group_child_may_end_with_its_job() {
         .into_iter()
         .map(Kind::must_outlive)
         .collect();
-    assert_eq!(must, [false, true, true, true]);
+    assert_eq!(must, [false, true, true, true, true, true]);
     let own: Vec<bool> = Kind::started(true)
         .into_iter()
         .map(Kind::own_group)
         .collect();
-    assert_eq!(own, [false, true, false, true]);
+    assert_eq!(own, [false, true, false, true, true, true]);
 }
 
 #[test]
@@ -228,14 +242,31 @@ fn a_tag_is_the_kind_under_the_state_directory() {
 }
 
 #[test]
+fn a_uid_ps_prints_negative_is_read_as_the_unsigned_uid() {
+    // macOS's `ps` prints nobody (4294967294) as -2.
+    let rows = parse_ps("43558 43551 43558    -2 S hold --tag /s/dropped\n");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uid, 4_294_967_294);
+    assert_eq!(
+        Fate::of(&hello(43558), Path::new("/s/dropped"), &rows),
+        Fate::Running {
+            ppid: 43551,
+            pgid: 43558,
+            uid: 4_294_967_294
+        }
+    );
+}
+
+#[test]
 fn ps_rows_keep_the_whole_command_and_lines_without_four_numbers_are_left_out() {
     let text = "  101     1   101 4294967294 /p/js-mac-probe child hold --tag /s/own group\n\
 PID PPID PGID UID COMMAND\n\
 102 1 102\n\
 103 1 x 0 cmd\n\
-104 1 104 -1 cmd\n\
+104 1 104 x cmd\n\
 105 x 105 0 cmd\n\
 x 1 106 0 cmd\n\
+108 1 108 -2147483649 cmd\n\
 107 1 107 0 \n";
     assert_eq!(
         parse_ps(text),
@@ -296,9 +327,10 @@ fn only_a_child_running_under_launchd_has_outlived_its_job() {
         pgid: 5,
         uid: 0,
     };
-    assert!(running(1).outlived());
-    assert!(!running(77).outlived());
-    assert!(!Fate::Gone.outlived());
+    assert!(running(1).outlived(1));
+    assert!(!running(77).outlived(1));
+    assert!(running(77).outlived(77));
+    assert!(!Fate::Gone.outlived(1));
     assert_eq!(
         running(1).to_string(),
         "runs on, parent pid 1, pgid 5, uid 0"
@@ -353,6 +385,7 @@ fn judged(children: &[Spawned], rows: &[Row]) -> Judgement {
     judge(&Kind::started(true), children, Path::new("/s"), rows)
 }
 
+/// Every kind started, pids 20 to 25 in kind order.
 fn all_started() -> Vec<Spawned> {
     Kind::started(true)
         .into_iter()
@@ -364,14 +397,21 @@ fn all_started() -> Vec<Spawned> {
         .collect()
 }
 
-#[test]
-fn a_case_holds_when_every_child_but_the_same_group_one_runs_on_under_launchd() {
-    let rows = [
+/// Every child but the same-group one runs on as it must: the job's under launchd, the
+/// supervisor's (25) under the supervisor (24).
+fn survivors() -> Vec<Row> {
+    vec![
         row(21, 1, "--tag /s/own-group"),
         row(22, 1, "--tag /s/own-session"),
         row(23, 1, "--tag /s/dropped"),
-    ];
-    let judgement = judged(&all_started(), &rows);
+        row(24, 1, "--tag /s/supervisor"),
+        row(25, 24, "--tag /s/supervised-job"),
+    ]
+}
+
+#[test]
+fn a_case_holds_when_every_child_but_the_same_group_one_runs_on_under_its_parent() {
+    let judgement = judged(&all_started(), &survivors());
     assert!(judgement.held);
     let facts: Vec<(&str, &str)> = judgement
         .facts
@@ -385,36 +425,33 @@ fn a_case_holds_when_every_child_but_the_same_group_one_runs_on_under_launchd() 
             ("own-group", "runs on, parent pid 1, pgid 21, uid 501"),
             ("own-session", "runs on, parent pid 1, pgid 22, uid 501"),
             ("dropped", "runs on, parent pid 1, pgid 23, uid 501"),
+            ("supervisor", "runs on, parent pid 1, pgid 24, uid 501"),
+            ("supervised-job", "runs on, parent pid 24, pgid 25, uid 501"),
         ]
     );
 }
 
 #[test]
 fn a_case_fails_when_a_needed_child_is_gone_kept_by_another_parent_or_never_started() {
-    let survivors = [
-        row(21, 1, "--tag /s/own-group"),
-        row(22, 1, "--tag /s/own-session"),
-        row(23, 1, "--tag /s/dropped"),
-    ];
+    let without = |at: usize| {
+        let mut rows = survivors();
+        rows.remove(at);
+        rows
+    };
     // The own-session child gone.
-    assert!(
-        !judged(
-            &all_started(),
-            &[survivors[0].clone(), survivors[2].clone()]
-        )
-        .held
-    );
+    assert!(!judged(&all_started(), &without(1)).held);
     // The dropped child still the job's.
-    let kept = [
-        survivors[0].clone(),
-        survivors[1].clone(),
-        row(23, 99, "--tag /s/dropped"),
-    ];
+    let mut kept = survivors();
+    kept[2] = row(23, 99, "--tag /s/dropped");
     assert!(!judged(&all_started(), &kept).held);
+    // The supervisor's child handed to launchd: its supervisor no longer waits for it.
+    let mut orphaned = survivors();
+    orphaned[4] = row(25, 1, "--tag /s/supervised-job");
+    assert!(!judged(&all_started(), &orphaned).held);
     // The dropped child refused, and then missing from the file.
     let mut children = all_started();
     children[3].outcome = Err("cannot start: EPERM".to_owned());
-    let refused = judged(&children, &survivors);
+    let refused = judged(&children, &survivors());
     assert!(!refused.held);
     assert_eq!(
         refused.facts[3],
@@ -423,8 +460,8 @@ fn a_case_fails_when_a_needed_child_is_gone_kept_by_another_parent_or_never_star
             "not started: cannot start: EPERM".to_owned()
         )
     );
-    children.pop();
-    let missing = judged(&children, &survivors);
+    children.remove(3);
+    let missing = judged(&children, &survivors());
     assert!(!missing.held);
     assert_eq!(
         missing.facts[3].1,
@@ -433,16 +470,54 @@ fn a_case_fails_when_a_needed_child_is_gone_kept_by_another_parent_or_never_star
 }
 
 #[test]
+fn a_supervised_job_whose_supervisor_did_not_start_has_no_parent_to_outlive_under() {
+    let mut children = all_started();
+    children[4].outcome = Err("cannot start".to_owned());
+    // Even a row that would pass with the supervisor's pid does not.
+    let judgement = judged(&children, &survivors());
+    assert!(!judgement.held);
+    assert_eq!(
+        judgement.facts[5].1,
+        "runs on, parent pid 24, pgid 25, uid 501"
+    );
+}
+
+#[test]
 fn a_same_group_child_that_is_missing_or_runs_on_does_not_decide_the_case() {
-    let rows = [
-        row(20, 1, "--tag /s/same-group"),
-        row(21, 1, "--tag /s/own-group"),
-        row(22, 1, "--tag /s/own-session"),
-        row(23, 1, "--tag /s/dropped"),
-    ];
+    let mut rows = survivors();
+    rows.push(row(20, 1, "--tag /s/same-group"));
     assert!(judged(&all_started(), &rows).held);
     let without: Vec<Spawned> = all_started().into_iter().skip(1).collect();
     assert!(judged(&without, &rows).held);
+}
+
+#[test]
+fn an_outcome_line_reads_back_and_a_line_that_is_neither_is_none() {
+    let ok = Ok(hello(7));
+    assert_eq!(render_outcome(&ok), "pid=7 pgid=7 sid=1 uid=501");
+    assert_eq!(parse_outcome("pid=7 pgid=7 sid=1 uid=501\n"), Some(ok));
+    let refused: Result<Hello, String> = Err("cannot start: a\nb".to_owned());
+    assert_eq!(render_outcome(&refused), "error cannot start: a b");
+    assert_eq!(
+        parse_outcome("error cannot start: a b"),
+        Some(Err("cannot start: a b".to_owned()))
+    );
+    assert_eq!(parse_outcome(""), None);
+    assert_eq!(parse_outcome("pid=x"), None);
+}
+
+#[test]
+fn an_end_names_the_exit_or_signal_or_why_the_child_was_not_reaped() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let exited = Ok(std::process::ExitStatus::from_raw(3 << 8));
+    assert_eq!(end_text(&exited), "exit status: 3");
+    let killed = Ok(std::process::ExitStatus::from_raw(9));
+    assert_eq!(end_text(&killed), "signal: 9 (SIGKILL)");
+    let failed = Err(std::io::Error::from_raw_os_error(10));
+    assert_eq!(
+        end_text(&failed),
+        "not reaped: No child processes (os error 10)"
+    );
 }
 
 #[test]

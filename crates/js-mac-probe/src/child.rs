@@ -57,6 +57,11 @@ pub enum Child {
         /// Start a session of its own first.
         #[arg(long)]
         setsid: bool,
+        /// Be a supervisor: start a `hold` child of its own in a group of its own as
+        /// `<uid>:<gid>` (tagged as the case's supervised job), and print that child's line
+        /// (or `error <reason>`) after its own.
+        #[arg(long)]
+        supervise: Option<Ids>,
     },
     /// The launchd probe's job: append its pid to the state directory's instances file and,
     /// on its first start there, start one `hold` child of each kind and list them in the
@@ -86,10 +91,11 @@ pub fn run(child: &Child) -> ExitCode {
         Child::Env { name } => Ok(env_text(name)),
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
         Child::Hold {
-            tag: _,
+            tag,
             secs,
             setsid,
-        } => hold(*setsid, *secs),
+            supervise,
+        } => hold(tag, *setsid, *secs, *supervise),
         Child::LaunchdJob { state, secs, drop } => launchd_job(state, *secs, *drop),
     };
     match outcome {
@@ -117,16 +123,38 @@ fn own_hello() -> Hello {
     }
 }
 
-fn hold(setsid: bool, secs: u64) -> io::Result<String> {
+fn hold(tag: &Path, setsid: bool, secs: u64, supervise: Option<Ids>) -> io::Result<String> {
     // SAFETY: setsid has no preconditions; it fails only for a process group leader.
     if setsid && unsafe { libc::setsid() } == -1 {
         return Err(io::Error::last_os_error());
     }
+    // A supervisor's child is its own, in a group of its own, as a run's job is.
+    let job = supervise.map(|ids| {
+        start_hold(&HoldSpec {
+            tag: tag.with_file_name(Kind::SupervisedJob.name()),
+            secs,
+            setsid: false,
+            own_group: true,
+            ids: Some(ids),
+            supervise: None,
+        })
+    });
     let mut out = io::stdout().lock();
     writeln!(out, "{}", own_hello())?;
+    if let Some(job) = &job {
+        writeln!(out, "{}", launchd::render_outcome(&job.outcome))?;
+    }
     out.flush()?;
     drop(out);
     std::thread::sleep(Duration::from_secs(secs));
+    // The supervisor waits for its child, as a run's supervisor waits for the run.
+    if let Some(Started {
+        child: Some(mut child),
+        ..
+    }) = job
+    {
+        let _ = child.wait();
+    }
     Ok(String::new())
 }
 
@@ -137,75 +165,143 @@ fn launchd_job(state: &Path, secs: u64, ids: Option<Ids>) -> io::Result<String> 
         .open(state.join(launchd::INSTANCES))?;
     writeln!(instances, "{}", std::process::id())?;
     let children = state.join(launchd::CHILDREN);
+    let mut waiters = Vec::new();
     if !children.exists() {
-        let exe = std::env::current_exe()?;
-        let started: Vec<Spawned> = Kind::started(ids.is_some())
-            .into_iter()
-            .map(|kind| Spawned {
+        let mut listed = Vec::new();
+        for kind in Kind::launched(ids.is_some()) {
+            let started = start_hold(&HoldSpec::of(state, kind, secs, ids));
+            listed.push(Spawned {
                 kind,
-                outcome: start_hold(
-                    &exe,
-                    state,
-                    kind,
-                    secs,
-                    ids.filter(|_| kind == Kind::Dropped),
-                ),
-            })
-            .collect();
+                outcome: started.outcome,
+            });
+            if kind == Kind::Supervisor {
+                listed.push(Spawned {
+                    kind: Kind::SupervisedJob,
+                    outcome: started.job,
+                });
+            }
+            waiters.extend(started.child.map(|child| reap(state, kind, child)));
+        }
         let temporary = state.join(format!("{}.tmp", launchd::CHILDREN));
-        std::fs::write(&temporary, launchd::render_children(&started))?;
+        std::fs::write(&temporary, launchd::render_children(&listed))?;
         std::fs::rename(&temporary, &children)?;
     }
     std::thread::sleep(Duration::from_secs(secs));
+    for waiter in waiters {
+        let _ = waiter.join();
+    }
     Ok(String::new())
 }
 
-/// Starts a `hold` child of `kind` and reads the line it prints when it has started. The
-/// child is left running: what becomes of it is the probe's question.
-fn start_hold(
-    exe: &Path,
-    state: &Path,
-    kind: Kind,
+/// Waits for a child on a thread of its own and appends how it ended to the ends file, so
+/// that a child that ends while its job runs is seen to end, and how.
+fn reap(state: &Path, kind: Kind, mut child: std::process::Child) -> std::thread::JoinHandle<()> {
+    let ends = state.join(launchd::ENDS);
+    std::thread::spawn(move || {
+        let line = format!("{} {}\n", kind.name(), launchd::end_text(&child.wait()));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ends);
+        let _ = file.and_then(|mut file| file.write_all(line.as_bytes()));
+    })
+}
+
+/// How to start one `hold` child.
+struct HoldSpec {
+    tag: PathBuf,
     secs: u64,
+    setsid: bool,
+    own_group: bool,
+    /// The ids the child runs as.
     ids: Option<Ids>,
-) -> Result<Hello, String> {
-    let started = spawn_hold(exe, state, kind, secs, ids);
-    let (child, reader) = started.map_err(|err| format!("cannot start: {err}"))?;
-    let mut line = String::new();
-    let read = io::BufReader::new(reader).read_line(&mut line);
+    /// The ids the child, a supervisor, gives its own child.
+    supervise: Option<Ids>,
+}
+
+impl HoldSpec {
+    /// The child of `kind` a job starts: only the dropped child runs as the ids, and the
+    /// supervisor passes them on to its own child.
+    fn of(state: &Path, kind: Kind, secs: u64, ids: Option<Ids>) -> Self {
+        Self {
+            tag: launchd::tag(state, kind),
+            secs,
+            setsid: kind == Kind::OwnSession,
+            own_group: kind.own_group(),
+            ids: ids.filter(|_| kind == Kind::Dropped),
+            supervise: ids.filter(|_| kind == Kind::Supervisor),
+        }
+    }
+}
+
+/// A `hold` child as started: its line, a supervisor's line for its own child, and the
+/// child if it started. What becomes of it is the probe's question.
+struct Started {
+    outcome: Result<Hello, String>,
+    /// A supervisor's second line; for any other child, why there is none.
+    job: Result<Hello, String>,
+    child: Option<std::process::Child>,
+}
+
+/// Starts a `hold` child and reads the line it prints when it has started (and, from a
+/// supervisor, the line for its own child).
+fn start_hold(spec: &HoldSpec) -> Started {
+    let started = std::env::current_exe().and_then(|exe| spawn_hold(&exe, spec));
+    let (child, reader) = match started {
+        Ok(started) => started,
+        Err(err) => {
+            let reason = format!("cannot start: {err}");
+            return Started {
+                job: Err(format!("its supervisor did not start: {reason}")),
+                outcome: Err(reason),
+                child: None,
+            };
+        }
+    };
     let pid = child.id();
-    Hello::parse(&line).ok_or(format!("pid {pid}: no start line, read {read:?}"))
+    let mut reader = io::BufReader::new(reader);
+    let mut line = String::new();
+    let read = reader.read_line(&mut line);
+    let outcome = Hello::parse(&line).ok_or(format!("pid {pid}: no start line, read {read:?}"));
+    let mut second = String::new();
+    let read = spec.supervise.map(|_| reader.read_line(&mut second));
+    let missing = Err(format!("pid {pid}: no line for its child, read {read:?}"));
+    let job = launchd::parse_outcome(&second).unwrap_or(missing);
+    Started {
+        outcome,
+        job,
+        child: Some(child),
+    }
 }
 
 /// The `hold` child, its standard output a pipe whose write end only the child holds.
-fn spawn_hold(
-    exe: &Path,
-    state: &Path,
-    kind: Kind,
-    secs: u64,
-    ids: Option<Ids>,
-) -> io::Result<(std::process::Child, io::PipeReader)> {
+fn spawn_hold(exe: &Path, spec: &HoldSpec) -> io::Result<(std::process::Child, io::PipeReader)> {
     let (reader, writer) = io::pipe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("child")
         .arg("hold")
         .arg("--tag")
-        .arg(launchd::tag(state, kind))
+        .arg(&spec.tag)
         .arg("--secs")
-        .arg(secs.to_string())
+        .arg(spec.secs.to_string())
         .stdin(Stdio::null())
         .stdout(writer)
         .stderr(Stdio::null());
-    if kind == Kind::OwnSession {
+    if spec.setsid {
         cmd.arg("--setsid");
     }
-    if kind.own_group() {
+    if let Some(ids) = spec.supervise {
+        cmd.arg("--supervise").arg(ids.to_string());
+    }
+    if spec.own_group {
         cmd.process_group(0);
     }
-    if let Some(ids) = ids {
+    if let Some(ids) = spec.ids {
         cmd.uid(ids.uid).gid(ids.gid);
     }
     let child = cmd.spawn()?;
+    // `cmd` holds the parent's copy of the write end; dropping it leaves the child's alone.
+    drop(cmd);
     Ok((child, reader))
 }
 
@@ -293,6 +389,7 @@ mod tests {
             tag: scratch("hold"),
             secs: 0,
             setsid: false,
+            supervise: None,
         };
         assert_eq!(run(&child), ExitCode::SUCCESS);
     }

@@ -116,6 +116,16 @@ fn read(path: std::path::PathBuf) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+/// The ends file's lines, sorted (the job's waiter threads append them in any order).
+fn ends(state: &std::path::Path) -> Vec<String> {
+    let mut lines: Vec<String> = read(state.join(launchd::ENDS))
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    lines
+}
+
 #[test]
 fn the_job_starts_a_child_of_each_kind_in_its_place_and_lists_them_once() {
     let scratch = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "job");
@@ -147,20 +157,56 @@ fn the_job_starts_a_child_of_each_kind_in_its_place_and_lists_them_once() {
     assert_eq!((ok[2].pgid, ok[2].sid), (ok[2].pid, ok[2].pid));
     // A group of its own, as the ids it was given.
     assert_eq!((ok[3].pgid, ok[3].uid), (ok[3].pid, own_uid(&scratch)));
+    // The supervisor and its child: each a group of its own, the child as the ids.
+    assert_eq!((ok[4].pgid, ok[4].sid), (ok[4].pid, plain.sid));
+    assert_eq!((ok[5].pgid, ok[5].uid), (ok[5].pid, own_uid(&scratch)));
     assert!(ok.iter().all(|h| h.pid != job_pid));
     assert_eq!(
         launchd::parse_instances(&read(state.join(launchd::INSTANCES))),
         [job_pid]
     );
     assert!(!state.join("children.tmp").exists());
+    // The job reaped each child it started itself, the supervisor after its own child.
+    assert_eq!(
+        ends(state),
+        [
+            "dropped exit status: 0",
+            "own-group exit status: 0",
+            "own-session exit status: 0",
+            "same-group exit status: 0",
+            "supervisor exit status: 0",
+        ]
+    );
 
-    // A restart of the job starts no children and leaves the list as it was.
+    // A restart of the job starts no children and leaves the lists as they were.
     let again = job(state, &ids);
     assert!(again.status.success(), "{again:?}");
     assert_eq!(read(state.join(launchd::CHILDREN)), listed);
+    assert_eq!(ends(state).len(), 5);
     let pids = launchd::parse_instances(&read(state.join(launchd::INSTANCES)));
     assert_eq!(pids.len(), 2);
     assert_eq!(pids[0], job_pid);
+}
+
+#[test]
+fn a_supervisor_prints_its_own_line_then_its_childs_which_runs_as_the_ids_in_a_group_of_its_own() {
+    let scratch = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hold-supervise");
+    let ids = format!("{}:{}", own_uid(&scratch), own_gid(&scratch));
+    let out = probe()
+        .args(["child", "hold", "--tag"])
+        .arg(scratch.join("supervisor"))
+        .args(["--secs", "0", "--supervise", &ids])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    let own = Hello::parse(lines[0]).unwrap();
+    let job = launchd::parse_outcome(lines[1]).unwrap().unwrap();
+    assert_ne!(own.pid, job.pid);
+    assert_eq!(job.pgid, job.pid);
+    assert_eq!(job.uid, own_uid(&scratch));
 }
 
 #[test]
@@ -170,14 +216,17 @@ fn a_child_the_kernel_refuses_to_start_is_listed_with_the_reason_and_the_rest_st
     let out = job(scratch.path(), "4294967295:4294967295");
     assert!(out.status.success(), "{out:?}");
     let children = launchd::parse_children(&read(scratch.join(launchd::CHILDREN)));
-    assert_eq!(children.len(), 4);
-    assert!(
-        children[..3].iter().all(|c| c.outcome.is_ok()),
-        "{children:?}"
-    );
-    assert_eq!(children[3].kind, Kind::Dropped);
-    let reason = children[3].outcome.as_ref().unwrap_err();
-    assert!(reason.starts_with("cannot start: "), "{reason}");
+    let kinds: Vec<Kind> = children.iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, Kind::started(true));
+    let started: Vec<bool> = children.iter().map(|c| c.outcome.is_ok()).collect();
+    // The supervisor itself is root's (here the test's); only its child takes the ids.
+    assert_eq!(started, [true, true, true, false, true, false]);
+    for at in [3, 5] {
+        let reason = children[at].outcome.as_ref().unwrap_err();
+        assert!(reason.starts_with("cannot start: "), "{reason}");
+    }
+    // The refused child was never there to reap.
+    assert_eq!(ends(scratch.path()).len(), 4);
 }
 
 #[test]

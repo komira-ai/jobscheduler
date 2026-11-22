@@ -5,8 +5,9 @@
 //!
 //! The question (`docs/design/mac-one-program.md`, section 4.3): when launchd stops a job,
 //! restarts it or sees it die, which of the job's children does it end? The job starts one
-//! child of each [`Kind`] and stays; the probe stops the job one [`Stop`] way, with and
-//! without `AbandonProcessGroup`, and reads which children run on and with which parent.
+//! child of each [`Kind`] (the supervisor starts its own child) and stays; the probe stops
+//! the job one [`Stop`] way, with and without `AbandonProcessGroup`, and reads which
+//! children run on and with which parent.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,19 @@ pub const CHILDREN: &str = "children";
 
 /// The file in a case's state directory where each start of the job appends its pid.
 pub const INSTANCES: &str = "instances";
+
+/// The file in a case's state directory where the job appends `<kind> <how it ended>` for
+/// each child it started and reaped.
+pub const ENDS: &str = "ends";
+
+/// How a reaped child ended, for the ends file.
+#[must_use]
+pub fn end_text(status: &std::io::Result<std::process::ExitStatus>) -> String {
+    match status {
+        Ok(status) => status.to_string(),
+        Err(err) => format!("not reaped: {err}"),
+    }
+}
 
 /// How the probe ends the job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,28 +71,42 @@ impl Stop {
 pub enum Kind {
     /// In the job's own process group, as the job's other processes are.
     SameGroup,
-    /// In a process group of its own (`setpgid`), as a run's supervisor is.
+    /// In a process group of its own (`setpgid`).
     OwnGroup,
     /// In a session of its own (`setsid`).
     OwnSession,
-    /// In a process group of its own, as another uid (root only): a supervisor's job.
+    /// In a process group of its own, as another uid (root only).
     Dropped,
+    /// In a process group of its own, starting [`Kind::SupervisedJob`] (root only): a run's
+    /// supervisor.
+    Supervisor,
+    /// The supervisor's child, in a process group of its own, as another uid: a run's job.
+    SupervisedJob,
 }
 
 impl Kind {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::SameGroup,
         Self::OwnGroup,
         Self::OwnSession,
         Self::Dropped,
+        Self::Supervisor,
+        Self::SupervisedJob,
     ];
 
-    /// The children a job starts: [`Kind::Dropped`] only when it has ids to drop to.
+    /// The children of a job, the supervisor's child included: the last three only when
+    /// the job has ids to drop to.
     #[must_use]
     pub fn started(dropped: bool) -> Vec<Self> {
         let all = Self::ALL.into_iter();
-        all.filter(|kind| dropped || *kind != Self::Dropped)
-            .collect()
+        all.filter(|kind| dropped || !kind.drops()).collect()
+    }
+
+    /// The children the job starts itself: all of [`Kind::started`] but the supervisor's.
+    #[must_use]
+    pub fn launched(dropped: bool) -> Vec<Self> {
+        let all = Self::started(dropped).into_iter();
+        all.filter(|kind| *kind != Self::SupervisedJob).collect()
     }
 
     /// The name in the children file and in a probe's facts.
@@ -89,6 +117,8 @@ impl Kind {
             Self::OwnGroup => "own-group",
             Self::OwnSession => "own-session",
             Self::Dropped => "dropped",
+            Self::Supervisor => "supervisor",
+            Self::SupervisedJob => "supervised-job",
         }
     }
 
@@ -108,7 +138,12 @@ impl Kind {
     /// Whether the child leads a process group of its own from its start.
     #[must_use]
     pub fn own_group(self) -> bool {
-        matches!(self, Self::OwnGroup | Self::Dropped)
+        !matches!(self, Self::SameGroup | Self::OwnSession)
+    }
+
+    /// Whether the child exists only when there are ids to drop to.
+    fn drops(self) -> bool {
+        matches!(self, Self::Dropped | Self::Supervisor | Self::SupervisedJob)
     }
 }
 
@@ -284,16 +319,30 @@ pub struct Spawned {
     pub outcome: Result<Hello, String>,
 }
 
+/// A child's start as one line: its [`Hello`], or `error <reason>`.
+#[must_use]
+pub fn render_outcome(outcome: &Result<Hello, String>) -> String {
+    match outcome {
+        Ok(hello) => hello.to_string(),
+        Err(reason) => format!("error {}", reason.replace('\n', " ")),
+    }
+}
+
+/// Reads [`render_outcome`]'s line; `None` for a line that is neither.
+#[must_use]
+pub fn parse_outcome(line: &str) -> Option<Result<Hello, String>> {
+    let line = line.trim_end_matches('\n');
+    match line.strip_prefix("error ") {
+        Some(reason) => Some(Err(reason.to_owned())),
+        None => Some(Ok(Hello::parse(line)?)),
+    }
+}
+
 /// The children file's text: `<kind> <hello>` or `<kind> error <reason>`, a line each.
 #[must_use]
 pub fn render_children(children: &[Spawned]) -> String {
-    let line = |child: &Spawned| {
-        let what = match &child.outcome {
-            Ok(hello) => hello.to_string(),
-            Err(reason) => format!("error {}", reason.replace('\n', " ")),
-        };
-        format!("{} {what}\n", child.kind.name())
-    };
+    let line =
+        |child: &Spawned| format!("{} {}\n", child.kind.name(), render_outcome(&child.outcome));
     children.iter().map(line).collect()
 }
 
@@ -304,10 +353,7 @@ pub fn parse_children(text: &str) -> Vec<Spawned> {
     let read = |line: &str| {
         let (kind, what) = line.split_once(' ')?;
         let kind = Kind::from_name(kind)?;
-        let outcome = match what.strip_prefix("error ") {
-            Some(reason) => Err(reason.to_owned()),
-            None => Ok(Hello::parse(what)?),
-        };
+        let outcome = parse_outcome(what)?;
         Some(Spawned { kind, outcome })
     };
     text.lines().filter_map(read).collect()
@@ -341,7 +387,8 @@ pub struct Row {
     pub command: String,
 }
 
-/// The rows of `ps` output; a line that does not start with four numbers is left out.
+/// The rows of `ps` output; a line that does not start with four numbers (a uid may be
+/// printed negative) is left out.
 #[must_use]
 pub fn parse_ps(text: &str) -> Vec<Row> {
     let read = |line: &str| {
@@ -357,11 +404,19 @@ pub fn parse_ps(text: &str) -> Vec<Row> {
             pid: pid.parse().ok()?,
             ppid: ppid.parse().ok()?,
             pgid: pgid.parse().ok()?,
-            uid: uid.parse().ok()?,
+            uid: ps_uid(uid)?,
             command: rest.to_owned(),
         })
     };
     text.lines().filter_map(read).collect()
+}
+
+/// A uid as `ps` prints it: macOS prints one above `i32::MAX` as negative (nobody,
+/// 4294967294, as -2).
+fn ps_uid(text: &str) -> Option<u32> {
+    let value: i64 = text.parse().ok()?;
+    let negative = i32::try_from(value).ok().map(i32::cast_unsigned);
+    u32::try_from(value).ok().or(negative)
 }
 
 /// What became of a child after its job was stopped.
@@ -395,11 +450,11 @@ impl Fate {
         })
     }
 
-    /// Whether the child outlived the job the way a supervisor must: running, its parent
-    /// launchd (pid 1).
+    /// Whether the child outlived the job as it must: running, its parent `parent` (launchd,
+    /// pid 1, for the job's own children; the supervisor for the supervisor's child).
     #[must_use]
-    pub fn outlived(self) -> bool {
-        matches!(self, Self::Running { ppid: 1, .. })
+    pub fn outlived(self, parent: i32) -> bool {
+        matches!(self, Self::Running { ppid, .. } if ppid == parent)
     }
 
     /// Whether the child no longer waits on the job's end: gone, or no longer the child of
@@ -443,11 +498,17 @@ pub struct Judgement {
 /// Judges the children of `expected` kinds after the stop.
 #[must_use]
 pub fn judge(expected: &[Kind], children: &[Spawned], state: &Path, rows: &[Row]) -> Judgement {
+    let find = |kind: Kind| children.iter().find(|child| child.kind == kind);
+    let supervisor = find(Kind::Supervisor).and_then(|child| child.outcome.as_ref().ok());
     let mut held = true;
     let mut facts = Vec::new();
     for &kind in expected {
-        let found = children.iter().find(|child| child.kind == kind);
-        let (text, outlived) = match found.map(|child| &child.outcome) {
+        // The supervisor's child must stay its child; the job's children become launchd's.
+        let parent = match kind {
+            Kind::SupervisedJob => supervisor.map_or(-1, |hello| hello.pid),
+            _ => 1,
+        };
+        let (text, outlived) = match find(kind).map(|child| &child.outcome) {
             None => (
                 "not started: no line in the children file".to_owned(),
                 false,
@@ -455,7 +516,7 @@ pub fn judge(expected: &[Kind], children: &[Spawned], state: &Path, rows: &[Row]
             Some(Err(reason)) => (format!("not started: {reason}"), false),
             Some(Ok(hello)) => {
                 let fate = Fate::of(hello, &tag(state, kind), rows);
-                (fate.to_string(), fate.outlived())
+                (fate.to_string(), fate.outlived(parent))
             }
         };
         held &= outlived || !kind.must_outlive();
