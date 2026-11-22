@@ -11,8 +11,13 @@ This file is the design for three connected changes, and it is the only place th
    can do the fewest *other* things. A Linux arm64 job goes to a Linux-only arm64 server before a Mac, so the Mac stays free for
    the macOS work only a Mac can do. The rule is general: the same rule keeps a GPU machine free for GPU jobs.
 
-It is a design only. Section 7 splits the implementation into pull-request-sized tasks. The owner's choices are recorded in section
-8, and section 9 lists what they leave open.
+It is a design only. Section 7 splits the implementation into pull-request-sized tasks. Section 8 records the owner's choices,
+section 9 holds the two decisions still to take, and section 10 lists what this design settles itself.
+
+Two parts of the design depend on those decisions:
+
+- The demand-driven split on a Mac (2.4, 2.7 item 4, section 4, and the memory row of section 8) assumes option (a) of C1.
+- Where a host's size comes from (2.1) assumes option (a) of C2.
 
 **How references read.**
 
@@ -21,8 +26,8 @@ It is a design only. Section 7 splits the implementation into pull-request-sized
   `AGENTS.md`.
 - Every code reference was read in the tree this file was written against. A line number is approximate; the symbol is the anchor.
 - The design is written against the current server. A hello and a heartbeat are served by any instance from the host's
-  `node/<host>` row, and each instance's registry is a cache of those rows
-  ([multi-instance.md](multi-instance.md), section 0).
+  `node/<host>` row, and a pass offers every host whose row is live, whichever server took its hello
+  (`crates/js-lease-server/src/sched/jobs_rows.rs`; [multi-instance.md](multi-instance.md), section 0).
 
 **The machines this is written for.**
 
@@ -61,7 +66,8 @@ not a machine provider (5.6), and not the operating system's machine id the agen
     32-core Mac at 28.
 - **What reads the shape.**
   - The placer is told the host's booked shape (admit.rs calls `list_claimed`, then `tell_up` with `book.shape_of`).
-  - The pass gives the commit `capacity_of(&view.shape, cpu_slack)` (`crates/js-lease-server/src/sched/jobs_pass.rs`).
+  - The pass gives the commit `capacity_of(shape, cpu_slack)` (`crates/js-lease-server/src/sched/jobs_rows.rs`), from the shape
+    the host's `node/<host>` row records.
   - The server sizes its usage limits from the largest pool shape (`crates/js-lease-server/src/agents.rs`, near line 268).
   - `check_pool` (`crates/js-lease-server/src/config/placement.rs`) requires the shape to name an `arch` unless the pool places by
     hello.
@@ -178,8 +184,9 @@ CLI code.
 
 **The booking.**
 
-- A host's capacity is its own claim: the cores, memory and GPUs of its last hello's `WireShape`, with memory cut by
-  `memory_schedulable_percent` and CPU scaled by the slack, as the pool's shape is cut and scaled today.
+- A host's capacity is its own claim: the cores, memory, GPUs and scratch disk of its last hello's `WireShape`. Memory is cut by
+  `memory_schedulable_percent` and CPU is scaled by the slack, as the pool's shape is cut and scaled today. Disk stays uncut, as
+  it is today.
 - There is no pool-wide size. Two hosts of one pool are booked each at its own size. A 32-core Mac is booked at 32 cores, and a
   28-core Mac at 28.
 
@@ -188,7 +195,7 @@ CLI code.
 - **Registry.** `placement_shape` takes its resources from the claim instead of the pool's `booked` resources. Its capabilities
   are built as today.
 - **Server.**
-  - `capacity_of(&view.shape, ...)` then reads the host's own size with no further change.
+  - `capacity_of` is unchanged. Its input, the shape the host's `node/<host>` row records, is now the claim-booked shape.
   - The usage limits are sized from the largest size the wire accepts for a hello (`js_agent_wire::limits`), not from a pool shape.
 - **Pool file.**
   - The pool's `shape` becomes optional. When a pool names one, it is a floor only: a hello that offers less is refused
@@ -196,13 +203,24 @@ CLI code.
   - What a pool must still name is its capabilities: `os` and `arch`, which `check_pool` needs to know the pool's platform.
   - `mac_pool_shape.rs` changes with the rule it pins. Its test of a 32-core Mac then expects 32 cores booked.
 
+**The admission checks that read the floor today** (`judge`, `registry/admit.rs`) read the claim where a pool has no shape:
+
+- **The GPU part of the host contract.** `HostContract::new(exec, gpus > 0)` takes `gpus` from the floor when the pool has one,
+  and otherwise from the claim. A host that reports GPUs then needs the GPU toolkit, as a GPU pool's host does today.
+- **`scratch-quota`.** A pool that names it still requires a quota default that counts. The default must fit the floor's disk
+  when the pool has a shape, and the claim's disk when it has none (`QuotaDefaultUnfit`).
+- **No pool disk.** A pool with no shape books the claim's disk, so `QuotaWithoutPoolDisk` applies only to a floor that names no
+  disk. A host with no scratch root reports no disk and books none.
+- **`QuotaWithoutDisk`.** The start check `PoolConfig::checked` (config.rs, near line 122) applies only to a pool that has a
+  shape. Without one, the claim's disk is checked at the hello instead.
+
 **Where the numbers come from.**
 
 - The agent's detection (1.2) is the host's report, the same code on Linux and macOS. It is what hostkeeper installs and starts on
   every host.
 - The operator's `--cpu-millis` and `--memory-bytes` still only lower it, for example to keep cores for something else on the
   host.
-- Hostkeeper's facts file adds nothing the server reads. Whether it should also carry the size is open (9).
+- Hostkeeper's facts file adds nothing the server reads. Whether it should carry the size instead is decision C2 (9).
 
 **A wrong or shrinking report.**
 
@@ -237,19 +255,32 @@ CLI code.
    - Their execution modes differ: `sandbox-exec` against `container`.
    - Their network ceilings differ. The experiment of
      [linux-containers-on-macos.md](experiments/linux-containers-on-macos.md) found no egress filter for the Linux VMs.
-   - Their failure modes differ: the container tool's per-user services can fail while native runs go on.
+   - Their failure modes differ: the Linux VMs' kernel, image or VM layer can fail while native runs go on.
 
    Under B each side has its own capabilities, ceiling, cordon and taint, and every per-host mechanism of section 1 stays as it is.
    Under A, one cordon or taint stops both.
 2. **Matching and pools do not change.** Under A, `NodeCaps`, `Request::unmet`, `Shape::satisfies` and a pool's capabilities all
    become per-platform lists, and several reads assume one `os` (`ios.device` requires `os == macos`). Under B a host stays one
    platform.
-3. **The one new thing is small and generic.** It is a ledger shared by the hosts of one machine. It is the same whether the Linux
-   side is a runtime inside the macOS agent, as now, or a guest with an agent of its own, as a later option.
+3. **The one new thing is small and generic.** It is a ledger shared by the hosts of one machine, and the same ledger serves a GPU
+   machine or any other machine with more than one side.
 4. **The second session is cheap.** It is a second hello and heartbeat loop in the macOS agent. The agent's job worker, dispatch
    poll and runtimes are already behind interfaces (`trait Runtime`, [mac-runtime.md](mac-runtime.md)).
 
 **What B costs.** The macOS agent runs two sessions, and the operator counts machines, not hosts (6.5).
+
+**One agent program per host still holds.** The two sessions are one `js-agent` program, the one program a Mac runs
+([mac-one-program.md](mac-one-program.md)).
+
+What the operating system forces is only this: a Linux job needs a Linux kernel, so on a Mac it runs in a VM, and something
+inside that VM must start `crun`. That something is a run-only guest program:
+
+- It has no hello, session, host id, pool or heartbeat, and it is never a `js-agent`.
+- It takes one job's start and kill from the Mac's `js-agent` over a virtio socket, and returns the job's exit record.
+- It ends with the VM.
+
+The only scheduling agent on the Mac is the host's `js-agent`. No other program registers with the server, inside a VM or beside
+it.
 
 ### 2.3 Terms
 
@@ -285,8 +316,8 @@ CLI code.
 - Each side's charge is checked against its own room, as today.
 - The engine also checks the charges of all sides together against the machine's scaled cores, so the slack setting holds per
   machine (B14).
-- A server sees only the readings of the sides it holds, so the machine sum is the engine's check, as all load admission is today.
-  The bookings are the hard check, made in the commit.
+- Each side's reading is in its `node/<host>` row, so every server sums the same readings. The machine sum is the engine's check,
+  as all load admission is today. The bookings are the hard check, made in the commit.
 
 **Whole-host jobs.**
 
@@ -320,11 +351,47 @@ CLI code.
 Allocations stay keyed by host. A release that does not know machines still writes and frees allocations the new commit reads
 correctly.
 
-### 2.6 The interface the Linux-on-Mac design must meet
+### 2.6 The job definition on each platform
 
-The owner's choices fix the first shape of Linux on the Macs: one Linux VM per job, started by the macOS agent. The experiment
-used Apple's `container` tool, with a median of about 0.6 s from request to the job's first output, about 0.54 s of it the VM's
-boot. Whatever runs the VMs, the server sees exactly this:
+The job definition is one OCI image on both platforms, as [jobscheduler-design.md](jobscheduler-design.md) rules (its summary,
+"The job is an OCI image on both platforms"):
+
+| Where the job runs | What the job is | What runs it |
+|---|---|---|
+| A Linux server | a `linux/<arch>` OCI image pinned by digest | `crun`, with the OCI config `js-contain` builds (`CrunRuntime`, `crates/js-agent/src/crun`) |
+| A Mac, macOS side | a darwin bundle, an OCI image manifest pinned by digest | the native runtime, under a pool user and its Seatbelt profile (`NativeRuntime`) |
+| A Mac, Linux side | the same `linux/arm64` OCI image a Linux server runs | `crun`, with the same `js-contain` OCI config, inside a Linux VM of its own |
+
+**How the Linux side meets the ruling.**
+
+- A Linux job on a Mac is the job a Linux arm64 server would run. The client submits one job, and the server may place it on either
+  kind of machine.
+- The VM is only the Linux kernel that `crun` needs. The macOS agent:
+  1. boots the VM for the job;
+  2. gives it the image's layers and the job's inputs;
+  3. hands it the OCI config `js-contain` builds;
+  4. reads the exit record at the end.
+- Inside the VM, a small init runs `crun`, the same `crun` and the same config as on a Linux server. The job's hardening is
+  therefore the Linux agent's: user, capabilities, seccomp, `no_new_privs`, a read-only root and a `noexec` `/tmp`. So is its
+  network rule, the `nft` rules of [agent-egress.md](agent-egress.md), set inside the guest by the init before `crun` starts.
+- The VM is started through Virtualization.framework, through `js-vmm`, which today stages macOS images and boots macOS probe
+  guests. New work, all owned by the Linux-on-Mac runtime design (`docs/design/linux-on-mac-runtime.md`, to be written):
+  - a Linux boot path;
+  - a guest image: kernel, the run-only guest program and `crun`;
+  - a job-control protocol for the start (the OCI config, the image's layers and the inputs) and the exit record. It is built
+    on the virtio-socket framing `js-guest-wire` has for probe guests, and is a new protocol version there, not an edit.
+
+**What the experiment's tool is, and is not.** The experiment of
+[linux-containers-on-macos.md](experiments/linux-containers-on-macos.md) used Apple's `container` tool. That tool does not run
+`crun` and does not take the OCI config `js-contain` builds (its section 7). As shipped it also lacks the job's hardening inside
+the guest, and it has no egress filter (its section 8). This design does not use it to run jobs. Its measurement stands as evidence
+of the cost: a median of about 0.6 s from request to the job's first output, about 0.54 s of it the VM's boot. A VM started by
+`js-vmm` pays a boot of the same kind.
+
+### 2.7 The interface the Linux-on-Mac design must meet
+
+The owner's choices fix the first shape of Linux on the Macs: one Linux VM per job, started by the macOS agent, running the job with
+`crun` (2.6). The server sees exactly this:
 
 1. **Each platform is a host session.**
    - The macOS agent opens a second session with a second host id for its Linux runtime: its own hello, heartbeat, dispatch poll
@@ -334,24 +401,27 @@ boot. Whatever runs the VMs, the server sees exactly this:
 2. **The Linux session's hello names its machine.**
    - It names the macOS session's host id, from a new agent flag `--machine <host id>`, a flag as S2 asks.
    - The macOS session names nothing, so a macOS agent of any release serves as a home side.
-3. **The Linux session reports the Mac's size and its VM overhead** (`vm.overhead_mib`, 2.4). Its capabilities say what its VMs
-   give a job. Its network ceiling is `none` until the VMs' egress is filtered, so a Linux job that needs egress is not capable
-   there and never spills onto a Mac.
-4. **CPU readings are not counted twice.**
+3. **The Linux session reports what it can do.**
+   - It reports the Mac's size and its VM overhead (`vm.overhead_mib`, 2.4).
+   - Its capabilities say what its VMs give a job: `exec = container`, and the `layered-rootfs` and scratch keys its guest
+     supports.
+   - Its network ceiling is the most its in-guest rules enforce, and `none` until they are built. While it is `none`, a Linux job
+     that needs egress is not capable there and never spills onto a Mac.
+4. **The Linux VMs do not take the macOS VM slots.**
+   - The agent's VM gate (`VM_SLOTS = 2`, `crates/js-agent/src/vm/mod.rs`) counts macOS guests only.
+   - Linux job VMs are bounded by the ledger alone. This assumes option (a) of decision C1 (9), pending the owner's ruling.
+5. **CPU readings are not counted twice.**
    - Each VM's CPU is the Linux session's.
    - If the macOS session ever reports a load reading, it excludes the VMs.
    - Today native macOS runs report no load (`NO_NATIVE_USAGE`, `crates/js-agent/src/platform/macos.rs`), so the macOS side is
      charged by prediction.
-5. **Machine operations are per side.**
+6. **Machine operations are per side.**
    - The server does not carry a cordon from one side to the other.
    - A step that stops the whole Mac cordons both sessions.
    - A step that stops the Linux runtime alone cordons only the Linux session.
-6. **A warm guest is a later option, not this design's.** A long-lived guest that keeps its memory would need the side to report
-   the memory it holds, in a value every server and the commit read (a node-row column), and the ledger to count `max(booked,
-   held)`. Nothing in this design needs it.
 
-   It would be worth building only if the VM's start, about 0.5 s more than a Linux host's, is measured to matter for the jobs
-   that spill onto the Macs.
+Each job's VM ends with its job. No long-lived VM, and no memory held between jobs, is part of this design. Memory follows demand
+as CPU does (8).
 
 ## 3. The preference: spend the narrowest machine first
 
@@ -694,7 +764,8 @@ The `--agent-pool-config` file keeps its required `[shape]`, now a floor, and re
 
 **`js-sched-placer`.**
 
-- `OpenHost` gains the machine and its offers, and `jobs_pass.rs` fills them from the registry's view and the configured pools.
+- `OpenHost` gains the machine and its offers, and `jobs_rows.rs` fills them from the hosts' `node/<host>` rows and the configured
+  pools.
 - The placer adds a side's `vm.overhead_mib` to each job's memory booking there.
 - The capacity it gives `place_claimed` grows by the machine's.
 - `walk_holding`'s `can_use` closes by machine, but not on spill sides (3.4).
@@ -703,7 +774,7 @@ The `--agent-pool-config` file keeps its required `[shape]`, now a floor, and re
 
 **`js-lease-server`.**
 
-- `capacity_of` reads the host's own size, through the registry's view.
+- `capacity_of` is unchanged; its input is the claim-booked shape (2.1). The commit's input gains the machine capacity (2.5).
 - The usage limits are sized from the wire's largest accepted size (2.1).
 - `check_pool` reads the pool's capabilities instead of a shape.
 
@@ -767,7 +838,7 @@ kbf must keep doing three things:
 - **Always send `arch`.** A Linux job with no `arch` is capable on x86_64 and arm64 hosts alike.
 - **Send `exec` only when the action needs it.**
 - **Send the network level the action needs.** A Linux job that asks for egress is not capable on a Mac's Linux session while that
-  session's ceiling is `none` (2.6).
+  session's ceiling is `none` (2.7).
 
 The preference is the server's: kbf names no pool and no machine.
 
@@ -793,6 +864,9 @@ The preference is the server's: kbf names no pool and no machine.
 - `a_host_that_says_hello_smaller_keeps_its_running_jobs_and_takes_none_until_they_fit`
 - `the_commit_holds_a_placement_to_the_hosts_reported_size`
 - `usage_limits_hold_the_largest_size_the_wire_accepts`
+- `a_pool_without_a_shape_books_the_reported_disk`
+- `a_scratch_quota_pool_without_a_shape_checks_the_quota_default_against_the_reported_disk`
+- `a_host_reporting_gpus_in_a_pool_without_a_shape_needs_the_gpu_toolkit`
 
 **`js-caps`**
 
@@ -820,6 +894,10 @@ The preference is the server's: kbf names no pool and no machine.
 - `machine_cpu_admission_sums_the_charges_of_both_sides`: within the machine's scaled cores.
 - `a_whole_host_job_on_either_side_closes_every_side_and_waits_for_all_to_empty`
 - `whole_host_marks_break_a_drain_cost_tie_by_breadth_after_the_provider`
+- `quiet_whole_host_hosts_order_by_provider_then_breadth_then_id`
+- `the_farm_rerun_avoid_set_applies_before_the_narrowness_tier`
+- `the_machine_load_check_counts_each_vm_once`: the Linux session's reading counts the VMs; the macOS session's reading, when
+  there is one, does not.
 
 **`js-sched-placer`: the walk**
 
@@ -848,6 +926,10 @@ The preference is the server's: kbf names no pool and no machine.
 - `a_side_naming_another_machine_than_its_binding_is_refused_host_bound`
 - `a_side_put_back_after_a_restart_keeps_its_machine`
 - `a_machine_named_in_a_pool_without_side_of_is_ignored`
+- `a_cordon_on_one_side_does_not_cordon_the_other`
+- `a_second_instance_reads_a_sides_machine_from_its_node_row`
+- `a_node_row_and_binding_with_a_machine_read_in_the_previous_release` (B8: previous release on new data)
+- `a_node_row_and_binding_without_a_machine_read_in_this_release` (B8: new release on old data)
 
 **`js-agent-wire`**, extending `tests/previous_release_v0_1_208.rs`
 
@@ -870,6 +952,17 @@ The preference is the server's: kbf names no pool and no machine.
 - `a_host_lists_its_machine_platform_and_offers`
 - `a_usage_record_names_its_machine_and_platform`
 - `get_usage_filters_by_machine`
+- `the_new_host_and_usage_fields_read_in_the_previous_release`: the `js-proto` schema test, for `Host`, `ListHostsResponse`,
+  `UsageRecord` and `GetUsageRequest` (B8).
+
+**The Linux runtime on a Mac.** These are written in the tasks of the Linux-on-Mac runtime design
+(`docs/design/linux-on-mac-runtime.md`, to be written), which holds them to 2.6 and 2.7:
+
+- `a_linux_job_on_a_mac_runs_under_the_oci_config_a_linux_server_builds`: the `js-contain` config handed to the VM is the
+  config the Linux agent builds for the same job.
+- `a_linux_job_vm_never_takes_a_macos_vm_slot`: two macOS VMs and Linux job VMs run together, and a third macOS VM is still
+  refused.
+- `a_linux_session_reports_ceiling_none_until_its_guest_sets_egress_rules`
 
 **`js-sim-cell`: the three examples of 3.3**, as scenarios on the fake clock
 
@@ -895,12 +988,14 @@ Each task is one pull request, and it updates the docs it changes and moves its 
 | `jsmp-place` | the placer wiring: machine, offers, VM overhead and machine capacity into `OpenHost` and the commit; the walk's closing by machine and spill | `jsmp-ledger`, `jsmp-narrow`, `jsmp-commit` |
 | `jsmp-output` | `Host` fields, `ListHostsResponse.platforms`, `/v1/hosts` JSON, the `UsageRecord` and `GetUsageRequest` fields | `jsmp-offers`, `jsmp-pools` |
 | `jsmp-sim` | the three `js-sim-cell` scenarios and the machine invariant | `jsmp-place` |
+| `jsmp-mac-session` | the macOS agent's second session: `--machine` set to its own host id, its own hello, heartbeat and dispatch poll, and a runtime that refuses every start until the Linux-on-Mac runtime lands; the cordon-per-side test | `jsmp-wire`, `jsmp-pools` |
 
 `jsmp-reported`, `jsmp-offers`, `jsmp-wire` and `jsmp-ledger` can land in parallel.
 
 `jsmp-pools` alone already refuses side hellos without a machine. Without the placer wiring of `jsmp-place` the server would not
 yet book the machine, so no pool file names `side_of` before `jsmp-place` is released (the rollout of section 5). The macOS
-agent's Linux session lands with the Linux-on-Mac design's runtime.
+agent's second session is `jsmp-mac-session`. The runtime behind it (the VM, the guest image, the run-only guest program, the
+job-control protocol and the in-guest egress rules) is the Linux-on-Mac runtime design's, whose tasks follow `jsmp-mac-session`.
 
 ## 8. The owner's choices
 
@@ -910,19 +1005,60 @@ These were questions in an earlier draft and are now settled. The design above f
 |---|---|
 | Provider order or narrowness first | The provider first, then narrowness. |
 | A fixed share for Linux on a Mac | None. Linux may use a whole Mac when macOS work does not need it, and the split follows demand. |
-| Memory between the sides | It follows demand, as CPU does. The first shape is one Linux VM per job, sized to the job. A warm guest is a later option (2.6). |
+| Memory between the sides | It follows demand, as CPU does: one Linux VM per job, sized to the job, ended with it (2.7). |
 | A key to refuse spill | None. Every job may spill onto a broader machine. |
 | The CPU slack | A Linux server is used into its slack before a Mac takes Linux work. |
 | Booked shapes | None. A host offers what it reports, per host, on Linux and macOS alike (2.1). |
 | macOS precedence over higher-priority Linux | None beyond queue order. |
 
-## 9. Open for the lead
+## 9. Decisions for the owner
 
-- **Hostkeeper's facts file.** The agent's own detection is the host's report, and it is all the server needs. Should hostkeeper's
-  facts file also carry cores and memory, for a reader other than the agent? Nothing in this design needs it.
-- **A pool's `shape`.** It is kept as an optional floor so that existing pool files keep their admission rule. Removing it outright
-  would refuse those files at start.
-- **The size between hellos.** A size that changes without a hello is not designed. Today a shrink is seen at the agent's next
-  start.
-- **Egress for the Linux VMs.** Until the Linux-on-Mac design filters their egress, the Linux session's ceiling is `none`, so Linux
-  jobs that need egress do not spill onto the Macs.
+**C1. Whether Linux VMs count against the two-VM limit on a Mac.**
+
+- **The limit.** At most two virtual machines per Mac. It is Apple's rule for macOS guests and applies to macOS virtual machines
+  only. Linux virtual machines on a Mac are not counted by it.
+- **The licence ruling it was checked against.** It has three parts:
+  - a base macOS image in our registry;
+  - Xcode in a VM;
+  - on Macs the operator owns.
+
+  The first two concern macOS guests. The third is a condition on the hardware, which a Linux VM on the same Mac meets equally. A
+  Linux job's VM is not a macOS guest, so the macOS-guest rule does not count it. This design relies on the rule as stated, and
+  its source in this repository is [mac-runtime.md](mac-runtime.md) ("at most 2 macOS guests per host under Apple's licence").
+- **What the code counts.** The agent's VM gate counts macOS guests (`VM_SLOTS = 2`; a third macOS VM is refused). Under this
+  design it keeps counting only those.
+- **The options.**
+  - (a) **Linux VMs are not counted.** Recommended. A Mac runs at most two macOS VMs, and as many Linux job VMs as the ledger
+    holds. This follows the rule as stated.
+  - (b) Count Linux VMs with macOS VMs, at most two in all. A Mac would then run at most two Linux jobs, and none while two macOS
+    VMs run. That contradicts the demand-driven split of section 8.
+  - (c) Count them until a reading of the licence text, which the owner commissions, confirms (a). The cost is (b)'s, for as
+    long as it takes.
+- **What (b) or (c) changes in this design.**
+  - The agent's VM gate counts Linux job VMs too.
+  - The demand-driven split of section 8 is lost: at most two Linux jobs per Mac.
+  - The test `a_linux_job_vm_never_takes_a_macos_vm_slot` inverts.
+
+**C2. Where a host's cores and memory come from.** The owner's words were "Hostkeeper should report stats from the host like cores
+and memory".
+
+- (a) **The agent's own detection, sent in its hello.** Recommended. It is already built, with the same code on Linux and macOS
+  (`facts::detect`). The agent is the program hostkeeper installs and starts on every host, so its report is the host's report.
+  Nothing new is built.
+- (b) Hostkeeper writes cores and memory into its facts file, and the agent reads them from there and sends them. It is a second
+  source for numbers the agent already reads from the same operating system, and a new field in the facts file.
+- (c) Both, and the agent refuses to start when they disagree. It catches a wrong facts file, at the cost of (b) plus a check.
+
+## 10. Settled in this design
+
+Each of these was open in an earlier draft. This design settles it, for the reason given.
+
+- **A pool's `shape` is kept as an optional floor.** A pool file written before this change keeps its admission rule. Removing the
+  key would refuse those files at start, and ignoring it would silently admit hosts a pool used to refuse. The floor books nothing.
+- **A host's size changes only at a hello.**
+  - Memory or cores change on Linux and macOS only with a reboot or a restart of the agent's unit, so a hello follows.
+  - A size reported between hellos would be an additive heartbeat field with no use today (B20).
+- **Egress for the Linux VMs follows from 2.6.**
+  - The job runs under `crun` in the guest, and the guest's init sets the same `nft` rules the Linux agent sets.
+  - The Linux session's ceiling is what those rules enforce, and `none` until they are built in the Linux-on-Mac design.
+  - Until then, Linux jobs that need egress do not spill onto the Macs (2.7, item 3).
