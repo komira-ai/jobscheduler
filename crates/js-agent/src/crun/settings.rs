@@ -120,11 +120,15 @@ impl Default for Hooks {
     }
 }
 
-/// Microseconds since the first call in this process, on the monotonic clock.
+/// Microseconds since the first call in this process, on the agent's monotonic usage clock
+/// ([`MonotonicClock`](crate::usage::MonotonicClock)), which a step of the wall clock does not
+/// move.
 pub(super) fn system_mono_us() -> u64 {
-    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let since = ORIGIN.get_or_init(std::time::Instant::now).elapsed();
-    u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+    use crate::usage::UsageClock as _;
+    static CLOCK: std::sync::OnceLock<crate::usage::MonotonicClock> = std::sync::OnceLock::new();
+    CLOCK
+        .get_or_init(crate::usage::MonotonicClock::new)
+        .now_usec()
 }
 
 pub(super) fn system_now_ms() -> u64 {

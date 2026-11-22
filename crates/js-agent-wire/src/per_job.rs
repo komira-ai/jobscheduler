@@ -70,6 +70,16 @@ pub const HOST_JOBS_CAPABILITY: &str = "host-jobs";
 /// so a server never holds its heartbeat: a held reply would stretch its interval.
 pub const HELD_BEAT_CAPABILITY: &str = "held-beat";
 
+/// The hello capability of an agent that admits a job start from the job service by the job
+/// service's own placement. Its value is `true`. Such an agent does not refuse a
+/// [`JobStartSpec`] (keyed by job id) for the summed CPU or memory bookings of the jobs it
+/// holds; it still refuses a job larger than the machine, and still sums disk, GPUs and slots.
+/// So a server may pack its host by measured load for CPU and memory. A host that does not
+/// report it exactly `true` (an agent from before it) refuses a start whose CPU, memory or
+/// disk bookings do not fit what the bookings it holds leave free, and a server packs it by
+/// those sums.
+pub const LOAD_ADMISSION_CAPABILITY: &str = "load-admission";
+
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
