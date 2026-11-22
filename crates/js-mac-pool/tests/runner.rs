@@ -58,6 +58,7 @@ impl Scene {
     /// The policy of `net` that also denies reads of `denies`.
     fn policy_denying(&self, net: Net, denies: &[&Path]) -> Policy {
         let layout = SlotLayout {
+            trees: None,
             run: AbsPath::new(&self.run).expect("run path"),
             uid_entry: Some(AbsPath::new(&self.uid_entry).expect("entry path")),
             inputs: vec![AbsPath::new(&self.input).expect("input path")],
@@ -538,6 +539,7 @@ fn a_floor_deny_beats_an_earlier_grant() {
         .join("sfanalytics")
         .join(format!("js-mac-pool-{}", std::process::id()));
     let layout = SlotLayout {
+        trees: None,
         run: AbsPath::new(protected).expect("run path"),
         uid_entry: Some(AbsPath::new(&scene.uid_entry).expect("entry path")),
         inputs: vec![],
