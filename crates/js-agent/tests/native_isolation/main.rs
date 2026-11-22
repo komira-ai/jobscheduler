@@ -245,7 +245,6 @@ fn serve(fixture: &Fixture) {
     let ready = start::prepare(
         &args,
         Box::new(MacHost),
-        "js-native-isolation".to_owned(),
         SweepPlan::macos_schedules(),
         SweepPlan::macos(),
         ScanFolder::macos(),
