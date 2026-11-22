@@ -12,6 +12,7 @@ pub(crate) mod agent;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
+pub(crate) mod end;
 mod env;
 pub(crate) mod fake_accounts;
 pub(crate) mod fake_launcher;
@@ -185,7 +186,9 @@ impl Rig {
         let pool = open_pool(&dir, &settings, &accounts);
         let mut config = config(&dir, &settings);
         adjust(&mut config, &dir);
-        let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM).unwrap();
+        let rt = NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM)
+            .unwrap()
+            .with_process_table(end::GroupTable::new(launcher.clone()));
         let rt = match slots {
             1 => rt,
             _ => rt.with_hand_over(keep_owner()),

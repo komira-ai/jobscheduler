@@ -147,6 +147,7 @@ use crate::lifecycle::{
 use crate::logs::LiveLogs;
 use crate::mac_accounts::Pool;
 use crate::mac_supervisor::Launcher;
+use crate::mac_sweep::{MacTable, ProcessTable};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
@@ -228,6 +229,8 @@ pub struct NativeRuntime {
     now_ms: Clock,
     /// Whether each run's supervisor opens an audit session of its own (which needs root).
     new_session: bool,
+    /// The process table a run's processes are swept from (`native/end.rs`).
+    table: Arc<dyn ProcessTable + Send + Sync>,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -310,6 +313,7 @@ impl NativeRuntime {
             logs: None,
             now_ms: system_clock(),
             new_session: true,
+            table: Arc::new(MacTable),
         })
     }
 
@@ -337,6 +341,14 @@ impl NativeRuntime {
             new_session: false,
             ..self
         }
+    }
+
+    /// The same runtime, sweeping a run's processes from `table` in place of the Mac's own.
+    /// For tests, whose runs are the test user's own processes; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_process_table(self, table: Arc<dyn ProcessTable + Send + Sync>) -> Self {
+        Self { table, ..self }
     }
 
     /// The same runtime, giving a run's files to its account through `hand_over` in place of
