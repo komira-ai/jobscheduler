@@ -26,7 +26,7 @@ use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, Capacity, EndReason, Exclusion, JobRecord, JobState,
-    Needs, StartFailure,
+    Needs, SizedFrom, StartFailure,
 };
 use crate::result::{JobEnd, ended};
 
@@ -40,6 +40,9 @@ pub struct Placement {
     /// The placement's wall limit when it is shorter than the job's own
     /// ([`AllocationRecord::wall_limit_secs`]).
     pub wall_limit_secs: Option<u64>,
+    /// Which history sized the job's booking ([`AllocationRecord::sized_from`]); `None` for a
+    /// job that named both its CPU and its memory, and for a whole-host placement.
+    pub sized_from: Option<SizedFrom>,
     /// The queue notes the engine decided for the job, applied in order to its queue status
     /// in the same transaction (`docs/design/queue-status.md`): what pass 2 told it since the
     /// last pass, then its placement.
@@ -298,6 +301,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 .prepare_timeout
                 .map(|timeout| now.saturating_add(timeout)),
             wall_limit_secs: placement.wall_limit_secs,
+            sized_from: placement.sized_from,
             carried: Carried::default(),
         };
         let mut placed = JobRecord {

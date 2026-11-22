@@ -88,7 +88,7 @@ mod whole;
 pub use capacity::StaticCapacity;
 pub use config::{
     ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
-    PoolConfig,
+    PoolConfig, quota_default,
 };
 pub use credential::{Binding, Credential};
 pub use js_whole::{

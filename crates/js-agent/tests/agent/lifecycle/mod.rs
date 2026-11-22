@@ -348,7 +348,7 @@ pub fn names(events: &[Event]) -> Vec<String> {
             Event::Refused { run_id, code, .. } => format!("refused {run_id} {code}"),
             Event::Skipped { run_id, why } => format!("skipped {run_id} {why:?}"),
             Event::Invalid { index, code } => format!("invalid #{index} {code}"),
-            Event::ResultReady { run_id } => format!("result {run_id}"),
+            Event::ResultReady { run_id, .. } => format!("result {run_id}"),
             Event::ContainerRemoved { run_id } => format!("container removed {run_id}"),
             Event::ScratchRemoved { run_id } => format!("scratch removed {run_id}"),
             Event::ChecksPassed { run_id } => format!("checks passed {run_id}"),

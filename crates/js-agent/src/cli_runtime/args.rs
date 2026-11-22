@@ -79,8 +79,13 @@ pub enum ArgsError {
 /// writable.
 pub type Bind = (String, String, bool);
 
-/// `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`, the GPU flags and `--mount`
+/// `--cpu-shares`, `--memory`, `--memory-swap`, `--pids-limit`, the GPU flags and `--mount`
 /// for the scratch directory and every mount of `spec`.
+///
+/// The CPU booking is what the job is guaranteed, kept by its share ([`cpu_shares`]) when the
+/// host is busier than planned: with no `ceiling` (the default) there is no `--cpus`, so the job
+/// also uses every core no other container wants. With the operator's `ceiling`
+/// (`--cpu-ceiling`) the job is held to the booking times it: `--cpus` of that, beside the share.
 ///
 /// `--memory-swap` is pinned equal to `--memory`, so the job cannot spill past its limit
 /// into swap. `--pids-limit` is always set ([`DEFAULT_PIDS`] when the job names none).
@@ -105,14 +110,15 @@ pub fn limits_to_args(
     engine: Engine,
     spec: &RunSpec,
     recursive_ro: bool,
+    ceiling: Option<js_types::CpuCeiling>,
 ) -> Result<Vec<String>, ArgsError> {
     if spec.cpu_millis == 0 || spec.memory_bytes == 0 || spec.pids == Some(0) {
         return Err(ArgsError::ZeroLimit);
     }
     let memory = spec.memory_bytes.to_string();
     let mut args = vec![
-        "--cpus".to_owned(),
-        format!("{}.{:03}", spec.cpu_millis / 1000, spec.cpu_millis % 1000),
+        "--cpu-shares".to_owned(),
+        cpu_shares(spec.cpu_millis).to_string(),
         "--memory".to_owned(),
         memory.clone(),
         "--memory-swap".to_owned(),
@@ -120,6 +126,12 @@ pub fn limits_to_args(
         "--pids-limit".to_owned(),
         spec.pids.unwrap_or(DEFAULT_PIDS).to_string(),
     ];
+    if let Some(most) = ceiling.and_then(|ceiling| ceiling.millis_of(spec.cpu_millis)) {
+        args.extend([
+            "--cpus".to_owned(),
+            format!("{}.{:03}", most / 1000, most % 1000),
+        ]);
+    }
     args.extend(gpu_args(engine, &spec.gpu_indices));
     let scratch = match engine {
         Engine::Docker => scratch_volume(&spec.scratch)?,
@@ -135,6 +147,17 @@ pub fn limits_to_args(
         args.extend(["--mount".to_owned(), value]);
     }
     Ok(args)
+}
+
+/// The engines' least and most `--cpu-shares` (cgroup v1's `cpu.shares` range, which both
+/// map onto cgroup v2's `cpu.weight`).
+const CPU_SHARES: (u64, u64) = (2, 262_144);
+
+/// The `--cpu-shares` of a booking of `cpu_millis`: 1024 a core, the engines' default for one
+/// container, held within the range they take. A share orders CPU between containers that
+/// all want it and bounds none.
+fn cpu_shares(cpu_millis: u64) -> u64 {
+    (cpu_millis.saturating_mul(1024) / 1000).clamp(CPU_SHARES.0, CPU_SHARES.1)
 }
 
 /// The bind mounts `spec` asks for, the scratch directory first and the run's files

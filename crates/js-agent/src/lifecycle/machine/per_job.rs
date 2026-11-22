@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, JobUsage, Limits, LogReport,
-    RunResult, StartKind, limits,
+    RunResult, StartKind, StartSizing, limits,
 };
 
 use super::Lifecycle;
@@ -121,6 +121,7 @@ impl Lifecycle {
                 placed_at_ms: spec.placed_at_ms,
                 fuse: spec.fuse,
                 xcode: spec.xcode.clone(),
+                sizing: spec.sizing.clone().map(StartSizing::checked),
             };
             self.admit_and_start((&run, Keyed::Job), &given, received, events);
             // The start always leaves its job last, running or refused.

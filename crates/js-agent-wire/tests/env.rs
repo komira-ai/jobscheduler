@@ -46,6 +46,7 @@ fn start(env: BTreeMap<String, String>) -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 

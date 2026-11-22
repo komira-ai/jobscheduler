@@ -3,20 +3,20 @@
 //! row, a host the registry holds, or both, is or is not offered. Every clock is manual;
 //! nothing sleeps.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{HeldRun, HeldState, Phase, Taint};
+use js_agent_wire::{HeldRun, HeldState, LOAD_ADMISSION_CAPABILITY, Phase, Taint};
 use js_jobs::interfere::{INJECTED, Interfere};
-use js_jobs::{JobId, NodeHello, NodeRow, NodeState, ScaleMark};
+use js_jobs::{Capacity, JobId, NodeHello, NodeRow, NodeState, ScaleMark};
 use js_registry::Credential;
 use js_sched_placer::place::SchedPlacer;
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock as StoreClock, Store, Txn};
 use js_testkit::dir::TestDir;
 use js_types::cordon::Asker;
-use js_types::{CordonHolder, ManualClock, Shape, Timestamp};
+use js_types::{CordonHolder, ManualClock, Resources, Shape, Timestamp};
 use serde_json::json;
 
 use super::tests::{booked, host, on_the_machine, shape};
@@ -370,4 +370,86 @@ fn the_scan_of_stored_bindings_returns_the_readable_ones() {
     w.store.fail_read_after(0);
     let error = w.agents.store.scan_stored().unwrap_err();
     assert!(error.to_string().contains(INJECTED), "{error}");
+}
+
+/// Asserts what a read offers of the capacity and load admission of a host by what its hello
+/// claimed: a host whose claim lacks `load-admission` is offered with `load_admission` false,
+/// the smaller of the pool's shape and its claim on each axis without the CPU slack, and the
+/// quota default its claim reports; a host whose claim reports it is offered with
+/// `load_admission` true, the slacked capacity of the pool's shape and no quota default when
+/// its claim reports none. It catches a host packed by load that its agent refuses by the
+/// summed bookings, and a booking that leaves out the disk its agent books.
+#[test]
+fn a_read_offers_a_host_by_the_rule_its_agent_enforces() {
+    let w = world("rows_admission", false);
+    let claim = |cores: u64, gib: u64, extra: &[(&str, &str)]| {
+        let mut caps: BTreeMap<String, String> = extra
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        caps.insert("arch".to_owned(), "x86_64".to_owned());
+        let resources = Resources::new(cores * 1000, gib * GIB, 0, None).unwrap();
+        Shape::new(resources, caps)
+    };
+    let old = claim(
+        4,
+        8,
+        &[("scratch-quota", "project"), ("scratch-default-gib", "3")],
+    );
+    let new = claim(8, 16, &[(LOAD_ADMISSION_CAPABILITY, "true")]);
+    for (name, claimed) in [("far-new", new), ("far-old", old)] {
+        let hello = NodeHello {
+            session: None,
+            pool: "burst".to_owned(),
+            claim: Some(claimed),
+            shape: Some(shape()),
+            labels: Default::default(),
+            phase: Phase::Serving,
+            agent_process: None,
+        };
+        w.jobs.hello_node(&host(name), &hello).unwrap();
+    }
+    let offered = w.offered().unwrap();
+    let old = &offered.open[&host("far-old")];
+    assert!(!old.load_admission);
+    assert_eq!(old.quota_disk_bytes, Some(3 * GIB));
+    let booked = Capacity {
+        cpu_millis: 4000,
+        memory_bytes: 8 * GIB,
+        disk_bytes: 0,
+        accelerators: 0,
+    };
+    assert_eq!(old.capacity, Some(booked));
+    let new = &offered.open[&host("far-new")];
+    assert!(new.load_admission);
+    assert_eq!(new.quota_disk_bytes, None);
+    let slacked = Capacity {
+        cpu_millis: 8800,
+        memory_bytes: 16 * GIB,
+        ..booked
+    };
+    assert_eq!(new.capacity, Some(slacked));
+}
+
+/// Asserts that a host with no claim is offered the pool shape's capacity without the slack:
+/// what its agent would offer is unknown, so the shape stands. It catches a host with no
+/// claim given the slack, which only a host that reports load admission is.
+#[test]
+fn a_host_with_no_claim_is_offered_the_shapes_capacity_without_slack() {
+    let w = world("rows_no_claim", false);
+    let hello = NodeHello {
+        session: None,
+        pool: "burst".to_owned(),
+        claim: None,
+        shape: Some(shape()),
+        labels: Default::default(),
+        phase: Phase::Serving,
+        agent_process: None,
+    };
+    w.jobs.hello_node(&host("far-bare"), &hello).unwrap();
+    let offered = w.offered().unwrap();
+    let bare = &offered.open[&host("far-bare")];
+    assert!(!bare.load_admission);
+    assert_eq!(bare.quota_disk_bytes, None);
+    assert_eq!(bare.capacity.map(|c| c.cpu_millis), Some(8000));
 }

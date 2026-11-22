@@ -10,7 +10,7 @@ use js_agent::update_hook::{
 };
 use serde_json::{Value, json};
 
-use super::step_rig::{LEASE_SECS, Rig, START, Spy, as_root, killable, line};
+use super::step_rig::{LEASE_SECS, Rig, START, Spy, UNIT, as_root, killable, line};
 
 fn cordon_calls(spy: &Spy<'_>) -> Vec<String> {
     spy.log()
@@ -374,12 +374,13 @@ fn a_rerun_after_a_blip_on_the_final_uncordon_places_again_once_the_cordon_lapse
     assert_eq!(cordon_calls(&spy).len(), 1);
 }
 
-/// A record that breaks a rule is refused with nothing changed.
-fn refused(rig: &Rig, done: &Done, before: Option<Vec<u8>>, spy: &Spy<'_>) {
+/// A record that breaks a rule is refused with nothing changed, and with no port touched but the
+/// reads `looks` names.
+fn refused(rig: &Rig, done: &Done, before: Option<Vec<u8>>, spy: &Spy<'_>, looks: &[String]) {
     assert_eq!(done.outcome, Outcome::Failure);
     assert_eq!(done.report.reason, Some(Reason::StateInvalid));
     assert_eq!(rig.record_bytes(), before);
-    assert_eq!(spy.log(), Vec::<String>::new(), "no port was touched");
+    assert_eq!(spy.log(), looks, "no port was touched but to read");
     assert_eq!(rig.world.ticks(), 0);
     assert_eq!(rig.cordon_expiry(), None);
 }
@@ -388,8 +389,10 @@ fn refused(rig: &Rig, done: &Done, before: Option<Vec<u8>>, spy: &Spy<'_>) {
 fn a_record_that_is_not_this_updates_or_breaks_a_rule_is_refused_as_state_invalid() {
     type Plant = fn(&Rig);
     let cases: [(&str, Plant); 6] = [
-        // Of another target past its stop: one that never took the host is superseded (see
-        // steps_prepare_supersede.rs).
+        // Of another target past its stop whose rollback is not complete (the unit is not
+        // active): read, and kept. One that never took the host is superseded, and one whose
+        // rollback is complete in effect is finished (see steps_prepare_supersede.rs and
+        // steps_stale_record.rs).
         ("another-target-past-its-stop", |rig| {
             let mut record = rig.fresh_record();
             record.update.target = "1.5.0".to_owned();
@@ -429,7 +432,11 @@ fn a_record_that_is_not_this_updates_or_breaks_a_rule_is_refused_as_state_invali
         let before = rig.record_bytes();
         let spy = Spy::new(&rig);
         let done = spy.prepare(&rig);
-        refused(&rig, &done, before, &spy);
+        let looks = match name {
+            "another-target-past-its-stop" => vec![format!("units.show({UNIT})")],
+            _ => Vec::new(),
+        };
+        refused(&rig, &done, before, &spy, &looks);
     }
 }
 
@@ -445,7 +452,7 @@ fn an_order_the_record_rules_cannot_hold_is_refused_before_anything_is_written()
     for rig in cases {
         let spy = Spy::new(&rig);
         let done = spy.prepare(&rig);
-        refused(&rig, &done, None, &spy);
+        refused(&rig, &done, None, &spy, &[]);
     }
 }
 
@@ -463,7 +470,7 @@ fn a_state_directory_that_is_not_root_0700_is_refused_and_so_is_a_second_holder(
     };
     let spy = Spy::new(&rig);
     let done = step::prepare(&spy.env(&rig, &loose), &rig.params);
-    refused(&rig, &done, None, &spy);
+    refused(&rig, &done, None, &spy, &[]);
     assert!(done.report.detail.unwrap().contains("0755"));
 
     let rig = Rig::new("hook-prepare-locked");

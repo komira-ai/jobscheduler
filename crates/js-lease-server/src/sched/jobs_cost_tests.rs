@@ -175,10 +175,10 @@ async fn a_heartbeat_that_changes_nothing_reads_no_job_table_and_runs_no_round()
 
 /// Asserts what the heartbeats that end and then free a host's job cost. The beat that reports
 /// the result ends the job, whose allocation still books the host: the pass reads the queued
-/// rows and not the row of the job running on the other host, and runs one round, for the
-/// first queued job, which then closes both hosts to the two behind it. The next beat, which
-/// no longer lists the job, frees it: the pass places the first queued job on the freed host
-/// in one round, and runs a second for the next job, which then closes the hosts to the last.
+/// rows and not the row of the job running on the other host, and runs no round: the ended
+/// job's allocation still books its host, and no host has room for a queued job. The next beat,
+/// which no longer lists the job, frees it: the pass places the first queued job on the freed
+/// host in one round, and runs none for the next job, since the host is booked full again.
 #[tokio::test]
 async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the_first_on_it() {
     let mut settled = Settled::new("cost_free").await;
@@ -192,7 +192,7 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
         !ended.read_job(&other),
         "the other host's job was read: {ended:?}"
     );
-    assert_eq!((ended.rounds, ended.skipped), (1, 0), "{ended:?}");
+    assert_eq!((ended.rounds, ended.skipped), (0, 0), "{ended:?}");
     settled.a.take(&reply);
     let (_, freed) = settled.beat(&settled.a).await;
     assert_eq!(settled.state("c-third"), JobState::Placed);
@@ -208,12 +208,12 @@ async fn a_heartbeat_that_frees_a_host_reads_only_the_queued_rows_and_places_the
     for id in &QUEUED[2..] {
         assert!(freed.read_job(id), "{id} was not read: {freed:?}");
     }
-    assert_eq!((freed.rounds, freed.skipped), (2, 0), "{freed:?}");
+    assert_eq!((freed.rounds, freed.skipped), (1, 0), "{freed:?}");
     assert_eq!(settled.state("d-fourth"), JobState::Queued);
 }
 
-/// Asserts that the tick's pass runs after a heartbeat's was skipped, running the one round
-/// the first queued job has a host for; and that the pass reads no job table when no write
+/// Asserts that the tick's pass runs after a heartbeat's was skipped, running no round since
+/// both hosts are booked full; and that the pass reads no job table when no write
 /// came since the last pass read them: it uses the rows that pass read, and reads only the
 /// rows of the hosts it offers (their `node/`, `taint/` and `hostmark/` rows). (The tick's job
 /// pass, before it, reads the tables for its own ends.)
@@ -223,10 +223,10 @@ async fn the_tick_runs_its_pass_and_reads_no_table_that_did_not_change() {
     let (_, quiet) = settled.counted(settled.quiet_beats()).await;
     assert_eq!(quiet.skipped, 2, "{quiet:?}");
     let (_, ticked) = settled.counted(async { settled.rig.tick() }).await;
-    assert_eq!((ticked.rounds, ticked.skipped), (1, 0), "{ticked:?}");
+    assert_eq!((ticked.rounds, ticked.skipped), (0, 0), "{ticked:?}");
     let pass = async { settled.rig.agents.place_jobs() };
     let (_, passed) = settled.counted(pass).await;
-    assert_eq!((passed.rounds, passed.skipped), (1, 0), "{passed:?}");
+    assert_eq!((passed.rounds, passed.skipped), (0, 0), "{passed:?}");
     // It reads the hosts' rows it offers, and no job table.
     let hosts = ["node/", "taint/", "hostmark/"].map(|prefix| Read::Scan(prefix.to_owned()));
     assert_eq!(passed.reads, hosts, "{passed:?}");
@@ -243,13 +243,13 @@ async fn a_submit_or_a_cancel_brings_the_next_heartbeats_pass_back() {
     assert_eq!(submitted.skipped, 0, "{submitted:?}");
     assert!(submitted.table_scans().contains(&"idx/job/queued/"));
     assert!(submitted.read_job("urgent"), "{submitted:?}");
-    // The new job is first and waits for both hosts: it alone runs a round.
-    assert_eq!(submitted.rounds, 1, "{submitted:?}");
+    // The new job is first and waits for both hosts, which are booked full: no round runs.
+    assert_eq!(submitted.rounds, 0, "{submitted:?}");
     settled.rig.jobs.request_cancel(&urgent).unwrap();
     let (_, cancelled) = settled.beat(&settled.a).await;
     assert_eq!(
         (cancelled.rounds, cancelled.skipped),
-        (1, 0),
+        (0, 0),
         "{cancelled:?}"
     );
     assert!(!cancelled.read_job("urgent"), "{cancelled:?}");

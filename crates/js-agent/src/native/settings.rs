@@ -249,8 +249,8 @@ impl NativeSettings {
         &self.logs
     }
 
-    /// The same settings with `state` as whether the root helper holds Full Disk Access, as
-    /// the agent asked it at start ([`super::grant::ask`]). The flags alone say nothing of it, so
+    /// The same settings with `state` as whether the agent holds Full Disk Access, as it
+    /// found at start ([`super::grant::ask`]). The flags alone say nothing of it, so
     /// settings are made `Undetermined`, which refuses every native job.
     #[must_use]
     pub fn with_full_disk_access(mut self, state: FullDiskAccess) -> Self {

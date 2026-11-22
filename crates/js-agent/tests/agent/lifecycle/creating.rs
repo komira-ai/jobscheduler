@@ -70,7 +70,12 @@ fn a_job_whose_create_is_under_way_is_starting_and_holds_only_itself() {
 
     gate.release("j1");
     let events = h.life.step();
-    let [Event::Started { run_id, timeline }] = events.as_slice() else {
+    let [
+        Event::Started {
+            run_id, timeline, ..
+        },
+    ] = events.as_slice()
+    else {
         panic!("one start: {events:?}");
     };
     assert_eq!(run_id, "j1");
@@ -95,7 +100,12 @@ fn a_create_that_fails_ends_the_start_failed_and_frees_its_slot() {
     h.fake.fail("create", 1);
     gate.release("r1");
     let events = h.life.step();
-    let [Event::Finding(finding), Event::ResultReady { run_id }, ..] = events.as_slice() else {
+    let [
+        Event::Finding(finding),
+        Event::ResultReady { run_id, .. },
+        ..,
+    ] = events.as_slice()
+    else {
         panic!("a finding and a result: {events:?}");
     };
     assert_eq!(finding.code, code::START_FAILED);

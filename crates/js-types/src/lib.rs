@@ -34,6 +34,7 @@ mod booking;
 mod class;
 mod clock;
 pub mod cordon;
+mod cpu_ceiling;
 mod digest;
 pub mod env;
 mod ids;
@@ -62,6 +63,7 @@ pub use accel::{
 pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
+pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{
     ClassId, CordonHolder, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError,

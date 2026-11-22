@@ -39,6 +39,7 @@ fn start(kind: StartKind) -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 

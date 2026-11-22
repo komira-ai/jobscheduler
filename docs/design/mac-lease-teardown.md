@@ -72,7 +72,7 @@ No lease user is ever an administrator: a native job never gets administrator ri
    - nothing past the entry's filesystem is touched;
    - a subtree too deep to remove in place is moved up *inside* the entry, so a removal cut short leaves everything under the entry, where the next removal finds it.
 5. Settle again.
-6. Delete the record. For a lease from before the pool, then record the deletion in the ledger. This is the one deletion left, and it fails on macOS 27 (the record, the home and the placed folders are refused, as above): the lease stays live and its uid held, unless the helper holds Full Disk Access. The release signs the helper and a privacy profile grants it that access (see `mac-hostkeeper-package.md`; the helper's `full-disk-access` verb reports whether it holds it), but this pool reset is unchanged by the grant: deleting an account per job is the next step (`mac-account-per-job.md`).
+6. Delete the record. For a lease from before the pool, then record the deletion in the ledger. This is the one deletion left, and it fails on macOS 27 (the record, the home and the placed folders are refused, as above): the lease stays live and its uid held, unless the helper holds Full Disk Access, which it does not: the privacy profile grants it to `js-agent` (see `mac-hostkeeper-package.md`), so this deletion still fails there. This pool reset is unchanged by the grant: deleting an account per job is the next step, in the agent (`mac-account-per-job.md`).
 
 ## Failure: the uid is held
 

@@ -186,10 +186,10 @@ pub trait Host: Send + Sync {
     /// Deletes the user record `name` (and any group membership it has); `false` when
     /// there is none. Only a lease user from before the pool is ever deleted: the pool's
     /// users are permanent, and macOS refuses root the deletion of a local user record
-    /// unless the helper holds Full Disk Access. The release signs the helper and a
-    /// privacy profile grants it that access ([`Host::list_privacy_dir`] shows whether it
-    /// holds it), but the pool's reset does not use the grant yet:
-    /// `docs/design/mac-account-per-job.md` deletes an account per job.
+    /// unless the helper holds Full Disk Access ([`Host::list_privacy_dir`] shows whether it
+    /// holds it). The privacy profile grants that access to `js-agent`, not to the helper,
+    /// and the pool's reset does not use it: `docs/design/mac-account-per-job.md` deletes an
+    /// account per job, in the agent.
     ///
     /// # Errors
     /// The record could not be deleted.

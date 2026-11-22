@@ -23,8 +23,8 @@
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
 //!   its privacy (TCC) responsibility disclaimed, so it never holds the helper's or the
 //!   agent's grants.
-//! - [`full_disk_access`]: whether the helper holds Full Disk Access, which the
-//!   `full-disk-access` verb answers.
+//! - [`full_disk_access`]: whether a process holds Full Disk Access, which `js-agent`
+//!   judges of itself at start and the `full-disk-access` verb answers for the helper.
 //! - [`proto`], [`server`], [`client`]: the socket, its wire format, the caller check.
 //! - [`start`]: flags and start-up.
 //! - [`node_admin`]: the `node-admin` mode, the verbs a node's administrator runs

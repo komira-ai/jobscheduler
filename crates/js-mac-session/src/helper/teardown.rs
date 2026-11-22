@@ -5,10 +5,10 @@
 //! The deletion of a user record here is only for a lease user from before the pool; a
 //! pool user is never deleted, and on macOS 27 root is refused the deletion of a record
 //! and of a home, so that path fails there (the lease stays live, its uid held) unless the
-//! helper holds Full Disk Access. The release signs the helper and a privacy profile grants
-//! it that access (`full-disk-access` reports whether it holds it); this module is the same
-//! with and without the grant, and deleting an account per job is the next step
-//! (`docs/design/mac-account-per-job.md`).
+//! helper holds Full Disk Access (`full-disk-access` reports whether it holds it). The
+//! privacy profile grants that access to `js-agent`, not to the helper; this module is the
+//! same with and without the grant, and deleting an account per job is the next step, in the
+//! agent (`docs/design/mac-account-per-job.md`).
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
 //! process of the uid is left, and the uid's launchd domains are gone. A

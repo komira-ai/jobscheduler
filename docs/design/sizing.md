@@ -96,13 +96,21 @@ only the first jobs of a client with no history. A job that needs more is raised
 booking it died at next (the floor), and each run's peak with its margin raises its class's next booking.
 
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
-submit with the same id is still the same job. What it was booked is its allocation's `booked`. A contained job's booking is its
-`memory.max`; its CPU booking is its share of the host's CPU (7.9), not a ceiling. The CPU slack and memory percent bound the
-booking as they bound every booking.
+submit with the same id is still the same job. What it was booked is its allocation's `booked`, and which history sized it its
+allocation's `sized_from` (`class`, `fallback`, `cold` or `over-cap`; none for a job that named both). A contained job's memory
+booking is its `memory.max`, with no swap. Its CPU booking is what it is guaranteed (7.9), and placement packs a host by the bookings;
+nothing holds a job below what it needs: a compile that needs 20 cores for 30 seconds gets them whenever the host has them. The
+lease's `cpu.weight`, from the booking, is how the kernel keeps the guarantee when a host is busier than planned (leases that all
+want CPU get the cores in proportion to their bookings); there is no `cpu.max` unless the agent's operator sets a ceiling
+(`--cpu-ceiling`, a multiple of the booking, off by default), and then the lease and the job's own cgroup are held to the booking
+times it. The CPU slack and memory percent bound the booking as they bound every booking. The job's start carries its size class and
+where each of its CPU and memory bookings came from (`sizing`: `named` or the allocation's `sized_from`), which the agent writes in
+its journal at the job's start and at its result.
 
 **Where a run's usage comes from.** Each run's peak memory and CPU time are what its host reported: when a contained job ends, its
 agent reads `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease control group, before the group is removed, and sends
-them as the `usage` of the job's result (`docs/design/agent-wire.md`); the server stores them with the job's output. A job whose
+them as the `usage` of the job's result (`docs/design/agent-wire.md`), with the `nr_periods` and `nr_throttled` of the same
+`cpu.stat` (`cpu_throttle`); the server stores them with the job's output. A job whose
 result carries none (an agent from before the field, cgroup version 1, a result read back after an agent restart) has no usage, and
 a success with no peak is not a memory sample, so a class whose jobs all lack it books from its fallback or its client (7.8),
 else the cold size. The count a server logs at

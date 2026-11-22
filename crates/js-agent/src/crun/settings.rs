@@ -51,6 +51,9 @@ pub struct CrunSettings {
     pub gpus: Option<GpuSettings>,
     /// The most bytes the unpacked images may take (`--image-budget-gib`); none for no budget.
     pub image_budget: Option<u64>,
+    /// The operator's CPU ceiling (`--cpu-ceiling`): each lease is held to its booked CPU
+    /// times it, a `cpu.max` beside its `cpu.weight`; none (the default) for no ceiling.
+    pub cpu_ceiling: Option<js_contain::CpuCeiling>,
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,
@@ -89,6 +92,9 @@ pub struct Hooks {
     pub chown: Chown,
     /// Milliseconds since the Unix epoch.
     pub now_ms: fn() -> u64,
+    /// Microseconds on a monotonic clock, which a step of the wall clock does not move: the
+    /// time base of a run's CPU peak ([`JobUsage::cpu_peak`](js_agent_wire::JobUsage::cpu_peak)).
+    pub mono_us: fn() -> u64,
     /// How long a run is waited for after its cgroup was killed ([`KILL_WAIT`]).
     pub kill_wait: Duration,
     /// How long a pull and unpack of one image may take ([`PULL_LIMIT`]).
@@ -105,12 +111,24 @@ impl Default for Hooks {
         Self {
             chown: hand_over_no_follow,
             now_ms: system_now_ms,
+            mono_us: system_mono_us,
             kill_wait: KILL_WAIT,
             pull_limit: PULL_LIMIT,
             call_limit: CALL_LIMIT,
             proc_read: read_proc,
         }
     }
+}
+
+/// Microseconds since the first call in this process, on the agent's monotonic usage clock
+/// ([`MonotonicClock`](crate::usage::MonotonicClock)), which a step of the wall clock does not
+/// move.
+pub(super) fn system_mono_us() -> u64 {
+    use crate::usage::UsageClock as _;
+    static CLOCK: std::sync::OnceLock<crate::usage::MonotonicClock> = std::sync::OnceLock::new();
+    CLOCK
+        .get_or_init(crate::usage::MonotonicClock::new)
+        .now_usec()
 }
 
 pub(super) fn system_now_ms() -> u64 {

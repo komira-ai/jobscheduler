@@ -43,7 +43,8 @@ arch = "x86_64"
 "#
     )
 }
-
+/// A hello of `host` claiming `cpu_millis` and `memory_bytes`, that reports `load-admission`: the
+/// rig packs its hosts by measured load, within the CPU slack.
 /// A hello of `host` claiming `cpu_millis` and `memory_bytes`.
 pub(super) fn hello_of(host: &str, cpu_millis: u64, memory_bytes: u64) -> Hello {
     let body = json!({
@@ -51,7 +52,7 @@ pub(super) fn hello_of(host: &str, cpu_millis: u64, memory_bytes: u64) -> Hello 
         "pool": "burst",
         "agent_version": "0.1.0",
         "shape": { "cpu_millis": cpu_millis, "memory_bytes": memory_bytes, "gpus": 0 },
-        "capabilities": { "arch": "x86_64" },
+        "capabilities": { "arch": "x86_64", "load-admission": "true" },
         "labels": {},
         "phase": "serving",
     });

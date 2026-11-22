@@ -191,6 +191,7 @@ pub(crate) fn render(seen: &Snapshot, recorder: &Recorder) -> String {
         let _ = writeln!(out, "{name}{{from=\"{from}\"}} {count}");
     }
     refusals(&mut out, recorder);
+    start_refusals(&mut out, recorder);
     acquires(&mut out, recorder);
     hosts(&mut out, seen);
     out
@@ -203,6 +204,16 @@ fn refusals(out: &mut String, recorder: &Recorder) {
     for ((host, reason), count) in recorder.refusals() {
         let host = label(&host);
         let _ = writeln!(out, "{name}{{host=\"{host}\",reason=\"{reason}\"}} {count}");
+    }
+}
+
+fn start_refusals(out: &mut String, recorder: &Recorder) {
+    let name = "js_agent_start_refusals_total";
+    let help = "Job starts a host's agent refused, by host and refusal code (the agent's code, or other), counted when the refusal is recorded, whether the job then goes back to the queue or fails.";
+    family(out, name, "counter", help);
+    for ((host, code), count) in recorder.start_refusals() {
+        let host = label(&host);
+        let _ = writeln!(out, "{name}{{host=\"{host}\",code=\"{code}\"}} {count}");
     }
 }
 
