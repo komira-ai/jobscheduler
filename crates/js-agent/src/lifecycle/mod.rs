@@ -845,9 +845,17 @@ impl Local {
                 .map_err(|why| format!("--state-root: cannot compare file systems: {why}"))
         };
         let own = device(state.path())?;
+        // A root at or beneath the runtime's agent-only root (a Mac's put root: no job is
+        // given anything beneath it, only the agent's commit writes there) lets no job fill
+        // the state root's file system.
+        let agent_only = self
+            .backend
+            .as_ref()
+            .and_then(crate::platform::Backend::agent_only_root);
         let roots = self
             .mounts
             .paths()
+            .filter(|path| !agent_only.is_some_and(|only| path.starts_with(only)))
             .map(|path| ("the --mount-root", path))
             .chain(
                 self.scratch

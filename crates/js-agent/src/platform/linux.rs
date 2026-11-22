@@ -466,6 +466,12 @@ impl Backend {
         settings
     }
 
+    /// The root only the agent writes beneath: none for containers.
+    #[allow(clippy::unused_self)] // the same call as the macOS backend's, which reads itself
+    pub(crate) fn agent_only_root(&self) -> Option<&Path> {
+        None
+    }
+
     /// The flag a failure to start the jobs is told under.
     pub(crate) fn flag(&self) -> &'static str {
         match self.settings().crun() {
