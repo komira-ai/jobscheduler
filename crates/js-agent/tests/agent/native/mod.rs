@@ -16,6 +16,7 @@ mod disclaim;
 mod env;
 pub(crate) mod fake_helper;
 mod files;
+mod grant;
 mod inputs;
 mod job_home;
 mod journal;
@@ -45,6 +46,7 @@ use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 pub use crate::support::Scratch;
 use fake_helper::FakeHelper;
@@ -82,6 +84,7 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     }
 }
 

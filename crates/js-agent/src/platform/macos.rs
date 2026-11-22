@@ -26,6 +26,7 @@ use crate::system::{Machine, RuntimeBuild, System};
 use crate::{Failure, Services};
 use js_agent_wire::LOG_UPLOAD_CAPABILITY;
 use js_caps::{EXEC, FLAG_SET, RUNTIME};
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_types::ExecMode;
 
 /// What `--version` prints after the version: the runtime this build runs jobs with, on a
@@ -65,6 +66,9 @@ pub struct Flags {
     /// semaphores or message queues (which the helper's reset removes) nor POSIX named
     /// semaphores, and the helper reuses uids, so a named semaphore a run leaves can be
     /// opened by a later run that gets the same uid, until the Mac restarts.
+    /// At start the agent asks the helper whether it holds Full Disk Access, reports the
+    /// answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
+    /// native job (`no-full-disk-access`).
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default
@@ -519,7 +523,12 @@ pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<()
                 Some(store) => native.with_bundles(Arc::clone(store))?,
                 None => native,
             };
-            let native = native.with_xcodes(start.xcodes.clone());
+            // The helper is asked once, here: the state it answers is the one the hello
+            // reports and the runtime refuses jobs by.
+            let held = native::grant::ask(&js_mac_session::client::Client::new(native.socket()))?;
+            let native = native
+                .with_full_disk_access(held)
+                .with_xcodes(start.xcodes.clone());
             Some(Backend::Native(native.with_log_file_cap(cli.log_file_cap)))
         }
         None => None,
@@ -560,10 +569,12 @@ pub(crate) fn report(
     let Some(native) = local.backend.as_ref().map(Backend::settings) else {
         return Ok(None);
     };
+    let config = native.config();
     let found = report_native(
         hello,
         local.files.is_some(),
-        native.config().network,
+        config.network,
+        config.full_disk_access,
         &local.providers,
     );
     if local.vm.is_some() {
@@ -652,7 +663,8 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// jobs: `runtime` and `exec` are `sandbox-exec`, `run-files` when `run_files` (the agent
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
-/// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload`, since the
+/// `open`), with no `egress-ports`, since a Mac forwards no port, `full-disk-access` (the state
+/// the helper answered at start: [`native::grant::report`]), and `log-upload`, since the
 /// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
 /// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]),
 /// and `mount-provider.<name>` for each of `providers`. The hello is sent only after
@@ -662,6 +674,7 @@ fn report_native(
     hello: &mut Hello,
     run_files: bool,
     ceiling: Ceiling,
+    full_disk_access: FullDiskAccess,
     providers: &MountProviders,
 ) -> Vec<String> {
     let mode = ExecMode::SandboxExec.name().to_owned();
@@ -673,6 +686,7 @@ fn report_native(
         .capabilities
         .insert(LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
     contract::report_native_jobs(hello);
+    native::grant::report(&mut hello.capabilities, full_disk_access);
     contract::report_mount_providers(hello, providers, true);
     ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
@@ -685,7 +699,9 @@ mod tests {
     use js_agent_wire::{HeldRun, Hello, NetworkCeiling, Phase, ProtocolRange, WireShape};
     use js_caps::{EXEC, FLAG_SET};
 
-    use super::{Ceiling, LOG_UPLOAD_CAPABILITY, MountProviders, UserNames, report_native};
+    use super::{
+        Ceiling, FullDiskAccess, LOG_UPLOAD_CAPABILITY, MountProviders, UserNames, report_native,
+    };
 
     /// A hello of a host with no capabilities but its os.
     fn hello() -> Hello {
@@ -723,7 +739,16 @@ mod tests {
     fn a_native_agent_reports_log_upload_the_job_keys_and_the_dispatch_poll() {
         let mut native = hello();
         let none = MountProviders::default();
-        assert!(report_native(&mut native, true, Ceiling::Off, &none).is_empty());
+        assert!(
+            report_native(
+                &mut native,
+                true,
+                Ceiling::Off,
+                FullDiskAccess::Granted,
+                &none
+            )
+            .is_empty()
+        );
         let flag = |key: &str| native.capabilities.get(key).cloned();
         assert_eq!(flag(LOG_UPLOAD_CAPABILITY).as_deref(), Some(FLAG_SET));
         assert_eq!(
@@ -764,7 +789,16 @@ mod tests {
         let providers =
             MountProviders::from_flags(&given, &[], None, UserNames::Directory(&none)).unwrap();
         let mut native = hello();
-        assert!(report_native(&mut native, false, Ceiling::Off, &providers).is_empty());
+        assert!(
+            report_native(
+                &mut native,
+                false,
+                Ceiling::Off,
+                FullDiskAccess::Granted,
+                &providers
+            )
+            .is_empty()
+        );
         let named: Vec<&String> = native
             .capabilities
             .keys()
@@ -792,7 +826,10 @@ mod tests {
         for (ceiling, level) in table {
             let mut hello = hello();
             let none = MountProviders::default();
-            assert!(report_native(&mut hello, false, ceiling, &none).is_empty());
+            assert!(
+                report_native(&mut hello, false, ceiling, FullDiskAccess::Granted, &none)
+                    .is_empty()
+            );
             assert_eq!(hello.capabilities[EXEC], "sandbox-exec", "{ceiling}");
             assert_eq!(hello.capabilities["egress"], level.name(), "{ceiling}");
             assert!(
@@ -802,6 +839,33 @@ mod tests {
             let read = NetworkCeiling::from_capabilities(&hello.capabilities).map(|c| c.level);
             assert_eq!(read, Ok(level), "{ceiling}");
             assert_eq!(hello.validate(), Ok(()), "{ceiling}");
+        }
+    }
+
+    /// Asserts that a native agent's hello carries the state its helper answered as the
+    /// capability `full-disk-access`, spelled `granted`, `not-granted` or `undetermined`, and
+    /// still validates. Catches a host listing that shows no grant state, or one that shows
+    /// a state other than the one the agent refuses jobs by.
+    #[test]
+    fn a_native_agent_reports_whether_its_helper_holds_full_disk_access() {
+        for (state, text) in [
+            (FullDiskAccess::Granted, "granted"),
+            (FullDiskAccess::NotGranted, "not-granted"),
+            (FullDiskAccess::Undetermined, "undetermined"),
+        ] {
+            let mut hello = hello();
+            assert!(
+                report_native(
+                    &mut hello,
+                    false,
+                    Ceiling::Off,
+                    state,
+                    &MountProviders::default()
+                )
+                .is_empty()
+            );
+            assert_eq!(hello.capabilities[js_caps::FULL_DISK_ACCESS], text);
+            assert_eq!(hello.validate(), Ok(()), "{text}");
         }
     }
 }

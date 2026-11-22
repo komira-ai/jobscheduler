@@ -333,6 +333,14 @@ pub const BUNDLE_XCODE_MISMATCH: &str = "bundle-xcode-mismatch";
 /// for it. A server sends the field only to a host whose `xcode` capability lists the build,
 /// so the refusal means the host's Xcodes changed under its hello.
 pub const XCODE_NOT_HELD: &str = "xcode-not-held";
+/// A native start (a native job, or a start by image with a `run`) on a Mac agent whose root
+/// helper `js-mac-session` does not hold Full Disk Access (the agent reports the state as the
+/// capability `full-disk-access`: `not-granted`, or `undetermined` when it could not be
+/// found out). It is the first refusal of a native start: nothing was created, no user was
+/// made and no bundle was pinned. The host is at fault, not the request: the Mac's operator
+/// installs the privacy profile through device management and restarts the agent, and the
+/// start can run on another host meanwhile.
+pub const NO_FULL_DISK_ACCESS: &str = "no-full-disk-access";
 /// A start whose bundle digest is not on the host's allow list (`--bundle-trust list`).
 pub const BUNDLE_NOT_ALLOWED: &str = "bundle-not-allowed";
 /// A start whose bundle digest is on the host's deny list.
@@ -359,7 +367,8 @@ pub enum RefusalClass {
 }
 
 /// The refusals of a bundle start that are the farm's fault.
-const FARM_CODES: [&str; 11] = [
+const FARM_CODES: [&str; 12] = [
+    NO_FULL_DISK_ACCESS,
     BUNDLE_UNSUPPORTED,
     BUNDLE_PENDING,
     BUNDLE_NOT_HELD,
