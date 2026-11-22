@@ -23,6 +23,9 @@ pub(crate) fn dispatch(
     err: &mut dyn Write,
 ) -> Option<ExitCode> {
     let verb = args.get(1).and_then(|verb| verb.to_str())?;
+    if verb == crate::dev_exec::VERB {
+        return Some(crate::dev_exec::run(args, err));
+    }
     if verb == crate::mac_supervisor::VERB {
         return Some(crate::mac_supervisor::run(args, out, err));
     }
