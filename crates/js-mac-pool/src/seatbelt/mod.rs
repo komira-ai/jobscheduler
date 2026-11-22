@@ -16,6 +16,11 @@
 //!   [`Caps`], and cannot change it except with a [`Narrowing`], which only lowers the
 //!   network, drops a grant or adds a deny.
 //! - The floor is a private constant emitted after every other rule.
+//! - A read deny wins over every allow that covers it: the run's write grant, the trees and
+//!   the allow model's reads are emitted before the denies, and a mount grant (emitted
+//!   after them, so that a grant below a denied path opens it) is refused at or above a
+//!   denied path ([`PolicyError::MountOverReadDeny`]). The runtime passes the system places
+//!   that only the privacy grant opens as read denies.
 //! - A run's trees on the store's shared mount ([`MountTrees`]) are its only readable
 //!   places below the mount's root: the root is read-denied, each tree is read-granted
 //!   after the deny, and a mount grant that would reopen the root is refused.
@@ -37,9 +42,10 @@
 //!
 //! What it does not do:
 //!
-//! - `(deny process-info* (target others))` is in the profile as defence in depth but
-//!   does not hide processes: on a hosted runner `pgrep` listed the same processes with
-//!   and without it. Hiding another user's processes is the user boundary's job.
+//! - `(deny process-info* (target others))` refuses a run the path and the details of
+//!   another user's process (`proc_pidpath`, `proc_pidinfo`) but does not hide that the
+//!   process exists: the kernel's process list (`sysctl`, which `pgrep` reads) is the same
+//!   with and without it. Hiding another user's processes is the user boundary's job.
 //! - Loopback is shared by every user of the Mac; see [`Net`].
 //! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).

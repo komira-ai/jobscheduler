@@ -4,19 +4,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_mac_pool::seatbelt::{AbsPath, ReadModel, SANDBOX_EXEC};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
-use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
+use super::accounts::Accounts;
+use super::fence::PRIVACY_ONLY_PLACES;
 use super::mounts::MountRoot;
 use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
 use crate::logs::{DEFAULT_FILE_CAP, LogPlan};
+use crate::mac_accounts::Slots;
 use crate::xcode::Xcode;
 
-/// Where the helper makes lease users' homes unless `--native-homes` says otherwise.
+/// Where the account pool makes its accounts' homes: the one value `--native-homes` takes.
 pub const DEFAULT_HOMES: &str = "/Users";
 
 /// The directories a start's program may lie under unless `--native-tool-root` is given:
@@ -30,15 +32,18 @@ pub const DEFAULT_MAX_FILE_MIB: u64 = 4096;
 /// otherwise.
 pub const DEFAULT_MAX_PROCESSES: u32 = 512;
 
-/// Where the system keeps the Mac's auto-login password: no run may read it, whatever the
-/// helper's own flags say. Spelled as the kernel resolves it (`/etc` is `/private/etc`).
+/// Where the system keeps the Mac's auto-login password: no run may read it. Spelled as the kernel resolves it (`/etc` is `/private/etc`).
 const KCPASSWORD: &str = "/private/etc/kcpassword";
 
 /// The native-job flags as the command line gave them.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeFlags<'a> {
-    /// `--native-helper-socket`.
-    pub socket: Option<&'a Path>,
+    /// `--native-accounts`: the switch that turns native jobs on.
+    pub accounts: Option<&'a Path>,
+    /// `--native-account-range`, as given.
+    pub account_range: Option<&'a str>,
+    /// `--native-account-ready`.
+    pub account_ready: Option<usize>,
     /// `--native-homes`.
     pub homes: Option<&'a Path>,
     /// `--native-network`.
@@ -55,12 +60,10 @@ pub struct NativeFlags<'a> {
     pub pf: PfFlags<'a>,
 }
 
-/// The checked native-job flags: the helper's socket and the runtime's configuration.
+/// The checked native-job flags: the runtime's configuration.
 #[derive(Debug, Clone)]
 pub struct NativeSettings {
-    socket: PathBuf,
     config: NativeConfig,
-    sandbox_exec: PathBuf,
     bundles: Option<Arc<Placer>>,
     /// The Xcodes the host holds, which a job start may name by build.
     xcodes: Vec<Xcode>,
@@ -69,26 +72,30 @@ pub struct NativeSettings {
 }
 
 impl NativeSettings {
-    /// Checks `flags`; `None` without `--native-helper-socket`. `denied` are the agent's
-    /// own roots and files (state and scratch roots, token, instance and CA files), which
-    /// no run may read; so are the helper's socket directory, `--native-deny-read` and
-    /// the auto-login password. Each is read-denied by the name the kernel resolves, a path
-    /// that is not there yet by the real path of its deepest ancestor that is (see
-    /// [`real_or_planned`]).
+    /// Checks `flags`; `None` without `--native-accounts`. `denied` are the agent's own
+    /// roots and files (state and scratch roots, token, instance and CA files), which no run
+    /// may read; so are `--native-accounts`, `--native-deny-read`, the auto-login password
+    /// and the places only the privacy controls guard ([`PRIVACY_ONLY_PLACES`]). Each is
+    /// read-denied by the name the kernel resolves, a path that is not there yet by the real
+    /// path of its deepest ancestor that is (see [`real_or_planned`]).
     ///
     /// # Errors
     ///
-    /// The text names the flag at fault: a native flag without the socket, a path that is
-    /// not absolute, a home directory that cannot be opened, a network level that is none of
-    /// `off`, `loopback`, `on` and `open`, a `--native-pf-*` flag beside `open` (or beside any
-    /// value but `on`), or a root a profile cannot name.
+    /// The text names the flag at fault: a native flag without `--native-accounts`, no
+    /// `--native-account-range` or one the pool refuses, more ready accounts than slots, a
+    /// path that is not absolute, a home directory other than the pool's, a network level
+    /// that is none of `off`, `loopback`, `on` and `open`, a `--native-pf-*` flag beside
+    /// `open` (or beside any value but `on`), a limit of 0 or one too large, or a root a
+    /// profile cannot name.
     pub fn from_flags(
         flags: &NativeFlags<'_>,
         denied: &[&Path],
         journal: &Path,
     ) -> Result<Option<Self>, String> {
-        let Some(socket) = flags.socket else {
+        let Some(state) = flags.accounts else {
             let given = [
+                ("--native-account-range", flags.account_range.is_some()),
+                ("--native-account-ready", flags.account_ready.is_some()),
                 ("--native-homes", flags.homes.is_some()),
                 ("--native-network", flags.network.is_some()),
                 ("--native-tool-root", !flags.tool_roots.is_empty()),
@@ -103,16 +110,23 @@ impl NativeSettings {
                 ("--native-pf-endpoint", !flags.pf.endpoints.is_empty()),
             ];
             return match given.iter().find(|(_, given)| *given) {
-                Some((flag, _)) => Err(format!("{flag}: needs --native-helper-socket")),
+                Some((flag, _)) => Err(format!("{flag}: needs --native-accounts")),
                 None => Ok(None),
             };
         };
-        absolute("--native-helper-socket", socket)?;
+        absolute("--native-accounts", state)?;
+        let accounts = accounts_of(state, flags.account_range, flags.account_ready)?;
         let homes = flags.homes.unwrap_or_else(|| Path::new(DEFAULT_HOMES));
         absolute("--native-homes", homes)?;
         let canonical = fs::canonicalize(homes);
         let homes =
             canonical.map_err(|why| format!("--native-homes: {}: {why}", homes.display()))?;
+        if fs::canonicalize(DEFAULT_HOMES).ok().as_deref() != Some(homes.as_path()) {
+            return Err(format!(
+                "--native-homes: {}: the account pool makes its homes in {DEFAULT_HOMES}",
+                homes.display()
+            ));
+        }
         let given = flags.network.unwrap_or(Ceiling::Off.name());
         let network = Ceiling::parse(given).ok_or_else(|| {
             format!("--native-network: {given:?} is not off, loopback, on or open")
@@ -143,7 +157,7 @@ impl NativeSettings {
             }
         }
         let mut denies: Vec<PathBuf> = denied.iter().map(|path| real_or_planned(path)).collect();
-        denies.push(real_or_planned(socket.parent().unwrap_or(socket)));
+        denies.push(real_or_planned(state));
         for path in flags.deny_read {
             let found = fs::canonicalize(path);
             denies.push(
@@ -151,6 +165,7 @@ impl NativeSettings {
             );
         }
         denies.push(PathBuf::from(KCPASSWORD));
+        denies.extend(PRIVACY_ONLY_PLACES.iter().map(PathBuf::from));
         let mib = flags.max_file_mib.unwrap_or(DEFAULT_MAX_FILE_MIB);
         let max_processes = flags.max_processes.unwrap_or(DEFAULT_MAX_PROCESSES);
         if mib == 0 || max_processes == 0 {
@@ -159,16 +174,19 @@ impl NativeSettings {
         let max_file_bytes = mib
             .checked_mul(1 << 20)
             .ok_or_else(|| format!("--native-max-file-mib: {mib} is too large"))?;
-        // The helper refuses limits above its caps; say so at start-up, not at the first run.
-        Limits::new(max_file_bytes, max_processes)
-            .map_err(|why| format!("--native-max-file-mib and --native-max-processes: {why}"))?;
+        // The run's process limit is this and one, for the supervisor (`NativeConfig`).
+        if max_processes == u32::MAX {
+            return Err(format!(
+                "--native-max-processes: {max_processes} is too large"
+            ));
+        }
         let read_denies = denies
             .iter()
             .map(|path| AbsPath::new(path).map_err(|why| format!("{}: {why}", path.display())))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(Self {
-            socket: socket.to_path_buf(),
             config: NativeConfig {
+                accounts,
                 homes,
                 network,
                 tool_roots,
@@ -181,7 +199,6 @@ impl NativeSettings {
                 egress: egress.map(|policy| Arc::new(policy) as Arc<dyn Enforcer>),
                 full_disk_access: FullDiskAccess::Undetermined,
             },
-            sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
             xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
@@ -283,31 +300,38 @@ impl NativeSettings {
         self
     }
 
-    /// The same settings with `program` as the `sandbox-exec` the start-up self-test runs:
-    /// a seam for tests.
-    #[must_use]
-    pub fn with_sandbox_exec(mut self, program: &Path) -> Self {
-        self.sandbox_exec = program.to_path_buf();
-        self
-    }
-
-    /// The `sandbox-exec` the start-up self-test runs.
-    #[must_use]
-    pub fn sandbox_exec(&self) -> &Path {
-        &self.sandbox_exec
-    }
-
-    /// The helper's socket.
-    #[must_use]
-    pub fn socket(&self) -> &Path {
-        &self.socket
-    }
-
     /// The runtime's configuration.
     #[must_use]
     pub fn config(&self) -> &NativeConfig {
         &self.config
     }
+}
+
+/// The account pool of `--native-accounts` (`state`): its slots, which
+/// `--native-account-range` must give, and how many accounts it keeps ready (by default one, at
+/// most one per slot).
+fn accounts_of(
+    state: &Path,
+    range: Option<&str>,
+    ready: Option<usize>,
+) -> Result<Accounts, String> {
+    let range = range.ok_or("--native-accounts: needs --native-account-range")?;
+    let slots: Slots = range
+        .parse()
+        .map_err(|why| format!("--native-account-range: {why}"))?;
+    let ready = ready.unwrap_or(1);
+    let count = usize::try_from(slots.count()).unwrap_or(usize::MAX);
+    if ready > count {
+        return Err(format!(
+            "--native-account-ready: {ready} is more than the {count} slots of \
+             --native-account-range"
+        ));
+    }
+    Ok(Accounts {
+        state: state.to_path_buf(),
+        slots,
+        ready,
+    })
 }
 
 /// `path` is absolute, or the error names `flag`.

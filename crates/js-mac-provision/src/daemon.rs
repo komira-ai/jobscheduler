@@ -102,8 +102,6 @@ impl Daemon {
             "/var/db/js-agent/state",
             "--scratch-root",
             "/var/db/js-agent/scratch/runs",
-            "--native-helper-socket",
-            SESSION_SOCKET,
         ];
         Daemon {
             label: AGENT_LABEL.to_owned(),

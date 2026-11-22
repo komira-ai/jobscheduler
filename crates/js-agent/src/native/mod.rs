@@ -1,84 +1,66 @@
-//! The runtime of native jobs: a program run on a Mac as a user of its own, under a
-//! Seatbelt profile, through the root helper `js-mac-session`.
+//! The runtime of native jobs: a program run on a Mac as an account of its own, under a
+//! Seatbelt profile, started by the agent's supervisor. No other program of ours takes part.
 //!
-//! The helper owns everything that needs root. One run uses five of its verbs, each on a
-//! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
-//! journal's paragraph below):
+//! One run, in the order its steps are done (`native/start.rs` names each):
 //!
-//! 1. `user-create` lends the run's lease (`<term>.<sequence>`, never used twice) a user of
-//!    the helper's pool, and answers its uid; `pool-status` then names the lease's slot,
-//!    and so its user and home (`native/pool_user.rs`).
-//! 2. The agent, as root and before any process of that user exists, makes the run
-//!    directory below the user's home (`exec/`, the working directory, with `.home/`,
-//!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
-//!    lifecycle's scratch directory, which only the agent can enter: an empty one for
-//!    standard input and one each for standard output and error.
-//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
-//!    the run's file-size and process limits as fields of the request: the helper sets
-//!    them with `setrlimit` in the child, before it executes `sandbox-exec`, so no shell
-//!    stands between the profile and the program. The helper starts it with
-//!    the empty file as standard input, the log files as standard output and error, and
-//!    `exec/` as the working directory. The profile is built by
-//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the run directory
-//!    `exec/` and nothing else: the account's home itself is not writable to the job (macOS
-//!    guards what a job would make in `~/Library` even against root, so the sweep could
-//!    not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
-//!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper
-//!    sets `HOME` to the account's home whatever the agent passes, so the command is
-//!    `sandbox-exec ... /usr/bin/env HOME=<exec/.home> <program> <args>`: `env` runs
-//!    inside the profile and executes the program, and the helper's wire is unchanged.
-//!    The helper builds the process's environment around the one the agent passes. The connection stays open until the process exits: a thread of the runtime
-//!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
-//!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
-//!    `--run-files-root`) has their directory given to the user before this, `0500` with
-//!    its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it. Its
-//!    mount inputs, which the lifecycle resolved below the agent's mount roots
-//!    (`RunSpec::mounts`), are copied to their `dest` below `exec/` and given to the user
-//!    the same way, and the profile denies writes there too (`native/files.rs`). The
-//!    working directory is `exec/` or, with a `cwd`, the directory it names below `exec/`,
-//!    made when it is not there; a `cwd` that leaves `exec/` (absolute, `..`, or a link
-//!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
-//! 4. `kill-uid` ends every process of the user, not only the one started (a job may
-//!    detach children), and boots out the user's launchd domains so launchd restarts
-//!    none of its per-user agents; `user-delete` resets the user and returns it to the
-//!    pool. A step that fails leaves the user in the helper's ledger, its uid held, and
-//!    the lease in the journal for the next start to end. Between the two, a removal
-//!    copies the run's declared outputs out of `exec/` into the run's scratch directory
-//!    (`native/outputs.rs`); one that cannot be copied does not stop the removal, which
-//!    then fails as [`RuntimeError`] of its outputs only.
+//! 1. The start is checked and its bundle pinned (`native/bundle.rs`), and its lease
+//!    (`<term>.<sequence>`, never used twice) is written to the [`Journal`].
+//! 2. The account pool ([`crate::mac_accounts::Pool`], opened by the runtime when the agent
+//!    holds Full Disk Access, `native/accounts.rs`) lends the run an account that never ran
+//!    a job. Its home is `<homes>/<name>`.
+//! 3. The agent, as root and before any process of that account exists, makes the run
+//!    directory below the account's home (`exec/`, the working directory, with `.home/`,
+//!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the account. A start with
+//!    run files (`RunSpec::files`, written by the lifecycle into the agent's
+//!    `--run-files-root`) has their directory given to the account, `0500` with its files
+//!    `0400`; the profile denies writes there and `JS_FILES_DIR` names it. Its mount inputs,
+//!    which the lifecycle resolved below the agent's mount roots (`RunSpec::mounts`), are
+//!    copied to their `dest` below `exec/` and given to the account the same way, and the
+//!    profile denies writes there too (`native/files.rs`). The working directory is `exec/`
+//!    or, with a `cwd`, the directory it names below `exec/`, made when it is not there; a
+//!    `cwd` that leaves `exec/` (absolute, `..`, or a link that resolves outside) fails the
+//!    start (`native/cwd.rs`).
+//! 4. The profile is built by [`js_mac_pool::seatbelt`] from a policy that grants writes to
+//!    the run directory `exec/` and nothing else: the account's home itself is not writable
+//!    to the job (macOS guards what a job would make in `~/Library` even against root), and
+//!    neither is its per-user folder in `/var/folders`. The agent's roots, its secret files,
+//!    `--native-accounts` and the places only the privacy controls guard
+//!    (`native/fence.rs`) are denied reads (`native/profile.rs`).
+//! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
+//!    run's environment and nothing else, the working directory, and the job's three standard
+//!    streams as files in the run's scratch directory, which only the agent can enter: an
+//!    empty one for standard input and one each for standard output and error. The supervisor
+//!    keeps the agent's privacy responsibility (it is started without the disclaim), drops to
+//!    the account, sets the run's largest file and the most processes the account may have
+//!    (the configured number and one, for the supervisor itself), applies the profile, and
+//!    starts the program, which keeps the responsibility too, so the profile is the fence.
+//!    It says when the job started (its pid and audit session) and how it ended.
+//! 6. The removal ends the run's processes (`native/end.rs`), copies its declared outputs out
+//!    of `exec/` into its scratch directory (`native/outputs.rs`), retires its account (every
+//!    process of the uid killed, its record and home deleted, its per-user folder emptied, all
+//!    shown gone) and marks the lease done (`native/remove.rs`). An account the pool cannot
+//!    show gone is held: the removal fails, and the lifecycle treats it as a failed removal.
+//!    Outputs that could not be copied fail it only as [`RuntimeError`] of its outputs.
 //!
 //! A run whose start carried a sink, on a runtime given [`LiveLogs`]
 //! ([`NativeRuntime::with_live_logs`]), has its two log files uploaded while it runs and
-//! finished after its end ([`Runtime::logs_report`] gives the totals); a run adopted after a
-//! restart goes on with its upload from the progress record in its scratch directory. See
-//! `native/logs.rs`.
+//! finished after its end ([`Runtime::logs_report`] gives the totals). See `native/logs.rs`.
 //!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's
-//! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in the store (or
-//! the clone) that the bundle's config names; the environment and arguments are the
-//! bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
+//! own `.trees` directory (below `exec/`), and `@bundle/<entrypoint>` resolved to the file in
+//! the store (or the clone) that the bundle's config names; the environment and arguments are
+//! the bundle's rules applied to the job's own (see `native/bundle.rs`). The pins end with
 //! the run.
 //!
-//! A lease is written to the [`Journal`] (in the state root, synced) before `user-create` is
-//! sent, with a run record once the helper has started its process (`native/journal.rs`),
-//! and marked done once its user is deleted or a failed start was undone. A process that
-//! ends with runs going leaves them in the journal. The runtime of the next process adopts
-//! each one that has a run record ([`Runtime::list_labelled`], `native/adopt.rs`): the
-//! helper's `watch` finds its process again, and the run is polled, stopped and removed as
-//! any other (its outputs collected at the removal); one the helper no longer has is listed
-//! ended. [`Runtime::reclaim`] ends (kill, then delete) the leases with no run record, when
-//! the next worker starts and when the rescue of a dead worker runs. A helper that restarted
-//! under the runtime refuses every verb until its boot reset has run again; the next start,
-//! stop or removal asks for it. The helper sets the largest file and the most processes the
-//! user may have on each run, so a run cannot fill the disk through its output or the
-//! process table with a fork bomb.
+//! A restart of the agent ends every native run: the pool's open retires every account an
+//! earlier process lent, and the journal's runs are listed ended (`native/adopt.rs`).
 //!
 //! # Privacy grants (TCC)
 //!
-//! The agent holds Full Disk Access, which a profile grants it and no job (the helper holds
-//! none); a Mac agent without it refuses every native job, `no-full-disk-access`. See
-//! `native/grant.rs`.
+//! The agent holds Full Disk Access, which a profile grants it; a native job and its
+//! supervisor keep the responsibility and answer for the agent. A Mac agent without the grant
+//! opens no pool and refuses every native job, `no-full-disk-access`. See `native/grant.rs`.
 //!
 //! A start named by its image runs when it carries a `run` and the runtime holds a bundle
 //! store: the image reference is the bundle's name (the bundle pin of the legacy form), the
@@ -94,23 +76,17 @@
 //! admission; a host port at its own number is refused by the lifecycle (this runtime offers none).
 //! A `cwd` at or below a mount's link leaves `exec/` and fails the start (`native/cwd.rs`).
 //!
-//! # Stops and deadlines
+//! # Stops
 //!
-//! [`Runtime::stop`] is the helper's `stop`: `SIGTERM` to the run's process group, and
-//! `kill-uid` only if the process has not ended once the grace has passed, so a job may
-//! flush. A start whose labels carry the job's wall limit asks the helper's `run` to hold a
-//! deadline of that limit and the agent's stop grace, which the helper enforces by itself
-//! (`kill-uid`): while an agent runs, its lifecycle has stopped the job by then; while the
-//! agent is down, has stopped or is restarting, the run still ends at it. The silence bound
-//! (`--silence-stop`) is the agent's alone. A helper from before `stop` and the deadline
-//! refuses either as a request it cannot read; the runtime then kills at once for a stop and
-//! starts the run without the deadline, so the agent's wall limit is the run's only bound
-//! again (`native/bound.rs`).
+//! [`Runtime::stop`] sends `SIGTERM` to the job's process group, so a job may flush, and the
+//! first poll after the grace ends the run's processes. The lifecycle holds the wall limit and
+//! the silence bound (`--silence-stop`) and calls the stop.
 //!
 //! The environment of a run is the agent's (the body's own `env`, or the bundle's rules
 //! applied to it, then `TMPDIR` and `JS_FILES_DIR`) with a job start's environment
-//! (`RunSpec::env`) laid over it: the job's value wins where both name a variable. It travels
-//! to the helper in the `env` of the `run` request, never on the command line, whose
+//! (`RunSpec::env`) laid over it: the job's value wins where both name a variable; then the
+//! account's names (`HOME`, `CFFIXED_USER_HOME`, `USER`, `LOGNAME`, `xcrun_db`), which no job
+//! may set. It reaches the supervisor as its environment, never on the command line, whose
 //! arguments every user of the Mac can read (`native/env.rs`).
 //!
 //! A start that names a `tree` input, which is retired and which no server sends, is refused
@@ -119,17 +95,19 @@
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
-//! grant the user's `/var/folders` entry (toolchains that need it get their temporary files
-//! from `TMPDIR`, which is inside the run directory).
+//! grant the account's `/var/folders` entry (toolchains that need it get their temporary files
+//! from `TMPDIR` and `xcrun` its cache from `xcrun_db`, both inside the run directory).
 //!
-//! The runtime builds on every platform so that its rules are tested on Linux; only a
-//! macOS agent makes one.
+//! The runtime is built in the macOS build only; the decisions it makes that need no Mac
+//! (the account pool, the supervisor's steps) live in modules every build tests.
 
+pub mod accounts;
 mod adopt;
-mod bound;
 mod bundle;
 mod cwd;
+mod end;
 mod env;
+pub mod fence;
 mod files;
 pub mod grant;
 mod journal;
@@ -138,68 +116,65 @@ mod mounts;
 mod network;
 mod outputs;
 mod pf;
-mod pool_user;
 mod profile;
+mod remove;
+mod run;
 mod settings;
+mod start;
 mod xcode;
 
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
+    BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
-use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::full_disk_access::FullDiskAccess;
-use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
-use js_mac_session::lease::Dotted;
-use js_mac_session::proto::Limits;
-use js_types::LeaseId;
 
-use crate::bundle::{Pinned, Placer};
+use crate::bundle::Placer;
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Body, Exit, Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError,
-    Status, check_run_env,
+    Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
 };
-use crate::logs::{LiveLogs, RunLogs};
+use crate::logs::LiveLogs;
+use crate::mac_accounts::Pool;
+use crate::mac_supervisor::Launcher;
 
-pub use crate::leak_scan::NativeChecks;
+pub use accounts::Accounts;
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
-pub use profile::{profile_argv, self_test};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
     NativeSettings,
 };
+pub use start::STEPS;
 
 /// What a native runtime is told, from the agent's flags.
 #[derive(Debug, Clone)]
 pub struct NativeConfig {
-    /// Where the helper makes the home of a run's user (its `--homes`), canonical: a
-    /// profile compares the path the kernel resolves, and `/var` is `/private/var`.
+    /// The account pool the runs are lent their accounts from.
+    pub accounts: Accounts,
+    /// Where the pool makes its accounts' homes, canonical: a profile compares the path the
+    /// kernel resolves.
     pub homes: PathBuf,
     /// The most network a run may ask for (`--native-network`): a start above it is refused
     /// (`network-above-ceiling`), never run with less.
     pub network: Ceiling,
     /// The directories a start's program must lie under.
     pub tool_roots: Vec<PathBuf>,
-    /// Paths no run may read, such as the agent's state and scratch roots, and every mount
-    /// root: a run reads only the mounts it was given.
+    /// Paths no run may read, such as the agent's state and scratch roots, every mount root
+    /// (a run reads only the mounts it was given) and the places only the privacy controls
+    /// guard.
     pub read_denies: Vec<AbsPath>,
     /// The roots a job's mounts must lie beneath once their links are followed
     /// (`--mount-root`, `--mount-root-ro`), canonical; also in `read_denies`.
@@ -212,77 +187,30 @@ pub struct NativeConfig {
     /// The most bytes any one file a run writes may reach (its output included): the
     /// run's `RLIMIT_FSIZE`. A run that writes more is ended by `SIGXFSZ`.
     pub max_file_bytes: u64,
-    /// The most processes the run's user may have: the run's `RLIMIT_NPROC`. A fork bomb
-    /// stops at it, and the helper's kill (which forks as root) is not held by it.
+    /// The most processes a run may start. The run's `RLIMIT_NPROC` is this and one, for the
+    /// supervisor that waits on the job as the run's account; a fork bomb stops at it.
     pub max_processes: u32,
     /// The check that the pf anchor of the pool is in force. Required when `network` is
     /// [`Ceiling::On`]: the runtime does not open without it. A ceiling of [`Ceiling::Open`]
     /// has none: nothing filters its jobs.
     pub egress: Option<Arc<dyn Enforcer>>,
     /// Whether the agent holds Full Disk Access, as its listing found at start. Only
-    /// [`FullDiskAccess::Granted`] runs native jobs: every start is refused
-    /// `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
+    /// [`FullDiskAccess::Granted`] opens the pool and runs native jobs: every start is
+    /// refused `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
     pub full_disk_access: FullDiskAccess,
 }
 
-/// A run that started: its scratch directory (where its log files are) and what the thread
-/// waiting on the helper found.
-struct Run {
-    scratch: PathBuf,
-    /// The home of the run's user, whose `exec/` holds the run's outputs.
-    home: PathBuf,
-    /// The outputs the start declared.
-    outputs: Vec<OutputSpec>,
-    /// What the removal copied of them, once it has: each file's path and bytes, and the
-    /// paths that could not be copied (taken when the removal reports them).
-    collected: Option<outputs::Collected>,
-    /// Set once the run has ended, so it is answered the same way again.
-    ended: Option<Status>,
-    /// The exit, or `None` when the helper's connection ended without one.
-    waiter: Receiver<Option<Exit>>,
-    /// The run's labels, as its start had them.
-    labels: BTreeMap<String, String>,
-    /// When the run started, in milliseconds since the Unix epoch.
-    started_ms: u64,
-    /// The trees of the run's bundle, pinned until the run is removed.
-    _pinned: Option<Pinned>,
-    /// Its live logs: the uploader, then the report.
-    logs: RunLogs,
-}
-
-impl Run {
-    /// Copies the run's outputs into its scratch directory, unless that was done, and logs
-    /// what was copied and what was not, by path and byte count.
-    fn collect(&mut self, lease: &str, max_file_bytes: u64) {
-        if self.collected.is_some() {
-            return;
-        }
-        let into = outputs::dir_in(&self.scratch);
-        let caps = outputs::Caps {
-            file_bytes: max_file_bytes,
-            run_bytes: outputs::MAX_COLLECTED_BYTES,
-            entries: outputs::MAX_ENTRIES,
-        };
-        let done = outputs::collect(&self.home, &self.outputs, &into, caps);
-        for (path, bytes) in &done.copied {
-            tracing::info!("native {lease}: output {path:?} copied, {bytes} bytes");
-        }
-        for why in &done.failed {
-            tracing::warn!("native {lease}: output {why:?}");
-        }
-        self.collected = Some(done);
-    }
-}
-
-/// Runs native jobs as users of the root helper.
+/// Runs native jobs as accounts of the agent's pool, started by its supervisor.
 pub struct NativeRuntime {
-    helper: Client,
+    /// The account pool; `None` when the agent does not hold Full Disk Access, and then every
+    /// start is refused.
+    pool: Option<Arc<Pool>>,
+    /// What starts the supervisor of a run.
+    launcher: Arc<dyn Launcher>,
     config: NativeConfig,
-    /// The limits of every run, checked when the runtime opens.
-    limits: Limits,
     term: u64,
     next: u64,
-    runs: BTreeMap<String, Run>,
+    runs: BTreeMap<String, run::Run>,
     /// The mounts of the job starts whose file system was resolved, by run id, until their
     /// start takes them (`native/mounts.rs`).
     plans: mounts::Plans,
@@ -290,20 +218,13 @@ pub struct NativeRuntime {
     bundles: Option<Arc<Placer>>,
     xcodes: xcode::Table,
     journal: Journal,
-    /// The helper said it needs its boot reset again (it restarted under this agent).
-    reset_needed: bool,
-    /// Gives a run's files to its user.
+    /// Gives a run's files to its account.
     hand_over: HandOver,
     /// Live logs, when the runtime uploads them ([`NativeRuntime::with_live_logs`]).
     logs: Option<LiveLogs>,
-    /// The wall clock, in milliseconds since the Unix epoch: when a run started, and so how
-    /// long an adopted one has run.
+    /// The wall clock, in milliseconds since the Unix epoch: when a run started and each step
+    /// of its start was done, and when a stop's grace ends.
     now_ms: Clock,
-    /// The grace the lifecycle gives a run it stops, added to the deadline the helper holds.
-    stop_grace: Duration,
-    /// The helper refused a deadline or `stop` as a request it cannot read: it predates them,
-    /// and neither is sent to it again (`native/bound.rs`).
-    old_helper: AtomicBool,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -320,48 +241,61 @@ fn system_clock() -> Clock {
 }
 
 impl NativeRuntime {
-    /// A runtime over the helper `helper`. Its run ids are `term.0`, `term.1` and so on, so
-    /// a `term` that another runtime of the same helper has used would be refused by the
-    /// helper's ledger: draw it at random.
-    ///
-    /// The helper refuses every verb until its boot reset has run since it started, so the
-    /// reset is asked for here, naming no lease held: it ends the runs of an earlier agent.
-    /// A helper that has reset already answers so, and that is fine.
+    /// A runtime whose runs start through `launcher`, over the account pool of
+    /// `config.accounts` on this Mac, which it opens when `config.full_disk_access` is
+    /// [`FullDiskAccess::Granted`] (and leaves closed otherwise: every start is then refused).
+    /// The pool is opened with no adopted job, so every account an earlier process lent is
+    /// retired. Its run ids are `term.0`, `term.1` and so on.
     ///
     /// # Errors
     ///
-    /// A configured limit is zero or above the helper's cap (nothing is sent to the helper),
-    /// the helper cannot be reached or its boot reset failed.
-    pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
-        if config.network == Ceiling::On && config.egress.is_none() {
-            return Err(RuntimeError::new(
-                "--native-network: on needs the check of the pf anchor of the pool \
-                 (--native-pf-uid-start and --native-pf-uid-count)",
-            ));
-        }
-        Self::open_ungated(helper, config, term)
+    /// A ceiling of `on` with no check of the pf anchor, or a pool that cannot be opened.
+    pub fn open(
+        launcher: Arc<dyn Launcher>,
+        config: NativeConfig,
+        term: u64,
+    ) -> Result<Self, RuntimeError> {
+        gate(&config)?;
+        let pool = accounts::open(&config.accounts, config.full_disk_access)?;
+        Self::open_ungated(pool, launcher, config, term)
     }
 
-    /// As [`NativeRuntime::open`], without refusing a cap of `on` that has no check. For
+    /// As [`NativeRuntime::open`], over `pool` (opened by the caller, over a host of its
+    /// own): how the tests give a pool over a fake host. An agent never calls it.
+    ///
+    /// # Errors
+    ///
+    /// A ceiling of `on` with no check of the pf anchor.
+    #[doc(hidden)]
+    pub fn over(
+        pool: Option<Arc<Pool>>,
+        launcher: Arc<dyn Launcher>,
+        config: NativeConfig,
+        term: u64,
+    ) -> Result<Self, RuntimeError> {
+        gate(&config)?;
+        Self::open_ungated(pool, launcher, config, term)
+    }
+
+    /// As [`NativeRuntime::over`], without refusing a cap of `on` that has no check. For
     /// tests of the gate itself, which must refuse on its own whatever `open` let through;
     /// an agent never calls it.
     ///
     /// # Errors
     ///
-    /// As [`NativeRuntime::open`], but for the missing check.
+    /// None today; the signature is that of the other constructors.
     #[doc(hidden)]
     pub fn open_ungated(
-        helper: Client,
+        pool: Option<Arc<Pool>>,
+        launcher: Arc<dyn Launcher>,
         config: NativeConfig,
         term: u64,
     ) -> Result<Self, RuntimeError> {
-        let limits = limits_of(&config)?;
-        reset(&helper)?;
         let journal = Journal::new(&config.journal);
         Ok(Self {
-            helper,
+            pool,
+            launcher,
             config,
-            limits,
             term,
             next: 0,
             runs: BTreeMap::new(),
@@ -369,13 +303,16 @@ impl NativeRuntime {
             bundles: None,
             xcodes: BTreeMap::new(),
             journal,
-            reset_needed: false,
             hand_over: files::lchown(),
             logs: None,
             now_ms: system_clock(),
-            stop_grace: Duration::ZERO,
-            old_helper: AtomicBool::new(false),
         })
+    }
+
+    /// Whether the runtime has an account pool: the agent holds Full Disk Access.
+    #[must_use]
+    pub fn has_pool(&self) -> bool {
+        self.pool.is_some()
     }
 
     /// The same runtime, reading the wall clock from `now_ms`. For tests; an agent never
@@ -386,17 +323,7 @@ impl NativeRuntime {
         Self { now_ms, ..self }
     }
 
-    /// The same runtime, with `grace` as the grace the lifecycle gives a run it stops: the
-    /// deadline the helper holds for a run is its wall limit and this grace.
-    #[must_use]
-    pub fn with_stop_grace(self, grace: Duration) -> Self {
-        Self {
-            stop_grace: grace,
-            ..self
-        }
-    }
-
-    /// The same runtime, giving a run's files to its user through `hand_over` in place of
+    /// The same runtime, giving a run's files to its account through `hand_over` in place of
     /// `lchown`, which needs root. For tests; an agent never calls it.
     #[doc(hidden)]
     #[must_use]
@@ -428,173 +355,6 @@ impl NativeRuntime {
         self.bundles.as_ref()
     }
 
-    /// Notes that the helper restarted under this runtime: it refuses every verb until its
-    /// boot reset has run again, so the next start, stop or removal asks for it first.
-    fn learn(&mut self, why: &ClientError) {
-        if matches!(why, ClientError::Refused(reason) if reason == RESET_NEEDED) {
-            self.reset_needed = true;
-        }
-    }
-
-    /// Asks for the boot reset again when the helper said it needs it.
-    fn ready(&mut self) -> Result<(), RuntimeError> {
-        if self.reset_needed {
-            reset(&self.helper)?;
-            self.reset_needed = false;
-        }
-        Ok(())
-    }
-
-    /// Marks `lease` done in the journal when nothing is left of it. A mark that cannot be
-    /// written costs nothing but a repeated kill and delete at the next start.
-    fn settle(&self, lease: &str, problems: &[String]) {
-        if problems.is_empty() {
-            let _ = self.journal.done(lease);
-        }
-    }
-
-    /// Everything after the user exists: the run directory, the log files, the profile and
-    /// the `run` verb.
-    fn launch(
-        &self,
-        spec: &RunSpec,
-        native: &NativeSpec,
-        (id, lease, uid): (LeaseId, &str, u32),
-        (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
-    ) -> Result<Run, RuntimeError> {
-        let user = pool_user::user_of(&self.helper, id, lease)?;
-        let home = self.config.homes.join(user);
-        let exec = profile::run_dir(&home);
-        let (tmp, job_home) = (
-            exec.join(profile::JOB_TMP_DIR),
-            exec.join(profile::JOB_HOME_DIR),
-        );
-        for dir in [&exec, &tmp, &job_home] {
-            make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
-        }
-        // The files and the inputs go to the user before any process of it exists.
-        if let Some(dir) = &spec.files {
-            files::hand_over(dir, uid, &self.hand_over).map_err(|why| fail(&"the files", &why))?;
-        }
-        let make = |path: &Path| make_dir(path, uid).map(drop);
-        files::stage_inputs(&exec, &spec.mounts, uid, (&self.hand_over, &make))
-            .map_err(|why| fail(&"an input", &why))?;
-        mounts::link_all(plans, &exec, uid, (&self.hand_over, &make))
-            .map_err(|why| fail(&"a mount", &why))?;
-        let cwd = cwd::open(&exec, &native.cwd, &make)
-            .map_err(|why| RuntimeError::new(why.to_string()))?;
-        let (native, mut env) = match &pinned {
-            Some(pinned) => {
-                let prepared = bundle::prepare(pinned, native, &exec, (uid, &tmp, dev.as_deref()))
-                    .map_err(|why| fail(&"the bundle", &why))?;
-                let body = NativeSpec {
-                    program: prepared.program,
-                    args: prepared.args,
-                    network: prepared.network,
-                    ..native.clone()
-                };
-                (body, prepared.env)
-            }
-            None => (native.clone(), env::plain(native, &tmp, dev.as_deref())),
-        };
-        env.push(env::job_home(&job_home));
-        let files = spec.files.as_deref();
-        if let Some(dir) = files {
-            env.push((files::FILES_DIR_ENV.to_owned(), dir.display().to_string()));
-        }
-        // Written by no run: its files and its inputs, each named for an error.
-        let read_only: Vec<(&str, PathBuf)> = files
-            .map(|dir| ("the files", dir.to_path_buf()))
-            .into_iter()
-            .chain(
-                spec.mounts
-                    .iter()
-                    .map(|input| ("an input", files::input_dest(&exec, input))),
-            )
-            .chain(mounts::read_only_links(plans, &exec))
-            .collect();
-        // The job start's environment last, over the agent's: its values win.
-        let env = env::with_job(env, &spec.env);
-        let grants = mounts::grants(plans);
-        let argv = profile::argv_of(&self.config, &native, &home, (&read_only, &grants))?;
-        let logs = logs::open(&spec.scratch).map_err(RuntimeError::new)?;
-        let fds = [
-            logs[0].as_fd(),
-            logs[1].as_fd(),
-            logs[2].as_fd(),
-            cwd.as_fd(),
-        ];
-        let (running, deadline_ms) = self
-            .start((spec, lease), (&argv, &env), fds)
-            .map_err(|why| fail(&"run", &why))?;
-        let record = RunRecord {
-            pid: running.pid,
-            started_ms: (self.now_ms)(),
-            deadline_ms,
-            labels: spec.labels.clone(),
-            scratch: spec.scratch.clone(),
-            home: home.clone(),
-            outputs: native.outputs.clone(),
-            bundle: spec.bundle.clone(),
-        };
-        // A record that cannot be written costs only the adoption: the next process ends
-        // the run, as it did before runs were recorded.
-        if let Err(why) = self.journal.started(lease, &record) {
-            tracing::warn!("native {lease}: the run is not recorded for adoption: {why}");
-        }
-        let (sender, waiter) = channel();
-        thread::spawn(move || {
-            let _ = sender.send(running.wait().ok().map(exit_of));
-        });
-        Ok(Run {
-            scratch: spec.scratch.clone(),
-            home,
-            outputs: native.outputs,
-            collected: None,
-            ended: None,
-            waiter,
-            labels: record.labels,
-            started_ms: record.started_ms,
-            _pinned: pinned,
-            logs: logs::start(self.logs.as_ref(), spec.log_sink.as_ref(), &spec.scratch),
-        })
-    }
-
-    /// Pins the bundle `spec` names, if it names one, before anything of the run is made:
-    /// a start whose bundle cannot be pinned, or whose program is one the bundle lacks, makes
-    /// no user. The program of a start that pins no bundle may not name one.
-    fn pin_bundle(
-        &self,
-        spec: &RunSpec,
-        native: &NativeSpec,
-        lease: &str,
-    ) -> Result<Option<Pinned>, RuntimeError> {
-        let entrypoint = native.program.strip_prefix(BUNDLE_PROGRAM_PREFIX);
-        match (&spec.bundle, &self.bundles) {
-            (None, _) if entrypoint.is_some() => Err(fail(
-                &"the program",
-                &"names an entrypoint of a bundle and the start pins none",
-            )),
-            (None, _) => Ok(None),
-            (Some(_), None) => Err(fail(&"the bundle", &"this runtime holds no bundle store")),
-            (Some(pin), Some(placer)) => bundle::pin(placer, pin, lease, entrypoint)
-                .map(Some)
-                .map_err(|why| fail(&"the bundle", &why)),
-        }
-    }
-
-    /// `result` of the helper verb `verb` as a runtime result: a refusal that the lease has
-    /// no user, or that its user was deleted, is the end that was wanted.
-    fn ended(&mut self, result: Result<(), ClientError>, verb: &str) -> Result<(), RuntimeError> {
-        match result {
-            Err(why) if !gone(&why) => {
-                self.learn(&why);
-                Err(fail(&verb, &why))
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Whether the pf anchor of the pool is in force right now, when the ceiling is `on`
     /// (the one value whose jobs the anchor limits; an `open` ceiling has no filter to
     /// check). Asked afresh at every call: a reload of the main ruleset can drop the anchor
@@ -624,202 +384,69 @@ impl NativeRuntime {
             )
         })
     }
-
-    /// Ends the user of `lease` after a start that failed, so none is left behind, and says
-    /// what could not be done: the start's own error is the first thing the operator needs,
-    /// but a user that is left is a uid held in the helper's range.
-    fn discard(&self, lease: &str) -> Vec<String> {
-        let killed = self
-            .helper
-            .kill_uid(lease)
-            .err()
-            .map(|why| format!("kill-uid: {why}"));
-        let deleted = self
-            .helper
-            .user_delete(lease)
-            .err()
-            .map(|why| format!("user-delete: {why}"));
-        killed.into_iter().chain(deleted).collect()
-    }
 }
 
-/// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
-fn reset(helper: &Client) -> Result<(), RuntimeError> {
-    match helper.boot_reset(&[]) {
-        Ok(_) => Ok(()),
-        Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
-        Err(why) => Err(fail(&"the boot reset", &why)),
-    }
-}
-
-/// Whether the helper refused because the lease has no user or its user was deleted.
-fn gone(why: &ClientError) -> bool {
-    matches!(why, ClientError::Refused(reason)
-        if reason.contains("has no user") || reason.contains("user was deleted"))
-}
-
-/// `error`, and what could not be undone after it.
-fn with_problems(error: RuntimeError, problems: &[String]) -> RuntimeError {
-    match problems.is_empty() {
-        true => error,
-        false => RuntimeError::new(format!(
-            "{}; and the lease user could not be removed ({}): the lease journal ends it at the next start",
-            error.0,
-            problems.join("; ")
+/// Refuses a ceiling of `on` with no check of the pf anchor.
+fn gate(config: &NativeConfig) -> Result<(), RuntimeError> {
+    match config.network == Ceiling::On && config.egress.is_none() {
+        true => Err(RuntimeError::new(
+            "--native-network: on needs the check of the pf anchor of the pool \
+             (--native-pf-uid-start and --native-pf-uid-count)",
         )),
+        false => Ok(()),
     }
-}
-
-/// Whether the helper refused `user-create` because the lease was used before: that lease
-/// is not ours to remove.
-fn used_before(why: &ClientError) -> bool {
-    matches!(why, ClientError::Refused(reason) if reason.contains("was used before"))
 }
 
 impl Runtime for NativeRuntime {
     fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        let Body::Native(native) = &spec.body else {
-            return Err(RuntimeError::new("this runtime runs native bodies only"));
-        };
-        check_run_env(&spec.env)?;
-        env::check_body(native)?;
-        cwd::check(&native.cwd).map_err(|why| RuntimeError::new(why.to_string()))?;
-        let dev = xcode::developer_dir(&self.xcodes, spec.xcode.as_deref())?;
-        self.ready()?;
-        let id = LeaseId::new(self.term, self.next);
-        self.next += 1;
-        let lease = Dotted(id).to_string();
-        // A start that cannot have its bundle makes no user at all.
-        let pinned = self.pin_bundle(spec, native, &lease)?;
-        // Written and synced before the helper hears of the lease, so a process that dies
-        // between the two leaves a lease to end and not a user nobody knows of.
-        self.journal
-            .add(&lease)
-            .map_err(|why| fail(&"the lease journal", &why))?;
-        // The helper records the lease, and the uid of the pool user it lends, before it
-        // finishes, so a refusal may leave a live lease: it is removed again.
-        let uid = match self.helper.user_create(&lease) {
-            Ok(uid) => uid,
-            Err(why) => {
-                self.learn(&why);
-                let problems = match used_before(&why) {
-                    true => Vec::new(),
-                    false => self.discard(&lease),
-                };
-                self.settle(&lease, &problems);
-                return Err(with_problems(fail(&"user-create", &why), &problems));
-            }
-        };
-        let plans = self.plans.remove(&spec.run_id).unwrap_or_default();
-        match self.launch(spec, native, (id, &lease, uid), (pinned, &plans, dev)) {
-            Ok(run) => {
-                self.runs.insert(lease.clone(), run);
-                Ok(RunHandle(lease))
-            }
-            Err(why) => {
-                let problems = self.discard(&lease);
-                self.settle(&lease, &problems);
-                Err(with_problems(why, &problems))
-            }
-        }
+        self.start(spec)
+    }
+
+    /// The steps of the start of `id` ([`STEPS`]), each with when it was done; once.
+    fn start_steps(&mut self, id: &RunHandle) -> Vec<(&'static str, u64)> {
+        let run = self.runs.get_mut(&id.0);
+        run.map(|run| std::mem::take(&mut run.marks))
+            .unwrap_or_default()
     }
 
     fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
-        let Some(run) = self.runs.get_mut(&id.0) else {
-            return Ok(Status::Gone);
-        };
-        if run.ended.is_none() {
-            run.ended = match run.waiter.try_recv() {
-                Ok(Some(exit)) => Some(Status::Exited(exit)),
-                // The helper's connection ended without an exit, or its waiter is gone:
-                // nothing says what became of the process, and removing the run ends it.
-                Ok(None) | Err(TryRecvError::Disconnected) => Some(Status::Gone),
-                Err(TryRecvError::Empty) => None,
-            };
-            if matches!(run.ended, Some(Status::Exited(_))) {
-                logs::end(&mut run.logs, &run.scratch);
-            }
-        }
-        Ok(run.ended.unwrap_or(Status::Running))
+        Ok(self.poll_run(id))
     }
 
-    /// The helper's `stop`: `SIGTERM` to the run's process group, `kill-uid` once `grace`
-    /// has passed; `kill-uid` at once on a helper from before `stop` (`native/bound.rs`).
+    /// `SIGTERM` to the job's process group; its processes are ended at the first poll after
+    /// `grace` (`native/remove.rs`).
     fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
-        self.ready()?;
-        self.soft_stop(id, grace)
+        self.stop_run(id, grace);
+        Ok(())
     }
 
-    /// Kills, copies the run's outputs (once: a removal that is tried again does not copy
-    /// them again), deletes the user, and only then reports outputs that could not be copied.
+    /// Ends the run's processes, copies its outputs, retires its account, and only then
+    /// reports outputs that could not be copied (`native/remove.rs`).
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        self.ready()?;
-        let killed = self.helper.kill_uid(&id.0);
-        self.ended(killed, "kill-uid")?;
-        let max_file_bytes = self.config.max_file_bytes;
-        if let Some(run) = self.runs.get_mut(&id.0) {
-            run.collect(&id.0, max_file_bytes);
-            logs::close(&mut run.logs, &run.scratch);
-        }
-        let deleted = self.helper.user_delete(&id.0).map(|_| ());
-        self.ended(deleted, "user-delete")?;
-        let run = self.runs.remove(&id.0);
-        let _ = self.journal.done(&id.0);
-        let failed = run.and_then(|run| run.collected).map(|done| done.failed);
-        match failed.unwrap_or_default() {
-            failed if failed.is_empty() => Ok(()),
-            failed => Err(RuntimeError::outputs(format!(
-                "outputs not copied: {}",
-                outputs::told(&failed)
-            ))),
-        }
+        self.remove_run(id)
     }
 
-    /// Ends the leases an earlier process left that have no run to adopt (a start that died
-    /// before the helper started its process, or a journal from before run records); a lease
-    /// with a run record is left for [`Runtime::list_labelled`].
+    /// Drops the leases an earlier process left whose job never started (`native/adopt.rs`).
     fn reclaim(&mut self) -> Vec<String> {
-        let live = self.journal.live().and_then(|live| {
-            let runs = self.journal.runs()?;
-            Ok(live
-                .into_iter()
-                .filter(move |lease| !runs.contains_key(lease)))
-        });
-        let live = match live {
-            Ok(live) => live,
-            Err(why) => return vec![format!("native: cannot read the lease journal: {why}")],
-        };
-        let mut lines = Vec::new();
-        let mut retired = Vec::new();
-        for lease in live {
-            let killed = self.helper.kill_uid(&lease);
-            let ended = self.ended(killed, "kill-uid").and_then(|()| {
-                let deleted = self.helper.user_delete(&lease).map(|_| ());
-                self.ended(deleted, "user-delete")
-            });
-            match ended {
-                Ok(()) => {
-                    lines.push(format!(
-                        "ended the lease user {lease} an earlier process left"
-                    ));
-                    retired.push(lease);
-                }
-                Err(why) => {
-                    lines.push(format!("cannot end the lease user {lease}: {}", why.0));
-                }
-            }
-        }
-        if let Err(why) = self.journal.retire(&retired) {
-            lines.push(format!("native: cannot rewrite the lease journal: {why}"));
-        }
-        lines
+        self.drop_unstarted()
     }
 
-    /// Every run this runtime holds, those an earlier process started adopted first
+    /// Every run this runtime holds, the runs an earlier process left listed ended first
     /// (`native/adopt.rs`).
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        self.adopt_all()?;
+        self.list_ended()?;
         Ok(self.found())
+    }
+
+    /// Refuses a job start's environment that sets a name of the run's account
+    /// (`invalid-env`): the runtime sets those itself (`native/env.rs`).
+    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        env::check_names("env", env.iter().map(|(name, _)| name.as_str())).map_err(|why| {
+            NativeRefusal {
+                code: refusal::INVALID_ENV,
+                why: why.0,
+            }
+        })
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
@@ -897,8 +524,9 @@ impl Runtime for NativeRuntime {
         xcode::check(&self.xcodes, build)
     }
 
-    /// Refuses, before anything is made: first a host whose helper does not hold Full Disk
-    /// Access (`no-full-disk-access`, `native/grant.rs`), then a level above the agent's ceiling
+    /// Refuses, before anything is made: first a host whose agent does not hold Full Disk
+    /// Access (`no-full-disk-access`, `native/grant.rs`), then a body whose environment sets
+    /// a name of the run's account (`invalid-env`), then a level above the agent's ceiling
     /// (`network-above-ceiling`; it is never run with less), then any declared port
     /// (`ports-not-supported`: a Mac forwards none), then a `stage` input
     /// (`native-unsupported`: this agent keeps no stage trees) or a retired `tree` input
@@ -907,6 +535,12 @@ impl Runtime for NativeRuntime {
     /// into `exec/` when the run starts and outputs are collected when it is removed.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
         grant::admit(self.config.full_disk_access)?;
+        env::check_names("native.env", native.env.keys().map(String::as_str)).map_err(|why| {
+            NativeRefusal {
+                code: refusal::INVALID_ENV,
+                why: why.0,
+            }
+        })?;
         let refused = |why: NetworkRefusal| NativeRefusal {
             code: why.code,
             why: why.detail,
@@ -955,31 +589,12 @@ impl Runtime for NativeRuntime {
     }
 }
 
-/// The limits of a run under `config`, as the helper's request carries them: the largest
-/// file in bytes and the most processes, both soft and hard in the helper's child, so the
-/// run cannot raise them. A configured limit that is zero or above the helper's cap
-/// ([`Limits::check`]) is an error.
-fn limits_of(config: &NativeConfig) -> Result<Limits, RuntimeError> {
-    Limits::new(config.max_file_bytes, config.max_processes)
-        .map_err(|why| fail(&"the limits", &why))
-}
-
 /// An error of `what`, for the operator's log.
 fn fail(what: &dyn Display, why: &dyn Display) -> RuntimeError {
     RuntimeError::new(format!("{what}: {why}"))
 }
 
-/// How a process ended, as a container's exit is told: a process that a signal ended has
-/// the status a shell would give it (128 and the signal).
-fn exit_of(ended: HelperExit) -> Exit {
-    let signalled = ended.signal.map(|signal| 128 + signal);
-    Exit {
-        code: ended.code.or(signalled).unwrap_or(255),
-        oom_killed: false,
-    }
-}
-
-/// Makes the directory `path`, private to `uid`, and opens it. No process of that user
+/// Makes the directory `path`, private to `uid`, and opens it. No process of that account
 /// exists yet, so nothing can race the steps.
 fn make_dir(path: &Path, uid: u32) -> io::Result<File> {
     fs::create_dir(path)?;
