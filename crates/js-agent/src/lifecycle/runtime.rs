@@ -266,8 +266,7 @@ enum Kind {
     /// The agent cannot see the host ([`RuntimeError::blind`]).
     Blind,
     /// A removal that ended everything of the run and could not copy a declared output
-    /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
-    #[cfg(target_os = "macos")]
+    /// ([`RuntimeError::outputs`]): the native runtime's.
     Outputs,
 }
 
@@ -291,17 +290,17 @@ impl RuntimeError {
     }
 
     /// A removal that did everything a removal does (the run's processes and its user are
-    /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
-    /// run is left on the host, so the lifecycle reports it and does not taint the host. Only
-    /// the native runtime copies outputs.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn outputs(text: impl Into<String>) -> Self {
+    /// gone) but could not copy one or more of the run's declared outputs, or could not
+    /// commit them to the put ingest. Nothing of the run is left on the host, so the
+    /// lifecycle reports it and does not taint the host. Only the native runtime of a Mac
+    /// copies outputs.
+    pub fn outputs(text: impl Into<String>) -> Self {
         Self(text.into(), Kind::Outputs)
     }
 
-    /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
-    #[cfg(target_os = "macos")]
-    pub(crate) fn is_outputs(&self) -> bool {
+    /// Whether the failure is only that outputs were not copied or not committed
+    /// ([`RuntimeError::outputs`]).
+    pub fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }
 }
@@ -383,6 +382,31 @@ pub enum Removal {
     Done(Result<(), RuntimeError>),
     /// Under way off the lifecycle's worker: ask again at the next step.
     Pending,
+}
+
+/// What the removal of a native Mac run committed of its collected outputs to tierstore's
+/// put ingest ([`Runtime::outputs_report`]): the object's key, the SHA-256 its bytes have,
+/// and how many there are. The lifecycle keeps it as the finding `outputs-committed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputsReport {
+    /// The object's key, `cas/b/<build>/<nonce>/pack`.
+    pub key: String,
+    /// The SHA-256 of its bytes, in lowercase hex, as the commit declared it.
+    pub sha256: String,
+    /// How many bytes it holds.
+    pub bytes: u64,
+}
+
+impl OutputsReport {
+    /// The text of the finding: a JSON object with the fields `key`, `sha256` and `bytes`.
+    pub(crate) fn note(&self) -> String {
+        serde_json::json!({
+            "key": self.key,
+            "sha256": self.sha256,
+            "bytes": self.bytes,
+        })
+        .to_string()
+    }
 }
 
 /// What the lifecycle needs of a container runtime.
@@ -542,6 +566,16 @@ pub trait Runtime {
     /// [`Runtime::log_tail`], before the container is removed. It never waits for the upload.
     /// The default, a runtime that uploads nothing, has none.
     fn logs_report(&mut self, _id: &RunHandle) -> Option<LogReport> {
+        None
+    }
+
+    /// What the removal of `id` committed of the run's outputs to the put ingest, asked once
+    /// the removal is done and has succeeded (`Removal::Done(Ok(()))`); the runtime forgets
+    /// it when it answers, so a second ask has none. A removal that committed nothing (no put
+    /// target, no output, or outputs not copied or not committed, which fails the removal as
+    /// [`RuntimeError::outputs`]) has none, and so does the default: only the native runtime
+    /// of a Mac commits outputs.
+    fn outputs_report(&mut self, _id: &RunHandle) -> Option<OutputsReport> {
         None
     }
 

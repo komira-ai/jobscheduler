@@ -12,8 +12,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, Prepared, Removal,
-    RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts,
+    CheckHook, Created, Found, FsPrepared, JobFs, Lifecycle, NativeRefusal, OutputsReport,
+    Prepared, Removal, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket, Wake,
+    Whereabouts,
 };
 use js_agent_wire::{
     HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
@@ -226,6 +227,9 @@ impl Runtime for Deferring {
     }
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.inner.logs_report(id)
+    }
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.inner.outputs_report(id)
     }
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         self.inner.usage(id)

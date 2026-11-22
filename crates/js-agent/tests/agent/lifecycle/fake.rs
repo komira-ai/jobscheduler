@@ -1,15 +1,15 @@
 //! A container runtime that lives in memory, and a clock a test moves. Nothing here
 //! starts a process or waits.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Exit, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
     HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
@@ -17,41 +17,14 @@ use js_agent_wire::{
 
 #[path = "fake_checks.rs"]
 mod checks;
+#[path = "fake_clock.rs"]
+mod clock;
 #[path = "fake_fs.rs"]
 mod fs;
+#[path = "fake_outputs.rs"]
+mod outputs;
 pub use checks::ScriptedChecks;
-
-/// A clock that moves only when a test says so. Clones share one reading.
-#[derive(Clone, Default)]
-pub struct ManualClock(Rc<Cell<u64>>);
-
-impl ManualClock {
-    pub fn advance(&self, ms: u64) {
-        self.0.set(self.0.get() + ms);
-    }
-}
-
-/// The Unix time in milliseconds at which a [`ManualClock`] reads zero.
-pub const UNIX_ORIGIN_MS: u64 = 1_800_000_000_000;
-
-impl Clock for ManualClock {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
-    }
-
-    fn unix_ms(&self) -> Option<u64> {
-        Some(UNIX_ORIGIN_MS + self.0.get())
-    }
-}
-
-/// A [`ManualClock`] that has no Unix time.
-pub struct NoUnixClock(pub ManualClock);
-
-impl Clock for NoUnixClock {
-    fn now_ms(&self) -> u64 {
-        self.0.now_ms()
-    }
-}
+pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
 /// The agent label of every container the fake makes.
 const AGENT: &str = "fake-host";
@@ -96,6 +69,10 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// What `usage` answers for a run, by run id.
     usages: BTreeMap<String, JobUsage>,
+    /// What the removal of a run commits, by run id, and what `outputs_report` answers for
+    /// a removed container, by its id (see [`FakeRuntime::commit_outputs`]).
+    committed: BTreeMap<String, OutputsReport>,
+    answers: BTreeMap<String, OutputsReport>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// The control group the first process of the container of a run runs in, outside the
@@ -335,6 +312,8 @@ impl FakeRuntime {
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
     /// `list` or `egress`, the egress check) fail; `u32::MAX` for as long as the test wants.
+    /// `outputs` makes a removal remove the container and fail as its outputs not copied
+    /// (`RuntimeError::outputs`).
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
     }
@@ -856,6 +835,10 @@ impl Runtime for FakeRuntime {
         run.and_then(|run| state.reports.get(&run).copied())
     }
 
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.state.borrow_mut().answers.remove(&id.0)
+    }
+
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         let state = self.state.borrow();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
@@ -895,8 +878,7 @@ impl Runtime for FakeRuntime {
         if self.fails("remove") {
             return Err(err("remove"));
         }
-        self.state.borrow_mut().containers.remove(&id.0);
-        Ok(())
+        self.removed(id)
     }
 
     fn places_in_cgroup(&self) -> bool {
