@@ -18,7 +18,6 @@ axum-core 0.5.6 26769
 base64 0.22.1 81597
 base64 0.23.1 93605
 bitflags 2.13.2 51678
-block-buffer 0.10.4 10538
 block-buffer 0.12.1 15902
 byteorder 1.5.0 23288
 bytes 1.12.1 75667
@@ -35,16 +34,12 @@ cmov 0.5.4 27367
 colorchoice 1.0.5 8187
 const-oid 0.10.2 61449
 core_detect 1.0.0 17758
-cpufeatures 0.2.17 13466
 cpufeatures 0.3.1 14272
 crc 3.4.0 13941
 crc-catalog 2.5.0 18057
 crc32fast 1.5.3 52272
-crypto-common 0.1.7 9619
 crypto-common 0.2.2 15449
 ctutils 0.4.6 35853
-curve25519-dalek 4.1.3 306017
-curve25519-dalek-derive 0.1.1 11723
 darling 0.20.11 37614
 darling_core 0.20.11 68006
 darling_macro 0.20.11 2532
@@ -54,11 +49,8 @@ deranged 0.5.9 27842
 derive_builder 0.20.2 36661
 derive_builder_core 0.20.2 31397
 derive_builder_macro 0.20.2 6360
-digest 0.10.7 19557
 digest 0.11.3 28955
 displaydoc 0.2.7 21343
-ed25519 2.2.3 17802
-ed25519-dalek 2.2.0 98034
 either 1.19.0 22501
 equivalent 1.0.3 7495
 errno 0.3.14 12002
@@ -78,7 +70,6 @@ futures-core 0.3.34 14692
 futures-sink 0.3.34 8107
 futures-task 0.3.34 11376
 futures-util 0.3.34 169782
-generic-array 0.14.7 15950
 getrandom 0.2.17 40780
 getrandom 0.4.3 52437
 getset 0.1.7 10514
@@ -181,7 +172,6 @@ regex-syntax 0.8.11 359055
 ring 0.17.14 1502610
 runc 0.3.0 20641
 rusqlite 0.41.0 181395
-rustc_version 0.4.1 12245
 rusticata-macros 4.1.0 11746
 rustix 1.1.6 426484
 rustls 0.23.46 386227
@@ -192,7 +182,6 @@ rustversion 1.0.23 21013
 ruzstd 0.9.1 106716
 saphyr-parser 0.1.2 74341
 scopeguard 1.2.0 11619
-semver 1.0.28 33064
 serde 1.0.229 83669
 serde-value 0.7.0 10249
 serde_core 1.0.229 63100
@@ -200,12 +189,10 @@ serde_derive 1.0.229 59864
 serde_json 1.0.154 158079
 serde_path_to_error 0.1.20 18046
 serde_spanned 1.1.2 11124
-sha2 0.10.9 29271
 sha2 0.11.1 32748
 sharded-slab 0.1.7 58227
 shlex 2.0.1 19332
 signal-hook-registry 1.4.8 21668
-signature 2.2.0 15531
 simd-adler32 0.3.10 18760
 siphasher 1.0.4 16131
 slab 0.4.12 19080
@@ -269,7 +256,6 @@ utf8parse 0.2.2 13499
 uuid 1.29.0 67939
 value-bag 1.14.1 50855
 vcpkg 0.2.15 228735
-version_check 0.9.5 15554
 want 0.3.2 7311
 webpki-roots 1.0.11 214596
 whoami 2.1.3 28630

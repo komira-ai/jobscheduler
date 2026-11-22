@@ -45,7 +45,7 @@ fn names(dir: &Path) -> Vec<String> {
 /// Takes slot 0's user in `rig` and plants in its home a file, a dot file, a dot
 /// directory with a file and a subdirectory with a nested one.
 fn plant(rig: &Rig) -> PathBuf {
-    rig.helper.user_create("80.1", None).unwrap();
+    rig.helper.user_create("80.1").unwrap();
     let home = home(rig, 0);
     std::fs::create_dir_all(home.join("Documents/deep/er")).unwrap();
     std::fs::create_dir_all(home.join(".ssh")).unwrap();

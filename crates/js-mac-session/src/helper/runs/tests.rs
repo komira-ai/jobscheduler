@@ -54,7 +54,7 @@ fn advance(rig: &Rig, by: Duration) {
 /// table, still running.
 fn running(name: &str) -> Rig {
     let rig = rig(name, 2);
-    rig.helper.user_create("7.1", None).unwrap();
+    rig.helper.user_create("7.1").unwrap();
     let lease = parse_lease("7.1").unwrap();
     rig.helper.runs.started(lease, PID, None);
     rig.host.state().log.clear();
@@ -71,7 +71,7 @@ fn kill_all_logged(rig: &Rig) -> bool {
 #[test]
 fn watch_finds_the_last_run_and_reports_its_end() {
     let rig = rig("watch", 2);
-    rig.helper.user_create("7.1", None).unwrap();
+    rig.helper.user_create("7.1").unwrap();
     let error = rig.helper.watch("7.1").unwrap_err();
     assert_eq!(error, format!("lease 7.1 {NO_RUN}"));
     assert!(rig.helper.watch("7.x").is_err());
@@ -163,7 +163,7 @@ fn a_run_that_ends_on_sigterm_is_never_killed() {
 #[test]
 fn stop_without_a_running_process_kills_at_once_and_refuses_what_it_cannot_do() {
     let rig = rig("stop-plain", 2);
-    rig.helper.user_create("7.1", None).unwrap();
+    rig.helper.user_create("7.1").unwrap();
     rig.host.state().log.clear();
     assert_eq!(rig.helper.stop("7.1", HOUR), Ok(()));
     assert!(kill_all_logged(&rig));
@@ -244,7 +244,7 @@ fn a_kill_at_the_deadline_that_fails_is_logged() {
 #[test]
 fn a_run_with_a_deadline_is_held_to_it_and_its_end_recorded() {
     let rig = rig("run-deadline", 2);
-    rig.helper.user_create("7.1", None).unwrap();
+    rig.helper.user_create("7.1").unwrap();
     let run = Request::Run {
         lease: "7.1".to_owned(),
         argv: act_argv("exit 0"),

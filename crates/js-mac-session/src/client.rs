@@ -103,10 +103,10 @@ impl Client {
     /// # Errors
     /// The call failed or was refused; [`ClientError::Exhausted`] when the pool had no
     /// free user.
-    pub fn user_create(&self, lease: &str, grant: Option<&str>) -> Result<u32, ClientError> {
+    pub fn user_create(&self, lease: &str) -> Result<u32, ClientError> {
         let request = Request::UserCreate {
             lease: lease.to_owned(),
-            grant: grant.map(str::to_owned),
+            grant: None,
         };
         match self.call(&request, &[])?.1 {
             Reply::Created { uid } => Ok(uid),
