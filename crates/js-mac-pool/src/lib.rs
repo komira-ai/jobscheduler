@@ -5,7 +5,7 @@
 //! sockets) are exempt. It builds text and argument vectors and starts nothing, so every
 //! rule in it is tested on Linux.
 //!
-//! - [`seatbelt`]: the `sandbox-exec` profile of one run, from a typed
+//! - [`seatbelt`]: the Seatbelt profile of one run, from a typed
 //!   [`Policy`](seatbelt::Policy), in two read models, with the start-up self-test of the
 //!   allow-list one.
 //! - [`xcode`]: the catalog of the Xcodes of this Mac, built from `--xcode BUILD=PATH`

@@ -2,9 +2,9 @@
 //! Seatbelt profile, and the lifecycle that drives it. The helper is a fake that speaks the
 //! helper's real protocol on a socket (`fake_helper`), so everything but what the verbs do
 //! to a machine runs as in the agent. On a Mac, one test module applies the runtime's
-//! `sandbox-exec` command line for real, as the user running the tests (`mac`), and one
-//! reads back that what the helper starts answers to the privacy controls for itself
-//! (`disclaim`).
+//! start-mode command line for real, as the user running the tests (`mac`), one runs the
+//! start mode itself (`job_start`) and one reads back that what the helper starts answers
+//! to the privacy controls for itself (`disclaim`).
 
 mod adopt;
 pub(crate) mod agent;
@@ -19,6 +19,8 @@ mod files;
 mod grant;
 mod inputs;
 mod job_home;
+#[cfg(target_os = "macos")]
+mod job_start;
 mod journal;
 mod lifecycle;
 mod live_logs;
@@ -85,6 +87,7 @@ pub fn config(fake: &FakeHelper) -> NativeConfig {
         max_processes: 512,
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
+        start: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     }
 }
 
@@ -192,10 +195,11 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
     }
 }
 
-/// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then `/usr/bin/env HOME=<job home>`, the program and its
-/// arguments. No shell stands between the profile and the program: the helper sets the
-/// run's limits, and `env` sets the job's `HOME` (the helper sets its own).
+/// The command line the runtime sent the helper, taken apart: the agent (`config().start`),
+/// its `__job-start` word, `--profile` and the profile, each `--param NAME=VALUE`, `--`, then
+/// `/usr/bin/env HOME=<job home>`, the program and its arguments. No shell stands between the
+/// profile and the program: the helper sets the run's limits, and `env` sets the job's `HOME`
+/// (the helper sets its own).
 pub struct Parsed {
     pub params: Vec<(String, String)>,
     pub profile: String,
@@ -207,24 +211,28 @@ pub struct Parsed {
 
 pub fn parse(argv: &[String]) -> Parsed {
     assert_eq!(
-        argv[0], "/usr/bin/sandbox-exec",
-        "nothing runs before the profile"
+        argv[0],
+        env!("CARGO_BIN_EXE_js-agent"),
+        "nothing but the agent runs before the profile"
     );
+    assert_eq!(argv[1], "__job-start");
+    assert_eq!(argv[2], "--profile");
+    let profile = argv[3].clone();
     let mut params = Vec::new();
-    let mut at = 1;
-    while argv[at] == "-D" {
+    let mut at = 4;
+    while argv[at] == "--param" {
         let (name, value) = argv[at + 1].split_once('=').unwrap();
         params.push((name.to_owned(), value.to_owned()));
         at += 2;
     }
-    assert_eq!(argv[at], "-p");
-    let profile = argv[at + 1].clone();
-    assert_eq!(argv[at + 2], "/usr/bin/env", "env sets the job's HOME");
-    let home = argv[at + 3].strip_prefix("HOME=").unwrap().to_owned();
+    assert_eq!(argv[at], "--");
+    let at = at + 1;
+    assert_eq!(argv[at], "/usr/bin/env", "env sets the job's HOME");
+    let home = argv[at + 1].strip_prefix("HOME=").unwrap().to_owned();
     Parsed {
         params,
         profile,
         home,
-        tail: argv[at + 4..].to_vec(),
+        tail: argv[at + 2..].to_vec(),
     }
 }

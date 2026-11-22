@@ -86,7 +86,7 @@
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. On a Mac whose scratch root is on the `--state-root`'s file system (as after a boot), the start first mounts the scratch volume the update hook made (`js-agent-scratch`, in the Data volume's container) on it, or ends saying why (see [`lifecycle::scratch_volume`]) |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. With the native runtime (a Mac, which has no tmpfs) the root is used only when the flag is given, is made `0711`, and is not checked for a tmpfs: the files are on disk unless the flag points at a RAM-backed volume; each run's directory and files are given to the run's user (`0500`, files `0400`) before its program starts, its profile denies writes there, and `JS_FILES_DIR` names it. It may not be, hold or lie in the state, scratch or a mount root, the homes of the native users, or a path native runs may not read. Not with `--no-jobs` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs, with `--allow-container-engine` (Linux build only; without `--allow-container-engine` it is refused, since the runtime is then `crun`, which takes no engine flag); never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on the crun runtime, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
-//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it the macOS build runs native jobs, each as a user the helper lends from its pool for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS build only, and required there unless `--no-jobs`; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts each run the lease journal in the state root recorded (the helper's `watch` finds it again) and ends the rest, as the rescue of an agent whose worker died does; the helper holds a deadline of each run's own, its wall limit plus `--stop-grace`, and ends it there while no agent runs (a helper from before that deadline holds none, and a run on it is bounded only while an agent runs); the silence bound (`--silence-stop`) is the agent's alone; the profile denies creating POSIX shared memory, but not System V shared memory, semaphores or message queues (which the helper's reset removes) nor POSIX named semaphores, and the helper reuses uids, so a named semaphore a run leaves can be opened by a later run that gets the same uid, until the Mac restarts; at start the agent lists the privacy database's directory to learn whether it holds Full Disk Access itself (which a privacy profile grants it, `packaging/js-agent-macos/mdm/`; the helper holds none), reports the answer as the capability `full-disk-access` (`granted`, `not-granted` or `undetermined`), and refuses every native job, `no-full-disk-access`, unless it is `granted`; after each run the agent judges the helper's leak scan (see [`leak_scan`]) |
+//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it the macOS build runs native jobs, each as a user the helper lends from its pool for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS build only, and required there unless `--no-jobs`; the agent must run as root and checks at start that its own start mode (`js-agent __job-start`, which applies a run's profile in the run's own process with `sandbox_init_with_parameters` and executes the program) applies a profile; needs `--scratch-root` and `--state-root`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts each run the lease journal in the state root recorded (the helper's `watch` finds it again) and ends the rest, as the rescue of an agent whose worker died does; the helper holds a deadline of each run's own, its wall limit plus `--stop-grace`, and ends it there while no agent runs (a helper from before that deadline holds none, and a run on it is bounded only while an agent runs); the silence bound (`--silence-stop`) is the agent's alone; the profile denies creating POSIX shared memory, but not System V shared memory, semaphores or message queues (which the helper's reset removes) nor POSIX named semaphores, and the helper reuses uids, so a named semaphore a run leaves can be opened by a later run that gets the same uid, until the Mac restarts; at start the agent lists the privacy database's directory to learn whether it holds Full Disk Access itself (which a privacy profile grants it, `packaging/js-agent-macos/mdm/`; the helper holds none), reports the answer as the capability `full-disk-access` (`granted`, `not-granted` or `undetermined`), and refuses every native job, `no-full-disk-access`, unless it is `granted`; after each run the agent judges the helper's leak scan (see [`leak_scan`]) |
 //! | `--native-homes <path>` | (macOS build only) the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
 //! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every run of the Mac); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-helper-socket` |
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
@@ -335,6 +335,7 @@ mod identity;
 pub mod image;
 pub mod in_place;
 pub mod integrity;
+mod job_start;
 mod jobs;
 pub mod leak_scan;
 pub mod lifecycle;
@@ -457,8 +458,7 @@ pub struct Services<'a> {
     pub jitter: &'a mut dyn Jitter,
     /// Lets time pass and reports stop requests.
     pub sleeper: &'a mut dyn Sleeper,
-    /// The clock, the container runtime and the host view of the jobs, when
-    /// `--container-bin` is given.
+    /// The clock, the container runtime and the host view of the jobs (`--container-bin`).
     pub machine: Arc<dyn Machine>,
     /// What the bundle store reads from the machine; used only with `--bundle-store`.
     pub bundle: Arc<dyn BundleHost>,
@@ -474,8 +474,7 @@ pub struct Services<'a> {
     /// The directories above a crun scratch root are checked from here down (`/` outside a
     /// test): a test that cannot make `/tmp` root-owned names the tree it made.
     pub ancestors_floor: &'a Path,
-    /// The user a `--registry-credentials` file must be owned by: root (0) outside a test,
-    /// which cannot make a root-owned file.
+    /// The user a `--registry-credentials` file must be owned by: root (0) outside a test.
     pub secret_owner: u32,
     /// Where a Mac's Xcodes are and whose they must be: [`xcode::Site::system`] outside a test.
     pub xcode_site: xcode::Site<'a>,
@@ -523,6 +522,9 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    if let Some(code) = job_start::dispatch(&args, err) {
+        return code;
+    }
     #[cfg(target_os = "linux")]
     if args
         .get(1)
@@ -557,9 +559,9 @@ pub fn main_with(
     if let Some(code) = start_refused::dispatch(&args, out, err) {
         return code;
     }
-    // The updater's hook is answered here too, before `install()`: it is a short-lived
-    // step of another program, and installs no signal handler. hostkeeper runs an update step as
-    // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
+    // The updater's hook is answered here too, before `install()`: a short-lived step of another
+    // program, no signal handler. hostkeeper runs an update step as the bare word (`js-agent
+    // prepare ...`) and its other steps behind the verb.
     if args
         .get(1)
         .is_some_and(|word| update_hook::is_hook_word(word))
@@ -651,8 +653,7 @@ fn execute(
         return Err(Failure::Usage(refusal.to_owned()));
     }
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
-    // The health route is bound before anything else, so a wrong address stops the agent
-    // before it registers.
+    // The health route is bound first, so a wrong address stops the agent before it registers.
     let route = cli.health_listen.map(Route::bind);
     let route = route.transpose().map_err(Failure::Usage)?;
     // Read once, before anything else: a credentials file that breaks a rule stops the
@@ -686,8 +687,7 @@ fn execute(
     let site = services.xcode_site;
     let mut offer =
         offer(&cli, platform, commands, files, site, version, store).map_err(Failure::Usage)?;
-    // A host that authenticates by its own certificate is issued no host credential, and
-    // says it keeps none.
+    // A host that authenticates by its own certificate is issued no host credential: it keeps none.
     let by_identity = matches!(login, Login::HostCertificate(_));
     offer.hello.accepts_host_credential &= !by_identity;
     offer.warnings.iter().for_each(|warning| {

@@ -20,7 +20,7 @@ fn sandboxed(class: Class) -> Vec<OsString> {
         .iter()
         .find(|step| step.class() == class && step.role() == Role::Allowed)
         .expect("the step")
-        .argv()
+        .argv(&common::path("/opt/js-agent"))
 }
 
 fn profile() -> String {
@@ -147,6 +147,14 @@ fn a_sandboxed_argv_can_swap_its_profile_or_its_program() {
     assert_eq!(program[program.len() - 2], OsString::from("/bin/cat"));
     assert_eq!(program[program.len() - 1], OsString::from("/etc/localtime"));
     assert_eq!(profile_of(&program), profile_of(&argv));
+    // The start program, the verb and every parameter stay; only what follows `--` changes.
+    let separator = argv
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("a separator");
+    assert_eq!(program[..=separator], argv[..=separator]);
+    assert_eq!(program[0], OsString::from("/opt/js-agent"));
+    assert_eq!(program.len(), separator + 3);
     let plain = vec![OsString::from("/usr/bin/true")];
     assert_eq!(profile_of(&plain), None);
     assert_eq!(retarget(&plain, "/bin/cat", &[]), None);

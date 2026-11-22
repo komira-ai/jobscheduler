@@ -3,7 +3,11 @@
 # The privileged tests (crates/js-mac-pool/tests/privileged.rs, all `#[ignore]`) run the allow-list self-test as an unprivileged pool
 # user against root-owned canaries, and need root and a second user, which a hosted runner
 # is not for: an operator runs them once on a provisioned Mac that has Xcode installed.
-# Download the artifact, check SHA256SUMS, copy the binary over, chmod +x it (the artifact
+# The tests apply a profile through js-agent's `__job-start` mode, so the artifact also holds
+# `js-agent`, built for the same target; the tests find it beside their own binary
+# (tests/common/mod.rs `start_program`), so copy `js-agent` into the same directory, which
+# must be 0755 with `js-agent` 0755: the pool user runs it.
+# Download the artifact, check SHA256SUMS, copy the binaries over, chmod +x them (the artifact
 # zip drops the mode) and, as root, run
 #   JS_MAC_POOL_PRIV_ROOT=<root-owned 0755 directory on the data volume> \
 #     JS_MAC_POOL_PRIV_UID=<uid> JS_MAC_POOL_PRIV_GID=<gid> \
@@ -43,7 +47,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p js-mac-pool --test privileged --test trace_base_set --no-run --locked --target "$TARGET" --message-format=json > build.json
-      - name: Pick the binary and check what it is
+      - name: Build js-agent, which applies the profile in the tests
+        run: |
+          set -euo pipefail
+          cargo build -p js-agent --locked --target "$TARGET"
+      - name: Pick the binaries and check what they are
         run: |
           set -euo pipefail
           commit="$(git rev-parse HEAD)"
@@ -68,7 +76,18 @@ jobs:
                 ;;
             esac
           done
-          (cd dist && shasum -a 256 privileged trace_base_set > SHA256SUMS)
+          # js-agent: the program the tests start with the profile (`__job-start`).
+          cp "target/$TARGET/debug/js-agent" dist/js-agent
+          description="$(file dist/js-agent)"
+          echo "$description"
+          case "$description" in
+            *"Mach-O 64-bit executable arm64"*) ;;
+            *)
+              echo "::error::dist/js-agent is not an arm64 Mach-O executable"
+              exit 1
+              ;;
+          esac
+          (cd dist && shasum -a 256 privileged trace_base_set js-agent > SHA256SUMS)
           {
             echo "### js-mac-pool privileged test binaries"
             echo
@@ -83,6 +102,7 @@ jobs:
           path: |
             dist/privileged
             dist/trace_base_set
+            dist/js-agent
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7

@@ -1,14 +1,15 @@
-//! The profile text and the `sandbox-exec` argument vector.
+//! The profile text and the argument vector of js-agent's start mode.
 
 use std::ffi::OsString;
 
 use super::allow;
 use super::apply::{InitError, SandboxInit};
 use super::net::Net;
+use super::path::AbsPath;
 use super::policy::{Policy, ReadModel};
 
-/// The program that applies a profile.
-pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// The word of js-agent's start mode.
+pub const START_VERB: &str = "__job-start";
 
 /// Lines before every grant: allow everything, then take away what a run gets back only
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
@@ -202,18 +203,29 @@ impl Profile {
         SandboxInit::new(&self.text, &self.params)
     }
 
-    /// The full command: `sandbox-exec`, a `-D NAME=value` pair per parameter, `-p` and
-    /// the profile, then `program` and its `args`. `program` is absolute (an [`AbsPath`](super::AbsPath)
-    /// or a [`ToolPath`](super::ToolPath)'s path), so `sandbox-exec` does not search `PATH`.
+    /// The full command: the `start` program (js-agent), the start verb, `--profile` and the
+    /// profile text, a `--param NAME=value` pair per parameter in [`Profile::params`]
+    /// order, `--`, then `program` and its `args`. The start mode applies the profile in
+    /// its own process and executes `program`, which is absolute (an
+    /// [`AbsPath`](super::AbsPath) or a [`ToolPath`](super::ToolPath)'s path).
     #[must_use]
-    pub fn argv(&self, program: impl AsRef<str>, args: &[OsString]) -> Vec<OsString> {
-        let mut argv = vec![OsString::from(SANDBOX_EXEC)];
+    pub fn start_argv(
+        &self,
+        start: &AbsPath,
+        program: impl AsRef<str>,
+        args: &[OsString],
+    ) -> Vec<OsString> {
+        let mut argv = vec![
+            OsString::from(start.as_str()),
+            OsString::from(START_VERB),
+            OsString::from("--profile"),
+            OsString::from(self.text.as_str()),
+        ];
         for (name, value) in &self.params {
-            argv.push(OsString::from("-D"));
+            argv.push(OsString::from("--param"));
             argv.push(OsString::from(format!("{name}={value}")));
         }
-        argv.push(OsString::from("-p"));
-        argv.push(OsString::from(self.text.as_str()));
+        argv.push(OsString::from("--"));
         argv.push(OsString::from(program.as_ref()));
         argv.extend(args.iter().cloned());
         argv

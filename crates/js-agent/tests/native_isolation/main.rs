@@ -283,6 +283,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         max_processes: 512,
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
+        start: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     };
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
