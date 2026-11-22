@@ -135,12 +135,6 @@ impl From<String> for LeaseError {
     }
 }
 
-impl From<&str> for LeaseError {
-    fn from(why: &str) -> Self {
-        Self::Refused(why.to_owned())
-    }
-}
-
 /// How the end of a slot's use came out.
 #[derive(Debug)]
 pub(super) enum Settled {

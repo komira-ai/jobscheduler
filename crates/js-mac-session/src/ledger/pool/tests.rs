@@ -255,3 +255,23 @@ fn a_failed_pool_write_changes_nothing() {
         Some(SlotState::Resetting { replace: true })
     );
 }
+
+/// Catches: a pool record that does not read back as the line it was written as (a
+/// record kind whose writer and reader disagree), including the `leased <slot> <lease>
+/// admin` line only a release that made administrators wrote: this release reads it, and
+/// a record read from such a file prints as the same line.
+#[test]
+fn every_record_reads_back_as_the_line_it_is() {
+    for line in [
+        "made 3 603",
+        "leased 1 9.2",
+        "leased 1 9.2 admin",
+        "resetting 2",
+        "resetting 2 replace",
+        "free 0",
+        "broken 3",
+    ] {
+        let record = Record::parse(line).unwrap();
+        assert_eq!(record.to_string(), line);
+    }
+}
