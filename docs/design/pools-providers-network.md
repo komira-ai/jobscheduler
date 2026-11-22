@@ -285,7 +285,8 @@ Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`
 requires a mode (`Requirements.exec`) is matched against the reported value, never against
 the pool's name or the cloud: admission holds each host to the mode it reports, and a pool that
 declares `exec` books its hosts with that mode among their capabilities, so a job that requires
-`sandbox-exec` is never placed on a container host. A pool that declares no mode books none,
+`sandbox-exec` is never placed on a container host (a job need not name a mode:
+`how-a-job-runs.md`). A pool that declares no mode books none,
 and a job that requires one finds no host there unless the pool's `[capabilities]` name `exec`
 (the join then compares each host's reported value with it). `disk-gib` is a minimum everywhere
 (`Shape::satisfies`, `js_caps::Request`): a pool that lists `disk-gib` in its `[capabilities]`

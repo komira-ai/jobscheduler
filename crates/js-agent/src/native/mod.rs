@@ -145,7 +145,7 @@ use crate::lifecycle::{
     Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
 };
 use crate::logs::LiveLogs;
-use crate::mac_accounts::Pool;
+use crate::mac_accounts::{Pool, Retired};
 use crate::mac_supervisor::Launcher;
 use crate::mac_sweep::{MacTable, ProcessTable};
 
@@ -156,8 +156,8 @@ pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use settings::{
-    DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
-    NativeSettings,
+    DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS,
+    MIN_MAX_FILE_MIB, NativeFlags, NativeSettings,
 };
 pub use start::STEPS;
 
@@ -231,6 +231,8 @@ pub struct NativeRuntime {
     new_session: bool,
     /// The process table a run's processes are swept from (`native/end.rs`).
     table: Arc<dyn ProcessTable + Send + Sync>,
+    /// The account the last removal retired, and what its retirement showed.
+    last_retired: Option<(String, Retired)>,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -314,7 +316,16 @@ impl NativeRuntime {
             now_ms: system_clock(),
             new_session: true,
             table: Arc::new(MacTable),
+            last_retired: None,
         })
+    }
+
+    /// The account the last removal retired and what its retirement showed (the processes it
+    /// killed, each item of the proof that it is gone): what the development verb prints.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_retired(&self) -> Option<&(String, Retired)> {
+        self.last_retired.as_ref()
     }
 
     /// Whether the runtime has an account pool: the agent holds Full Disk Access.

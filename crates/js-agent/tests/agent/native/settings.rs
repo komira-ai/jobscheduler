@@ -536,7 +536,8 @@ fn a_tool_root_must_be_a_directory_below_the_root() {
 }
 
 /// Asserts the resource flags: defaults of 4096 MiB and 512 processes, the values given
-/// reach the configuration (the file size in bytes), zero is refused, a size that does not
+/// reach the configuration (the file size in bytes), zero is refused, a size below 128 MiB
+/// (a build's largest output) is refused, a size that does not
 /// fit in bytes is refused, a process count of `u32::MAX` (which the supervisor's own process
 /// would overflow) is refused, and each needs `--native-accounts`. It catches a limit that is
 /// not applied, that overflows into a small one, or that wraps to none.
@@ -550,14 +551,20 @@ fn the_resource_limits_are_checked_and_handed_on() {
     assert_eq!(settings.config().max_file_bytes, 4096 << 20);
     assert_eq!(settings.config().max_processes, 512);
     assert_eq!(settings.config().journal, journal);
-    given.max_file_mib = Some(8);
+    given.max_file_mib = Some(128);
     given.max_processes = Some(64);
     let settings = NativeSettings::from_flags(&given, &[], journal)
         .unwrap()
         .unwrap();
-    assert_eq!(settings.config().max_file_bytes, 8 << 20);
+    assert_eq!(settings.config().max_file_bytes, 128 << 20);
     assert_eq!(settings.config().max_processes, 64);
-    for (mib, procs) in [(Some(0), Some(64)), (Some(8), Some(0))] {
+    given.max_file_mib = Some(127);
+    let why = NativeSettings::from_flags(&given, &[], journal).unwrap_err();
+    assert_eq!(
+        why,
+        "--native-max-file-mib: 127 is below 128, the largest output a build writes by default"
+    );
+    for (mib, procs) in [(Some(0), Some(64)), (Some(128), Some(0))] {
         given.max_file_mib = mib;
         given.max_processes = procs;
         let why = NativeSettings::from_flags(&given, &[], journal).unwrap_err();

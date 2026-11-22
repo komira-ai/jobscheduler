@@ -231,6 +231,10 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     match &removed {
         Ok(()) => {
             let _ = writeln!(out, "remove: ok");
+            if let Some((name, retired)) = runtime.last_retired() {
+                let _ = writeln!(out, "retired: {name} killed {:?}", retired.killed);
+                let _ = writeln!(out, "retired.gone: {:?}", retired.gone);
+            }
         }
         Err(why) => {
             let _ = writeln!(out, "remove: {}", why.0);

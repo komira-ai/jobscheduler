@@ -353,6 +353,15 @@ fn the_supervisor_is_asked_for_the_account_the_limits_and_the_profile() {
         })
     );
     rig.rt.remove(&id).unwrap();
+    let (retired, how) = rig
+        .rt
+        .last_retired()
+        .expect("the removal retired the account");
+    assert_eq!(retired, &lent);
+    assert!(
+        how.gone.record && how.gone.home && how.gone.folders,
+        "{how:?}"
+    );
 }
 
 /// Asserts that a runtime opened without Full Disk Access (not granted, or not known) has no

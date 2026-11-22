@@ -267,6 +267,45 @@ fn process_uids() -> Vec<u32> {
 /// account's, and that the same program is refused a file in a directory every user may
 /// write: the profile is applied to a real account. It catches a program that runs as root,
 /// one that runs unconfined, and a run directory the account cannot use.
+/// Asserts that the production open, as root with Full Disk Access, makes the pool's state
+/// directory when it is missing (mode 0700, root's), opens the real pool over the Mac, and
+/// runs `/usr/bin/true` through every step of a start and its removal (the self-test). No
+/// account is kept ready, so the open makes none. Catches an agent that stops at start on a
+/// fresh host because nothing made the directory, and a production open path no test runs.
+#[test]
+#[ignore = "needs root and creates users"]
+fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
+    let fixture = fixture();
+    let state = fixture.root.join("opened-accounts");
+    let config = NativeConfig {
+        accounts: Accounts {
+            state: state.clone(),
+            slots: slots(),
+            ready: 0,
+        },
+        homes: PathBuf::from("/Users"),
+        network: Ceiling::Off,
+        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+        read_denies: vec![AbsPath::new(&state).unwrap()],
+        mount_roots: Vec::new(),
+        read_model: ReadModel::Open,
+        journal: fixture.root.join("opened-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
+        egress: None,
+        full_disk_access: FullDiskAccess::Granted,
+    };
+    let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
+    let term = TERMS.fetch_add(1, Ordering::SeqCst);
+    let mut rt = NativeRuntime::open(launcher, config, term)
+        .unwrap_or_else(|why| panic!("the production open: {why}"));
+    assert!(rt.has_pool(), "the pool is opened with Full Disk Access");
+    let made = fs::metadata(&state).unwrap();
+    assert_eq!((made.uid(), made.mode() & 0o7777), (0, 0o700));
+    rt.self_test()
+        .unwrap_or_else(|why| panic!("the self-test: {why}"));
+}
+
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_program_runs_as_a_slot_account_under_the_profile() {
