@@ -48,7 +48,9 @@ impl Machine for OverAccounts {
             self.config.clone(),
             TERM,
         );
-        let runtime = runtime.map_err(|why| why.to_string())?;
+        let runtime = runtime
+            .map_err(|why| why.to_string())?
+            .with_process_table(super::end::GroupTable::new(self.launcher.clone()));
         Ok((Box::new(runtime), Vec::new()))
     }
 

@@ -142,7 +142,9 @@ impl Native {
                 TERM,
             ),
         };
-        let mut runtime = opened.unwrap();
+        let mut runtime = opened
+            .unwrap()
+            .with_process_table(super::end::GroupTable::new(launcher.clone()));
         match (hand_over, slots) {
             (Some(hand_over), _) => runtime = runtime.with_hand_over(hand_over),
             (None, 1) => {}

@@ -51,9 +51,13 @@ pub(super) struct Job {
     /// What the supervisor said once the job started: its pid (and process group) and its
     /// audit session.
     pub(super) ready: Ready,
-    /// When a stop's grace ends, in milliseconds since the Unix epoch: set by
-    /// [`Runtime::stop`](crate::lifecycle::Runtime::stop).
+    /// When a stop's grace ends, in milliseconds since the Unix epoch: set by the first
+    /// [`Runtime::stop`](crate::lifecycle::Runtime::stop); a later stop does not move it.
     pub(super) kill_after: Option<u64>,
+    /// Set by the first poll after the grace that found the job still running: from then on
+    /// every poll sweeps the run's processes, and reads the job's end only after a sweep that
+    /// left none.
+    pub(super) sweeping: bool,
 }
 
 impl Run {
