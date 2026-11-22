@@ -47,10 +47,12 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+pub mod code_signature;
 pub mod deb;
 pub mod desired;
 pub mod image_digest;
 pub mod include;
+pub mod mac_programs;
 pub mod macos_leg;
 pub mod next_version;
 pub mod plan;
