@@ -214,6 +214,9 @@ pub fn main() -> ExitCode {
         "js-vm-guest: listening on virtio socket port {}",
         flags.port
     );
+    if flags.ready_port != 0 {
+        say_ready(flags.ready_port);
+    }
     let shared = Arc::new(Shared {
         flags,
         book: Mutex::new(Book::default()),
