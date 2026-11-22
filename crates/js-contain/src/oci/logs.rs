@@ -117,27 +117,8 @@ pub fn stderr_path(lease: &Path) -> PathBuf {
     lease.join("stderr")
 }
 
-/// What one stream of a job wrote.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StreamTail {
-    /// The last bytes: at most [`LogLimits::tail`] of them, as written (not necessarily
-    /// UTF-8, and cut anywhere).
-    pub bytes: Vec<u8>,
-    /// How many bytes the job wrote in all.
-    pub total: u64,
-    /// Whether the stream's file lacks bytes the job wrote: past the cap, or after the
-    /// file could not be written.
-    pub file_cut: bool,
-}
-
-/// What a job wrote to its two streams, apart.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LogTail {
-    /// The standard output.
-    pub stdout: StreamTail,
-    /// The standard error.
-    pub stderr: StreamTail,
-}
+/// What a job wrote to its streams (`js-supervise`'s, as the exit record holds it).
+pub use js_supervise::{LogTail, StreamTail};
 
 /// One stream: its file and its ring.
 #[derive(Debug)]
