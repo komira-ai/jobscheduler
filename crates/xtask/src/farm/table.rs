@@ -9,15 +9,17 @@
 //!
 //! 1. `buck2 build buildrules//cli:buildrules --show-full-output` builds the command line on the
 //!    farm (it is a target of the cell `.buckconfig` pins) and names the file it was written to.
-//! 2. `buildrules check`: status 0 is a fresh table, and the build goes on. A failure whose lines
-//!    say `STALE:` is a stale table; any other failure is not one `buildrules sync` fixes, and is
-//!    the error, with what check printed.
-//! 3. For a stale table: `buildrules sync --buck2 <buck2>`, with what it prints written to the log,
-//!    then `buildrules check` again, which must now pass.
-//! 4. The patch: the files sync changed, as `git diff --binary` of the working tree after the new
-//!    files below the generated directories are added to the index as intended (`git add -N`), so
-//!    that `git apply` of it on the pull request's branch writes exactly what sync wrote. It is
-//!    written to [`Handoff::patch`]; the workflow uploads it as [`PATCH_ARTIFACT`].
+//! 2. `buildrules check`: status 0 is a fresh table, and the build goes on. Status 1 is a table
+//!    that is stale or missing a generated file (its problems are what check printed); any other
+//!    status (a usage error) is the error, with what check printed.
+//! 3. For status 1: `buildrules sync --buck2 <buck2>`, with what it prints written to the log, then
+//!    `buildrules check` again, which must now pass. A problem sync does not fix (a member with no
+//!    `cargo_package` call) fails here, with check's words, and no patch is handed over.
+//! 4. The patch: the files sync changed below the paths it writes ([`SYNCED`]), as
+//!    `git diff --binary` of the working tree after its new files there are added to the index as
+//!    intended (`git add -N`), so that `git apply` of it writes exactly what sync wrote. On a pull
+//!    request the checkout is the merge of the branch into main, so the patch is made against that
+//!    merge. It is written to [`Handoff::patch`]; the workflow uploads it as [`PATCH_ARTIFACT`].
 //! 5. The job summary ([`Handoff::summary`], appended): the stale inputs, the changed files and
 //!    the one command that downloads and applies the patch. The error says the same.
 //!
@@ -35,25 +37,29 @@ pub const TOOL: &str = "buildrules//cli:buildrules";
 pub const PATCH_ARTIFACT: &str = "buildrules-sync";
 /// The patch's file name, in the artifact.
 pub const PATCH_FILE: &str = "buildrules-sync.patch";
-/// The start of a line of `buildrules check` that calls the table stale.
-const STALE: &str = "buildrules: STALE: ";
+/// The start of every line of `buildrules check`'s problems, and of those that call the table stale.
+const PREFIX: &str = "buildrules: ";
+const STALE: &str = "STALE: ";
 /// The fix `buildrules check` ends each of its lines with, which the job does for the reader.
 const FIX: &str = ": run `buildrules sync` and commit the result";
-/// The paths below which `buildrules sync` makes new files: their untracked files are the
-/// patch's new files.
-const GENERATED: [&str; 4] = [
+/// The paths `buildrules sync` writes (`Cargo.lock` when its `cargo fetch` must change it, the root
+/// `BUCK` only when there is none): the patch holds these and nothing else of the working tree.
+pub const SYNCED: [&str; 6] = [
+    "BUCK",
+    "Cargo.lock",
     "buildrules.bzl",
     "buildrules.lock.bzl",
     "third_party/buildrules",
     "toolchains",
 ];
 /// The `git diff` the patch and its file list are made with, whatever the reader's git config.
-const DIFF: [&str; 8] = [
+const DIFF: [&str; 9] = [
     "-c",
     "core.quotepath=off",
     "diff",
     "--no-color",
     "--no-ext-diff",
+    "--no-textconv",
     "--no-renames",
     "--src-prefix=a/",
     "--dst-prefix=b/",
@@ -101,11 +107,8 @@ pub enum Error {
         /// What buck2 printed on its standard output.
         stdout: String,
     },
-    /// `buildrules check` failed, and not for a stale table.
-    #[error(
-        "`buildrules check` failed ({status}) and found no stale input, which is all \
-         `buildrules sync` fixes: {stderr}"
-    )]
+    /// `buildrules check` could not judge the table (a status other than 0 and 1).
+    #[error("`buildrules check` could not judge the table ({status}): {stderr}")]
     Check {
         /// How it ended.
         status: String,
@@ -149,7 +152,7 @@ pub enum Error {
     /// The table was stale: its fix is the patch of this run.
     #[error("{}", stale_message(inputs, files, apply))]
     Stale {
-        /// What `buildrules check` found changed, without its fix.
+        /// The problems `buildrules check` found, without their marks and fix.
         inputs: Vec<String>,
         /// The files the patch changes.
         files: Vec<String>,
@@ -164,7 +167,9 @@ fn stale_message(inputs: &[String], files: &[String], apply: &str) -> String {
         "the generated build table is stale: {}. buildrules.lock.bzl, buildrules.bzl and \
          third_party/buildrules/ are generated from the Cargo files by `buildrules sync`, which \
          this job ran at the pinned version; what it changed ({}) is the artifact \
-         {PATCH_ARTIFACT} of this run. Apply it in the branch's checkout, then commit and push: {apply}",
+         {PATCH_ARTIFACT} of this run, made against this run's merge of the branch into main. \
+         Apply it in the branch's checkout, then commit and push (if it does not apply, merge \
+         main first): {apply}",
         inputs.join("; "),
         files.join(", "),
     )
@@ -207,16 +212,18 @@ pub fn summary_markdown(inputs: &[String], files: &[String], apply: &str) -> Str
 pub fn tool_path(stdout: &str) -> Option<PathBuf> {
     stdout.lines().find_map(|line| {
         let (label, path) = line.split_once(' ')?;
-        (label == TOOL && !path.trim().is_empty()).then(|| PathBuf::from(path.trim()))
+        let path = path.trim();
+        (label == TOOL && path.starts_with('/')).then(|| PathBuf::from(path))
     })
 }
 
-/// What the lines of `buildrules check` (its standard error) that call the table stale say,
-/// without the `STALE:` mark and the fix each ends with.
+/// The problems the lines of `buildrules check` (its standard error) name, without the
+/// `buildrules:` and `STALE:` marks and the fix each ends with.
 pub fn stale_inputs(stderr: &str) -> Vec<String> {
     stderr
         .lines()
-        .filter_map(|line| line.strip_prefix(STALE))
+        .filter_map(|line| line.strip_prefix(PREFIX))
+        .map(|line| line.strip_prefix(STALE).unwrap_or(line))
         .map(|line| line.strip_suffix(FIX).unwrap_or(line).to_owned())
         .collect()
 }
@@ -245,14 +252,14 @@ pub(super) fn ensure_fresh(
         return Ok(());
     }
     let stderr = trimmed(&checked.stderr);
-    let inputs = stale_inputs(&stderr);
-    if inputs.is_empty() {
+    if checked.status.code() != Some(1) {
         return Err(Error::Check {
             status: checked.status.to_string(),
             stderr,
         }
         .into());
     }
+    let inputs = stale_inputs(&stderr);
     sync(&tool, buck2, log)?;
     let again = output(&tool, &["check"])?;
     if !again.status.success() {
@@ -329,7 +336,7 @@ fn git(args: &[&str]) -> Result<Vec<u8>, FarmError> {
 /// The patch of what sync changed in the working tree, and the files it changes.
 fn patch() -> Result<(Vec<u8>, Vec<String>), FarmError> {
     let mut list = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
-    list.extend(GENERATED);
+    list.extend(SYNCED);
     let untracked = git(&list)?;
     let untracked = String::from_utf8_lossy(&untracked);
     let new: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
@@ -338,8 +345,8 @@ fn patch() -> Result<(Vec<u8>, Vec<String>), FarmError> {
         add.extend(&new);
         git(&add)?;
     }
-    let patch = git(&[&DIFF[..], &["--binary"]].concat())?;
-    let names = git(&[&DIFF[..], &["--name-only"]].concat())?;
+    let patch = git(&[&DIFF[..], &["--binary", "--"], &SYNCED[..]].concat())?;
+    let names = git(&[&DIFF[..], &["--name-only", "--"], &SYNCED[..]].concat())?;
     let files = String::from_utf8_lossy(&names)
         .lines()
         .map(str::to_owned)

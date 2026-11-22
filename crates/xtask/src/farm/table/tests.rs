@@ -18,17 +18,19 @@ fn the_tool_is_the_path_buck2_names_for_its_label() {
         "buildrules//cli:buildrules_unit /x/unit\n",
         "buildrules//cli:buildrules\n",
         "buildrules//cli:buildrules   \n",
+        "buildrules//cli:buildrules buck-out/v2/gen/buildrules\n",
     ] {
         assert_eq!(tool_path(out), None, "{out:?}");
     }
 }
 
 #[test]
-fn the_stale_inputs_are_the_stale_lines_without_their_mark_and_fix() {
-    // Catches: a line that is not a stale one (another problem, buck2's or cargo's words) taken
-    // for a stale input, a stale line lost, the `STALE:` mark or the advice to run
-    // `buildrules sync` kept, or a stale line with another ending dropped. The lines are the
-    // real command line's (cli/src/check.zig of the pinned buildrules).
+fn the_stale_inputs_are_checks_problem_lines_without_their_marks_and_fix() {
+    // Catches: a line that is not the command line's (buck2's or cargo's words, an indented one)
+    // taken for a problem, a problem lost (a stale one, or one without the `STALE:` mark such as a
+    // missing generated file), the `buildrules:` or `STALE:` mark or the advice to run
+    // `buildrules sync` kept, or a line with another ending dropped. The lines are the real
+    // command line's (cli/src/check.zig of the pinned buildrules).
     let stderr = "\
 buildrules: STALE: Cargo.lock changed since `buildrules sync` (recorded sha256 aa, now bb): run `buildrules sync` and commit the result
 buildrules: a member has no cargo_package call: crates/x/BUCK
@@ -40,14 +42,18 @@ buildrules: STALE: a line of a later release
         stale_inputs(stderr),
         [
             "Cargo.lock changed since `buildrules sync` (recorded sha256 aa, now bb)",
+            "a member has no cargo_package call: crates/x/BUCK",
             "crates/js-types/Cargo.toml changed since `buildrules sync` (recorded sha256 cc, now dd)",
             "a line of a later release",
         ]
     );
     assert_eq!(stale_inputs(""), Vec::<String>::new());
+    assert_eq!(stale_inputs("Compiling x\n"), Vec::<String>::new());
     assert_eq!(
-        stale_inputs("buildrules: buildrules.lock.bzl is missing"),
-        Vec::<String>::new()
+        stale_inputs(
+            "buildrules: buildrules.bzl is missing: run `buildrules sync` and commit the result"
+        ),
+        ["buildrules.bzl is missing"]
     );
 }
 
@@ -131,11 +137,11 @@ fn every_error_says_what_is_wrong() {
         ),
         (
             Error::Check {
-                status: "exit status: 1".to_owned(),
-                stderr: "buildrules: Cargo.toml is missing".to_owned(),
+                status: "exit status: 2".to_owned(),
+                stderr: "buildrules: check: unknown argument".to_owned(),
             },
-            "`buildrules check` failed (exit status: 1) and found no stale input, which is all \
-             `buildrules sync` fixes: buildrules: Cargo.toml is missing",
+            "`buildrules check` could not judge the table (exit status: 2): buildrules: check: \
+             unknown argument",
         ),
         (
             Error::Sync {
@@ -176,8 +182,9 @@ fn every_error_says_what_is_wrong() {
             "the generated build table is stale: a changed; b changed. buildrules.lock.bzl, \
              buildrules.bzl and third_party/buildrules/ are generated from the Cargo files by \
              `buildrules sync`, which this job ran at the pinned version; what it changed (f, g) \
-             is the artifact buildrules-sync of this run. Apply it in the branch's checkout, \
-             then commit and push: gh run download 1",
+             is the artifact buildrules-sync of this run, made against this run's merge of the \
+             branch into main. Apply it in the branch's checkout, then commit and push (if it \
+             does not apply, merge main first): gh run download 1",
         ),
     ];
     for (error, words) in cases {

@@ -48,8 +48,9 @@ do not need `buildrules` to fix it: the job makes the fix and hands it to you
 
 1. Before the build, the job builds the `buildrules` command line from the pinned buildrules cell
    on the build farm (`buildrules//cli:buildrules`) and runs `buildrules check`.
-2. When check says `STALE:`, the job runs that `buildrules sync` on the runner, checks the table
-   again, and writes what sync changed as a patch (`git diff --binary`, new files included). It
+2. When check finds the table stale or a generated file missing, the job runs that
+   `buildrules sync` on the runner, checks the table again, and writes what sync changed as a patch
+   (`git diff --binary` of the paths sync writes, new files included). It
    fails without building. Its error and the job's summary name the inputs that changed, say
    that the table is generated from them, list the files the patch changes, and give the one
    command that applies it; the patch is the run's artifact `buildrules-sync`.
@@ -60,12 +61,14 @@ do not need `buildrules` to fix it: the job makes the fix and hands it to you
    ```
 
    The summary prints it with the run's id filled in. `buck-out/` is ignored by git, so the
-   download leaves nothing to commit. If `git apply` refuses the patch, main has changed the table
-   too: merge main into the branch and push, and the next run carries a new patch.
+   download leaves nothing to commit. On a pull request the job's checkout is the merge of the
+   branch into main, so the patch is made against that merge. If `git apply` refuses it, main has
+   changed the table too: merge main into the branch and push, and the next run carries a new
+   patch.
 
-A check that fails for another reason (a member with no `cargo_package` in its BUCK file, a
-floating `rust-toolchain.toml`) is not one sync fixes: the job runs no sync and prints what check
-said.
+A problem sync does not fix (a member with no `cargo_package` in its BUCK file, a floating
+`rust-toolchain.toml`) is still there when the job checks again after sync: the job fails with what
+check said, and hands over no patch.
 
 The job does not push the regenerated files to the branch itself. A job that pushes needs a token
 that can write to the repository, in the one job of this repository that already holds an OIDC

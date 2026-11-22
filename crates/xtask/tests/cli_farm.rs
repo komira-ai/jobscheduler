@@ -235,8 +235,9 @@ fn hands_over(d: &Rig, inputs: &[String], files: &[&str]) {
             "buildrules: wrote {TABLE}\nxtask: the generated build table is stale: {}. \
              buildrules.lock.bzl, buildrules.bzl and third_party/buildrules/ are generated from \
              the Cargo files by `buildrules sync`, which this job ran at the pinned version; what \
-             it changed ({}) is the artifact {PATCH_ARTIFACT} of this run. Apply it in the \
-             branch's checkout, then commit and push: {}\n",
+             it changed ({}) is the artifact {PATCH_ARTIFACT} of this run, made against this \
+             run's merge of the branch into main. Apply it in the branch's checkout, then commit \
+             and push (if it does not apply, merge main first): {}\n",
             inputs.join("; "),
             files.join(", "),
             apply()
@@ -298,12 +299,15 @@ fn a_changed_manifest_hands_over_a_patch_that_changes_the_table_and_adds_a_file(
     // Catches: a stale table built (or failed without a fix), sync not run or run without the
     // job's buck2, the second check skipped, a patch that leaves out a file sync made (git diff
     // without the new file in the index), the fix's words (STALE mark and `buildrules sync`
-    // advice) left in the inputs, a summary that replaces what the job wrote before, and a patch
-    // that does not apply to the branch or leaves the table stale.
+    // advice) left in the inputs, a summary that replaces what the job wrote before, a patch
+    // that does not apply to the branch or leaves the table stale, and a patch that takes in a
+    // change of the working tree that sync did not make (a tracked file outside the paths sync
+    // writes, changed by an earlier step).
     let d = Rig::new("stale-add", false, &PASSING);
     let was = std::fs::read_to_string(d.repo.dir.join("Cargo.toml")).expect("read");
     d.append_manifest(GIT_DEP);
     d.repo.commit("a git dependency, the table not synced");
+    d.repo.write("README.md", "changed by an earlier step\n");
     let now = format!("{was}{GIT_DEP}");
     hands_over(&d, &[changed("Cargo.toml", &was, &now)], &[TABLE, ARCHIVES]);
 }
@@ -410,24 +414,19 @@ fn a_sync_that_leaves_the_table_stale_fails_with_what_check_still_says() {
 }
 
 #[test]
-fn a_check_that_fails_for_another_reason_fails_with_its_words_and_runs_no_sync() {
-    // Catches: a sync run (and a patch handed over) for a problem sync does not fix, a check that
-    // could not run (a usage error) taken for a fresh table, and check's words hidden.
+fn a_missing_generated_file_without_a_stale_mark_hands_over_a_patch_that_adds_it() {
+    // Catches: a problem check prints without `STALE:` (a generated file deleted) taken for one
+    // sync cannot fix, and a patch that leaves out a new file at the repository's root.
     let d = Rig::new("no-table", false, &PASSING);
     d.repo.git(&["rm", "--quiet", TABLE]);
     d.repo.commit("no table");
-    let o = d.farm_build();
-    refused(
-        &d,
-        &o,
-        "",
-        &format!(
-            "`buildrules check` failed (exit status: 1) and found no stale input, which is all \
-             `buildrules sync` fixes: buildrules: {TABLE} is missing: {FIX}"
-        ),
-    );
-    assert_eq!(tool_calls(&d.repo.dir), ["check"]);
+    hands_over(&d, &[format!("{TABLE} is missing")], &[TABLE]);
+}
 
+#[test]
+fn a_check_that_cannot_judge_the_table_fails_with_its_words_and_runs_no_sync() {
+    // Catches: a check that could not run (a usage error, status 2) taken for a fresh table or a
+    // stale one, and check's words hidden.
     let d = Rig::new("check-usage", false, &PASSING);
     d.defect("check-usage");
     let o = d.farm_build();
@@ -435,9 +434,10 @@ fn a_check_that_fails_for_another_reason_fails_with_its_words_and_runs_no_sync()
         &d,
         &o,
         "",
-        "`buildrules check` failed (exit status: 2) and found no stale input, which is all \
-         `buildrules sync` fixes: buildrules: check: unknown argument --nope",
+        "`buildrules check` could not judge the table (exit status: 2): buildrules: check: \
+         unknown argument --nope",
     );
+    assert_eq!(tool_calls(&d.repo.dir), ["check"]);
 }
 
 #[test]
@@ -510,7 +510,7 @@ fn a_patch_that_git_cannot_make_fails_and_hands_over_nothing() {
     assert_eq!(o.status.code(), Some(1));
     let words = stderr(&o);
     let start = "buildrules: wrote buildrules.lock.bzl\nxtask: `git ls-files --others \
-                 --exclude-standard -z -- buildrules.bzl buildrules.lock.bzl \
+                 --exclude-standard -z -- BUCK Cargo.lock buildrules.bzl buildrules.lock.bzl \
                  third_party/buildrules toolchains` failed (exit status: 128): fatal: ";
     assert!(words.starts_with(start), "{words}");
     assert!(!d.patch().exists());
