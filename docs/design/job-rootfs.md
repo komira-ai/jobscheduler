@@ -804,6 +804,7 @@ not change whichever wins, because all three realise the same thing: a `COPY_ON_
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target below `/work` | a link in `exec/` (5.2); built. A target below another mount's target is refused `mount-target-unsupported-here` (its link would be made inside the host directory the first points at) |
 | `mounts`, `READ_ONLY` or `READ_WRITE`, target exactly `/work` | refused `mount-target-unsupported-here`: the run's working directory is a directory of the run's home, which a link cannot replace |
 | `mounts`, any target outside `/work` | refused `mount-target-unsupported-here` |
+| `mounts[i].source`, a provider (`--mount-provider`) | `READ_ONLY`: the lifecycle asks the provider to prepare and mount the tree and the link of 5.2 points at the directory it answered (tierstore: a directory of its one NFS mount of the Mac, below `--native-trees-root`); below the trees root the mount is one of the run's trees (5.4); built. `READ_WRITE` refused `input-not-allowed` at admission; `COPY_ON_WRITE` as above. The hello reports `mount-provider.<name>` for each provider, as on Linux |
 | `mounts[i].sub_path` | resolved beneath the host path as on Linux; the link of 5.2 points at the result |
 | `mounts[i].no_exec` | a Seatbelt deny of `process-exec*` and `file-map-executable` for the mount's path (5.4) |
 | `mounts[i].propagation` | private is what a link gives: nothing mounted on the host later appears through it unless it is mounted below the linked path itself, which the provider controls |
@@ -833,7 +834,7 @@ Independent of 5.3:
   the run's home, where the profile's head denies them. A working directory at or below the link is refused
   `cwd-in-tree` (an existing code), since the working-directory check (`crates/js-agent/src/native/cwd.rs`) refuses a
   link out of `exec/`.
-- **Built** in `native/mounts.rs`. The lookup (`resolve_fs`) canonicalises each host path with its `sub_path`, requires a directory (`input-unavailable` when it is missing or is not one) beneath a canonical root of the agent that its mode allows (`input-not-allowed`; the lifecycle's own check reads the path's text only, so a link inside a root that leads out is caught here), and keeps the plan by run id; the start makes the links, with the missing directories above them as the run's user's, and a name that is there already fails the start. `discard_fs` drops an unused plan.
+- **Built** in `native/mounts.rs`. The lookup (`resolve_fs`) canonicalises each host path with its `sub_path`, requires a directory (`input-unavailable` when it is missing or is not one) beneath a canonical root of the agent that its mode allows (`input-not-allowed`; the lifecycle's own check reads the path's text only, so a link inside a root that leads out is caught here), then holds the whole set to the trees root's rules (5.4; `input-not-allowed`), and keeps the plan by run id; the start makes the links, with the missing directories above them as the run's user's, and a name that is there already fails the start. The agent makes no directory a mount points at and never unmounts anything. `discard_fs` drops an unused plan.
 - **`READ_WRITE`**: the same link, with the host path in a write grant of the profile (5.4); the Unix permissions of the
   host path must also let the run's user write it, which the profile cannot grant.
 
@@ -871,9 +872,22 @@ and because it is the cheapest if the measurements show that the jobs only repla
 
 The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever candidate is chosen:
 
-- Built. Each `--mount-root`/`--mount-root-ro` is a **read deny** of every run (`NativeConfig.read_denies`), so a run cannot
-  read what another run was given below the same root. An operator who keeps a tool under a mount root, which jobs read
-  without mounting, moves it out; the agent already refuses a files root that overlaps a mount root at start.
+- Built. Each `--mount-root`/`--mount-root-ro` but the trees root is a **read deny** of every run
+  (`NativeConfig.read_denies`), so a run cannot read what another run was given below the same root. An operator who
+  keeps a tool under a mount root, which jobs read without mounting, moves it out; the agent already refuses a files root
+  that overlaps a mount root at start.
+- Built. **Trees.** `--native-trees-root` names the one mount point below which the provider serves every run's trees
+  (tierstore's NFS mount of the Mac). The agent does not start unless it is absolute, resolves to a `--mount-root-ro`
+  that no `--mount-root` names, no other mount root lies above or below it, and a `--mount-provider` is given (`crates/js-agent/src/native_fs.rs`, `trees_root`). A
+  mount whose directory is below it, as named or once resolved, is a tree of the run; the set is refused at the lookup
+  (`input-not-allowed`, naming the path) when a tree is the root itself, resolves outside it (`..`, a link), is
+  `READ_WRITE` or lacks `no_exec`, or a mount's directory holds the root (`tree_rules`). A tree gets no `GR_i`: the
+  profile denies reads below the root (`MOUNT`), then grants each tree's reads (`MT_i`) and the metadata of its
+  ancestors (js-mac-pool `MountTrees`), so a run reads its own trees and cannot read or list another run's or the root.
+  The builder renders these rules before the read denies, so the trees root is the one mount root left out of
+  `read_denies` (a later deny of it would hide every tree). The trees' rules begin with a deny of `process-exec*`
+  and `file-map-executable` below the root, which no later rule allows, so no tree is ever run or mapped executable;
+  `no_exec` is required of a tree at admission so that a start asking otherwise is refused before it runs.
 - Each read-only or read-write mount of the run, and each host path a candidate reads through, is **granted** by a new
   policy item emitted after the read denies and before the floor: `(allow file-read* (subpath (param "GR_i")))`, and
   `(allow file-read-metadata (path-ancestors (param "GR_i")))`, so that `realpath` and

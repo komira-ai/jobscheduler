@@ -133,6 +133,10 @@ pub struct Cli {
     /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
+    /// The node-local mount providers (`--mount-provider`, `--mount-provider-user`,
+    /// `--mount-provider-wait`), which both builds take.
+    #[command(flatten)]
+    pub providers: crate::lifecycle::ProviderFlags,
     /// Bound each run's disk with a project quota on the scratch root's file system. At
     /// start the agent probes the root and refuses to start unless the file system
     /// enforces project quota; then it advertises `scratch-quota=project` and

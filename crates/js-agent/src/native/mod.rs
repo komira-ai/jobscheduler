@@ -122,6 +122,7 @@ mod remove;
 mod run;
 mod settings;
 mod start;
+pub mod trees_proof;
 mod xcode;
 
 use std::collections::BTreeMap;

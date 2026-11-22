@@ -28,6 +28,7 @@ fn rig(name: &str) -> Rig {
             config.mount_roots.push(MountRoot {
                 path,
                 read_only: root == "ro",
+                trees: false,
             });
         }
     })
@@ -184,10 +185,137 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
     );
 }
 
+/// A rig whose roots are `roots/ro` and `roots/rw` as [`rig`] makes them, and `roots/trees`,
+/// a read-only root that is the trees root and no read deny.
+fn trees_rig(name: &str) -> Rig {
+    Rig::in_dir(name, 1, |config, dir| {
+        for root in ["ro", "rw", "trees"] {
+            fs::create_dir_all(dir.path("roots").join(root)).unwrap();
+            let path = fs::canonicalize(dir.path("roots").join(root)).unwrap();
+            if root != "trees" {
+                config.read_denies.push(AbsPath::new(&path).unwrap());
+            }
+            config.mount_roots.push(MountRoot {
+                path,
+                read_only: root != "rw",
+                trees: root == "trees",
+            });
+        }
+    })
+}
+
+/// Asserts a start with a tree below the trees root beside a read-only mount of another root:
+/// the tree is linked at `exec/<rest>` to its canonical directory and protected as a read-only
+/// link (`IN_`), and the profile the supervisor was asked to apply reads it as one of the
+/// run's trees: `MOUNT` is the trees root, `MT_0` the tree, no `GR_` names the tree or the
+/// root, no read deny names the root, and the other mount keeps its grant. Catches a tree
+/// granted as a mount (the builder refuses that layout, so every such start would fail), a
+/// tree the job cannot read, and a link the job could replace.
+#[test]
+fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
+    let mut rig = trees_rig("mounts-trees");
+    let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
+    let tree = root.join("mount-provider/aa/r1/0");
+    fs::create_dir_all(&tree).unwrap();
+    let input = dir_in(&rig, "ro", "input");
+    let mounts = fs_of(vec![
+        JobMount {
+            source: MountSource::Provider {
+                provider: "tierstore".to_owned(),
+                reference: "cas/l/00".to_owned(),
+            },
+            ..mount(&tree, "/work/.kbf-tree", MountMode::ReadOnly, true)
+        },
+        mount(&input, "/work/input", MountMode::ReadOnly, true),
+    ]);
+    // Admitted as a provider's tree; resolved once the lifecycle put the answered directory
+    // in its source.
+    assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
+    let answered = fs_of(vec![
+        mount(&tree, "/work/.kbf-tree", MountMode::ReadOnly, true),
+        mount(&input, "/work/input", MountMode::ReadOnly, true),
+    ]);
+    assert_eq!(rig.rt.resolve_fs("r1", "", &answered, 0), FsPrepared::Ready);
+    rig.rt
+        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .unwrap();
+
+    let exec = exec_of(&rig, 0);
+    assert_eq!(fs::read_link(exec.join(".kbf-tree")).unwrap(), tree);
+    let parsed = rig.launcher.last();
+    let value = |name: &str| {
+        parsed
+            .params
+            .iter()
+            .find(|(given, _)| given == name)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    assert_eq!(value("MOUNT"), Some(root.clone()));
+    assert_eq!(value("MT_0"), Some(tree.clone()));
+    assert_eq!(value("MT_1"), None);
+    for (name, path) in &parsed.params {
+        let path = Path::new(path);
+        assert!(
+            !(name.starts_with("GR_") && (path == tree || path == root)),
+            "{name} grants {}",
+            path.display()
+        );
+        assert!(
+            !(name.starts_with("RD_") && path == root),
+            "the trees root is a read deny"
+        );
+    }
+    assert!(param_for(&parsed.params, &input).starts_with("GR_"));
+    let protected = param_for(&parsed.params, &exec.join(".kbf-tree"));
+    assert!(protected.starts_with("IN_"), "{protected}");
+}
+
+/// Asserts that the lookup holds a run's mounts to the trees root's rules, refused
+/// `input-not-allowed` naming the path by exact equality, and that no plan is kept: a tree
+/// without `no_exec`, and the trees root itself (the holding case and the escapes are the
+/// Linux tests of `native_fs::tree_rules`). Catches a tree a job could run, a mount that
+/// opens every run's trees, and a refusal found only when the profile is built at the start.
+#[test]
+fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
+    let mut rig = trees_rig("mounts-tree-rules");
+    let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
+    let tree = root.join("mount-provider/aa/r1/0");
+    fs::create_dir_all(&tree).unwrap();
+    let shown = root.display();
+    let cases = [
+        (
+            mount(&tree, "/work/t", MountMode::ReadOnly, false),
+            format!(
+                "{}: a tree below the trees root {shown} is mounted no_exec only: the profile \
+                 grants a tree reads only",
+                tree.display()
+            ),
+        ),
+        (
+            mount(&root, "/work/t", MountMode::ReadOnly, true),
+            format!("{shown}: the tree {shown} is the mount root itself"),
+        ),
+    ];
+    for (one, why) in cases {
+        let refused = rig.rt.resolve_fs("r1", "", &fs_of(vec![one]), 0);
+        assert_eq!(
+            refused,
+            FsPrepared::Refused(refusal_of(refusal::INPUT_NOT_ALLOWED, &why))
+        );
+    }
+    let err = rig
+        .rt
+        .create_and_start(&rig.spec("r1", native("/bin/true", &[])));
+    assert!(err.is_ok(), "{err:?}");
+    let exec = exec_of(&rig, 0);
+    assert!(!exec.join("t").exists(), "a refused plan was kept");
+}
+
 /// Asserts the refusals made from the text of a start, with no I/O, by code and by exact
 /// detail: a layer, a copy-on-write mount, a remapped host port, a target that is `/work`,
-/// outside it or below another mount's (in any case), and more mounts than the profile lists;
-/// and that what a Mac gives is admitted: a host port at its own number (equal, or its job
+/// outside it or below another mount's (in any case), a provider's tree mounted read-write,
+/// and more mounts than the profile lists; and that what a Mac gives is admitted: a
+/// provider's tree mounted read-only, a host port at its own number (equal, or its job
 /// port left out) is not refused here (the lifecycle's host-port admission refuses it, as this
 /// runtime offers none), and mounts at siblings and a nested directory. Catches a mount that
 /// would be linked over the working directory or inside another mount's host directory, a
@@ -218,7 +346,24 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
         )
     };
     let many: Vec<JobMount> = (0..65).map(|i| ro(&format!("/work/m{i}"))).collect();
+    let tree = |mode| JobMount {
+        source: MountSource::Provider {
+            provider: "tierstore".to_owned(),
+            reference: "cas/l/ab".to_owned(),
+        },
+        ..mount(&dir, "/work/.kbf-tree", mode, true)
+    };
     let cases: Vec<(JobFs, Vec<HostPort>, Result<(), NativeRefusal>)> = vec![
+        (fs_of(vec![tree(MountMode::ReadOnly)]), vec![], Ok(())),
+        (
+            fs_of(vec![tree(MountMode::ReadWrite)]),
+            vec![],
+            Err(refusal_of(
+                refusal::INPUT_NOT_ALLOWED,
+                "/work/.kbf-tree: a provider's tree is shared by every native job that names \
+                 it, so a native job mounts it read-only only",
+            )),
+        ),
         (
             layered,
             vec![],
@@ -288,9 +433,10 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
 /// is not there and one that is a file (`input-unavailable`), a link inside a root that leads
 /// outside every root and a read-write mount that resolves beneath the read-only root
 /// (`input-not-allowed`: the lifecycle's own check reads the text of the path only), a mount
-/// of a provider, a path the profile cannot name (`invalid-mount`) and a bad target. The first
-/// refusal wins and no plan is kept: a start after it makes no link. Catches a link that gets
-/// a job out of the roots, and a read-write grant over a read-only root.
+/// of a provider that has not answered, a path the profile cannot name (`invalid-mount`) and
+/// a bad target. The first refusal wins and no plan is kept: a start after it makes no link.
+/// Catches a link that gets a job out of the roots, and a read-write grant over a read-only
+/// root.
 #[test]
 fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
     let mut rig = rig("mounts-resolve");
@@ -358,7 +504,8 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
             provider,
             refusal_of(
                 refusal::INPUT_NOT_ALLOWED,
-                "/work/p: a Mac is given no mount provider",
+                "/work/p: a provider's tree is looked up once the provider has answered its \
+                 directory",
             ),
         ),
         (
@@ -500,6 +647,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let roots = vec![MountRoot {
         path: root.clone(),
         read_only: true,
+        trees: false,
     }];
     let settings = settings.with_mount_roots(roots.clone()).unwrap();
     let config = settings.config();
@@ -514,6 +662,7 @@ fn the_mount_roots_are_read_denies_of_every_run() {
     let bad = vec![MountRoot {
         path: PathBuf::from("/tmp/root"),
         read_only: false,
+        trees: false,
     }];
     let why = settings.with_mount_roots(bad).unwrap_err();
     assert_eq!(

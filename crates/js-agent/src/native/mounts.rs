@@ -12,7 +12,9 @@
 //!    port (`host-port-remap-unsupported-here`: a native job shares the host's loopback), a
 //!    mount target that is `/work` itself, outside `/work`, or below another mount's target
 //!    (`mount-target-unsupported-here`: a link cannot replace the working directory, and a
-//!    link made below another would be made inside the host's directory), and more mounts than
+//!    link made below another would be made inside the host's directory), a provider's tree
+//!    mounted other than read-only (`input-not-allowed`: every job that names the tree is given
+//!    the one directory of the provider's mount, [`crate::native_fs`]), and more mounts than
 //!    the profile lists (`too-many-inputs-here`). A host port whose two numbers are equal is
 //!    not refused here: it falls through to the lifecycle's host-port admission, which refuses
 //!    it `input-not-allowed` because a native runtime offers no host port.
@@ -21,19 +23,28 @@
 //!    at once (`Ready`), and its canonical path must be a directory (`input-unavailable`
 //!    when it is missing or is not one) beneath a root of the agent that the mount's mode
 //!    allows (`input-not-allowed`). The lifecycle's own check of the same rule reads the
-//!    text of the path only, so a link inside a root that leads out is caught here. The
-//!    plans are kept by run id until [`NativeRuntime::create_and_start`] takes them, or
-//!    [`discard`] drops them.
+//!    text of the path only, so a link inside a root that leads out is caught here. Then the
+//!    whole set is held to the trees root's rules ([`native_fs::tree_rules`]): a mount
+//!    below `--native-trees-root` is one of the run's trees, read-only and `no_exec`, never
+//!    the root itself, and no mount holds the root. The plans are kept by run id until
+//!    [`NativeRuntime::create_and_start`] takes them, or [`discard`] drops them.
 //! 3. [`link_all`], in the start, after `exec/` is made and before the working directory is
 //!    opened: the parent directories of each link are made as the run's user's, the link is
 //!    made and given to the user. A name that is there already fails the start.
 //!
-//! No provider reaches a Mac (an agent on a Mac is given none, and admission refuses a start
-//! that names one), so a mount here is always a host path.
+//! A provider's tree (`--mount-provider`) reaches this runtime as a host path: the lifecycle
+//! asks the provider to prepare and mount it and puts the directory the provider answered (on
+//! tierstore, a directory of its one NFS mount, the trees root) in the mount's source before
+//! it asks [`resolve`], so the directory is held to the same rules and becomes a read-only
+//! link like any read-only mount. A tree gets no [`MountGrant`] ([`grants`]): the profile
+//! denies reads below the trees root and grants back the run's own trees ([`trees_of`]), and
+//! a grant there would reopen the root (`PolicyError::MountOverTrees`). The agent makes
+//! nothing below the trees root and never unmounts it; the lifecycle releases the trees
+//! after the run.
 //!
 //! [`NativeRuntime::create_and_start`]: super::NativeRuntime
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, symlink};
@@ -43,34 +54,12 @@ use js_agent_wire::{HostPort, JobMount, MountMode, MountSource, refusal};
 use js_mac_pool::seatbelt::{AbsPath, MAX_LISTED, MountGrant};
 
 use super::files::{HandOver, MakeDir, make_parents};
-use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal};
+use crate::lifecycle::{FsPrepared, JobFs, NativeRefusal};
+use crate::native_fs::{self, TreeRules};
+pub use crate::native_fs::{MountRoot, roots_of};
 
 /// The directory a mount's target lies below: the run's working directory, `exec/`.
 const WORK: &str = "/work/";
-
-/// A root of the agent that jobs may mount from (`--mount-root`, `--mount-root-ro`), by
-/// canonical path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MountRoot {
-    /// The canonical path of the root.
-    pub path: PathBuf,
-    /// Jobs may mount from it read-only only (`--mount-root-ro`).
-    pub read_only: bool,
-}
-
-/// The roots of `roots` as the native runtime holds them, by path: one entry per canonical
-/// path, writable when any root of that path is.
-#[must_use]
-pub fn roots_of(roots: &MountRoots) -> Vec<MountRoot> {
-    let writable: BTreeSet<&Path> = roots.writable_paths().collect();
-    let all: BTreeSet<&Path> = roots.paths().collect();
-    all.into_iter()
-        .map(|path| MountRoot {
-            path: path.to_path_buf(),
-            read_only: !writable.contains(path),
-        })
-        .collect()
-}
 
 /// One mount of a run, resolved: what [`link_all`] makes and what the profile grants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +72,8 @@ pub(super) struct MountPlan {
     pub(super) write: bool,
     /// Nothing below it may be run or mapped executable.
     pub(super) no_exec: bool,
+    /// The trees root `host` is a tree below, or `None` for a mount that is no tree.
+    pub(super) trees_root: Option<PathBuf>,
 }
 
 /// The plans of the runs whose file system was resolved and whose start has not taken them,
@@ -94,8 +85,8 @@ fn refuse(code: &'static str, why: String) -> NativeRefusal {
 }
 
 /// What a Mac cannot give a job start (see the module documentation), in the order: layers,
-/// a remapped host port, then each mount (copy-on-write, then target), nested targets, and
-/// the count.
+/// a remapped host port, then each mount (copy-on-write, then target, then a provider's tree
+/// other than read-only), nested targets, and the count.
 pub(super) fn check(fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
     if !fs.layers.is_empty() {
         return Err(refuse(
@@ -128,6 +119,7 @@ pub(super) fn check(fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRef
             ));
         }
         plan_target(&mount.target)?;
+        native_fs::check_provider_mode(mount)?;
     }
     nested(&fs.mounts)?;
     if fs.mounts.len() > MAX_LISTED {
@@ -184,7 +176,8 @@ fn nested(mounts: &[JobMount]) -> Result<(), NativeRefusal> {
 }
 
 /// Resolves the mounts of `fs` for the run `run_id` and keeps the plans: `Ready`, or the
-/// refusal of the first mount that cannot be had.
+/// refusal of the first mount that cannot be had, or of the set when its trees break the
+/// trees root's rules.
 pub(super) fn resolve(
     roots: &[MountRoot],
     plans: &mut Plans,
@@ -196,6 +189,7 @@ pub(super) fn resolve(
         .iter()
         .map(|mount| plan_of(roots, mount))
         .collect::<Result<Vec<_>, _>>()
+        .and_then(|list| with_trees(roots, list))
     {
         Ok(list) => {
             plans.insert(run_id.to_owned(), list);
@@ -212,7 +206,10 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
     let MountSource::HostPath { path } = &mount.source else {
         return Err(refuse(
             refusal::INPUT_NOT_ALLOWED,
-            format!("{}: a Mac is given no mount provider", mount.target),
+            format!(
+                "{}: a provider's tree is looked up once the provider has answered its directory",
+                mount.target
+            ),
         ));
     };
     let wanted = match mount.sub_path.as_deref() {
@@ -265,7 +262,36 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         host,
         write,
         no_exec: mount.no_exec,
+        trees_root: None,
     })
+}
+
+/// `list` with each tree marked by the trees root (the root of `roots` that is one), once
+/// the set is held to its rules ([`native_fs::tree_rules`]); `list` as it is when the agent
+/// has no trees root.
+fn with_trees(
+    roots: &[MountRoot],
+    mut list: Vec<MountPlan>,
+) -> Result<Vec<MountPlan>, NativeRefusal> {
+    let Some(root) = roots.iter().find(|root| root.trees) else {
+        return Ok(list);
+    };
+    let dirs: Vec<(PathBuf, bool, bool)> = list
+        .iter()
+        .map(|plan| (PathBuf::from(plan.host.as_str()), !plan.write, plan.no_exec))
+        .collect();
+    if let Some(rules) = native_fs::tree_rules(&root.path, &dirs)? {
+        for plan in &mut list {
+            if rules
+                .trees
+                .iter()
+                .any(|tree| tree.as_os_str() == plan.host.as_str())
+            {
+                plan.trees_root = Some(root.path.clone());
+            }
+        }
+    }
+    Ok(list)
 }
 
 /// Makes the link of each plan below `exec`, given to `uid`: the missing directories above it
@@ -295,16 +321,30 @@ pub(super) fn link_all(
     Ok(())
 }
 
-/// The grants of the profile for `plans`.
+/// The grants of the profile for `plans`, but for the trees: the profile reads a tree
+/// through [`trees_of`], and a grant of one would reopen the trees root.
 pub(super) fn grants(plans: &[MountPlan]) -> Vec<MountGrant> {
     plans
         .iter()
+        .filter(|plan| plan.trees_root.is_none())
         .map(|plan| MountGrant {
             path: plan.host.clone(),
             write: plan.write,
             no_exec: plan.no_exec,
         })
         .collect()
+}
+
+/// The run's trees below the trees root, in the order of the mounts, or `None` when no plan
+/// is a tree.
+pub(super) fn trees_of(plans: &[MountPlan]) -> Option<TreeRules> {
+    let root = plans.iter().find_map(|plan| plan.trees_root.clone())?;
+    let trees = plans
+        .iter()
+        .filter(|plan| plan.trees_root.is_some())
+        .map(|plan| PathBuf::from(plan.host.as_str()))
+        .collect();
+    Some(TreeRules { root, trees })
 }
 
 /// The links of the read-only mounts below `exec`: the run may not replace them (the profile
@@ -347,6 +387,7 @@ mod tests {
             host: AbsPath::parse(host).unwrap(),
             write: false,
             no_exec: true,
+            trees_root: None,
         }
     }
 
@@ -401,48 +442,6 @@ mod tests {
             refused.why,
             "/work/A/b lies below the mount at /work/a: a native job's mounts are links and do \
              not nest"
-        );
-    }
-
-    /// Asserts that a root of a path that is read-write and read-only under two names is
-    /// writable, and that the others keep their mode, in path order.
-    ///
-    /// Catches a root listed twice, or a writable root reported read-only.
-    #[test]
-    fn roots_are_listed_once_by_path_and_writable_when_any_name_of_it_is() {
-        let dir = TestDir::under(std::env::temp_dir(), "native-mount-roots");
-        let (a, b, c) = (
-            dir.path().join("a"),
-            dir.path().join("b"),
-            dir.path().join("c"),
-        );
-        for path in [&a, &b, &c] {
-            fs::create_dir(path).unwrap();
-        }
-        let named = |name: &str, path: &Path| (name.to_owned(), path.to_path_buf());
-        let roots = MountRoots::with_read_only(
-            &[named("rw", &a), named("same", &b)],
-            &[named("ro", &c), named("same-ro", &b)],
-        )
-        .unwrap();
-        let listed = roots_of(&roots);
-        let canonical = |path: &Path| fs::canonicalize(path).unwrap();
-        assert_eq!(
-            listed,
-            [
-                MountRoot {
-                    path: canonical(&a),
-                    read_only: false
-                },
-                MountRoot {
-                    path: canonical(&b),
-                    read_only: false
-                },
-                MountRoot {
-                    path: canonical(&c),
-                    read_only: true
-                },
-            ]
         );
     }
 
@@ -525,26 +524,54 @@ mod tests {
         );
     }
 
-    /// Asserts that the grants carry each plan's path and modes, and that only the
-    /// read-only plans have a link to protect.
+    /// Asserts that the grants carry each plan's path and modes but leave the trees out,
+    /// that the trees are the tree plans' directories below their root in order, and that
+    /// every read-only plan, a tree included, has a link to protect; and that plans with no
+    /// tree have no trees.
     ///
-    /// Catches a grant that widens a read-only mount, or a read-write link that the profile
-    /// would deny writes through.
+    /// Catches a grant that widens a read-only mount, a grant of a tree (the builder refuses
+    /// it as reopening the trees root), and a read-write link that the profile would deny
+    /// writes through.
     #[test]
-    fn grants_and_protected_links_follow_the_plans() {
+    fn grants_leave_the_trees_out_and_protected_links_follow_the_plans() {
         let mut writable = plan("out", "/Volumes/data/out");
         writable.write = true;
         writable.no_exec = false;
-        let plans = [plan("tree", "/Volumes/data/tree"), writable];
+        let tree = |rest: &str, host: &str| MountPlan {
+            trees_root: Some(PathBuf::from("/Volumes/tierstore")),
+            ..plan(rest, host)
+        };
+        let plans = [
+            plan("tree", "/Volumes/data/tree"),
+            tree(".kbf-tree", "/Volumes/tierstore/mount-provider/aa/r1/0"),
+            writable,
+            tree("more", "/Volumes/tierstore/mount-provider/aa/r1/1"),
+        ];
         let granted = grants(&plans);
-        assert_eq!(
-            (granted[0].write, granted[0].no_exec),
-            (false, true),
-            "{granted:?}"
-        );
+        assert_eq!(granted.len(), 2, "{granted:?}");
+        assert_eq!(granted[0].path.as_str(), "/Volumes/data/tree");
+        assert_eq!((granted[0].write, granted[0].no_exec), (false, true));
         assert_eq!((granted[1].write, granted[1].no_exec), (true, false));
         assert_eq!(granted[1].path.as_str(), "/Volumes/data/out");
+        assert_eq!(
+            trees_of(&plans),
+            Some(TreeRules {
+                root: PathBuf::from("/Volumes/tierstore"),
+                trees: vec![
+                    PathBuf::from("/Volumes/tierstore/mount-provider/aa/r1/0"),
+                    PathBuf::from("/Volumes/tierstore/mount-provider/aa/r1/1"),
+                ],
+            })
+        );
+        assert_eq!(trees_of(&plans[..1]), None);
         let links: Vec<_> = read_only_links(&plans, Path::new("/h/exec")).collect();
-        assert_eq!(links, [("a mount", PathBuf::from("/h/exec/tree"))]);
+        assert_eq!(
+            links,
+            [
+                ("a mount", PathBuf::from("/h/exec/tree")),
+                ("a mount", PathBuf::from("/h/exec/.kbf-tree")),
+                ("a mount", PathBuf::from("/h/exec/more")),
+            ]
+        );
     }
 }
