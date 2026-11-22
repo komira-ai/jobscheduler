@@ -1,5 +1,5 @@
 //! The report of a trace: what its jobs look like, how far the replay can be trusted, and what
-//! each way of packing does with the same arrivals (`docs/design/cpu-packing.md`).
+//! each way of packing does with the same arrivals (`docs/design/cpu-over-time.md`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -9,7 +9,7 @@ use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
 /// The ways of packing the report compares, in its order.
-pub const ARMS: [Arm; 7] = [
+pub const ARMS: [Arm; 9] = [
     Arm {
         name: "recorded bookings",
         bookings: Bookings::Recorded,
@@ -21,6 +21,18 @@ pub const ARMS: [Arm; 7] = [
         bookings: Bookings::Learned,
         rule: Rule::Booked,
         limit_permille: 1100,
+    },
+    Arm {
+        name: "A median, 1.0",
+        bookings: Bookings::Learned,
+        rule: Rule::Booked,
+        limit_permille: 1000,
+    },
+    Arm {
+        name: "A median, 0.9",
+        bookings: Bookings::Learned,
+        rule: Rule::Booked,
+        limit_permille: 900,
     },
     Arm {
         name: "B reserve z=2, 1.1",

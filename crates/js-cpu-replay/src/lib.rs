@@ -1,5 +1,5 @@
 //! `js-cpu-replay`: replays the job service's recorded jobs against ways of packing CPU on a
-//! host, for the design in `docs/design/cpu-packing.md`.
+//! host, for the design in `docs/design/cpu-over-time.md`.
 //!
 //! `convert` turns an export (the job records the job service's `GetUsage` returned, and the
 //! agents' result lines) into a trace that names no job, host or class ([`convert`],

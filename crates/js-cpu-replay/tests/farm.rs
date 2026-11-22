@@ -1,4 +1,4 @@
-//! The farm's trace replays to the report `docs/design/cpu-packing.md` cites, so every number
+//! The farm's trace replays to the report `docs/design/cpu-over-time.md` cites, so every number
 //! the document takes from it is the replay's, of the committed trace.
 //!
 //! When the replay or the trace changes on purpose, write the report again with
