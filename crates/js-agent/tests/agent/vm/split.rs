@@ -262,6 +262,9 @@ fn every_host_question_is_the_other_runtimes() {
     fake.mount_in(Path::new("/mounts"));
     fake.refuse_layer_image("registry.example/l@sha256:0");
     assert!(with.layered_rootfs());
+    fake.own_host_paths(Path::new("/put"));
+    assert!(with.owns_host_path("/put/cas/b/b1/n1"));
+    assert!(!with.owns_host_path("/elsewhere"));
     assert_eq!(
         with.check_layer_image("registry.example/l@sha256:0"),
         alone.check_layer_image("registry.example/l@sha256:0")

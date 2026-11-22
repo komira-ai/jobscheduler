@@ -164,6 +164,8 @@ struct FsScript {
     unreadable: Vec<String>,
     /// The directory the runs' mounts are under (`mounts_of`).
     mounts: Option<PathBuf>,
+    /// The host paths below which the runtime takes a mount source itself (`owns_host_path`).
+    owned: Option<PathBuf>,
 }
 
 /// Where a scripted pull stands.
@@ -605,6 +607,12 @@ impl FakeRuntime {
 impl Runtime for FakeRuntime {
     fn layered_rootfs(&self) -> bool {
         self.state.borrow().fs.is_some()
+    }
+
+    fn owns_host_path(&self, path: &str) -> bool {
+        let state = self.state.borrow();
+        let owned = state.fs.as_ref().and_then(|fs| fs.owned.as_deref());
+        owned.is_some_and(|below| Path::new(path).starts_with(below))
     }
 
     fn check_layer_image(&self, image: &str) -> Result<(), String> {

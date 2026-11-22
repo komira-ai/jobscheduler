@@ -21,6 +21,12 @@ impl FakeRuntime {
         })
     }
 
+    /// From now on the runtime takes a mount source below `below` itself
+    /// (`owns_host_path`), as a Mac's native runtime takes its put targets.
+    pub fn own_host_paths(&self, below: &Path) {
+        self.script().owned = Some(below.to_owned());
+    }
+
     /// `resolve_fs` answers `answer` for `run_id` from now on.
     pub fn resolve_answers(&self, run_id: &str, answer: FsPrepared) {
         self.script().resolved.insert(run_id.to_owned(), answer);

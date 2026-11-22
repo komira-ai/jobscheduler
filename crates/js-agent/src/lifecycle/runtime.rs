@@ -733,6 +733,16 @@ pub trait Runtime {
         false
     }
 
+    /// Whether this runtime takes the host path `path` of a job start's mount itself, as the
+    /// target of what it writes after the run, rather than as a source beneath the agent's
+    /// mount roots: the native runtime's put targets below `--native-put-root`, which no job
+    /// is ever given. The admission then does not hold `path` to the mount roots; the
+    /// runtime's own lookup ([`Runtime::resolve_fs`]) accepts it or refuses it. The default
+    /// takes none.
+    fn owns_host_path(&self, _path: &str) -> bool {
+        false
+    }
+
     /// Refuses a job start's `fs` and `host_ports` this runtime cannot realise, with a code of
     /// its own (not a VM start), asked before the host ports are admitted. The default
     /// refuses nothing.
