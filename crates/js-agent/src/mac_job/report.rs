@@ -26,13 +26,18 @@ pub struct Leftovers {
     pub files: Vec<String>,
     /// The job folder, if it could not be removed: why.
     pub folder: Option<String>,
+    /// What could not be checked, and why (the process table could not be read).
+    pub unchecked: Option<String>,
 }
 
 impl Leftovers {
     /// Whether nothing is left.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.processes.is_empty() && self.files.is_empty() && self.folder.is_none()
+        self.processes.is_empty()
+            && self.files.is_empty()
+            && self.folder.is_none()
+            && self.unchecked.is_none()
     }
 }
 

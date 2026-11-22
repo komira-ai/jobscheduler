@@ -36,8 +36,8 @@
 //! `--spawn ordinary` (the default) starts the job the usual way, so it answers to the privacy
 //! controls as the agent and holds the agent's Full Disk Access: the one way measured to let a
 //! job read tierstore's network file system mount. `--spawn disclaimed` disclaims it, as the
-//! agent's other starts do. The default is provisional, until the owner decides how jobs get the
-//! right to read the mount.
+//! agent's other starts do. The owner decided the default: a job is an ordinary child of the
+//! agent, and the profile keeps it on the mount to its own trees (see [`profile::mount_rules`]).
 //!
 //! It writes a JSON report ([`report::Report`]) to `<out>/report.json` and to standard output,
 //! and the program's standard output and error to `<out>/stdout` and `<out>/stderr`.
@@ -100,7 +100,7 @@ pub mod status {
 /// How the job's program is started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Spawn {
-    /// The usual way: it holds the agent's privacy grants (provisional default).
+    /// The usual way: it holds the agent's privacy grants (the owner's decided default).
     Ordinary,
     /// With its privacy responsibility disclaimed.
     Disclaimed,
@@ -171,7 +171,7 @@ pub struct Args {
     /// The put ingest's root, to commit the outputs to.
     #[arg(long)]
     pub put_ingest: Option<PathBuf>,
-    /// The user the put ingest's node runs as (a name or a uid).
+    /// The user the put ingest's node runs as: a name, or `uid:gid`.
     #[arg(long, default_value = "_tierstore")]
     pub put_user: String,
 }

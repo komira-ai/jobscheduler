@@ -91,7 +91,7 @@ pub fn commit(
     writer.flush()?;
     writer.inner.sync_all()?;
     let sha256 = hex::encode(writer.hash.finalize());
-    let declared = dir.join(format!("pack.sha256-{sha256}.part"));
+    let declared = dir.join(declared_name(&sha256));
     fs::rename(&part, &declared)?;
     fs::rename(&declared, dir.join("pack"))?;
     Ok(Committed {
@@ -101,14 +101,30 @@ pub fn commit(
     })
 }
 
-/// Refuses an output any part of whose path, itself included, is a link.
+/// The name that declares the digest `sha256` (hex) of the object being committed.
+#[must_use]
+pub fn declared_name(sha256: &str) -> String {
+    format!("pack.sha256-{sha256}.part")
+}
+
+/// Refuses an output any part of whose path, itself included, is a link, and one that is not a
+/// regular file or a folder (a FIFO's read would never end).
 fn no_link_on_the_way(work: &Path, output: &str) -> io::Result<()> {
     let mut at = work.to_owned();
+    let mut kind = None;
     for part in output.split('/') {
         at.push(part);
-        if fs::symlink_metadata(&at)?.file_type().is_symlink() {
+        let file_type = fs::symlink_metadata(&at)?.file_type();
+        if file_type.is_symlink() {
             return Err(io::Error::other(format!("{} is a link", at.display())));
         }
+        kind = Some(file_type);
+    }
+    if kind.is_some_and(|k| !k.is_file() && !k.is_dir()) {
+        return Err(io::Error::other(format!(
+            "{} is not a regular file or a folder",
+            at.display()
+        )));
     }
     Ok(())
 }

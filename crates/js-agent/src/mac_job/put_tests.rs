@@ -8,7 +8,7 @@ use std::path::Path;
 use js_testkit::dir::TestDir;
 use sha2::{Digest as _, Sha256};
 
-use super::{Committed, commit};
+use super::{Committed, commit, declared_name};
 
 /// A work folder with a file, a folder holding a file and a link, and a link at its top.
 fn work(dir: &Path) -> std::path::PathBuf {
@@ -110,5 +110,26 @@ fn an_output_through_a_link_or_a_missing_one_is_refused_before_anything_is_made(
     );
     let why = commit(&work, &["gone".to_owned()], &root, "b", "n", &none).expect_err("missing");
     assert_eq!(why.kind(), io::ErrorKind::NotFound);
+    assert!(!root.exists());
+}
+
+#[test]
+fn the_declaring_name_carries_the_digest() {
+    assert_eq!(declared_name("ab12"), "pack.sha256-ab12.part");
+}
+
+#[test]
+fn an_output_that_is_neither_a_file_nor_a_folder_is_refused() {
+    let scratch = TestDir::under(std::env::temp_dir(), "put-sock");
+    let work = work(scratch.path());
+    // A socket file: neither a regular file nor a folder, as a FIFO is not.
+    let fifo = work.join("out/pipe");
+    let _listener = std::os::unix::net::UnixListener::bind(&fifo).unwrap();
+    let root = scratch.path().join("put");
+    let why = commit(&work, &["out/pipe".to_owned()], &root, "b", "n", &none).expect_err("fifo");
+    assert_eq!(
+        why.to_string(),
+        format!("{} is not a regular file or a folder", fifo.display())
+    );
     assert!(!root.exists());
 }

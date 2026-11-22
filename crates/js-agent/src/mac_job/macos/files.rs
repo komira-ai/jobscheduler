@@ -167,10 +167,14 @@ fn collect_one(work: &Path, output: &str, to: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    if fs::metadata(&at)?.is_dir() {
+    let kind = fs::symlink_metadata(&at)?.file_type();
+    if kind.is_dir() {
         fs::create_dir_all(&dest)?;
         copy_tree(&at, &dest, None)
-    } else {
+    } else if kind.is_file() {
         fs::copy(&at, &dest).map(|_| ())
+    } else {
+        // A FIFO or a device: a copy's read would wait for ever or read a device.
+        Err(io::Error::other("not a regular file or a folder"))
     }
 }

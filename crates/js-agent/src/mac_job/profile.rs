@@ -16,8 +16,13 @@
 //!   uses. Kept for measurement.
 //!
 //! The job folder is the parameter `JOB`, given to `sandbox_init_with_parameters` beside the
-//! text, so no path is written into the text. Rules a run adds for measurement (`--profile-add`)
-//! come last.
+//! text, so no path is written into the text. A job with trees also gets [`mount_rules`]: no
+//! read below the mount provider's mount root but in the job's own trees (the owner's decision:
+//! a job started as an ordinary child holds the agent's Full Disk Access, which would let it read
+//! every tree on the mount). Rules a run adds for measurement (`--profile-add`) come last.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 
@@ -110,10 +115,10 @@ const LOOPBACK: &str = r#"; network: the loopback address
 (allow network-outbound (remote ip "localhost:*"))
 "#;
 
-/// The profile text of `kind` for a job with `network`, then `added` (rules a run adds, possibly
-/// empty).
+/// The profile text of `kind` for a job with `network`, then `mount` (the text of
+/// [`mount_rules`], possibly empty), then `added` (rules a run adds, possibly empty).
 #[must_use]
-pub fn render(kind: Kind, network: &Network, added: &str) -> String {
+pub fn render(kind: Kind, network: &Network, mount: &str, added: &str) -> String {
     let mut text = String::from(match kind {
         Kind::ConfinedWrites => CONFINED,
         Kind::DenyDefault => DENY_DEFAULT,
@@ -133,6 +138,7 @@ pub fn render(kind: Kind, network: &Network, added: &str) -> String {
             "(allow network-outbound (remote tcp \"*:{port}\"))\n"
         ));
     }
+    text.push_str(mount);
     if !added.is_empty() {
         text.push_str("; added for this run\n");
         text.push_str(added);
@@ -141,6 +147,50 @@ pub fn render(kind: Kind, network: &Network, added: &str) -> String {
         }
     }
     text
+}
+
+/// The rules that keep a job on the mount to its own trees, and the parameters they name: no
+/// read below `mount` (parameter `MOUNT`), but reads anywhere in each of `trees` (`TREE0`, ...),
+/// and the metadata (not the listing) of each folder between `mount` and a tree (`UP0`, ...),
+/// which a path walk to the tree needs. Every path is absolute and resolved; a tree not strictly
+/// beneath `mount` is refused, with its path.
+pub fn mount_rules(
+    mount: &Path,
+    trees: &[PathBuf],
+) -> Result<(String, Vec<(String, String)>), PathBuf> {
+    let text_of = |p: &Path| p.to_string_lossy().into_owned();
+    let mut params = vec![("MOUNT".to_owned(), text_of(mount))];
+    let mut ups: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut text = String::from(
+        "; the mount: the job's own trees only\n(deny file-read* (subpath (param \"MOUNT\")))\n",
+    );
+    for (i, tree) in trees.iter().enumerate() {
+        let Ok(below) = tree.strip_prefix(mount) else {
+            return Err(tree.clone());
+        };
+        if below.as_os_str().is_empty() {
+            return Err(tree.clone());
+        }
+        let mut up = tree.parent();
+        while let Some(dir) = up.filter(|dir| *dir != mount) {
+            ups.insert(dir.to_owned());
+            up = dir.parent();
+        }
+        let name = format!("TREE{i}");
+        text.push_str(&format!(
+            "(allow file-read* (subpath (param \"{name}\")))\n"
+        ));
+        params.push((name, text_of(tree)));
+    }
+    text.push_str("(allow file-read-metadata (literal (param \"MOUNT\")))\n");
+    for (i, dir) in ups.iter().enumerate() {
+        let name = format!("UP{i}");
+        text.push_str(&format!(
+            "(allow file-read-metadata (literal (param \"{name}\")))\n"
+        ));
+        params.push((name, text_of(dir)));
+    }
+    Ok((text, params))
 }
 
 #[cfg(test)]

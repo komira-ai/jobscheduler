@@ -60,6 +60,7 @@ fn the_tally_counts_each_pid_once_and_ends_clean_on_an_empty_round() {
             by_user_only: vec![102],
             rounds: 3,
             clean: true,
+            error: None,
         }
     );
 }
@@ -70,4 +71,13 @@ fn rules_serialize_in_kebab_case() {
         serde_json::to_string(&[Found::Session, Found::UserOnly]).expect("json"),
         r#"["session","user-only"]"#
     );
+}
+
+#[test]
+fn a_sweep_that_cannot_read_the_process_table_is_not_clean() {
+    let mut tally = Tally::default();
+    assert!(!tally.round(&[]));
+    tally.failed("no listing".to_owned());
+    assert!(!tally.clean);
+    assert_eq!(tally.error.as_deref(), Some("no listing"));
 }

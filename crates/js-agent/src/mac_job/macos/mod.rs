@@ -34,6 +34,12 @@ const POLL: Duration = Duration::from_millis(50);
 /// The pause between sweep rounds, for a killed process to become a zombie and be reaped.
 const SWEEP_PAUSE: Duration = Duration::from_millis(20);
 
+/// The profile text and the parameters it names beside `JOB`.
+struct Profile<'a> {
+    text: &'a str,
+    params: &'a [(String, String)],
+}
+
 /// Why the mode stops before a report.
 enum Stop {
     /// The command line or the job file is wrong.
@@ -161,10 +167,22 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         }
     };
 
-    let profile_text = profile::render(args.profile, &job.network, added);
+    let (mount_text, mount_params) = match trees::rules(args, &mounted) {
+        Ok(rules) => rules,
+        Err(why) => {
+            let _ = trees::release(args, &job, mounted);
+            let _ = files::remove_folder(&layout.folder);
+            return Err(Stop::Setup(why));
+        }
+    };
+    let profile_text = profile::render(args.profile, &job.network, &mount_text, added);
     let new_session = args.audit_session == AuditSession::New;
     let started = Instant::now();
-    let started_job = start(&job, &layout, name, &user, &profile_text, new_session, args);
+    let profile_of = Profile {
+        text: &profile_text,
+        params: &mount_params,
+    };
+    let started_job = start(&job, &layout, name, &user, &profile_of, new_session, args);
     let (mut child, asid) = match started_job {
         Ok(started) => started,
         Err(why) => {
@@ -183,7 +201,7 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         asid,
         own_pid: std::process::id().cast_signed(),
     };
-    let sweep = sweep_job(&ids)?;
+    let sweep = sweep_job(&ids);
     let trees = trees::release(args, &job, mounted);
     let put = args
         .put_ingest
@@ -193,8 +211,13 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     let folder = files::remove_folder(&layout.folder)
         .err()
         .map(|why| format!("{}: {why}", layout.folder.display()));
+    let (processes, unchecked) = match user_processes(user.uid) {
+        Ok(processes) => (processes, None),
+        Err(Stop::Usage(why) | Stop::Setup(why)) => (Vec::new(), Some(why)),
+    };
     let leftovers = Leftovers {
-        processes: user_processes(user.uid)?,
+        processes,
+        unchecked,
         files: snapshot.changed(&scan_roots, user.uid),
         folder: folder.or_else(|| {
             layout
@@ -233,9 +256,14 @@ fn commit_outputs(
     job: &JobFile,
     layout: &Layout,
 ) -> Result<put::Committed, String> {
-    let node = match args.put_user.parse::<u32>() {
-        Ok(uid) => (uid, uid),
-        Err(_) => {
+    let ids = args
+        .put_user
+        .split_once(':')
+        .map(|(uid, gid)| (uid.parse::<u32>(), gid.parse::<u32>()));
+    let node = match ids {
+        Some((Ok(uid), Ok(gid))) => (uid, gid),
+        Some(_) => return Err(format!("--put-user {}: a name or uid:gid", args.put_user)),
+        None => {
             let user =
                 sys::user(&args.put_user).map_err(|why| format!("{}: {why}", args.put_user))?;
             (user.uid, user.gid)
@@ -308,9 +336,27 @@ fn make_folder(layout: &Layout, job: &JobFile, uid: u32, gid: u32) -> Result<(),
         |what: &Path, why: std::io::Error| Stop::Setup(format!("{}: {why}", what.display()));
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700);
+    // A folder that is there already is another run's: it is refused and left alone.
     builder
         .create(&layout.folder)
         .map_err(|why| setup(&layout.folder, why))?;
+    let filled = fill_folder(layout, job, uid, gid, &builder);
+    if filled.is_err() {
+        let _ = files::remove_folder(&layout.folder);
+    }
+    filled
+}
+
+/// The subfolders of a job folder just made, its owner, and its inputs.
+fn fill_folder(
+    layout: &Layout,
+    job: &JobFile,
+    uid: u32,
+    gid: u32,
+    builder: &fs::DirBuilder,
+) -> Result<(), Stop> {
+    let setup =
+        |what: &Path, why: std::io::Error| Stop::Setup(format!("{}: {why}", what.display()));
     for dir in std::iter::once(layout.folder.clone())
         .chain(SUBFOLDERS.iter().map(|name| layout.folder.join(name)))
     {
@@ -333,7 +379,7 @@ fn start(
     layout: &Layout,
     user_name: &str,
     user: &sys::User,
-    profile_text: &str,
+    profile: &Profile<'_>,
     new_session: bool,
     args: &Args,
 ) -> Result<(std::process::Child, Option<i32>), String> {
@@ -357,9 +403,14 @@ fn start(
         asid_out: asid_write.as_raw_fd(),
         uid: user.uid,
         gid: user.gid,
-        profile: cstring("profile", profile_text)?,
-        param_name: cstring("parameter", JOB_PARAM)?,
-        param_value: cstring("job folder", &layout.folder.to_string_lossy())?,
+        profile: cstring("profile", profile.text)?,
+        params: std::iter::once((
+            JOB_PARAM.to_owned(),
+            layout.folder.to_string_lossy().into_owned(),
+        ))
+        .chain(profile.params.iter().cloned())
+        .map(|(name, value)| Ok((cstring("parameter", &name)?, cstring("parameter", &value)?)))
+        .collect::<Result<Vec<_>, String>>()?,
     };
     let run_steps = move || {
         // SAFETY: `Program` runs this in the child of a fork of this process, which has one
@@ -370,7 +421,8 @@ fn start(
     // SAFETY: as above: the steps allocate only because no other thread exists to hold a lock.
     let mut program = unsafe { Program::with_steps(&job.program, &job.args, run_steps) };
     if args.spawn == Spawn::Ordinary {
-        // Provisional (the module documentation of `super`): the job holds the agent's grants.
+        // The owner's decision (the module documentation of `super`): the job holds the agent's
+        // grants, and its profile keeps it on the mount to its own trees.
         program.keep_responsibility();
     }
     program
@@ -421,12 +473,18 @@ fn ended(status: std::process::ExitStatus) -> Ended {
     }
 }
 
-/// Ends every process of the job, in rounds, until a round finds none.
-fn sweep_job(ids: &JobIds) -> Result<Tally, Stop> {
+/// Ends every process of the job, in rounds, until a round finds none. A process table that
+/// cannot be read stops the sweep, not clean, and the cleanup after it goes on.
+fn sweep_job(ids: &JobIds) -> Tally {
     let mut tally = Tally::default();
     for _ in 0..ROUNDS_MAX {
-        let procs = sys::processes(ids.asid.is_some())
-            .map_err(|why| Stop::Setup(format!("listing the processes: {why}")))?;
+        let procs = match sys::processes(ids.asid.is_some()) {
+            Ok(procs) => procs,
+            Err(why) => {
+                tally.failed(format!("listing the processes: {why}"));
+                break;
+            }
+        };
         let found = sweep::targets(&procs, ids);
         if !tally.round(&found) {
             break;
@@ -436,7 +494,7 @@ fn sweep_job(ids: &JobIds) -> Result<Tally, Stop> {
         }
         thread::sleep(SWEEP_PAUSE);
     }
-    Ok(tally)
+    tally
 }
 
 /// The mode of a regular file copied for a job: the owner's bits and the others' read and

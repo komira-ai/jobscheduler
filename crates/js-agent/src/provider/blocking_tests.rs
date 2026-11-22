@@ -6,8 +6,9 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::Duration;
 
+use js_proto::provider::v1 as pb;
 use js_testkit::dir::TestDir;
-use js_testkit::mount_provider::{FakeProvider, Kind, mount_path};
+use js_testkit::mount_provider::{FakeProvider, Kind, Seen, mount_path};
 
 use super::{Provider, beneath};
 use crate::provider::CallBounds;
@@ -48,10 +49,21 @@ fn a_tree_is_prepared_read_only_then_mounted_at_the_path_the_provider_names() {
         .mount("job-1", 0, "cas/l/abc", WAIT)
         .expect("mounted");
     assert_eq!(path, mount_path("mac-1", "js.job-1", 0));
-    let prepared = fake.prepared();
+    let source = Some(pb::Source {
+        agent: "mac-1".to_owned(),
+        run: "js.job-1".to_owned(),
+        index: 0,
+    });
     assert_eq!(
-        prepared.get(&("mac-1".to_owned(), "js.job-1".to_owned(), 0)),
-        Some(&"cas/l/abc".to_owned())
+        fake.requests(),
+        [
+            Seen::Prepare(pb::PrepareRequest {
+                source: source.clone(),
+                r#ref: "cas/l/abc".to_owned(),
+                mode: pb::MountMode::ReadOnly as i32,
+            }),
+            Seen::Mount(pb::MountRequest { source }),
+        ]
     );
 }
 

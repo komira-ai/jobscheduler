@@ -47,8 +47,8 @@
 //! [`Program::keep_responsibility`] leaves the disclaim out for one start: the program then
 //! answers for its starter, as a program started the usual way does. The prototype of the one
 //! Mac program uses it for the jobs it starts (`js-agent __mac-job --spawn ordinary`), because a
-//! measured job reads a network file system mount only when it holds the agent's grant; it is
-//! provisional until the owner decides how jobs get that right.
+//! measured job reads a network file system mount only when it holds the agent's grant, and the
+//! owner decided jobs start so. The agent's other starts keep the disclaim.
 //!
 //! This module is the only code of `js-agent` and `js-mac-session` that starts a program.
 //! `cargo test -p xtask --test spawn_sites` fails when their production code, on any

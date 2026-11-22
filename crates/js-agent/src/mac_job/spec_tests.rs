@@ -339,3 +339,22 @@ fn at_most_sixteen_trees() {
         assert_eq!(error.to_string(), text);
     }
 }
+
+#[test]
+fn a_job_missing_a_required_field_or_with_a_bad_value_does_not_decode() {
+    for text in [
+        r#"{"id":"j","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh"}"#,
+        r#"{"os":"macos","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","arch":"sparc","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":-1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":1.5}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":1,"network":{"outbound_ports":[70000]}}"#,
+    ] {
+        assert!(
+            matches!(JobFile::parse(text, Arch::Arm64), Err(SpecError::Decode(_))),
+            "{text}"
+        );
+    }
+}

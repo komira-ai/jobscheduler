@@ -25,6 +25,8 @@ const RELEASE_WAIT: Duration = Duration::from_secs(30);
 pub(super) struct Mounted {
     /// The source index it was mounted under.
     index: u32,
+    /// The path it was mounted at, resolved.
+    resolved: PathBuf,
     /// What the report says of it.
     entry: TreeUse,
 }
@@ -75,8 +77,14 @@ pub(super) fn link(
     let mut mounted = Vec::new();
     for (index, tree) in (0u32..).zip(&job.trees) {
         match link_one(&provider, &root, job, layout, index, tree, (uid, gid)) {
-            Ok(entry) => mounted.push(Mounted { index, entry }),
+            Ok((entry, resolved)) => mounted.push(Mounted {
+                index,
+                resolved,
+                entry,
+            }),
             Err(why) => {
+                // The failing tree may be prepared or mounted already: it goes too.
+                let _ = provider.release(&job.id, index, RELEASE_WAIT);
                 let _ = release(args, job, mounted);
                 return Err(format!("tree {} at {}: {why}", tree.reference, tree.at));
             }
@@ -94,7 +102,7 @@ fn link_one(
     index: u32,
     tree: &crate::mac_job::spec::Tree,
     (uid, gid): (u32, u32),
-) -> Result<TreeUse, String> {
+) -> Result<(TreeUse, PathBuf), String> {
     let started = Instant::now();
     let path = provider
         .mount(&job.id, index, &tree.reference, MOUNT_WAIT)
@@ -107,31 +115,51 @@ fn link_one(
             root.display()
         ));
     }
-    let link = layout.work().join(&tree.at);
-    let work = layout.work();
-    let mut parent = link
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| work.clone());
-    let mut made = Vec::new();
-    while parent != work && !parent.exists() {
-        made.push(parent.clone());
-        let Some(up) = parent.parent() else { break };
-        parent = up.to_path_buf();
+    // Each part of the place is walked without following a link: the inputs copied into work may
+    // hold links, and root must make nothing through one.
+    let mut link = layout.work();
+    let parts: Vec<&str> = tree.at.split('/').collect();
+    let (last, parents) = parts.split_last().unwrap_or((&"", &[]));
+    for part in parents {
+        link.push(part);
+        match fs::symlink_metadata(&link) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(format!("{} is not a folder", link.display())),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&link).map_err(|why| format!("{}: {why}", link.display()))?;
+                lchown(&link, Some(uid), Some(gid))
+                    .map_err(|why| format!("{}: {why}", link.display()))?;
+            }
+            Err(why) => return Err(format!("{}: {why}", link.display())),
+        }
     }
-    for dir in made.iter().rev() {
-        fs::create_dir(dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-        lchown(dir, Some(uid), Some(gid)).map_err(|why| format!("{}: {why}", dir.display()))?;
-    }
+    link.push(last);
     symlink(&resolved, &link).map_err(|why| format!("{}: {why}", link.display()))?;
     lchown(&link, Some(uid), Some(gid)).map_err(|why| format!("{}: {why}", link.display()))?;
-    Ok(TreeUse {
+    let entry = TreeUse {
         reference: tree.reference.clone(),
         at: tree.at.clone(),
         path,
         mount_ms,
         released: Ok(()),
-    })
+    };
+    Ok((entry, resolved))
+}
+
+/// The profile's rules for the mounted trees, and their parameters: none without trees.
+pub(super) fn rules(
+    args: &Args,
+    mounted: &[Mounted],
+) -> Result<(String, Vec<(String, String)>), String> {
+    if mounted.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    let Some((_, root)) = provider(args)? else {
+        return Err("trees are mounted and no --mount-root is given".to_owned());
+    };
+    let trees: Vec<PathBuf> = mounted.iter().map(|m| m.resolved.clone()).collect();
+    crate::mac_job::profile::mount_rules(&root, &trees)
+        .map_err(|tree| format!("{} is not beneath {}", tree.display(), root.display()))
 }
 
 /// Releases every mounted tree: the report's entries, each with its release.
@@ -142,14 +170,18 @@ pub(super) fn release(args: &Args, job: &JobFile, mounted: Vec<Mounted>) -> Vec<
     };
     mounted
         .into_iter()
-        .map(|Mounted { index, mut entry }| {
-            entry.released = match &provider {
-                Some(provider) => provider
-                    .release(&job.id, index, RELEASE_WAIT)
-                    .map_err(|why| why.to_string()),
-                None => Err("no provider to release it with".to_owned()),
-            };
-            entry
-        })
+        .map(
+            |Mounted {
+                 index, mut entry, ..
+             }| {
+                entry.released = match &provider {
+                    Some(provider) => provider
+                        .release(&job.id, index, RELEASE_WAIT)
+                        .map_err(|why| why.to_string()),
+                    None => Err("no provider to release it with".to_owned()),
+                };
+                entry
+            },
+        )
         .collect()
 }
