@@ -146,7 +146,7 @@ use crate::lifecycle::{
     Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
 };
 use crate::logs::LiveLogs;
-use crate::mac_accounts::Pool;
+use crate::mac_accounts::{Pool, Retired};
 use crate::mac_supervisor::Launcher;
 
 pub use accounts::Accounts;
@@ -229,6 +229,8 @@ pub struct NativeRuntime {
     now_ms: Clock,
     /// Whether each run's supervisor opens an audit session of its own (which needs root).
     new_session: bool,
+    /// The account the last removal retired, and what its retirement showed.
+    last_retired: Option<(String, Retired)>,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -311,7 +313,16 @@ impl NativeRuntime {
             logs: None,
             now_ms: system_clock(),
             new_session: true,
+            last_retired: None,
         })
+    }
+
+    /// The account the last removal retired and what its retirement showed (the processes it
+    /// killed, each item of the proof that it is gone): what the development verb prints.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_retired(&self) -> Option<&(String, Retired)> {
+        self.last_retired.as_ref()
     }
 
     /// Whether the runtime has an account pool: the agent holds Full Disk Access.
