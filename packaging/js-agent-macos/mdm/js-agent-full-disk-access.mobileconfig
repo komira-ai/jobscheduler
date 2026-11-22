@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadDescription</key>
+			<string>Grants Full Disk Access to the root helper of js-agent and to nothing else.</string>
+			<key>PayloadDisplayName</key>
+			<string>js-agent root helper: Full Disk Access</string>
+			<key>PayloadIdentifier</key>
+			<string>com.komira.js-agent.full-disk-access.policy</string>
+			<key>PayloadType</key>
+			<string>com.apple.TCC.configuration-profile-policy</string>
+			<key>PayloadUUID</key>
+			<string>5C0E7A52-6B1D-4B7E-9C47-2D1F3A8E9B10</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>Services</key>
+			<dict>
+				<key>SystemPolicyAllFiles</key>
+				<array>
+					<dict>
+						<key>Authorization</key>
+						<string>Allow</string>
+						<key>CodeRequirement</key>
+						<string>identifier "com.komira.js-agent.session" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X</string>
+						<key>Comment</key>
+						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and manages the accounts native jobs run as. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<key>Identifier</key>
+						<string>/Library/Application Support/js-agent/bin/js-mac-session</string>
+						<key>IdentifierType</key>
+						<string>path</string>
+						<key>StaticCode</key>
+						<false/>
+					</dict>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>Full Disk Access for the root helper of js-agent, by its installed path and its signature.</string>
+	<key>PayloadDisplayName</key>
+	<string>js-agent: Full Disk Access</string>
+	<key>PayloadIdentifier</key>
+	<string>com.komira.js-agent.full-disk-access</string>
+	<key>PayloadOrganization</key>
+	<string>Komira AI, Inc.</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>A3F1D2C4-8E65-4F0B-B7A9-6D52E0C14F38</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>

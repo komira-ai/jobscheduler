@@ -98,9 +98,22 @@ fn step_jobs(text: &str) -> BTreeMap<String, Vec<&str>> {
 #[test]
 fn the_workflow_has_a_build_job_a_first_install_call_and_a_sign_job() {
     let names: Vec<String> = jobs(&read(WORKFLOW)).into_keys().collect();
-    assert_eq!(names, ["build", "build-update", "first-install", "sign"]);
+    assert_eq!(
+        names,
+        [
+            "build",
+            "build-update",
+            "first-install",
+            "package",
+            "sign",
+            "sign-code"
+        ]
+    );
     let steps: Vec<String> = step_jobs(&read(WORKFLOW)).into_keys().collect();
-    assert_eq!(steps, ["build", "build-update", "sign"]);
+    assert_eq!(
+        steps,
+        ["build", "build-update", "package", "sign", "sign-code"]
+    );
 }
 
 /// One line per way the job `first-install` of the workflow `text` is not the call of the
@@ -338,7 +351,7 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
         .filter(|l| l.contains("uses:"))
         .collect();
     // The calls that are not pinned are the local workflow and the local actions, which are this
-    // repository's own: the package action in the two jobs that build a package, and the action
+    // repository's own: the package action in the three jobs that build a package, and the action
     // that names the next version.
     let local: Vec<&str> = uses
         .iter()
@@ -350,6 +363,7 @@ fn every_action_is_pinned_to_a_commit_and_the_jobs_that_run_steps_run_on_macos_1
         [
             "uses: ./.github/actions/js-agent-macos-pkg",
             "uses: ./.github/actions/js-agent-next-version",
+            "uses: ./.github/actions/js-agent-macos-pkg",
             "uses: ./.github/actions/js-agent-macos-pkg",
             FIRST_INSTALL_USES,
         ]
@@ -480,7 +494,7 @@ fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protec
         .collect();
     assert!(at_four.contains(&SIGN_IF), "{at_four:?}");
     assert!(at_four.contains(&"environment: pkg-signing"), "{at_four:?}");
-    assert!(at_four.contains(&"needs: [build]"), "{at_four:?}");
+    assert!(at_four.contains(&"needs: [build, package]"), "{at_four:?}");
 }
 
 #[test]
@@ -708,6 +722,7 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
     let build = all.get("build").map_or(String::new(), |j| j.join("\n"));
     let build = format!("{build}\n{}", code(action).join("\n"));
     let sign = all.get("sign").map_or(String::new(), |j| j.join("\n"));
+    let package = all.get("package").map_or(String::new(), |j| j.join("\n"));
     let body = format!("{}\n{}", code(text).join("\n"), code(action).join("\n"));
     let mut problems = Vec::new();
     let mut want = |ok: bool, what: &str| {
@@ -777,10 +792,12 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
     );
     want(
         build.contains("name: js-agent-macos-pkg-unsigned")
-            && sign.contains("name: js-agent-macos-pkg-unsigned")
+            && package.contains("name: js-agent-macos-pkg-codesigned")
+            && sign.contains("name: js-agent-macos-pkg-codesigned")
+            && !sign.contains("name: js-agent-macos-pkg-unsigned")
             && sign.contains("name: js-agent-macos-pkg-signed")
             && !build.contains("js-agent-macos-pkg-signed"),
-        "the artifacts are not the unsigned one from build and the signed one from sign",
+        "the artifacts are not the unsigned one from build, the one of the signed programs from package and the signed one from sign",
     );
     problems
 }
@@ -809,8 +826,8 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "pkgbuild does not build the component",
         ),
         (
-            "\"dist/js-agent-$VERSION-macos-arm64.pkg\"\n    - name: The unsigned",
-            "\"dist/js-agent-$VERSION-aarch64-apple-darwin.pkg\"\n    - name: The unsigned",
+            "\"dist/js-agent-$VERSION-macos-arm64.pkg\"\n    - name: The package is the package",
+            "\"dist/js-agent-$VERSION-aarch64-apple-darwin.pkg\"\n    - name: The package is the package",
             "the package is not named js-agent-<version>-macos-arm64.pkg",
         ),
         (
@@ -871,7 +888,12 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
         (
             "name: js-agent-macos-pkg-signed",
             "name: js-agent-macos-pkg",
-            "the artifacts are not the unsigned one from build and the signed one from sign",
+            "the artifacts are not the unsigned one from build",
+        ),
+        (
+            "name: js-agent-macos-pkg-codesigned",
+            "name: js-agent-macos-pkg-other",
+            "the artifacts are not the unsigned one from build",
         ),
     ] {
         // The package's steps are the action's; the artifacts and the signing are the workflow's.
