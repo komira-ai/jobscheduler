@@ -51,6 +51,9 @@ pub struct CrunSettings {
     pub gpus: Option<GpuSettings>,
     /// The most bytes the unpacked images may take (`--image-budget-gib`); none for no budget.
     pub image_budget: Option<u64>,
+    /// The operator's CPU ceiling (`--cpu-ceiling`): each lease is held to its booked CPU
+    /// times it, a `cpu.max` beside its `cpu.weight`; none (the default) for no ceiling.
+    pub cpu_ceiling: Option<js_contain::CpuCeiling>,
     /// Whether a host job (`isolation = host`) is launched (`--allow-host-jobs`); without it
     /// one is refused before anything is made.
     pub host_jobs: bool,

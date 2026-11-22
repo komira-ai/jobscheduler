@@ -337,6 +337,8 @@ pub struct CrunRuntime {
     configs: PathBuf,
     files: Option<FilesRoot>,
     gpus: Option<GpuSettings>,
+    /// The operator's CPU ceiling ([`CrunSettings::cpu_ceiling`]).
+    cpu_ceiling: Option<js_contain::CpuCeiling>,
     /// Whether host jobs are launched ([`CrunSettings::host_jobs`]).
     host_jobs: bool,
     /// Whether the leases' directories are made beside the runs' own
@@ -466,6 +468,7 @@ impl CrunRuntime {
             files: settings.files,
             gpus: settings.gpus,
             host_jobs: settings.host_jobs,
+            cpu_ceiling: settings.cpu_ceiling,
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,

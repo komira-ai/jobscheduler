@@ -40,6 +40,7 @@
 pub mod cgroup;
 pub mod cgroup_usage;
 pub mod container;
+pub mod cpu_ceiling;
 pub mod delegate;
 pub mod give;
 pub mod job_fs;
@@ -62,6 +63,7 @@ pub use cgroup_usage::{CgroupUsage, NumaNodeBytes};
 pub use container::{
     ContainerLimits, ContainerSpec, Dirs, Ended, HostMount, Isolation, SharedMount,
 };
+pub use cpu_ceiling::{CpuCeiling, CpuCeilingError};
 pub use delegate::Capacity;
 pub use numa::Spot;
 pub use oci::{Oci, OciConfig, OciError};

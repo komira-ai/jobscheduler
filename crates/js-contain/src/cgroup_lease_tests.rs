@@ -457,3 +457,25 @@ fn the_build_host_policy_is_unchanged_and_the_default() {
     assert_eq!(read("memory.swap.max"), None);
     assert_eq!(read("cpu.max"), None);
 }
+
+/// Catches an operator's CPU ceiling not written, or written as something else than the cores
+/// as a quota per 100 ms period beside the weight that shares the cores: a lease that booked
+/// half a core under a ceiling of 2 is held to one core (`100000 100000`) and keeps its weight
+/// of 50; a ceiling of 0 cores writes nothing.
+#[test]
+fn an_operators_ceiling_holds_a_lease_beside_its_weight() {
+    let root = mount("ceiling");
+    std::fs::create_dir(root.join("actions")).expect("mkdir");
+    let lease = LeaseCgroup::at(&root, "/actions", "lease-1-1");
+    lease
+        .create_with(&booking(500, 1 << 30), None, LeasePolicy::HardMemory)
+        .expect("created");
+    let read = |file: &str| std::fs::read_to_string(lease.dir().join(file)).ok();
+    lease.hold_cpu(0).expect("nothing to hold");
+    assert_eq!(read("cpu.max"), None);
+    let ceiling: crate::CpuCeiling = "2".parse().expect("a ceiling");
+    let most = ceiling.millis_of(500).expect("a booking");
+    lease.hold_cpu(most).expect("held");
+    assert_eq!(read("cpu.max").as_deref(), Some("100000 100000"));
+    assert_eq!(read("cpu.weight").as_deref(), Some("50"));
+}

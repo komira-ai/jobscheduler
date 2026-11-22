@@ -157,7 +157,7 @@ fn the_timeline_of_a_start_with_a_provider_shows_provided_between_dirs_and_resol
             run_id: "j1".to_owned(),
             timeline,
             booked: js_agent::lifecycle::JobBooking {
-                cpu_millis: 1000,
+                cpu_millis: 100,
                 memory_bytes: 1 << 30,
                 sizing: None,
             },

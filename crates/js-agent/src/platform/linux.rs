@@ -138,6 +138,15 @@ pub struct Flags {
     /// 0; by default there is no budget and no image is evicted. Needs the crun runtime.
     #[arg(long, value_name = "GIB")]
     pub image_budget_gib: Option<u64>,
+    /// A ceiling on each job's CPU, as a multiple of the CPU it booked (`1`, `1.5`, `2`; from
+    /// 1 to 1000, at most three decimals). A job is always guaranteed the CPU it booked: its
+    /// lease's `cpu.weight` keeps that when the host is busier than planned. By default there
+    /// is no ceiling and a job also uses every core no other job wants. With one, the lease
+    /// and the job's own cgroup get a `cpu.max` of the booking times the multiple, so a job
+    /// is held to it and reads it as its CPU count (`--cpus` on the container engine); at 1 a
+    /// job is held to its booking.
+    #[arg(long, value_name = "MULTIPLE")]
+    pub cpu_ceiling: Option<js_contain::CpuCeiling>,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -414,6 +423,7 @@ impl Flags {
             ("--allow-container-engine", self.allow_container_engine),
             ("--allow-host-jobs", self.allow_host_jobs),
             ("--allow-fuse-jobs", self.allow_fuse_jobs),
+            ("--cpu-ceiling", self.cpu_ceiling.is_some()),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
@@ -732,7 +742,9 @@ pub(crate) fn jobs(
     );
     let from_flags = Settings::from_flags(&os.engine(), agent).map_err(|why| why.to_string())?;
     Ok(Jobs {
-        container: crun.or(from_flags),
+        container: crun
+            .or(from_flags)
+            .map(|settings| settings.with_cpu_ceiling(os.cpu_ceiling)),
         layout,
         egress,
         settle: crate::lifecycle::settle(os.settle_ms)?,

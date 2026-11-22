@@ -1,10 +1,11 @@
 //! Where a job's booking came from ([`StartSizing`], on [`crate::JobStartSpec::sizing`]) and
 //! the throttled share of a job's CPU periods ([`CpuThrottle::throttled_permille`]; the counts
-//! are [`crate::JobUsage::cpu_throttle`]). The agent books a job's CPU as a share of the node's
-//! cores (its lease's `cpu.weight`), never as a ceiling; both fields are there so that a run's
-//! CPU can be read for what it is: a run its host never throttled used what it wanted, and
-//! one a host throttled (an agent from before the share, which wrote `cpu.max`) used at most
-//! what it booked.
+//! are [`crate::JobUsage::cpu_throttle`]). A job is guaranteed the CPU it booked and is not held
+//! below what it needs (its lease's `cpu.weight` keeps the guarantee; there is no `cpu.max`
+//! unless the operator sets a ceiling), so a run's CPU can be read for what it is: a run its
+//! host never throttled used what it wanted, and one a host throttled (an agent from before
+//! this, which wrote `cpu.max` of the booking, or one under a ceiling) used at most what it was
+//! allowed.
 //!
 //! Both are additive and never part of a message's acceptance: a value that does not decode
 //! reads as absent, and an agent or a server from before them ignores them.

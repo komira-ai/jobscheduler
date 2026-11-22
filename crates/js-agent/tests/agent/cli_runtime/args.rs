@@ -89,7 +89,7 @@ fn limits_to_args_table() {
     ];
     for (name, job, expected) in rows {
         assert_eq!(
-            limits_to_args(Engine::Docker, &job, true).unwrap(),
+            limits_to_args(Engine::Docker, &job, true, None).unwrap(),
             expected,
             "{name}"
         );
@@ -97,7 +97,7 @@ fn limits_to_args_table() {
         *podman.last_mut().unwrap() =
             "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev".to_owned();
         assert_eq!(
-            limits_to_args(Engine::Podman, &job, true).unwrap(),
+            limits_to_args(Engine::Podman, &job, true, None).unwrap(),
             podman,
             "{name}"
         );
@@ -118,7 +118,7 @@ fn a_limit_of_zero_is_refused() {
         let mut job = spec("r1");
         (job.cpu_millis, job.memory_bytes, job.pids) = (cpu_millis, memory_bytes, pids);
         for engine in [Engine::Docker, Engine::Podman] {
-            let said = limits_to_args(engine, &job, true);
+            let said = limits_to_args(engine, &job, true, None);
             assert_eq!(said, Err(ArgsError::ZeroLimit), "{name}");
         }
     }
@@ -356,13 +356,13 @@ fn the_actions_cgroup_becomes_the_cgroup_parent() {
 fn gpu_flag_lists_exact_indices() {
     let mut job = spec("r1");
     job.gpu_indices = vec![0, 2];
-    let docker = limits_to_args(Engine::Docker, &job, true).unwrap();
+    let docker = limits_to_args(Engine::Docker, &job, true, None).unwrap();
     let at = docker.iter().position(|arg| arg == "--gpus").unwrap();
     assert_eq!(docker[at + 1], "\"device=0,2\"");
     assert!(!docker.iter().any(|arg| arg.contains("all")));
     assert!(!docker.iter().any(|arg| arg == "--device"));
 
-    let podman = limits_to_args(Engine::Podman, &job, false).unwrap();
+    let podman = limits_to_args(Engine::Podman, &job, false, None).unwrap();
     let devices: Vec<&String> = podman
         .windows(2)
         .filter(|pair| pair[0] == "--device")
@@ -376,12 +376,12 @@ fn gpu_flag_lists_exact_indices() {
     );
 
     job.gpu_indices = vec![1];
-    let one = limits_to_args(Engine::Docker, &job, true).unwrap();
+    let one = limits_to_args(Engine::Docker, &job, true, None).unwrap();
     assert!(one.contains(&"\"device=1\"".to_owned()));
 
     job.gpu_indices = Vec::new();
     for engine in [Engine::Docker, Engine::Podman] {
-        let none = limits_to_args(engine, &job, true).unwrap();
+        let none = limits_to_args(engine, &job, true, None).unwrap();
         assert!(!none.iter().any(|a| a == "--gpus" || a == "--device"));
     }
 }
@@ -398,7 +398,7 @@ fn docker_gets_the_gpu_indices_as_one_quoted_argument() {
     let mut job = spec("r1");
     for (indices, value) in [(vec![1], "\"device=1\""), (vec![0, 1], "\"device=0,1\"")] {
         job.gpu_indices = indices;
-        let args = limits_to_args(Engine::Docker, &job, true).unwrap();
+        let args = limits_to_args(Engine::Docker, &job, true, None).unwrap();
         let pairs: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ["--gpus".to_owned(), value.to_owned()]);
@@ -432,7 +432,7 @@ fn mount_ro_honoured() {
         mount("/srv/data/in", "/mnt/data/in", true),
         mount("/srv/data/out", "/mnt/data/out", false),
     ];
-    let args = limits_to_args(Engine::Docker, &job, true).unwrap();
+    let args = limits_to_args(Engine::Docker, &job, true, None).unwrap();
     assert_eq!(
         mounts_of(&args),
         [
@@ -444,7 +444,7 @@ fn mount_ro_honoured() {
     assert_eq!(SCRATCH_TARGET, "/scratch");
     assert!(!args.iter().any(|arg| arg == "-v" || arg == "--volume"));
 
-    let old = limits_to_args(Engine::Docker, &job, false).unwrap();
+    let old = limits_to_args(Engine::Docker, &job, false, None).unwrap();
     assert_eq!(
         mounts_of(&old),
         [
@@ -470,7 +470,7 @@ fn podman_mounts_are_nosuid_nodev() {
         mount("/srv/data/in", "/mnt/data/in", true),
         mount("/srv/data/out", "/mnt/data/out", false),
     ];
-    let args = limits_to_args(Engine::Podman, &job, false).unwrap();
+    let args = limits_to_args(Engine::Podman, &job, false, None).unwrap();
     assert_eq!(
         mounts_of(&args),
         [
@@ -479,7 +479,7 @@ fn podman_mounts_are_nosuid_nodev() {
             "type=bind,src=/srv/data/out,dst=/mnt/data/out,nosuid,nodev",
         ]
     );
-    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    let docker = limits_to_args(Engine::Docker, &job, false, None).unwrap();
     let docker = mounts_of(&docker);
     assert_eq!(docker[0], DOCKER_SCRATCH);
     assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
@@ -494,19 +494,19 @@ fn podman_mounts_are_nosuid_nodev() {
 fn the_files_mount_is_read_only_at_the_fixed_path() {
     let mut job = spec("r1");
     assert!(
-        !mounts_of(&limits_to_args(Engine::Podman, &job, false).unwrap())
+        !mounts_of(&limits_to_args(Engine::Podman, &job, false, None).unwrap())
             .iter()
             .any(|m| m.contains("/run/js-files"))
     );
     job.mounts = vec![mount("/srv/data/in", "/mnt/data/in", true)];
     job.files = Some("/work/scratch/r1@files".into());
     assert_eq!(FILES_TARGET, "/run/js-files");
-    let podman = limits_to_args(Engine::Podman, &job, true).unwrap();
+    let podman = limits_to_args(Engine::Podman, &job, true, None).unwrap();
     assert_eq!(
         mounts_of(&podman).last().unwrap().as_str(),
         "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly,bind-recursive=readonly,bind-propagation=rprivate,nosuid,nodev"
     );
-    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    let docker = limits_to_args(Engine::Docker, &job, false, None).unwrap();
     assert_eq!(
         mounts_of(&docker).last().unwrap().as_str(),
         "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly"
@@ -542,7 +542,7 @@ fn mount_injection_is_refused() {
     for host in bad_host {
         let mut job = spec("r1");
         job.mounts = vec![mount(host, "/mnt/data/a", false)];
-        let said = limits_to_args(Engine::Docker, &job, true);
+        let said = limits_to_args(Engine::Docker, &job, true, None);
         assert_eq!(said, Err(ArgsError::MountPath), "{host:?}");
     }
     for target in [
@@ -554,25 +554,25 @@ fn mount_injection_is_refused() {
     ] {
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/a", target, true)];
-        let said = limits_to_args(Engine::Podman, &job, true);
+        let said = limits_to_args(Engine::Podman, &job, true, None);
         assert_eq!(said, Err(ArgsError::MountPath), "{target:?}");
     }
     let mut job = spec("r1");
     job.mounts = vec![mount("/srv/a", "/mnt/a", false)];
     job.mounts[0].host = PathBuf::from(OsStr::from_bytes(b"/srv/\xff"));
     assert_eq!(
-        limits_to_args(Engine::Docker, &job, true),
+        limits_to_args(Engine::Docker, &job, true, None),
         Err(ArgsError::MountPath)
     );
     let mut job = spec("r1");
     job.scratch = PathBuf::from("/work/scratch,x=y/r1");
     assert_eq!(
-        limits_to_args(Engine::Docker, &job, true),
+        limits_to_args(Engine::Docker, &job, true, None),
         Err(ArgsError::MountPath)
     );
     job.scratch = PathBuf::from("/work/scratch:x/r1");
     assert_eq!(
-        limits_to_args(Engine::Docker, &job, true),
+        limits_to_args(Engine::Docker, &job, true, None),
         Err(ArgsError::MountPath)
     );
 }
@@ -622,5 +622,28 @@ fn add_hosts_reach_create() {
             pairs,
             ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
         );
+    }
+}
+
+/// Asserts the operator's CPU ceiling on the engines: none gives no `--cpus` (the booking is
+/// the share alone); a ceiling gives `--cpus` of the booking times it, rounded up, after the
+/// share and the other limits, on Docker and Podman alike; a ceiling of 1 holds the job to its
+/// booking. It catches a ceiling not passed, one below the booking times the multiple, and one
+/// that drops the share it sits beside.
+#[test]
+fn an_operators_ceiling_adds_cpus_of_the_booking_times_it() {
+    let mut job = spec("r1");
+    (job.cpu_millis, job.memory_bytes, job.pids) = (1500, 1 << 30, Some(100));
+    let ceiling = |text: &str| Some(text.parse::<js_contain::CpuCeiling>().expect("a ceiling"));
+    for engine in [Engine::Docker, Engine::Podman] {
+        let none = limits_to_args(engine, &job, true, None).unwrap();
+        assert!(!none.contains(&"--cpus".to_owned()), "{none:?}");
+        for (multiple, cpus) in [("1", "1.500"), ("2", "3.000"), ("1.001", "1.502")] {
+            let held = limits_to_args(engine, &job, true, ceiling(multiple)).unwrap();
+            let at = held.iter().position(|arg| arg == "--cpus").expect("--cpus");
+            assert_eq!(held[at + 1], cpus, "{engine:?} {multiple}");
+            assert_eq!(&held[..2], ["--cpu-shares", "1536"], "{engine:?}");
+            assert_eq!(held.len(), none.len() + 2, "{engine:?}");
+        }
     }
 }

@@ -117,7 +117,8 @@ pub(super) fn container_spec(
         argv: Vec::new(),
         // The memory booking again on the container's own cgroup, which the job reads as its
         // `/sys/fs/cgroup`: the lease's (`LeasePolicy::HardMemory`) is what bounds it. The CPU
-        // booking is the lease's `cpu.weight`, a share: no cgroup of the job has a `cpu.max`.
+        // booking is a guarantee the lease's `cpu.weight` keeps, not a ceiling: no cgroup of the
+        // job has a `cpu.max` unless the operator set a ceiling (`Maker::make_recorded`).
         limits: ContainerLimits {
             pids: run.pids.unwrap_or(DEFAULT_PIDS),
             memory_bytes: Some(run.memory_bytes),

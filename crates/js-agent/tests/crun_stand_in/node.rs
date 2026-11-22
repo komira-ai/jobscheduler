@@ -353,6 +353,7 @@ impl Node {
             host_jobs: false,
             host_ports: HostPorts::default(),
             fs: None,
+            cpu_ceiling: None,
         }
     }
 

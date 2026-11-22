@@ -21,6 +21,7 @@ use super::hardening::{
 };
 use crate::cgroup::hard_memory_max;
 use crate::container::{ACTION_ID, ContainerLimits, ContainerSpec, HostMount, Isolation};
+use crate::cpu_ceiling::cpu_max;
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
@@ -319,13 +320,18 @@ pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
 /// more than its parent allows, and the job, which owns its cgroup's files, may raise it to
 /// no effect). It is there because the job's cgroup namespace makes this cgroup its
 /// `/sys/fs/cgroup`: a tool that sizes itself from `memory.max` there (the JVM) reads the
-/// booking rather than `max`. There is no `cpu.max`, here or on the lease: the CPU booking
-/// is a share, not a ceiling, so a tool that sizes itself from `cpu.max` (Rust's
-/// `available_parallelism`, Go's `GOMAXPROCS` from Go 1.25, the JVM) reads `max` and, like
-/// one that counts the CPUs it may run on (`sched_getaffinity`: busybox `nproc`, Zig's
-/// `getCpuCount`), sizes itself to the node's CPUs.
+/// booking rather than `max`. The CPU booking is the lease's `cpu.weight`, not a ceiling: with
+/// no operator's ceiling there is no `cpu.max`, here or on the lease, so a tool that sizes
+/// itself from `cpu.max` (Rust's `available_parallelism`, Go's `GOMAXPROCS` from Go 1.25, the
+/// JVM) reads `max` and, like one that counts the CPUs it may run on (`sched_getaffinity`:
+/// busybox `nproc`, Zig's `getCpuCount`), sizes itself to the node's CPUs. With a ceiling
+/// (`limits.cpu_ceiling_millis`) the lease's `cpu.max` is repeated here, so such a tool reads
+/// the ceiling.
 pub(crate) fn unified(limits: ContainerLimits) -> HashMap<String, String> {
     let mut files = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
+    if let Some(cpu) = limits.cpu_ceiling_millis.and_then(cpu_max) {
+        files.insert("cpu.max".to_owned(), cpu);
+    }
     if let Some(memory) = limits.memory_bytes.and_then(hard_memory_max) {
         files.insert("memory.max".to_owned(), memory.to_string());
     }
@@ -363,7 +369,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | only the Command's environment           | `process.env` is the Command's variables only      |
 /// | the Command's argv and directory         | `process.args`, `process.cwd`                      |
 /// | the lease cgroup, `memory.oom.group=1`   | `cgroupsPath` a child of the lease cgroup, `unified` `memory.oom.group`       |
-/// | the memory booking seen from inside      | `unified` `memory.max` the lease's (only when the limits name it); no `cpu.max` |
+/// | the booking seen from inside             | `unified` `memory.max` the lease's (when the limits name it); `cpu.max` only for an operator's CPU ceiling |
 /// | a pids limit                             | `resources.pids.limit`                             |
 /// | `nofile`, `nproc` ulimits, no core dump  | `process.rlimits` (`RLIMIT_CORE` 0)                |
 /// | no capability                            | the five `process.capabilities` sets, empty; the seccomp filter resolved for none |
@@ -873,7 +879,8 @@ mod tests {
     /// Catches a job whose `/sys/fs/cgroup/memory.max` reads `max` while its lease is held to
     /// the booking, a container cgroup whose memory limit differs from the lease's (1 GiB is
     /// `1073741824` in both, byte for byte, beside `memory.oom.group`), and a `cpu.max` on
-    /// either: the CPU booking is a share, so neither the lease nor the container holds the
+    /// either: the CPU booking is a guarantee kept by the lease's weight, so (with no operator's
+    /// ceiling) neither the lease nor the container holds the
     /// job to it, and the job reads `max`.
     #[test]
     fn the_containers_cgroup_repeats_the_leases_memory_max_and_neither_has_a_cpu_max() {
@@ -901,6 +908,28 @@ mod tests {
         assert_eq!(
             unified(Some(4096)),
             json!({"memory.oom.group": "1", "memory.max": "4096"})
+        );
+    }
+
+    /// Catches an operator's CPU ceiling the job cannot read: with one, the container's own
+    /// cgroup repeats it as `cpu.max` (one and a half cores is `150000 100000`) beside the
+    /// memory limit, so a tool that sizes itself from `cpu.max` sizes itself to the ceiling.
+    #[test]
+    fn an_operators_ceiling_is_repeated_on_the_containers_cgroup() {
+        let mut capped = booked(Some(1 << 30));
+        capped.limits.cpu_ceiling_millis = Some(1500);
+        assert_eq!(
+            config_of(&capped)["linux"]["resources"]["unified"],
+            json!({
+                "memory.oom.group": "1",
+                "memory.max": "1073741824",
+                "cpu.max": "150000 100000",
+            })
+        );
+        capped.limits.cpu_ceiling_millis = Some(0);
+        assert_eq!(
+            config_of(&capped)["linux"]["resources"]["unified"],
+            json!({"memory.oom.group": "1", "memory.max": "1073741824"})
         );
     }
 }

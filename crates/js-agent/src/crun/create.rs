@@ -115,6 +115,8 @@ pub(super) struct Maker {
     pub(super) hooks: Hooks,
     pub(super) ledger: Ledger,
     pub(super) logs: Option<LiveLogs>,
+    /// The operator's CPU ceiling ([`CrunSettings::cpu_ceiling`](super::CrunSettings::cpu_ceiling)).
+    pub(super) cpu_ceiling: Option<js_contain::CpuCeiling>,
 }
 
 /// What the worker settles of a start before its lease is made.
@@ -149,6 +151,7 @@ impl CrunRuntime {
             hooks: self.hooks,
             ledger: self.ledger.clone(),
             logs: self.logs.clone(),
+            cpu_ceiling: self.cpu_ceiling,
         }
     }
 

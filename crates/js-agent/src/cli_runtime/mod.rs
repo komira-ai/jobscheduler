@@ -778,7 +778,13 @@ impl CliRuntime {
             let mountinfo = (self.proc_read)("/proc/self/mountinfo");
             check_submounts(spec, mountinfo.as_deref())?;
         }
-        args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
+        let ceiling = self.settings.cpu_ceiling();
+        args.extend(limits_to_args(
+            self.engine,
+            spec,
+            self.recursive_ro,
+            ceiling,
+        )?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
         args.extend(user_args(&self.settings, spec.slot));

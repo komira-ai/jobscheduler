@@ -581,3 +581,37 @@ fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
     runtime.remove(&id).expect("removed");
     assert_eq!(runtime.usage(&id), None);
 }
+
+/// Proves the operator's CPU ceiling (`--cpu-ceiling`) on a run: with a ceiling of 2, the lease
+/// of a run that booked 1.5 cores is held to 3 (`cpu.max` `300000 100000`) beside its weight of
+/// 150, and the container's own cgroup repeats it in the bundle, so the job reads 3 cores as
+/// its count. Without one (every other test here) there is no `cpu.max` at all. Catches a
+/// ceiling the runtime was given and did not write, one written on the lease only (the job
+/// would size itself to the node's CPUs and be throttled), and one that drops the weight.
+#[test]
+fn an_operators_ceiling_holds_the_lease_and_the_job_reads_it() {
+    let node = Node::new("run-ceiling");
+    let settings = js_agent::crun::CrunSettings {
+        cpu_ceiling: Some("2".parse().expect("a ceiling")),
+        ..node.settings("/root")
+    };
+    let mut runtime = js_agent::crun::CrunRuntime::open_with(
+        settings,
+        std::sync::Arc::new(crate::node::NoImages),
+        Node::hooks(LONG, LONG),
+    )
+    .expect("opens");
+    let spec = node.spec("r1-exit");
+    let id = runtime.create_and_start(&spec).expect("started");
+    runtime.wait_ended(&id);
+    let (lease, cgroup) = (node.lease_of(&id.0), node.cgroup_of(&id.0));
+    assert_eq!(read(&cgroup.join("cpu.max")), "300000 100000");
+    assert_eq!(read(&cgroup.join("cpu.weight")), "150");
+    assert_eq!(read(&cgroup.join("memory.max")), (1_u64 << 30).to_string());
+    let bundle: Value =
+        serde_json::from_str(&read(&lease.join("bundle/config.json"))).expect("a config");
+    assert_eq!(
+        bundle["linux"]["resources"]["unified"]["cpu.max"],
+        json!("300000 100000")
+    );
+}

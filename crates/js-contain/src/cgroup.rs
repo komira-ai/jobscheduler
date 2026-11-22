@@ -22,9 +22,13 @@
 //! [`LeasePolicy::HardMemory`] is the other policy, the agent's for a job: `memory.max` the
 //! booking and `memory.swap.max` 0, so a lease's memory is what the lease-server's arithmetic
 //! assumes it is and an OOM kill is the job's own ([`SwapKill`] has nothing to watch: no
-//! swap); and CPU, as here, a share: `cpu.weight` from the booked CPU and no `cpu.max`. A job
-//! uses every idle core; when the node's cores are all wanted, each lease gets them in
-//! proportion to its booking, and placement keeps the bookings within the cores.
+//! swap). Its CPU booking is what the job is guaranteed (placement packs a host by the
+//! bookings), and nothing holds a job below what it needs: there is no `cpu.max`, so a job
+//! uses every core no other job wants. `cpu.weight` from the booking is how the kernel keeps
+//! the guarantee when the host is busier than planned: leases that all want CPU get the cores
+//! in proportion to their bookings. An operator's ceiling, when set
+//! ([`CpuCeiling`](crate::CpuCeiling)), is a `cpu.max` beside the weight
+//! ([`LeaseCgroup::hold_cpu`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -72,8 +76,9 @@ pub enum LeasePolicy {
     /// `cpu.weight` only.
     #[default]
     BuildHost,
-    /// The memory booking is the limit and the CPU booking a share: `memory.max` the booking,
-    /// `memory.swap.max` 0, `cpu.weight` from the booked CPU, never `cpu.max`.
+    /// The memory booking is the limit and the CPU booking the guarantee: `memory.max` the
+    /// booking, `memory.swap.max` 0, `cpu.weight` from the booked CPU, and no `cpu.max` (an
+    /// operator's ceiling is written apart, [`LeaseCgroup::hold_cpu`]).
     HardMemory,
 }
 
@@ -323,6 +328,16 @@ impl LeaseCgroup {
             self.write("cpuset.mems", &pin.node().to_string())?;
         }
         Ok(())
+    }
+
+    /// Holds the lease to `cpu_millis` thousandths of a core: its `cpu.max`
+    /// ([`cpu_max`](crate::cpu_ceiling::cpu_max)), for an operator's optional ceiling
+    /// ([`CpuCeiling`](crate::CpuCeiling)). Nothing is written for 0.
+    pub fn hold_cpu(&self, cpu_millis: u64) -> io::Result<()> {
+        match crate::cpu_ceiling::cpu_max(cpu_millis) {
+            Some(max) => self.write("cpu.max", &max),
+            None => Ok(()),
+        }
     }
 
     /// The name the bundle's `cgroupsPath` is made under.

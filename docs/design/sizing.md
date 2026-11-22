@@ -96,9 +96,12 @@ come near it raise the next booking after two runs.
 The size is decided by the placement pass, not at submit, and is not written on the job: its needs stay as submitted, so a retried
 submit with the same id is still the same job. What it was booked is its allocation's `booked`, and which history sized it its
 allocation's `sized_from` (`class`, `fallback`, `cold` or `over-cap`; none for a job that named both). A contained job's memory
-booking is its `memory.max`, with no swap; its CPU booking is its lease's `cpu.weight`, a share of the node's cores and never a
-ceiling (no `cpu.max`): a job uses every core no other job wants, and jobs that all want every core get them in proportion to their
-bookings. The CPU slack and memory percent bound the booking as they bound every booking. The job's start carries its size class and
+booking is its `memory.max`, with no swap. Its CPU booking is what it is guaranteed, and placement packs a host by the bookings;
+nothing holds a job below what it needs: a compile that needs 20 cores for 30 seconds gets them whenever the host has them. The
+lease's `cpu.weight`, from the booking, is how the kernel keeps the guarantee when a host is busier than planned (leases that all
+want CPU get the cores in proportion to their bookings); there is no `cpu.max` unless the agent's operator sets a ceiling
+(`--cpu-ceiling`, a multiple of the booking, off by default), and then the lease and the job's own cgroup are held to the booking
+times it. The CPU slack and memory percent bound the booking as they bound every booking. The job's start carries its size class and
 where each of its CPU and memory bookings came from (`sizing`: `named` or the allocation's `sized_from`), which the agent writes in
 its journal at the job's start and at its result.
 
@@ -114,9 +117,10 @@ its start (`taught`) counts the runs that gave a class a sample, not the jobs it
 a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
 the job's own limit, which raises the class's floor to twice the booking it died at. A success whose peak came within 5% of its
 booking counts as having hit its limit (the estimator's own censoring rule assumes the build-host limit of 7.3), so it can hold the
-class at its booking but not lower it. CPU counts as measured at no node pressure. An agent from before the CPU share held a
+class at its booking but not lower it. CPU counts as measured at no node pressure. An agent from before the guarantee held a
 contained job's CPU to its booking with a `cpu.max`, so what such a run used is at most what it was given, and its result carries no
-`cpu_throttle`; a run whose result carries `cpu_throttle` with no periods had no `cpu.max` and used what it wanted. The estimator
+`cpu_throttle`; a run whose result carries `cpu_throttle` with no periods had no `cpu.max` and used what it wanted, and one with
+periods ran under an operator's ceiling. The estimator
 does not yet tell the two apart: the runs a class made at the cold size under a `cpu.max` never taught it more CPU than the cold
 size; a class that needs more names its CPU (its runs that do are learned too).
 
