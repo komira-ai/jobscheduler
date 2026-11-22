@@ -11,7 +11,8 @@
 //! is the macOS implementation (OpenDirectory for the records, `libproc` and `kill` for the
 //! processes, `launchctl` for the domains), and the tests run the same code over a fake.
 //! What the caller does itself: the job's folder, the sandbox profile, starting the job as
-//! the lent uid, its outputs.
+//! the lent uid, its outputs. [`cycle`] is a development verb that runs the life cycle once
+//! on a Mac, to prove it.
 //!
 //! # The slot
 //!
@@ -112,6 +113,7 @@
 //! one at a time; a deletion holds no lock while it runs, so a job can be lent an account
 //! while another's is being deleted.
 
+pub mod cycle;
 mod error;
 mod folder;
 mod home;

@@ -533,6 +533,14 @@ pub fn main_with(
     {
         return mac_job::run(&args, out, err);
     }
+    // The development verb that proves the account life cycle on a Mac, removed before any
+    // release: answered at once, as it only runs programs as one account and waits for them.
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(mac_accounts::cycle::VERB))
+    {
+        return mac_accounts::cycle::run(&args, out, err);
+    }
     #[cfg(target_os = "linux")]
     if args
         .get(1)

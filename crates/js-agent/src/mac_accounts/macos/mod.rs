@@ -1,11 +1,13 @@
 //! The macOS implementation of [`AccountHost`]: user records through OpenDirectory's local
 //! node, launchd through `launchctl`, processes through `libproc` and `kill`, and the few
 //! calls on files that only macOS has (the user flags and the ACLs that block a removal, a
-//! rename that does not replace).
+//! rename that does not replace), and the start of a program as an account for
+//! `js-agent __account-cycle`.
 //!
 //! Nothing here is reached by the Linux test jobs; the pure decisions it serves are tested
 //! there over a fake host.
 
+mod as_account;
 mod directory;
 mod procs;
 mod sys;
@@ -13,6 +15,7 @@ mod sys;
 use std::io;
 use std::path::Path;
 
+pub(super) use as_account::AsAccount;
 pub(super) use sys::{clear_user_flags, rename_excl, strip_acl};
 
 use super::host::{
