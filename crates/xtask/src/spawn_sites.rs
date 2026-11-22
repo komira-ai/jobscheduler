@@ -428,9 +428,9 @@ fn roots(root: &Path, name: &str, manifest: &toml::Table) -> Result<Vec<PathBuf>
     Ok(found.into_iter().collect())
 }
 
-/// Every [`Site`] of the tree at `root` (a repository checkout), in file and line order,
-/// each file, line and name once; none when every program is started through [`SPAWNER`]
-/// and only the files of [`KEEPERS`] keep a program's responsibility.
+/// Every [`Site`] of the tree at `root` (a repository checkout), in file and line order;
+/// none when every program is started through [`SPAWNER`] and only the files of [`KEEPERS`]
+/// keep a program's responsibility.
 ///
 /// # Errors
 /// As [`check_with_keepers`].
@@ -471,8 +471,6 @@ pub fn check_with_keepers(root: &Path, keepers: &[&str]) -> Result<Vec<Site>, Er
         });
     }
     walk.sites.sort();
-    // `disclaim::Kept::Job` holds two of the sequences: one site.
-    walk.sites.dedup();
     Ok(walk.sites)
 }
 
@@ -552,7 +550,12 @@ impl Visitor<'_, '_> {
                 }
             }
             for (sequence, what) in KEEPS {
-                if !self.keeper && names[at..].starts_with(sequence) {
+                // `disclaim::Kept::Job` holds two of the sequences on one line: one site.
+                let line = words[at].1.start().line;
+                let again = found
+                    .iter()
+                    .any(|(seen, name)| name == what && words[*seen].1.start().line == line);
+                if !self.keeper && !again && names[at..].starts_with(sequence) {
                     found.push((at, what.to_owned()));
                 }
             }

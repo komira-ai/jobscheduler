@@ -261,7 +261,8 @@ Every other program `js-agent` starts stays disclaimed, which is the default of
 carries the grant), the `sandbox-exec` self-test, and the agent re-executing itself in place.
 Not decided: the VM launcher (`js-vmm lease`), which stays disclaimed for now, and the
 graphical-session start (`launchctl asuser`), which launchd starts in the user's session and
-which is not measured and stays disclaimed.
+which is not measured and stays disclaimed. After an unattended restart a Mac has no logged-in
+user, so a start that needs a user's graphical session cannot happen until someone logs in.
 
 Today the root helper starts every native job, disclaimed, and the helper holds no grant, so a
 job it starts holds none. The supervisor, whose starts keep the responsibility, is not in this

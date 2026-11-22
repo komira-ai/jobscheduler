@@ -30,7 +30,7 @@ Today the root helper `js-mac-session` still starts every native job (`crates/js
 | The `sandbox-exec` self-test (`native/profile.rs`) | `js-agent` | disclaimed; goes away with the helper path |
 | The agent re-executing itself in place (`in_place.rs`) | `js-agent` | unchanged: the same process |
 | The VM launcher (`vm/helper.rs`, the `js-vmm` lease) | `js-agent` | not decided; stays disclaimed. Disclaimed, it answers for itself by its own signature and entitlement and has no Full Disk Access; kept, it answers for the agent |
-| The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | not decided, not measured; stays disclaimed. launchd starts it in the user's session, so keeping it is not simply a flag |
+| The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | not decided, not measured; stays disclaimed. launchd starts it in the user's session, so keeping it is not simply a flag. After an unattended restart a Mac has no logged-in user, so a start that needs a user's graphical session cannot happen until someone logs in. |
 
 Not measured: what macOS does with the responsible process when the agent that started a supervisor exits (a restart or an update while a job runs). Nothing is claimed about it.
 
