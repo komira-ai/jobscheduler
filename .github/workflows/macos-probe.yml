@@ -1,7 +1,12 @@
 # What a native (sandbox-exec) runtime relies on, probed on a hosted macOS runner.
 # crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
-# expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
-# probe runs as the runner's own user; the trace file is uploaded with the report. The image
+# expected outcome is wrong; probes whose answer is unknown only report. The report runs as
+# the runner's own user, and its launchd probe in that user's domain; the trace file is
+# uploaded with the report. One step runs as root through sudo, which the runner allows
+# without a password: the launchd probe in the system domain (`launchd-system`), which
+# bootstraps and boots out LaunchDaemons and drops a child to the uid and gid of `nobody`
+# (-2); its report is in the step's log and the uploaded files. Each report fails its step
+# on its own asserted probes. The image
 # is pinned to macos-15 (macos-14 retires on 2026-11-02). It runs in the beta stage of the
 # release (release.yml's `beta-macos-probe` calls this file on a push to main) and by hand; no
 # pull request runs it.
@@ -36,6 +41,10 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/report"
           cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json" --trace-out "$RUNNER_TEMP/report/trace.sb"
+      # /private/var/tmp: a directory every uid may traverse, which the dropped child needs.
+      - name: Probe launchd as root
+        if: ${{ !cancelled() }}
+        run: sudo -n "$GITHUB_WORKSPACE/target/debug/js-mac-probe" launchd-system --work /private/var/tmp --drop 4294967294:4294967294 --out "$RUNNER_TEMP/report/launchd-system.json"
       - name: Report
         if: ${{ !cancelled() }}
         run: |
@@ -48,5 +57,6 @@ jobs:
           name: macos-probe-report
           path: |
             ${{ runner.temp }}/report/report.json
+            ${{ runner.temp }}/report/launchd-system.json
             ${{ runner.temp }}/report/trace.sb
           if-no-files-found: ignore

@@ -1531,6 +1531,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

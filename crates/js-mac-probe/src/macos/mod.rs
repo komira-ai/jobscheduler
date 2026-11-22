@@ -12,6 +12,7 @@ mod clone;
 mod dyld;
 mod exec;
 mod image;
+mod launchd;
 mod net;
 mod relocate;
 mod sandbox;
@@ -43,9 +44,29 @@ pub fn collect(work: &Path, home: &Path, trace_out: Option<&Path>) -> Report {
             volume::probes(&scratch, &mut report);
             image::probes(&scratch, &mut report);
             allow::probes(&scratch, trace_out, &mut report);
+            launchd::probes(
+                &scratch.base.join("launchd"),
+                &scratch.places.exe,
+                None,
+                &mut report,
+            );
             scratch.remove();
         }
         Err(err) => report.push(Probe::asserted("setup", false).fact("error", err)),
+    }
+    report
+}
+
+/// The facts of the system, then the launchd probe in the system domain (run as root).
+pub fn collect_launchd_system(work: &Path, drop: crate::launchd::Ids) -> Report {
+    let mut report = Report::default();
+    report.push(system::probe());
+    match std::env::current_exe().and_then(|exe| exe.canonicalize()) {
+        Ok(exe) => {
+            let dir = work.join(format!("js-mac-probe-launchd-{}", std::process::id()));
+            launchd::probes(&dir, &exe, Some(drop), &mut report);
+        }
+        Err(err) => report.push(Probe::asserted("launchd/system/setup", false).fact("error", err)),
     }
     report
 }
