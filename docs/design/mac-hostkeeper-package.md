@@ -280,9 +280,13 @@ place, and a first install on a Mac that already has the pool's users (an earlie
 that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
 users: a Mac that must lose them is reset by its administrator.
 
-A management profile that grants Full Disk Access to the helper (a privacy-policy payload for its signed binary, which
-needs device management) would be an option, not a need: with it the helper could delete a user's record and home, and
-the one deletion that is left, of a lease user from before the pool, would work. Nothing here asks for it.
+The release signs the helper, and a management profile in the repository (a privacy-policy payload for the helper's
+installed path and its designated requirement, which needs device management) grants it Full Disk Access. With the grant
+the helper can delete a user's record and home, and the one deletion that is left, of a lease user from before the pool,
+would work. The helper's `full-disk-access` verb reports whether it holds the grant (it lists the privacy database's
+directory, which only a process with the grant may list), and the agent reports the answer as its capability
+`full-disk-access`. The pool's reset described here is unchanged by the grant; deleting an account per job is the next
+step (`mac-account-per-job.md`).
 
 ## Platform properties
 

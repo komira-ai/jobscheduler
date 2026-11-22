@@ -15,6 +15,7 @@ use js_mac_provision::pfctl::SystemPfctl;
 use js_mac_provision::provision::Provisioner;
 use js_mac_provision::{AnchorName, UidRange};
 use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::ROLE;
 use crate::verdict::{self, CaseA, Probe, Ready, Rise, Verdict};
@@ -165,6 +166,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     };
     NativeRuntime::open_ungated(Client::new(&fixture.socket), config, 1).unwrap()
 }

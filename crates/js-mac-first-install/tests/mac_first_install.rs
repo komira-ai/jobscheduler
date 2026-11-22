@@ -5,7 +5,13 @@
 //! helper from the installed plists, and the agent joining a lease server
 //! by its host certificate. On the host that install leaves, the host group's config package is
 //! rolled over the running agent (the config hook restarts it onto the new flags) and then the
-//! agent itself is updated to the next version. What of hostkeeper's daemon is reproduced, and
+//! agent itself is updated to the next version. The host the lease server lists carries the
+//! capability `full-disk-access` as `not-granted`: the root helper the hosted runner installs is
+//! not signed by the release's identity, so no privacy profile grants it Full Disk Access, and
+//! the agent reports what its helper says. (That such an agent refuses every native job with
+//! `no-full-disk-access` is the agent's own tests; submitting a job here would need a lease
+//! request, a native job body and its outcome read back, which is more machinery than this
+//! install test carries.) What of hostkeeper's daemon is reproduced, and
 //! what of a Studio, is said in `mac_first_install/hostkeeper.rs` and `mac_first_install/host.rs`.
 //!
 //! It changes the machine it runs on for good (a group, an APFS volume, packages installed,
@@ -299,6 +305,16 @@ fn config_update(daemon: &Arc<Daemon>, server: &LeaseServer, scratch: &Path) {
     );
 }
 
+/// The host entry carries the helper's answer to the agent's question as the capability
+/// `full-disk-access`: `not-granted`, as the helper of this runner is unsigned and holds no grant.
+fn assert_full_disk_access_not_granted(server: &LeaseServer) {
+    let seen = server.host(HOST_ID);
+    assert_eq!(
+        seen["capabilities"]["full-disk-access"], "not-granted",
+        "the host list shows the helper without Full Disk Access: {seen}"
+    );
+}
+
 /// The running agent updated to the next version, over the release it is installed from.
 fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, versions: &Inputs) {
     let next = Arc::new(daemon.another(&AGENT, &versions.update_pkg, &versions.update_version));
@@ -339,6 +355,7 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
         versions.update_version.as_str(),
         "{seen}"
     );
+    assert_full_disk_access_not_granted(server);
 }
 
 /// js-agent on a Mac from its first install to an update: a first install whose cutover failed
@@ -372,7 +389,8 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// the next one cannot install on, a config hook that halts on the links above its state
 /// directory (`/var` is one) or leaves the agent on the old flags, and an update of a running
 /// agent that does not switch `current` and `previous`, or does not bring the agent of the next
-/// version up and joined.
+/// version up and joined, and an agent that does not report whether its helper holds Full Disk
+/// Access (the host list then lacks the capability or shows another state).
 #[test]
 #[ignore = "needs root on a disposable Mac: installs the js-agent package, updates it and loads launchd jobs"]
 fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_package_and_updates_to_the_next_version()
@@ -399,6 +417,7 @@ fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_packag
     // The runtime the agent's hello named, which the host list does not show.
     let itself = server.host_as_itself(HOST_ID);
     assert_eq!(itself["runtime"], "sandbox-exec", "{itself}");
+    assert_full_disk_access_not_granted(&server);
 
     config_update(&daemon, &server, &dir.path().join("config-pkg"));
     agent_update(&daemon, &server, &installed, &versions);

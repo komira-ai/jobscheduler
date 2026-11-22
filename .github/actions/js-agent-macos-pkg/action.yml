@@ -1,25 +1,36 @@
-# One command that builds the unsigned js-agent installer package of one version, on a macOS
-# runner that has checked out the repository and installed the toolchain: it stamps the version,
-# builds the programs, checks that they print it, stages the payload, builds the package with
-# pkgbuild and productbuild, reads it back with the xtask `pkg check-macos` verb and sums it. The
-# package is `dist/js-agent-<version>-macos-arm64.pkg` with `dist/SHA256SUMS`, in the workspace.
+# One command that builds the js-agent installer package of one version, on a macOS runner that
+# has checked out the repository and installed the toolchain: it stamps the version, builds the
+# programs, checks that they print it, stages the payload, builds the package with pkgbuild and
+# productbuild, reads it back with the xtask `pkg check-macos` verb and sums it. The package is
+# `dist/js-agent-<version>-macos-arm64.pkg` with `dist/SHA256SUMS`, in the workspace.
 #
-# js-agent-macos-pkg.yml calls it twice, in two jobs that run side by side: `build` for the
-# release's version, whose package is the one that is signed and released, and `build-update` for
-# the next patch version, which the first-install test updates the agent to and which no release
-# takes. A job builds one version, since the stamp rewrites the workspace's version and the
-# second build would rebuild every crate in the same job.
+# With the input `programs` (a directory holding the three programs, already signed) it builds
+# nothing: it takes the programs from there, and checks each staged program with the xtask
+# `release check-code-signature` verb before the package is built, so a program that is not
+# signed as the release signs it never goes into the package. The cdhash the helper's plist
+# names is then the cdhash of the signed `js-agent`.
+#
+# js-agent-macos-pkg.yml calls it three times, in three jobs: `build` for the release's version
+# (an unsigned package, which the first-install test installs), `build-update` for the next patch
+# version, which the first-install test updates the agent to and which no release takes, and
+# `package` for the release's version again, from the signed programs, whose package is the one
+# that is signed and released. A job builds one version, since the stamp rewrites the workspace's
+# version and a second build would rebuild every crate in the same job.
 #
 # No command expands an expression: a step reads its environment. The caller checks the version
-# as MAJOR.MINOR.PATCH before it calls this. crates/xtask/tests/macos_pkg_workflow/ pins these
-# rules.
+# as MAJOR.MINOR.PATCH before it calls this. crates/xtask/tests/macos_pkg_workflow/ and
+# macos_code_signing.rs pin these rules.
 name: js-agent-macos-pkg
-description: Build, check and sum the unsigned js-agent installer package of one version
+description: Build, check and sum the js-agent installer package of one version, unsigned or from signed programs
 
 inputs:
   version:
     description: The package version, MAJOR.MINOR.PATCH
     required: true
+  programs:
+    description: A directory with the signed js-agent, js-mac-session and js-mac-provision to package instead of building them; empty builds them
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -30,12 +41,25 @@ runs:
         VERSION: ${{ inputs.version }}
       run: cargo xtask release stamp --to "$VERSION"
     - name: Build the programs
+      if: ${{ inputs.programs == '' }}
       shell: bash
       run: |
         set -euo pipefail
         cargo build --locked --release -p js-agent --bin js-agent
         cargo build --locked --release -p js-mac-session --bin js-mac-session
         cargo build --locked --release -p js-mac-provision --bin js-mac-provision
+    - name: Take the signed programs
+      if: ${{ inputs.programs != '' }}
+      shell: bash
+      env:
+        PROGRAMS: ${{ inputs.programs }}
+      run: |
+        set -euo pipefail
+        mkdir -p target/release
+        for bin in js-agent js-mac-session js-mac-provision; do
+          cp "$PROGRAMS/$bin" "target/release/$bin"
+          chmod 755 "target/release/$bin"
+        done
     - name: The programs print the version
       shell: bash
       env:
@@ -76,6 +100,14 @@ runs:
           echo "::error::the staged js-agent has the cdhash '$staged', not '$cdhash'"
           exit 1
         fi
+    - name: The staged programs are signed as the release signs them
+      if: ${{ inputs.programs != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        for bin in js-agent js-mac-session js-mac-provision; do
+          cargo xtask release check-code-signature "stage/root/Library/Application Support/js-agent/bin/$bin" --program "$bin"
+        done
     - name: Build the package
       shell: bash
       env:
@@ -85,12 +117,12 @@ runs:
         mkdir dist
         pkgbuild --root stage/root --identifier com.komira.js-agent --version "$VERSION" --install-location / --ownership recommended stage/component.pkg
         productbuild --package stage/component.pkg --version "$VERSION" "dist/js-agent-$VERSION-macos-arm64.pkg"
-    - name: The unsigned package is the package
+    - name: The package is the package
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
       run: cargo xtask pkg check-macos --pkg "dist/js-agent-$VERSION-macos-arm64.pkg" --version "$VERSION"
-    - name: Sum the unsigned package
+    - name: Sum the package
       shell: bash
       env:
         VERSION: ${{ inputs.version }}

@@ -76,25 +76,8 @@
 //!
 //! # Privacy grants (TCC)
 //!
-//! macOS's privacy controls (TCC: Full Disk Access and the like) let a process do what its
-//! *responsible* process was granted, and a process answers for whoever started it unless
-//! its starter disclaims that when it starts it. Nothing in this repository gives the agent
-//! or the helper a grant, and neither needs one: what they touch is their own state, the
-//! run users' homes and the system's tools (the helper's sweep takes the system's refusal of
-//! Apple's data vaults, which root without Full Disk Access cannot examine, as an entry
-//! that is not there). A grant someone gives them anyway never reaches a job. Every
-//! process of a run is started through `js_mac_session::disclaim`, which disclaims the
-//! responsibility, so the run's processes, and the processes they start, answer for the
-//! run's program and hold no grant of the helper's or the agent's; what the run may do is
-//! what its own program was granted, which this runtime neither gives nor takes away. The
-//! same holds for the programs the agent starts itself (its probes, the `sandbox-exec`
-//! self-test, and `pfctl` through `js_mac_provision`) and for the helper's own
-//! (`launchctl`, `getconf`). `cargo test -p xtask --test spawn_sites` fails when the agent,
-//! the helper or a crate built into them starts a program another way. On a Mac, the tests
-//! read the responsible process of what the helper's `run` and the agent start
-//! (`tests/agent/native/disclaim.rs`). The check by hand, with a grant given to the helper,
-//! is in `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the
-//! design.
+//! The helper holds Full Disk Access, which a profile grants it and no job; a Mac agent
+//! without it refuses every native job, `no-full-disk-access`. See `native/grant.rs`.
 //!
 //! A start named by its image runs when it carries a `run` and the runtime holds a bundle
 //! store: the image reference is the bundle's name (the bundle pin of the legacy form), the
@@ -147,6 +130,7 @@ mod bundle;
 mod cwd;
 mod env;
 mod files;
+pub mod grant;
 mod journal;
 mod logs;
 mod mounts;
@@ -177,6 +161,7 @@ use js_agent_wire::{
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_provision::keep::Keeper;
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::Dotted;
 use js_mac_session::proto::Limits;
@@ -234,6 +219,10 @@ pub struct NativeConfig {
     /// [`Ceiling::On`]: the runtime does not open without it. A ceiling of [`Ceiling::Open`]
     /// has none: nothing filters its jobs.
     pub egress: Option<Arc<dyn Enforcer>>,
+    /// Whether the root helper holds Full Disk Access, as the agent asked it at start. Only
+    /// [`FullDiskAccess::Granted`] runs native jobs: every start is refused
+    /// `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
+    pub full_disk_access: FullDiskAccess,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
@@ -891,7 +880,8 @@ impl Runtime for NativeRuntime {
         xcode::check(&self.xcodes, build)
     }
 
-    /// Refuses, before anything is made: a level above the agent's ceiling
+    /// Refuses, before anything is made: first a host whose helper does not hold Full Disk
+    /// Access (`no-full-disk-access`, `native/grant.rs`), then a level above the agent's ceiling
     /// (`network-above-ceiling`; it is never run with less), then any declared port
     /// (`ports-not-supported`: a Mac forwards none), then a `stage` input
     /// (`native-unsupported`: this agent keeps no stage trees) or a retired `tree` input
@@ -899,6 +889,7 @@ impl Runtime for NativeRuntime {
     /// working directory whose text leaves `exec/` (`invalid-job`). Mount inputs are staged
     /// into `exec/` when the run starts and outputs are collected when it is removed.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
+        grant::admit(self.config.full_disk_access)?;
         let refused = |why: NetworkRefusal| NativeRefusal {
             code: why.code,
             why: why.detail,

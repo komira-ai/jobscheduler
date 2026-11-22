@@ -69,6 +69,7 @@ mod steps_retired_pf;
 mod steps_rollback;
 mod steps_rollback_first;
 mod steps_rollback_guards;
+mod steps_stale_record;
 mod steps_taint_clearable;
 mod steps_unit;
 mod steps_verify;

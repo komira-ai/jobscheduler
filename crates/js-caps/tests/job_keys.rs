@@ -113,11 +113,11 @@ fn a_report_with_a_bad_disk_is_refused() {
     assert!(node(&[("disk-gib", "lots")]).is_err());
 }
 
-/// Asserts that the detected keys are exactly these fifteen, and that a request may name only
+/// Asserts that the detected keys are exactly these sixteen, and that a request may name only
 /// `disk-gib`, `exec`, `layered-rootfs`, `fuse-jobs`, `fuse-uring`, `os_version` and `xcode` of
 /// them (the layered root because the server asks for it of a job with layers, mounts or host
 /// ports, the FUSE keys of a job that needs the FUSE device, `os_version` of a job that asks
-/// for a least macOS, `xcode` of a job that names a build): each of the other eight is refused
+/// for a least macOS, `xcode` of a job that names a build): each of the other nine is refused
 /// as an unknown key, naming it. It catches a detected key
 /// added without the agent detecting it, and a host
 /// property a request could ask for though no agent reports it, so that a job naming it
@@ -140,6 +140,7 @@ fn a_request_names_only_some_detected_keys() {
         "fuse-uring",
         "os_version",
         "xcode",
+        "full-disk-access",
     ];
     assert_eq!(DETECTED_KEYS.as_slice(), detected.as_slice());
     let nameable = [
