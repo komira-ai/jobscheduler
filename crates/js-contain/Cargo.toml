@@ -23,6 +23,7 @@ test = false
 [dependencies]
 async-trait.workspace = true
 flate2.workspace = true
+js-supervise = { path = "../js-supervise" }
 js-types = { path = "../js-types" }
 # `mount_setattr(2)`, which rustix does not wrap (src/job_fs/kernel.rs); the egress spike
 # tests (tests/egress_spike) also call unshare, ioctl and open through it.
