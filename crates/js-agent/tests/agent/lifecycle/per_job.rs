@@ -44,6 +44,7 @@ pub(super) fn start(job_id: &str) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: None,
+        sizing: None,
     }
 }
 
@@ -663,6 +664,7 @@ fn a_jobs_usage_reaches_its_result_and_an_unread_one_is_absent() {
     let counted = JobUsage {
         peak_memory_bytes: 3 << 30,
         cpu_usage_usec: 4_500_000,
+        cpu_throttle: None,
     };
     h.fake.report_usage("j1", counted);
     h.fake.exit("j1", 0);

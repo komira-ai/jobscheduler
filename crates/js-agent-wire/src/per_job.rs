@@ -32,6 +32,7 @@ use crate::network;
 use crate::refusal;
 use crate::rootfs::{self, HostPort, JobMount, Layer};
 use crate::run::RunSpec;
+use crate::sizing::{CpuThrottle, StartSizing};
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
@@ -264,6 +265,18 @@ pub struct JobStartSpec {
     /// a host whose `xcode` capability ([`crate::limits::XCODE_CAPABILITY`]) lists the build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xcode: Option<String>,
+    /// What the job's booking came from ([`StartSizing`]): its size class and which history
+    /// gave its CPU and its memory. The agent writes it in its journal beside the booking and
+    /// decides nothing by it. It is never part of the start's acceptance: a value that does
+    /// not decode reads as absent, and [`JobStartSpec::validate`] does not look at it
+    /// ([`StartSizing::checked`] does). Absent when the server sends none; an agent that
+    /// predates the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub sizing: Option<StartSizing>,
 }
 
 impl JobStartSpec {
@@ -434,7 +447,7 @@ pub struct JobResult {
 }
 
 /// What one job used while it ran, as its host read it from the job's control group once it
-/// ended. Both numbers are measured; an agent that cannot read one of them sends no
+/// ended. Both required numbers are measured; an agent that cannot read one of them sends no
 /// [`JobUsage`] at all, so a zero is a measured zero and never an unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
@@ -443,6 +456,12 @@ pub struct JobUsage {
     /// The CPU time the job's group used, in microseconds (`usage_usec` of `cpu.stat`), the
     /// unit of `cpu_usage_usec` in [`crate::LoadReport`].
     pub cpu_usage_usec: u64,
+    /// How often the group's CPU was throttled ([`CpuThrottle`]), when the agent could read
+    /// it; absent otherwise, and left out of the text. An agent from before the field sends
+    /// none: its jobs' groups had a `cpu.max` of their booking, so a run without it may have
+    /// been held to what it booked. A server from before the field ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_throttle: Option<CpuThrottle>,
 }
 
 impl JobResult {

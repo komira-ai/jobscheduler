@@ -347,6 +347,7 @@ fn job_start(id: &str) -> Command {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }))
 }
 

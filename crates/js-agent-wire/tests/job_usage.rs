@@ -27,6 +27,7 @@ fn counted() -> JobUsage {
     JobUsage {
         peak_memory_bytes: 3 << 30,
         cpu_usage_usec: 4_500_000,
+        cpu_throttle: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn a_result_with_usage_has_the_exact_wire_form() {
     let zero = result(Some(JobUsage {
         peak_memory_bytes: 0,
         cpu_usage_usec: 0,
+        cpu_throttle: None,
     }));
     let text = serde_json::to_value(&zero).unwrap();
     assert_eq!(
@@ -102,6 +104,7 @@ fn usage_at_its_widest_adds_89_bytes_to_a_result() {
     let widest = JobUsage {
         peak_memory_bytes: u64::MAX,
         cpu_usage_usec: u64::MAX,
+        cpu_throttle: None,
     };
     let len = |result: &JobResult| serde_json::to_string(result).unwrap().len();
     assert_eq!(len(&result(Some(widest))) - len(&result(None)), 89);

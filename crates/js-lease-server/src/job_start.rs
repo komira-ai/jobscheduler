@@ -255,6 +255,7 @@ pub(crate) fn start_of(
         placed_at_ms: job.placed_at.map(millis),
         fuse: false,
         xcode,
+        sizing: None,
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

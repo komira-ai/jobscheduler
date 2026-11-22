@@ -559,6 +559,7 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
     let counted = JobUsage {
         peak_memory_bytes: 3 << 30,
         cpu_usage_usec: 4_500_001,
+        cpu_throttle: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),

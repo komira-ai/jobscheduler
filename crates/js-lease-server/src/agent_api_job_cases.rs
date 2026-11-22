@@ -51,6 +51,7 @@ async fn a_start_is_resent_until_listed() {
         placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
         fuse: false,
         xcode: None,
+        sizing: None,
     };
     let mut last = None;
     for _ in 0..3 {
@@ -603,6 +604,7 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
     let counted = js_agent_wire::JobUsage {
         peak_memory_bytes: 2 << 30,
         cpu_usage_usec: 30_000_000,
+        cpu_throttle: None,
     };
     let mut memory_of = Vec::new();
     for (class, usage) in [("measured", Some(counted)), ("bare", None)] {
