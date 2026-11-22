@@ -9,7 +9,7 @@ use tonic::{Code, Request};
 
 use super::{Ctx, submit_job};
 use crate::admit::{Admit, JobAdmission};
-use crate::agent_api::job_rig::{Rig, clocked_rig};
+use crate::agent_api::job_rig::{FakeAgent, Rig, clocked_rig, starts};
 use crate::agent_api::peer_rig::NEVER;
 use crate::agent_api::peer_rig::peer_of;
 use crate::config::Role;
@@ -66,4 +66,46 @@ async fn a_submit_to_a_server_that_took_no_hello_is_admitted_and_placed_on_the_h
     );
     crate::poller::pass(&second.agents).await;
     assert_eq!(second.job(&id("job-r")).state, JobState::Placed);
+}
+
+/// Two job-service replicas over one store: replica B took the hello of `host-a`, so B holds
+/// its heartbeats, and replica A holds none; the job of the tests below is submitted to A.
+async fn two_replicas(name: &str) -> (Rig, Rig) {
+    let mut b = clocked_rig(&format!("{name}_b"), true, NEVER);
+    b.join("host-a", false).await;
+    let a = peer_of(&format!("{name}_a"), &b);
+    (a, b)
+}
+
+/// Asserts that a submit to replica A pokes A's own placement poller and no other: B, which
+/// holds the host, has no poke waiting. A's poller then places the job on B's host from the
+/// host's `node/` row, and B's next heartbeat of that host carries the start, built from the
+/// job table both replicas share. It catches a poke sent to another replica, and a placement
+/// that needs the poked replica to hold the host.
+#[tokio::test]
+async fn a_submit_to_one_replica_pokes_its_own_poller_and_the_replica_holding_the_host_starts_it() {
+    let (a, b) = two_replicas("rows_replica_pokes").await;
+    let made = submit(&api(&a), wire("job-r")).await.unwrap();
+    assert_eq!(made.state(), v1::JobState::Queued);
+    assert!(!b.agents.poller.take_poke());
+    assert!(crate::poller::poked_pass(&a.agents).await);
+    assert_eq!(b.job(&id("job-r")).state, JobState::Placed);
+    let reply = b.beat(&FakeAgent::new("host-a")).await.unwrap();
+    let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
+    assert_eq!(started, ["job-r"]);
+}
+
+/// Asserts that a job submitted to replica A whose poller never runs (A stopped right after the
+/// commit) is not lost: replica B, never poked, finds it queued on its own pass, its tick's, and
+/// places it. It catches a job left queued for good when the replica that took it does not
+/// place it.
+#[tokio::test]
+async fn a_job_whose_replica_never_places_it_is_placed_by_the_other_replicas_own_pass() {
+    let (a, b) = two_replicas("rows_replica_tick").await;
+    submit(&api(&a), wire("job-t")).await.unwrap();
+    drop(a);
+    assert!(!b.agents.poller.take_poke());
+    assert_eq!(b.job(&id("job-t")).state, JobState::Queued);
+    b.tick();
+    assert_eq!(b.job(&id("job-t")).state, JobState::Placed);
 }
