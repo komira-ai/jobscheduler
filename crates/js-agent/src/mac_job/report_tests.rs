@@ -20,6 +20,7 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
+        put: None,
         trees: Vec::new(),
         account: None,
         spawn: "ordinary".to_owned(),
@@ -154,4 +155,26 @@ fn a_tree_reports_its_reference_place_path_and_release() {
         serde_json::to_string(&tree).expect("json"),
         r#"{"ref":"cas/l/ab","at":"src","path":"/fs/mount-provider/a/b/0","mount_ms":12,"released":{"Ok":null}}"#
     );
+}
+
+#[test]
+fn a_failed_put_is_a_job_failure_and_a_committed_one_is_not() {
+    let committed = crate::mac_job::put::Committed {
+        key: "cas/b/j/n/pack".to_owned(),
+        sha256: "ab".to_owned(),
+        bytes: 3,
+    };
+    assert_eq!(
+        Report {
+            put: Some(Ok(committed)),
+            ..report()
+        }
+        .status(),
+        status::OK
+    );
+    let failed = Report {
+        put: Some(Err("no root".to_owned())),
+        ..report()
+    };
+    assert_eq!(failed.status(), status::JOB_FAILED);
 }

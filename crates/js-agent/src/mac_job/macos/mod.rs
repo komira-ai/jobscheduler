@@ -22,6 +22,7 @@ use crate::mac_accounts::Pool;
 
 use super::layout::{Layout, SUBFOLDERS};
 use super::profile::{self, JOB_PARAM};
+use super::put;
 use super::report::{self, AccountUse, Ended, Leftovers, Report};
 use super::spec::JobFile;
 use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
@@ -184,6 +185,10 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     };
     let sweep = sweep_job(&ids)?;
     let trees = trees::release(args, &job, mounted);
+    let put = args
+        .put_ingest
+        .as_ref()
+        .map(|root| commit_outputs(args, root, &job, &layout));
     let outputs = files::collect(&layout.work(), &job.outputs, &args.out.join("outputs"));
     let folder = files::remove_folder(&layout.folder)
         .err()
@@ -210,12 +215,46 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         sweep,
         outputs,
         leftovers,
+        put,
         trees,
         account: None,
         spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
+}
+
+/// Commits the job's outputs to the put ingest at `root`, its directories given to the node's
+/// user as the node needs them: the key's folders its, the job's put directory root's with the
+/// node's group able to write it (the node removes the file and the directory).
+fn commit_outputs(
+    args: &Args,
+    root: &Path,
+    job: &JobFile,
+    layout: &Layout,
+) -> Result<put::Committed, String> {
+    let node = match args.put_user.parse::<u32>() {
+        Ok(uid) => (uid, uid),
+        Err(_) => {
+            let user =
+                sys::user(&args.put_user).map_err(|why| format!("{}: {why}", args.put_user))?;
+            (user.uid, user.gid)
+        }
+    };
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).map_err(|why| format!("a nonce: {why}"))?;
+    let nonce = hex::encode(nonce);
+    let ready = |dir: &Path| -> std::io::Result<()> {
+        let mut at = root.to_owned();
+        for part in ["cas", "b", job.id.as_str()] {
+            at.push(part);
+            std::os::unix::fs::chown(&at, Some(node.0), Some(node.1))?;
+        }
+        std::os::unix::fs::chown(dir, Some(0), Some(node.1))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o770))
+    };
+    put::commit(&layout.work(), &job.outputs, root, &job.id, &nonce, &ready)
+        .map_err(|why| why.to_string())
 }
 
 /// Makes `state`, root's and closed to everyone else, when it is missing.

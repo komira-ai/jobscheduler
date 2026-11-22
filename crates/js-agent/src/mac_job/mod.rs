@@ -6,6 +6,7 @@
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
 //!     [--mount-provider <socket> --mount-root <dir> [--mount-provider-user <user>] [--agent-id <id>]]
+//!     [--put-ingest <dir> [--put-user <user>]]
 //! ```
 //!
 //! A prototype of the one-program Mac runtime (`docs/design/mac-one-program.md`): no helper
@@ -47,6 +48,11 @@
 //! profile lets the job read it and write nothing there; the deny-default one has no rule for it,
 //! so a job with trees is refused under it. Each tree is released after the sweep.
 //!
+//! With `--put-ingest`, the declared outputs also go back to tierstore: after the sweep the agent
+//! commits one tar of them to the put directory `<dir>/cas/b/<job id>/<nonce>` ([`put`]), whose
+//! directories it gives to `--put-user`, the node's user, as the node needs them; the job is
+//! never given a writable put directory. The report names the key and the digest.
+//!
 //! `--job-inline` takes the job's JSON as the argument itself, for a run that can pass arguments
 //! to the program but no file; the job then fetches its own inputs. `--root` is made (root's,
 //! mode 0755) when it is missing.
@@ -59,6 +65,7 @@
 
 pub mod layout;
 pub mod profile;
+pub mod put;
 pub mod report;
 pub mod spec;
 pub mod sweep;
@@ -161,6 +168,12 @@ pub struct Args {
     /// The id the provider calls carry as the agent's.
     #[arg(long, default_value = "mac-job")]
     pub agent_id: String,
+    /// The put ingest's root, to commit the outputs to.
+    #[arg(long)]
+    pub put_ingest: Option<PathBuf>,
+    /// The user the put ingest's node runs as (a name or a uid).
+    #[arg(long, default_value = "_tierstore")]
+    pub put_user: String,
 }
 
 /// Parses the command line after the mode word.

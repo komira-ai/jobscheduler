@@ -61,6 +61,8 @@ pub struct Report {
     pub outputs: Outputs,
     /// What was left.
     pub leftovers: Leftovers,
+    /// The outputs committed to the put ingest, or why they were not, when one was named.
+    pub put: Option<Result<super::put::Committed, String>>,
     /// The trees the job read, where they were mounted, and their release.
     pub trees: Vec<TreeUse>,
     /// The lent account and what its retirement did, when the pool lent one.
@@ -126,7 +128,10 @@ impl Report {
         let held = self.account.as_ref().is_some_and(|a| a.retired.is_err());
         if held || !self.leftovers.is_clean() || !self.sweep.clean {
             status::LEFT_BEHIND
-        } else if self.ended == Ended::Exited(0) && self.outputs.missing.is_empty() {
+        } else if self.ended == Ended::Exited(0)
+            && self.outputs.missing.is_empty()
+            && !self.put.as_ref().is_some_and(Result::is_err)
+        {
             status::OK
         } else {
             status::JOB_FAILED

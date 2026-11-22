@@ -35,6 +35,8 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             mount_provider_user: "0".to_owned(),
             mount_root: None,
             agent_id: "mac-job".to_owned(),
+            put_ingest: None,
+            put_user: "_tierstore".to_owned(),
         }
     );
 }
@@ -165,4 +167,21 @@ fn the_mount_provider_and_its_root_come_together() {
         list.extend(alone);
         assert!(parse(&words(&list)).is_err(), "{alone:?}");
     }
+}
+
+#[test]
+fn the_put_ingest_names_its_root_and_the_nodes_user() {
+    let mut list = MINIMAL.to_vec();
+    list.extend([
+        "--put-ingest",
+        "/usr/local/tierstore/put",
+        "--put-user",
+        "601",
+    ]);
+    let args = parse(&words(&list)).expect("parses");
+    assert_eq!(
+        args.put_ingest,
+        Some(PathBuf::from("/usr/local/tierstore/put"))
+    );
+    assert_eq!(args.put_user, "601");
 }
