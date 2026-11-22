@@ -201,6 +201,8 @@ fn each_input_of_a_pass_brings_the_next_one_back() {
             host_jobs: true,
             rank: None,
             capacity: None,
+            load_admission: false,
+            quota_disk_bytes: None,
         },
     );
     rig.ran(&offered, &[]);

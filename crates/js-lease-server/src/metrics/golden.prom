@@ -65,6 +65,10 @@ js_job_tables_total{from="submitted"} 3
 js_placement_refusals_total{host="host-a",reason="cpu"} 3
 js_placement_refusals_total{host="host-a",reason="predicted-memory"} 1
 js_placement_refusals_total{host="host-b",reason="booked-memory"} 2
+# HELP js_agent_start_refusals_total Job starts a host's agent refused, by host and refusal code (the agent's code, or other), counted when the refusal is recorded, whether the job then goes back to the queue or fails.
+# TYPE js_agent_start_refusals_total counter
+js_agent_start_refusals_total{host="host-a",code="no-capacity"} 2
+js_agent_start_refusals_total{host="host-b",code="input-not-allowed"} 1
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3

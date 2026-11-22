@@ -1,6 +1,7 @@
-//! The requeue after a start a held host refused ([`crate::JobStore::requeue_held`]): one
+//! The requeue after a start a host refused ([`crate::JobStore::requeue_held`]): one
 //! commit that puts a placed or starting job, of a share of a host or of the whole host, back
-//! to queued with the bars and note it is given and the host appended to its held refusals,
+//! to queued with the bars and note it is given and the host appended to its held refusals or
+//! its capacity refusals,
 //! frees the allocation with `Refused`, writes the rows given beside it and deletes the
 //! allocation's start from the host's dispatch queue without queueing a stop. It counts no
 //! failed prepare, writes nothing when its commit fails, is refused for a job or allocation it
@@ -20,13 +21,14 @@ use crate::codec::{alloc_tag, set_field};
 use crate::keys;
 use crate::{
     AllocationRecord, AllocationStep, Beside, EndReason, Exclusion, HeldRequeue, HostBooking,
-    JobId, JobRecord, JobState, JobStoreError,
+    JobId, JobRecord, JobState, JobStoreError, RequeuedFor,
 };
 
 /// The requeue the server makes of a job `host-a` refused: the host barred for an hour beside
 /// a bar for life the job had on `host-x`, and a note naming the host.
 fn held_on_a<S: Store>(rig: &Rig<S>) -> HeldRequeue {
     HeldRequeue {
+        refused: RequeuedFor::Held,
         prepare_bars: BTreeMap::from([
             (host("host-a"), Exclusion::Until(later(rig, 3600))),
             (host("host-x"), Exclusion::ForLife),
@@ -164,6 +166,7 @@ pub fn a_held_refusal_requeues_the_job_without_counting_a_failure<B: Backend>(ba
     assert_eq!(claimed.len(), 1, "{name}: the second start was not queued");
     let bars = BTreeMap::from([(host("host-b"), Exclusion::Until(later(&rig, 3600)))]);
     let again = HeldRequeue {
+        refused: RequeuedFor::Held,
         prepare_bars: bars.clone(),
         queue: None,
     };
@@ -380,5 +383,104 @@ where
             .map(|allocation| allocation.step),
         Some(AllocationStep::Booked),
         "{name}: the stale requeue freed the allocation"
+    );
+}
+
+/// A job whose start `host-a` refused for capacity goes back to queued as after a held refusal
+/// (its submit time kept, its allocation freed with `Refused` at once, its start gone from the
+/// dispatch queue with no stop, the bars and the note given, no failed prepare counted) but
+/// the host is appended to its capacity refusals and not to its held refusals. A later held
+/// refusal on another host is appended to the held refusals and leaves the capacity refusals
+/// as they were, and a second capacity refusal follows the first in order. Catches the host
+/// written to the wrong list, and one list overwriting the other.
+pub fn a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list<B: Backend>(
+    backend: &B,
+) {
+    let name = "a_capacity_refusal_requeues_the_job_and_names_the_host_in_its_own_list";
+    let rig = rig(backend);
+    let id = rig.placed("cr-first");
+    rig.tick();
+    let placed = rig.jobs.get_job(&id).expect("reads").expect("recorded");
+    let first = rig
+        .jobs
+        .get_allocation(&id)
+        .expect("reads")
+        .expect("booked");
+    let now = rig.store.now().expect("the store's clock");
+    let requeue = HeldRequeue {
+        refused: RequeuedFor::Capacity,
+        ..held_on_a(&rig)
+    };
+    let (queued, freed) = rig
+        .jobs
+        .requeue_held(&id, requeue.clone(), &history)
+        .expect("a refused start requeues");
+    let mut trail = placed.queue.clone();
+    trail.apply_all(requeue.queue.as_slice(), now);
+    assert_eq!(
+        queued,
+        JobRecord {
+            state: JobState::Queued,
+            host: None,
+            placed_at: None,
+            prepare_bars: requeue.prepare_bars.clone(),
+            capacity_refusals: vec![host("host-a")],
+            queue: trail,
+            ..placed
+        },
+        "{name}: the job is not queued with the host in its capacity refusals, and nothing else"
+    );
+    assert_eq!(
+        freed,
+        AllocationRecord {
+            step: AllocationStep::Freed,
+            freed_at: Some(now),
+            end_reason: Some(EndReason::Refused),
+            ..first
+        },
+        "{name}: the allocation is not freed with the refusal's reason"
+    );
+    assert_eq!(
+        dispatch_of(&rig, "host-a"),
+        [],
+        "{name}: the start was left in the dispatch queue or a stop was queued"
+    );
+
+    rig.tick();
+    rig.jobs
+        .place(&id, host("host-b"), share())
+        .expect("placed again");
+    let held = HeldRequeue {
+        prepare_bars: BTreeMap::new(),
+        queue: None,
+        ..held_on_a(&rig)
+    };
+    let (after_held, _) = rig
+        .jobs
+        .requeue_held(&id, held, &|_| Vec::new())
+        .expect("a held refusal requeues");
+    assert_eq!(
+        (after_held.held_refusals, after_held.capacity_refusals),
+        (vec![host("host-b")], vec![host("host-a")]),
+        "{name}: a held refusal changed the capacity refusals or went to the wrong list"
+    );
+
+    rig.tick();
+    rig.jobs
+        .place(&id, host("host-c"), share())
+        .expect("placed again");
+    let again = HeldRequeue {
+        refused: RequeuedFor::Capacity,
+        prepare_bars: BTreeMap::new(),
+        queue: None,
+    };
+    let (twice, _) = rig
+        .jobs
+        .requeue_held(&id, again, &|_| Vec::new())
+        .expect("a second capacity refusal requeues");
+    assert_eq!(
+        (twice.held_refusals, twice.capacity_refusals),
+        (vec![host("host-b")], vec![host("host-a"), host("host-c")]),
+        "{name}: the second capacity refusal did not follow the first"
     );
 }
