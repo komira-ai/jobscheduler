@@ -31,6 +31,10 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             profile: Kind::ConfinedWrites,
             audit_session: AuditSession::New,
             profile_add: None,
+            mount_provider: None,
+            mount_provider_user: "0".to_owned(),
+            mount_root: None,
+            agent_id: "mac-job".to_owned(),
         }
     );
 }
@@ -136,4 +140,29 @@ fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
     both.extend(rest);
     assert!(parse(&words(&both)).is_err());
     assert!(parse(&words(&rest)).is_err());
+}
+
+#[test]
+fn the_mount_provider_and_its_root_come_together() {
+    let mut list = MINIMAL.to_vec();
+    list.extend([
+        "--mount-provider",
+        "/p.sock",
+        "--mount-root",
+        "/fs",
+        "--mount-provider-user",
+        "_tierstore",
+        "--agent-id",
+        "mac-1",
+    ]);
+    let args = parse(&words(&list)).expect("parses");
+    assert_eq!(args.mount_provider, Some(PathBuf::from("/p.sock")));
+    assert_eq!(args.mount_root, Some(PathBuf::from("/fs")));
+    assert_eq!(args.mount_provider_user, "_tierstore");
+    assert_eq!(args.agent_id, "mac-1");
+    for alone in [["--mount-provider", "/p.sock"], ["--mount-root", "/fs"]] {
+        let mut list = MINIMAL.to_vec();
+        list.extend(alone);
+        assert!(parse(&words(&list)).is_err(), "{alone:?}");
+    }
 }

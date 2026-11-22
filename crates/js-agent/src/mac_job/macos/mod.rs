@@ -2,6 +2,7 @@
 
 mod files;
 mod sys;
+mod trees;
 
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -151,6 +152,13 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     let scan_roots = files::scan_roots(&user.home, user.uid);
     let snapshot = files::Snapshot::take(&scan_roots, user.uid);
     make_folder(&layout, &job, user.uid, user.gid)?;
+    let mounted = match trees::link(args, &job, &layout, user.uid, user.gid) {
+        Ok(mounted) => mounted,
+        Err(why) => {
+            let _ = files::remove_folder(&layout.folder);
+            return Err(Stop::Setup(why));
+        }
+    };
 
     let profile_text = profile::render(args.profile, &job.network, added);
     let new_session = args.audit_session == AuditSession::New;
@@ -159,8 +167,9 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     let (mut child, asid) = match started_job {
         Ok(started) => started,
         Err(why) => {
-            // Nothing ran: the folder goes, and the stop says why.
-            let _ = fs::remove_dir_all(&layout.folder);
+            // Nothing ran: the trees and the folder go, and the stop says why.
+            let _ = trees::release(args, &job, mounted);
+            let _ = files::remove_folder(&layout.folder);
             return Err(Stop::Setup(why));
         }
     };
@@ -174,6 +183,7 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         own_pid: std::process::id().cast_signed(),
     };
     let sweep = sweep_job(&ids)?;
+    let trees = trees::release(args, &job, mounted);
     let outputs = files::collect(&layout.work(), &job.outputs, &args.out.join("outputs"));
     let folder = files::remove_folder(&layout.folder)
         .err()
@@ -200,6 +210,7 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         sweep,
         outputs,
         leftovers,
+        trees,
         account: None,
         spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),

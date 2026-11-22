@@ -26,6 +26,7 @@
 //! The calls carry the agent's own id (the host id it registered under) in every `Source` and
 //! in `SweepRequest.agent`, and `js.` before every run id.
 
+pub mod blocking;
 mod call;
 mod flight;
 mod socket;

@@ -5,6 +5,7 @@
 //!     --root <dir> --out <dir> [--ready <n>] [--spawn ordinary|disclaimed]
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
+//!     [--mount-provider <socket> --mount-root <dir> [--mount-provider-user <user>] [--agent-id <id>]]
 //! ```
 //!
 //! A prototype of the one-program Mac runtime (`docs/design/mac-one-program.md`): no helper
@@ -39,6 +40,12 @@
 //!
 //! It writes a JSON report ([`report::Report`]) to `<out>/report.json` and to standard output,
 //! and the program's standard output and error to `<out>/stdout` and `<out>/stderr`.
+//!
+//! A job's `trees` come from the mount provider at `--mount-provider`: each is prepared read-only
+//! and mounted (run id the job's id, source index its place in the list), the path it is mounted
+//! at must lie beneath `--mount-root`, and `work/<at>` is a link to it. The confined-writes
+//! profile lets the job read it and write nothing there; the deny-default one has no rule for it,
+//! so a job with trees is refused under it. Each tree is released after the sweep.
 //!
 //! `--job-inline` takes the job's JSON as the argument itself, for a run that can pass arguments
 //! to the program but no file; the job then fetches its own inputs. `--root` is made (root's,
@@ -142,6 +149,18 @@ pub struct Args {
     /// Seatbelt rules appended to the profile, for measuring what a build needs.
     #[arg(long)]
     pub profile_add: Option<PathBuf>,
+    /// The mount provider's socket, for the job's trees.
+    #[arg(long, requires = "mount_root")]
+    pub mount_provider: Option<PathBuf>,
+    /// The user the mount provider runs as (a name or a uid), whose socket it is.
+    #[arg(long, default_value = "0")]
+    pub mount_provider_user: String,
+    /// The folder every tree the provider mounts must lie beneath.
+    #[arg(long, requires = "mount_provider")]
+    pub mount_root: Option<PathBuf>,
+    /// The id the provider calls carry as the agent's.
+    #[arg(long, default_value = "mac-job")]
+    pub agent_id: String,
 }
 
 /// Parses the command line after the mode word.

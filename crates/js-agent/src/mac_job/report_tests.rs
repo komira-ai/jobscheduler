@@ -1,6 +1,6 @@
 //! The report: its status and its JSON.
 
-use super::{AccountUse, Ended, Leftovers, Outputs, Report, TAIL_MAX, tail};
+use super::{AccountUse, Ended, Leftovers, Outputs, Report, TAIL_MAX, TreeUse, tail};
 use crate::mac_job::status;
 use crate::mac_job::sweep::Tally;
 
@@ -20,6 +20,7 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
+        trees: Vec::new(),
         account: None,
         spawn: "ordinary".to_owned(),
         stdout_tail: String::new(),
@@ -137,5 +138,20 @@ fn the_json_names_how_the_job_ended() {
     assert!(
         text.starts_with(r#"{"id":"j","user":"u","uid":680,"asid":7,"folder":"/r/j""#),
         "{text}"
+    );
+}
+
+#[test]
+fn a_tree_reports_its_reference_place_path_and_release() {
+    let tree = TreeUse {
+        reference: "cas/l/ab".to_owned(),
+        at: "src".to_owned(),
+        path: "/fs/mount-provider/a/b/0".to_owned(),
+        mount_ms: 12,
+        released: Ok(()),
+    };
+    assert_eq!(
+        serde_json::to_string(&tree).expect("json"),
+        r#"{"ref":"cas/l/ab","at":"src","path":"/fs/mount-provider/a/b/0","mount_ms":12,"released":{"Ok":null}}"#
     );
 }

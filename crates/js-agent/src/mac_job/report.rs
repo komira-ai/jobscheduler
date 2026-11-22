@@ -61,6 +61,8 @@ pub struct Report {
     pub outputs: Outputs,
     /// What was left.
     pub leftovers: Leftovers,
+    /// The trees the job read, where they were mounted, and their release.
+    pub trees: Vec<TreeUse>,
     /// The lent account and what its retirement did, when the pool lent one.
     pub account: Option<AccountUse>,
     /// How the program was started: `ordinary` or `disclaimed`.
@@ -69,6 +71,22 @@ pub struct Report {
     pub stdout_tail: String,
     /// The last [`TAIL_MAX`] bytes of its standard error.
     pub stderr_tail: String,
+}
+
+/// A tree of the mount provider, as the job had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TreeUse {
+    /// The tree's reference.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Where it appeared, under `work`.
+    pub at: String,
+    /// The path the provider mounted it at.
+    pub path: String,
+    /// Milliseconds from the prepare to the mount's answer.
+    pub mount_ms: u64,
+    /// The release after the job, or why it failed.
+    pub released: Result<(), String>,
 }
 
 /// An account the pool lent for the job.
