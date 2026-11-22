@@ -199,7 +199,7 @@ its share by weight, 91% of its peak.
 reading, plus the peaks of the jobs placed since (covered leases, below). With the admission's floor at its default (1), a
 measurement below the peaks does not release room: a host whose jobs are between bursts is still booked by their peaks, and it is
 busy at the share of their peaks its jobs use on average. A measurement above them (a job bursting past its booking) blocks new
-jobs until it falls. Whether between-burst room should be released (the admission floor below 1) is open.
+jobs until it falls. The floor stays at 1: between-burst room is not released.
 
 **Unknown jobs.** A class with no CPU history books its kind's learned peak, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
