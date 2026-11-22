@@ -318,6 +318,15 @@ impl Host for MacHost {
         signal_group(pgid, libc::SIGTERM)
     }
 
+    fn list_privacy_dir(&self) -> io::Result<()> {
+        // Opens the directory and reads one entry name: no file in it is opened and no
+        // database is read.
+        std::fs::read_dir(crate::full_disk_access::PRIVACY_DIR)?
+            .next()
+            .transpose()
+            .map(|_| ())
+    }
+
     fn pause(&self) {
         std::thread::sleep(Duration::from_millis(100));
     }

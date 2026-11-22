@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::helper::POOL_EXHAUSTED;
-use crate::proto::{self, Call, Limits, PoolState, Reply, Request, Session};
+use crate::proto::{self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session};
 
 /// Why a call did not succeed.
 #[derive(Debug)]
@@ -132,6 +132,18 @@ impl Client {
     /// The call failed or was refused.
     pub fn pool_status(&self) -> Result<PoolState, ClientError> {
         self.pool_call(&Request::PoolStatus)
+    }
+
+    /// `full-disk-access`: whether the helper holds Full Disk Access. A helper from
+    /// before the verb refuses it ([`ClientError::unknown_to_helper`]).
+    ///
+    /// # Errors
+    /// The call failed or was refused.
+    pub fn full_disk_access(&self) -> Result<FullDiskAccess, ClientError> {
+        match self.call(&Request::FullDiskAccess, &[])?.1 {
+            Reply::FullDiskAccess { state } => Ok(state),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn pool_call(&self, request: &Request) -> Result<PoolState, ClientError> {

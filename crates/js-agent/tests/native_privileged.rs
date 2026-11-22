@@ -39,6 +39,7 @@ use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_bundle::pack_layer;
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_oci::{Allow, Digest};
 use js_testkit::oci_registry::{Artifact, Fixture as Registry};
 use js_treestore::Sealer;
@@ -197,6 +198,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     };
     adjust(&mut config);
     let term = TERMS.fetch_add(1, Ordering::SeqCst);

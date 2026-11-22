@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::autologin::SessionPaths;
 use crate::client::{Client, ClientError, Exit};
-use crate::helper::POOL_EXHAUSTED;
-use crate::helper::Settings;
+use crate::helper::{POOL_EXHAUSTED, Settings};
 use crate::lease::UidRange;
 use crate::ledger::Ledger;
 use crate::proto::{PoolState, Request};
@@ -1070,3 +1069,4 @@ fn a_watched_run_that_was_forgotten_is_refused() {
         }
     );
 }
+mod full_disk_access;

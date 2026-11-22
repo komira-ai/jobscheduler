@@ -13,7 +13,9 @@ use std::os::unix::net::UnixStream;
 use js_mac_session::lease::{Dotted, Slot, parse_lease, pool_user_name, user_name};
 use js_mac_session::ledger::Ledger;
 use js_mac_session::ledger::pool::SlotState;
-use js_mac_session::proto::{self, Call, Limits, PoolState, Reply, Request, Session};
+use js_mac_session::proto::{
+    self, Call, FullDiskAccess, Limits, PoolState, Reply, Request, Session,
+};
 use js_testkit::dir::TestDir;
 use js_types::LeaseId;
 
@@ -152,6 +154,7 @@ fn requests() -> Vec<(Request, &'static str)> {
         (Request::RebootDirty, r#"{"verb":"reboot-dirty"}"#),
         (Request::PoolCreate, r#"{"verb":"pool-create"}"#),
         (Request::PoolStatus, r#"{"verb":"pool-status"}"#),
+        (Request::FullDiskAccess, r#"{"verb":"full-disk-access"}"#),
     ]
 }
 
@@ -225,6 +228,24 @@ fn replies() -> Vec<(Reply, &'static str)> {
         (
             Reply::Refused { reason: s("no") },
             r#"{"refused":{"reason":"no"}}"#,
+        ),
+        (
+            Reply::FullDiskAccess {
+                state: FullDiskAccess::NotGranted,
+            },
+            r#"{"full-disk-access":{"state":"not-granted"}}"#,
+        ),
+        (
+            Reply::FullDiskAccess {
+                state: FullDiskAccess::Granted,
+            },
+            r#"{"full-disk-access":{"state":"granted"}}"#,
+        ),
+        (
+            Reply::FullDiskAccess {
+                state: FullDiskAccess::Undetermined,
+            },
+            r#"{"full-disk-access":{"state":"undetermined"}}"#,
         ),
         (
             Reply::Pool(Box::new(PoolState {

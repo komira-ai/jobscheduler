@@ -23,6 +23,8 @@
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
 //!   its privacy (TCC) responsibility disclaimed, so it never holds the helper's or the
 //!   agent's grants.
+//! - [`full_disk_access`]: whether the helper holds Full Disk Access, which the
+//!   `full-disk-access` verb answers.
 //! - [`proto`], [`server`], [`client`]: the socket, its wire format, the caller check.
 //! - [`start`]: flags and start-up.
 //! - [`node_admin`]: the `node-admin` mode, the verbs a node's administrator runs
@@ -47,6 +49,7 @@
 pub mod autologin;
 pub mod client;
 pub mod disclaim;
+pub mod full_disk_access;
 pub mod groups;
 pub mod helper;
 pub mod lease;
