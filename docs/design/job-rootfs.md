@@ -73,7 +73,7 @@ Read in code; every later section builds on these facts.
   to the host whose `input` chain rejects everything it sends to the host itself
   (`crates/js-agent/src/egress/ruleset.rs`, the rule commented `input`). The `ports` of a job (`PortForward`,
   `PortMap { host, container }`) are the other direction: a forward from a host port into the job.
-- **macOS has no root to replace.** A native job runs as a pool user under a Seatbelt profile that the agent's `__job-start` mode applies, in `exec/` of the user's
+- **macOS has no root to replace.** A native job runs as a pool user under `sandbox-exec`, in `exec/` of the user's
   home, with reads open except listed denies (`ReadModel::Open`, `crates/js-agent/src/native/settings.rs`) and writes
   only in the run directory `exec/` (`HOME` is `exec/.home`, `TMPDIR` `exec/.tmp`; the account's home is never written). A `Mount` input is copied into `exec/<dest>` (`crates/js-agent/src/native/files.rs`). The Seatbelt
   builder can already allow single loopback ports (`Net::Ports`, `crates/js-mac-pool/src/seatbelt/profile.rs:191-195`),

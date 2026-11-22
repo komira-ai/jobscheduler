@@ -48,7 +48,6 @@ mod identity;
 #[cfg(target_os = "linux")]
 mod image_budget;
 mod integrity;
-mod job_start_verb;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;

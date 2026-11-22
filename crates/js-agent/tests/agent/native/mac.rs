@@ -1,5 +1,5 @@
 //! The runtime's command line applied for real, on a Mac, as the user running the tests: the
-//! fake helper starts the `run` it is asked for (`real_runs`), so the agent's start mode reads the
+//! fake helper starts the `run` it is asked for (`real_runs`), so `sandbox-exec` reads the
 //! profile the runtime built. What this cannot show is the change of user, which needs root
 //! (`tests/native_privileged.rs`).
 
@@ -18,7 +18,7 @@ fn exited(code: i32) -> Status {
 }
 
 /// Asserts that a program runs under the profile the runtime builds, and that what it prints
-/// reaches the log. It catches a profile the start mode refuses to read, a parameter
+/// reaches the log. It catches a profile `sandbox-exec` refuses to read, a parameter
 /// spelled wrong, and a program that cannot start under it.
 #[test]
 fn a_program_runs_under_the_profile_and_its_output_reaches_the_log() {
@@ -152,7 +152,7 @@ fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
 }
 
 /// Asserts the file size limit for real, as the helper sets it with `setrlimit` in the child
-/// before the start mode executes: a program that writes four MiB to its standard output
+/// before `sandbox-exec` executes: a program that writes four MiB to its standard output
 /// under a limit of one MiB is ended by `SIGXFSZ` (status 128 and the signal) or, where the
 /// signal is ignored, fails with `EFBIG` ("File too large"), and the log never grows past
 /// the limit. It catches a run that can fill the agent's disk through its output, and a

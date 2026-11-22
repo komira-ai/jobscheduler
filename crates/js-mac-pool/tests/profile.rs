@@ -4,7 +4,7 @@ use std::ffi::OsString;
 
 use js_mac_pool::seatbelt::{
     AbsPath, Caps, MAX_LISTED, MountGrant, Narrowing, Net, Policy, PolicyError, Ports, Profile,
-    ReadModel, START_VERB, SlotLayout,
+    ReadModel, SANDBOX_EXEC, SlotLayout,
 };
 
 fn path(text: &str) -> AbsPath {
@@ -126,31 +126,26 @@ fn every_path_is_a_named_parameter_in_a_fixed_order() {
     assert_eq!(profile.params(), expected.as_slice());
 }
 
-/// Catches a start vector with the pieces out of order: js-agent, the verb, `--profile`
-/// and the text, a `--param NAME=value` pair per parameter in the profile's order, `--`,
-/// then the program and its arguments untouched.
 #[test]
-fn the_start_argv_is_start_verb_profile_parameters_separator_program_and_arguments() {
+fn the_argv_is_sandbox_exec_parameters_profile_program_and_arguments() {
     let policy = Policy::base(bare_layout(), caps(Net::Off)).unwrap();
     let profile = Profile::for_policy(&policy).unwrap();
     let args = [OsString::from("-c"), OsString::from("echo hi")];
-    let argv = profile.start_argv(&path("/opt/js-agent"), path("/bin/sh").as_str(), &args);
+    let argv = profile.argv(path("/bin/sh"), &args);
     let expected = [
-        OsString::from("/opt/js-agent"),
-        OsString::from("__job-start"),
-        OsString::from("--profile"),
-        OsString::from(profile.text()),
-        OsString::from("--param"),
+        OsString::from(SANDBOX_EXEC),
+        OsString::from("-D"),
         OsString::from("RUN=/Volumes/work/slot1/run"),
-        OsString::from("--param"),
+        OsString::from("-D"),
         OsString::from("UENTRY=/private/var/folders/ab/cdef0123"),
-        OsString::from("--"),
+        OsString::from("-p"),
+        OsString::from(profile.text()),
         OsString::from("/bin/sh"),
         OsString::from("-c"),
         OsString::from("echo hi"),
     ];
     assert_eq!(argv, expected);
-    assert_eq!(START_VERB, "__job-start");
+    assert_eq!(SANDBOX_EXEC, "/usr/bin/sandbox-exec");
 }
 
 /// Every combination the builder can emit ends with the floor, in order, and a policy

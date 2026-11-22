@@ -13,7 +13,7 @@ use super::trees::MountTrees;
 use crate::xcode::HostXcode;
 
 /// The most entries any one list of a policy holds. Each is a rule and a `-D` parameter
-/// on the start mode's command line.
+/// on the `sandbox-exec` command line.
 pub const MAX_LISTED: usize = 64;
 
 /// Which reads the profile permits.

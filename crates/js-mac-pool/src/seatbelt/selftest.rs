@@ -34,7 +34,7 @@
 //! environment of [`Step::env`], as the pool user, and reports what each step did
 //! ([`Outcome`]): a denied step passes only when it was refused with the kernel's
 //! "Operation not permitted", so a spawn error, a signal or a timeout is not a denial.
-//! A profile the Seatbelt compiler refuses makes every sandboxed step fail, which fails
+//! A profile `sandbox-exec` cannot compile makes every sandboxed step fail, which fails
 //! the allowed steps, so a broken profile cannot pass as "everything denied".
 
 use std::ffi::OsString;
@@ -223,13 +223,12 @@ impl Step {
         self.role
     }
 
-    /// The program and its arguments, under js-agent's start mode (`start`, the path of
-    /// js-agent) with the profile when the step is sandboxed. The first element is the
-    /// program to start.
+    /// The program and its arguments, under `sandbox-exec` with the profile when the
+    /// step is sandboxed. The first element is the program to start.
     #[must_use]
-    pub fn argv(&self, start: &AbsPath) -> Vec<OsString> {
+    pub fn argv(&self) -> Vec<OsString> {
         match &self.profile {
-            Some(profile) => profile.start_argv(start, &self.program, &self.args),
+            Some(profile) => profile.argv(&self.program, &self.args),
             None => {
                 let mut argv = vec![OsString::from(&self.program)];
                 argv.extend(self.args.iter().cloned());
@@ -342,11 +341,10 @@ impl Outcome {
 
 /// Whether `line` is the tool's own refusal: `<tool>: <path>: Operation not permitted`
 /// (or a Python tool's `[Errno 1] Operation not permitted`), and not a line of
-/// the start mode's own (`js-agent:`), whose messages are about the profile or the
-/// exec, not about a read.
+/// `sandbox-exec` itself, whose messages are about the profile, not about a read.
 fn refusal_line(line: &str) -> bool {
     let line = line.trim();
-    let own = !line.starts_with("js-agent:");
+    let own = !line.starts_with("sandbox-exec:");
     let tool = line
         .strip_suffix(": Operation not permitted")
         .is_some_and(|rest| rest.contains(": "));

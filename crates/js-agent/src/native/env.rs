@@ -4,7 +4,7 @@
 //! with a job start's environment (`RunSpec::env`) laid over it.
 //!
 //! The whole environment goes to the helper as the `env` of its `run` request, which the
-//! helper sets in the child's environment block before it executes the agent's start mode. No value
+//! helper sets in the child's environment block before it executes `sandbox-exec`. No value
 //! is ever put on the command line: a process's arguments are readable by every user of the
 //! Mac, its environment only by its own user and root.
 

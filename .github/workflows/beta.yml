@@ -16,10 +16,9 @@
 # (the Linux host steps) and js-mdm (which applies its rendering to a Linux host through
 # js-host-step; the rendering, js-mdm-core, is tested here). Tests that need Linux (pidfds,
 # /proc, crun) are cfg-gated, not removed; the coverage and the Postgres tests stay on Linux.
-# js-mac-pool's Seatbelt profile builder also runs its generated profile here
-# (tests/runner.rs), applied by js-agent's `__job-start` mode (the workspace build makes
-# js-agent first, beside the test binaries; a run of `-p js-mac-pool` alone does not),
-# and xtask's macOS package tests build a package with Apple's pkgbuild. The release's own macOS build (artifacts.yml, `build` for
+# js-mac-pool's Seatbelt profile builder also runs its generated profile under the real
+# `sandbox-exec` here (tests/runner.rs), and xtask's macOS package tests build a package with
+# Apple's pkgbuild. The release's own macOS build (artifacts.yml, `build` for
 # aarch64-apple-darwin) makes the release binaries of that leg.
 name: beta
 

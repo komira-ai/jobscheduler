@@ -129,19 +129,16 @@ fn spawned_job_has_responsibility_disclaimed() {
     job.finish();
 }
 
-/// A native job runs as `js-agent __job-start ... -- <program>`: once the program itself has
-/// printed (so the agent's start mode has applied the profile and executed it), it is still
-/// its own responsible process. It catches a disclaim lost on the way from the start mode to
-/// the job's program.
+/// A native job runs as `sandbox-exec ... <program>`: once the program itself has printed
+/// (so `sandbox-exec` has executed it), it is still its own responsible process. It
+/// catches a disclaim lost on the way from `sandbox-exec` to the job's program.
 #[test]
-fn a_job_under_the_agents_start_answers_for_itself() {
+fn a_job_under_sandbox_exec_answers_for_itself() {
     let dir = Scratch::new("disclaim-sandbox");
     let argv = [
-        env!("CARGO_BIN_EXE_js-agent"),
-        "__job-start",
-        "--profile",
-        "(version 1)\n(allow default)\n",
-        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default)",
         READY[0],
         READY[1],
         READY[2],
@@ -183,7 +180,7 @@ fn a_jobs_children_answer_for_the_job() {
     job.finish();
 }
 
-/// A program the agent starts itself (a probe, the start-mode self-test) is its own
+/// A program the agent starts itself (a probe, the `sandbox-exec` self-test) is its own
 /// responsible process too. It catches a [`Program`] that disclaims only when it is given
 /// steps, as the helper's runs are.
 #[test]

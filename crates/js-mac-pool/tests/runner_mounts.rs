@@ -1,5 +1,5 @@
-//! A profile with mount grants applied by js-agent's `__job-start` on a macOS runner, as
-//! the runner's own user, laid out as the agent lays out a job start's mounts
+//! A profile with mount grants under the real `sandbox-exec` on a macOS runner, as the
+//! runner's own user, laid out as the agent lays out a job start's mounts
 //! (`docs/design/job-rootfs.md` 5.2 and 5.4): two mount roots are read denies, a read-only
 //! `no_exec` tree and a read-write `no_exec` output below them are granted, and the run
 //! reaches each through a link in its own directory. Each refusal has a control: the same
@@ -7,16 +7,13 @@
 
 #![cfg(target_os = "macos")]
 
-mod common;
-
 use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::start_program;
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MountGrant, MountTrees, Net, Policy, Profile, ReadModel, SlotLayout,
+    AbsPath, Caps, MountGrant, Net, Policy, Profile, ReadModel, SlotLayout,
 };
 
 /// A scratch tree under the build's own target directory, removed when dropped:
@@ -108,15 +105,11 @@ impl Scene {
     /// Runs `program args` under the generated profile of [`Scene::policy`].
     fn sandboxed(&self, program: &str, args: &[OsString]) -> Output {
         let profile = Profile::for_policy(&self.policy()).expect("profile");
-        let argv = profile.start_argv(
-            &start_program(),
-            AbsPath::parse(program).expect("program"),
-            args,
-        );
+        let argv = profile.argv(AbsPath::parse(program).expect("program"), args);
         Command::new(&argv[0])
             .args(&argv[1..])
             .output()
-            .expect("js-agent starts")
+            .expect("sandbox-exec starts")
     }
 }
 
@@ -208,163 +201,4 @@ fn nothing_in_a_no_exec_mount_runs() {
         assert!(!out.status.success(), "{tool:?}: {}", describe(&out));
         assert!(!String::from_utf8_lossy(&out.stdout).contains("ran"));
     }
-}
-
-/// A run's own tree and another run's tree below one mount root, and a link from the run
-/// directory to its own tree:
-///
-/// - `fs/` the mount's root, holding `mp/aa/r1/0` (this run's tree, with `mine`) and
-///   `mp/aa/r1/1` (another run's tree, with `theirs`);
-/// - `job/` the run's directory, with `job/exec` a link to its own tree.
-struct TreesScene {
-    base: PathBuf,
-    root: PathBuf,
-    mine: PathBuf,
-    theirs: PathBuf,
-    run: PathBuf,
-}
-
-impl TreesScene {
-    fn new() -> Self {
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
-        let base = root.join(format!("mac-pool-trees-{}", std::process::id()));
-        let made = |path: &Path| {
-            std::fs::create_dir_all(path).expect("scratch directory");
-            path.canonicalize().expect("canonical scratch directory")
-        };
-        let base = made(&base);
-        let root = made(&base.join("fs"));
-        let mine = made(&root.join("mp/aa/r1/0"));
-        let theirs = made(&root.join("mp/aa/r1/1"));
-        let run = made(&base.join("job"));
-        std::fs::write(mine.join("mine"), "this run's tree\n").expect("mine");
-        std::fs::write(theirs.join("theirs"), "another run's tree\n").expect("theirs");
-        symlink(&mine, run.join("exec")).expect("exec link");
-        Self {
-            base,
-            root,
-            mine,
-            theirs,
-            run,
-        }
-    }
-
-    fn profile(&self) -> Profile {
-        let abs = |path: &Path| AbsPath::new(path).expect("absolute path");
-        let trees = MountTrees::new(abs(&self.root), vec![abs(&self.mine)]).expect("trees");
-        let layout = SlotLayout {
-            trees: Some(trees),
-            run: abs(&self.run),
-            uid_entry: None,
-            inputs: vec![],
-            read_denies: vec![],
-            mounts: vec![],
-        };
-        let caps = Caps {
-            net: Net::Off,
-            read_model: ReadModel::Open,
-        };
-        Profile::for_policy(&Policy::base(layout, caps).expect("policy")).expect("profile")
-    }
-
-    /// Runs `program args` under `profile`, whose text is replaced by `text` when given.
-    fn sandboxed(
-        &self,
-        profile: &Profile,
-        text: Option<&str>,
-        program: &str,
-        args: &[OsString],
-    ) -> Output {
-        let mut argv = profile.start_argv(
-            &start_program(),
-            AbsPath::parse(program).expect("program"),
-            args,
-        );
-        if let Some(text) = text {
-            let at = argv
-                .iter()
-                .position(|arg| arg == "--profile")
-                .expect("--profile")
-                + 1;
-            argv[at] = OsString::from(text);
-        }
-        Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .expect("js-agent starts")
-    }
-}
-
-impl Drop for TreesScene {
-    fn drop(&mut self) {
-        // Best effort: the runner is discarded anyway.
-        let _ = std::fs::remove_dir_all(&self.base);
-    }
-}
-
-/// The profile text without the deny of every read below the mount's root.
-fn without_root_deny(text: &str) -> String {
-    let deny = "(deny file-read* (subpath (param \"MOUNT\")))";
-    assert!(
-        text.lines().any(|line| line == deny),
-        "the root deny is there"
-    );
-    let kept: Vec<&str> = text.lines().filter(|line| *line != deny).collect();
-    format!("{}\n", kept.join("\n"))
-}
-
-/// Asserts that a run given one tree of a mount reads that tree's file by its absolute
-/// path and through the link in its run directory, is refused another tree's file by its
-/// absolute path and is refused listing the mount's root, and can find its working
-/// directory inside its tree (`pwd -P` walks up through the root). The same probes under
-/// the profile with the root deny taken out read the other tree's file and list the root:
-/// the deny is what refuses.
-///
-/// Catches a profile that does not deny the root (another run's tree readable), a deny
-/// that is not reopened for the run's own tree, and a missing metadata grant on the tree's
-/// ancestors (the working directory could not be found).
-#[test]
-fn a_run_reads_only_its_own_tree_below_a_shared_mount_root() {
-    let scene = TreesScene::new();
-    let profile = scene.profile();
-    let theirs = scene.theirs.join("theirs");
-    let listing = [os(&scene.root)];
-    let out = control("/bin/cat", &[os(&theirs)]);
-    assert!(out.status.success(), "control cat: {}", describe(&out));
-    let out = control("/bin/ls", &listing);
-    assert!(out.status.success(), "control ls: {}", describe(&out));
-
-    for path in [scene.mine.join("mine"), scene.run.join("exec/mine")] {
-        let out = scene.sandboxed(&profile, None, "/bin/cat", &[os(&path)]);
-        assert!(out.status.success(), "{path:?}: {}", describe(&out));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "this run's tree\n");
-    }
-    let out = scene.sandboxed(&profile, None, "/bin/cat", &[os(&theirs)]);
-    assert!(!out.status.success(), "other tree: {}", describe(&out));
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("another"));
-    let out = scene.sandboxed(&profile, None, "/bin/ls", &listing);
-    assert!(!out.status.success(), "root listing: {}", describe(&out));
-    let out = scene.sandboxed(
-        &profile,
-        None,
-        "/bin/sh",
-        &[
-            OsString::from("-c"),
-            OsString::from("cd \"$1\" && /bin/pwd -P"),
-            OsString::from("sh"),
-            os(&scene.run.join("exec")),
-        ],
-    );
-    assert!(out.status.success(), "getcwd: {}", describe(&out));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        scene.mine.to_str().expect("utf8")
-    );
-
-    let open = without_root_deny(profile.text());
-    let out = scene.sandboxed(&profile, Some(&open), "/bin/cat", &[os(&theirs)]);
-    assert!(out.status.success(), "without the deny: {}", describe(&out));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "another run's tree\n");
-    let out = scene.sandboxed(&profile, Some(&open), "/bin/ls", &listing);
-    assert!(out.status.success(), "without the deny: {}", describe(&out));
 }

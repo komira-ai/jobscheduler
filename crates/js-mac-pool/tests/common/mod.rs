@@ -24,31 +24,6 @@ pub fn tree(store: &str, digit: char) -> PinnedTree {
     PinnedTree::new(&path(store), &diff_id(digit)).expect("a tree")
 }
 
-/// The js-agent binary that applies a profile in a test: the file named `js-agent` in the
-/// directory of this test binary or its parent (cargo puts a workspace build's binaries in
-/// `target/<profile>/` and test binaries in `target/<profile>/deps/`; the privileged
-/// workflow ships both into one directory), canonicalized.
-pub fn start_program() -> AbsPath {
-    let exe = std::env::current_exe().expect("the test binary's own path");
-    let found = exe
-        .parent()
-        .into_iter()
-        .flat_map(|dir| [Some(dir), dir.parent()])
-        .flatten()
-        .map(|dir| dir.join("js-agent"))
-        .find(|candidate| candidate.is_file());
-    let Some(found) = found else {
-        panic!(
-            "js-agent is not next to {}: these tests need js-agent built in the same target \
-             directory (cargo build -p js-agent), because the profile is applied by js-agent's \
-             __job-start",
-            exe.display()
-        );
-    };
-    let found = found.canonicalize().expect("a canonical js-agent path");
-    AbsPath::new(&found).expect("an acceptable js-agent path")
-}
-
 /// A directory of this test's own under the build's target directory, emptied first and
 /// removed when dropped. Its path is canonical.
 pub struct Scratch {

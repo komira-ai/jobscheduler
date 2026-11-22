@@ -249,7 +249,7 @@ fn the_system_machine_opens_the_native_runtime() {
         os: "macos".to_owned(),
         arch: "aarch64".to_owned(),
     };
-    let open = |socket: &std::path::Path, start: &str| {
+    let open = |socket: &std::path::Path, sandbox: &str| {
         let flags = NativeFlags {
             socket: Some(socket),
             homes: Some(fake.homes()),
@@ -263,7 +263,7 @@ fn the_system_machine_opens_the_native_runtime() {
         let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
             .unwrap()
             .unwrap();
-        let backend = Backend::Native(settings.with_start(Path::new(start)));
+        let backend = Backend::Native(settings.with_sandbox_exec(Path::new(sandbox)));
         let build = RuntimeBuild {
             backend: &backend,
             host_id: "h1",
@@ -350,9 +350,9 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
     assert!(denied.contains(&"/private/etc/kcpassword"));
 }
 
-/// Asserts the start-up self-test of the sandbox: a start program that runs and accepts the
+/// Asserts the start-up self-test of the sandbox: a program that runs and accepts the
 /// profile passes; one that refuses it fails with its status and what it said; one that
-/// cannot be run fails naming it; one a pool user cannot execute fails naming the path; a configuration with no profile builder fails by name.
+/// cannot be run fails naming it; a configuration with no profile builder fails by name.
 /// It catches an agent that says `sandbox-exec` while every job it takes would fail.
 #[test]
 fn the_sandbox_self_test_fails_closed() {
@@ -371,42 +371,25 @@ fn the_sandbox_self_test_fails_closed() {
     let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
         .unwrap()
         .unwrap();
-    let starting = |program: &str| settings.clone().with_start(Path::new(program));
+    let config = settings.config();
     assert_eq!(
-        native::self_test(starting("/usr/bin/true").config()),
+        native::self_test(config, Path::new("/usr/bin/true")),
         Ok(())
     );
-    let refused = native::self_test(starting("/usr/bin/false").config()).unwrap_err();
+    let refused = native::self_test(config, Path::new("/usr/bin/false")).unwrap_err();
     assert!(
         refused.contains("/usr/bin/false refused the profile"),
         "{refused}"
     );
-    let missing = native::self_test(starting("/nonexistent/js-agent").config()).unwrap_err();
-    assert!(missing.starts_with("/nonexistent/js-agent: "), "{missing}");
-    let private = dir.path("private-js-agent");
-    std::fs::copy("/usr/bin/true", &private).unwrap();
-    std::fs::set_permissions(
-        &private,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .unwrap();
-    let closed = native::self_test(starting(private.to_str().unwrap()).config()).unwrap_err();
+    let missing = native::self_test(config, Path::new("/nonexistent/sandbox-exec")).unwrap_err();
     assert!(
-        closed.starts_with(&format!(
-            "{}: {} is not readable and searchable",
-            private.display(),
-            private.display()
-        )),
-        "{closed}"
+        missing.starts_with("/nonexistent/sandbox-exec: "),
+        "{missing}"
     );
-    let mut allow = starting("/usr/bin/true").config().clone();
+    let mut allow = config.clone();
     allow.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
-    let unbuilt = native::self_test(&allow).unwrap_err();
+    let unbuilt = native::self_test(&allow, Path::new("/usr/bin/true")).unwrap_err();
     assert!(unbuilt.starts_with("the profile: "), "{unbuilt}");
-    let mut relative = starting("/usr/bin/true").config().clone();
-    relative.start = std::path::PathBuf::from("js-agent");
-    let named = native::self_test(&relative).unwrap_err();
-    assert!(named.contains("js-agent"), "{named}");
 }
 
 /// The flags of a Mac agent that runs native jobs over `fake` and keeps a store of bundles.
@@ -571,7 +554,7 @@ fn the_system_machine_gives_the_store_to_the_native_runtime() {
     let plain = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
         .unwrap()
         .unwrap();
-    let plain = plain.with_start(Path::new("/usr/bin/true"));
+    let plain = plain.with_sandbox_exec(Path::new("/usr/bin/true"));
     let stored = plain
         .clone()
         .with_bundles(placer(&bundles, no_registry()))

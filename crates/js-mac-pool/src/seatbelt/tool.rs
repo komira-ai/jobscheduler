@@ -97,7 +97,7 @@ impl ToolPath {
         }
     }
 
-    /// The program's absolute path, for [`Profile::start_argv`](super::Profile::start_argv).
+    /// The program's absolute path, for [`Profile::argv`](super::Profile::argv).
     #[must_use]
     pub fn path(&self) -> &AbsPath {
         &self.0

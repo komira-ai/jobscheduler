@@ -1,4 +1,4 @@
-//! A fixture for the tests that run the generated profile applied by js-agent's `__job-start`:
+//! A fixture for the tests that run the generated profile under the real `sandbox-exec`:
 //! a store with a pinned tree and an unpinned one, a run directory, the canaries, and the
 //! real Xcode of the host. Used by the macOS runner tests and by the privileged tests.
 
@@ -166,14 +166,7 @@ impl Mac {
 pub fn run_steps(test: &SelfTest, ids: Option<(u32, u32)>) -> Vec<Ran> {
     test.steps()
         .iter()
-        .map(|step| {
-            run(
-                &step.argv(&super::start_program()),
-                step.env(),
-                Some(step.cwd()),
-                ids,
-            )
-        })
+        .map(|step| run(&step.argv(), step.env(), Some(step.cwd()), ids))
         .collect()
 }
 

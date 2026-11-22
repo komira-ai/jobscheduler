@@ -670,28 +670,3 @@ fn settings_are_undetermined_until_the_agent_has_looked() {
         assert_eq!(told.socket(), socket);
     }
 }
-
-/// Asserts that the program the helper starts for each run is this agent's own executable
-/// unless a test sets another. It catches settings that name a second program (such as
-/// `sandbox-exec`) or no program at all, with which every job would fail.
-#[test]
-fn the_start_program_is_the_agent_itself_unless_set() {
-    let dir = Scratch::new("native-set-start");
-    let homes = dir.path("homes");
-    fs::create_dir_all(&homes).unwrap();
-    let socket = dir.path("helper.sock");
-    let settings = NativeSettings::from_flags(
-        &flags(Some(&socket), Some(&homes), None, &[]),
-        &[],
-        Path::new("/srv/journal"),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        settings.config().start,
-        std::env::current_exe().unwrap(),
-        "the default start is this executable"
-    );
-    let set = settings.with_start(Path::new("/usr/bin/true"));
-    assert_eq!(set.config().start, Path::new("/usr/bin/true"));
-}

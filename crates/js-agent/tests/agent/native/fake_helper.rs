@@ -12,7 +12,7 @@
 //! of each lease's own, `kbf-lease-<term>-<seq>`.
 //!
 //! On a Mac a test can ask the fake to start the program of a `run` for real, as the
-//! user running the tests (`real_runs`), which is how the start-mode command line the
+//! user running the tests (`real_runs`), which is how the `sandbox-exec` command line the
 //! runtime builds is applied without root.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

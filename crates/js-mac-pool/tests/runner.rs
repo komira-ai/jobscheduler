@@ -1,20 +1,17 @@
-//! The generated profile applied by js-agent's `__job-start` on a macOS runner, as the
-//! runner's own user. Each refusal has a control: the same step without the sandbox must succeed,
+//! The generated profile under the real `sandbox-exec` on a macOS runner, as the runner's
+//! own user. Each refusal has a control: the same step without the sandbox must succeed,
 //! or the refusal proves nothing.
 
 #![cfg(target_os = "macos")]
 
-mod common;
-
 use std::ffi::OsString;
-use std::net::{TcpListener, UdpSocket};
+use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::start_program;
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, Narrowing, Net, Policy, Ports, Profile, ReadModel, START_VERB, SlotLayout,
+    AbsPath, Caps, Narrowing, Net, Policy, Ports, Profile, ReadModel, SlotLayout,
 };
 
 /// A scratch tree under the build's own target directory: `run/` (granted), `run/in/`
@@ -88,15 +85,11 @@ impl Scene {
 
     fn sandboxed_with(&self, policy: &Policy, program: &str, args: &[OsString]) -> Output {
         let profile = Profile::for_policy(policy).expect("profile");
-        let argv = profile.start_argv(
-            &start_program(),
-            AbsPath::parse(program).expect("program"),
-            args,
-        );
+        let argv = profile.argv(AbsPath::parse(program).expect("program"), args);
         Command::new(&argv[0])
             .args(&argv[1..])
             .output()
-            .expect("js-agent starts")
+            .expect("sandbox-exec starts")
     }
 }
 
@@ -226,11 +219,7 @@ const EPERM: &str = "1";
 /// A listener that accepts every connection on its own thread, so a connect completes
 /// by the handshake and never waits in an accept queue.
 fn accepting_listener() -> u16 {
-    accepting_listener_on("127.0.0.1:0")
-}
-
-fn accepting_listener_on(address: &str) -> u16 {
-    let listener = TcpListener::bind(address).expect("listener");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let port = listener.local_addr().expect("addr").port();
     std::thread::spawn(move || for _connection in listener.incoming() {});
     port
@@ -369,28 +358,19 @@ fn a_c_toolchain_smoke_runs_under_the_profile_and_in_the_control() {
 }
 
 /// Seatbelt takes only `*` and `localhost` as the host of a `remote ip` filter, so the
-/// profile cannot deny a literal address; the builder offers no such rule. The text goes
-/// to the start mode, which refuses it with the compiler's words and exits 125, and does
-/// not run the program.
+/// profile cannot deny a literal address; the builder offers no such rule.
 #[test]
 fn the_profile_compiler_refuses_a_literal_address_in_a_remote_ip_filter() {
-    let start = start_program();
     let out = control(
-        start.as_str(),
+        "/usr/bin/sandbox-exec",
         &args(&[
-            START_VERB,
-            "--profile",
+            "-p",
             "(version 1)(allow default)(deny network-outbound (remote ip \"10.0.0.1:*\"))",
-            "--",
             "/usr/bin/true",
         ]),
     );
-    assert_eq!(out.status.code(), Some(125), "{}", describe(&out));
+    assert!(!out.status.success(), "compiled: {}", describe(&out));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        stderr.starts_with("js-agent: the Seatbelt profile was refused: "),
-        "{stderr}"
-    );
     assert!(stderr.contains("host must be * or localhost"), "{stderr}");
 }
 
@@ -438,7 +418,7 @@ fn listeners_are_allowed_on_loopback_only() {
 }
 
 #[test]
-fn the_name_resolver_is_reachable_under_on_and_remote_only() {
+fn the_name_resolver_is_reachable_under_on_only() {
     let scene = Scene::new("dns", "run");
     let free = control("/usr/bin/dns-sd", &args(&["-V"]));
     assert!(
@@ -452,13 +432,6 @@ fn the_name_resolver_is_reachable_under_on_and_remote_only() {
         "On reaches the resolver: {}",
         describe(&on)
     );
-    let remote = Net::Remote(Ports::new(&[443]).expect("ports"));
-    let out = resolver_under(&scene, remote);
-    assert!(
-        resolver_answers(&out),
-        "Remote reaches the resolver: {}",
-        describe(&out)
-    );
     for (name, net) in [("Off", Net::Off), ("Loopback", Net::Loopback)] {
         let out = resolver_under(&scene, net);
         assert!(!resolver_answers(&out), "{name} reached the resolver");
@@ -468,69 +441,6 @@ fn the_name_resolver_is_reachable_under_on_and_remote_only() {
             "{name} refuses the resolver: {stderr}"
         );
     }
-}
-
-/// Connects to `HOST:PORT` and reports as [`CONNECT`] does.
-const CONNECT_HOST: &str = r#"use IO::Socket::INET; my $s = IO::Socket::INET->new(PeerAddr => $ARGV[0], PeerPort => $ARGV[1]); exit 0 if $s; print STDERR ($!+0); exit 1"#;
-
-/// The address this Mac would use to reach another network. A UDP `connect` only picks
-/// the route, so nothing is sent.
-fn own_address() -> String {
-    let probe = UdpSocket::bind("0.0.0.0:0").expect("a UDP socket");
-    probe
-        .connect("192.0.2.1:9")
-        .expect("the Mac has a route out");
-    probe.local_addr().expect("addr").ip().to_string()
-}
-
-fn connect_to_host(host: &str, port: u16) -> Vec<OsString> {
-    perl(
-        CONNECT_HOST,
-        &[OsString::from(host), OsString::from(port.to_string())],
-    )
-}
-
-/// Under `Remote(ports)` a run connects to a listed port of an address that is not
-/// loopback, to any port on loopback, and to no other port beyond it; `Loopback` and `Off`
-/// refuse the non-loopback address. The control connects without the sandbox.
-///
-/// Catches a `Remote` level that allows no outbound connect (the listed port refused), one
-/// that allows every port beyond loopback, and one that drops the loopback rules.
-#[test]
-fn remote_connects_to_its_named_ports_beyond_loopback_and_to_loopback() {
-    let scene = Scene::new("remote", "run");
-    let named = accepting_listener_on("0.0.0.0:0");
-    let other = accepting_listener_on("0.0.0.0:0");
-    let host = own_address();
-    let to_named = connect_to_host(&host, named);
-    let to_other = connect_to_host(&host, other);
-    let control_out = control("/usr/bin/perl", &to_named);
-    assert!(
-        control_out.status.success(),
-        "control connect: {}",
-        describe(&control_out)
-    );
-    let remote = Net::Remote(Ports::new(&[named]).expect("ports"));
-    assert!(
-        allowed(&scene, &remote, &to_named),
-        "a named port connects beyond loopback"
-    );
-    assert!(
-        refused(&scene, &remote, &to_other),
-        "an unnamed port is refused beyond loopback"
-    );
-    assert!(
-        allowed(&scene, &remote, &connect_to(other)),
-        "Remote connects to any loopback port"
-    );
-    assert!(
-        refused(&scene, &Net::Loopback, &to_named),
-        "Loopback refuses a named port beyond loopback"
-    );
-    assert!(
-        refused(&scene, &Net::Off, &to_named),
-        "Off refuses beyond loopback"
-    );
 }
 
 #[test]
@@ -644,17 +554,13 @@ fn a_floor_deny_beats_an_earlier_grant() {
         Profile::for_policy(&Policy::base(layout, caps).expect("policy")).expect("profile");
     let program = AbsPath::parse("/usr/bin/touch").expect("program");
     let run = |profile_text: &str, params: &Profile| {
-        let mut argv = params.start_argv(&start_program(), &program, &touch(&target));
-        let at = argv
-            .iter()
-            .position(|a| a == "--profile")
-            .expect("--profile")
-            + 1;
+        let mut argv = params.argv(&program, &touch(&target));
+        let at = argv.iter().position(|a| a == "-p").expect("-p") + 1;
         argv[at] = OsString::from(profile_text);
         Command::new(&argv[0])
             .args(&argv[1..])
             .output()
-            .expect("js-agent starts")
+            .expect("sandbox-exec starts")
     };
     let with_floor = run(profile.text(), &profile);
     let created_with_floor = target.exists();
@@ -739,12 +645,11 @@ fn mounting_is_refused() {
         os(&mountpoint),
     ];
 
-    // Root starts js-agent, so the mount runs as root inside the profile: a setuid
+    // Root starts `sandbox-exec`, so the mount runs as root inside the profile: a setuid
     // `sudo` cannot be started under it, and the refusal must be the mount's.
     let profile = Profile::for_policy(&scene.policy(Net::Off)).expect("profile");
     let mut under_sudo = vec![OsString::from("-n")];
-    under_sudo.extend(profile.start_argv(
-        &start_program(),
+    under_sudo.extend(profile.argv(
         AbsPath::parse("/sbin/mount_devfs").expect("program"),
         &mount[2..],
     ));

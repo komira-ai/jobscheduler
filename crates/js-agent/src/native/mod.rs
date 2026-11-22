@@ -13,9 +13,9 @@
 //!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
-//! 3. `run` starts `<agent> __job-start --profile <profile> --param ... -- <program> <args>` as the user, with
+//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
 //!    the run's file-size and process limits as fields of the request: the helper sets
-//!    them with `setrlimit` in the child, before it executes the agent, so no shell
+//!    them with `setrlimit` in the child, before it executes `sandbox-exec`, so no shell
 //!    stands between the profile and the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
@@ -25,9 +25,8 @@
 //!    not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
 //!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper
 //!    sets `HOME` to the account's home whatever the agent passes, so the command is
-//!    `<agent> __job-start ... -- /usr/bin/env HOME=<exec/.home> <program> <args>`: the
-//!    agent applies the profile to its own process and executes `env`, which runs inside
-//!    the profile and executes the program, and the helper's wire is unchanged.
+//!    `sandbox-exec ... /usr/bin/env HOME=<exec/.home> <program> <args>`: `env` runs
+//!    inside the profile and executes the program, and the helper's wire is unchanged.
 //!    The helper builds the process's environment around the one the agent passes. The connection stays open until the process exits: a thread of the runtime
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
 //!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
@@ -224,10 +223,6 @@ pub struct NativeConfig {
     /// [`FullDiskAccess::Granted`] runs native jobs: every start is refused
     /// `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
     pub full_disk_access: FullDiskAccess,
-    /// The program the helper starts for each run: this agent itself. Its `__job-start`
-    /// mode applies the run's profile in its own process and executes the run's program
-    /// (no `sandbox-exec`, no second program).
-    pub start: PathBuf,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread

@@ -37,7 +37,7 @@ pub enum PathError {
     Linked(String),
 }
 
-/// An absolute path in normal form that is safe to hand to the start mode as a `--param`
+/// An absolute path in normal form that is safe to hand to `sandbox-exec` as a `-D`
 /// parameter value.
 ///
 /// The check is on the spelling only: the caller canonicalises through a descriptor

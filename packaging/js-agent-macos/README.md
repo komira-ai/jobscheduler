@@ -241,8 +241,8 @@ profile, never reaches a job. macOS lets a
 process use the grants of its *responsible* process, which is whoever started it, unless
 the starter disclaims that responsibility as it starts it. Every process the helper
 starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
-a GUI session), and every program the agent starts itself (its probes, the self-test of its own
-`__job-start` mode, which applies a job's profile in the job's own process, `pfctl`), is started with that responsibility disclaimed
+a GUI session), and every program the agent starts itself (its probes, the `sandbox-exec`
+self-test, `pfctl`), is started with that responsibility disclaimed
 (`crates/js-mac-session/src/disclaim.rs`; the design is in
 `docs/design/spawn-disclaim.md`). A job's process therefore answers for itself, and the
 processes it starts answer for it: none of them holds the agent's or the helper's grants.

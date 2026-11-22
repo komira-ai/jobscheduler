@@ -338,8 +338,8 @@ static MACOS_15: BaseSet = BaseSet {
 /// - `/` is a data read, as in the older sets: every workload fails without it.
 /// - `/System/Library`, `/usr/lib`, `/usr/share`: needed by the compile (frameworks,
 ///   `dyld`, the ICU data) and touched by every dynamically linked workload.
-/// - `/usr/bin`, `/bin`: touched by `true`, `bash`, `cat` and `cc`, and by the
-///   exec of `/usr/bin/env` after the apply; no workload failed without them.
+/// - `/usr/bin`, `/bin`: touched by `true`, `bash`, `cat`, `cc` and `sandbox-exec`; no
+///   workload failed without them.
 /// - `/System/Volumes/Preboot/Cryptexes`: touched by `bash`, `cat`, `cc`, `codesign` and
 ///   the linker (the system frameworks are opened through the `OS` cryptex); no workload
 ///   failed without it.

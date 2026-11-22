@@ -16,7 +16,7 @@ mod common;
 
 use common::mac::{describe, host_major, outcomes, run_steps};
 use common::priv_root::{fixture, ids};
-use common::{run, start_program};
+use common::run;
 use js_mac_pool::seatbelt::{Class, Role, SelfTest};
 
 #[test]
@@ -57,12 +57,7 @@ fn the_canaries_are_readable_by_the_pool_user_without_the_profile() {
         .iter()
         .filter(|step| step.role() == Role::Control)
     {
-        let ran = run(
-            &step.argv(&start_program()),
-            step.env(),
-            Some(step.cwd()),
-            Some(ids),
-        );
+        let ran = run(&step.argv(), step.env(), Some(step.cwd()), Some(ids));
         assert!(ran.ok, "{}: {}", step.class(), ran.stderr);
     }
 }

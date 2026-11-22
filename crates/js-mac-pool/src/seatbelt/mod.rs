@@ -55,9 +55,8 @@
 //!   because a layout may keep a read-denied state directory under a granted one.
 //! - A path is only spelled correctly by [`AbsPath`]; its canonical form (symbolic
 //!   links, Unicode normalisation) is the caller's duty, and the host step pins it.
-//! - It starts nothing. The profile is applied in the run's own process by js-agent's
-//!   start mode ([`Profile::start_argv`], read back by [`StartArgs`]); nothing here
-//!   starts anything.
+//! - It starts nothing; applying the profile is the caller's `exec` of
+//!   [`Profile::argv`].
 
 mod allow;
 mod apply;
@@ -68,7 +67,6 @@ mod policy;
 mod profile;
 mod scan;
 mod selftest;
-mod start;
 mod tool;
 mod trees;
 
@@ -80,12 +78,11 @@ pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
 pub use policy::{
     Caps, MAX_LISTED, MountGrant, Narrowing, Policy, PolicyError, ReadModel, SlotLayout,
 };
-pub use profile::{BuildError, Profile, START_VERB};
+pub use profile::{BuildError, Profile, SANDBOX_EXEC};
 pub use scan::{PrivilegedScan, scan_privileged};
 pub use selftest::{
     Assurance, Canaries, Class, Failure, Fixture, KEYCHAIN_CANARY, Outcome, Role, SETUID_CANARY,
     STUB_OUTPUT, STUB_SOURCE, SelfTest, SelfTestError, Step, Why,
 };
-pub use start::{StartArgs, StartError};
 pub use tool::{BUNDLE_PREFIX, ToolError, ToolPath, check_path_dirs};
 pub use trees::{MountTrees, TreesError};

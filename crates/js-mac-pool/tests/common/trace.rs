@@ -14,7 +14,7 @@ pub enum TraceError {
     /// The profile has no line of the base set in the form the generator writes it.
     #[error("the profile has no line {0:?}")]
     LineNotFound(String),
-    /// A workload's argv is not `start __job-start --profile <profile> ... -- program args`.
+    /// A workload's argv is not `sandbox-exec ... -p <profile> program args`.
     #[error("workload {0} is not run under a profile")]
     NoProfile(String),
     /// A table row is not in the table format.
@@ -304,10 +304,9 @@ pub fn without(profile: &str, base: &BaseSet, line: &Line) -> Result<String, Tra
     Ok(text)
 }
 
-/// The index of the profile text in a `start __job-start --profile <profile> ... --
-/// program args` argv.
+/// The index of the profile text in a `sandbox-exec ... -p <profile> program args` argv.
 fn profile_at(argv: &[OsString]) -> Option<usize> {
-    let flag = argv.iter().position(|arg| arg == "--profile")?;
+    let flag = argv.iter().position(|arg| arg == "-p")?;
     (flag + 2 < argv.len()).then_some(flag + 1)
 }
 
@@ -327,12 +326,11 @@ pub fn with_profile(argv: &[OsString], text: &str) -> Option<Vec<OsString>> {
     Some(out)
 }
 
-/// `argv`'s start program, profile and parameters with another program and arguments.
+/// `argv`'s `sandbox-exec` and profile with another program and arguments.
 #[must_use]
 pub fn retarget(argv: &[OsString], program: &str, args: &[OsString]) -> Option<Vec<OsString>> {
     let at = profile_at(argv)?;
-    let separator = argv.iter().skip(at + 1).position(|arg| arg == "--")? + at + 1;
-    let mut out = argv[..=separator].to_vec();
+    let mut out = argv[..=at].to_vec();
     out.push(OsString::from(program));
     out.extend(args.iter().cloned());
     Some(out)
@@ -345,7 +343,7 @@ pub struct Workload {
     pub name: String,
     /// Allowed workloads must succeed; denied ones must be refused.
     pub allowed: bool,
-    /// `start __job-start --profile <profile> ... -- program args`.
+    /// `sandbox-exec ... -p <profile> program args`.
     pub argv: Vec<OsString>,
     /// The environment.
     pub env: Vec<(String, String)>,
