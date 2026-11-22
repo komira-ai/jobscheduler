@@ -4,7 +4,7 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "2758d0cdd87bc7fa3fc12ff0b28af13cb5e038c3e8f3901fe6fe89c48dcf9509"
+CARGO_LOCK_SHA256 = "32a7b3199b9d0119c3113b8c59af38fe5f2c084cae524527c405768da0120448"
 MANIFEST_SHA256 = {
     "Cargo.toml": "b04f371ef0d58aa0f93d16a27d700af1b4972fa48f84cfdab7732b78edb31f78",
     "crates/js-agent-usage/Cargo.toml": "eb4f33ee86f779ec8745bcaf2419317e1dd8d97b148bad2fa2d8019b6726f147",
@@ -30,7 +30,7 @@ MANIFEST_SHA256 = {
     "crates/js-lease-server/Cargo.toml": "d602869ae2a991688aea8bf55afe4f37819c8250d5fbd5f8b800e84602241b8f",
     "crates/js-logmint/Cargo.toml": "ec250325fd15ac39651d1c11e2389e29d287fe002f57b7cf3341887f2c472a1c",
     "crates/js-logstore/Cargo.toml": "b828c9a79f5d1d9584ff93ef57d3118a452cdeba97fda12511dc53fbd5d41f2d",
-    "crates/js-mac-first-install/Cargo.toml": "a7d25c28d7b6cd1b8ba2aa43b5f783f1068a13bc5d1c309a54f35640bbd883c5",
+    "crates/js-mac-first-install/Cargo.toml": "d5ace6bebf1f802209b4f91371751329cf19955c419e90881fd864d8db41af0d",
     "crates/js-mac-pool/Cargo.toml": "7c88c06839565f7b9f8af8975c1a45afd68316e063d0a1754087fddfd6328f91",
     "crates/js-mac-probe/Cargo.toml": "08635a033b01c024748ef4a9dbdd750802aa9c3cca7f7a227f0b998a0294d3f9",
     "crates/js-mac-provision/Cargo.toml": "39574cd14e63026a0f8020e0b6b927f5a1ed81e13c537b2e546c5030bdff505f",
