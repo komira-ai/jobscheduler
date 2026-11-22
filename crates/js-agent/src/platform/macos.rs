@@ -136,6 +136,14 @@ pub struct Flags {
     /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
     #[arg(long, value_name = "PATH")]
     pub native_pfctl: Option<PathBuf>,
+    /// The mount point under which the `--mount-provider` serves every job's trees (tierstore's
+    /// one NFS mount of the Mac). It must be a `--mount-root-ro` that no `--mount-root` names,
+    /// and needs a `--mount-provider`. It is the one mount root that is not a read deny of
+    /// every run: a run's profile denies reads below it and grants back the run's own trees.
+    /// A job's mount below it is one of its trees, mounted read-only and `no_exec`, or the
+    /// start is refused (`input-not-allowed`).
+    #[arg(long, value_name = "PATH")]
+    pub native_trees_root: Option<PathBuf>,
     /// Turns the VM backend on (macOS build only, beside `--native-helper-socket`): the
     /// absolute path of the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A
     /// VM start then runs in a fresh VM cloned from the base image and destroyed when it
@@ -154,7 +162,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 15] {
+    pub fn given(&self) -> [(&'static str, bool); 16] {
         [
             (
                 "--native-helper-socket",
@@ -175,6 +183,7 @@ impl Flags {
             ("--native-pf-anchor", self.native_pf_anchor.is_some()),
             ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
             ("--native-pfctl", self.native_pfctl.is_some()),
+            ("--native-trees-root", self.native_trees_root.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
         ]
@@ -383,10 +392,10 @@ pub(crate) struct Jobs {
     providers: MountProviders,
 }
 
-/// The job flags of a macOS agent: the mount roots, which become read denies of every run and
-/// the roots a job's mounts lie beneath, each on a local volume (a job's programs may not read
-/// a network volume), and the mount providers, a user named by name looked up in the
-/// directory service. The native settings are checked once the roots are known
+/// The job flags of a macOS agent: the mount roots, which become read denies of every run
+/// (but the trees root, `--native-trees-root`, checked by [`crate::native_fs::trees_root`])
+/// and the roots a job's mounts lie beneath, and the mount providers, a user named by name
+/// looked up in the directory service. The native settings are checked once the roots are known
 /// ([`Jobs::finish`]). A macOS agent has no crun settings (`start`) and no egress, settle or
 /// taint re-check flags.
 ///
@@ -398,7 +407,6 @@ pub(crate) fn jobs(
     _start: Option<Settings>,
     mounts: &crate::lifecycle::MountRoots,
 ) -> Result<Jobs, String> {
-    crate::native_fs::local_roots(mounts, &native::volume_of)?;
     let flags = &cli.providers;
     let providers = MountProviders::from_flags(
         &flags.mount_providers,
@@ -406,9 +414,14 @@ pub(crate) fn jobs(
         flags.mount_provider_wait,
         UserNames::Directory(&uid_of_name),
     )?;
+    let trees = crate::native_fs::trees_root(
+        cli.os.native_trees_root.as_deref(),
+        mounts,
+        !flags.mount_providers.is_empty(),
+    )?;
     Ok(Jobs {
         native: None,
-        mounts: crate::native::roots_of(mounts),
+        mounts: crate::native::roots_of(mounts, trees.as_deref()),
         layout: crate::lifecycle::DirLayout::Private,
         egress: crate::egress::Config::default(),
         settle: crate::lifecycle::DEFAULT_SETTLE,

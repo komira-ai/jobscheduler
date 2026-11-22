@@ -30,7 +30,7 @@ pub struct ProviderFlags {
     /// `mount-provider.NAME` where it reports `layered-rootfs`. The directory a provider
     /// mounts trees in is listed as a `--mount-root-ro` (a `--mount-root` for a provider whose
     /// trees a job may write). Repeatable. On Linux it needs the crun runtime; on macOS a
-    /// job's provider mount is read-only and its directory must be on a local volume.
+    /// job's provider mount is read-only: a link to the directory the provider answered.
     #[arg(long = "mount-provider", value_name = "NAME=SOCKET", value_parser = crate::cli::named_path)]
     pub mount_providers: Vec<(String, PathBuf)>,
     /// The user a `--mount-provider` runs as, as `NAME=USER` (a user name or a uid; root when
