@@ -6,6 +6,9 @@ use super::*;
 const BUILD_CUT: &str = include_str!("build_cut.log");
 /// A build whose many failures were all cuts (an excerpt: three reports and two of the list).
 const BUILD_CUTS: &str = include_str!("build_cuts.log");
+/// A build whose cuts came with buck2's own warnings that it retries its calls, which say `timed
+/// out` (an excerpt of a recorded run: two reports, five warnings, a third report and the list).
+const BUILD_CUT_WITH_WARNINGS: &str = include_str!("build_cut_with_warnings.log");
 /// A build whose cuts sat beside a real failure: two cut reports of one recorded run and the
 /// failed test of another (no recorded run held both), with the list of failures of the cut run.
 const BUILD_CUT_AND_FAILED_TEST: &str = include_str!("build_cut_and_failed_test.log");
@@ -31,6 +34,7 @@ fn a_recorded_build_whose_every_failure_is_a_cut_is_cut_counting_each_report() {
     // matched), or a report counted once when buck2 lists it twice.
     assert_eq!(only_cuts(BUILD_CUT), Some(2));
     assert_eq!(only_cuts(BUILD_CUTS), Some(5));
+    assert_eq!(only_cuts(BUILD_CUT_WITH_WARNINGS), Some(4));
 }
 
 #[test]
@@ -42,6 +46,45 @@ fn a_recorded_build_with_a_failed_action_beside_its_cuts_is_final() {
     let alone = "[t] Error: (Failed to make BatchReadBlobs request: code: 'The operation was \
                  cancelled', message: \"operation was canceled\")\n";
     assert_eq!(only_cuts(&format!("{CUT}{alone}{FAILED}")), None);
+}
+
+#[test]
+fn buck2s_own_warnings_are_passed_over_and_its_errors_are_final() {
+    // Catches: buck2's warning that it retries a call (`keep-alive timed out`) taken for a real
+    // failure, so a build cut on the farm is never run again; buck2's own ERROR line taken for a
+    // warning; and a line that only looks like one (no stamp, no level, a stamp without `Z`)
+    // passed over.
+    let warn = "[t] \u{1b}[2m2026-11-22T00:18:21.391037Z\u{1b}[0m \u{1b}[33m WARN\u{1b}[0m \
+                \u{1b}[2mremote_execution::client\u{1b}[0m: Transient error (attempt 1/5), retrying in \
+                114ms: http2 error: keep-alive timed out: operation timed out\n";
+    assert_eq!(only_cuts(&format!("{CUT}{warn}{FAILED}")), Some(1));
+    let plain = "2026-11-22T00:18:21.391037Z  INFO buck2: Error panicked timed out\n";
+    assert_eq!(only_cuts(&format!("{plain}{CUT}{FAILED}")), Some(1));
+    let error = "[t] \u{1b}[2m2026-11-22T00:18:21.391037Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m buck2: \
+                 lost the daemon\n";
+    assert_eq!(only_cuts(&format!("{CUT}{error}{FAILED}")), None);
+    for line in [
+        "WARN timed out",
+        "2026-11-22T00:18:21 WARN timed out",
+        "2026-11-22T00:18:21Z NOTE timed out",
+        "\u{1b}[2mx\u{1b}[0m WARN timed out",
+        "2026-11-22T00:18:21Z timed out",
+        "Z WARN timed out",
+    ] {
+        assert_eq!(
+            only_cuts(&format!("{CUT}{line}\n{FAILED}")),
+            None,
+            "{line:?}"
+        );
+    }
+    // An escape that is not a colour code is kept, so the line is not buck2's log.
+    assert_eq!(log_level("\u{1b}]2026-11-22T00:18:21Z WARN x"), None);
+    assert_eq!(log_level("\u{1b}[2x2026-11-22T00:18:21Z WARN x"), None);
+    assert_eq!(log_level("\u{1b}[2xm2026-11-22T00:18:21Z WARN x"), None);
+    assert_eq!(
+        log_level("\u{1b}[1;33m2026-11-22T00:18:21Z\u{1b}[0m WARN x"),
+        Some("WARN")
+    );
 }
 
 #[test]

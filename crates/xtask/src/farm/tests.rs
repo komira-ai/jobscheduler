@@ -161,7 +161,7 @@ fn the_rerun_line_names_the_target_and_the_cuts() {
     assert_eq!(
         rerun_line("//:ci", 39),
         "xtask: every failure of `buck2 build //:ci` was a cut connection to the farm (39 \
-         reported); running it once more\n"
+         cut messages); running it once more\n"
     );
 }
 

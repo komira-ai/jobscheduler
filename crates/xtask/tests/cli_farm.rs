@@ -205,7 +205,7 @@ const CUT_AND_FAILED_LOG: &str = include_str!("../src/farm/cuts/build_cut_and_fa
 const TEST_FAILED_LOG: &str = include_str!("../src/farm/cuts/test_failed.log");
 /// What the job summary and the log get when the first run of `//:ci` was cut twice.
 const RERUN: &str = "xtask: every failure of `buck2 build //:ci` was a cut connection to the farm \
-                     (2 reported); running it once more\n";
+                     (2 cut messages); running it once more\n";
 
 /// The log of a passing build.
 const BUILD_LOG: &str = "[t] Waiting on 3 actions\n[t] Commands: 474 (cached: 0, remote: 474, local: 0)\nBUILD SUCCEEDED\n";

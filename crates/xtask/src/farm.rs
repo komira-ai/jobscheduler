@@ -123,7 +123,7 @@ pub fn summary(log: &str) -> Option<(&str, u64)> {
 pub fn rerun_line(target: &str, cuts: usize) -> String {
     format!(
         "xtask: every failure of `buck2 build {target}` was a cut connection to the farm ({cuts} \
-         reported); running it once more\n"
+         cut messages); running it once more\n"
     )
 }
 

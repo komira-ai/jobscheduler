@@ -99,14 +99,18 @@ second run. The rule is the one of komira-ai/buildrules#172 and komira-ai/komira
 - A failure is a **cut** when it is buck2's own `Error:` line holding `RE channel error: code:`,
   and a failed action's report is one when its reason is an `Internal error (stage: ...)` naming a
   `Remote Execution Error on ...` and the line after it is a cut.
+- buck2's own log lines (its `tracing` lines: a time stamp ending `Z`, then the level, often in
+  colour) at `WARN` or below are passed over, whatever their words: `Transient error (attempt
+  1/5), retrying ...: keep-alive timed out` comes with every cut and says buck2 retries a call. One
+  at `ERROR` is a failure.
 - Anything else makes the failure real, and a real failure is never run again, even beside any
   number of cuts: a test or a compile error (`returned non-zero exit code`), a timeout, a panic, a
   line starting `Error` that is not a cut (an analysis or load error, or `Failed to make
-  BatchReadBlobs request ... operation was cancelled` standing alone, which is final), a line of
-  buck2's remote client that says a call `timed out`, and a test that only prints the cut's words.
+  BatchReadBlobs request ... operation was cancelled` standing alone, which is final), and a test
+  that only prints the cut's words.
 - A buck2 that ended by a signal (killed by the runner, out of memory) is not run again, whatever
-  it printed first. Neither is the build of the `buildrules` command line, which is not
-  `//:ci`.
+  it printed first. Only the build of the target runs again: the audit and the build of the
+  `buildrules` command line are not retried.
 - The second run is final, and its summary line is the one held to `local: 0`. A second run that
   fails for a real reason fails with that reason. A second run that is all cuts again fails the job
   by name (`on its second run too, every failure again a cut connection to the farm`): one cut is a
