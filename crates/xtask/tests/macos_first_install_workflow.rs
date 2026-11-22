@@ -205,6 +205,13 @@ fn problems(text: &str) -> Vec<String> {
         }),
         "the version the agent is updated to is not the next-version action's of the release's",
     );
+    // The action is one `cargo xtask` command: it needs the checkout and the toolchain first.
+    let checkout = position("actions/checkout@");
+    let rustup = position("run: rustup toolchain install");
+    want(
+        matches!((checkout, rustup, next), (Some(c), Some(r), Some(n)) if c < r && r < n),
+        "the next-version action runs before the checkout and the toolchain it needs",
+    );
     let build = position("--no-run");
     let run = position("--ignored");
     want(
@@ -286,7 +293,7 @@ fn the_workflow_takes_the_version_as_its_one_input_and_defaults_it() {
 #[test]
 fn each_way_of_leaving_the_first_install_shape_is_named() {
     let text = read(WORKFLOW);
-    let table: [(&str, &str, &str); 25] = [
+    let table: [(&str, &str, &str); 26] = [
         (
             "on:\n  workflow_call:\n",
             "on:\n  pull_request:\n  workflow_call:\n",
@@ -376,6 +383,11 @@ fn each_way_of_leaving_the_first_install_shape_is_named() {
             "uses: ./.github/actions/js-agent-next-version",
             "uses: ./.github/actions/other-version",
             "a local action other than js-agent-next-version",
+        ),
+        (
+            "      - run: rustup toolchain install\n      - name: Name the version the agent is updated to\n",
+            "      - name: Name the version the agent is updated to\n",
+            "runs before the checkout and the toolchain it needs",
         ),
         (
             "          UPDATE_VERSION: ${{ steps.next.outputs.version }}\n",

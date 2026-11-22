@@ -72,12 +72,12 @@ jobs:
       - name: The update package is the one that was summed
         working-directory: dist-update
         run: /usr/bin/shasum -a 256 --check SHA256SUMS
+      - run: rustup toolchain install
       - name: Name the version the agent is updated to
         id: next
         uses: ./.github/actions/js-agent-next-version
         with:
           version: ${{ env.VERSION }}
-      - run: rustup toolchain install
       - name: Build the test as the runner's user
         run: cargo test --locked -p js-mac-first-install --test mac_first_install --no-run
       - name: Install the package, roll the config package over it and update it, as root

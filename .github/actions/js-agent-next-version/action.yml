@@ -1,7 +1,12 @@
-# The version after a package's: MAJOR.MINOR.(PATCH+1). The one place it is computed: the package
+# The version after a package's: MAJOR.MINOR.(PATCH+1). The one place it is named: the package
 # workflow builds the update package at it (js-agent-macos-pkg.yml's `build-update`) and the
 # first-install workflow tells the test which version it is (js-agent-macos-first-install.yml), so
-# the two cannot name different versions. The version is checked as MAJOR.MINOR.PATCH first.
+# the two cannot name different versions.
+#
+# One command, on a runner that has checked out the repository and installed the toolchain:
+# `cargo xtask release next-version` (crates/xtask/src/release/next_version.rs) refuses a version
+# that is not MAJOR.MINOR.PATCH, and one whose patch cannot be raised, naming it, and appends
+# `version=<next>` to the step's output file. The calculation is Rust with tests, not bash.
 #
 # No command expands an expression: the step reads its environment.
 # crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
@@ -26,10 +31,4 @@ runs:
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
-      run: |
-        set -euo pipefail
-        if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-          echo "::error::the version must be MAJOR.MINOR.PATCH"
-          exit 1
-        fi
-        echo "version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))" >> "$GITHUB_OUTPUT"
+      run: cargo xtask release next-version --version "$VERSION" --output "$GITHUB_OUTPUT"

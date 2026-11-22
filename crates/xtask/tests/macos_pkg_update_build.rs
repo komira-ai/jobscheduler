@@ -3,7 +3,8 @@
 //! `.github/actions/js-agent-macos-pkg` (the one `build` calls), the package of the next patch
 //! version, which the local action `.github/actions/js-agent-next-version` names, and uploads it as
 //! an artifact of its own. The version is computed in that action alone, and the first-install
-//! workflow calls the same action, so the two cannot differ. The update package is never signed
+//! workflow calls the same action, so the two cannot differ (the action is one `cargo xtask release
+//! next-version` command, which checks the version and adds one to its patch). The update package is never signed
 //! and never reaches a release. The steps of both actions are one command each that reads its
 //! environment and runs under bash.
 
@@ -101,10 +102,12 @@ fn problems(text: &str, package: &str, next: &str, release: &str) -> Vec<String>
         "the workflow computes a version of its own",
     );
     want(
-        next.contains("$((BASH_REMATCH[3] + 1))")
-            && next.matches("BASH_REMATCH[3] + 1").count() == 1
-            && next.contains("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"),
-        "js-agent-next-version does not add one to the patch of a checked MAJOR.MINOR.PATCH",
+        code(next).iter().any(|l| {
+            l.trim()
+                == r#"run: cargo xtask release next-version --version "$VERSION" --output "$GITHUB_OUTPUT""#
+        }) && !next.contains("BASH_REMATCH")
+            && !next.contains("+ 1"),
+        "js-agent-next-version does not take the next patch version from the xtask command that checks it",
     );
     want(
         !package.contains("BASH_REMATCH"),
@@ -209,14 +212,19 @@ fn each_way_of_leaving_the_update_build_shape_is_named() {
     }
     let on_next = [
         (
-            "$((BASH_REMATCH[3] + 1))",
-            "$((BASH_REMATCH[3] + 2))",
-            "does not add one to the patch",
+            "run: cargo xtask release next-version",
+            "run: cargo xtask release stamp",
+            "does not take the next patch version from the xtask command",
         ),
         (
-            "^(0|[1-9][0-9]*)",
-            "^([0-9]*)",
-            "does not add one to the patch of a checked",
+            "--version \"$VERSION\"",
+            "--version 1.0.0",
+            "does not take the next patch version from the xtask command",
+        ),
+        (
+            "      run: cargo",
+            "      run: BASH_REMATCH=1 cargo",
+            "does not take the next patch version from the xtask command",
         ),
     ];
     for (from, to, says) in on_next {

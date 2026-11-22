@@ -5,6 +5,8 @@
 //!   that ships changed since the latest `v*` tag, and the version if so.
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
+//! - [`next_version`]: the version after a package's, its patch plus one, for the update package
+//!   the macOS first install is tested with.
 //! - [`server_image`]: the OCI image tar of `js-lease-server` for one Linux target.
 //! - [`image_digest`]: the manifest digest of the release's linux-x86_64 image and the release's
 //!   addresses of it and its bundle, which the control plane's deploy of `js-server` is given.
@@ -46,6 +48,7 @@ pub mod desired;
 pub mod image_digest;
 pub mod include;
 pub mod macos_leg;
+pub mod next_version;
 pub mod plan;
 pub mod server_image;
 pub mod stage;
@@ -58,6 +61,9 @@ mod tests;
 /// Why a release verb failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    /// A version whose patch cannot be raised by one.
+    #[error("the patch of {0} is the largest number: there is no next version")]
+    PatchOverflow(String),
     /// A string that is not `MAJOR.MINOR.PATCH`.
     #[error("not a version MAJOR.MINOR.PATCH: {0:?}")]
     NotAVersion(String),
