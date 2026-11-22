@@ -37,7 +37,7 @@ pub trait StateView {
     fn taint(&self) -> Option<Taint>;
 
     /// Whether a restarted agent re-checks `taint`, the taint on record, and so may clear it
-    /// itself: a residue of a process that the state root's pin file does not name. This is
+    /// itself: a residue of a post-job check that the state root's pin file does not name. This is
     /// the rule the agent applies when it starts ([`StateRoot::restored_rechecks`]).
     fn restored_rechecks(&self, taint: &Taint) -> bool;
 

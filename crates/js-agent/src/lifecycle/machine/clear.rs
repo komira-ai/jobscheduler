@@ -58,8 +58,9 @@ impl Lifecycle {
     /// The check is the post-job one with nothing live, against the baseline taken before
     /// the job that tainted the host; for a taint read from the marker at start it is
     /// [`CheckHook::run_restored`](crate::lifecycle::CheckHook::run_restored), which also
-    /// judges the processes the restart baseline holds.
-    pub(super) fn recheck_taint(&mut self) {
+    /// judges the processes the restart baseline holds. What the check notes is pushed to
+    /// `events` as a finding of no run, and does not fail the re-check.
+    pub(super) fn recheck_taint(&mut self, events: &mut Vec<Event>) {
         if !self.taint.rechecks() {
             return;
         }
@@ -82,9 +83,21 @@ impl Lifecycle {
             true => self.checks.run_restored(&finished),
             false => self.checks.run(&finished),
         };
+        // What the check noted is logged, as after a job; a note does not fail the re-check.
+        events.extend(self.checks.notes().into_iter().map(|note| note.event()));
         let now = self.clock.now_ms();
         self.taint
             .rechecked(verdict.is_ok(), now, self.taint_recheck);
+    }
+
+    /// The line that says what changed, of the first taint of the host, when the check that
+    /// found it gave one: the detail of the finding, with the words "the check could not run"
+    /// before it for a check that could not. None while the host is clean, for a taint no
+    /// check found (a host job, a container that cannot be removed; the `cgroup-not-found`
+    /// taint carries its message) and for one read from the
+    /// marker at start, which holds no detail.
+    pub fn taint_detail(&self) -> Option<String> {
+        self.taint.detail().map(str::to_owned)
     }
 
     /// Ends the taint when `acked` (a reply's `taint_cleared_ack`) answers the report of its clear:

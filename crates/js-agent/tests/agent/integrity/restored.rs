@@ -1,14 +1,14 @@
 //! The re-check of a taint read from the marker at start ([`CheckHook::run_restored`]): the
 //! baseline of the restarted agent holds what the tainting job left, so it exempts no process
-//! from the two rules that need no baseline, a uid of the job users' range and a parent
-//! `init` in a group a job can be in.
+//! from the rule that needs no baseline, a uid of the job users' range (a finding); a parent
+//! `init` in a group a job can be in is judged by the same rule and is a note.
 
 use std::time::Duration;
 
 use js_agent::integrity::{FakeHost, Integrity, code};
-use js_agent::lifecycle::{CheckFinding, CheckHook as _, Finished};
+use js_agent::lifecycle::{CheckFinding, CheckHook as _, CheckNote, Finished};
 
-use super::{JOB_UID, after, mount, process, started};
+use super::{JOB_UID, codes, mount, process, quiet, started};
 
 /// The wait of these tests.
 const WAIT: Duration = Duration::from_millis(300);
@@ -30,6 +30,12 @@ fn restored(checks: &mut Integrity, run_id: &str) -> Result<(), CheckFinding> {
     })
 }
 
+/// The re-check of a restored taint that is expected to pass, and the notes it made.
+fn restored_notes(checks: &mut Integrity, run_id: &str) -> Vec<CheckNote> {
+    assert_eq!(restored(checks, run_id), Ok(()), "the re-check passes");
+    checks.notes()
+}
+
 /// Asserts that a process of the job users' range that the baseline holds passes the normal
 /// check and is a `process-as-job-user` at the restored one, whatever its group or parent.
 /// Catches a restored re-check that trusts the restart baseline, which holds the process the
@@ -39,18 +45,19 @@ fn a_job_user_process_in_the_baseline_is_found_at_a_restored_recheck() {
     let host = FakeHost::quiet();
     host.start_process(process(300, 100, JOB_UID, 900, CONTAINER_GROUP));
     let mut checks = started(&host, vec![]);
-    assert!(after(&mut checks, "r1").is_ok(), "the baseline holds it");
+    assert!(quiet(&mut checks, "r1"), "the baseline holds it");
     let found = restored(&mut checks, "taint-recheck").unwrap_err();
     assert_eq!(found.code(), code::PROCESS_AS_JOB_USER);
-    assert!(found.detail().contains("pid 300"), "{found:?}");
+    assert!(found.detail().starts_with("pid 300"), "{found:?}");
 }
 
 /// Asserts that a process with parent `init` in the agent's own group or below it, or in a
-/// container's group, that the baseline holds is a `daemonised-child` at the restored
-/// re-check and not at the normal one. Catches a daemonised child of the tainting job that
-/// hides in the restart baseline.
+/// container's group, that the baseline holds is a `daemonised-child` note at the restored
+/// re-check, which passes, and no note at the normal one. It catches a restored re-check that
+/// taints for a process that is not a job user's, and one that does not name what the
+/// restart baseline hides.
 #[test]
-fn a_parent_init_process_in_a_job_group_in_the_baseline_is_found_at_a_restored_recheck() {
+fn a_parent_init_process_in_a_job_group_in_the_baseline_is_noted_at_a_restored_recheck() {
     for cgroup in [
         "0::/system.slice/agent.service",
         "0::/system.slice/agent.service/leftover",
@@ -61,9 +68,12 @@ fn a_parent_init_process_in_a_job_group_in_the_baseline_is_found_at_a_restored_r
         let host = FakeHost::quiet();
         host.start_process(process(300, 1, 0, 900, cgroup));
         let mut checks = started(&host, vec![]);
-        assert!(after(&mut checks, "r1").is_ok(), "{cgroup}: baseline");
-        let found = restored(&mut checks, "taint-recheck").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+        assert!(quiet(&mut checks, "r1"), "{cgroup}: baseline");
+        assert_eq!(
+            codes(&restored_notes(&mut checks, "taint-recheck")),
+            [code::DAEMONISED_CHILD],
+            "{cgroup}"
+        );
     }
 }
 
@@ -87,19 +97,19 @@ fn a_restored_recheck_leaves_the_hosts_own_processes_alone() {
         host.start_process(process(pid, ppid, uid, 900 + u64::from(pid), cgroup));
     }
     let mut checks = started(&host, vec![]);
-    assert!(restored(&mut checks, "taint-recheck").is_ok());
+    assert!(restored_notes(&mut checks, "taint-recheck").is_empty());
 }
 
 /// Asserts that the agent's own process (parent `init` in its own group, as a service's main
-/// process is) is not a finding at a restored re-check, and that it is one when the checks
-/// could not read which process is the agent's (`/proc/self/stat` missing or not text with a
-/// pid first). Catches a restored re-check that taints every host for the agent itself, and
-/// one that quietly exempts a pid it never learned.
+/// process is) is no note at a restored re-check, and that it is a `daemonised-child` note
+/// when the checks could not read which process is the agent's (`/proc/self/stat` missing or
+/// not text with a pid first). Catches a restored re-check that logs the agent itself, and one
+/// that quietly exempts a pid it never learned.
 #[test]
 fn the_agents_own_process_is_not_a_finding() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    assert!(restored(&mut checks, "taint-recheck").is_ok());
+    assert!(restored_notes(&mut checks, "taint-recheck").is_empty());
 
     for stat in [None, Some("not a pid (js-agent) S 1")] {
         let host = FakeHost::quiet();
@@ -108,9 +118,9 @@ fn the_agents_own_process_is_not_a_finding() {
             None => host.remove_file("/proc/self/stat"),
         }
         let mut checks = started(&host, vec![]);
-        let found = restored(&mut checks, "taint-recheck").unwrap_err();
-        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{stat:?}");
-        assert!(found.detail().contains("pid 100"), "{found:?}");
+        let notes = restored_notes(&mut checks, "taint-recheck");
+        assert_eq!(codes(&notes), [code::DAEMONISED_CHILD], "{stat:?}");
+        assert!(notes[0].detail.starts_with("pid 100"), "{notes:?}");
     }
 }
 
@@ -135,23 +145,21 @@ fn a_restored_recheck_judges_what_is_there_after_the_wait() {
     assert_eq!(host.settled(), [WAIT]);
 }
 
-/// Asserts that a new mount at the re-check of a restored taint is judged after the wait like
-/// a process: one gone after the wait clears nothing against the host, and one still there
-/// is a `new-mount`. It catches a restored re-check that keeps a taint for a mount the host
-/// held for a moment.
+/// Asserts that a new mount at the re-check of a restored taint is a `new-mount` note at the
+/// first look, with no wait, and that the re-check passes: a restored taint of a check that
+/// no longer taints is not kept for a mount. It catches a restored re-check that keeps a taint
+/// for a mount, or waits for one.
 #[test]
-fn a_restored_recheck_judges_a_mount_after_the_wait() {
+fn a_restored_recheck_notes_a_mount_without_a_wait() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]).with_settle(WAIT);
     host.mount(mount("/mnt/brief", "/dev/sdb"));
-    host.at_settle(|host| host.unmount("/mnt/brief"));
-    assert!(restored(&mut checks, "taint-recheck").is_ok());
-    assert_eq!(host.settled(), [WAIT]);
-
-    let host = FakeHost::quiet();
-    let mut checks = started(&host, vec![]).with_settle(WAIT);
-    host.mount(mount("/mnt/brief", "/dev/sdb"));
-    let found = restored(&mut checks, "taint-recheck").unwrap_err();
-    assert_eq!(found.code(), code::NEW_MOUNT);
-    assert_eq!(host.settled(), [WAIT]);
+    assert_eq!(
+        restored_notes(&mut checks, "taint-recheck"),
+        [CheckNote::new(
+            code::NEW_MOUNT,
+            "/mnt/brief (ext4) from /dev/sdb"
+        )]
+    );
+    assert!(host.settled().is_empty());
 }

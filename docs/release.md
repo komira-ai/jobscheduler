@@ -11,17 +11,13 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
 1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
-2. `ci-passed` waits for the jobs of the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every job succeeded or was skipped. Nothing waits for it: when a job of `ci`
-   failed, was cancelled or timed out, it fails with an error naming those jobs and the `ci` run,
-   after the release has gone out, and `release-red` reports it (step 11). It holds
-   `actions: read` and nothing else, and checks out no code.
-   `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
+2. Nothing in the release waits for `ci` or reports its result: a failing job of `ci` is that run's own
+   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
 3. `plan` (`cargo xtask release plan`) decides at once whether to release and as which version
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
-   (`unit-tests` and `ci-passed`, which start beside `plan`, still run).
+   (`unit-tests`, which starts beside `plan`, still runs).
    Beside it, from the push on, `unit-tests` runs the workspace's tests (those `ci`'s `test` job
-   runs with `cargo test --workspace`; not its `--ignored` live steps and not doctests), and
+   runs with `cargo nextest run --workspace`; not its `--ignored` live steps and not doctests), and
    with them the four longest test binaries of `js-sim-cell` (`faults`, `smoke`, `replay` and
    `whole_host_prepare`, built with `--features js-sim-cell/slow-families`) that `test` leaves out,
    under cargo-nextest, in four shards on four runners, with a Postgres service as in `ci`, starting
@@ -115,7 +111,7 @@ next push that ships code. Nothing runs on a timer.
    `stable` lists the release and `pkg-upload` has ended; that workflow sets the release as
    hostkeeper's desired version of `js-agent` ([Deploying through
    hostkeeper](#deploying-through-hostkeeper)). Then `deployed` ends the run's turn.
-11. When any job of the run failed (the deploy path, `ci-passed`, the beta stage), `release-red`
+11. When any job of the run failed (the deploy path, the beta stage), `release-red`
    opens an issue titled `RELEASE-RED: jobscheduler <first failing job> failed on main at <commit>`
    with the label `main-red`, its body a `Run:`, a `Head:` and up to five `Failing:` lines, or
    comments those lines on the RELEASE-RED issue that is open. When a run that released had no job
@@ -124,7 +120,7 @@ next push that ships code. Nothing runs on a timer.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums,
 verify, the apt index jobs and `check-apt` (plus `attestations: read` for verify), `id-token` and
-`attestations` write for `attest`, `actions: read` alone for `ci-passed`, `actions: read` and
+`attestations` write for `attest`, `actions: read` and
 `contents: read` for `turn`, `actions: write` alone for `desired`, `issues: write` and
 `actions: read` for `release-red` and `release-green`, `contents` write for
 `publish` (the tag and the release), `contents: read` and `id-token` write for the apt read and
@@ -478,6 +474,7 @@ SHA-256 as the pin, and the manifest:
 | `hook.timeoutSecs` | prepare 3900, cutover 4320, verify 615, rollback 8220, cleanup 120; no uninstall: hostkeeper refuses an uninstall order of the agent |
 | `hook.verifyDeadlineSecs`, `hook.cleanupRetries` | 9000, 3 |
 | `run` | `js-agent-crun.service` |
+| `healthUrl` | `http://127.0.0.1:7311/healthz`: the route of the agent's `--health-listen` in the package's unit (a test holds the two equal). hostkeeper probes it once per round and reports the service unhealthy unless it answers `2xx`; the agent answers `503` while it or the lease server holds a taint on the host, so a tainted host is shown as unhealthy and holds a rollout's bake |
 | `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
@@ -613,6 +610,7 @@ The Mac manifest is the Linux one (`minHostkeeper`, `installerBounds`, the hook'
 | `hook.command` | `/Library/Application Support/js-agent/bin/js-agent update-hook` |
 | `hook.drain`, `hook.resume` | the same words, `drain` and `resume` |
 | `run` | the launchd labels `js-agent`, `js-agent.session` and `js-agent.pf-pool` (the agent, its root helper and the job that keeps the pool's pf anchor loaded) |
+| `healthUrl` | none: the Mac agent is started without `--health-listen` |
 | `params.unit`, `params.helper_unit`, `params.pf_unit` | `js-agent`, `js-agent.session`, `js-agent.pf-pool` |
 | `params.state_dir` | `/Library/Application Support/js-agent/update` |
 | `params.state_root` | `/var/db/js-agent/state` |
@@ -836,7 +834,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
 | An apt job of `testing` failed, or all three attempts lost the race | The release is published; the suite holds this version or not | Re-run failed jobs: a re-run of a read job reads again, and a write never puts other bytes in the pool under a name it holds. A package already in the pool is accepted when its bytes are equal. |
 | `check-apt` failed | The release and `testing` hold the version; `stable` does not | Nothing is promoted and hosts are not ordered it (`desired` starts `hostkeeper-desired.yml` only once a stable write succeeded). Fix forward: the next release supersedes it in `testing`. |
-| `ci-passed`, a beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the beta jobs pass. |
+| A beta job or `promote-macos` failed | The release is published and deployed; RELEASE-RED is open | Fix forward with a new push; its green release run closes the issue. Re-running the failed jobs adds the macOS archives when the beta jobs pass. |
 | A run that `turn` gave the turn failed after it, and a newer release has been published since | The failed run is older than what is deployed | Do not re-run its failed jobs: a re-run keeps its `turn`, and its `gamma` or control-plane deploy would move those back to the older version (`desired` checks and starts nothing for an older release, so hostkeeper is not moved). Fix forward. |
 | `turn` failed or timed out | Nothing published by this run | A newer push releases the change. `turn` fails on an error reading the runs or releases, or after three hours waiting for an older run's `deployed`. |
 | The run was green but `publish` and everything after it were skipped | `turn` said `go=false` | A newer run has the turn, or a newer release is published: it carries this change. Nothing to do. |
@@ -852,8 +850,7 @@ whose upload did not finish is deleted before it is uploaded again.
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files and signs them again; `publish` compares each against the release and keeps them, and keeps the release's bundles without comparing them (each signing writes new bytes for the same file). If a file differs the run fails and nothing is changed. |
 
 Runs that wait: a release run starts with its push and does not wait for `ci`; it waits only at `turn`, for an older
-run's publish and deploy. If a job of `ci` fails, the run fails at `ci-passed` (red, with the `ci` run's link and the
-failed jobs) after the release went out, and RELEASE-RED says so; the fix is the next push.
+run's publish and deploy. If a job of `ci` fails, the release has gone out and only the `ci` run is red; the fix is the next push.
 
 There is no dispatch and no tag trigger for `release.yml`: a `v*` tag pushed by hand does not start a release, and
 it has no `workflow_dispatch`. An old run that is re-run with "Re-run all jobs" cannot publish its

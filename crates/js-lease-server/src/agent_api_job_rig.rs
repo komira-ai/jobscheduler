@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use js_agent_wire::{
-    Command, DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult,
-    JobStartSpec, LogGrant, LogGrantState, LogTail, Outcome, Phase, RefusalReason, Taint,
+    DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult, LogGrant,
+    LogGrantState, LogTail, Outcome, Phase, RefusalReason, Taint,
 };
 use js_jobs::interfere::Interfere;
 use js_jobs::{
@@ -39,6 +39,10 @@ use super::*;
 use crate::clock::SharedClock;
 use crate::job_expiry::JobLimits;
 use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
+
+#[path = "agent_api_job_rig_replies.rs"]
+mod replies;
+pub(crate) use replies::{starts, stops};
 
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
@@ -269,25 +273,25 @@ impl Logs {
 }
 
 /// The store under a server's job tables, and the tables.
-type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
+pub(crate) type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
 
 /// What a [`logging_rig`] gives a server beyond [`rig_on`]'s: the grace after which a silent
 /// host is lost (the pool's own when `None`), the grants it mints with, the job tables of a
 /// server that ran before (fresh ones when `None`), and the clock of fresh tables (the rig's
 /// clock when `None`).
 #[derive(Default)]
-struct Extra {
-    grace_ms: Option<u64>,
-    logs: Option<Arc<LogGrants>>,
-    tables: Option<Tables>,
-    store_clock: Option<Arc<StoreClock>>,
-    whole: Option<WholePool>,
+pub(crate) struct Extra {
+    pub(crate) grace_ms: Option<u64>,
+    pub(crate) logs: Option<Arc<LogGrants>>,
+    pub(crate) tables: Option<Tables>,
+    pub(crate) store_clock: Option<Arc<StoreClock>>,
+    pub(crate) whole: Option<WholePool>,
 }
 
 /// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
 /// settings, and the longest wall time its scheduler trusts for backfill, when it backfills.
 #[derive(Clone)]
-struct WholePool {
+pub(crate) struct WholePool {
     rules: WholeNodeConfig,
     backfill: Option<std::time::Duration>,
 }
@@ -398,7 +402,7 @@ pub(crate) fn two_clock_rig(name: &str, limits: JobLimits) -> (Rig, ManualClock)
 /// A server named `name` (`(with_jobs, placing)` as [`rig_of`]) holding its jobs to the limits
 /// of `kept` and keeping each ended job for its retention, on the server clock `shared`, its
 /// store on `clock`, with what `extra` adds.
-fn rig_on(
+pub(crate) fn rig_on(
     name: &str,
     (with_jobs, placing): (bool, bool),
     (limits, retention): (JobLimits, Retention),
@@ -675,6 +679,7 @@ impl Rig {
             results: Vec::new(),
             taint,
             taint_cleared: None,
+            tainted: agent.tainted,
             exclusive_ready: agent.ready.clone(),
             exclusive_refused: agent.refused.clone(),
             load: None,
@@ -765,6 +770,8 @@ pub(crate) struct FakeAgent {
     pub(crate) stale: bool,
     /// The phase its heartbeats report.
     pub(crate) phase: Phase,
+    /// Whether its beats say it holds a taint (`None`: nothing).
+    pub(crate) tainted: Option<bool>,
     /// The allocation the last reply named for it to prepare for or keep.
     pub(crate) exclusive: Option<String>,
     /// The allocation it reports ready.
@@ -786,6 +793,7 @@ impl FakeAgent {
             grant: None,
             stale: false,
             phase: Phase::Serving,
+            tainted: None,
             exclusive: None,
             ready: None,
             refused: None,
@@ -981,22 +989,4 @@ pub(crate) fn result(
         input_failure: None,
         usage: None,
     }
-}
-
-/// The job starts of `reply`.
-pub(crate) fn starts(reply: &HeartbeatReply) -> Vec<JobStartSpec> {
-    let each = reply.commands.iter().filter_map(|command| match command {
-        Command::JobStart(spec) => Some(spec.as_ref().clone()),
-        _ => None,
-    });
-    each.collect()
-}
-
-/// The job ids `reply` says to stop.
-pub(crate) fn stops(reply: &HeartbeatReply) -> Vec<String> {
-    let each = reply.commands.iter().filter_map(|command| match command {
-        Command::JobStop { job_id } => Some(job_id.clone()),
-        _ => None,
-    });
-    each.collect()
 }

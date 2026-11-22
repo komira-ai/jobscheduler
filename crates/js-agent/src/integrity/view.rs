@@ -61,7 +61,8 @@ pub enum Watched {
 }
 
 /// The host as the post-job checks see it. Each input can fail on its own; a failure is
-/// the text of the reason, and the check that needed it is a finding.
+/// the text of the reason. An unreadable process table makes the check an unchecked finding;
+/// any other unreadable input is a note.
 pub trait HostView {
     /// The process table.
     ///
@@ -121,8 +122,16 @@ pub trait HostView {
     /// It cannot be read.
     fn file(&self, path: &str) -> Result<String, String>;
 
+    /// The command line of the process `pid`, for the findings and notes that name it: the
+    /// arguments joined by spaces, as short as the host cuts it. Empty when it cannot be
+    /// read (the process ended, or it is a kernel thread). The default is empty.
+    fn cmdline(&self, pid: u32) -> String {
+        let _ = pid;
+        String::new()
+    }
+
     /// Lets the host go on for `wait` before the checks look at it again (they look twice at
-    /// what they would call a job's leftover process or mount: see
+    /// what they would call a job's leftover process: see
     /// [`Integrity::with_settle`]). The default does not wait.
     ///
     /// [`Integrity::with_settle`]: super::Integrity::with_settle
@@ -160,6 +169,7 @@ struct FakeState {
     watched: BTreeMap<PathBuf, Watched>,
     links: BTreeMap<String, String>,
     files: BTreeMap<String, String>,
+    cmdlines: BTreeMap<u32, String>,
     failing: BTreeSet<&'static str>,
     /// The waits the checks asked for, in order.
     settled: Vec<Duration>,
@@ -246,6 +256,14 @@ impl FakeHost {
             .borrow_mut()
             .files
             .insert(path.to_owned(), text.to_owned());
+    }
+
+    /// The command line of the process `pid` reads as `text` from now on.
+    pub fn set_cmdline(&self, pid: u32, text: &str) {
+        self.state
+            .borrow_mut()
+            .cmdlines
+            .insert(pid, text.to_owned());
     }
 
     /// The file at `path` cannot be read from now on.
@@ -396,6 +414,15 @@ impl HostView for FakeHost {
     fn file(&self, path: &str) -> Result<String, String> {
         let text = self.state.borrow().files.get(path).cloned();
         text.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn cmdline(&self, pid: u32) -> String {
+        self.state
+            .borrow()
+            .cmdlines
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn settle(&self, wait: Duration) {

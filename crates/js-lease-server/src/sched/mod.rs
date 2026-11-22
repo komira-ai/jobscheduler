@@ -14,12 +14,14 @@
 pub(crate) use js_sched_placer::{engine, map, place};
 
 mod jobs_pass;
+pub(crate) mod jobs_rows;
 pub(crate) mod rank;
+pub(crate) mod taint_skips;
 
 #[cfg(test)]
 mod cold_tests;
 #[cfg(test)]
-mod cordon_tests;
+pub(crate) mod cordon_tests;
 #[cfg(test)]
 mod engine_hosts_tests;
 #[cfg(test)]

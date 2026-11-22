@@ -1,57 +1,105 @@
 //! The post-job integrity checks (design 5.12): after every job, the agent compares the
-//! host with what it was when it was last known clean, and a host that differs, or that the
-//! agent cannot look at, is tainted (see [`crate::lifecycle::taint`]).
+//! host with what it was when it was last known clean. A job's process that is still running
+//! taints the host, and so does a host whose process table the agent cannot read (see
+//! [`crate::lifecycle::taint`]); every other change is the host's own doing, and is logged
+//! as one line (a [`CheckNote`]) without a taint.
 //!
 //! [`Integrity`] is the [`CheckHook`] of an agent that runs jobs. It runs after the job's
 //! container and scratch directory are gone and before the slot is freed, and it reads the
 //! host through a [`HostView`]: [`ProcHost`] on Linux, [`FakeHost`] in a test.
 //!
+//! # What taints, and what does not
+//!
+//! A check taints only for something a contained job could have left behind that the sandbox
+//! cannot prevent and that would affect a later job. A package install by the host's updater
+//! while jobs run must never taint (it changes `/etc/passwd` and `/etc/group`, may start
+//! services, mount file systems and load kernel modules), and a taint whose cause is gone
+//! clears itself when the agent checks again. Every taint says what changed in one line.
+//!
+//! A contained job runs in a user namespace of its own, with a mount namespace and a pid
+//! namespace of its own, no capability on the host and a seccomp profile that refuses kernel
+//! module calls. What that leaves it:
+//!
+//! - **A process of the job users' range that outlives the job.** The sandbox is meant to
+//!   end every process of a job with its container; one still running is a sandbox failure,
+//!   and it shares its uids and mount roots with the later jobs. This taints
+//!   (`process-as-job-user`), and the taint ends when the process does.
+//! - **Nothing else on the host.** The orphans of a contained job are reparented to the init
+//!   of its own pid namespace and die with it, so a process whose parent is the host's `init`
+//!   is the runtime's or the host's. Every mount a contained job makes is in its own mount
+//!   namespace, and the mounts the agent makes for a job that fail to unmount already taint
+//!   as `cleanup-failed`. A job cannot write the host's `/etc` (the host's root owns it and
+//!   nothing mounts it writable for an unmapped id), so the user and group databases are
+//!   the host's. `init_module`, `finit_module` and `delete_module` fail for a job (the
+//!   profile, no capability, and the check that the caller is in the init namespace), the
+//!   kernel only loads in-tree modules on a process's behalf, and no job unloads one. A
+//!   `--watch-dir` may not hold or lie in a mount root, the scratch root or the state root,
+//!   so no contained job can write one. A host job (`isolation=host`) has none of these
+//!   walls and taints `host-job` whatever the checks find.
+//!
 //! # The baseline
 //!
 //! [`Integrity::start`] takes the baseline when the agent starts; a host that cannot be
 //! read whole then is no host to run jobs on, and the agent does not start. A check that
-//! finds nothing takes the baseline again, and so does a job that starts on an idle host
+//! finds no leftover takes the baseline again, and so does a job that starts on an idle host
 //! (no other job's container, scratch directory or checks on it, and no container the agent
 //! could not remove; see [`CheckHook::idle`]): what changed between jobs is the host's, not
 //! a job's. So the baseline is the host as it was after the last job that left nothing, or
-//! when the job started on an idle host. A check that finds something leaves it alone (the
-//! host is tainted, and every later check is compared with the last clean state). The
-//! re-checks of a taint that may clear itself (see [`crate::lifecycle::taint`]) are these
-//! same checks, run on an idle host with nothing live: one that passes takes the baseline
-//! again, as after any job that leaves nothing. The re-check of a taint read from the marker
-//! at start ([`CheckHook::run_restored`]) is the same check with one change: the baseline
-//! exempts no process, because this process took it with whatever the tainting job left. A
-//! process of the job users' range, and a process whose parent is `init` in a group a job
-//! can be in, are findings even if the baseline holds them (the agent's own process, read from
-//! `/proc/self/stat` when the agent starts, is never one). A helper of the agent that is a
-//! child of `init` in the agent's group keeps a restored taint until it ends.
+//! when the job started on an idle host. A check that finds a leftover keeps the baseline's
+//! processes of the job users' range (the host is tainted, and every later check is compared
+//! with them) and takes everything else that only the notes look at: the users, the groups,
+//! the modules, the mounts, the watched directories and the other processes, without the
+//! neighbours' containers. So a noted change is logged once, by the check that sees it, and
+//! not again after every later check. A check that cannot run (the process table cannot be
+//! read) leaves the baseline alone. An input other than the process table that cannot be
+//! read is a note, and its value in the baseline stays what it was: it is taken as
+//! unchanged.
+//!
+//! The re-checks of a taint that may clear itself (see [`crate::lifecycle::taint`]) are
+//! these same checks, run on an idle host with nothing live: one that passes takes the
+//! baseline again, as after any job that leaves nothing. The re-check of a taint read from
+//! the marker at start ([`CheckHook::run_restored`]) is the same check with one change: the
+//! baseline exempts no process, because this process took it with whatever the tainting job
+//! left. A process of the job users' range is a finding even if the baseline holds it (the
+//! agent's own process, read from `/proc/self/stat` when the agent starts, is never one).
+//! A marker written by an earlier version for one of the checks that now only note
+//! (`daemonised-child`, `new-mount`, `user-changed`, `group-changed`,
+//! `kernel-module-changed`, `watch-dir-changed`) is re-checked the same way, and passes
+//! unless a job's process is left.
 //!
 //! # What is checked
 //!
 //! | code | what | kind |
 //! |---|---|---|
 //! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs and not of the uid of a slot whose job is still running; one of the finished job's own slot's uid is named as that slot's leftover | residue |
-//! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs, and in a control group a job can be in (the agent's own group or below it, a group that names a container, or no unified path; see [What the host does while jobs run](#what-the-host-does-while-jobs-run)): what a child that outlived its parent looks like | residue |
-//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source) and is still there after the settle wait, other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | residue |
-//! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
-//! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
-//! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
-//! | `processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable` | an input could not be read or understood | unchecked |
-//! | `watch-over-bound` | a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested | unchecked |
+//! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs, and in a control group a job can be in (the agent's own group or below it, a group that names a container, or no unified path; see [What the host does while jobs run](#what-the-host-does-while-jobs-run)) | note |
+//! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers and those below the directory where the runtime mounts another held job's file system | note |
+//! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group`: the detail names `added <name>`, `removed <name>` or `changed <name>` | note |
+//! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline (`loaded <name>`), or one that was and is gone (`unloaded <name>`) | note |
+//! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | note |
+//! | `processes-unreadable` | the process table could not be read or understood, so the check cannot run | unchecked |
+//! | `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable`, `watch-over-bound` | an input of a check that does not taint could not be read or understood (or a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested); the check takes the baseline's value for it | note |
 //!
 //! A new process and a new mount count only when they are not the host's own (see
 //! [What the host does while jobs run](#what-the-host-does-while-jobs-run)).
 //!
-//! A new process or mount counts only when it is still there after the settle wait
-//! ([`Integrity::with_settle`], `--settle-ms`): checks that would call one a job's leftover
-//! look again after the wait and judge what of the first look is still there. The service
-//! manager's fork of a unit (parent `init` until it is moved into the unit's group), a
-//! process that is ending, and a mount a host's test or a runtime's unwinding holds for a
-//! moment are gone by then; a job's leftover is not.
+//! A process of the job users' range counts only when it is still there after the settle
+//! wait ([`Integrity::with_settle`], `--settle-ms`): the check looks again after the wait and
+//! judges what of the first look is still there. A process that is ending is gone by then; a
+//! job's leftover is not. The notes are taken from the host as the check last looked at it.
 //!
-//! A check that cannot run is a finding, never a skipped check. When several things are
-//! found, the code is the first's (in the order of the table) and the detail holds all of
-//! them, cut to [`CHECK_DETAIL_MAX`](crate::lifecycle::CHECK_DETAIL_MAX) bytes.
+//! The finding names the process: `pid <pid> (<comm>, state <state>, cgroup <cgroup>, owner
+//! <owner>, cmd "<command line>") is running after job <run>`, where the owner is `name
+//! (uid)` when `/etc/passwd` has a line for that uid and the uid alone when it has not, and
+//! the command line is read from `/proc/<pid>/cmdline` (its control characters as spaces,
+//! cut to 80 bytes with `...`) and left out when it cannot be read or is empty. The
+//! `daemonised-child` note names a process the same way.
+//!
+//! A check that cannot run is a finding, never a skipped check; the one that can taint is
+//! the process table's. A finding's detail holds the processes it names, cut to
+//! [`CHECK_DETAIL_MAX`](crate::lifecycle::CHECK_DETAIL_MAX) bytes. The notes are one per
+//! code, with every name joined by `, `, in the order of the table after the notes of the inputs that could not be read, and are given to
+//! [`CheckHook::notes`] after the check.
 //!
 //! The container cleanup failures of design 5.12 (a container or scratch directory that
 //! could not be removed) are the lifecycle's own, and taint the host there.
@@ -91,11 +139,11 @@
 //!
 //! # What is not checked
 //!
-//! - **A process of another user** that started during the job, unless its parent is
-//!   `init` and it is in a group a job can be in: a host where operators log in and services
-//!   restart while jobs run has such processes, and the agent does not call every one of
-//!   them the job's. A kernel thread
-//!   (its parent is `kthreadd`, pid 2) is not a daemonised child.
+//! - **A process of another user** that started during the job: a host where operators log
+//!   in and services restart while jobs run has such processes, and the agent does not call
+//!   them the job's. One whose parent is `init` and that is in a group a job can be in is a
+//!   `daemonised-child` note. A kernel thread (its parent is `kthreadd`, pid 2) is not a
+//!   daemonised child.
 //! - **Files outside the watched directories**, and the contents of any file. With no
 //!   `--watch-dir` that is every file but `/etc/passwd` and `/etc/group` (no cron, systemd
 //!   units, `authorized_keys`, sudoers, shadow or `ld.so.preload`), and the agent warns at
@@ -121,8 +169,13 @@
 //!   baseline. A job whose container was still running when the agent stopped is adopted
 //!   and checked when it ends, but what it did before the stop is part of the baseline the
 //!   new process took.
-//! - **A mount's options**, remounts, and mounts that disappeared: only a new mount is a
-//!   finding, and two identical mounts count as one. Modules compare by name only.
+//! - **A mount's options**, remounts, and mounts that disappeared: only a new mount is
+//!   noted, and two identical mounts count as one. Modules compare by name only.
+//! - **What the host's own changes mean.** A mount, an account, a module, a daemonised
+//!   process or a watched file that changed is logged and never taints: a contained job
+//!   cannot cause any of them (see [What taints, and what does not](#what-taints-and-what-does-not)),
+//!   so the agent cannot tell a host's change from a changed host and does not try. A host
+//!   job taints `host-job` whatever the checks find.
 //! - **What a job does inside its container** (a container can fill its own file system),
 //!   and anything a process does without leaving the process table, the mounts, the
 //!   databases, the modules or a watched directory behind. This is a post-job check, not an
@@ -132,14 +185,15 @@
 //!
 //! A host starts processes and makes mounts of its own while jobs run, and none of them is
 //! a job's: a job cannot place a process outside its container's control group, nor make a
-//! mount on the host. They are not counted:
+//! mount on the host. They are not counted (a process is no `daemonised-child` note, and a
+//! mount no `new-mount` note):
 //!
 //! - **A process with parent `init` outside every group a job can be in** is not a
 //!   `daemonised-child`. A contained job cannot place a process in a control group other
 //!   than its container's (the control group file system is read-only in the container, and
 //!   it runs in a user namespace without capabilities), so a transient process of the host
 //!   with parent `init` in the root group, `init.scope`, a scope of the system slice or
-//!   another slice is not a job's, whatever lives past the settle wait. The groups a job can
+//!   another slice is not a job's. The groups a job can
 //!   be in are the agent's own group and below it, a group that names a container (below), and
 //!   a process with no unified path, which is judged conservatively. `process-as-job-user` is
 //!   not narrowed this way: a uid of the job users' range is a job's wherever the process is.
@@ -178,9 +232,9 @@
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
 //!   **and a user's run directory** (`tmpfs` at `/run/user/<uid>`), made by a login.
 //!
-//! What is not on this list still counts: Kubernetes pods, a container engine's other
-//! mounts, and a service started in a scope. A host with such churn can still be tainted
-//! when what it made at a job's end outlives the settle wait.
+//! What is not on this list still counts as a note: Kubernetes pods, a container engine's
+//! other mounts, and a service started in a scope. A host with such churn logs a line for
+//! each; it is not tainted by them.
 //!
 //! # Jobs that run side by side
 //!
@@ -190,12 +244,10 @@
 //! group path holds one of them, and a mount whose root, mount point or source does, are
 //! not counted against the finished job. An engine that names its mounts or places its
 //! helper processes without the container id does not match, and the neighbour then shows
-//! as a finding: Podman's overlay layers, and with Docker the overlay mount (named by its
-//! layer id) and the container's `containerd-shim` process (whose parent is `init` and
-//! whose control group is the containerd service's), so two jobs at once on a Docker or
-//! Podman host can taint it when the first of them ends. Run one job at a time there, or
-//! accept that such a host is tainted. This is stated from how the engines work, not from
-//! a measurement on a host.
+//! as a note: Podman's overlay layers, and with Docker the overlay mount (named by its
+//! layer id), so two jobs at once on a Docker or Podman host can log a `new-mount` note when
+//! the first of them ends. The notes taint nothing. This is stated from how the engines work,
+//! not from a measurement on a host.
 //!
 //! Under the direct runner every job runs as the one uid of the job users' range (there are
 //! no slots to tell apart), so a process's uid does not say whose it is: its lease's group
@@ -207,12 +259,12 @@
 //! has a container, and unmounts it after the container is gone.
 //! [`Finished::held_mounts`] lists those directories of the agent's other jobs; a mount
 //! whose point lies below one is not counted against the finished job. The finished job's
-//! own are gone by its check, so one left there is a finding.
+//! own are gone by its check, so one left there is a `new-mount` note.
 //!
 //! A container user that is the agent's own user (`--container-user` for an agent that
 //! does not run as root) makes every process of the agent's user that is not in the
-//! baseline, and not in the host's own control groups, a finding: a child of the agent
-//! that left its service's control group included.
+//! baseline, and not in the host's own control groups, a `process-as-job-user` finding: a
+//! child of the agent that left its service's control group included.
 //!
 //! # macOS
 //!
@@ -221,75 +273,61 @@
 //! Mac when it starts, so a Mac agent runs no job and no check. This is stated, not
 //! hidden: `js-agent` does not pretend that a Mac host was checked.
 
+mod compare;
+mod modules;
+mod note;
+mod own;
 mod proc;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cli_runtime::{IdRange, JobUsers};
-use crate::lifecycle::{CheckFinding, CheckHook, Finished};
+use crate::lifecycle::{CheckFinding, CheckHook, CheckNote, Finished};
 
+use own::{is_live, under_held, unified};
 pub use proc::{DirLister, Entry, Listing, PROCESS_CAP, ProcHost, SystemDirs, WATCH_ENTRY_CAP};
 pub use view::{FakeHost, HostView, Mount, Process, Watched, input};
 
-/// The codes of the findings of the checks.
+/// The codes of the findings and notes of the checks.
 pub mod code {
     /// A process of the container user outlived the job.
     pub const PROCESS_AS_JOB_USER: &str = "process-as-job-user";
-    /// A process whose parent is `init` outlived the job.
+    /// A process whose parent is `init` is new on the host (a note).
     pub const DAEMONISED_CHILD: &str = "daemonised-child";
-    /// A mount that was not there before.
+    /// A mount that was not there before (a note).
     pub const NEW_MOUNT: &str = "new-mount";
-    /// The user database changed.
+    /// The user database changed (a note).
     pub const USER_CHANGED: &str = "user-changed";
-    /// The group database changed.
+    /// The group database changed (a note).
     pub const GROUP_CHANGED: &str = "group-changed";
-    /// A kernel module was loaded or unloaded.
+    /// A kernel module was loaded or unloaded (a note).
     pub const MODULE_CHANGED: &str = "kernel-module-changed";
-    /// A watched directory changed.
+    /// A watched directory changed (a note).
     pub const WATCH_DIR_CHANGED: &str = "watch-dir-changed";
-    /// The process table could not be read.
+    /// The process table could not be read (the unchecked finding).
     pub const PROCESSES_UNREADABLE: &str = "processes-unreadable";
-    /// The mounts could not be read.
+    /// The mounts could not be read (a note).
     pub const MOUNTS_UNREADABLE: &str = "mounts-unreadable";
-    /// The user database could not be read.
+    /// The user database could not be read (a note).
     pub const USERS_UNREADABLE: &str = "users-unreadable";
-    /// The group database could not be read.
+    /// The group database could not be read (a note).
     pub const GROUPS_UNREADABLE: &str = "groups-unreadable";
-    /// The kernel modules could not be read.
+    /// The kernel modules could not be read (a note).
     pub const MODULES_UNREADABLE: &str = "modules-unreadable";
-    /// A watched directory could not be listed.
+    /// A watched directory could not be listed (a note).
     pub const WATCH_UNREADABLE: &str = "watch-unreadable";
-    /// A watched directory holds more entries than the checks read.
+    /// A watched directory holds more entries than the checks read (a note).
     pub const WATCH_OVER_BOUND: &str = "watch-over-bound";
 }
 
-/// One thing a check noticed: its code and what it saw.
+/// An input of the checks that could not be read: the code of its `*-unreadable` finding (the
+/// process table's) or note, and the reason.
 struct Problem {
     code: &'static str,
     detail: String,
-    /// The check could not run, as opposed to having found something.
-    unrun: bool,
-}
-
-impl Problem {
-    fn found(code: &'static str, detail: String) -> Self {
-        Self {
-            code,
-            detail,
-            unrun: false,
-        }
-    }
-
-    fn unrun(code: &'static str, detail: String) -> Self {
-        Self {
-            code,
-            detail,
-            unrun: true,
-        }
-    }
 }
 
 /// The control groups of `init` that only a host's `/proc` shows: the root, or the scope a
@@ -416,210 +454,8 @@ impl Snapshot {
     }
 }
 
-/// Whether the mount point `point` lies below a directory where the runtime mounts the file
-/// system of another job the agent holds ([`Finished::held_mounts`]), by whole components.
-fn under_held(job: &Finished<'_>, point: &str) -> bool {
-    let point = Path::new(point);
-    job.held_mounts
-        .iter()
-        .any(|dir| point != dir && point.starts_with(dir))
-}
-
-/// Whether `text` (a control group path, the lines of `/proc/<pid>/cgroup`, or a mount's
-/// root, point or source) names one of the containers still on the host beside the
-/// finished job: some component of it, between `/` or white space, is the container's
-/// handle, or is an engine's name for it (`libpod-<id>.scope`, `docker-<id>.scope`, ...).
-/// A handle that is only part of a longer name does not match: run ids are `run-<n>-<m>`,
-/// so `run-3-1` is the start of the live `run-3-12`'s name.
-fn is_live(job: &Finished<'_>, text: &str) -> bool {
-    text.split(|c: char| c == '/' || c.is_whitespace())
-        .any(|part| job.live.iter().any(|id| names_container(part, &id.0)))
-}
-
-/// Whether the path component `part` is the container `id`: its handle, or an engine's
-/// control group name for it, with or without the `.scope`.
-fn names_container(part: &str, id: &str) -> bool {
-    part == id
-        || ENGINES.iter().any(|prefix| {
-            part.strip_prefix(prefix)
-                .is_some_and(|rest| rest.strip_suffix(".scope").unwrap_or(rest) == id)
-        })
-}
-
-/// The prefixes of the control group names container engines give a container.
-const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
-
-/// Whether a process in the control groups `cgroup` (the lines of `/proc/<pid>/cgroup`) is
-/// the host's own, which no job can have left: one in a service of the system slice, in the
-/// user slice (logins, `systemd --user`), or in the scope of a Podman container's monitor
-/// (`libpod-conmon-<id>.scope`, which outlives its container for a moment). Only the path
-/// of the unified hierarchy (`0::`) is read; a process without one is not the host's.
-///
-/// A container's processes are in a control group that names the container
-/// (`libpod-<id>.scope`, `docker-<id>.scope`, `/docker/<id>`), and a contained job cannot
-/// move a process out of it: the control group file system is read-only in the container.
-/// A path that holds such a name is never the host's, wherever it is, so a container placed
-/// under the system or the user slice still counts.
-///
-/// A process with parent `init` that is not in a group a job can be in ([`job_can_be_in`])
-/// is not a `daemonised-child` either; that is judged separately, after this.
-///
-/// The agent's own control group (`own`, its unified path) and every group below it are
-/// not the host's: a child of the agent that outlives it is in the agent's service, and is
-/// judged like any other process. A Podman monitor's scope is the host's even there.
-fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
-    let Some(path) = unified(cgroup) else {
-        return false;
-    };
-    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
-    // A Podman monitor's scope is the host's wherever it is, the agent's own group included
-    // (containers parented under the agent's group put their monitors there too): a job
-    // cannot place a process in it.
-    let monitor = units
-        .last()
-        .is_some_and(|unit| unit.starts_with("libpod-conmon-") && unit.ends_with(".scope"));
-    if monitor {
-        return true;
-    }
-    if in_or_below(path, own) {
-        return false;
-    }
-    if runners_helper(&units) {
-        return true;
-    }
-    if names_a_container(&units) {
-        return false;
-    }
-    match units.as_slice() {
-        ["user.slice", ..] => true,
-        ["system.slice", unit, rest @ ..] => {
-            unit.ends_with(".service") && !rest.iter().any(|unit| unit.ends_with(".scope"))
-        }
-        _ => false,
-    }
-}
-
-/// Whether the unified path `path` is the agent's own control group `own` or lies below it.
-fn in_or_below(path: &str, own: Option<&str>) -> bool {
-    own.is_some_and(|own| {
-        path == own
-            || path
-                .strip_prefix(own)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
-
-/// Whether a job's process can be in the control groups `cgroup` (the lines of
-/// `/proc/<pid>/cgroup`): the agent's own group (`own`) or one below it, a group that names
-/// a container ([`names_a_container`]), or a process with no unified path, which is judged
-/// conservatively. A contained job cannot place a process in any other group: the control
-/// group file system is read-only in its container and it holds no capability, so a process
-/// elsewhere (the root group, `init.scope`, a scope of the system slice, another slice) is
-/// the host's, whatever its parent.
-fn job_can_be_in(cgroup: &str, own: Option<&str>) -> bool {
-    let Some(path) = unified(cgroup) else {
-        return true;
-    };
-    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
-    in_or_below(path, own) || names_a_container(&units)
-}
-
-/// The path of the unified hierarchy (`0::`) in the control groups `cgroup` (the lines of
-/// `/proc/<pid>/cgroup`), if there is one.
-fn unified(cgroup: &str) -> Option<&str> {
-    cgroup
-        .split_whitespace()
-        .find_map(|line| line.strip_prefix("0::"))
-}
-
-/// The name of the runner's group that holds every lease's group (js-contain's `actions/`).
-const ACTIONS: &str = "actions";
-
-/// The group below `actions/` that holds the helper containers (unpack and removal).
-const HELPERS: &str = "helpers";
-
-/// Whether the control groups `units` (the names in a unified path) hold a container's: a
-/// group an engine makes for one (`libpod-<id>`, `docker-<id>`, ...), or any group in or
-/// below the direct runner's `actions` group, which holds nothing but leases (a lease's group
-/// is named for its container, `js-<agent tag>-<run id>`, and the container's is `ctr`
-/// below it) and the helper containers' group. A name that only looks like `actions`
-/// (`actions-old`) is not one.
-fn names_a_container(units: &[&str]) -> bool {
-    let engine = |unit: &&str| {
-        ENGINES.iter().any(|prefix| unit.starts_with(prefix))
-            || ["docker", "libpod_parent", "machine.slice"].contains(unit)
-    };
-    units.iter().any(engine) || units.contains(&ACTIONS)
-}
-
-/// Whether the control groups `units` are those of a helper container of the runner:
-/// `actions/helpers` and below, where `actions` is the real actions group, not one made
-/// inside a lease (no `ctr`, and no lease group `js-<16 hex digits>-<run id>`, before it).
-/// The helpers (the image unpacker, the removal of a lease's tree) run inside a runtime
-/// call, but a background pull runs one while the lifecycle checks another job, so a helper
-/// can be alive at a check; it is the runner's, not a stray. A helper that never ends is
-/// therefore not found here: the runtime's own call ends it, not the post-job checks.
-///
-/// The invariant behind the exemption: code a job controls never runs as the job user (the
-/// uid of the agent's helpers and of `crun`) on the host. It runs at `sub_uid + 1000`, in a
-/// user namespace, with no capabilities, so it cannot place a process in `actions/helpers`
-/// or write a cgroup there.
-fn runners_helper(units: &[&str]) -> bool {
-    let inside_a_lease = |unit: &&str| *unit == "ctr" || is_lease_group(unit);
-    units
-        .iter()
-        .position(|unit| *unit == ACTIONS)
-        .is_some_and(|at| {
-            units.get(at + 1) == Some(&HELPERS) && !units[..at].iter().any(inside_a_lease)
-        })
-}
-
-/// Whether `unit` is the name of a lease's group: `js-`, the agent's tag of 16 hexadecimal
-/// digits, `-` and the run id.
-fn is_lease_group(unit: &str) -> bool {
-    unit.strip_prefix("js-")
-        .and_then(|rest| rest.split_once('-'))
-        .is_some_and(|(tag, run)| {
-            tag.len() == 16 && tag.bytes().all(|b| b.is_ascii_hexdigit()) && !run.is_empty()
-        })
-}
-
-/// Whether `process` is one of the direct runner's own: it is in the agent's own control
-/// group exactly, and its parent is not `init` (the process table does not say whose
-/// child it is, so any live parent will do). The runner's `crun run`, `crun kill` and
-/// `crun delete` and the keeper are started by the agent and stay in its group; no job
-/// process can be in it, since a container's processes are in its own group and cannot
-/// leave it. A process whose parent is `init` (the agent no longer holds it) is not the
-/// runner's, nor is one in a group below the agent's.
-fn runners_own(process: &Process, own: Option<&str>) -> bool {
-    process.ppid != 1 && unified(&process.cgroup).is_some_and(|path| Some(path) == own)
-}
-
-/// Whether `mount` is one the host makes while jobs run, which no job can have left: the
-/// network namespaces Podman pins under `/run/netns` (one per container, the neighbours'
-/// included, whose names hold no container id), the bind of `/run/netns` onto itself that
-/// the first container after a boot makes, and the run directory of a user who logs in
-/// (`/run/user/<uid>`).
-fn hosts_own_mount(mount: &Mount) -> bool {
-    let one_name = |rest: &str| !rest.is_empty() && !rest.contains('/');
-    match mount.fstype.as_str() {
-        "nsfs" => mount
-            .point
-            .strip_prefix("/run/netns/")
-            .is_some_and(one_name),
-        "tmpfs" => {
-            (mount.point == "/run/netns" && mount.root == "/netns")
-                || mount
-                    .point
-                    .strip_prefix("/run/user/")
-                    .is_some_and(|uid| one_name(uid) && uid.bytes().all(|b| b.is_ascii_digit()))
-        }
-        _ => false,
-    }
-}
-
 /// The post-job checks: a [`HostView`], the user the containers run as, the watched
-/// directories, and the baseline.
+/// directories, the baseline, and the notes of the last check.
 pub struct Integrity {
     view: Box<dyn HostView>,
     users: IdRange,
@@ -633,9 +469,12 @@ pub struct Integrity {
     /// when it cannot be read). The agent is never a job's leftover: a re-check of a taint
     /// read from the marker judges processes the baseline holds, the agent's among them.
     agent_pid: Option<u32>,
-    /// How long a process or mount the checks would call a job's leftover must go on before
-    /// it is one (`--settle-ms`); zero looks once.
+    /// How long a process the checks would call a job's leftover must go on before it is one
+    /// (`--settle-ms`); zero looks once.
     settle: Duration,
+    /// What the last check saw change that does not taint the host, until
+    /// [`CheckHook::notes`] drains it.
+    notes: Vec<CheckNote>,
 }
 
 impl Integrity {
@@ -644,9 +483,12 @@ impl Integrity {
     ///
     /// # Errors
     ///
-    /// The host cannot be read whole, so there is nothing to compare with later, or the
-    /// agent's own control group (`/proc/self/cgroup`) cannot be read: the text says which
-    /// input failed. A mapped range that `view` shows is not acceptable is one too.
+    /// The host cannot be read whole (every input, the process table, the mounts, the users,
+    /// the groups, the modules and each watched directory, must be readable now, though a
+    /// later check may do without all but the process table), so there is nothing to compare
+    /// with later, or the agent's own control group (`/proc/self/cgroup`) cannot be read: the
+    /// text says which input failed. A mapped range that `view` shows is not acceptable is
+    /// one too.
     pub fn start(
         view: Box<dyn HostView>,
         users: JobUsers,
@@ -674,22 +516,25 @@ impl Integrity {
             own,
             agent_pid,
             settle: Duration::ZERO,
+            notes: Vec::new(),
         };
-        this.baseline = this.observe().map_err(|problems| {
-            format!(
+        let reading = this.observe();
+        if !reading.unread.is_empty() {
+            return Err(format!(
                 "cannot take the baseline of the host: {}",
-                details(&problems)
-            )
-        })?;
+                details(&reading.unread)
+            ));
+        }
+        this.baseline = reading.snapshot;
         Ok(this)
     }
 
-    /// The same checks, which count a process or mount the baseline did not have as a job's
-    /// leftover (`process-as-job-user`, `daemonised-child`, `new-mount`) only when it is still
-    /// there `wait` after they first saw it: the checks look again then, and keep of the
-    /// first look what is still there. A host's own process or mount that lives for a moment
-    /// (the service manager's fork of a timer's unit, a FUSE test's mount) is gone by then;
-    /// a job's leftover is not. With no wait (what [`Integrity::start`] gives) they look once.
+    /// The same checks, which call a process of the job users' range that the baseline did
+    /// not have a job's leftover (`process-as-job-user`) only when it is still there `wait`
+    /// after they first saw it: the checks look again then, and keep of the first look what
+    /// is still there. A host's own process that lives for a moment (the service manager's
+    /// fork of a timer's unit, a process that is ending) is gone by then; a job's leftover is
+    /// not. With no wait (what [`Integrity::start`] gives) they look once.
     #[must_use]
     pub fn with_settle(self, wait: Duration) -> Self {
         Self {
@@ -722,217 +567,9 @@ impl Integrity {
                 .saturating_add(slot)
         })
     }
-
-    /// The host now, or why it cannot be read whole: every input is tried, so the reasons
-    /// are all given.
-    fn observe(&self) -> Result<Snapshot, Vec<Problem>> {
-        let mut problems = Vec::new();
-        let processes = keep(
-            &mut problems,
-            code::PROCESSES_UNREADABLE,
-            self.view.processes(),
-        );
-        let mounts = keep(&mut problems, code::MOUNTS_UNREADABLE, self.view.mounts());
-        let users = keep(&mut problems, code::USERS_UNREADABLE, self.view.users());
-        let groups = keep(&mut problems, code::GROUPS_UNREADABLE, self.view.groups());
-        let modules = keep(&mut problems, code::MODULES_UNREADABLE, self.view.modules());
-        let mut watched = BTreeMap::new();
-        for dir in &self.watch {
-            match self.view.watched(dir) {
-                Ok(Watched::Digest(digest)) => {
-                    watched.insert(dir.clone(), digest);
-                }
-                Ok(Watched::TooMany) => problems.push(Problem::unrun(
-                    code::WATCH_OVER_BOUND,
-                    format!("{}: more than {WATCH_ENTRY_CAP} entries", dir.display()),
-                )),
-                Err(why) => problems.push(Problem::unrun(code::WATCH_UNREADABLE, why)),
-            }
-        }
-        match problems.is_empty() {
-            true => Ok(Snapshot {
-                processes,
-                mounts: mounts.into_iter().collect(),
-                users,
-                groups,
-                modules,
-                watched,
-            }),
-            false => Err(problems),
-        }
-    }
-
-    /// The host after `job`, and what differs from the baseline. A process or mount that would
-    /// be a leftover of the job is looked at again after the settle wait, and only what of
-    /// the first look is still there is judged; the second look is the host that is compared.
-    /// A process or mount that starts during the wait is judged by the next check, and is not
-    /// in the baseline this one may take. `restored` is the re-check of a taint read from the
-    /// marker at start (see `Integrity::compare`).
-    fn look(
-        &self,
-        job: &Finished<'_>,
-        restored: bool,
-    ) -> Result<(Snapshot, Vec<Problem>), Vec<Problem>> {
-        let first = self.observe()?;
-        let found = self.compare(&first, job, restored);
-        let leftover = found.iter().any(|problem| {
-            matches!(
-                problem.code,
-                code::PROCESS_AS_JOB_USER | code::DAEMONISED_CHILD | code::NEW_MOUNT
-            )
-        });
-        if self.settle.is_zero() || !leftover {
-            return Ok((first, found));
-        }
-        self.view.settle(self.settle);
-        let mut later = self.observe()?;
-        let seen: BTreeSet<(u32, u64)> = first.processes.iter().map(Process::key).collect();
-        later
-            .processes
-            .retain(|process| seen.contains(&process.key()));
-        // A mount that arrived during the wait is the next check's; one of the baseline that
-        // was remounted during the wait did not arrive.
-        later
-            .mounts
-            .retain(|mount| first.mounts.contains(mount) || self.baseline.mounts.contains(mount));
-        let found = self.compare(&later, job, restored);
-        Ok((later, found))
-    }
-
-    /// What differs between the baseline and `now`, in the order of the table of the module.
-    ///
-    /// With `restored` (the re-check of a taint read from the marker at start) the baseline
-    /// exempts no process: the baseline of this process was taken with whatever the tainting
-    /// job left, so every process is judged by the two rules that need no baseline, a uid of
-    /// the job users' range and a parent `init` in a group a job can be in. The agent's own
-    /// process is the exception.
-    fn compare(&self, now: &Snapshot, job: &Finished<'_>, restored: bool) -> Vec<Problem> {
-        let mine = |text: &str| is_live(job, text);
-        let known: BTreeSet<(u32, u64)> = match restored {
-            true => BTreeSet::new(),
-            false => self.baseline.processes.iter().map(Process::key).collect(),
-        };
-        let strays: Vec<&Process> = now
-            .processes
-            .iter()
-            .filter(|process| {
-                !known.contains(&process.key())
-                    && Some(process.pid) != self.agent_pid
-                    && !mine(&process.cgroup)
-                    && !hosts_own_process(&process.cgroup, self.own.as_deref())
-                    && !runners_own(process, self.own.as_deref())
-            })
-            .collect();
-        let own = job.slot.and_then(|slot| self.slot_host_uid(slot));
-        let live_uids: BTreeSet<u32> = job
-            .live_slots
-            .iter()
-            .filter_map(|slot| self.slot_host_uid(*slot))
-            .collect();
-        let as_job = strays
-            .iter()
-            .filter(|stray| self.users.contains(stray.uid) && !live_uids.contains(&stray.uid));
-        let daemonised = strays
-            .iter()
-            .filter(|stray| stray.ppid == 1 && job_can_be_in(&stray.cgroup, self.own.as_deref()));
-        let new_mounts = now
-            .mounts
-            .difference(&self.baseline.mounts)
-            .filter(|mount| {
-                !(mine(&mount.root)
-                    || mine(&mount.point)
-                    || mine(&mount.source)
-                    || under_held(job, &mount.point)
-                    || hosts_own_mount(mount))
-            });
-        let moved = now
-            .watched
-            .iter()
-            .filter(|(dir, digest)| self.baseline.watched.get(*dir) != Some(*digest));
-        [
-            group(
-                code::PROCESS_AS_JOB_USER,
-                as_job.map(|stray| {
-                    let slot = job
-                        .slot
-                        .filter(|_| own == Some(stray.uid))
-                        .map_or(String::new(), |slot| format!(" (leftover of slot {slot})"));
-                    format!(
-                        "pid {} ({}, state {}, cgroup {}) of user {} is running after job {}{slot}",
-                        stray.pid, stray.comm, stray.state, stray.cgroup, stray.uid, job.run_id
-                    )
-                }),
-            ),
-            group(
-                code::DAEMONISED_CHILD,
-                daemonised.map(|stray| {
-                    format!(
-                        "pid {} ({}, state {}, cgroup {}) was left behind by job {} (parent init)",
-                        stray.pid, stray.comm, stray.state, stray.cgroup, job.run_id
-                    )
-                }),
-            ),
-            group(
-                code::NEW_MOUNT,
-                new_mounts.map(|mount| {
-                    format!("{} ({}) from {}", mount.point, mount.fstype, mount.source)
-                }),
-            ),
-            group(
-                code::USER_CHANGED,
-                changed(&self.baseline.users, &now.users),
-            ),
-            group(
-                code::GROUP_CHANGED,
-                changed(&self.baseline.groups, &now.groups),
-            ),
-            group(
-                code::MODULE_CHANGED,
-                now.modules
-                    .difference(&self.baseline.modules)
-                    .map(|name| format!("loaded {name}"))
-                    .chain(
-                        self.baseline
-                            .modules
-                            .difference(&now.modules)
-                            .map(|name| format!("unloaded {name}")),
-                    ),
-            ),
-            group(
-                code::WATCH_DIR_CHANGED,
-                moved.map(|(dir, _)| format!("{} differs from the baseline", dir.display())),
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
 }
 
-/// `read`, or an empty one and the reason in `problems` when the input could not be read.
-fn keep<T: Default>(problems: &mut Vec<Problem>, code: &'static str, read: Result<T, String>) -> T {
-    read.unwrap_or_else(|why| {
-        problems.push(Problem::unrun(code, why));
-        T::default()
-    })
-}
-
-/// The names in the lines that are in one of `before` and `after` and not in the other.
-fn changed(before: &BTreeSet<String>, after: &BTreeSet<String>) -> Vec<String> {
-    let names: BTreeSet<&str> = before
-        .symmetric_difference(after)
-        .map(|line| line.split(':').next().unwrap_or_default())
-        .collect();
-    names.into_iter().map(str::to_owned).collect()
-}
-
-/// One problem of `code` for the things `seen` names, or none for no things.
-fn group(code: &'static str, seen: impl IntoIterator<Item = String>) -> Option<Problem> {
-    let seen: Vec<String> = seen.into_iter().collect();
-    (!seen.is_empty()).then(|| Problem::found(code, seen.join(", ")))
-}
-
-/// The details of `problems`, one after the other.
+/// The details of `problems`, one after the other, each with its code.
 fn details(problems: &[Problem]) -> String {
     problems
         .iter()
@@ -944,10 +581,11 @@ fn details(problems: &[Problem]) -> String {
 impl CheckHook for Integrity {
     /// Takes the baseline again: no job is on the host, so what changed since the last
     /// clean check (an operator's login, a timer's service, a package upgrade) is the
-    /// host's. A host that cannot be read keeps the baseline it had; the check after the job
-    /// finds it unreadable.
+    /// host's. A host whose process table cannot be read keeps the baseline it had; the check
+    /// after the job finds it unreadable. An input of the others that cannot be read keeps
+    /// its value in the baseline.
     fn idle(&mut self) {
-        if let Ok(now) = self.observe() {
+        if let Ok((now, _)) = self.observe().seen() {
             self.baseline = now;
         }
     }
@@ -959,27 +597,8 @@ impl CheckHook for Integrity {
     fn run_restored(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         self.judge(job, true)
     }
-}
 
-impl Integrity {
-    /// The check after `job`, as [`CheckHook::run`], or as [`CheckHook::run_restored`] when
-    /// `restored`.
-    fn judge(&mut self, job: &Finished<'_>, restored: bool) -> Result<(), CheckFinding> {
-        let problems = match self.look(job, restored) {
-            Err(unrun) => unrun,
-            Ok((now, found)) => {
-                if found.is_empty() {
-                    self.baseline = now.without_live(job);
-                }
-                found
-            }
-        };
-        match problems.first() {
-            None => Ok(()),
-            Some(first) if first.unrun => {
-                Err(CheckFinding::unchecked(first.code, &details(&problems)))
-            }
-            Some(first) => Err(CheckFinding::residue(first.code, &details(&problems))),
-        }
+    fn notes(&mut self) -> Vec<CheckNote> {
+        std::mem::take(&mut self.notes)
     }
 }

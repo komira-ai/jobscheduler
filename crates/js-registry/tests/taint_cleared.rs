@@ -1,6 +1,7 @@
-//! The taint an agent reports cleared (`Heartbeat::taint_cleared`): the one thing that ends
-//! a host's taint in the registry. The registry is driven directly, on a manual clock, with
-//! hand-built heartbeats.
+//! The taint an agent reports cleared (`Heartbeat::taint_cleared`): one of the two ways the
+//! host's own word ends its taint in the registry (the other, `Heartbeat::tainted` false, is in
+//! `taint_agent_word.rs`). The registry is driven directly, on a manual clock, with hand-built
+//! heartbeats.
 
 mod support;
 

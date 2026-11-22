@@ -13,7 +13,7 @@
 //!    that is not there, mode 0755: hostkeeper makes none, so a first install finds none (on a
 //!    Mac, not even `/Library/Application Support/js-agent`);
 //! 2. a taint the restarted agent will not re-check, or an `owed-*` record, halts (76); a taint
-//!    it will re-check (a residue of a process the pin file does not name, see
+//!    it will re-check (a residue of a post-job check the pin file does not name, see
 //!    [`restored_rechecks`](crate::update_hook::StateView::restored_rechecks)) does not, and the
 //!    step goes on as for a clean host;
 //! 3. the staged release's agent (`bin/js-agent`, or `tree/usr/bin/js-agent` in a native package
@@ -263,8 +263,10 @@ fn bad_artifact(why: impl ToString) -> Done {
 }
 
 /// A taint the restarted agent will not re-check, or an owed check, halts: no version can repair
-/// it. A taint it will re-check does not: a residue of a process (`process-as-job-user`,
-/// `daemonised-child`) that the state root's pin file does not name. The marker stays, the
+/// it. A taint it will re-check does not: a residue of a post-job check (`process-as-job-user`,
+/// or `daemonised-child`, `new-mount`, `user-changed`, `group-changed`, `kernel-module-changed`
+/// or `watch-dir-changed`, which an older agent wrote and which the checks now only note) that
+/// the state root's pin file does not name. The marker stays, the
 /// restarted agent restores it, and its own re-checks clear it, so a halt would only keep the
 /// release that carries that clearing from reaching the host. Every unchecked taint
 /// (`*-unreadable`, `watch-over-bound`, `cgroup-not-found`) still halts, because a restart

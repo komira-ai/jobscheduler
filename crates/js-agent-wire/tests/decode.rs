@@ -101,7 +101,8 @@ fn minimal_hello_takes_defaults() {
 /// Asserts that a welcome with no `protocol` field names major 1, and that a heartbeat,
 /// a reply and an empty reply decode from their required fields alone, with an empty
 /// `session` on the welcome and the heartbeat (which the agent's welcome check and the
-/// registry then refuse). It catches a server of the first version being read as
+/// registry then refuse), and with no `tainted` on the heartbeat and no `host_taint` on the
+/// reply. It catches a server of the first version being read as
 /// speaking no version, and an old body failing to decode instead of being refused by
 /// name.
 #[test]
@@ -116,11 +117,13 @@ fn minimal_welcome_heartbeat_and_reply_take_defaults() {
     let beat: Heartbeat =
         serde_json::from_value(json!({"host_id": "a", "epoch": 1, "phase": "serving"})).unwrap();
     assert!(beat.held.is_empty() && beat.results.is_empty() && beat.taint.is_none());
+    assert_eq!((beat.taint_cleared, beat.tainted), (None, None));
     assert_eq!(beat.session, "");
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": []})).unwrap();
     assert_eq!(reply, HeartbeatReply::default());
     let reply: HeartbeatReply = serde_json::from_value(json!({})).unwrap();
     assert!(reply.commands.is_empty() && reply.result_acks.is_empty() && !reply.taint_ack);
+    assert_eq!(reply.host_taint, None);
 }
 
 /// Asserts that a phase text this version does not know reads as quarantined, an empty
@@ -184,6 +187,7 @@ fn unknown_fields_ignored_everywhere() {
         }],
         taint_ack: true,
         taint_cleared_ack: false,
+        host_taint: None,
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),

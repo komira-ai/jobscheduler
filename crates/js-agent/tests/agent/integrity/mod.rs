@@ -1,11 +1,14 @@
 //! The post-job integrity checks: each check from a clean baseline with one change made in
 //! the in-memory host, the inputs that cannot be read, the bounds, and the real Linux
-//! reader over recorded `/proc` text. Nothing here reads the machine's own `/proc`.
+//! reader over recorded `/proc` text. A change that is the host's own is a note and the
+//! check passes; only a job's process left running is a finding. Nothing here reads the
+//! machine's own `/proc`.
 
 mod checks;
 mod crun;
 mod lifecycle;
 mod mapped;
+mod modules;
 mod noise;
 mod overlap;
 mod proc;
@@ -17,7 +20,7 @@ use std::path::PathBuf;
 
 use js_agent::cli_runtime::JobUsers;
 use js_agent::integrity::{FakeHost, Integrity, Mount, Process};
-use js_agent::lifecycle::{CheckFinding, CheckHook, Finished, RunHandle};
+use js_agent::lifecycle::{CheckFinding, CheckHook, CheckNote, Finished, RunHandle};
 
 /// The user the containers run as in these tests.
 pub const JOB_UID: u32 = 65534;
@@ -109,4 +112,35 @@ pub fn said(found: &CheckFinding) -> (bool, &'static str, String) {
         found.code(),
         found.detail().to_owned(),
     )
+}
+
+/// Asserts that the check after the run `run_id` passes (only a leftover process of a job
+/// taints), and returns the notes it made.
+pub fn noted_after(checks: &mut Integrity, run_id: &str) -> Vec<CheckNote> {
+    assert_eq!(after(checks, run_id), Ok(()), "the check passes");
+    checks.notes()
+}
+
+/// Asserts that the check after `run_id`, with the containers `live` still on the host,
+/// passes, and returns the notes it made.
+pub fn noted_beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> Vec<CheckNote> {
+    assert_eq!(beside(checks, run_id, live), Ok(()), "the check passes");
+    checks.notes()
+}
+
+/// Whether the check after `run_id` passes and notes nothing: the host's change, if any, is
+/// not one the checks see.
+pub fn quiet(checks: &mut Integrity, run_id: &str) -> bool {
+    after(checks, run_id).is_ok() && checks.notes().is_empty()
+}
+
+/// Whether the check after `run_id`, with the containers `live` still on the host, passes
+/// and notes nothing.
+pub fn quiet_beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> bool {
+    beside(checks, run_id, live).is_ok() && checks.notes().is_empty()
+}
+
+/// The codes of `notes`, in order.
+pub fn codes(notes: &[CheckNote]) -> Vec<&'static str> {
+    notes.iter().map(|note| note.code).collect()
 }

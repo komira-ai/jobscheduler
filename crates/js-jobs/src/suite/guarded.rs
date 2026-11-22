@@ -219,8 +219,9 @@ pub fn a_guarded_claimed_placement_honours_the_node_guard<B: Backend>(backend: &
     let said = rig.jobs.hello_node(&node, &hello()).expect("a hello");
     let guarded = rig.jobs.guarded(&node, said.version);
     let plain = Placement::default();
-    let first = rig.queue("p-first");
-    let second = rig.queue("p-second");
+    // Jobs without host ports: two placements on one host would otherwise hold one port.
+    let first = rig.queue_portless("p-first");
+    let second = rig.queue_portless("p-second");
 
     let (job, _) = guarded
         .place_claimed(&first, &node, share(), &plain, None)
