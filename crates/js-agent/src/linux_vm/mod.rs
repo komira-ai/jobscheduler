@@ -13,6 +13,8 @@
 //! - `ctl`, `call` and `time` are clients ([`client`]): a control request; timed requests to
 //!   the guest program over the virtio socket ([`wire`]); a timed program (the stock channel,
 //!   `ssh`).
+//! - `place` places one input tree through a mount provider on the Mac (tierstore's) with the
+//!   agent's own provider client ([`place`]), for the tree routes.
 //!
 //! The VM's directory holds `disk.raw` (the guest's disk), an optional `seed.iso` (the
 //! cloud-init seed, attached read-only), and what the owner makes on the first boot and
@@ -29,6 +31,7 @@ pub mod client;
 pub mod clock;
 pub mod control;
 pub mod flags;
+pub mod place;
 #[cfg(target_os = "macos")]
 mod vm;
 pub mod wire;
@@ -80,6 +83,13 @@ pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitC
             program,
             args,
         } => counted(client::time(&program, &args, samples, out), err),
+        flags::Command::Place(place) => match place::run(&place, out) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => {
+                let _ = writeln!(err, "js-agent {VERB} place: {why}");
+                ExitCode::FAILURE
+            }
+        },
         flags::Command::Run(flags) => owner(&flags, false, out, err),
         flags::Command::Adopt(flags) => owner(&flags, true, out, err),
     }

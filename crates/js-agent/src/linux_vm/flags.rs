@@ -8,6 +8,7 @@
 //! js-agent __linux-vm ctl   --dir D <request words>
 //! js-agent __linux-vm call  --dir D --port N --request JSON [--samples N]
 //! js-agent __linux-vm time  [--samples N] -- PROGRAM [ARGS...]
+//! js-agent __linux-vm place --socket S --uid N --ref R --run ID [--release]
 //! ```
 
 use std::path::PathBuf;
@@ -85,6 +86,8 @@ pub enum Command {
         /// How many times.
         samples: u32,
     },
+    /// Place (or release) a tree through a mount provider and print its directory.
+    Place(super::place::Place),
     /// Run a program `samples` times and print the summary of its wall times.
     Time {
         /// How many times.
@@ -125,6 +128,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         "call" => call(rest),
         "time" => time(rest),
+        "place" => place(rest),
         other => Err(format!("unknown command {other:?}")),
     }
 }
@@ -252,6 +256,36 @@ fn call(args: &[String]) -> Result<Command, String> {
     })
 }
 
+fn place(args: &[String]) -> Result<Command, String> {
+    let (mut socket, mut uid, mut reference, mut run, mut release) =
+        (None, None, None, None, false);
+    let mut at = 0;
+    while at < args.len() {
+        let flag = args[at].as_str();
+        if flag == "--release" {
+            release = true;
+            at += 1;
+            continue;
+        }
+        let v = value(args, at)?;
+        match flag {
+            "--socket" => socket = Some(v.to_owned()),
+            "--uid" => uid = Some(number::<u32>(flag, v)?),
+            "--ref" => reference = Some(v.to_owned()),
+            "--run" => run = Some(v.to_owned()),
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+        at += 2;
+    }
+    Ok(Command::Place(super::place::Place {
+        socket: socket.ok_or("--socket is required")?,
+        uid: uid.ok_or("--uid is required")?,
+        reference: reference.unwrap_or_default(),
+        run: run.ok_or("--run is required")?,
+        release,
+    }))
+}
+
 fn time(args: &[String]) -> Result<Command, String> {
     let dashes = args
         .iter()
@@ -376,6 +410,40 @@ mod tests {
             ),
         ];
         for (line, why) in cases {
+            assert_eq!(parse(&words(line)), Err(why.to_owned()), "{line:?}");
+        }
+    }
+
+    /// Asserts `place` with and without `--release`, and its refusals. Catches a tree placed
+    /// for no run or by a provider of no named user.
+    #[test]
+    fn place_reads_its_flags() {
+        assert_eq!(
+            parse(&words("place --socket /s --uid 7 --ref cas/l/ab --run r1")).unwrap(),
+            Command::Place(crate::linux_vm::place::Place {
+                socket: "/s".into(),
+                uid: 7,
+                reference: "cas/l/ab".into(),
+                run: "r1".into(),
+                release: false
+            })
+        );
+        let Command::Place(p) =
+            parse(&words("place --release --socket /s --uid 7 --run r1")).unwrap()
+        else {
+            panic!("not Place");
+        };
+        assert!(p.release && p.reference.is_empty());
+        for (line, why) in [
+            ("place --uid 7 --run r", "--socket is required"),
+            ("place --socket /s --run r", "--uid is required"),
+            ("place --socket /s --uid 7", "--run is required"),
+            (
+                "place --socket /s --uid x --run r",
+                "--uid: \"x\" is not a number",
+            ),
+            ("place --who 1", "unknown flag \"--who\""),
+        ] {
             assert_eq!(parse(&words(line)), Err(why.to_owned()), "{line:?}");
         }
     }
