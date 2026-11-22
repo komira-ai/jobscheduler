@@ -1,16 +1,40 @@
-//! Starting a program: the one way the helper and the agent do it, so that on macOS no
-//! process they start answers to the privacy controls as theirs.
+//! Starting a program: the one way the helper and the agent do it, and the one place that
+//! decides, on macOS, which process a program they start answers to for the privacy controls.
 //!
 //! macOS's privacy controls (TCC: Full Disk Access, the camera, another app's files)
-//! judge a process by its *responsible* process. A process started the usual way (`fork`
-//! and `exec`, or `posix_spawn` with no more) answers for whoever started it, so it is
-//! allowed whatever its starter was granted. It answers for itself only when its starter
-//! disclaims the responsibility as it starts it (`responsibility_spawnattrs_setdisclaim`
-//! on the `posix_spawn` attributes), or when launchd starts it as a job of its own. The
-//! helper and the agent are launchd daemons and answer for themselves. A job started the
-//! standard library's way would answer for the helper that started it, and a probe for
-//! the agent. A grant ever given to either would then reach the code of whoever queued a
-//! job.
+//! judge a process by its *responsible* process: the process whose grants count for it. A
+//! process started the usual way (`fork` and `exec`, or `posix_spawn` with no more) answers
+//! for the process its starter answers for, so it holds whatever that process was granted.
+//! It answers for itself only when its starter disclaims the responsibility as it starts it
+//! (`responsibility_spawnattrs_setdisclaim` on the `posix_spawn` attributes), or when
+//! launchd starts it as a job of its own; it is then judged by its own code signature. The
+//! helper and the agent are launchd daemons and answer for themselves. The agent holds Full
+//! Disk Access (`packaging/js-agent-macos/mdm`).
+//!
+//! **The default: disclaimed.** A [`Program`] starts its program with the responsibility
+//! disclaimed, so the program holds none of its starter's grants: the host probes, the
+//! firewall and `launchctl` tools, the VM launcher (whether it should keep the
+//! responsibility is not decided) and every other program the agent or the helper starts.
+//! A start that does not choose is this one: forgetting to choose can cost a
+//! program a read it needed, never give it a grant it should not have.
+//!
+//! **The one exception: a job and its supervisor.** [`Program::keep_responsibility`] leaves
+//! the disclaim out for one start, and its argument, [`Kept`], says which of the two starts
+//! allowed to do so this is: the agent's start of the supervisor of a native job
+//! ([`Kept::Supervisor`]), or the supervisor's start of the job's program ([`Kept::Job`]).
+//! With both kept, every process between the agent and the job is started without the
+//! disclaim, so the job answers for the agent and holds what the agent holds, Full Disk
+//! Access included. No production code calls it yet: the one job start in this tree, the
+//! helper's (`crate::spawn`), disclaims, and the helper holds no grant to pass on. A
+//! job started disclaimed is judged by its own signature and is refused every read of the
+//! network file system mount its build trees are served from, and so are Apple's own tools
+//! it runs. What keeps a job from using the rest of the grant is the user it runs as (Unix
+//! permissions) and the Seatbelt profile its supervisor applies before the program runs. The
+//! job's own children answer for the agent too, as every process's children follow their
+//! parent. `cargo test -p xtask --test spawn_sites` fails when production code calls
+//! [`Program::keep_responsibility`] or names [`Kept`] outside the files listed in
+//! `crates/xtask/src/spawn_sites.rs` (`KEEPERS`). Off macOS there is no responsibility, and
+//! the call changes nothing.
 //!
 //! [`Program`] is the standard library's [`Command`], with its program and arguments fixed
 //! when it is made. Off macOS there is nothing to disclaim, and it is the standard
@@ -24,6 +48,10 @@
 //!   each directory of the environment's `PATH` (`/usr/bin:/bin` when it has none), in
 //!   order, an empty directory being the working directory;
 //! - the `posix_spawn` attributes: `POSIX_SPAWN_SETEXEC` and the disclaim.
+//!
+//! A program whose responsibility is kept skips all of this: the child does the standard
+//! library's set-up and the steps, and the standard library executes the program, as it
+//! does off macOS.
 //!
 //! The child that the standard library forks does its usual set-up (standard streams,
 //! group and user ids, working directory, process group), then the steps given to
@@ -52,9 +80,9 @@
 //! `responsibility_spawnattrs_setdisclaim` and `responsibility_get_pid_responsible_for_pid`
 //! are not in Apple's public headers; libSystem exports both, and the binaries link
 //! against them directly, so a macOS without them would refuse to load the binary rather
-//! than start a program undisclaimed. The macOS CI job links and calls both. On macOS,
-//! [`responsible_pid`] reads a process's responsible process back, and the agent's tests
-//! use it to check the processes they start.
+//! than start a program it was asked to disclaim without the disclaim. The macOS CI job
+//! links and calls both. On macOS, [`responsible_pid`] reads a process's responsible
+//! process back, and the agent's tests use it to check the processes they start.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -62,11 +90,20 @@ use std::io;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
-#[cfg(not(target_os = "macos"))]
 use std::os::unix::process::CommandExt as _;
 
 /// Steps the child runs before the program executes.
 type Steps = Box<dyn FnMut() -> io::Result<()> + Send + Sync>;
+
+/// Which of the two starts that keep the responsibility a start is (see the module
+/// documentation): every other start disclaims it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// The start of a native job's program, by its supervisor.
+    Job,
+    /// The agent's start of the supervisor of a native job, which starts the job.
+    Supervisor,
+}
 
 /// A program to start, with its arguments fixed (see the module documentation).
 pub struct Program {
@@ -75,6 +112,9 @@ pub struct Program {
     steps: Option<Steps>,
     /// Whether the program has been started (it is started once).
     started: bool,
+    /// Why the program keeps its starter's responsibility, when it does
+    /// ([`Self::keep_responsibility`]); it is disclaimed otherwise.
+    kept: Option<Kept>,
     /// The program, for the file and the vector `posix_spawn` is given.
     #[cfg(target_os = "macos")]
     program: OsString,
@@ -91,6 +131,7 @@ impl fmt::Debug for Program {
         f.debug_struct("Program")
             .field("command", &self.command)
             .field("started", &self.started)
+            .field("kept", &self.kept)
             .finish_non_exhaustive()
     }
 }
@@ -137,6 +178,7 @@ impl Program {
                 command,
                 steps,
                 started: false,
+                kept: None,
                 program: program.to_owned(),
                 args,
                 cleared: false,
@@ -148,12 +190,14 @@ impl Program {
                 command,
                 steps,
                 started: false,
+                kept: None,
             }
         }
     }
 
-    /// Gives the command its one closure, once: the steps and, on macOS, the disclaimed
-    /// execution after them, with everything it uses made here, before the fork.
+    /// Gives the command its one closure, once: the steps and, on macOS unless the
+    /// responsibility is kept, the disclaimed execution after them, with everything it uses
+    /// made here, before the fork.
     ///
     /// # Errors
     /// The program was started already (an attempt that failed counts); on macOS also: the
@@ -166,13 +210,13 @@ impl Program {
         self.started = true;
         let steps = self.steps.take();
         #[cfg(target_os = "macos")]
-        {
+        if self.kept.is_none() {
             let env = darwin::environment(self.cleared, &self.command);
             let plan = plan::Plan::new(&self.program, &self.args, &env)?;
             let attributes = darwin::Attributes::new()?;
             darwin::disclaim(&mut self.command, plan, attributes, steps);
+            return Ok(());
         }
-        #[cfg(not(target_os = "macos"))]
         if let Some(steps) = steps {
             // SAFETY: `with_steps`'s caller promises that `steps` is async-signal-safe and
             // allocates nothing; it is the only closure the command has.
@@ -181,6 +225,17 @@ impl Program {
             }
         }
         Ok(())
+    }
+
+    /// Starts the program without disclaiming its responsibility: on macOS it then answers to
+    /// the privacy controls for the process its starter answers for, and holds what that
+    /// process was granted. `why` says which of the two starts allowed to do this it is: a
+    /// native job's supervisor, or the job's program (see the module documentation, which
+    /// also names the check that holds every call to the files listed for it). Off macOS
+    /// nothing changes.
+    pub fn keep_responsibility(&mut self, why: Kept) -> &mut Self {
+        self.kept = Some(why);
+        self
     }
 
     /// Clears the environment the program gets ([`Command::env_clear`]).
@@ -261,7 +316,8 @@ impl Program {
     /// It could not be started: the program is not found or may not be executed, a step or
     /// the set-up failed, the program, an argument or the environment holds NUL, or it was
     /// started already (a failed attempt counts: a [`Program`] is used once); on macOS also
-    /// the attributes that disclaim the responsibility could not be made.
+    /// the attributes that disclaim the responsibility could not be made (a program whose
+    /// responsibility is kept makes none).
     pub fn spawn(&mut self) -> io::Result<Child> {
         self.arm()?;
         self.command.spawn()

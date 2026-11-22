@@ -12,14 +12,19 @@
 //! which root without it may not do. The root helper `js-mac-session` is granted nothing: the
 //! pool's reset in place, which it does, neither needs nor uses the grant.
 //!
-//! The grant never reaches a job. Every process of a run is started through
-//! `js_mac_session::disclaim`, which disclaims the responsibility, so the run's processes,
-//! and the processes they start, answer for the run's program and hold no grant of the
-//! helper's or the agent's; what the run may do is what its own program was granted, which
-//! this runtime neither gives nor takes away. The same holds for the programs the agent
-//! starts itself (its probes, the `sandbox-exec` self-test, and `pfctl` through
-//! `js_mac_provision`) and for the helper's own (`launchctl`, `getconf`). `cargo test -p xtask
-//! --test spawn_sites` fails when the agent, the helper or a crate built into them starts a
+//! Today the root helper starts every native job, through `js_mac_session::disclaim` and
+//! disclaimed, and it holds no grant, so a job it starts holds none. A native job and its
+//! supervisor are to be started without the disclaim (`js_mac_session::disclaim::Kept`), so
+//! that they answer for the agent and hold what the agent holds, Full Disk Access included,
+//! and so do the job's own children: a job started disclaimed is judged by its own code
+//! signature and is refused every read of the network file system mount its build trees are
+//! served from. What is to keep a job from the rest of the grant is the slot user it runs as
+//! and the Seatbelt profile applied in the job's child before its program runs. Every other
+//! program the agent starts stays disclaimed, the default of `disclaim::Program`: its probes, the
+//! `sandbox-exec` self-test, `pfctl` through `js_mac_provision`, and the helper's own
+//! (`launchctl`, `getconf`). Whether the VM launcher and the GUI-session path keep the
+//! responsibility is not decided; both are disclaimed today. `cargo test -p xtask --test
+//! spawn_sites` fails when the agent, the helper or a crate built into them starts a
 //! program another way. On a Mac, the tests read the responsible process of what the helper's
 //! `run` and the agent start (`tests/agent/native/disclaim.rs`). The check by hand is in
 //! `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the design.
