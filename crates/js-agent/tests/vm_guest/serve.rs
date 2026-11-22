@@ -253,10 +253,13 @@ fn serve(stream: UnixStream, shared: &Shared) {
             ..Reply::default()
         },
         Ok(Request::Poweroff) => {
-            // Answered first; the shutdown follows on its own thread.
+            // Answered first; then the file systems are synced and the guest is powered off
+            // at once (sysrq `o`), not through the distribution's shutdown, which can take
+            // longer than the owner's grace on a guest that has just booted.
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                let _ = js_mac_session::disclaim::Program::new("systemctl", ["poweroff"]).output();
+                let _ = js_mac_session::disclaim::Program::new("sync", [""; 0]).output();
+                let _ = std::fs::write("/proc/sysrq-trigger", "o");
             });
             Reply {
                 ok: true,
