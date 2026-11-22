@@ -17,6 +17,7 @@ mod env;
 pub(crate) mod fake_helper;
 mod files;
 mod grant;
+mod held;
 mod inputs;
 mod job_home;
 mod journal;

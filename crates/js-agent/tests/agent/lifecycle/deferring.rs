@@ -6,7 +6,7 @@
 //! the step after the release.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -21,6 +21,10 @@ use js_agent_wire::{
 
 use super::fake::{FakeRuntime, ManualClock};
 use super::{Harness, hook};
+
+/// What a removal that cannot delete the run's account says: the helper's refusal.
+pub const ACCOUNT_HELD: &str =
+    "user-delete: kbf-mac-session refused: not shown gone: a record has uid 612";
 
 /// What the test and the runtime share.
 #[derive(Default)]
@@ -44,6 +48,9 @@ struct Gate {
     /// The clock a removal moves and by how much, as a `crun delete` and the removal of a
     /// lease's directories take on a busy disk.
     remove_takes: Option<(ManualClock, u64)>,
+    /// The accounts held that the next removals answer, one for each: each removal ends the
+    /// run and fails as a native run's does when the helper cannot delete its account.
+    accounts_held: VecDeque<usize>,
 }
 
 /// The test's hand on the gate of a [`Deferring`] runtime.
@@ -87,6 +94,16 @@ impl Control {
     /// asks for it.
     pub fn remove_takes(&self, clock: &ManualClock, ms: u64) {
         self.0.borrow_mut().remove_takes = Some((clock.clone(), ms));
+    }
+
+    /// From now on the next removals each end the run's container and fail as a native run's
+    /// removal does when the helper cannot delete the run's account: the first with `held`
+    /// accounts held (itself among them), the second with the second count, and so on.
+    pub fn hold_accounts(&self, held: &[usize]) {
+        self.0
+            .borrow_mut()
+            .accounts_held
+            .extend(held.iter().copied());
     }
 
     /// How often the lifecycle asked about the removal of the container `id`.
@@ -205,7 +222,11 @@ impl Runtime for Deferring {
         if let Some((clock, ms)) = &self.gate.0.borrow().remove_takes {
             clock.advance(*ms);
         }
-        self.inner.remove(id)
+        let removed = self.inner.remove(id);
+        match self.gate.0.borrow_mut().accounts_held.pop_front() {
+            Some(held) if removed.is_ok() => Err(RuntimeError::account_held(ACCOUNT_HELD, held)),
+            _ => removed,
+        }
     }
     /// Pending while the gate holds the removal of `id`, and the wrapped runtime's `remove`
     /// otherwise.

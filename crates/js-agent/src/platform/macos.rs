@@ -1,5 +1,5 @@
-//! The macOS build: jobs run as native programs, each as a user the root helper
-//! `js-mac-session` lends from its pool for the run, under a Seatbelt profile
+//! The macOS build: jobs run as native programs, each as an account the root helper
+//! `js-mac-session` makes for the run and deletes when it ends, under a Seatbelt profile
 //! ([`crate::native`]), with the VM backend beside them when `--vm-driver` turns it on
 //! ([`crate::vm`]). A start with `--no-jobs` runs no job. Neither `crun` nor the container
 //! engine is built here.
@@ -46,11 +46,11 @@ pub fn foreign_flag(name: &str) -> String {
 #[derive(Debug, clap::Args)]
 pub struct Flags {
     /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
-    /// agent runs native jobs, programs started as a user the helper lends from its pool for each run, under
-    /// a Seatbelt profile, and reports `exec = sandbox-exec`. This flag is in the macOS build
-    /// only, and the build requires it unless `--no-jobs` is given. Needs `--scratch-root`
-    /// and `--state-root`, and the agent must run as root. The agent checks at start that
-    /// `sandbox-exec` applies a profile.
+    /// agent runs native jobs, programs started as an account of its own that the helper
+    /// makes for each run and deletes when it ends, under a Seatbelt profile, and reports
+    /// `exec = sandbox-exec`. This flag is in the macOS build only, and the build requires it
+    /// unless `--no-jobs` is given. Needs `--scratch-root` and `--state-root`, and the agent
+    /// must run as root. The agent checks at start that `sandbox-exec` applies a profile.
     /// The helper must be dedicated to this agent, on a Mac used for native jobs only, and
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
@@ -61,9 +61,13 @@ pub struct Flags {
     /// deadline, its wall limit plus `--stop-grace` (a helper from before that deadline holds
     /// none, and its runs are bounded only while an agent runs).
     /// The profile denies creating POSIX shared memory, but not System V shared memory,
-    /// semaphores or message queues (which the helper's reset removes) nor POSIX named
-    /// semaphores, and the helper reuses uids, so a named semaphore a run leaves can be
-    /// opened by a later run that gets the same uid, until the Mac restarts.
+    /// semaphores or message queues (which the helper removes with the account) nor POSIX
+    /// named semaphores, and the helper gives each new account the next free uid after the
+    /// last it gave, wrapping around its range, so a named semaphore a run leaves can be
+    /// opened by a later run whose account gets the same uid, until the Mac restarts.
+    /// A deletion the helper refuses leaves the account held with its uid, so the host runs
+    /// one native job fewer at a time; the agent tries the end again after each job and at
+    /// its start, and two held accounts taint the host (`account-not-deleted`).
     /// At start the agent asks the helper whether it holds Full Disk Access, reports the
     /// answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
     /// native job (`no-full-disk-access`).

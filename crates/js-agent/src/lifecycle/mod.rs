@@ -295,6 +295,7 @@ mod codes;
 mod event;
 mod finding;
 pub mod handover;
+pub mod held_accounts;
 pub mod hold;
 mod job_fs;
 mod machine;
@@ -360,7 +361,8 @@ pub use silence::{
     silence_stop,
 };
 pub use taint::{
-    DEFAULT_TAINT_RECHECK, MARKER_FILE, MAX_TAINT_RECHECK_MS, StateRoot, clearable, recheck_every,
+    ACCOUNTS_HELD_TAINT, DEFAULT_TAINT_RECHECK, MARKER_FILE, MAX_TAINT_RECHECK_MS, StateRoot,
+    clearable, recheck_every,
 };
 pub use wake::Wake;
 

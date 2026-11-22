@@ -15,7 +15,7 @@ use js_mac_session::disclaim::Program;
 use super::{NativeConfig, fail};
 use crate::lifecycle::RuntimeError;
 
-/// The run directory below a pool user's home: the working directory and the only place a
+/// The run directory below a run's account's home: the working directory and the only place a
 /// job may write (the profile grants writes below it and nowhere else in the home).
 pub(super) const RUN_DIR: &str = "exec";
 
@@ -35,7 +35,7 @@ pub(super) const JOB_TREES_DIR: &str = ".trees";
 /// after `sandbox-exec`, and executes the job's program.
 const ENV_PROGRAM: &str = "/usr/bin/env";
 
-/// The run directory of the pool user whose home is `home`.
+/// The run directory of the account whose home is `home`.
 pub(super) fn run_dir(home: &Path) -> PathBuf {
     home.join(RUN_DIR)
 }

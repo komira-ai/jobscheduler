@@ -11,14 +11,14 @@
 //! new against it:
 //!
 //! - an added login item or Background Task Management entry of a uid other than root's
-//!   is residue ([`code::SCAN_RESIDUE`]): a run as a pool user can make its own, and the
-//!   reset removes neither the entries nor (for a uid the pool keeps) their owner, so the
-//!   next run of the uid would inherit them. So is an added `and <n> more` line, which
-//!   may hide one;
+//!   is residue ([`code::SCAN_RESIDUE`]): a run as a lease user can make its own, and
+//!   deleting the account removes neither the entries nor, when a later account gets the
+//!   same uid, their owner, so that account would inherit them. So is an added `and <n> more`
+//!   line, which may hide one;
 //! - every other change is a note ([`code::SCAN_HOST_CHANGED`]), never a taint: the
 //!   launch agent and daemon folders and the auto-login state are root's, and the lease
-//!   users are the pool's own (the helper reports no live lease's user, and the end of a
-//!   lease fails when its user is not reset); so is a removal, which no pool user can make
+//!   users are the helper's own (the helper reports no live lease's user, and a lease whose
+//!   account it could not delete stays live); so is a removal, which no lease user can make
 //!   of another user's entries. Lines are compared by their text, so when the idle host
 //!   already had more changes than a reply holds, a root-owned change that moves an item
 //!   past the cut changes the count of `and <n> more` and taints the host, and a run's

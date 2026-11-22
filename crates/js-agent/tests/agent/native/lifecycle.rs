@@ -202,7 +202,6 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
         [
             "boot-reset",
             "user-create 7.0",
-            "pool-status",
             "run 7.0",
             "kill-uid 7.0",
             "user-delete 7.0"

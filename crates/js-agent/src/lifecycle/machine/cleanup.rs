@@ -284,12 +284,27 @@ impl Lifecycle {
                         });
                         job.stage = Stage::Scratch;
                     }
-                    Removal::Done(Err(why)) => {
-                        let tainted = cleanup_taint(Some(&run_id), code::CONTAINER_REMOVE_FAILED);
-                        job.taint(taint, tainted, events);
-                        job.note(code::CONTAINER_REMOVE_FAILED, why.to_string(), events);
-                        return;
-                    }
+                    Removal::Done(Err(why)) => match why.held_accounts() {
+                        // The run is gone and only its account is held: the helper could not
+                        // delete it, so the account stays with its uid, and the runtime deletes
+                        // it after a later run. It is a finding, and the host is tainted only
+                        // once the held accounts reach `ACCOUNTS_HELD_TAINT`; the cleanup goes
+                        // on. Only the native runtime makes accounts.
+                        Some(held) => {
+                            job.account_held((taint, held), &why, events);
+                            events.push(Event::ContainerRemoved {
+                                run_id: run_id.clone(),
+                            });
+                            job.stage = Stage::Scratch;
+                        }
+                        None => {
+                            let tainted =
+                                cleanup_taint(Some(&run_id), code::CONTAINER_REMOVE_FAILED);
+                            job.taint(taint, tainted, events);
+                            job.note(code::CONTAINER_REMOVE_FAILED, why.to_string(), events);
+                            return;
+                        }
+                    },
                 },
                 // The run's directories, off the worker when the lifecycle has threads for it
                 // (see `dirs_removal`); the job waits here until they are gone.

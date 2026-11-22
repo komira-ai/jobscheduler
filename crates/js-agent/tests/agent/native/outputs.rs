@@ -146,10 +146,12 @@ fn a_directory_output_copies_regular_files_and_skips_links() {
 
 /// Asserts that an output over the run's largest file is not copied past the cap (no part
 /// of it is kept), that the removal still kills and deletes the user and marks the journal
-/// done, and that it then fails naming the path and the cap, not the bytes. A removal the
-/// helper refused first (`user-delete`) and that is tried again copies nothing twice and
-/// reports the failure once, and a removal after that is fine. It catches a failure that
-/// returns early and leaves the user, and a copy that is cut short and kept.
+/// done, and that it then fails naming the path and the cap, not the bytes. A removal whose
+/// delete the helper refused leaves the account held and says the outputs that were not
+/// copied in the same error (the run is gone, so no later removal could), and the removal
+/// tried again, which copies nothing, is fine. It catches a failure that returns early and
+/// leaves the user, a copy that is cut short and kept, and an output failure lost with a
+/// held account.
 #[test]
 fn an_output_over_the_cap_is_a_collection_failure_and_teardown_still_happens() {
     let declared = vec![output("big", OutputKind::File)];
@@ -159,15 +161,14 @@ fn an_output_over_the_cap_is_a_collection_failure_and_teardown_still_happens() {
     rig.settle(&handle());
     rig.fake.refuse("user-delete", "busy");
     let first = rig.rt.remove(&handle()).unwrap_err();
-    assert!(first.0.starts_with("user-delete: "), "{}", first.0);
-    assert!(first.0.contains("busy"), "{}", first.0);
-    assert!(!first.0.contains("outputs"), "{}", first.0);
-    rig.fake.allow("user-delete");
-    let why = rig.rt.remove(&handle()).unwrap_err();
     assert_eq!(
-        why.0,
-        "outputs not copied: big: over the 10 bytes it may hold: not copied"
+        first.0,
+        "user-delete: kbf-mac-session refused: busy; outputs not copied: \
+         big: over the 10 bytes it may hold: not copied"
     );
+    assert_eq!(first.held_accounts(), Some(1));
+    rig.fake.allow("user-delete");
+    rig.rt.remove(&handle()).unwrap();
     assert!(!collected(&rig).join("big").exists());
     let verbs = rig.fake.verbs();
     assert_eq!(
@@ -179,6 +180,19 @@ fn an_output_over_the_cap_is_a_collection_failure_and_teardown_still_happens() {
             "user-delete 7.0"
         ]
     );
+    assert_eq!(journal(&rig), ["+ 7.0", "- 7.0"]);
+
+    let declared = vec![output("big", OutputKind::File)];
+    let (mut rig, exec) = started("outputs-cap-removed", 10, declared);
+    fs::write(exec.join("big"), b"0123456789A").unwrap();
+    rig.fake.exit("7.0", 0);
+    rig.settle(&handle());
+    let why = rig.rt.remove(&handle()).unwrap_err();
+    assert_eq!(
+        why.0,
+        "outputs not copied: big: over the 10 bytes it may hold: not copied"
+    );
+    assert_eq!(why.held_accounts(), None);
     assert_eq!(journal(&rig), ["+ 7.0", "- 7.0"]);
     rig.rt.remove(&handle()).unwrap();
 }

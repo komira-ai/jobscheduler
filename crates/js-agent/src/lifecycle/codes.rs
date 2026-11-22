@@ -52,6 +52,11 @@ pub mod code {
     /// A native run was removed (its processes and its user are gone) and one or more of
     /// its declared outputs could not be copied. The host holds nothing of it: not a taint.
     pub const OUTPUTS_FAILED: &str = "outputs-failed";
+    /// A native run was removed (its processes are gone) and the helper could not delete its
+    /// account: the account stays, its uid held, and is tried again after each later run. The
+    /// host is not tainted for one such account; from two it is, as
+    /// [`reason::ACCOUNT_NOT_DELETED`](crate::lifecycle::taint::reason).
+    pub const ACCOUNT_HELD: &str = "account-held";
     /// The scratch directory could not be made or removed.
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// A labelled container could not be accounted for after a restart.

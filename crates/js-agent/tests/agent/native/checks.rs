@@ -8,7 +8,7 @@ use js_mac_session::proto::Reply;
 use super::lifecycle::{Native, job};
 use crate::lifecycle::{cleanup, names};
 
-/// A login item of the pool uid 601, as the helper's scan prints one.
+/// A login item of the job uid 601, as the helper's scan prints one.
 const LOGIN_ITEM: &str = "login-items \"loginitems.601.plist\" file 601:20 600 sha256:ab";
 
 fn scanned(added: &[&str]) -> Reply {
@@ -26,9 +26,9 @@ fn no_baseline() -> Reply {
     }
 }
 
-/// Catches: a native job that left a login item, which the reset of its pool user does
-/// not remove, ending with its slot freed and the next job started on the host (the
-/// check that passed every run), so that the next run of the same uid inherits it.
+/// Catches: a native job that left a login item, which deleting its account does not
+/// remove, ending with its slot freed and the next job started on the host (the check that
+/// passed every run), so that a later account that gets the same uid inherits it.
 #[test]
 fn a_login_item_a_native_job_left_taints_the_host_and_the_next_job_is_refused() {
     let mut h = Native::new("checks-residue");

@@ -50,7 +50,7 @@ fn a_start_makes_a_user_and_a_run_directory_and_runs_the_program_under_the_profi
     assert_eq!(id, handle("7.0"));
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "run 7.0"]
     );
     let home = rig.fake.home_of("7.0");
     for dir in ["exec", "exec/.tmp", "exec/.home"] {
@@ -111,22 +111,20 @@ fn each_start_gets_a_user_of_its_own() {
     assert!(rig.fake.home_of("7.1").join("exec").is_dir());
 }
 
-/// Asserts that a run's home is the home of the pool user the helper lent its lease,
-/// named by the slot `pool-status` gives (`kbf-lease-pool-<slot>`), and not a name made
-/// from the lease id: the helper lends slots 4 and 5 to the leases `7.0` and `7.1`, and
-/// each run's directory and its profile's write grant are in that slot's home. It catches
-/// a run directory made below a home the helper never made (`kbf-lease-<term>-<seq>`, or
-/// a slot guessed from the lease's sequence), which fails every start on a Mac whose
-/// helper lends pool users.
+/// Asserts that a run's home is the home of the account the helper made for its lease,
+/// named from the lease id (`kbf-lease-<term>-<seq>`), and that nothing is asked of the helper
+/// to learn it: the helper makes the leases `7.0` and `7.1` the accounts `kbf-lease-7-0` and
+/// `kbf-lease-7-1`, and each run's directory and its profile's write grant are in that
+/// account's home. It catches a run directory made below a home the helper never made, which
+/// fails every start on a Mac, and a start that still asks the helper which user a lease holds.
 #[test]
-fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
-    let mut rig = Rig::new("poolhome");
-    rig.fake.lend_from(4);
+fn a_run_lives_in_the_home_of_the_account_made_for_its_lease() {
+    let mut rig = Rig::new("accounthome");
     rig.start("r1", "/bin/true", &[]);
     rig.start("r2", "/bin/true", &[]);
     let homes = rig.fake.homes().to_path_buf();
-    for (lease, slot) in [("7.0", 4), ("7.1", 5)] {
-        let home = homes.join(format!("kbf-lease-pool-{slot}"));
+    for (lease, name) in [("7.0", "kbf-lease-7-0"), ("7.1", "kbf-lease-7-1")] {
+        let home = homes.join(name);
         assert_eq!(rig.fake.home_of(lease), home);
         assert!(home.join("exec").is_dir(), "{}", home.display());
         let ran = parse(&rig.fake.run_of(lease).argv);
@@ -135,66 +133,48 @@ fn a_run_lives_in_the_home_of_the_pool_user_its_lease_was_lent() {
             ("RUN".to_owned(), home.join("exec").display().to_string())
         );
     }
-    for name in ["kbf-lease-7-0", "kbf-lease-pool-0", "kbf-lease-pool-1"] {
-        assert!(!homes.join(name).exists(), "{name}");
-    }
-    assert_eq!(
-        rig.fake.verbs()[..4],
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
-    );
-}
-
-/// Asserts that on a helper from before the pool, which refuses `pool-status` as a verb it
-/// cannot read, a run's home is the user that helper made for the lease alone
-/// (`kbf-lease-<term>-<seq>`). It catches an agent that cannot run a job while its helper
-/// is still the release before the pool, as during an update.
-#[test]
-fn on_a_helper_from_before_the_pool_a_run_lives_in_its_leases_own_home() {
-    let mut rig = Rig::new("prepool");
-    rig.fake.be_old();
-    rig.start("r1", "/bin/true", &[]);
-    let home = rig.fake.homes().join("kbf-lease-7-0");
-    assert_eq!(rig.fake.home_of("7.0"), home);
-    assert!(home.join("exec").is_dir());
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "unreadable", "run 7.0"]
+        [
+            "boot-reset",
+            "user-create 7.0",
+            "run 7.0",
+            "user-create 7.1",
+            "run 7.1"
+        ]
     );
 }
 
-/// Asserts that a start whose lease `pool-status` cannot place fails by name and ends the
-/// user it was lent: when the helper refuses `pool-status`, and when the status names no
-/// slot for the lease. Nothing is made below the homes directory and no `run` is sent.
-/// It catches a run directory guessed when the helper did not say which user the lease
-/// holds, and a lent user left behind by such a start.
+/// Asserts that a start the helper refuses at `user-create` (no uid of its range is free)
+/// fails by name with what the helper said, ends the lease it journaled (`kill-uid` and
+/// `user-delete`, which the helper answers as it answers a lease it never made), makes
+/// nothing below the homes directory and sends no `run`. It catches a refused start that
+/// leaves a journaled lease or a home behind.
 #[test]
-fn a_lease_the_pool_status_does_not_place_fails_the_start_and_is_ended() {
-    let ended = [
-        "boot-reset",
-        "user-create 7.0",
-        "pool-status",
-        "kill-uid 7.0",
-        "user-delete 7.0",
-    ];
-    let mut rig = Rig::new("nostatus");
-    rig.fake.refuse("pool-status", "busy");
-    let spec = rig.spec("r1", native("/bin/true", &[]));
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert!(error.0.starts_with("pool-status: "), "{}", error.0);
-    assert!(error.0.contains("busy"), "{}", error.0);
-    assert_eq!(rig.fake.verbs(), ended);
-    assert!(!rig.fake.home_of("7.0").exists());
-
-    let mut rig = Rig::new("unnamed");
-    rig.fake.status_names_no_lease();
+fn a_start_whose_account_cannot_be_made_fails_by_name_and_ends_the_lease() {
+    let mut rig = Rig::new("nocreate");
+    rig.fake.refuse(
+        "user-create",
+        "no free uid in 600-699: 600: a record has uid 600",
+    );
     let spec = rig.spec("r1", native("/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert_eq!(
         error.0,
-        "pool-status: the helper names no pool user for lease 7.0"
+        "user-create: kbf-mac-session refused: no free uid in 600-699: 600: a record has uid 600"
     );
-    assert_eq!(rig.fake.verbs(), ended);
+    assert_eq!(
+        rig.fake.verbs(),
+        [
+            "boot-reset",
+            "user-create 7.0",
+            "kill-uid 7.0",
+            "user-delete 7.0"
+        ]
+    );
     assert!(!rig.fake.home_of("7.0").exists());
+    let journal = js_agent::native::Journal::new(&rig.dir.path("native-leases"));
+    assert_eq!(journal.live().unwrap(), Vec::<String>::new());
 }
 
 /// Asserts the network rules of the profile: `off` has no loopback rule, `loopback` has it,
@@ -364,9 +344,12 @@ fn a_stop_asks_the_helper_to_stop_with_its_grace() {
     assert!(error.0.starts_with("stop: "), "{}", error.0);
 }
 
-/// Asserts that a removal kills the user, deletes it (the helper sweeps its home), forgets
-/// the run, and that a removal the helper refuses is an error that keeps the run and can be
-/// tried again. It catches a lease user left on the Mac after its job.
+/// Asserts that a removal kills the user, deletes it (the helper deletes its home), and
+/// forgets the run, and that a removal the helper refuses at either step leaves the account
+/// held: the run is forgotten all the same, the lease stays in the journal, and the error is
+/// the helper's refusal, naming the step, as a held account (`held_accounts`), which a removal
+/// tried again ends. It catches a lease user left on the Mac after its job, and a refused
+/// delete that keeps the run for ever.
 #[test]
 fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     let mut rig = Rig::new("remove");
@@ -375,12 +358,14 @@ fn a_removal_kills_and_deletes_the_user_and_forgets_the_run() {
     assert!(home.is_dir());
     rig.fake.refuse("user-delete", "busy");
     let error = rig.rt.remove(&id).unwrap_err();
-    assert!(error.0.starts_with("user-delete: "), "{}", error.0);
+    assert_eq!(error.0, "user-delete: kbf-mac-session refused: busy");
+    assert_eq!(error.held_accounts(), Some(1));
     assert!(home.is_dir(), "a refused delete removes nothing");
-    assert_ne!(rig.rt.poll(&id).unwrap(), Status::Gone, "the run is kept");
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Gone, "the run is gone");
     rig.fake.refuse("kill-uid", "stuck");
     let error = rig.rt.remove(&id).unwrap_err();
-    assert!(error.0.starts_with("kill-uid: "), "{}", error.0);
+    assert_eq!(error.0, "kill-uid: kbf-mac-session refused: stuck");
+    assert_eq!(error.held_accounts(), Some(1), "the same account");
     rig.fake.allow("kill-uid");
     rig.fake.allow("user-delete");
     rig.rt.remove(&id).unwrap();

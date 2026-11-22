@@ -6,6 +6,7 @@
 //! `live_logs::s3_compat`, whose uploaders wait for the answers of the S3-compatible test
 //! store; its tests are `#[ignore]`d, and CI's `test` job, which runs the store, runs them.
 
+mod account_held;
 mod adopt;
 mod blind_cgroup;
 mod cleanup;

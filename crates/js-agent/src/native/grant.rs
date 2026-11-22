@@ -9,7 +9,7 @@
 //! (`packaging/js-agent-macos/mdm/`) gives Full Disk Access to it by its installed path and
 //! its designated requirement. The helper holds it for deleting a job's account, its home
 //! and its per-user folders (`docs/design/mac-account-per-job.md`), which root without it
-//! may not do; the pool's reset in place neither needs nor uses it.
+//! may not do.
 //!
 //! The grant never reaches a job. Every process of a run is started through
 //! `js_mac_session::disclaim`, which disclaims the responsibility, so the run's processes,

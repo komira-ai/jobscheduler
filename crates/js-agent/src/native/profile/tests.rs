@@ -48,7 +48,7 @@ fn body(program: &str, args: &[&str]) -> NativeSpec {
 /// home (the helper's value) because nothing set it.
 #[test]
 fn a_run_may_write_below_its_run_directory_alone_and_gets_a_home_there() {
-    let home = Path::new("/srv/homes/kbf-lease-pool-4");
+    let home = Path::new("/srv/homes/kbf-lease-7-4");
     let argv = profile_argv(&config(), &body("/bin/echo", &["HOME=/x", "-n"]), home).unwrap();
     let rule = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))";
     let at = argv.iter().position(|word| word == "-p").unwrap();
@@ -62,18 +62,18 @@ fn a_run_may_write_below_its_run_directory_alone_and_gets_a_home_there() {
         .iter()
         .filter(|word| word.contains('='))
         .collect();
-    assert!(params.contains(&&"RUN=/srv/homes/kbf-lease-pool-4/exec".to_owned()));
+    assert!(params.contains(&&"RUN=/srv/homes/kbf-lease-7-4/exec".to_owned()));
     assert!(
         !params
             .iter()
-            .any(|word| word.ends_with("=/srv/homes/kbf-lease-pool-4")),
+            .any(|word| word.ends_with("=/srv/homes/kbf-lease-7-4")),
         "{params:?}"
     );
     assert_eq!(
         argv[at + 2..],
         [
             "/usr/bin/env",
-            "HOME=/srv/homes/kbf-lease-pool-4/exec/.home",
+            "HOME=/srv/homes/kbf-lease-7-4/exec/.home",
             "/bin/echo",
             "HOME=/x",
             "-n"
@@ -87,7 +87,7 @@ fn a_run_may_write_below_its_run_directory_alone_and_gets_a_home_there() {
 /// Catches: a relative program that `env` would search `PATH` for.
 #[test]
 fn a_relative_program_is_refused() {
-    let home = Path::new("/srv/homes/kbf-lease-pool-4");
+    let home = Path::new("/srv/homes/kbf-lease-7-4");
     let why = profile_argv(&config(), &body("echo", &[]), home).unwrap_err();
     assert!(why.0.contains("echo"), "{}", why.0);
 }

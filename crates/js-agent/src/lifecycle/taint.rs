@@ -97,10 +97,10 @@
 //!    no longer find a mount, user, group, module or watched-directory change, so a re-check
 //!    of an old marker of one passes unless a job's process is left, and the marker clears.
 //!    A residue the pin file names is pinned too (see "The pin file"). Every other
-//!    restored taint (`unchecked` of any kind, `cleanup-failed`, `check-owed`, `host-job`,
-//!    `marker-unreadable`) stays until an operator moves the marker aside, as does a
-//!    restored taint beside which a non-clearable one was sealed at start (owed records, a
-//!    host job taken over).
+//!    restored taint (`unchecked` of any kind, `cleanup-failed`, `check-owed`,
+//!    `account-not-deleted`, `host-job`, `marker-unreadable`) stays until an operator moves
+//!    the marker aside, as does a restored taint beside which a non-clearable one was sealed
+//!    at start (owed records, a host job taken over).
 //! 1. Only a taint [`clearable`] says so: reason [`reason::RESIDUE`] with the check
 //!    `process-as-job-user` (the one residue the checks still make) or one of
 //!    `daemonised-child`, `new-mount`, `user-changed`, `group-changed`,
@@ -110,7 +110,8 @@
 //!    native leak scan's `scan-unreadable` and `scan-failed`) or
 //!    `cgroup-not-found` (a crun run whose container group was not found within the settle
 //!    wait while its first process ran in another group; the checks do not depend on that
-//!    group). Never `cleanup-failed`, `check-owed`,
+//!    group). Never `cleanup-failed`, `check-owed`, `account-not-deleted` (the helper of a
+//!    Mac could not delete the accounts of two native jobs: an operator looks at the host),
 //!    `host-job`, `marker-unreadable`, `host-not-visible`
 //!    (a re-check does not show that the agent now sees the host). A non-clearable taint
 //!    sealed *after* a clearable one (the first stays in the marker) keeps the host from
@@ -199,6 +200,12 @@ const OWED_PREFIX: &str = "owed-";
 /// most as many runs as a heartbeat can list, so more records than this is not its own doing.
 pub const OWED_MAX: usize = 1024;
 
+/// How many held accounts of native jobs taint the host ([`reason::ACCOUNT_NOT_DELETED`]).
+/// An account the helper could not delete costs one uid of its range and one native job
+/// fewer at a time, and is tried again after each run; a first one may be a process that
+/// came back once, two are a fault of the host.
+pub const ACCOUNTS_HELD_TAINT: usize = 2;
+
 /// The `reason` of a [`Taint`] the agent makes.
 pub mod reason {
     /// A job that was allowed to change the host (`isolation = host`) was started.
@@ -215,6 +222,10 @@ pub mod reason {
     /// and never ran (the agent stopped between the job's cleanup and its checks), or
     /// could not tell whether there is one.
     pub const CHECK_OWED: &str = "check-owed";
+    /// The helper could not delete the accounts of two or more native jobs
+    /// ([`ACCOUNTS_HELD_TAINT`](super::ACCOUNTS_HELD_TAINT)): the host holds accounts and uids no
+    /// retry has freed. The agent never clears it: an operator looks at the host and clears it.
+    pub const ACCOUNT_NOT_DELETED: &str = "account-not-deleted";
 }
 
 /// The state root: the directory the agent keeps what must outlive a restart in.

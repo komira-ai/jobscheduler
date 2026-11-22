@@ -164,6 +164,19 @@ fn a_starts_host_paths_are_its_layers_then_its_mounts() {
     assert_eq!(fs.images(), ["registry.example/a@sha256:0"]);
 }
 
+/// Asserts that only a removal that left a native run's account held says how many accounts
+/// are held, and that the text is the runtime's own whatever the kind: a plain failure and a
+/// blind one say none. Catches a kind that reads as a held account for any failure, which
+/// would let the lifecycle skip the taint of a removal that failed.
+#[test]
+fn only_a_held_account_says_how_many_accounts_are_held() {
+    let held = RuntimeError::account_held("user-delete: refused", 3);
+    assert_eq!(held.held_accounts(), Some(3));
+    assert_eq!(held.0, "user-delete: refused");
+    assert_eq!(RuntimeError::new("remove failed").held_accounts(), None);
+    assert_eq!(RuntimeError::blind("not seen").held_accounts(), None);
+}
+
 /// A run of no consequence.
 fn spec() -> RunSpec {
     RunSpec {

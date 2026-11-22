@@ -241,7 +241,7 @@ fn the_job_environment_steers_no_shell_because_there_is_none() {
             format!("() {{ {touch}; return 0; }}"),
         ),
     ]);
-    let home = rig.fake.homes().join("kbf-lease-pool-0");
+    let home = rig.fake.homes().join("kbf-lease-7-0");
     let exec = home.join("exec");
     fs::create_dir_all(&exec).unwrap();
     fs::create_dir_all(exec.join(".home")).unwrap();

@@ -63,7 +63,7 @@ fn a_start_naming_a_held_xcode_runs_with_that_apps_developer_dir_and_selects_not
     assert!(named.is_empty(), "{named:?}");
     assert_eq!(
         rig.fake.verbs(),
-        ["boot-reset", "user-create 7.0", "pool-status", "run 7.0"]
+        ["boot-reset", "user-create 7.0", "run 7.0"]
     );
     assert!(run.argv.iter().all(|arg| !arg.contains("xcode-select")));
 }

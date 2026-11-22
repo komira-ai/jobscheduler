@@ -1,14 +1,15 @@
-//! The two-run isolation test of the Mac pool users, for real, as root, on a Mac.
+//! The two-run isolation test of the Mac lease accounts, for real, as root, on a Mac.
 //!
 //! Question: does what a run leaves behind survive into the next run that gets the same
-//! uid? Every run is lent a user from the helper's pool of reused users, and the user is
-//! reset when the run ends. A reset may not remove what the user left.
+//! uid? Every run is made an account of its own, `kbf-lease-<term>-<seq>`, which the helper
+//! deletes and shows gone when the run ends; the uid is the one thing a later account can
+//! share with it. Deleting an account may not leave what the account made.
 //!
-//! The test serves the real `js-mac-session` helper from this process with a pool of ONE
-//! user (a range of one uid), so the second run gets the user of the first. Then:
+//! The test serves the real `js-mac-session` helper from this process with a range of ONE
+//! uid, so the second run is a new account with the uid of the first. Then:
 //!
 //! 1. Run A (a native run through the agent's own `NativeRuntime`, under the product's
-//!    Seatbelt profile, as the pool user) leaves one item of every kind behind, each with a
+//!    Seatbelt profile, as its account) leaves one item of every kind behind, each with a
 //!    random token: a file in its home and in its scratch, a file in the system temp
 //!    directory, a process left running (detached), a keychain item, a defaults key, a
 //!    launchd agent in its user domain, System V shared memory, semaphore and message
@@ -23,7 +24,7 @@
 //!    seed failure, a bare EPERM/EACCES included, proves nothing. A run that did not cover at
 //!    least a file, a process, a keychain item, a launchd agent and shared memory, or seeded
 //!    nothing itself, fails. A launch agent that root loaded is labelled "loaded by root" and
-//!    is no sandbox claim. A launch agent that neither the job nor root can load (a pool uid
+//!    is no sandbox claim. A launch agent that neither the job nor root can load (a lease uid
 //!    has no login session, so launchd may have no domain for it) has NO PATH, and is
 //!    covered, only on all of `no_path.rs`'s evidence: launchd's domain-level refusal of the
 //!    job's own bootstrap, the job's plist valid by `plutil -lint`, every attempt of root run,
@@ -32,7 +33,8 @@
 //!    agent-attempt` line.
 //! 2. Between the runs the test does what the agent does when a run ends and the next
 //!    begins: `NativeRuntime::remove` (the helper's `kill-uid`, then `user-delete`, which
-//!    resets the pool user), and the next start is lent that user again (`user-create`).
+//!    deletes the account and shows it gone), and the next start is made a new account
+//!    with the same uid (`user-create`).
 //! 3. Run B (the same program, another role, the same uid) looks for every token. The test
 //!    also reads the system-wide views: `ipcs` for objects owned by the uid, `ps` for
 //!    processes of the uid, `launchctl print` of `user/<uid>` and `gui/<uid>`, and `find -uid`
@@ -227,10 +229,6 @@ fn serve(fixture: &Fixture) {
         path(&fixture.state),
         "--uid-range".to_owned(),
         format!("{0}-{0}", fixture.uid),
-        // The pool is the one user of the one uid: a pool larger than the range is
-        // refused at the helper's start.
-        "--pool-size".to_owned(),
-        "1".to_owned(),
         "--homes".to_owned(),
         path(&fixture.homes),
         // The boot reset clears the auto-login of the Mac the helper serves; the files it
@@ -342,10 +340,11 @@ fn settle(rt: &mut NativeRuntime, id: &RunHandle) -> Result<Status, String> {
     Err("the run did not end".to_owned())
 }
 
-/// The user of `id`: the pool holds one user, in slot 0, so every run is lent
-/// `kbf-lease-pool-0`, and its home is that name below the homes directory.
-fn user_of(_: &RunHandle) -> String {
-    js_mac_session::lease::pool_user_name(js_mac_session::lease::Slot::new(0))
+/// The account the helper made for the run `id`: `kbf-lease-<term>-<seq>`, and its home is
+/// that name below the homes directory.
+fn user_of(id: &RunHandle) -> String {
+    let lease = js_mac_session::lease::parse_lease(&id.0).expect("a lease id of the runtime");
+    js_mac_session::lease::user_name(lease)
 }
 
 fn tool_output(program: &str, args: &[&str]) -> Result<(bool, String), String> {
@@ -430,7 +429,7 @@ fn row(kind: Kind, place: impl Into<String>, detail: impl Into<String>) -> Row {
 }
 
 impl Trial {
-    /// The two runs and the views; the table of survivors, empty when the pool user is clean.
+    /// The two runs and the views; the table of survivors, empty when the uid is clean.
     fn body(&mut self) -> Result<Vec<Row>, String> {
         let uid = self.fixture.uid;
         let exe = self.exe.clone();
@@ -481,6 +480,12 @@ impl Trial {
             .remove(&a)
             .map_err(|why| format!("remove run A: {}", why.0))?;
         self.runs.clear();
+        if home_a.exists() {
+            return Err(format!(
+                "the home of run A is left after its removal: {}",
+                home_a.display()
+            ));
+        }
 
         // Run B, on the same uid.
         let handoff = self.fixture.root.join("seeded.txt");
@@ -503,7 +508,13 @@ impl Trial {
             .uid();
         if owner != uid {
             return Err(format!(
-                "run B got uid {owner}, not run A's uid {uid}: the helper did not reuse it, so this run proves nothing"
+                "run B got uid {owner}, not run A's uid {uid}: the helper did not give it again, so this run proves nothing"
+            ));
+        }
+        if user_of(&b) == user_of(&a) {
+            return Err(format!(
+                "run B ran as the account of run A, {}: it is not a new account",
+                user_of(&a)
             ));
         }
         look::uids_agree(ran_a.uid, ran_b.uid, uid)?;

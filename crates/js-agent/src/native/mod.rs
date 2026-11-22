@@ -5,9 +5,9 @@
 //! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
 //! journal's paragraph below):
 //!
-//! 1. `user-create` lends the run's lease (`<term>.<sequence>`, never used twice) a user of
-//!    the helper's pool, and answers its uid; `pool-status` then names the lease's slot,
-//!    and so its user and home (`native/pool_user.rs`).
+//! 1. `user-create` makes the run's lease (`<term>.<sequence>`, never used twice) an account of
+//!    its own, `kbf-lease-<term>-<sequence>`, with a home below the helper's homes directory,
+//!    and answers its uid.
 //! 2. The agent, as root and before any process of that user exists, makes the run
 //!    directory below the user's home (`exec/`, the working directory, with `.home/`,
 //!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
@@ -40,12 +40,22 @@
 //!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
-//!    none of its per-user agents; `user-delete` resets the user and returns it to the
-//!    pool. A step that fails leaves the user in the helper's ledger, its uid held, and
-//!    the lease in the journal for the next start to end. Between the two, a removal
-//!    copies the run's declared outputs out of `exec/` into the run's scratch directory
-//!    (`native/outputs.rs`); one that cannot be copied does not stop the removal, which
-//!    then fails as [`RuntimeError`] of its outputs only.
+//!    none of its per-user agents; `user-delete` deletes the account, its home and its
+//!    per-user folders, and shows it gone. Between the two, a removal copies the run's
+//!    declared outputs out of `exec/` into the run's scratch directory (`native/outputs.rs`);
+//!    one that cannot be copied does not stop the removal, which then fails as
+//!    [`RuntimeError`] of its outputs only.
+//!
+//! A step of the end that fails at the helper leaves the account held: the helper refuses by
+//! naming the step, the lease stays live in its ledger with its uid held, and in the journal.
+//! The removal then ends the run and fails as [`RuntimeError::account_held`], carrying how
+//! many accounts are held; the lifecycle goes on with the cleanup and reports it, and taints
+//! the host from two held accounts. The agent repeats the end of each held account after each
+//! removal that succeeds and at its start (`native/held.rs`); the helper does not give a held
+//! uid out, so the range it gives from has one uid fewer for each, which is one native job
+//! fewer at a time (a Mac agent has no native slot count of its own). A failure of the socket
+//! is not a hold. A boot reset that left an account held returns its lease, and the agent
+//! journals it.
 //!
 //! A run whose start carried a sink, on a runtime given [`LiveLogs`]
 //! ([`NativeRuntime::with_live_logs`]), has its two log files uploaded while it runs and
@@ -131,13 +141,13 @@ mod cwd;
 mod env;
 mod files;
 pub mod grant;
+mod held;
 mod journal;
 mod logs;
 mod mounts;
 mod network;
 mod outputs;
 mod pf;
-mod pool_user;
 mod profile;
 mod settings;
 mod xcode;
@@ -162,12 +172,13 @@ use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
-use js_mac_session::lease::Dotted;
+use js_mac_session::lease::{Dotted, user_name};
 use js_mac_session::proto::Limits;
 use js_types::LeaseId;
 
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
+use crate::lifecycle::held_accounts::{HeldAccounts, gone};
 use crate::lifecycle::{
     Body, Exit, Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError,
     Status, check_run_env,
@@ -291,6 +302,8 @@ pub struct NativeRuntime {
     journal: Journal,
     /// The helper said it needs its boot reset again (it restarted under this agent).
     reset_needed: bool,
+    /// The leases whose account the helper did not delete (`native/held.rs`).
+    held: HeldAccounts,
     /// Gives a run's files to its user.
     hand_over: HandOver,
     /// Live logs, when the runtime uploads them ([`NativeRuntime::with_live_logs`]).
@@ -355,9 +368,9 @@ impl NativeRuntime {
         term: u64,
     ) -> Result<Self, RuntimeError> {
         let limits = limits_of(&config)?;
-        reset(&helper)?;
+        let booted = reset(&helper)?;
         let journal = Journal::new(&config.journal);
-        Ok(Self {
+        let mut runtime = Self {
             helper,
             config,
             limits,
@@ -369,12 +382,15 @@ impl NativeRuntime {
             xcodes: BTreeMap::new(),
             journal,
             reset_needed: false,
+            held: HeldAccounts::default(),
             hand_over: files::lchown(),
             logs: None,
             now_ms: system_clock(),
             stop_grace: Duration::ZERO,
             old_helper: AtomicBool::new(false),
-        })
+        };
+        runtime.take_booted(booted);
+        Ok(runtime)
     }
 
     /// The same runtime, reading the wall clock from `now_ms`. For tests; an agent never
@@ -438,8 +454,9 @@ impl NativeRuntime {
     /// Asks for the boot reset again when the helper said it needs it.
     fn ready(&mut self) -> Result<(), RuntimeError> {
         if self.reset_needed {
-            reset(&self.helper)?;
+            let booted = reset(&self.helper)?;
             self.reset_needed = false;
+            self.take_booted(booted);
         }
         Ok(())
     }
@@ -461,8 +478,7 @@ impl NativeRuntime {
         (id, lease, uid): (LeaseId, &str, u32),
         (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
-        let user = pool_user::user_of(&self.helper, id, lease)?;
-        let home = self.config.homes.join(user);
+        let home = self.config.homes.join(user_name(id));
         let exec = profile::run_dir(&home);
         let (tmp, job_home) = (
             exec.join(profile::JOB_TMP_DIR),
@@ -623,38 +639,16 @@ impl NativeRuntime {
             )
         })
     }
-
-    /// Ends the user of `lease` after a start that failed, so none is left behind, and says
-    /// what could not be done: the start's own error is the first thing the operator needs,
-    /// but a user that is left is a uid held in the helper's range.
-    fn discard(&self, lease: &str) -> Vec<String> {
-        let killed = self
-            .helper
-            .kill_uid(lease)
-            .err()
-            .map(|why| format!("kill-uid: {why}"));
-        let deleted = self
-            .helper
-            .user_delete(lease)
-            .err()
-            .map(|why| format!("user-delete: {why}"));
-        killed.into_iter().chain(deleted).collect()
-    }
 }
 
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
-fn reset(helper: &Client) -> Result<(), RuntimeError> {
+/// Returns the leases whose account the reset did not show gone.
+fn reset(helper: &Client) -> Result<Vec<String>, RuntimeError> {
     match helper.boot_reset(&[]) {
-        Ok(_) => Ok(()),
-        Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
+        Ok(booted) => Ok(booted.held),
+        Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(Vec::new()),
         Err(why) => Err(fail(&"the boot reset", &why)),
     }
-}
-
-/// Whether the helper refused because the lease has no user or its user was deleted.
-fn gone(why: &ClientError) -> bool {
-    matches!(why, ClientError::Refused(reason)
-        if reason.contains("has no user") || reason.contains("user was deleted"))
 }
 
 /// `error`, and what could not be undone after it.
@@ -695,8 +689,8 @@ impl Runtime for NativeRuntime {
         self.journal
             .add(&lease)
             .map_err(|why| fail(&"the lease journal", &why))?;
-        // The helper records the lease, and the uid of the pool user it lends, before it
-        // finishes, so a refusal may leave a live lease: it is removed again.
+        // The helper records the lease and the uid it chose before it makes the home and the
+        // account, so a refusal may leave a live lease: it is removed again.
         let uid = match self.helper.user_create(&lease) {
             Ok(uid) => uid,
             Err(why) => {
@@ -751,19 +745,18 @@ impl Runtime for NativeRuntime {
 
     /// Kills, copies the run's outputs (once: a removal that is tried again does not copy
     /// them again), deletes the user, and only then reports outputs that could not be copied.
+    /// A helper that refuses to end the account leaves it held (`native/held.rs`): the run
+    /// goes, its lease stays in the journal, and the error says how many accounts are held.
+    /// After a removal that succeeds, the held accounts are ended again.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.ready()?;
-        let killed = self.helper.kill_uid(&id.0);
-        self.ended(killed, "kill-uid")?;
-        let max_file_bytes = self.config.max_file_bytes;
-        if let Some(run) = self.runs.get_mut(&id.0) {
-            run.collect(&id.0, max_file_bytes);
-            logs::close(&mut run.logs, &run.scratch);
+        if let Err(stop) = self.end_run(&id.0) {
+            return Err(self.stopped(&id.0, stop));
         }
-        let deleted = self.helper.user_delete(&id.0).map(|_| ());
-        self.ended(deleted, "user-delete")?;
         let run = self.runs.remove(&id.0);
         let _ = self.journal.done(&id.0);
+        self.held.release(&id.0);
+        self.retry_held();
         let failed = run.and_then(|run| run.collected).map(|done| done.failed);
         match failed.unwrap_or_default() {
             failed if failed.is_empty() => Ok(()),
@@ -776,42 +769,10 @@ impl Runtime for NativeRuntime {
 
     /// Ends the leases an earlier process left that have no run to adopt (a start that died
     /// before the helper started its process, or a journal from before run records); a lease
-    /// with a run record is left for [`Runtime::list_labelled`].
+    /// with a run record is left for [`Runtime::list_labelled`]. One that cannot be ended is
+    /// held and tried again after each removal (`native/held.rs`).
     fn reclaim(&mut self) -> Vec<String> {
-        let live = self.journal.live().and_then(|live| {
-            let runs = self.journal.runs()?;
-            Ok(live
-                .into_iter()
-                .filter(move |lease| !runs.contains_key(lease)))
-        });
-        let live = match live {
-            Ok(live) => live,
-            Err(why) => return vec![format!("native: cannot read the lease journal: {why}")],
-        };
-        let mut lines = Vec::new();
-        let mut retired = Vec::new();
-        for lease in live {
-            let killed = self.helper.kill_uid(&lease);
-            let ended = self.ended(killed, "kill-uid").and_then(|()| {
-                let deleted = self.helper.user_delete(&lease).map(|_| ());
-                self.ended(deleted, "user-delete")
-            });
-            match ended {
-                Ok(()) => {
-                    lines.push(format!(
-                        "ended the lease user {lease} an earlier process left"
-                    ));
-                    retired.push(lease);
-                }
-                Err(why) => {
-                    lines.push(format!("cannot end the lease user {lease}: {}", why.0));
-                }
-            }
-        }
-        if let Err(why) = self.journal.retire(&retired) {
-            lines.push(format!("native: cannot rewrite the lease journal: {why}"));
-        }
-        lines
+        self.end_unadopted()
     }
 
     /// Every run this runtime holds, those an earlier process started adopted first

@@ -119,10 +119,7 @@ fn files_are_readable_by_the_job_user_only() {
     seen.sort();
     let files: Vec<_> = two.map(|(name, _)| (dir.join(name), uid, gid)).into();
     assert_eq!(seen, files);
-    assert_eq!(
-        h.fake.verbs()[1..],
-        ["user-create 7.0", "pool-status", "run 7.0"]
-    );
+    assert_eq!(h.fake.verbs()[1..], ["user-create 7.0", "run 7.0"]);
 
     handed.lock().unwrap().clear();
     let one = [("grant", "token-2\n")];
@@ -326,7 +323,6 @@ fn a_failed_staging_ends_the_start_with_a_code() {
         [
             "boot-reset",
             "user-create 7.0",
-            "pool-status",
             "kill-uid 7.0",
             "user-delete 7.0"
         ]

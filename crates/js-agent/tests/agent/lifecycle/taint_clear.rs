@@ -721,6 +721,7 @@ fn a_restored_taint_that_is_not_a_check_residue_stays_pinned() {
         (reason::UNCHECKED, Some(code::HOST_NOT_VISIBLE)),
         (reason::CLEANUP_FAILED, Some(code::CONTAINER_REMOVE_FAILED)),
         (reason::CHECK_OWED, None),
+        (reason::ACCOUNT_NOT_DELETED, Some(code::ACCOUNT_HELD)),
         (reason::HOST_JOB, None),
         (reason::RESIDUE, None),
         (reason::RESIDUE, Some(check::PROCESSES_UNREADABLE)),

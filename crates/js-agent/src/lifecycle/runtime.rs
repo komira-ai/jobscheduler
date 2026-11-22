@@ -269,6 +269,9 @@ enum Kind {
     /// ([`RuntimeError::outputs`]): the native runtime's (a macOS build's).
     #[cfg(target_os = "macos")]
     Outputs,
+    /// A removal that ended the run and could not delete its account
+    /// ([`RuntimeError::account_held`]), with how many accounts are held.
+    AccountHeld(usize),
 }
 
 impl RuntimeError {
@@ -303,6 +306,26 @@ impl RuntimeError {
     #[cfg(target_os = "macos")]
     pub(crate) fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
+    }
+
+    /// A removal that ended the run's processes and could not delete its account: the helper
+    /// refused, so the account stays, its uid held, until a later try deletes it. `held` is
+    /// how many accounts are held now, this one among them. The run is gone from the runtime
+    /// and the runtime tries the account again at the end of each later run, so the lifecycle
+    /// goes on with the cleanup and reports it (it taints the host only from
+    /// [`ACCOUNTS_HELD_TAINT`](crate::lifecycle::ACCOUNTS_HELD_TAINT) held accounts). Only the
+    /// native runtime makes accounts.
+    pub fn account_held(text: impl Into<String>, held: usize) -> Self {
+        Self(text.into(), Kind::AccountHeld(held))
+    }
+
+    /// How many accounts are held, when the failure is that a run's account was not deleted
+    /// ([`RuntimeError::account_held`]).
+    pub fn held_accounts(&self) -> Option<usize> {
+        match self.1 {
+            Kind::AccountHeld(held) => Some(held),
+            _ => None,
+        }
     }
 }
 
@@ -484,7 +507,9 @@ pub trait Runtime {
     ///
     /// # Errors
     ///
-    /// The runtime cannot remove it.
+    /// The runtime cannot remove it. A native runtime that ended the run and could not delete
+    /// its account fails with [`RuntimeError::account_held`] and forgets the run: the lifecycle
+    /// goes on with the cleanup.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError>;
 
     /// Begins, or follows, [`Runtime::remove`] of the container `id`, off the lifecycle's

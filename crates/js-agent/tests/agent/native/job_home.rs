@@ -1,7 +1,7 @@
 //! Where a native job may write and what it takes for its home: the run directory and
-//! nothing else, with `HOME`, `CFFIXED_USER_HOME` and `TMPDIR` below it, so the pool user's
+//! nothing else, with `HOME`, `CFFIXED_USER_HOME` and `TMPDIR` below it, so the account's
 //! real home stays empty (a folder a job makes in it, such as `~/Library/Preferences`, is
-//! one macOS refuses the root helper to remove, which breaks the slot).
+//! one macOS guards even against root, which would keep the helper from removing the home).
 
 use std::path::Path;
 

@@ -321,6 +321,27 @@ fn a_clear_keeps_every_file_aside_records_it_and_restarts_the_agent() {
     );
 }
 
+/// Proves that an operator's clear takes the taint of held accounts (`account-not-deleted`),
+/// which the agent never clears itself: the marker is kept aside, the state root reads as
+/// untainted, and the unit is stopped and started. Catches a reason the verb refuses, which
+/// would leave a host whose accounts an operator has deleted tainted for good.
+#[test]
+fn an_operator_clears_the_taint_of_held_accounts() {
+    let rig = Rig::new("clear-taint-account-not-deleted");
+    rig.taint(&Taint {
+        reason: "account-not-deleted".to_owned(),
+        run_id: Some("r2".to_owned()),
+        check: Some("account-held".to_owned()),
+    });
+    let fake = Fake::default();
+    let (status, line, _) = run_on(&fake, &rig.args(&[]));
+    assert_eq!(status, ExitCode::SUCCESS);
+    assert_eq!(line["class"], "release");
+    assert_eq!(fake.log(), stopped_and_started());
+    assert_eq!(StateRoot::open(&rig.state()).expect("open").read(), None);
+    assert!(rig.names().contains(&format!("taint.json.{TAIL}")));
+}
+
 /// Proves that a host with no marker, pin file or owed record is left alone: success, the
 /// unit is not touched, nothing but the lock is written. Catches a clear that restarts a
 /// healthy agent.
