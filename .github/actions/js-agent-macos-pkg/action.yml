@@ -11,7 +11,7 @@
 # second build would rebuild every crate in the same job.
 #
 # No command expands an expression: a step reads its environment. The caller checks the version
-# as MAJOR.MINOR.PATCH before it calls this. crates/xtask/tests/macos_pkg_workflow.rs pins these
+# as MAJOR.MINOR.PATCH before it calls this. crates/xtask/tests/macos_pkg_workflow/ pins these
 # rules.
 name: js-agent-macos-pkg
 description: Build, check and sum the unsigned js-agent installer package of one version

@@ -15,10 +15,12 @@
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
 //!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
-//! - `release plan --head <sha>`, `release stamp --to <version>`, `release next-version --version <version>` and `release stage --bin <name>
+//! - `release plan --head <sha>`, `release stamp --to <version>`,
+//!   `release next-version --version <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
-//!   and laying down the files of each release archive (docs/release.md).
+//!   the patch version after a version (the macOS update package's), and laying down the files
+//!   of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:

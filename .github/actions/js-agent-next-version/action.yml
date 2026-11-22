@@ -9,7 +9,7 @@
 # `version=<next>` to the step's output file. The calculation is Rust with tests, not bash.
 #
 # No command expands an expression: the step reads its environment.
-# crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
+# crates/xtask/tests/macos_pkg_workflow/ pins these rules.
 name: js-agent-next-version
 description: The patch version after a MAJOR.MINOR.PATCH version
 

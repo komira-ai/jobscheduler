@@ -44,7 +44,7 @@
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
 # The release's call builds the release's version; a manual run builds the version typed.
-# crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
+# crates/xtask/tests/macos_pkg_workflow/ pins these rules.
 name: js-agent-macos-pkg
 
 on:
