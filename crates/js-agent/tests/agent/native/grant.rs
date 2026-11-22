@@ -65,8 +65,8 @@ fn the_agent_judges_its_own_listing() {
 /// Asserts that the listing reads a directory, with or without entries, and that a missing
 /// path and a file are errors of their own kind, which the judgement then calls
 /// `undetermined`. The directory it lists on a Mac is the privacy database's. Catches a
-/// listing that opens what is in the directory (the database itself), or one that answers
-/// `Ok` for a path that is not there.
+/// listing that answers `Ok` for a path that is not there or for a file, and one that fails
+/// on an empty directory.
 #[test]
 fn the_listing_reads_the_directory_and_nothing_in_it() {
     let dir = Scratch::new("grant-list");

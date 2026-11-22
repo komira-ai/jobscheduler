@@ -117,7 +117,7 @@ Stays:
 - the sweep of the shared places and the IPC removal, which reach what the job left outside its account;
 - the leak scan after each job and the taint it sets: a login item, a Background Task Management entry or a launch daemon a job left outside its account is not undone by deleting the account.
 
-It fits the one-program design: no new daemon, and no new helper verb but `full-disk-access`, which goes with the socket when the helper's work moves into the agent (the agent then checks its own grant in-process).
+It fits the one-program design: no new daemon, and no new helper verb: the agent checks its own grant in-process, and the helper's `full-disk-access` verb, which the agent no longer asks, goes with the socket when the helper's work moves into the agent.
 
 ## Step 6: the proof
 

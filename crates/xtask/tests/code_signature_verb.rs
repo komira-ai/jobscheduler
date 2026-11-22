@@ -1,7 +1,7 @@
 //! The code signing of the programs of the macOS package, as code: the table of programs
 //! (`xtask::release::mac_programs`), the verb `release check-code-signature` with its port and
-//! the fake that answers it, and the privacy profile that grants Full Disk Access to the root
-//! helper, rendered from the table and held byte for byte to the file in the repository. The
+//! the fake that answers it, and the privacy profile that grants Full Disk Access to
+//! `js-agent`, rendered from the table and held byte for byte to the file in the repository. The
 //! workflow that signs the programs is read in macos_code_signing.rs.
 
 use std::cell::RefCell;

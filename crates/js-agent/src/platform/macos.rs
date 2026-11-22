@@ -64,8 +64,8 @@ pub struct Flags {
     /// semaphores or message queues (which the helper's reset removes) nor POSIX named
     /// semaphores, and the helper reuses uids, so a named semaphore a run leaves can be
     /// opened by a later run that gets the same uid, until the Mac restarts.
-    /// At start the agent asks the helper whether it holds Full Disk Access, reports the
-    /// answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
+    /// At start the agent lists the privacy database's directory to learn whether it holds
+    /// Full Disk Access itself (the helper is not asked), reports the answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
     /// native job (`no-full-disk-access`).
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
@@ -760,12 +760,12 @@ mod tests {
         }
     }
 
-    /// Asserts that a native agent's hello carries the state its helper answered as the
+    /// Asserts that a native agent's hello carries the state it found at start as the
     /// capability `full-disk-access`, spelled `granted`, `not-granted` or `undetermined`, and
     /// still validates. Catches a host listing that shows no grant state, or one that shows
     /// a state other than the one the agent refuses jobs by.
     #[test]
-    fn a_native_agent_reports_whether_its_helper_holds_full_disk_access() {
+    fn a_native_agent_reports_whether_it_holds_full_disk_access() {
         for (state, text) in [
             (FullDiskAccess::Granted, "granted"),
             (FullDiskAccess::NotGranted, "not-granted"),
