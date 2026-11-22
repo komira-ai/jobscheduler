@@ -1,7 +1,9 @@
 //! The held script `tools/held/live-update-drill/live_update_drill.sh`, run by `bash` with
 //! stand-ins first on `PATH`: a `js` that answers the host and job listings from files of the
-//! test (the hosts after the update once the stand-in `docker` has run), a `docker` that
-//! writes the arguments it was given and exits with the status it is told, a `sleep` that
+//! test (the hosts after the update once the stand-in `docker` has run an update), a `docker`
+//! that logs each call's arguments, answers `service inspect` and `service ps` from files of
+//! the test (those of before the update until it ran an update, those of after it then) and
+//! exits with the status it is told for the update, a `sleep` that
 //! returns at once and, for one test, a `wc` that pads its count as macOS's does. So each test
 //! pins what the script would run, that a dry run is the default and changes nothing, what the
 //! verdict of an update is, and what it refuses (exit 2, with `docker` never run). Nothing
@@ -27,6 +29,33 @@ const HOSTS: &str = r#"{"hosts":[{"id":"h2","state":"HOST_STATE_LIVE"},{"id":"h1
 /// Two running jobs.
 const RUNNING: &str = r#"{"jobs":[{"id":"job-1","state":"JOB_STATE_RUNNING"},{"id":"job-2","state":"JOB_STATE_RUNNING"}]}"#;
 
+/// A service spec as `docker service inspect` prints it, with the fields the drill reads: the
+/// replicas, the update's order, parallelism and failure action, the stop grace period in
+/// nanoseconds and, when given, the state of the last update.
+fn spec(replicas: u32, order: &str, parallelism: u32, action: &str, grace: u64) -> String {
+    format!(
+        r#"{{"Spec":{{"Mode":{{"Replicated":{{"Replicas":{replicas}}}}},"UpdateConfig":{{"Order":"{order}","Parallelism":{parallelism},"FailureAction":"{action}"}},"TaskTemplate":{{"ContainerSpec":{{"StopGracePeriod":{grace}}}}}}}}}"#
+    )
+}
+
+/// The spec the drill needs: two replicas, start-first, one at a time, rollback, 40 s grace.
+fn good_spec() -> String {
+    spec(2, "start-first", 1, "rollback", 40_000_000_000)
+}
+
+/// The good spec after an update whose state is `state`.
+fn after_spec(state: &str) -> String {
+    let mut json = good_spec();
+    json.pop();
+    format!(r#"{json},"UpdateStatus":{{"State":"{state}"}}}}"#)
+}
+
+/// Two tasks, both running, as `docker service ps` prints them.
+const TASKS_BEFORE: &str = "old1 Running 3 hours ago\nold2 Running 3 hours ago\n";
+
+/// Two new tasks.
+const TASKS_AFTER: &str = "new1 Running 5 seconds ago\nnew2 Running 2 seconds ago\n";
+
 /// No job.
 const NONE: &str = r#"{"jobs":[]}"#;
 
@@ -43,8 +72,8 @@ struct Ran {
     status: i32,
     stdout: String,
     stderr: String,
-    /// The arguments the stand-in `docker` got, or `None` when it was not run.
-    docker: Option<String>,
+    /// Each call of the stand-in `docker`, its arguments joined by spaces.
+    docker: Vec<String>,
     /// Each call of the stand-in `js`, its arguments joined by spaces.
     js: Vec<String>,
 }
@@ -60,7 +89,12 @@ impl Rig {
         let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("bin")).unwrap();
         fs::create_dir_all(dir.join("out")).unwrap();
+        let (svc_before, svc_after) = (good_spec(), after_spec("completed"));
         for (file, text) in [
+            ("service-before.json", svc_before.as_str()),
+            ("tasks-before.txt", TASKS_BEFORE),
+            ("service-after.json", svc_after.as_str()),
+            ("tasks-after.txt", TASKS_AFTER),
             ("hosts.json", hosts),
             ("hosts-after.json", after),
             ("running.json", running),
@@ -73,7 +107,7 @@ impl Rig {
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> \"$FAKE_DIR/js.log\"\n\
              case \"$*\" in\n\
-             *'host list'*) if [ -e \"$FAKE_DIR/docker.log\" ]; then cat \"$FAKE_DIR/hosts-after.json\"; else cat \"$FAKE_DIR/hosts.json\"; fi ;;\n\
+             *'host list'*) if grep -q 'service update' \"$FAKE_DIR/docker.log\" 2>/dev/null; then cat \"$FAKE_DIR/hosts-after.json\"; else cat \"$FAKE_DIR/hosts.json\"; fi ;;\n\
              *'--states running'*) cat \"$FAKE_DIR/running.json\" ;;\n\
              *) cat \"$FAKE_DIR/ended.json\" ;;\n\
              esac\n",
@@ -81,7 +115,14 @@ impl Rig {
         );
         install_script(
             &dir.join("bin/docker"),
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FAKE_DIR/docker.log\"\nexit \"${FAKE_STATUS:-0}\"\n",
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> \"$FAKE_DIR/docker.log\"\n\
+             if grep -q 'service update' \"$FAKE_DIR/docker.log\"; then phase=after; else phase=before; fi\n\
+             case \"$*\" in\n\
+             'service inspect'*) cat \"$FAKE_DIR/service-$phase.json\" ;;\n\
+             'service ps'*) cat \"$FAKE_DIR/tasks-$phase.txt\" ;;\n\
+             'service update'*) exit \"${FAKE_STATUS:-0}\" ;;\n\
+             esac\n",
             "755",
         );
         install_script(&dir.join("bin/sleep"), "#!/bin/sh\nexit 0\n", "755");
@@ -127,11 +168,12 @@ impl Rig {
             .output()
             .unwrap();
         let js = fs::read_to_string(self.dir.join("js.log")).unwrap_or_default();
+        let docker = fs::read_to_string(self.dir.join("docker.log")).unwrap_or_default();
         Ran {
             status: out.status.code().unwrap(),
             stdout: String::from_utf8(out.stdout).unwrap(),
             stderr: String::from_utf8(out.stderr).unwrap(),
-            docker: fs::read_to_string(self.dir.join("docker.log")).ok(),
+            docker: docker.lines().map(str::to_owned).collect(),
             js: js.lines().map(str::to_owned).collect(),
         }
     }
@@ -146,6 +188,11 @@ impl Rig {
         );
     }
 
+    /// Replaces an answer of the stand-in `docker` (`service-before.json`, `tasks-after.txt`...).
+    fn set(&self, file: &str, text: &str) {
+        fs::write(self.dir.join(file), text).unwrap();
+    }
+
     fn run(&self, more: &[&str]) -> Ran {
         self.run_with(&self.args(more), 0)
     }
@@ -157,10 +204,25 @@ impl Rig {
 }
 
 /// The update the script makes.
-const UPDATE: &str = "service update --force --detach=false js-server_server\n";
+const UPDATE: &str = "service update --force --detach=false js-server_server";
+
+/// The reading of the service.
+const INSPECT: &str = "service inspect --format {{json .}} js-server_server";
+
+/// The reading of the running tasks.
+const PS: &str =
+    "service ps --filter desired-state=running --format {{.ID}} {{.CurrentState}} js-server_server";
+
+/// Whether the stand-in `docker` was told to update the service.
+fn updated(ran: &Ran) -> bool {
+    ran.docker
+        .iter()
+        .any(|call| call.starts_with("service update"))
+}
 
 /// Asserts that a dry run reads the hosts and the running jobs through the job service with
-/// the flags given, says what it found and the update it would make, and never runs `docker`.
+/// the flags given, reads the service and its tasks, says what it found and the update it
+/// would make, and runs no `docker` but those two readings.
 /// It catches a drill that updates the service without `--update`, and one that counts a
 /// tainted host as taking jobs.
 #[test]
@@ -168,12 +230,18 @@ fn a_dry_run_reads_and_changes_nothing() {
     let rig = Rig::quiet("dry");
     let ran = rig.run(&[]);
     assert_eq!(ran.status, 0, "{ran:?}");
-    assert_eq!(ran.docker, None);
+    assert_eq!(ran.docker, [INSPECT, PS]);
     let lines: Vec<&str> = ran.stdout.lines().collect();
     assert_eq!(
         lines[1..],
         [
             "jobs running: 2",
+            "service replicas: 2 (ok)",
+            "service update-order: start-first (ok)",
+            "service update-parallelism: 1 (ok)",
+            "service update-failure-action: rollback (ok)",
+            "service stop-grace-period-ns: 40000000000 (ok)",
+            "tasks running: 2 (want 2, all Running)",
             "update: docker service update --force --detach=false js-server_server",
             "dry run: nothing was changed; run again with --update while a build runs",
         ]
@@ -184,6 +252,8 @@ fn a_dry_run_reads_and_changes_nothing() {
         ran.stdout
     );
     assert_eq!(rig.out("hosts-before.txt"), "h1\nh2\n");
+    assert_eq!(rig.out("service-before.json"), good_spec());
+    assert_eq!(rig.out("tasks-before.txt"), TASKS_BEFORE);
     let flags = "--server https://jobs.example:7300 --token-file token --json";
     assert_eq!(ran.js[0], format!("{flags} host list"));
     assert_eq!(
@@ -229,8 +299,8 @@ fn an_update_that_loses_nothing_passes() {
     );
     assert_eq!(ran.status, 0, "{ran:?}");
     assert_eq!(
-        ran.docker.as_deref(),
-        Some("service update --force --detach=false jobs_server\n")
+        ran.docker[2],
+        "service update --force --detach=false jobs_server"
     );
     let last = ran.stdout.lines().last().unwrap();
     assert_eq!(
@@ -254,7 +324,7 @@ fn a_host_that_does_not_take_jobs_again_fails() {
     let rig = Rig::new("missing", (HOSTS, after), RUNNING, NONE);
     let ran = rig.run(&["--update", "--settle-samples", "3"]);
     assert_eq!(ran.status, 1, "{ran:?}");
-    assert_eq!(ran.docker.as_deref(), Some(UPDATE));
+    assert_eq!(ran.docker[2], UPDATE);
     let tail: Vec<&str> = ran.stdout.lines().rev().take(2).collect();
     assert_eq!(
         tail,
@@ -314,10 +384,11 @@ fn an_update_that_fails_fails_the_drill() {
     );
 }
 
-/// Asserts what the drill refuses, each with status 2 and `docker` never run: an update with no
+/// Asserts what the drill refuses, each with status 2 and the service never updated (a bad
+/// argument runs no `docker` at all): an update with no
 /// job running (the drill needs a build under way), one with no host taking jobs, a missing
 /// `--server`, `--token-file` or `--out-dir`, an out-dir that does not exist, a service name
-/// that is not one, a settle count or interval that is not a positive count, and an unknown
+/// that is not one, a replica count, settle count or interval that is not a positive count, and an unknown
 /// argument. It catches a drill that updates a farm with nothing to lose, and one that passes
 /// an operator's typo to `docker`.
 #[test]
@@ -325,23 +396,23 @@ fn what_the_drill_refuses() {
     let idle = Rig::new("idle", (HOSTS, HOSTS), NONE, NONE);
     let ran = idle.run(&["--update"]);
     assert_eq!(
-        (ran.status, ran.docker.clone(), ran.stderr.trim()),
+        (ran.status, updated(&ran), ran.stderr.trim()),
         (
             2,
-            None,
+            false,
             "live_update_drill.sh: no job is running: start the build first"
         ),
     );
     let empty = r#"{"hosts":[]}"#;
     let down = Rig::new("down", (empty, empty), RUNNING, NONE);
     let ran = down.run(&["--update"]);
-    assert_eq!((ran.status, ran.docker.clone()), (2, None), "{ran:?}");
+    assert_eq!((ran.status, updated(&ran)), (2, false), "{ran:?}");
     assert!(ran.stderr.contains("no host takes jobs"), "{}", ran.stderr);
 
     let rig = Rig::quiet("refused");
     let out = rig.dir.join("out").display().to_string();
     // Each with the flags every run needs (`true`) or alone.
-    let refusals: [(bool, Vec<&str>, &str); 8] = [
+    let refusals: [(bool, Vec<&str>, &str); 9] = [
         (
             false,
             vec!["--token-file", "t", "--out-dir", &out],
@@ -376,6 +447,11 @@ fn what_the_drill_refuses() {
         ),
         (
             true,
+            vec!["--replicas", "0"],
+            "--replicas is a count from 1",
+        ),
+        (
+            true,
             vec!["--settle-samples", "0"],
             "--settle-samples is a count from 1",
         ),
@@ -394,10 +470,245 @@ fn what_the_drill_refuses() {
         let ran = rig.run_with(&args, 0);
         assert_eq!(
             (ran.status, ran.docker.clone()),
-            (2, None),
+            (2, Vec::<String>::new()),
             "{said}: {ran:?}"
         );
         let first = ran.stderr.lines().next().unwrap_or_default();
         assert_eq!(first, format!("live_update_drill.sh: {said}"));
     }
+}
+
+/// Asserts that a spec that is not the one the drill needs is reported by the dry run and
+/// refused by `--update` (status 2, the service never updated), one case per field: the
+/// replicas, the update's order, its parallelism, its failure action and a stop grace period
+/// shorter than 40 s. The dry run names the field with `FAIL` and exits 0.
+#[test]
+fn a_spec_that_is_not_two_start_first_replicas_is_refused() {
+    let good = 40_000_000_000;
+    let cases = [
+        (
+            "replicas",
+            spec(1, "start-first", 1, "rollback", good),
+            "service replicas: 1 (want 2): FAIL",
+        ),
+        (
+            "order",
+            spec(2, "stop-first", 1, "rollback", good),
+            "service update-order: stop-first (want start-first): FAIL",
+        ),
+        (
+            "parallelism",
+            spec(2, "start-first", 2, "rollback", good),
+            "service update-parallelism: 2 (want 1): FAIL",
+        ),
+        (
+            "action",
+            spec(2, "start-first", 1, "pause", good),
+            "service update-failure-action: pause (want rollback): FAIL",
+        ),
+        (
+            "grace",
+            spec(2, "start-first", 1, "rollback", 39_999_999_999),
+            "service stop-grace-period-ns: 39999999999 (want at least 40000000000): FAIL",
+        ),
+        (
+            "none",
+            r#"{"Spec":{}}"#.to_owned(),
+            "service replicas: none (want 2): FAIL",
+        ),
+    ];
+    for (name, json, finding) in cases {
+        let rig = Rig::quiet(&format!("spec-{name}"));
+        rig.set("service-before.json", &json);
+        let dry = rig.run(&[]);
+        assert_eq!(dry.status, 0, "{name}: {dry:?}");
+        assert!(
+            dry.stdout.lines().any(|line| line == finding),
+            "{name}: {}",
+            dry.stdout
+        );
+        assert!(!updated(&dry), "{name}");
+        let ran = rig.run(&["--update"]);
+        assert_eq!(ran.status, 2, "{name}: {ran:?}");
+        assert!(!updated(&ran), "{name}: {ran:?}");
+        assert_eq!(
+            ran.stderr.trim(),
+            "live_update_drill.sh: the service is not as the drill needs it (see above)",
+            "{name}"
+        );
+        assert!(
+            ran.stdout.lines().any(|line| line == finding),
+            "{name}: {}",
+            ran.stdout
+        );
+    }
+}
+
+/// Asserts that a service that cannot be read is reported and refused: `docker service
+/// inspect` printing something that is not JSON fails every finding, and `--update` exits 2
+/// without updating.
+#[test]
+fn a_spec_that_cannot_be_read_is_refused() {
+    let rig = Rig::quiet("spec-garbled");
+    rig.set("service-before.json", "not json");
+    let ran = rig.run(&["--update"]);
+    assert_eq!(ran.status, 2, "{ran:?}");
+    assert!(!updated(&ran), "{ran:?}");
+    assert!(
+        ran.stdout.contains("service replicas: none (want 2): FAIL"),
+        "{}",
+        ran.stdout
+    );
+}
+
+/// Asserts that a count of running tasks other than `--replicas`, or a task that is not
+/// Running yet, is reported by the dry run and refused by `--update` (status 2, the service
+/// never updated); and that `--replicas 3` with three Running tasks and a spec of three
+/// replicas is accepted.
+#[test]
+fn a_task_count_other_than_the_replicas_is_refused() {
+    let cases = [
+        (
+            "one",
+            "old1 Running 3 hours ago\n",
+            "tasks running: 1 (want 2, all Running)",
+        ),
+        (
+            "three",
+            "a Running 1 hour ago\nb Running 1 hour ago\nc Running 1 hour ago\n",
+            "tasks running: 3 (want 2, all Running)",
+        ),
+        (
+            "starting",
+            "old1 Running 3 hours ago\nold2 Starting 1 second ago\n",
+            "tasks running: 2 (want 2, all Running)",
+        ),
+    ];
+    for (name, tasks, line) in cases {
+        let rig = Rig::quiet(&format!("tasks-{name}"));
+        rig.set("tasks-before.txt", tasks);
+        let dry = rig.run(&[]);
+        assert_eq!(dry.status, 0, "{name}: {dry:?}");
+        assert!(
+            dry.stdout.lines().any(|l| l == line),
+            "{name}: {}",
+            dry.stdout
+        );
+        let ran = rig.run(&["--update"]);
+        assert_eq!(ran.status, 2, "{name}: {ran:?}");
+        assert!(!updated(&ran), "{name}: {ran:?}");
+        assert_eq!(
+            ran.stderr.trim(),
+            "live_update_drill.sh: the running tasks are not 2, all Running",
+            "{name}"
+        );
+    }
+    let rig = Rig::quiet("tasks-three");
+    rig.set(
+        "service-before.json",
+        &spec(3, "start-first", 1, "rollback", 40_000_000_000),
+    );
+    rig.set(
+        "tasks-before.txt",
+        "a Running 1 hour ago\nb Running 1 hour ago\nc Running 1 hour ago\n",
+    );
+    rig.set(
+        "tasks-after.txt",
+        "d Running 1 second ago\ne Running 1 second ago\nf Running 1 second ago\n",
+    );
+    let ran = rig.run(&["--update", "--replicas", "3"]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert!(updated(&ran));
+}
+
+/// Asserts that an update that leaves an old task running fails the drill with status 1, the
+/// message `FAIL: the update did not replace every task` and the kept task named; and that
+/// the same happens when fewer running tasks than the replicas are left.
+#[test]
+fn an_update_that_leaves_an_old_task_running_fails() {
+    let rig = Rig::quiet("kept");
+    rig.set(
+        "tasks-after.txt",
+        "old2 Running 3 hours ago\nnew1 Running 2 seconds ago\n",
+    );
+    let ran = rig.run(&["--update"]);
+    assert_eq!(ran.status, 1, "{ran:?}");
+    let lines: Vec<&str> = ran.stdout.lines().collect();
+    assert!(
+        lines.contains(&"FAIL: the update did not replace every task"),
+        "{}",
+        ran.stdout
+    );
+    assert!(
+        lines.contains(&"  old2 Running 3 hours ago"),
+        "{}",
+        ran.stdout
+    );
+    assert!(!ran.stdout.contains("PASS"), "{}", ran.stdout);
+    assert_eq!(
+        rig.out("tasks-after.txt"),
+        "old2 Running 3 hours ago\nnew1 Running 2 seconds ago\n"
+    );
+
+    let few = Rig::quiet("few");
+    few.set("tasks-after.txt", "new1 Running 2 seconds ago\n");
+    let ran = few.run(&["--update"]);
+    assert_eq!(ran.status, 1, "{ran:?}");
+    assert!(
+        ran.stdout
+            .contains("FAIL: the update did not replace every task"),
+        "{}",
+        ran.stdout
+    );
+}
+
+/// Asserts that a service update that ended in any state but `completed` fails the drill with
+/// status 1 and names the state, even when every task is new: `rollback_completed` is the
+/// rollback of a failed start, and a missing state is not a completed update either.
+#[test]
+fn an_update_status_other_than_completed_fails() {
+    for state in ["rollback_completed", "paused", "updating"] {
+        let rig = Rig::quiet(&format!("state-{state}"));
+        rig.set("service-after.json", &after_spec(state));
+        let ran = rig.run(&["--update"]);
+        assert_eq!(ran.status, 1, "{state}: {ran:?}");
+        let want = format!(
+            "FAIL: the service update ended {state}, not completed (see {})",
+            rig.dir.join("out/service-after.json").display()
+        );
+        assert!(
+            ran.stdout.lines().any(|l| l == want),
+            "{state}: {}",
+            ran.stdout
+        );
+        assert!(!ran.stdout.contains("PASS"), "{state}: {}", ran.stdout);
+    }
+    let rig = Rig::quiet("state-none");
+    rig.set("service-after.json", &good_spec());
+    let ran = rig.run(&["--update"]);
+    assert_eq!(ran.status, 1, "{ran:?}");
+    assert!(
+        ran.stdout.contains("ended none, not completed"),
+        "{}",
+        ran.stdout
+    );
+}
+
+/// Asserts the happy path of two tasks rolled one at a time: status 0, the PASS line, and
+/// `docker` saw exactly the inspect and the task listing before, the update, and the task
+/// listing and the inspect after, in that order. Every reading is kept in the out-dir.
+#[test]
+fn two_tasks_replaced_and_a_completed_update_pass_with_the_readings_in_order() {
+    let rig = Rig::quiet("order");
+    let ran = rig.run(&["--update"]);
+    assert_eq!(ran.status, 0, "{ran:?}");
+    assert_eq!(ran.docker, [INSPECT, PS, UPDATE, PS, INSPECT]);
+    assert_eq!(
+        ran.stdout.lines().last().unwrap(),
+        "PASS: every host takes jobs again and no job ended lost, failed or failed to start"
+    );
+    assert_eq!(rig.out("tasks-before.txt"), TASKS_BEFORE);
+    assert_eq!(rig.out("tasks-after.txt"), TASKS_AFTER);
+    assert_eq!(rig.out("service-before.json"), good_spec());
+    assert_eq!(rig.out("service-after.json"), after_spec("completed"));
 }

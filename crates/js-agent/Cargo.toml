@@ -78,6 +78,8 @@ tonic = { workspace = true, features = ["channel"] }
 # The protobuf codec of a provider call (src/provider).
 tonic-prost.workspace = true
 tracing.workspace = true
+# The subscriber that writes the agent's warnings to its journal (src/warnings.rs).
+tracing-subscriber.workspace = true
 # The metadata service of `--identity-source` (src/identity), over plain HTTP.
 ureq.workspace = true
 
@@ -122,7 +124,6 @@ clap.workspace = true
 rustix = { workspace = true, features = ["event", "net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
-tracing-subscriber.workspace = true
 # hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
 hostkeeper-hook = { workspace = true, features = ["conformance"] }
 # hostkeeper's daemon's step runner: a first install of the package as a native entry, run as the
@@ -133,3 +134,13 @@ rcgen.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of this package but does not build it:
+# it depends on js-contain, directly or through a dev-dependency, and its build compiles `js-init`
+# (crates/js-contain/build.rs), which must be a static executable, and buildrules' linker links it
+# dynamically and succeeds (komira-ai/buildrules#173), which `build.rs` refuses. So the farm checks
+# this package's format only; it is built, linted and tested in ci.yml.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt"]

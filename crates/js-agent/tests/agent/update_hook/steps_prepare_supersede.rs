@@ -10,7 +10,7 @@ use js_agent::update_hook::{
     Cordon, Done, Lease, Outcome, Reason, Record, UnitRestart, UpdateInfo,
 };
 
-use super::step_rig::{Rig, START, Spy, UNIT, killable};
+use super::step_rig::{DRAINS_NO_HANDOVER, Rig, START, Spy, UNIT, killable};
 
 /// The older target the left record is of.
 const OLD: &str = "0.1.214";
@@ -153,7 +153,10 @@ fn an_update_of_another_target_that_never_stopped_the_agent_is_superseded() {
     let done = spy.prepare(&rig);
 
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(done.report.detail, Some(superseded(&rig)));
+    assert_eq!(
+        done.report.detail,
+        Some(format!("{}; {DRAINS_NO_HANDOVER}", superseded(&rig)))
+    );
     assert_eq!(fs::read(aside_path(&rig)).unwrap(), before);
     let record = rig.record().unwrap();
     assert_eq!(record.update, rig.fresh_record().update);

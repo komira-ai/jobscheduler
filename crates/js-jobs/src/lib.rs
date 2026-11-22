@@ -92,12 +92,14 @@
 //! [`SWEEP_BATCH`] rows to a transaction; [`JobStore::raise_deadlines_at_boot`] raises every
 //! stored retention end to at least the boot plus [`BOOT_GRACE`] before the first tick, so an
 //! outage longer than the window deletes no result before a client could read it.
-//! [`JobStore::raise_at_boot`] commits that raise, and in the same transaction gives every
-//! queued, placed or starting job a deadline floor ([`JobRecord::deadline_floor`]) of at least
-//! the boot plus [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout
-//! may end it, so an outage longer than either fails no job at the first tick; and it raises
-//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so a mark restored after an
-//! outage does not show a deadline already past (reaching a deadline gives nothing up).
+//! [`JobStore::raise_at_boot`] commits that raise, and gives every queued, placed or starting
+//! job a deadline floor ([`JobRecord::deadline_floor`]) of at least the boot plus
+//! [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout may end it, so
+//! an outage longer than either fails no job at the first tick; and it raises each mark's
+//! deadline to at least the boot plus [`BOOT_GRACE`], so a mark restored after an outage does
+//! not show a deadline already past (reaching a deadline gives nothing up). Each row is raised
+//! in a transaction of its own, so another server writing the tables meanwhile costs the raise
+//! only the rows it changed, which are read again.
 //!
 //! # Keys
 //!
@@ -185,7 +187,7 @@
 //! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
 //! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version; then delete up to [`SWEEP_BATCH`] freed `alloc/<id>` rows past the allocation retention, at their versions, in one transaction |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
-//! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, and each `mark/<id>` whose deadline it raises, at its version, or nothing when none is |
+//! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, and each `mark/<id>` whose deadline it raises, at its version, each in a transaction of its own, or nothing when none is |
 //! | [`JobStore::put_mark`] | check `job/<id>` at its version (queued, whole host), put `mark/<id>` if absent or at its version |
 //! | [`JobStore::delete_mark`] | delete `mark/<id>` at its version, or nothing when there is none |
 //! | [`JobStore::end_and_unmark`] | as [`JobStore::end_job`] (nothing for an ended job), and delete `mark/<id>` at its version, or check it absent; nothing when the job has ended and has no mark |

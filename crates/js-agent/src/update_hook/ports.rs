@@ -20,6 +20,7 @@ pub use js_update_hook::{
 
 use crate::CredentialFile;
 use crate::lifecycle::StateRoot;
+use crate::lifecycle::handover;
 use crate::lifecycle::hold::{self, HOLD_FILE, HOLD_RESUME_FILE};
 
 // The lease server's own-host routes are not the hook's alone: `js-agent cordon` calls them too,
@@ -51,6 +52,20 @@ pub trait StateView {
     /// a join token, so a host that has one needs no token file. A credential file that cannot
     /// be read, or holds no credential, is not one.
     fn has_credential(&self) -> bool;
+
+    /// Asks the agent's next stop to hand its runs over to the agent's next process instead
+    /// of draining the host: writes the handover file in the state root, atomically and
+    /// durably (see [`crate::lifecycle::handover`]).
+    ///
+    /// # Errors
+    /// The file could not be written.
+    fn request_handover(&self) -> Result<(), PortError>;
+
+    /// Withdraws the request: removes the handover file, if it is there.
+    ///
+    /// # Errors
+    /// The file is there and could not be removed.
+    fn withdraw_handover(&self) -> Result<(), PortError>;
 }
 
 impl StateView for StateRoot {
@@ -70,6 +85,16 @@ impl StateView for StateRoot {
         CredentialFile::in_dir(self.path())
             .load()
             .is_ok_and(|loaded| loaded.is_some())
+    }
+
+    fn request_handover(&self) -> Result<(), PortError> {
+        handover::write(self.path()).map_err(PortError::from)
+    }
+
+    fn withdraw_handover(&self) -> Result<(), PortError> {
+        handover::remove(self.path())
+            .map(|_| ())
+            .map_err(PortError::from)
     }
 }
 

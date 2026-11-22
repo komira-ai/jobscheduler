@@ -1,5 +1,13 @@
-# CI for pull requests and main. GitHub-hosted runners only, actions pinned to commit
-# SHAs, and no permission beyond reading the repository.
+# CI for pull requests, the merge queue's merge groups and main. GitHub-hosted runners only,
+# actions pinned to commit SHAs, and no permission beyond reading the repository.
+#
+# main takes a pull request through GitHub's merge queue (docs/ci.md, "The merge queue"). The
+# one check its ruleset requires is `all-passed`, which needs every other job here: a merge
+# group runs this whole workflow on the commit main would move to, and `all-passed` fails
+# unless every job it needs passed (a skipped or cancelled job fails it too, so nothing reaches
+# main untested). No job is kept off a merge group, and no step either but the Cargo cache
+# saves (main's alone); crates/xtask/tests/merge_queue holds the trigger, the job conditions,
+# the concurrency key and the bases read here to that.
 #
 # The Cargo cache (registry, git checkouts and target) is keyed on the runner, the job,
 # Cargo.lock and rust-toolchain.toml. Every job restores it except `deny` and the two
@@ -29,15 +37,20 @@
 # compiled by tsc, a build program that prerenders the pages, and node:test tests over the
 # built tree (golden output, links, the Content-Security-Policy rules, the pinned theme, a
 # public-repo scan, and the statements of the pages held to the code and documents they rest
-# on). Those steps run on a push to main, and on a pull request that changes a path listed
-# in site/ci-paths (the site, and the files its statements are held to; the claims test reads
-# them), or whose diff cannot be computed. The Node version is exactly the one in
-# site/.node-version. The network is touched by `npm ci` alone, with install scripts off.
+# on). Those steps run on a push to main, and on a pull request or a merge group that changes
+# a path listed in site/ci-paths (the site, and the files its statements are held to; the
+# claims test reads them), or whose diff cannot be computed. The Node version is exactly the
+# one in site/.node-version. The network is touched by `npm ci` alone, with install scripts off.
 # The site steps build and test; they hold no cloud access and put nothing anywhere.
 #
 # A pull request runs Linux x86_64 on GitHub's hosted ubuntu runners and nothing else: macOS and
 # arm64 are the beta stage of the release (beta.yml, called by release.yml on a push to main;
 # crates/xtask/tests/pr_linux_only holds every workflow that a pull request starts to that).
+# What macOS compiles is still checked on the pull request, from Linux: the `lint` job runs
+# clippy over the workspace's code and tests for aarch64-apple-darwin, the crates beta.yml tests
+# on Apple silicon, so code under `cfg(target_os = "macos")` (which no Linux build compiles)
+# fails the pull request that breaks it instead of the release after the merge. Nothing is
+# linked and no test runs there; the macOS tests still run in the beta stage only.
 name: ci
 
 on:
@@ -45,15 +58,21 @@ on:
     # No `labeled` type: a label-only run would show skipped checks under the names of the
     # real run's checks and could hide a red run.
     types: [opened, synchronize, reopened]
+  # The merge queue's check of a group: main, the pull requests ahead and this one's squash commit.
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
   push:
     branches: [main]
 
 permissions: {}
 
 # One run per workflow and pull request: a new push to a PR cancels that PR's queued or
-# running run. A push to main gets a group of its own (the run
-# id), so it is never cancelled and never replaced while pending: GitHub keeps only one
-# pending run per group, and the release runs only after a main run succeeds.
+# running run. A push to main and a merge group get a group of their own (the run id), so
+# neither is ever cancelled or replaced while pending: GitHub keeps only one pending run per
+# group, so a shared group would drop the check of every run but the last. A merge group has
+# no pull request number, so keyed on the number alone the queue's groups would share one key
+# and replace each other; and only a pull request's run is cancelled in progress.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -71,9 +90,16 @@ jobs:
   # hold back fmt and clippy.
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The macOS clippy below is a second clippy of the workspace; a cold one takes about as long
+    # as the first.
+    timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      ZIG_VERSION: 0.15.2
+      ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+      ZIGBUILD_VERSION: 0.24.0
+      ZIGBUILD_SHA256: 52be2cb85ad3875682564a29bac1832b2ab3db68b1c504765c92d5249cc9b96f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +128,41 @@ jobs:
       - run: cargo check --locked --manifest-path crates/js-agent-wire/fuzz/Cargo.toml --target-dir target/fuzz-check
       - run: cargo check --locked --manifest-path crates/js-api-gateway/fuzz/Cargo.toml --target-dir target/fuzz-check
       - run: cargo check --locked --manifest-path crates/js-jobs/fuzz/Cargo.toml --target-dir target/fuzz-check
+      # The workspace's code and tests as macOS compiles them: clippy for aarch64-apple-darwin
+      # over the crates and features beta.yml's `macos` job tests (crates/xtask/tests/
+      # macos_clippy holds the two to the same list). Code under `cfg(target_os = "macos")` is
+      # compiled by no Linux build, so without this a change that breaks it (a struct literal
+      # in a macOS-only test, a call a dependency lacks on Apple targets) fails only the
+      # release's beta stage, after the merge. ring's and libsqlite3-sys's build scripts compile
+      # C for the target; zig is that C compiler (it carries macOS's libc headers), and
+      # cargo-zigbuild runs cargo with it. Nothing is linked and no test runs.
+      - run: rustup target add aarch64-apple-darwin
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zig-cache
+        with:
+          path: ${{ runner.temp }}/pinned/zig.tar.xz
+          key: pinned-zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_SHA256 }}
+      - name: Install zig (pinned version and checksum)
+        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256" --cache "$RUNNER_TEMP/pinned/zig.tar.xz" --out "$RUNNER_TEMP/zig" --extract tar.xz --member "zig-x86_64-linux-$ZIG_VERSION" --tree
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/zig.tar.xz
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zigbuild-cache
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-zigbuild.tar.xz
+          key: pinned-cargo-zigbuild-${{ env.ZIGBUILD_VERSION }}-${{ env.ZIGBUILD_SHA256 }}
+      - name: Install cargo-zigbuild (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz" --sha256 "$ZIGBUILD_SHA256" --cache "$RUNNER_TEMP/pinned/cargo-zigbuild.tar.xz" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member cargo-zigbuild-x86_64-unknown-linux-musl/cargo-zigbuild
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.zigbuild-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pinned/cargo-zigbuild.tar.xz
+          key: ${{ steps.zigbuild-cache.outputs.cache-primary-key }}
+      - run: echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mdm -- -D warnings
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -110,15 +171,19 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-      # Whether the site steps run: always on a push to main; on a pull request when a
-      # changed file matches site/ci-paths (a directory prefix ending in '/', or an exact
-      # file). Fail closed: a diff or a list that cannot be read runs them. The decision is
+      # Whether the site steps run: always on a push to main; on a pull request when a file
+      # changed since the merge base with its base branch matches site/ci-paths (a directory
+      # prefix ending in '/', or an exact file), and on a merge group when one changed since
+      # the commit the group is built on (`base_sha`: HEAD is the group's own commit, not a
+      # merge commit, and `github.base_ref` is empty there). Fail closed: a diff, a group
+      # base or a list that cannot be read runs them. The decision is
       # crates/xtask/src/site_changed.rs.
       - id: site
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
-        run: cargo xtask site-changed --event "$EVENT" --base "$BASE" --paths site/ci-paths --github-output "$GITHUB_OUTPUT"
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: cargo xtask site-changed --event "$EVENT" --base "$BASE" --group-base "$GROUP_BASE" --paths site/ci-paths --github-output "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: ${{ steps.site.outputs.run == 'true' }}
         with:
@@ -654,8 +719,14 @@ jobs:
           path: ${{ runner.temp }}/pinned/cargo-deny.tar.gz
           key: ${{ steps.deny-cache.outputs.cache-primary-key }}
       - run: cargo deny --version
-      # The arguments cargo-deny-action passed by default.
-      - run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
+      # The arguments cargo-deny-action passed by default. Licences, bans and sources decide the
+      # job; an advisory (RUSTSEC) never blocks a pull request or the merge queue, so the
+      # advisories are checked in a step of their own whose failure is shown but does not fail
+      # the job.
+      - run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check bans licenses sources
+      - name: Advisories (shown, never blocking)
+        continue-on-error: true
+        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check advisories
 
   # Line and branch coverage per crate, and the ratchet in `coverage-baseline`
   # (crates/js-coverage): a crate may miss no more lines or branches than its line in
@@ -871,17 +942,20 @@ jobs:
         run: cargo "+$COVERAGE_TOOLCHAIN" run -p js-coverage --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --baseline coverage-baseline --write-baseline target/coverage/coverage-baseline.measured --summary-file "$GITHUB_STEP_SUMMARY" --run-id "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --artifact coverage
       # A pull request may not raise any count above the base branch's file, and a new
       # crate enters at zero (the table above only compares with this change's own
-      # file). A push to main has no base. A base branch that exists but has no file yet
-      # (it predates this gate) is an empty baseline: every crate is new and enters at
-      # zero. A base ref that cannot be read fails the step.
+      # file). A merge group is held to the file of the commit it is built on (`base_sha`:
+      # main, or main and the pull requests ahead of it in the queue), so two pull requests
+      # that each pass against main cannot raise a count together. A push to main has no
+      # base. A base that exists but has no file yet (it predates this gate) is an empty
+      # baseline: every crate is new and enters at zero. A base that cannot be read fails
+      # the step (an empty `base_sha` reads as `origin/`, which is no commit).
       - name: Compare with the base branch
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}
         run: |
-          git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" > /dev/null
-          if git cat-file -e "origin/$BASE_REF:coverage-baseline" 2> /dev/null; then
-            git show "origin/$BASE_REF:coverage-baseline" > target/coverage/base-baseline
+          git rev-parse --verify --quiet "$BASE^{commit}" > /dev/null
+          if git cat-file -e "$BASE:coverage-baseline" 2> /dev/null; then
+            git show "$BASE:coverage-baseline" > target/coverage/base-baseline
           else
             : > target/coverage/base-baseline
           fi
@@ -898,3 +972,20 @@ jobs:
             target/coverage/coverage-baseline.measured
           if-no-files-found: error
           retention-days: 7
+
+  # The one check main's ruleset requires, for a pull request and for a merge group alike: it
+  # needs every other job of this workflow and passes only when each of them passed. It runs
+  # whatever they did (`always()`), so a failed, cancelled or skipped job is a red check here,
+  # never a missing one, and a skipped job cannot count as a passed required check. It checks
+  # out nothing and runs no repository code.
+  all-passed:
+    needs: [lint, test, state-postgres, live-podman, agent-privilege, crun-rootless, crun-root, agent-egress, deny, coverage-shard, coverage]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # The run's graph names the job that did not pass.
+      - name: A job this check needs did not pass
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: exit 1

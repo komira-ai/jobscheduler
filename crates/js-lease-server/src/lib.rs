@@ -379,10 +379,11 @@
 //! begins with no jobs, and a `.jobs` file of an earlier start is left unread); without
 //! it, a SQLite file beside the state file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. The server opens it once and holds that one handle: the job service and the
-//! per-job heartbeat both read it. A commit of the open (its index backfill, the boot's raise of
-//! deadlines) that another server's write beat, as the old instance of a start-first update
-//! does, is not a refusal: the open reads again and commits again, after a pause that doubles
-//! from 10 ms up to one second, for as long as it loses; any other error refuses the start.
+//! per-job heartbeat both read it. The open (its index backfill, the boot's raise of
+//! deadlines) is one pass that always finishes while another server writes the tables, as the
+//! old instance of a start-first update does: it reads the tables once and commits each row on
+//! its own, and a row another server changed before its commit is read again and decided
+//! again alone, with no wait and no new pass. Any error of the open refuses the start.
 //! Without `--job-listen` no store is opened and no file is made.
 //!
 //! # The store

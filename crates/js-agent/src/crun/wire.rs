@@ -18,8 +18,8 @@ use js_oci::{Client, Policy};
 use super::adopt::report_lines;
 use super::fs::{FsSettings, MOUNTS_DIR, PathCalls};
 use super::{
-    CgroupSettings, CrunError, CrunRuntime, CrunSettings, GpuSettings, Hooks, HostPorts,
-    config_dir, port_of, read_node,
+    CgroupSettings, CrunError, CrunRuntime, CrunSettings, EgressPort, GpuSettings, Hooks,
+    HostPorts, config_dir, port_of, read_node,
 };
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
@@ -188,6 +188,10 @@ pub struct Seams {
     pub daemon: PathBuf,
     /// Where the runs' mounts are made, and with what.
     pub mounts: MountSeam,
+    /// A port that stands for the host's egress in place of the one the agent starts (see
+    /// [`crate::Machine::egress_port`]): for a test that runs wired jobs on a machine that
+    /// cannot set a firewall up. None on a node.
+    pub egress: Option<Arc<dyn EgressPort>>,
 }
 
 impl Default for Seams {
@@ -199,6 +203,7 @@ impl Default for Seams {
             ids: IdSources::system(),
             daemon: OciConfig::default().daemon,
             mounts: MountSeam::default(),
+            egress: None,
         }
     }
 }
@@ -252,7 +257,10 @@ pub fn open(
         host_id: host_id.to_owned(),
         pull_threads: PULL_THREADS,
         files: plan.files.clone(),
-        egress: plan.egress.as_ref().map(port_of),
+        egress: seams
+            .egress
+            .clone()
+            .or_else(|| plan.egress.as_ref().map(port_of)),
         // A node is read from the host when a run starts, as the start check read it.
         gpus: plan.gpus.clone().map(|passthrough| GpuSettings {
             passthrough,

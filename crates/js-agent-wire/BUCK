@@ -1,0 +1,19 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond what buildrules gives each of its units (a library src/ and
+# build.rs, a test target tests/), which a Buck2 action sees only when declared: tests/wire.rs
+# includes src/refusal.rs.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "src/refusal.rs",
+    ],
+)
+
+# Read by other members (their extra_srcs); exported by reference, so each stays at its path.
+export_file(
+    name = "tests/fixtures/v0.1.208",
+    src = "tests/fixtures/v0.1.208",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)

@@ -21,7 +21,10 @@ pub enum Reason {
     /// The agent holds a taint a restart does not re-check (anything but a residue of a post-job
     /// check that its pin file does not name): no version can repair it (exit 76).
     Tainted,
-    /// A job's post-job checks are owed: no version can repair it (exit 76).
+    /// A job's post-job checks are owed where no running agent can settle them: on a first
+    /// install, or once the update stopped the agent. No version can repair it (exit 76). Before
+    /// the stop, a record is a check the running agent has yet to run, and the drain waits for
+    /// it (`drain_bound`, exit 75, when the bound passes first).
     OwedCheck,
     /// The staged release is not an agent this hook can run.
     BadArtifact,
@@ -63,11 +66,14 @@ pub enum Reason {
     /// A Mac's host setup is not complete and `prepare` could not complete it: the helper's
     /// socket group, the agent's state root or the scratch root's own volume (exit 75).
     HostSetupMissing,
+    /// The system refused a call of a Mac's host setup (`EPERM`), which no retry changes: the
+    /// path and the error are named (exit 1).
+    HostSetupRefused,
 }
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 24] = [
+    pub const ALL: [Reason; 25] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -92,6 +98,7 @@ impl Reason {
         Reason::DrainDeadline,
         Reason::HoldFailed,
         Reason::HostSetupMissing,
+        Reason::HostSetupRefused,
     ];
 
     /// The token in the JSON.
@@ -122,6 +129,7 @@ impl Reason {
             Reason::DrainDeadline => "drain_deadline",
             Reason::HoldFailed => "hold_failed",
             Reason::HostSetupMissing => "host_setup_missing",
+            Reason::HostSetupRefused => "host_setup_refused",
         }
     }
 }

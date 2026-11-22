@@ -35,7 +35,7 @@ use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
 
-use super::crun_machine::{CrunMachine, On};
+use super::crun_machine::{CrunMachine, On, euid};
 use crate::crun_host::Fixture;
 use crate::server::{
     Agent, POOL_QUOTA_TOML, POOL_RUNS_QUICK_TOML, POOL_RUNS_TOML, QUICK_INTERVAL, Redirect, Server,
@@ -79,11 +79,13 @@ case "$cmd" in
     mkdir -p "${root:?}/${name:?}"
     echo $$ > "$root/pid"
     echo up > "$DIR/ready"
-    while [ ! -e "$DIR/go" ]; do sleep 0.02; done
+    while [ ! -e "$DIR/go" ] && [ ! -e "$DIR/go-$name" ]; do sleep 0.02; done
+    [ -e "$DIR/code-$name" ] && exit "$(cat "$DIR/code-$name")"
     exit 0;;
   kill)
     kill -TERM "$(cat "$root/pid")";;
   delete)
+    find "$cg/ctr" -depth -delete 2>/dev/null
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
     exit 0;;
   state) echo '{"pid":1}';;
@@ -97,11 +99,11 @@ pub(super) struct Node {
     pub(super) dir: TestDir,
     host: CrunHost,
     crun: PathBuf,
-    state: PathBuf,
-    scratch: PathBuf,
+    pub(super) state: PathBuf,
+    pub(super) scratch: PathBuf,
     ids: IdFiles,
     tools: PathBuf,
-    cgroups: PathBuf,
+    pub(super) cgroups: PathBuf,
 }
 
 /// The one node of this test binary: the seams are function pointers, so what they read is
@@ -189,6 +191,7 @@ pub(super) fn seams() -> Seams {
             call_limit: LONG,
             proc_read: |_| None,
         },
+        egress: None,
         host: || self::node().host.clone(),
         ids: IdSources {
             files: node.ids.clone(),
@@ -308,11 +311,6 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
     assert_eq!(placed, engine);
 }
 
-/// The effective user id of the test, as the agent reads its own.
-fn euid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
 /// The command line of a crun agent on the node, less `without`.
 fn crun_cli(without: &str) -> Cli {
     let node = node();
@@ -398,12 +396,12 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
 
 /// A server and an agent of the crun runtime over the node.
 pub(super) struct Rig {
-    server: Server,
+    pub(super) server: Server,
     pub(super) agent: Agent,
-    worker: Handle,
+    pub(super) worker: Handle,
     pub(super) machine: Arc<CrunMachine>,
-    flags: Vec<String>,
-    address: Arc<Mutex<String>>,
+    pub(super) flags: Vec<String>,
+    pub(super) address: Arc<Mutex<String>>,
 }
 
 /// The flags of a crun agent of the node with host id `host_id`, and `extra`.
@@ -493,7 +491,7 @@ impl Rig {
     /// An agent with `flags` exactly as given, over a machine that is the node's. Flags that
     /// name neither `--no-jobs` nor `--allow-container-engine` start the agent of the build's
     /// runtime, which on Linux is crun.
-    fn spawn(
+    pub(super) fn spawn(
         server: &Server,
         address: &Arc<Mutex<String>>,
         flags: &[String],

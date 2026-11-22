@@ -279,7 +279,7 @@ impl CrunRuntime {
         let run = self.runs.get(name)?;
         match &run.fs.as_ref()?.check {
             Check::Done(Some(why)) => {
-                tracing::warn!(lease = %name, "a source did not answer after the job: {why}");
+                warn_unreadable(name, why);
                 Some(refusal::INPUT_UNREADABLE.to_owned())
             }
             _ => None,
@@ -301,6 +301,16 @@ impl CrunRuntime {
             )),
         }
     }
+}
+
+/// Writes the warning that the input sources of the lease `name` (which holds the run's id)
+/// did not answer once its job failed: `why` names the source's path and the error.
+pub(crate) fn warn_unreadable(name: &str, why: &str) {
+    tracing::warn!(
+        "the input sources of {name} did not answer after its job failed, so its result says \
+         {}: {why}",
+        refusal::INPUT_UNREADABLE
+    );
 }
 
 /// Removes the pins of the lease `name` from `oci`, its image's and its image layers', and

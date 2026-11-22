@@ -294,6 +294,7 @@
 mod codes;
 mod event;
 mod finding;
+pub mod handover;
 pub mod hold;
 mod job_fs;
 mod machine;
@@ -306,6 +307,7 @@ mod quota_flags;
 pub(crate) mod run_files;
 mod runtime;
 mod scratch;
+pub mod scratch_volume;
 mod settle;
 mod silence;
 pub mod taint;

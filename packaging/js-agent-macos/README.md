@@ -244,7 +244,12 @@ Known limits:
 - The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
   root, from its params (`socket_group`, `scratch_root`): the helper's socket group
   `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root
-  `/var/db/js-agent/scratch` on an APFS volume of its own (`js-agent-scratch`, named in
-  `/etc/fstab`), as the agent requires. `/etc/js-agent/flags` comes from the group's config
-  package. The setup has run against fakes of `dscl`, `dseditgroup` and `diskutil` only, never
-  on a Mac.
+  `/var/db/js-agent/scratch` on an APFS volume of its own (`js-agent-scratch`), as the agent
+  requires. Nothing names the volume in `/etc/fstab`, which macOS lets only a process with Full
+  Disk Access write: the agent mounts the volume on its scratch root at each start
+  (`diskutil mount nobrowse -mountPoint`), so a reboot needs nothing more. `/etc/js-agent/flags`
+  comes from the group's config package. The setup and the agent's mount have run against
+  fakes of `dscl`, `dseditgroup` and `diskutil` only.
+- No Mac with the package installed has been restarted yet. What a restart or a macOS update
+  needs, and the drill that proves a restart on one Mac, are in
+  [docs/runbooks/mac-restart-and-update.md](../../docs/runbooks/mac-restart-and-update.md).

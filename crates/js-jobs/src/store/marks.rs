@@ -30,7 +30,7 @@ use crate::record::{JobRecord, JobState, MarkRecord, Needs};
 use crate::result::{BOOT_GRACE, JobEnd};
 
 /// The mark the row `key` holds.
-fn mark_at(key: &str, value: &[u8]) -> Result<MarkRecord, JobStoreError> {
+pub(super) fn mark_at(key: &str, value: &[u8]) -> Result<MarkRecord, JobStoreError> {
     decode_mark(value)
         .and_then(|mark| same_key(key, keys::mark(&mark.job), mark))
         .map_err(|why| JobStoreError::row(key, why))
@@ -181,30 +181,6 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             Some(row) => txn.delete(key, Cond::Version(row.version)),
             None => txn.check(key, Cond::Absent),
         })
-    }
-
-    /// `txn` with every mark whose deadline is before `boot` plus [`BOOT_GRACE`] put with its
-    /// deadline raised to that instant ([`marked_at_boot`]), each at the version read, and the
-    /// jobs of the marks it raised. A row a later build wrote is left as it is.
-    pub(super) fn raise_marks_at_boot(
-        &self,
-        txn: Txn,
-        boot: StoreTime,
-    ) -> Result<(Txn, Vec<JobId>), JobStoreError> {
-        let mut txn = txn;
-        let mut raised = Vec::new();
-        for (key, row) in self.store.scan_prefix(keys::MARK)? {
-            let mark = match mark_at(&key, &row.value) {
-                Ok(mark) => mark,
-                Err(JobStoreError::UnknownRow { .. }) => continue,
-                Err(error) => return Err(error),
-            };
-            if let Some(later) = marked_at_boot(&mark, boot) {
-                txn = txn.put(key, encode_mark(&later)?, Cond::Version(row.version));
-                raised.push(later.job);
-            }
-        }
-        Ok((txn, raised))
     }
 
     fn read_mark(&self, id: &JobId) -> Result<Option<(MarkRecord, Version)>, JobStoreError> {

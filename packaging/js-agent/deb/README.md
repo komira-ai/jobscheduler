@@ -180,7 +180,16 @@ the package: `cargo xtask release desired` writes it into the `targets` that
   615 s (the new agent runs and is registered), `rollback` 8220 s (the stop and start back to the
   previous release), `cleanup` 120 s. `verifyDeadlineSecs` is at least verify plus rollback
   (615 + 8220), so a failed verify can still be rolled back. Each bound is mirrored in `params`
-  for the hook.
+  for the hook. They cover the drain, which an update still makes on a host that cannot hand its
+  jobs over. One that can (a running agent whose `js-agent --version` prints `stops: drain
+  handover`, the unit unchanged, and with an `--egress` in the flags file `egress-handover` on the
+  `stops:` line of both the running and the staged agent) is neither cordoned nor drained:
+  `prepare` returns at once, and `cutover` writes the handover file in the state root and stops
+  the unit, which takes seconds, the agent leaving its jobs running, and under an `--egress`
+  ceiling their network wiring and their records in the state root's `egress` directory, for the
+  new agent to adopt
+  (docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). `rollback` hands them back
+  the same way.
 - There is no `uninstall` bound: hostkeeper refuses an uninstall order for this package.
 - `params` is what the hook reads, as the `--params` file hostkeeper writes: the unit it
   restarts (`js-agent-crun.service`), its state directory, hostkeeper's `current` link, the flags

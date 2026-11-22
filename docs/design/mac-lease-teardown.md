@@ -6,6 +6,8 @@ How `js-mac-session` ends a lease's use of its user on macOS (`kill-uid`, then `
 
 - **Per-user launchd agents.** launchd keeps a `user/<uid>` domain (and a `gui/<uid>` domain after a login) and restarts the agents in it, `distnoted` among them, for as long as the domain exists. A live process of the uid makes `user/<uid>` again. So booting the domain out while the job still runs does nothing, and killing the processes alone lets launchd restart an agent as the uid after the kill.
 - **The per-user folders entry.** `/private/var/folders/<xx>/<hash>/` (with `0`, `C` and `T`) is keyed by the user record's UUID and uid, not by the home. Daemons make folders in it for the user, such as `C/com.apple.ScreenTimeAgent`, that outlive the account.
+- **POSIX shared memory and named semaphores.** One lasts until it is unlinked or the Mac restarts, and no interface of macOS lists the names, so no step below can find one. A run cannot create shared memory: the job profile's floor denies `ipc-posix-shm-write-create`, and `shm_open` with `O_CREAT` fails with `EPERM` (measured on macOS 26.4 and 27.0.1, where clang, swiftc, codesign, git and Python's `multiprocessing` pools still ran under the rule; `crates/js-mac-pool/tests/runner.rs` holds the profile to it on a macOS runner). A program that makes its own POSIX shared memory fails there, for example Python's `multiprocessing.shared_memory`, or a PostgreSQL started with `dynamic_shared_memory_type = posix`. Opening an object that exists is still allowed. Named semaphores are not denied, because Python's `multiprocessing` locks are made with `sem_open`: a semaphore a run left holds a count, not data, and the next run of the same uid can open it by its name until the Mac restarts.
+- **Login items and Background Task Management entries.** The reset removes the uid's `loginitems.<uid>.plist` with the swept places, but not a Background Task Management entry under the uid. The post-job leak scan below finds both.
 
 ## `kill-uid`
 
@@ -43,7 +45,7 @@ The lease is recorded over (the ledger's `deleted`, then the slot's `resetting`)
 1. `kill-uid`'s teardown, as above.
 2. The user's record must exist; the entry is taken from its `DARWIN_USER_DIR`, as in the deletion's step 1.
 3. Settle, as in the deletion's step 2. Remove the crontab and `at` jobs; no process may remain.
-4. Remove the uid's System V IPC objects: every object `ipcs -a` lists with the uid (or its name) as owner or creator, removed with `ipcrm` (a failure only logged), then `ipcs` again: an object still listed fails the step. POSIX shared memory and semaphores have no listing on macOS and are not found.
+4. Remove the uid's System V IPC objects: every object `ipcs -a` lists with the uid (or its name) as owner or creator, removed with `ipcrm` (a failure only logged), then `ipcs` again: an object still listed fails the step. POSIX shared memory and semaphores have no listing on macOS and are not found (see above: a run cannot create shared memory).
 5. Sweep the other places and remove the home whole; make the home again, new, empty and the user's.
 6. Empty the entry, keeping its `0`, `C` and `T` (each emptied).
 7. Settle again.
@@ -73,6 +75,18 @@ A clean reset records the slot free. One that is not replaces the user: the kill
 A pool user is lent only from a free slot. A reset that is not clean replaces the user; a replacement that fails leaves the slot broken: it is lent to no one, `pool-status` and the pool-full refusal name it, and the next `pool-create` (the boot reset runs one) replaces it again. A slot found resetting after a restart, or leased to a lease that is not live, is reset (or replaced) by the boot reset before it is free. A ledger write that fails leaves the slot not free. Either way no other lease gets the uid until a reset or a replacement completes.
 
 For a lease from before the pool, a step that fails leaves the lease live in the helper's ledger: the uid is quarantined. A live lease's uid is never handed to another lease, nor made a pool slot. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
+
+## After the run: the leak scan
+
+After each native run is removed, the agent's post-job check (`NativeChecks`, `crates/js-agent/src/leak_scan.rs`) asks the helper for its leak scan (`scan`, `crates/js-mac-session/src/scan.rs`). The scan reports what changed since the node's recorded baseline. The check compares that with the scan it took when the host was last idle, and judges only what is new:
+
+- An added login item or Background Task Management entry of a uid other than root's taints the host as residue (`scan-residue`), and so does an added `and <n> more` line, which may hide one. A run as a pool user can make its own entries, and the next run of the same uid would inherit them. The taint does not clear itself.
+- Every other change is a note (`scan-host-changed`) and never taints. The launch agent and daemon folders and the auto-login state are root's, the lease users are the pool's own, and a removal is not something a pool user can make to another user's entries. The scan does not report the users of live leases, so a scan while other leases run is not dirty by their users.
+- A scan that could not read an item (`scan-unreadable`), or one the helper did not answer (`scan-failed`), taints the host as unchecked. That taint clears itself once two re-checks of the idle host pass, as the Linux checks' unreadable inputs do.
+- Lines are compared by their text. When the idle host already has more changes than a reply holds (20 per list), the `and <n> more` count can change because of a root-owned change and taint the host, and a run's entry behind an unchanged count is missed. A node whose drift fits in a reply has neither problem; record the baseline again after a software change.
+- A node whose baseline was never recorded is not judged. The helper refuses the scan (`no baseline was recorded`), the check notes it once (`scan-no-baseline`), and every run passes until a baseline is recorded. The baseline is recorded only in its window, which the root tool that applied a software set or erased the Mac opens. No tool opens that window yet, so on a node today the check judges nothing.
+
+A change by another job running beside the one that ended is judged with the one that ended: the host is tainted either way, and the finding names the run that ended.
 
 ## While no agent runs
 

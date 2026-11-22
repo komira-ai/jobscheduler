@@ -116,8 +116,11 @@ holds the container's output and, when the container ends, writes how it ended t
 the lease's directory. The unit's `KillMode=process` lets systemd kill only the agent's main
 process, on a stop and after a crash, so the supervisors and the containers outlive the agent.
 
-- **A stop** (`systemctl stop`, an update) still drains: the agent lets its jobs run for up to
+- **A plain stop** (`systemctl stop`) drains: the agent lets its jobs run for up to
   `--drain-wait` seconds, stops them within `--stop-grace`, reports, and exits.
+- **An update** hands the jobs over instead (see "Agent updates while jobs run" below): the agent
+  exits within seconds, leaving every job running, and the new agent takes them over as after a
+  crash.
 - **A crash** leaves the jobs running. When `Restart=always` starts the agent again, it reads its
   ledger and takes over (adopts) each container its record holds, then lists those jobs in its
   first heartbeat. A job that ended while no agent ran is reported with the code and output tail
@@ -128,10 +131,72 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **A job's wall limit** counts the time the job ran with no agent, but only a running agent stops
   a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
   its result says it timed out.
-- **An agent with an allow-list `--egress`** takes over no container that may still run: its
-  start removes every network wiring an earlier process made, so it removes those containers
-  instead, and their jobs are lost. A container that ended while no agent ran has no network
-  left: it is taken over and its result reported, as above.
+- **An agent with an `--egress` ceiling** (`allow-list` or `open`) takes over a container's
+  network wiring with the container. The agent keeps one record per wired run in the egress
+  store, the directory `egress` of its state root (`/var/lib/js-agent/state/egress`), written
+  when it wires the run and removed when it takes the wiring down: the run's address block, its
+  level and its declared ports. The stopping agent leaves each run's veth pair, set member and
+  port forwards in place, and the records with them, so the kernel's rules enforce with no agent
+  running. The next agent's start reads the records, loads the firewall in one transaction that
+  puts each recorded run's member and forwards back (so the job's egress holds before, during
+  and after the restart), and then takes over each run from its record after comparing the
+  level and ports in it with those the container's labels (`jobscheduler.dev/network`,
+  `jobscheduler.dev/network-ports`) give. It removes the wiring and the record of every run no
+  one took over, any record it cannot read or use, and any `jsv`/`jsp` interface no record
+  names. A container that does not fit (no network label, no record or a record that differs, a
+  level above the agent's ceiling, a port the ceiling does not list, or an agent with no ceiling
+  and a container wired at a level above none) is removed and its job lost, as any container the
+  agent cannot take over. A container that ended while no agent ran has no network left: it is
+  taken over and its result reported, as above. What is not handed over: the host-port relay
+  connections (`--host-port`) the agent process itself carries end with it, and the next agent
+  offers them again.
+
+## Agent updates while jobs run
+
+An agent update does not wait for the node to be idle, and it stops no job. hostkeeper runs the
+update hook's steps; on a crun node they go like this:
+
+1. `prepare` checks the new release and records that this update hands the jobs over. It places
+   no cordon and waits for nothing: the node keeps taking work.
+2. `cutover` writes the file `handover` in the agent's state root (`/var/lib/js-agent/state`) and
+   stops the unit. The agent reads the file when the stop reaches it. It takes no new job and
+   says `draining` to the server, so no new job is placed on the node for those seconds. It
+   waits until no job is being started (an image still being pulled counts), no job is being
+   stopped and no finished job's cleanup and post-job checks are under way. Then it exits,
+   leaving every running job as it is; that takes seconds. The hook removes the file and starts
+   the unit on the new release.
+3. The new agent takes over (adopts) every job, as after a crash, and lists them in its first
+   heartbeat. A job that ended in the gap is reported from its `exit.json`, once. A job's result
+   that the old agent had not had acknowledged is kept in the state root and sent by the new
+   agent, once. Its first hello waits until the server stops counting the old session as live
+   (the pool's grace, 15 s by default), so the node takes no new job for that long; the jobs
+   that run are not touched by it.
+4. `verify` waits for the new agent's hello, and `cleanup` ends the update. A `rollback` hands
+   the jobs back to the previous agent the same way: no drain, the request file, a stop and a
+   start.
+
+The update hands over only when all of these hold; otherwise it drains as before (cordon, wait
+for no lease, stop):
+
+- the runtime is crun and the unit manager systemd;
+- the new release's unit is the same as the installed one (a changed unit must start from an
+  empty cgroup, which a running job keeps busy);
+- on a host whose flags file sets `--egress allow-list` or `open`, both the running agent (which
+  leaves the wiring in place) and the new release's agent (which adopts it) list
+  `egress-handover` on the `stops:` line of `js-agent --version`; a host whose flags file cannot be
+  read is treated as having a ceiling. An `--egress` given only on the unit's command line is not
+  seen by the hook, and such an agent does not read the file: it drains, and its jobs are
+  stopped once `--drain-wait` has passed;
+- the running agent can hand over: `js-agent --version` prints `stops: drain handover` (and
+  `egress-handover`, as above). The first update from a release without that line still drains.
+
+What does not survive the restart's few seconds: a job's `--host-port` listeners, and the
+connections open through them, are the agent's and end with it; they are down until the new
+agent offers the ports again (a job that took the port itself meanwhile is stopped, its result
+`host-port-lost`). The CPU and memory use of a job taken over is no longer sampled.
+
+The maintenance `drain` step (an OS update or a reboot) is not an agent update: it still cordons
+the node and waits until no job runs.
 
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:

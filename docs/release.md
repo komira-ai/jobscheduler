@@ -12,7 +12,7 @@ opens a `RELEASE-RED` issue (step 11) and is fixed forward.
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. Nothing in the release waits for `ci` or reports its result: a failing job of `ci` is that run's own
-   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a).
+   red check. `ci` and every other check of a pull request run on Linux x86_64 alone: macOS and arm64 are the beta stage of this release (step 6a). What macOS compiles is checked on the pull request all the same, from Linux: `ci`'s `lint` job runs clippy over the workspace's code and tests for `aarch64-apple-darwin`, the crates and features the beta stage tests (`cargo test -p xtask --test macos_clippy` holds the two lists together), so a change that breaks code under `cfg(target_os = "macos")` fails its pull request; nothing is linked and no macOS test runs there.
 3. `plan` (`cargo xtask release plan`) decides at once whether to release and as which version
    (below). When there is nothing to release, the run builds, publishes and deploys nothing
    (`unit-tests`, which starts beside `plan`, still runs).
@@ -369,7 +369,7 @@ everything after the image in `docker run` is the server's flags: either the fla
   nothing about a lock: a Postgres store has none.
 
 **Stopping.** The stop signal is `SIGTERM` (ctrl-c's `SIGINT` does the same). The server answers
-`/readyz` 503 `draining` at once and keeps serving the job service for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed. The agents leave at the signal: the listener that serves the agent routes (`server.agent_listen`, or `--listen` with every route on it when they share it) takes no new connection and closes each one once it has answered, a held heartbeat or dispatch poll is answered at once, a dispatch poll that has already claimed its messages is answered with them and its claim is committed (it finishes within `--drain-timeout`, which the stop timeout below covers), and the server places no more jobs and claims no more dispatch messages, so each agent's next heartbeat or poll reaches the server that took over (it says hello there and keeps its runs) or, with none, retries with its backoff. Then it stops
+`/readyz` 503 `draining` at once and keeps serving the job service for `--drain-hold` (`15s` by default), so a proxy that polls `/readyz` takes it out of rotation while requests still succeed. The agents leave at the signal: the listener that serves the agent routes (`server.agent_listen`, or `--listen` with every route on it when they share it) takes no new connection and closes each one once it has answered, a held heartbeat or dispatch poll is answered at once, a dispatch poll that has already claimed its messages is answered with them and its claim is committed (it finishes within `--drain-timeout`, which the stop timeout below covers), and the server places no more jobs and claims no more dispatch messages, so each agent's next heartbeat or poll reaches the server that took over (which serves its session from the host's row, so it says no hello again, and it keeps its runs) or, with none, retries with its backoff. Then it stops
 accepting, gives the requests in flight `--drain-timeout` (`10s` by default) to finish, cuts what is
 still open, ticks once more and exits 0. Give the engine a stop timeout longer than `--drain-hold`
 plus `--drain-timeout` plus that last tick, for example `docker stop --time 40` with the defaults, so the engine's `SIGKILL` never cuts the drain. A
@@ -478,6 +478,17 @@ SHA-256 as the pin, and the manifest:
 | `params` | the inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`): the unit, the hook's state directory, hostkeeper's `current` link, the flags and token files, the state root, the runtime, the cordon and drain bounds and the step bounds |
 | `minHostkeeper` | `0.1.225`, the first hostkeeper whose daemon runs a native entry's hook command |
 | `installerBounds` | stage 600, activate 300, remove 300 |
+
+The update steps do not drain a host whose agent can hand its jobs over (a crun host whose
+running agent prints `stops: drain handover` in `js-agent --version`, with the unit unchanged
+and, where the flags file sets an `--egress` ceiling, `egress-handover` on the `stops:` line of
+both the running and the staged agent): `prepare` neither cordons nor waits, and `cutover` and
+`rollback` write the handover file in the agent's state root before they stop the unit, so the
+stopping agent exits within seconds leaving its jobs to the agent started next, which adopts them
+(under an egress ceiling each job's wiring stays in the kernel and its record in the state root's
+`egress` directory, from which the new agent takes the wiring over)
+(docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). The timeouts above cover the
+drain of any other host.
 
 The two maintenance steps. `drain` writes the hold file in the agent's state root, cordons the
 host on the lease server and returns once the host is idle (no lease, no running job, not

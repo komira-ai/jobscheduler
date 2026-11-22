@@ -1,0 +1,11 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond what buildrules gives each of its units (a library src/ and
+# build.rs, a test target tests/), which a Buck2 action sees only when declared: the library's
+# store suite includes the stored-format goldens of tests/golden.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "tests/golden",
+    ],
+)

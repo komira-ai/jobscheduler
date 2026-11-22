@@ -417,7 +417,7 @@ where
     let boot = store.now().expect("the store's clock");
     let bare_row = store.get("job/old-bare").expect("reads");
     let live_row = store.get("job/old-running").expect("reads");
-    let commits = store.commit_stats().txns;
+    let commits = store.commit_stats();
 
     assert_eq!(
         jobs.raise_at_boot(boot),
@@ -425,10 +425,11 @@ where
         "{name}: the boot did not write the three ended rows with contents and the bare row's \
          retention end alone"
     );
+    let after = store.commit_stats();
     assert_eq!(
-        store.commit_stats().txns,
-        commits + 1,
-        "{name}: the boot was not one commit"
+        (after.txns, after.syncs),
+        (commits.txns + 4, commits.syncs + 1),
+        "{name}: the boot was not a transaction a row in one store batch"
     );
     let now = jobs.get_job(&old).expect("reads").expect("present");
     assert_eq!(

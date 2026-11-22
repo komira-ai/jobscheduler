@@ -366,7 +366,7 @@ pub fn read_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<Option<S
     let read = command(host, DEFAULTS, &["read", domain, AUTO_LOGIN_USER])?;
     if read.success {
         Ok(Some(read.stdout.trim().to_owned()))
-    } else if read.stderr.contains("does not exist") {
+    } else if key_absent(&read.stderr) {
         Ok(None)
     } else {
         Err(failed(
@@ -374,6 +374,14 @@ pub fn read_auto_login(host: &dyn Host, paths: &SessionPaths) -> Result<Option<S
             &read,
         ))
     }
+}
+
+/// Whether a failed `defaults read`'s `stderr` says the key is not set. macOS 26 says
+/// `The domain/default pair of (<domain>, <key>) does not exist`; macOS 27 says
+/// `Error: Could not find key '<key>' in domain '<domain>'.`. Both exit 1, as every
+/// other failure of `defaults read` does, so only the text tells them apart.
+pub(crate) fn key_absent(stderr: &str) -> bool {
+    stderr.contains(") does not exist") || stderr.contains("Could not find key '")
 }
 
 /// Clears the login window's `autoLoginUser` and removes `/etc/kcpassword`; neither

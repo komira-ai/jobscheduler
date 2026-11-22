@@ -4,6 +4,10 @@
 # assets to the release (release.yml's `promote-macos`); nothing of Linux x86_64 waits for it.
 # No pull request runs it: a pull request's checks are Linux x86_64 alone
 # (crates/xtask/tests/pr_linux_only holds every workflow to that).
+# A pull request compiles what this job tests, though: ci.yml's `lint` job runs clippy for
+# aarch64-apple-darwin on Linux over the same crates and features (crates/xtask/tests/
+# macos_clippy holds the two lists together), so code that does not compile for macOS fails its
+# pull request rather than this job.
 #
 # The workspace builds and passes its tests on Apple silicon but for the three crates that are
 # Linux code and are not built for macOS: js-contain (the crun runtime, cgroups), js-host-step
