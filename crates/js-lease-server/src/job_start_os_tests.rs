@@ -70,3 +70,35 @@ fn a_container_start_carries_the_jobs_system_and_architecture() {
         assert_eq!((start.os, start.arch), carried, "{os:?}");
     }
 }
+
+/// A container start names the system and the architecture only in the spellings every agent
+/// that has the fields decodes, `linux` and `x86_64` on the wire: an architecture constraint
+/// in another spelling (`amd64`, which submit stores as given) and a system in another case
+/// (`Linux`, which submit refuses) leave the field out, and `aarch64` is sent as `arm64`. An
+/// agent of the release on the build nodes reads a start with a value it does not know as a
+/// command it does not know and runs nothing. It catches a constraint's text copied onto the
+/// wire.
+#[test]
+fn a_container_start_names_its_platform_only_in_the_spellings_agents_decode() {
+    let (mut job, allocation) = records();
+    job.spec.constraints.os = Some("linux".to_owned());
+    job.spec.constraints.arch = Some("x86_64".to_owned());
+    let start = build(&job, &allocation, &allow_list()).unwrap();
+    let wire = serde_json::to_value(&start).unwrap();
+    assert_eq!(
+        (&wire["os"], &wire["arch"]),
+        (&serde_json::json!("linux"), &serde_json::json!("x86_64"))
+    );
+    for (os, arch, carried) in [
+        ("Linux", "amd64", (None, None)),
+        ("linux", "aarch64", (Some(Os::Linux), Some(Arch::Arm64))),
+    ] {
+        job.spec.constraints.os = Some(os.to_owned());
+        job.spec.constraints.arch = Some(arch.to_owned());
+        let start = build(&job, &allocation, &allow_list()).unwrap();
+        assert_eq!((start.os, start.arch), carried, "{os} {arch}");
+        let wire = serde_json::to_value(&start).unwrap();
+        let named = carried.1.map(|_| serde_json::json!("arm64"));
+        assert_eq!(wire.get("arch").cloned(), named, "{os} {arch}");
+    }
+}

@@ -357,10 +357,8 @@ The scheduler owns one set of terms for what a request needs and what a host, an
 | ISA level | `x86-64-v1` to `v4`, or an Armv8 version | at least, within the family |
 | `cpu` | cores (thousandths of a core in `Requirements`) | at least |
 | `memory`, `disk` | bytes (GiB in request syntax) | at least |
-| `exec` | `container` or `sandbox-exec`; a request need not name it (how a job is run, below) | exact |
+| `exec` | `container` or `sandbox-exec`; a request need not name it (`how-a-job-runs.md`) | exact |
 | `accelerator` | `vendor` (open set of lower-case strings, `nvidia` first); `model` (canonical lower-case family name, such as `nvidia-gb300`); `count` (integer); `memory per device` (GiB); `interconnect` (optional, a kind and a size, for example `nvlink-domain>=72`) | `model` exact after alias resolution; `count` and `memory per device` at least; `interconnect` at least when given. A field the request omits matches anything |
-
-**How a job is run.** A client names the operating system and the architecture, not how the host runs the job. The job service decides it when it builds the start (`start_of`, `js-lease-server/src/job_start.rs`): a job on `macos` that names an image runs that image natively, as a bundle; any other job runs in a container. A job that names `exec` (as an older client does) is held to it as before: it is placed only on a host that reports that mode, and `sandbox-exec` runs natively and `container` in a container whatever `os` says (a job that `validate.rs` gives `container` for its layers or a remapped host port is a container job). Every start, native or container, carries the job's `os` and `arch` when it names them, so that an agent that runs more than one platform can choose its runtime from them; an agent that runs one ignores them. A Linux job is never placed on a Mac, since a Macs' pool names `os = "macos"` and `os` is matched exactly; a Mac that runs Linux jobs is a later design.
 
 **What is built.**
 
