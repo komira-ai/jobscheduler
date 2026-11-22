@@ -6,9 +6,11 @@
 //! installs, and gives no call to ask whether a program has it. A program finds out the
 //! way every program does: it lists the directory of the privacy database, which only a
 //! process with Full Disk Access may list. The listing opens no file and reads no
-//! database. The profile grants it to `js-agent` alone, not to the helper, and everything
-//! either starts is started with its privacy responsibility disclaimed
-//! ([`crate::disclaim`]), so the grant never reaches a job.
+//! database. The profile grants it to `js-agent` alone, not to the helper. A program started
+//! with its privacy responsibility disclaimed ([`crate::disclaim`], the default) does not
+//! hold the grant of the process that started it; a native job and its supervisor keep the
+//! responsibility, so they answer for `js-agent` and hold its grant. Today the helper starts
+//! every job, disclaimed, and holds no grant.
 
 use std::io;
 

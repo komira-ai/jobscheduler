@@ -3,7 +3,8 @@
 //! <dir>` through the one spawner, `js_mac_session::disclaim`, one process for each VM, and
 //! drives over the line protocol of [`js_vm_lease::protocol`]. The agent links nothing of
 //! `js-vmm`: it holds a [`Session`] to each VM's process, and the process ends when the VM is
-//! destroyed (its input is closed).
+//! destroyed (its input is closed). The launcher is started disclaimed; whether it should
+//! keep the responsibility (answering for the agent) is not decided.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;

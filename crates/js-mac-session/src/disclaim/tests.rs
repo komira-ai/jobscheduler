@@ -8,8 +8,8 @@ use std::io::{self, Read as _};
 use std::os::fd::{AsRawFd as _, BorrowedFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 
-use super::Program;
 use super::plan::{self, AttributeCalls, NUL_REFUSED, Plan, SETEXEC, Strings};
+use super::{Kept, Program};
 
 /// What `/bin/sh -c <script>` printed, run through a [`Program`] that `configure` set up.
 fn printed(script: &str, configure: impl FnOnce(&mut Program)) -> String {
@@ -216,6 +216,41 @@ fn a_nul_anywhere_is_refused_at_the_start() {
             io::ErrorKind::InvalidInput
         );
     }
+}
+
+/// A program that keeps its starter's responsibility, for either reason, runs as any other
+/// [`Program`] does: with its arguments and environment, its steps first, once, and the
+/// reason shown. Off macOS the keep changes nothing; on macOS it leaves out only the
+/// disclaim, which the agent's macOS tests read back. Catches a kept start that drops the
+/// steps (on macOS they are installed on a path of their own), the arguments or the
+/// environment, or one that may be started twice.
+#[test]
+fn a_program_that_keeps_its_responsibility_runs_its_steps_and_arguments_once() {
+    for why in [Kept::Job, Kept::Supervisor] {
+        // SAFETY: the step writes to a descriptor and allocates nothing.
+        let mut program = unsafe {
+            Program::with_steps(
+                "/bin/sh",
+                ["-c", "echo \"$1 $KEPT\"", "sh", "arg"],
+                marker(1),
+            )
+        };
+        let out = program
+            .env("KEPT", "kept")
+            .keep_responsibility(why)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{why:?}: {out:?}");
+        assert_eq!(out.stdout, b"step\narg kept\n", "{why:?}");
+        assert_eq!(
+            program.spawn().unwrap_err().to_string(),
+            "a Program starts its program once"
+        );
+        let shown = format!("{program:?}");
+        assert!(shown.contains(&format!("kept: Some({why:?})")), "{shown}");
+    }
+    let shown = format!("{:?}", Program::new("/bin/true", [""; 0]));
+    assert!(shown.contains("kept: None"), "{shown}");
 }
 
 /// Catches: a program started twice from one [`Program`] (on macOS the second start would
