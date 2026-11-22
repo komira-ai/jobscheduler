@@ -228,14 +228,14 @@ fn an_entry_that_cannot_be_unlocked_is_named_and_the_rest_goes() {
             "{}: the flags cannot be cleared",
             hash.join("C/frozen").display()
         )),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert!(
         why.contains(&format!(
             "{}: Permission denied (os error 13); stripping its ACL: the ACL cannot be stripped",
             hash.join("C/denied").display()
         )),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert_eq!(names(&hash.join("C")), ["denied", "frozen"]);
     assert!(names(&hash.join("0")).is_empty());
@@ -283,7 +283,7 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
     ] {
         assert!(
             why.starts_with(&format!("{}: ", folders.display())),
-            "{why}"
+            "the error does not say what the test expects"
         );
     }
     fs::remove_file(&folders).unwrap();
@@ -300,7 +300,7 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
     let why = empty(&folders, me(), &os).unwrap_err().to_string();
     assert!(
         why.contains("T/frozen: the flags cannot be cleared"),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert_emptied(&second);
 }
@@ -329,8 +329,11 @@ fn only_a_sealed_or_pinned_system_item_is_kept_in_a_folder() {
     os.seal("vault");
 
     // Not pinned yet: the trust daemon's folder is removed like anything else.
-    let why = empty(&folders, me(), &os).unwrap_err().to_string();
-    assert!(names(&hash.join("T")).is_empty(), "{why}");
+    empty(&folders, me(), &os).unwrap_err();
+    assert!(
+        names(&hash.join("T")).is_empty(),
+        "the error does not say what the test expects"
+    );
     fs::create_dir_all(hash.join("T/com.apple.trustd/sub")).unwrap();
     fs::write(hash.join("T/com.apple.trustd/cache"), "x").unwrap();
     fs::create_dir_all(hash.join("C/com.apple.trustd")).unwrap();
@@ -356,11 +359,17 @@ fn only_a_sealed_or_pinned_system_item_is_kept_in_a_folder() {
     ] {
         assert!(
             why.contains(&hash.join(refused).display().to_string()),
-            "{why}"
+            "the error does not say what the test expects"
         );
     }
-    assert!(!why.contains("0/com.apple"), "{why}");
-    assert!(!why.contains("T/com.apple"), "{why}");
+    assert!(
+        !why.contains("0/com.apple"),
+        "the error does not say what the test expects"
+    );
+    assert!(
+        !why.contains("T/com.apple"),
+        "the error does not say what the test expects"
+    );
     assert_eq!(names(&hash.join("0/com.apple.LaunchServices.dv")), ["db"]);
     assert_eq!(names(&hash.join("T")), ["com.apple.trustd"]);
     assert!(names(&hash.join("T/com.apple.trustd")).is_empty());
@@ -376,4 +385,19 @@ fn only_a_sealed_or_pinned_system_item_is_kept_in_a_folder() {
     );
     let unsealed = left(&folders, me(), &System).unwrap();
     assert!(unsealed.contains(&hash.join("0/com.apple.LaunchServices.dv")));
+}
+
+/// Asserts that a pinned system item that is a file, not a folder, stays as it is and counts
+/// for nothing: there is nothing in it to empty, and macOS refuses its removal.
+#[test]
+fn a_pinned_system_item_that_is_a_file_stays_and_counts_for_nothing() {
+    let dir = scratch("pinned-file");
+    let folders = dir.join("folders");
+    let hash = folder(&folders, "ab", "hash");
+    fs::write(hash.join("T/com.apple.trustd"), "x").unwrap();
+    let os = FakeOs::new();
+    os.pin("com.apple.trustd");
+    empty(&folders, me(), &os).unwrap();
+    assert_eq!(names(&hash.join("T")), ["com.apple.trustd"]);
+    assert!(left(&folders, me(), &os).unwrap().is_empty());
 }
