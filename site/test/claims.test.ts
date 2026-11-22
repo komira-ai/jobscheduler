@@ -86,7 +86,7 @@ const ROWS: readonly Row[] = [
   ['concepts', 'and not a supported mode', 'crates/js-sched/src/lib.rs', 'it is not a supported mode'],
   ['concepts', '<td>Memory</td><td><code>round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))</code>,', 'crates/js-sizing/src/lib.rs', '`round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))`'],
   ['concepts', 'and at least 1 GiB</td>', 'crates/js-sizing/src/lib.rs', 'at least 1 GiB'],
-  ['concepts', '<td>CPU</td><td><code>round_up_250m(P90(cpu_usage / wall))</code>, clamped to 250 m and the node\'s cores', 'crates/js-sizing/src/lib.rs', '`round_up_250m(P90(cpu_usage / wall))`, clamped to `[250 m, node cpus]`'],
+  ['concepts', '<td>CPU</td><td><code>round_up_250m(P90(sample))</code>, clamped to 250 m and the node\'s cores', 'crates/js-sizing/src/lib.rs', '`round_up_250m(P90(sample))`, clamped to `[250 m, node cpus]`'],
   ['concepts', 'A booking at or above the memory of the largest matching live node owns the host: the estimate never reaches a whole host, and the caller books cold instead.', 'crates/js-sizing/src/lib.rs', 'A booking at or above the memory of the largest matching live node ([`Bounds::host_memory`]) owns the host'],
   ['concepts', '<code>--placement</code> is deprecated and does nothing.', 'crates/js-lease-server/src/lib.rs', '`--placement js-sched` | deprecated, and does nothing'],
   ['concepts', '<strong>Where it stops.</strong> <code>js-lease-server</code> places every job with <code>js-sched</code>, the only placement;', 'crates/js-lease-server/src/lib.rs', '`js-sched` is the only placement'],
