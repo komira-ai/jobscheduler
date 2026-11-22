@@ -181,6 +181,106 @@ fn a_mac_agent_advertises_its_native_network_ceiling() {
     }
 }
 
+/// Asserts the provider flags through the whole macOS agent: given `--mount-provider`,
+/// `--mount-provider-user` naming a user of the directory service (`nobody`, on every Mac) and
+/// `--mount-provider-wait`, the agent starts and its hello reports `mount-provider.tierstore`
+/// beside `layered-rootfs`; without them it reports no provider; a user the directory service
+/// does not know ends the agent with status 2 before anything is sent, naming the flag; and
+/// `--no-jobs` refuses each of the three flags by name. Catches a Mac agent that drops the
+/// flags, one never placed a provider's job, a provider's socket judged against root for a
+/// name the agent could not look up, and a no-job agent that silently ignores the flags.
+#[test]
+fn a_mac_agent_takes_the_provider_flags_and_reports_the_provider() {
+    let dir = Scratch::new("native-agent-providers");
+    let fake = FakeHelper::start(&dir);
+    let socket = dir.path("provider").join("provider.sock");
+    fs::create_dir(dir.path("provider")).unwrap();
+    let provider = format!("tierstore={}", socket.display());
+    let with = |user: &str| {
+        let mut extra = native_flags(&dir, &fake);
+        extra.extend(
+            [
+                "--mount-provider",
+                &provider,
+                "--mount-provider-user",
+                &format!("tierstore={user}"),
+                "--mount-provider-wait",
+                "60",
+            ]
+            .map(str::to_owned),
+        );
+        extra
+    };
+    let (ran, hello) = hello_on(&mac_host(), &with("nobody"), welcome(1));
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(hello["capabilities"]["mount-provider.tierstore"], "true");
+    assert_eq!(hello["capabilities"]["layered-rootfs"], "true");
+
+    let bare = Scratch::new("native-agent-providers-none");
+    let bare_fake = FakeHelper::start(&bare);
+    let (ran, hello) = hello_on(&mac_host(), &native_flags(&bare, &bare_fake), welcome(1));
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    let keys = hello["capabilities"].as_object().unwrap();
+    assert!(
+        !keys.keys().any(|key| key.starts_with("mount-provider.")),
+        "{hello}"
+    );
+
+    let other = Scratch::new("native-agent-providers-unknown");
+    let other_fake = FakeHelper::start(&other);
+    let mut extra = native_flags(&other, &other_fake);
+    extra.extend(
+        [
+            "--mount-provider",
+            &provider,
+            "--mount-provider-user",
+            "tierstore=_js-no-such-user",
+        ]
+        .map(str::to_owned),
+    );
+    let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    // The harness's host has no `df`, so a warning about the disk comes first; the last line
+    // is the agent's reason for ending.
+    assert_eq!(
+        ran.err.lines().last(),
+        Some(
+            "js-agent: --mount-provider-user tierstore: no user \"_js-no-such-user\" in the \
+             directory service"
+        ),
+        "{}",
+        ran.err
+    );
+    assert_eq!(hello, Value::Null);
+
+    for (flag, value) in [
+        ("--mount-provider", provider.as_str()),
+        ("--mount-provider-user", "tierstore=nobody"),
+        ("--mount-provider-wait", "60"),
+    ] {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
+}
+
 /// Asserts that an agent whose helper does not answer ends with status 2 before it says
 /// hello, naming the flag. It catches an agent that registers as a native host with no way
 /// to run a job.

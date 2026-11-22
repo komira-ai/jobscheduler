@@ -12,24 +12,31 @@
 //!    port (`host-port-remap-unsupported-here`: a native job shares the host's loopback), a
 //!    mount target that is `/work` itself, outside `/work`, or below another mount's target
 //!    (`mount-target-unsupported-here`: a link cannot replace the working directory, and a
-//!    link made below another would be made inside the host's directory), and more mounts than
-//!    the profile lists (`too-many-inputs-here`). A host port whose two numbers are equal is
+//!    link made below another would be made inside the host's directory), a provider's tree
+//!    mounted other than read-only (`input-not-allowed`: every job that names the tree is given
+//!    the one directory the provider wrote, [`crate::native_fs`]), and more mounts than the
+//!    profile lists (`too-many-inputs-here`). A host port whose two numbers are equal is
 //!    not refused here: it falls through to the lifecycle's host-port admission, which refuses
 //!    it `input-not-allowed` because a native runtime offers no host port.
 //! 2. [`resolve`], when the start waits for its file system: each host path (with its
 //!    `sub_path`) is resolved with `canonicalize`, which is a metadata lookup and is answered
 //!    at once (`Ready`), and its canonical path must be a directory (`input-unavailable`
 //!    when it is missing or is not one) beneath a root of the agent that the mount's mode
-//!    allows (`input-not-allowed`). The lifecycle's own check of the same rule reads the
+//!    allows (`input-not-allowed`), on a local volume (`input-not-allowed`, `statfs`'s
+//!    `MNT_LOCAL`). A read-write mount's directory that is missing is taken when the deepest
+//!    part of it that is there lies beneath a writable root: the rest is made at the start
+//!    ([`crate::native_fs::Missing`]). The lifecycle's own check of the same rule reads the
 //!    text of the path only, so a link inside a root that leads out is caught here. The
 //!    plans are kept by run id until [`NativeRuntime::create_and_start`] takes them, or
 //!    [`discard`] drops them.
 //! 3. [`link_all`], in the start, after `exec/` is made and before the working directory is
-//!    opened: the parent directories of each link are made as the run's user's, the link is
-//!    made and given to the user. A name that is there already fails the start.
+//!    opened: a read-write mount's missing directories are made (the last the run user's),
+//!    the parent directories of each link are made as the run's user's, the link is made and
+//!    given to the user. A name that is there already fails the start.
 //!
-//! No provider reaches a Mac (an agent on a Mac is given none, and admission refuses a start
-//! that names one), so a mount here is always a host path.
+//! A provider's tree (`--mount-provider`) reaches this runtime as a host path: the lifecycle
+//! asks the provider for it and puts the directory the provider answered in the mount's
+//! source before it asks [`resolve`] again, so the directory is held to the same rules.
 //!
 //! [`NativeRuntime::create_and_start`]: super::NativeRuntime
 
@@ -44,6 +51,29 @@ use js_mac_pool::seatbelt::{AbsPath, MAX_LISTED, MountGrant};
 
 use super::files::{HandOver, MakeDir, make_parents};
 use crate::lifecycle::{FsPrepared, JobFs, MountRoots, NativeRefusal};
+use crate::native_fs::{self, Missing, Volume};
+
+/// `statfs`'s flag of a local volume (`MNT_LOCAL` of `<sys/mount.h>`).
+const MNT_LOCAL: u32 = 0x0000_1000;
+
+/// The volume `path` is on, as `statfs` reads it: its type and whether it is local.
+///
+/// # Errors
+///
+/// `statfs` failed.
+pub fn volume_of(path: &Path) -> io::Result<Volume> {
+    let found = rustix::fs::statfs(path)?;
+    let name: Vec<u8> = found
+        .f_fstypename
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| byte.to_ne_bytes()[0])
+        .collect();
+    Ok(Volume {
+        fs_type: String::from_utf8_lossy(&name).into_owned(),
+        local: found.f_flags & MNT_LOCAL != 0,
+    })
+}
 
 /// The directory a mount's target lies below: the run's working directory, `exec/`.
 const WORK: &str = "/work/";
@@ -83,6 +113,9 @@ pub(super) struct MountPlan {
     pub(super) write: bool,
     /// Nothing below it may be run or mapped executable.
     pub(super) no_exec: bool,
+    /// The directories of a read-write mount that are not there yet, and the root they are
+    /// made below: [`link_all`] makes them.
+    pub(super) missing: Option<(Missing, PathBuf)>,
 }
 
 /// The plans of the runs whose file system was resolved and whose start has not taken them,
@@ -94,8 +127,8 @@ fn refuse(code: &'static str, why: String) -> NativeRefusal {
 }
 
 /// What a Mac cannot give a job start (see the module documentation), in the order: layers,
-/// a remapped host port, then each mount (copy-on-write, then target), nested targets, and
-/// the count.
+/// a remapped host port, then each mount (copy-on-write, then target, then a provider's tree
+/// other than read-only), nested targets, and the count.
 pub(super) fn check(fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
     if !fs.layers.is_empty() {
         return Err(refuse(
@@ -128,6 +161,7 @@ pub(super) fn check(fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRef
             ));
         }
         plan_target(&mount.target)?;
+        native_fs::check_provider_mode(mount)?;
     }
     nested(&fs.mounts)?;
     if fs.mounts.len() > MAX_LISTED {
@@ -212,31 +246,42 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
     let MountSource::HostPath { path } = &mount.source else {
         return Err(refuse(
             refusal::INPUT_NOT_ALLOWED,
-            format!("{}: a Mac is given no mount provider", mount.target),
+            format!(
+                "{}: a provider's tree is looked up once the provider has answered its directory",
+                mount.target
+            ),
         ));
     };
     let wanted = match mount.sub_path.as_deref() {
         Some(sub) if !sub.is_empty() => Path::new(path).join(sub),
         _ => PathBuf::from(path),
     };
-    let host = fs::canonicalize(&wanted).map_err(|why| {
+    let write = mount.mode == MountMode::ReadWrite;
+    let unavailable = |why: io::Error| {
         refuse(
             refusal::INPUT_UNAVAILABLE,
             format!("{}: {why}", wanted.display()),
         )
-    })?;
-    if !host.is_dir() {
+    };
+    let (host, missing) = match fs::canonicalize(&wanted) {
+        Ok(host) => (host, None),
+        Err(why) if write && why.kind() == io::ErrorKind::NotFound => {
+            let missing = Missing::find(&wanted).map_err(unavailable)?;
+            (missing.path(), Some(missing))
+        }
+        Err(why) => return Err(unavailable(why)),
+    };
+    if missing.is_none() && !host.is_dir() {
         return Err(refuse(
             refusal::INPUT_UNAVAILABLE,
             format!("{}: not a directory", host.display()),
         ));
     }
-    let write = mount.mode == MountMode::ReadWrite;
     let beneath = roots
         .iter()
         .filter(|root| host.starts_with(&root.path))
         .max_by_key(|root| root.path.components().count());
-    match beneath {
+    let root = match beneath {
         None => {
             return Err(refuse(
                 refusal::INPUT_NOT_ALLOWED,
@@ -256,8 +301,24 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
                 ),
             ));
         }
-        Some(_) => {}
+        Some(root) => root,
+    };
+    // What is there of the source: the directory (beneath the root, as found above), or the
+    // deepest part of a missing one, which must lie beneath the root too: the root itself is
+    // never made, so only a missing directory can fail this.
+    let there = missing.as_ref().map_or(host.as_path(), Missing::base);
+    if !there.starts_with(&root.path) {
+        return Err(refuse(
+            refusal::INPUT_UNAVAILABLE,
+            format!(
+                "{}: the root {} is not there",
+                wanted.display(),
+                root.path.display()
+            ),
+        ));
     }
+    native_fs::local_source(there, &volume_of)?;
+    let missing = missing.map(|missing| (missing, root.path.clone()));
     let host = AbsPath::new(&host)
         .map_err(|why| refuse(refusal::INVALID_MOUNT, format!("{}: {why}", host.display())))?;
     Ok(MountPlan {
@@ -265,11 +326,14 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         host,
         write,
         no_exec: mount.no_exec,
+        missing,
     })
 }
 
-/// Makes the link of each plan below `exec`, given to `uid`: the missing directories above it
-/// are made by `make` (as the user's), then the link, then `chown` of the link itself.
+/// Makes the link of each plan below `exec`, given to `uid`: a read-write mount's missing
+/// directories first (below its root, given away by `chown`), then the missing directories
+/// above the link, made by `make` (as the user's), then the link, then `chown` of the link
+/// itself.
 ///
 /// # Errors
 ///
@@ -286,6 +350,9 @@ pub(super) fn link_all(
         let named = |why: io::Error| {
             io::Error::new(why.kind(), format!("{WORK}{}: {why}", plan.rest.display()))
         };
+        if let Some((missing, root)) = &plan.missing {
+            missing.make(root, uid, &**chown).map_err(named)?;
+        }
         let above = plan.rest.parent().unwrap_or(Path::new(""));
         make_parents(exec, above, make).map_err(named)?;
         let link = exec.join(&plan.rest);
@@ -347,6 +414,7 @@ mod tests {
             host: AbsPath::parse(host).unwrap(),
             write: false,
             no_exec: true,
+            missing: None,
         }
     }
 

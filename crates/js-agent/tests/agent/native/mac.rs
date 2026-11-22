@@ -272,3 +272,68 @@ fn the_job_environment_steers_no_shell_because_there_is_none() {
         marker.display()
     );
 }
+
+/// Asserts the kbf shape on a Mac under the real profile: a provider's tree (the directory
+/// the provider answered, below a read-only root that every run is denied) is read through
+/// its link `exec/.kbf-tree`, a write there is refused by the profile though the file modes
+/// would allow it, and the put directory `cas/b/<build>/<nonce>`, not there at the lookup,
+/// is made at the start below the writable root and written through `exec/.kbf-out`. It
+/// catches a mount the profile hides from the job, a tree a job can write, and a put
+/// directory the job cannot write.
+#[test]
+fn a_job_reads_a_providers_tree_and_writes_its_put_directory_under_the_real_profile() {
+    use js_agent::lifecycle::{FsPrepared, JobFs};
+    use js_agent::native::MountRoot;
+    use js_agent_wire::{JobMount, MountMode, MountSource, Propagation};
+
+    let mut rig = Rig::in_dir("mac-tree-put", |config, dir| {
+        for (name, read_only) in [("trees", true), ("put", false)] {
+            let root = denied(dir, name);
+            config.mount_roots.push(MountRoot {
+                path: root.as_str().into(),
+                read_only,
+            });
+            config.read_denies.push(root);
+        }
+    });
+    rig.fake.real_runs();
+    let trees = fs::canonicalize(rig.dir.path("trees")).unwrap();
+    let put = fs::canonicalize(rig.dir.path("put")).unwrap();
+    let tree = trees.join("ab");
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("data.txt"), "tree bytes\n").unwrap();
+    let nonce = put.join("cas/b/build/nonce");
+    let mount = |path: &std::path::Path, target: &str, mode| JobMount {
+        source: MountSource::HostPath {
+            path: path.display().to_string(),
+        },
+        target: target.to_owned(),
+        mode,
+        sub_path: None,
+        no_exec: true,
+        propagation: Propagation::Private,
+    };
+    let fs_of = JobFs {
+        layers: Vec::new(),
+        mounts: vec![
+            mount(&tree, "/work/.kbf-tree", MountMode::ReadOnly),
+            mount(&nonce, "/work/.kbf-out", MountMode::ReadWrite),
+        ],
+    };
+    assert_eq!(rig.rt.check_job_fs(&fs_of, &[]), Ok(()));
+    assert_eq!(rig.rt.resolve_fs("r1", "", &fs_of, 0), FsPrepared::Ready);
+    let script = "cat .kbf-tree/data.txt; \
+                  if echo x > .kbf-tree/new 2>/dev/null; then echo wrote-the-tree; \
+                  else echo the tree is read-only; fi; \
+                  echo written > .kbf-out/out.txt";
+    let spec = rig.spec("r1", super::native("/bin/sh", &["-c", script]));
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    assert_eq!(rig.settle(&id), exited(0));
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "tree bytes\nthe tree is read-only\n");
+    assert!(!tree.join("new").exists(), "the job wrote the tree");
+    assert_eq!(
+        fs::read_to_string(nonce.join("out.txt")).unwrap(),
+        "written\n"
+    );
+}

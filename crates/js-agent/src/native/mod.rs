@@ -178,7 +178,7 @@ use crate::logs::{LiveLogs, RunLogs};
 pub use crate::leak_scan::NativeChecks;
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
-pub use mounts::{MountRoot, roots_of};
+pub use mounts::{MountRoot, roots_of, volume_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use profile::{profile_argv, self_test};
