@@ -338,8 +338,8 @@ pub mod in_place;
 pub mod integrity;
 mod jobs;
 pub mod leak_scan;
-pub mod linux_vm;
 pub mod lifecycle;
+pub mod linux_vm;
 mod login;
 pub mod logs;
 #[cfg(target_os = "macos")]
