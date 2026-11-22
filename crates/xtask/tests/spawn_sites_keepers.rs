@@ -195,6 +195,8 @@ fn only_the_two_starts_of_the_supervisor_may_keep() {
     assert_eq!(
         KEEPERS,
         [
+            // Proof branch only: the development verb is the third keeper here.
+            "crates/js-agent/src/dev_exec.rs",
             format!("{supervisor}/launch.rs").as_str(),
             format!("{supervisor}/run.rs").as_str(),
         ]
