@@ -100,10 +100,10 @@ fn a_uid_whose_record_is_gone_is_ended_without_asking_launchd() {
 fn a_record_that_cannot_be_looked_up_before_the_kill_holds_the_account() {
     let (rig, pool, account) = lent("no-lookup");
     rig.fake.fail("in_directory kbf-acct-1");
-    let held = held(pool.retire(account));
-    assert_eq!(held.step, Step::Kill);
+    let by_name = held(pool.retire(account));
+    assert_eq!(by_name.step, Step::Kill);
     assert_eq!(
-        held.why,
+        by_name.why,
         format!(
             "looking up the record kbf-acct-1 before ending uid {}'s processes: \
              in_directory kbf-acct-1 failed",
@@ -116,9 +116,10 @@ fn a_record_that_cannot_be_looked_up_before_the_kill_holds_the_account() {
     let (rig, pool, account) = lent_on(rig.next("no-uid-lookup", 4, 0));
     let u = me();
     rig.fake.fail(&format!("uid_in_directory {u}"));
-    let held = held(pool.retire(account));
+    let by_uid = held(pool.retire(account));
+    assert_eq!(by_uid.step, Step::Kill);
     assert_eq!(
-        held.why,
+        by_uid.why,
         format!(
             "looking up the record kbf-acct-1 before ending uid {u}'s processes: \
              uid_in_directory {u} failed"
