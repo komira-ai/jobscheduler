@@ -409,8 +409,8 @@ fn a_job_reads_its_own_tree_and_nothing_else_below_the_trees_root() {
         });
         let root = fs::canonicalize(rig.dir.path("trees")).unwrap();
         let (own, other) = (
-            root.join("mount-provider/aa/r1/0"),
-            root.join("mount-provider/aa/r2/0"),
+            root.join("mount-provider/aa/6a732e7231/0"),
+            root.join("mount-provider/aa/6a732e7232/0"),
         );
         for (tree, text) in [(&own, "tree one\n"), (&other, "tree two\n")] {
             fs::create_dir_all(tree).unwrap();

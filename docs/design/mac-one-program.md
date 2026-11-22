@@ -131,7 +131,7 @@ launchd ─ js-agent __supervise-native ... (root)  own process group; parent la
 
 **Supervisors of different releases.** A supervisor speaks to agents only through files (the exit record and the `supervisor` file) and signals. The record is versioned and later forms only add to it, so the next release's agent can adopt this release's supervisors. That is the Linux rule too.
 
-**Privacy attribution.** `docs/design/spawn-disclaim.md` has the rule and the table of which start keeps the responsibility. Today the helper still starts every native job (`crates/js-mac-session/src/spawn.rs`), disclaimed, and it holds no grant, so a job it starts holds none. The rule below is what holds once the supervisor lands.
+**Privacy attribution.** `docs/design/spawn-disclaim.md` has the rule and the table of which start keeps the responsibility. The native runtime starts every native job through the supervisor (section 13), and the rule below is the one in force.
 
 - `js-agent` holds Full Disk Access, by the privacy profile `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig`, which device management installs. The helper holds none.
 - The agent starts the supervisor without the disclaim, and the supervisor starts the job without the disclaim. Both keep the responsibility, so they answer for the agent and hold what the agent holds, Full Disk Access included. Every process between the agent and the job is started so. A job's own children (compilers, shells, `buck2`) follow their parent and answer for the agent too.

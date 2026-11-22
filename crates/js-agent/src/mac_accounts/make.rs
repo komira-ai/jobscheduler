@@ -58,9 +58,21 @@ impl Pool {
         if let Some(n) = self.ledger().holding(uid) {
             return Some(format!("held by {}", name(n)));
         }
-        match self.host.uid_taken(uid) {
+        // The directory node decides whether a record has the uid, as the proof that an
+        // account is gone does: right after a retirement the system's lookup cache may still
+        // answer for the deleted record, which is only logged. A lookup that fails still
+        // cannot tell, and the slot is passed over.
+        match self.host.uid_in_directory(uid) {
             Err(why) => return Some(format!("looking up its record: {why}")),
             Ok(true) => return Some("a user record has it".to_owned()),
+            Ok(false) => {}
+        }
+        match self.host.uid_taken(uid) {
+            Err(why) => return Some(format!("looking up its record: {why}")),
+            Ok(true) => tracing::info!(
+                uid,
+                "the directory has no record of the uid; a lookup still answers from its cache"
+            ),
             Ok(false) => {}
         }
         match self.host.guid_taken(&generated_uid(uid)) {

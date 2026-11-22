@@ -881,7 +881,7 @@ The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever
   that no `--mount-root` names, no other mount root lies above or below it, and a `--mount-provider` is given (`crates/js-agent/src/native_fs.rs`, `trees_root`). A
   mount whose directory is below it, as named or once resolved, is a tree of the run; the set is refused at the lookup
   (`input-not-allowed`, naming the path) when a tree is the root itself, resolves outside it (`..`, a link), is
-  `READ_WRITE` or lacks `no_exec`, or a mount's directory holds the root (`tree_rules`). A tree gets no `GR_i`: the
+  `READ_WRITE` or lacks `no_exec`, is not a tree the provider answered for this run (`<root>/mount-provider/<provider>/<run>/<index>`, the run the hex of `js.<run id>`: a job cannot name another run's tree as a host path), or a mount's directory holds the root (`tree_rules`). With a trees root every run's profile carries the root's rules, with no tree when the run mounts none. A tree gets no `GR_i`: the
   profile denies reads below the root (`MOUNT`), then grants each tree's reads (`MT_i`) and the metadata of its
   ancestors (js-mac-pool `MountTrees`), so a run reads its own trees and cannot read or list another run's or the root.
   The builder renders these rules before the read denies, so the trees root is the one mount root left out of
@@ -1112,7 +1112,7 @@ every other refusal to `AgentRefused`, with the code. A result with `input_failu
   agent that reports `layered-rootfs`.
 - **The agent's files.** The ledger sidecar does not change (4.6). The list of a run's mounts is a new file in a new
   directory, `<mounts>`, that no earlier release reads or sweeps; 4.6 says what a rollback leaves.
-- **macOS.** A mount root becomes a read deny of every run (5.4). A job that read a tool under a mount root without
+- **macOS.** A mount root but the trees root becomes a read deny of every run (5.4). A job that read a tool under a mount root without
   mounting it no longer can; the operator keeps such tools outside the roots.
 - **The tree wire** is retired additively (section 6); only the never-reported capability key is removed.
 - **Kernel.** Linux 5.12 for `mount_setattr` (`openat2` needs 5.6, `open_tree` and `move_mount` 5.2); `layered-rootfs`
