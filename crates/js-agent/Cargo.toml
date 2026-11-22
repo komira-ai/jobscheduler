@@ -89,6 +89,20 @@ ureq.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 js-contain = { path = "../js-contain" }
 
+# OpenDirectory's local node, where the accounts of native Mac jobs are made and deleted
+# (src/mac_accounts/macos).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSArray", "NSDictionary", "NSError", "NSString"] }
+objc2-open-directory = { workspace = true, features = [
+    "CFOpenDirectory",
+    "CFOpenDirectoryConstants",
+    "ODNode",
+    "ODQuery",
+    "ODRecord",
+    "ODSession",
+] }
+
 [dev-dependencies]
 # The `js join-token` verb's library entry point mints the join tokens the join round trip
 # starts agents with (tests/agent/join_round_trip.rs).
