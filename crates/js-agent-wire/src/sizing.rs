@@ -1,6 +1,6 @@
 //! Where a job's booking came from ([`StartSizing`], on [`crate::JobStartSpec::sizing`]) and
-//! how often its control group's CPU was throttled ([`CpuThrottle`], on
-//! [`crate::JobUsage::cpu_throttle`]). The agent books a job's CPU as a share of the node's
+//! the throttled share of a job's CPU periods ([`CpuThrottle::throttled_permille`]; the counts
+//! are [`crate::JobUsage::cpu_throttle`]). The agent books a job's CPU as a share of the node's
 //! cores (its lease's `cpu.weight`), never as a ceiling; both fields are there so that a run's
 //! CPU can be read for what it is: a run its host never throttled used what it wanted, and
 //! one a host throttled (an agent from before the share, which wrote `cpu.max`) used at most
@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::check;
 use crate::limits;
+use crate::per_job::CpuThrottle;
 
 /// Which history gave one dimension of a job's booking, as the server's placement recorded
 /// it. The names are those the server's placement log gives.
@@ -83,18 +84,8 @@ impl StartSizing {
     }
 }
 
-/// How often the CFS bandwidth control held a job's control group back: `nr_periods` and
-/// `nr_throttled` of the group's `cpu.stat`, read when the job ended. A group with no
-/// `cpu.max` has no bandwidth control, so both are 0: the job used every core it wanted that
-/// no other job wanted more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CpuThrottle {
-    /// The enforcement periods in which the group ran (`nr_periods`).
-    pub periods: u64,
-    /// Of those, the periods at whose end the group was throttled (`nr_throttled`).
-    pub throttled_periods: u64,
-}
-
+/// The throttled share of a job's CPU periods ([`CpuThrottle`], which the usage carries),
+/// for the agent's journal.
 impl CpuThrottle {
     /// The throttled share of the periods, in thousandths; 0 for a group with no period (no
     /// `cpu.max`).

@@ -35,6 +35,7 @@ pub(super) fn full_result() -> JobResult {
             cpu_time: Duration::from_secs(7),
             peak_memory_bytes: 4096,
             cpu_throttle: None,
+            cpu_pressure_some: None,
         }),
         logs: Some(LogLengths {
             stdout_bytes: 2_621_440,
@@ -471,6 +472,8 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_PLACED_AT,
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
+        job_tag::RESULT_CPU_THROTTLE,
+        job_tag::RESULT_CPU_PRESSURE_SOME,
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
         job_tag::RESULT_LOGS,
@@ -509,7 +512,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58]) {
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58, 60, 61, 62]) {
         before_results = without(&before_results, tag);
     }
     assert_eq!(
@@ -777,6 +780,45 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             .concat(),
             BadValue {
                 tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            t::RESULT_CPU_THROTTLE,
+            vec![0; 15],
+            BadLength {
+                tag: t::RESULT_CPU_THROTTLE,
+            },
+        ),
+        (
+            t::RESULT_CPU_THROTTLE,
+            vec![0; 17],
+            BadLength {
+                tag: t::RESULT_CPU_THROTTLE,
+            },
+        ),
+        (
+            t::RESULT_CPU_PRESSURE_SOME,
+            vec![0; 11],
+            BadLength {
+                tag: t::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            t::RESULT_CPU_PRESSURE_SOME,
+            vec![0; 13],
+            BadLength {
+                tag: t::RESULT_CPU_PRESSURE_SOME,
+            },
+        ),
+        (
+            t::RESULT_CPU_PRESSURE_SOME,
+            [
+                0u64.to_be_bytes().to_vec(),
+                1_000_000_000u32.to_be_bytes().to_vec(),
+            ]
+            .concat(),
+            BadValue {
+                tag: t::RESULT_CPU_PRESSURE_SOME,
             },
         ),
         (

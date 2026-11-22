@@ -32,7 +32,7 @@ use crate::network;
 use crate::refusal;
 use crate::rootfs::{self, HostPort, JobMount, Layer};
 use crate::run::RunSpec;
-use crate::sizing::{CpuThrottle, StartSizing};
+use crate::sizing::StartSizing;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
@@ -447,8 +447,10 @@ pub struct JobResult {
 }
 
 /// What one job used while it ran, as its host read it from the job's control group once it
-/// ended. Both required numbers are measured; an agent that cannot read one of them sends no
-/// [`JobUsage`] at all, so a zero is a measured zero and never an unknown.
+/// ended. The first two numbers are measured; an agent that cannot read one of them sends no
+/// [`JobUsage`] at all, so a zero is a measured zero and never an unknown. The two that
+/// follow are optional: each is absent for an agent from before it and when the agent could
+/// not read that counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
     /// The most memory the job's group held at once, in bytes (`memory.peak`).
@@ -456,17 +458,30 @@ pub struct JobUsage {
     /// The CPU time the job's group used, in microseconds (`usage_usec` of `cpu.stat`), the
     /// unit of `cpu_usage_usec` in [`crate::LoadReport`].
     pub cpu_usage_usec: u64,
-    /// How often the group's CPU was throttled ([`CpuThrottle`]), when the agent could read
-    /// it; absent otherwise, and left out of the text. An agent from before the field sends
-    /// none: its jobs' groups had a `cpu.max` of their booking, so a run without it may have
-    /// been held to what it booked. A server from before the field ignores it. A value that
-    /// does not decode reads as absent and leaves the rest of the usage as sent.
+    /// The job group's CPU throttle counters when it ended ([`CpuThrottle`]). Absent for an
+    /// agent from before the field and when the counters could not be read; a value that does
+    /// not decode reads as absent and leaves the rest of the usage intact.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "log_sink::lenient"
     )]
     pub cpu_throttle: Option<CpuThrottle>,
+    /// The time, in microseconds, some task of the job's group waited for a CPU (the `some`
+    /// total of the group's `cpu.pressure`). Absent for an agent from before the field and
+    /// when the counter could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_pressure_some_usec: Option<u64>,
+}
+
+/// The CPU throttle counters of a job's group: `nr_periods` and `nr_throttled` of its
+/// `cpu.stat` when it ended. `periods` 0 means the group had no `cpu.max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuThrottle {
+    /// The scheduling periods the group lived through (`nr_periods`).
+    pub periods: u64,
+    /// The periods among them in which the group was throttled (`nr_throttled`).
+    pub throttled_periods: u64,
 }
 
 impl JobResult {

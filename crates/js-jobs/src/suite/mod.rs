@@ -745,6 +745,7 @@ pub(crate) fn output() -> Output {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
             cpu_throttle: None,
+            cpu_pressure_some: None,
         }),
         logs: None,
     }

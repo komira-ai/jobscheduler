@@ -62,6 +62,16 @@ pub struct JobTiming {
     pub ended_at: StoreTime,
 }
 
+/// The CPU throttle counters of a job's control group: `nr_periods` and `nr_throttled` of its
+/// `cpu.stat` when it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuThrottle {
+    /// The scheduling periods the group lived through; 0 means the group had no `cpu.max`.
+    pub periods: u64,
+    /// The periods among them in which the group was throttled.
+    pub throttled_periods: u64,
+}
+
 /// What a job used, as the agent reported it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceUsage {
@@ -69,21 +79,12 @@ pub struct ResourceUsage {
     pub cpu_time: Duration,
     /// The most memory it held at once, in bytes.
     pub peak_memory_bytes: u64,
-    /// How often the job's CPU was held back, as the agent read it at the end. `None`: the
-    /// agent sent none, an older agent whose jobs had a `cpu.max` of their booking, so the
-    /// run's CPU may have been held to its booking.
+    /// The CPU throttle counters of its control group when it ended. `None` when the agent
+    /// did not report them (an agent from before the field, or an unreadable counter).
     pub cpu_throttle: Option<CpuThrottle>,
-}
-
-/// The CPU throttle counts of a job's group: `nr_periods` and `nr_throttled` of its
-/// `cpu.stat`, as the agent read them at the end of the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CpuThrottle {
-    /// The enforcement periods that elapsed. Zero: the group had no `cpu.max`, so the run
-    /// used what it wanted.
-    pub periods: u64,
-    /// The periods in which the group was held back.
-    pub throttled_periods: u64,
+    /// The time some task of its group waited for a CPU (the `some` total of `cpu.pressure`).
+    /// `None` when the agent did not report it.
+    pub cpu_pressure_some: Option<Duration>,
 }
 
 /// The length of each output stream of a job and the bytes of each that the host's capture
@@ -485,6 +486,7 @@ mod tests {
                 cpu_time: Duration::from_millis(1500),
                 peak_memory_bytes: 4096,
                 cpu_throttle: None,
+                cpu_pressure_some: None,
             }),
             logs: Some(LENGTHS),
         }
@@ -580,6 +582,7 @@ mod tests {
                             cpu_time: Duration::from_millis(1500),
                             peak_memory_bytes: 4096,
                             cpu_throttle: None,
+                            cpu_pressure_some: None,
                         }),
                         logs: Some(LENGTHS),
                         input_failure: None,

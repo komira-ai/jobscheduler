@@ -414,7 +414,8 @@ fn advance(
 /// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
 /// result's `usage`, what the job's control group counted, is kept as the output's resource
-/// usage; a result with none records none, never a zero.
+/// usage, with the CPU periods, the throttled periods and the CPU pressure it reports; a
+/// result with none records none, never a zero, and a counter it does not report is `None`.
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
 /// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
@@ -437,6 +438,7 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             periods: throttle.periods,
             throttled_periods: throttle.throttled_periods,
         }),
+        cpu_pressure_some: used.cpu_pressure_some_usec.map(Duration::from_micros),
     });
     let output = Output {
         stdout: tail.stdout,

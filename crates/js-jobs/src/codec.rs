@@ -126,7 +126,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`], [`RESULT_LOGS`] and the tags 60 and 61 are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -157,6 +157,13 @@ pub(crate) mod job_tag {
     /// in place of [`FILES`], so a row with it holds no contents. A row a build before this
     /// field rewrote holds it beside an empty [`FILES`].
     pub const FILE_DIGESTS: u16 = 44;
+    /// The CPU throttle counters of the job's control group (16 bytes: the periods, then the
+    /// throttled periods, each a u64), written beside [`RESULT_USAGE`] when the agent
+    /// reported them. Read only beside [`RESULT_USAGE`].
+    pub const RESULT_CPU_THROTTLE: u16 = 60;
+    /// The time some task of the group waited for a CPU (time), written beside
+    /// [`RESULT_USAGE`] when the agent reported it. Read only beside [`RESULT_USAGE`].
+    pub const RESULT_CPU_PRESSURE_SOME: u16 = 61;
 }
 
 /// The tags of an allocation row (tags 14 to 16 are in `whole_fields`).

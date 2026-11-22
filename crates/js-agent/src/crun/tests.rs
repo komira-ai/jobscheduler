@@ -827,6 +827,7 @@ fn a_leases_usage_is_both_counters_or_none() {
             peak_memory_bytes: 3_221_225_472,
             cpu_usage_usec: 4_500_000,
             cpu_throttle: None,
+            cpu_pressure_some_usec: None,
         })
     );
     fs::write(dir.join("memory.peak"), "max\n").expect("peak");
@@ -835,7 +836,8 @@ fn a_leases_usage_is_both_counters_or_none() {
     assert_eq!(usage_of(&fixture.lease()), None);
 }
 
-/// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both:
+/// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both, and
+/// the `some` total of its `cpu.pressure` when it holds one:
 /// `nr_periods` and `nr_throttled` as they are (a group with no `cpu.max` counts 0 of each,
 /// a capped one counts its periods), and none when either is missing. Catches the counts
 /// left out, read from each other's line, or a missing count sent as a zero (which would
@@ -865,4 +867,18 @@ fn a_leases_usage_carries_its_throttle_counts_when_both_are_there() {
     );
     assert_eq!(throttle("usage_usec 9\nnr_periods 5597\n"), None);
     assert_eq!(throttle("usage_usec 9\nnr_throttled 5585\n"), None);
+    let pressure = || {
+        usage_of(&fixture.lease())
+            .expect("a usage")
+            .cpu_pressure_some_usec
+    };
+    assert_eq!(pressure(), None, "no cpu.pressure: unknown, not 0");
+    let psi = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1250000\n\
+               full avg10=0.00 avg60=0.00 avg300=0.00 total=7\n";
+    fs::write(dir.join("cpu.pressure"), psi).expect("pressure");
+    assert_eq!(
+        pressure(),
+        Some(1_250_000),
+        "the some total, not the full one"
+    );
 }

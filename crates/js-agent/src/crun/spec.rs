@@ -275,7 +275,9 @@ pub(super) fn end_of(
 /// is removed: `memory.peak` and `usage_usec` of `cpu.stat`, read by js-contain. `None` when
 /// either is not readable (cgroup version 1, a kernel without `memory.peak`, a group that is
 /// gone): an unknown is never a zero. With them, the throttle counts of `cpu.stat`
-/// (`nr_periods`, `nr_throttled`) when both are there, and `None` for them otherwise.
+/// (`nr_periods`, `nr_throttled`) when both are there, and the `some` total of `cpu.pressure`
+/// when it is; `None` for each otherwise. A lease of this agent has no `cpu.max`, so its counts
+/// are 0 periods, 0 throttled.
 pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
     let counted = NumaSample::default().finish(cgroup.dir());
     let cpu_throttle = counted.cpu_periods.zip(counted.cpu_throttled_periods).map(
@@ -288,6 +290,7 @@ pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
         peak_memory_bytes: counted.memory_peak_bytes?,
         cpu_usage_usec: counted.cpu_usage_micros?,
         cpu_throttle,
+        cpu_pressure_some_usec: counted.cpu_pressure_some_micros,
     })
 }
 
