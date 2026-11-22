@@ -91,7 +91,8 @@ pub const SPAWNER: &str = "crates/js-mac-session/src/disclaim.rs";
 /// The files, from the repository root, that may keep a program's responsibility
 /// (`Program::keep_responsibility`, `disclaim::Kept`): the agent's start of a native job's
 /// supervisor (`Kept::Supervisor`), and the supervisor's start of the job (`Kept::Job`).
-pub const KEEPERS: [&str; 2] = [
+pub const KEEPERS: [&str; 3] = [
+    "crates/js-agent/src/dev_exec.rs",
     "crates/js-agent/src/mac_supervisor/launch.rs",
     "crates/js-agent/src/mac_supervisor/run.rs",
 ];

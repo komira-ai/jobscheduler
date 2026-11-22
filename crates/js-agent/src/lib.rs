@@ -305,6 +305,7 @@ mod credential;
 pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
+pub mod dev_exec;
 pub mod disk;
 pub mod dispatch;
 pub mod egress;
