@@ -66,9 +66,13 @@
 //!    recorded `made` and then `lent`
 //!    (never `ready`, which another lend could take).
 //! 3. **Retired.** After the job, [`Pool::retire`]:
-//!    1. kills every process of the uid and boots out its launchd domains, until none is
-//!       left (judged by outcome, not by what a call answered); removes its crontab and `at`
-//!       jobs; kills once more;
+//!    1. kills every process of the uid and boots out its launchd domains, until no process
+//!       is left and its login domain does not print (judged by outcome, not by what a call
+//!       answered); removes its crontab and `at` jobs; kills once more. launchd is asked only
+//!       while the account's record is there, and its user domain is never printed: a print
+//!       of `user/<uid>` makes the domain again, and launchd then keeps trying to start its
+//!       per-user services for a uid with no account. Without the record the rounds judge by
+//!       the processes alone;
 //!    2. removes its System V IPC objects;
 //!    3. removes what it owns in the shared places and launchd's per-uid files;
 //!    4. deletes the record and the home, and empties every per-user folder the uid owns
@@ -82,7 +86,8 @@
 //!       passes;
 //!    5. proves it gone: no record by name or uid in the directory node it was deleted from
 //!       (a lookup through the system's cache that fails also fails the proof, one that
-//!       still answers for the record does not), no process and no domain, no home, every
+//!       still answers for the record does not), no process (launchd is not asked after
+//!       the deletion), no home, every
 //!       per-user folder of the uid emptied (the folders being there is no fault), nothing in
 //!       the shared places, no IPC object, each looked at again after the deletion (an item
 //!       that cannot be looked at does not hold);
@@ -190,7 +195,8 @@ pub struct Lent {
 pub struct Proof {
     /// No user record by the account's name and none with its uid.
     pub record: bool,
-    /// No live process of the uid, and its launchd domains read as gone.
+    /// No live process of the uid after the deletion (its launchd domains were judged by the
+    /// kill rounds, while its record was there).
     pub processes: bool,
     /// The home folder's path does not exist.
     pub home: bool,

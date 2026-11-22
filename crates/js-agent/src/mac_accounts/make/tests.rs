@@ -430,9 +430,10 @@ fn a_refill_whose_ready_cannot_be_recorded_is_named_and_deleted() {
     assert!(rig.fake.state().users.is_empty());
 }
 
-/// Asserts that the proof's launchd judgment is used for a uid that is passed over: a domain
-/// that prints holds nothing in the choice of a uid (only the records, processes and files
-/// do), so a uid whose domain prints is chosen and its deletion judges the domain.
+/// Asserts that launchd plays no part in the choice of a uid: a domain that would print
+/// does not make a uid busy (only the records, processes and files do), the uid is chosen,
+/// and the choice asks launchd nothing (a question about a uid with no account would make
+/// its user domain).
 #[test]
 fn a_domain_that_prints_does_not_make_a_uid_busy() {
     let rig = Rig::new("domain-not-busy", 1, 0);
@@ -440,8 +441,16 @@ fn a_domain_that_prints_does_not_make_a_uid_busy() {
     rig.fake
         .state()
         .print
-        .insert(format!("user/{}", me()), Print::Stays);
+        .insert(format!("gui/{}", me()), Print::Stays);
+    rig.fake.take_calls();
     assert_eq!(pool.lend("job-1").unwrap().account.uid, me());
+    let calls = rig.fake.take_calls();
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.starts_with("launchctl_print") && !call.starts_with("bootout")),
+        "{calls:?}"
+    );
 }
 
 /// Asserts that the record is made with the slot's `GeneratedUID`: the account is lent with
@@ -673,6 +682,12 @@ fn a_stray_process_of_a_free_slot_is_ended_and_the_slot_taken() {
             .filter(|c| **c == format!("kill_all {u}"))
             .count(),
         2
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.starts_with("launchctl_print") && !call.starts_with("bootout")),
+        "no account has the uid, so launchd is not asked about it: {calls:?}"
     );
     let log = rig.log.text();
     assert!(

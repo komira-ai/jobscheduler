@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use super::error::Failure;
 use super::pool::Pool;
 use super::teardown::{NAMED, remaining};
-use super::{Gone, Proof, Step, folder, ipc, launchd, tree};
+use super::{Gone, Proof, Step, folder, ipc, tree};
 
 /// The failure of the proof item `item`, with `detail`.
 fn not_gone(item: Gone, detail: impl std::fmt::Display) -> Failure {
@@ -79,7 +79,9 @@ impl Pool {
         Ok(())
     }
 
-    /// No process of `uid`, and its launchd domains gone, as the kill rounds judge them.
+    /// No process of `uid`. launchd is not asked: the record is deleted by now, and a print
+    /// of the uid's user domain would make the domain again for a uid with no account
+    /// (`teardown::Launchd`); the kill rounds judged its domains while the record was there.
     fn gone_processes(&self, uid: u32) -> Result<(), Failure> {
         let left = self.host.processes(uid).map_err(|why| {
             not_gone(
@@ -87,21 +89,11 @@ impl Pool {
                 format!("listing the processes of uid {uid}: {why}"),
             )
         })?;
-        if !left.is_empty() {
-            return Err(not_gone(
-                Gone::Processes,
-                remaining(uid, "after the account was deleted", &left),
-            ));
-        }
-        let stayed = launchd::still_printing(&*self.host, &launchd::domains(uid), &[]);
-        match stayed.is_empty() {
+        match left.is_empty() {
             true => Ok(()),
             false => Err(not_gone(
                 Gone::Processes,
-                format!(
-                    "launchd domains of uid {uid} remain after the account was deleted: {}",
-                    stayed.join(", ")
-                ),
+                remaining(uid, "after the account was deleted", &left),
             )),
         }
     }

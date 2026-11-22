@@ -13,7 +13,8 @@ use super::Account;
 pub enum Gone {
     /// No user record by the account's name, and none with its uid.
     Record,
-    /// No live process of the uid, and its launchd domains read as gone.
+    /// No live process of the uid after the deletion (launchd is not asked then: the kill
+    /// rounds judged its domains while the record was there).
     Processes,
     /// The home folder's path does not exist (`lstat` answers "no such file or directory").
     Home,

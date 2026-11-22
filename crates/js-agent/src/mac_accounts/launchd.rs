@@ -1,19 +1,32 @@
 //! The launchd domains of a uid, judged by their outcome: a `launchctl bootout` is asked for
 //! and its failure only logged; `launchctl print` is read as a domain that is there or not,
 //! and no exit status of it is matched. A domain is gone when the print exits non-zero, or
-//! exits 0 and prints a domain that holds nothing: `launchctl print user/<uid>` exits 0 for
-//! any uid (the print makes the user domain), so for a user domain "gone" is an empty one,
-//! with no service and no unmanaged process ([`holds_nothing`]).
+//! exits 0 and prints a domain that holds nothing, with no service and no unmanaged process
+//! ([`holds_nothing`]).
+//!
+//! Asking launchd is not reading it: `launchctl print user/<uid>` exits 0 for any uid because
+//! the print makes the user domain, and launchd then tries to start the domain's per-user
+//! services every few seconds, for ever when no account has the uid. So a user domain is
+//! booted out and never printed ([`printed_domains`]), and launchd is asked only about the
+//! uid of a record the pool made and has not deleted yet (`teardown::Launchd`).
 
 use std::io;
 
 use super::host::{AccountHost, PrintAnswer};
 
-/// The launchd domains of `uid` that are booted out and judged, in order: its login
-/// session's and its user domain. A uid that never logged in has no `gui` domain, and that
-/// reads as gone.
+/// The launchd domains of `uid` that are booted out, in order: its login session's and its
+/// user domain.
 pub(super) fn domains(uid: u32) -> [String; 2] {
     [format!("gui/{uid}"), format!("user/{uid}")]
+}
+
+/// The launchd domains of `uid` that are printed to judge whether they are gone: its login
+/// session's only. A uid that never logged in has no `gui` domain, and that reads as gone.
+/// Its user domain is booted out and never printed: a print of `user/<uid>` makes the
+/// domain again, and launchd then keeps trying to start its per-user services, for ever
+/// once the account is deleted. What would run in it is judged by the uid's processes.
+pub(super) fn printed_domains(uid: u32) -> [String; 1] {
+    [format!("gui/{uid}")]
 }
 
 /// Whether the text of a successful `launchctl print <domain>` is that of a domain that

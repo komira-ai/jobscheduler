@@ -6,6 +6,20 @@ use super::ledger::Record;
 use super::pool::Pool;
 use super::{KILL_ROUNDS, Proof, Step, folder, ipc, launchd, tree};
 
+/// Whether the kill rounds of a uid may ask launchd about it. Asking is not reading:
+/// `launchctl print user/<uid>` makes the user domain of any uid it names, and launchd then
+/// tries to start that domain's per-user services every few seconds, for ever when the uid
+/// has no account. So launchd is asked only about the uid of a record the pool made and has
+/// not deleted yet, and never to print a user domain ([`launchd::printed_domains`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Launchd {
+    /// The uid's record is there: its domains are booted out and its login domain printed.
+    Ask,
+    /// No record has the uid (a free slot, a record already deleted, or one never made):
+    /// launchd is not asked, and the rounds judge by the uid's processes alone.
+    Never,
+}
+
 /// How many processes a refusal names; it counts the rest.
 pub(super) const NAMED: usize = 8;
 
@@ -38,7 +52,8 @@ impl Pool {
         uid: u32,
         killed: &mut Vec<i32>,
     ) -> Result<Proof, Failure> {
-        self.end_processes(name, uid, killed)?;
+        let ask = self.launchd_for(name, uid)?;
+        self.end_processes(name, uid, killed, ask)?;
         ipc::remove(&*self.host, name, uid).map_err(|why| Failure::new(Step::Ipc, why))?;
         self.cleanup(name, uid)
     }
@@ -46,13 +61,41 @@ impl Pool {
     /// Step 1: kills every process of `uid` and boots out its launchd domains until none is
     /// left, removes its crontab and `at` jobs (so no job of the account starts after
     /// this), and does the rounds again, for a job that fired before they went.
-    fn end_processes(&self, name: &str, uid: u32, killed: &mut Vec<i32>) -> Result<(), Failure> {
-        self.kill_rounds(uid, killed)?;
+    fn end_processes(
+        &self,
+        name: &str,
+        uid: u32,
+        killed: &mut Vec<i32>,
+        ask: Launchd,
+    ) -> Result<(), Failure> {
+        self.kill_rounds(uid, killed, ask)?;
         // Removed only once nothing of the account runs: nothing races the walk.
         let schedules = tree::sweep(&self.settings.schedules, name, uid)
             .map_err(|why| Failure::new(Step::Schedules, why));
-        self.kill_rounds(uid, killed)?;
+        self.kill_rounds(uid, killed, ask)?;
         schedules.map(drop)
+    }
+
+    /// Whether launchd may be asked about `uid`, the uid of the account `name`: only while
+    /// the directory holds a record named `name` and a record with `uid` ([`Launchd`]). A
+    /// record of the name under another uid does not let `uid` be asked about.
+    ///
+    /// # Errors
+    /// The directory could not be asked: the rounds do not start, since neither answer can
+    /// be taken for granted.
+    pub(super) fn launchd_for(&self, name: &str, uid: u32) -> Result<Launchd, Failure> {
+        let held = match self.host.in_directory(name) {
+            Ok(true) => self.host.uid_in_directory(uid),
+            named => named,
+        };
+        match held {
+            Ok(true) => Ok(Launchd::Ask),
+            Ok(false) => Ok(Launchd::Never),
+            Err(why) => Err(Failure::new(
+                Step::Kill,
+                format!("looking up the record {name} before ending uid {uid}'s processes: {why}"),
+            )),
+        }
     }
 
     /// The live processes of `uid`.
@@ -65,10 +108,22 @@ impl Pool {
         })
     }
 
-    /// For at most [`KILL_ROUNDS`] rounds: kills every process of `uid`, boots out its
-    /// domains, and looks at the outcome, until no process is left and no domain prints.
-    pub(super) fn kill_rounds(&self, uid: u32, killed: &mut Vec<i32>) -> Result<(), Failure> {
-        let domains = launchd::domains(uid);
+    /// For at most [`KILL_ROUNDS`] rounds: kills every process of `uid`, and with
+    /// [`Launchd::Ask`] boots out its domains, then looks at the outcome, until no process is
+    /// left and (with `Ask`) its login domain does not print.
+    pub(super) fn kill_rounds(
+        &self,
+        uid: u32,
+        killed: &mut Vec<i32>,
+        ask: Launchd,
+    ) -> Result<(), Failure> {
+        let (domains, printed) = match ask {
+            Launchd::Ask => (
+                launchd::domains(uid).to_vec(),
+                launchd::printed_domains(uid).to_vec(),
+            ),
+            Launchd::Never => (Vec::new(), Vec::new()),
+        };
         let mut seen = self.processes(uid)?;
         let mut stayed = Vec::new();
         for _ in 0..KILL_ROUNDS {
@@ -81,7 +136,7 @@ impl Pool {
             })?;
             let refused = launchd::boot_out(&*self.host, &domains);
             seen = self.processes(uid)?;
-            stayed = launchd::still_printing(&*self.host, &domains, &refused);
+            stayed = launchd::still_printing(&*self.host, &printed, &refused);
             if seen.is_empty() && stayed.is_empty() {
                 return Ok(());
             }
