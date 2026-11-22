@@ -46,7 +46,8 @@
 //!    too), each as an [`OpenHost`]:
 //!    the network ceiling its hello advertises, whether it reported that it runs host jobs and
 //!    the machine provider it is of, read again on every pass. Of the hosts that could take a
-//!    job now (capable, with room under the CPU slack and the memory percent), the job goes to
+//!    job now (capable, with room under the CPU slack and the memory percent, and with room in the
+//!    host's [`OpenHost::capacity`] for the summed bookings: [`crate::room`]), the job goes to
 //!    one of the first provider in the Default platform's order (pass 1 of design section 5.6),
 //!    and the scheduler's score chooses among that provider's hosts alone; a busy, draining,
 //!    tainted or too small host of an earlier provider never keeps it off a free one of a
@@ -102,7 +103,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_agent_wire::{NetworkCeiling, Phase};
+use js_agent_wire::Phase;
 use js_jobs::{
     AllocationRecord, Booked, Capacity, IdSource, Isolation, JobId, JobRecord, JobStore,
     JobStoreError, Needs, NetworkPolicy, Placement,
@@ -110,7 +111,7 @@ use js_jobs::{
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::queue_status::{self, Outcome};
-use js_sched::{Event, Prediction, ProviderRank, Request};
+use js_sched::{Event, Prediction, Request};
 use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WorkKey};
 use js_types::{EXEC_KEY, HostId, JobNetwork, QueueCode, QueueNote, Resources};
@@ -120,6 +121,7 @@ use super::whole_jobs::{self, WholeJobStep, WholeJobs};
 use super::{Engine, Placed, TablesFrom, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
+use crate::room::{self, Room};
 use crate::sizes::{bounds_of, day_of};
 
 /// The network level a job's policy asks for.
@@ -166,24 +168,7 @@ pub struct JobHold {
     placed: Placed,
 }
 
-/// A host a pass may place on: the network ceiling its hello advertises, whether it reported
-/// that it runs host jobs, and the machine provider it is of.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpenHost {
-    /// The most network the host's agent gives a job.
-    pub ceiling: NetworkCeiling,
-    /// Whether the host's hello reported `host-jobs`.
-    pub host_jobs: bool,
-    /// The machine provider the host is of, and where the Default platform lists it (design
-    /// section 5.6, step 4): a job goes to a free host of the first provider in that order
-    /// that has one. `None`: of no provider the platform lists, ranked after every host that
-    /// is (the server offers no such host).
-    pub rank: Option<ProviderRank>,
-    /// What the host can book, which a placement is held to in its own transaction against the
-    /// allocations the store holds ([`js_jobs::JobStore::place_claimed`]); `None`: the engine's
-    /// picture alone decides.
-    pub capacity: Option<Capacity>,
-}
+pub use crate::room::OpenHost;
 
 /// The capacity the pass holds a placement on `host` to, when the host offers one.
 fn capacity_of<'a>(hosts: &'a JobHosts<'_>, host: &HostId) -> Option<&'a Capacity> {
@@ -479,6 +464,7 @@ impl Engine {
             .recover(JOB_TERM, operation, operation.0, Vec::new());
         let free = room.iter().filter(|host| capable.contains(host));
         let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
+        let free = free.filter(|host| self.room.fits(host, walker.booked));
         let only: BTreeSet<_> = free.map(map::worker).collect();
         if only.is_empty() {
             let next = OperationId(operation.0.saturating_add(1));
@@ -507,6 +493,7 @@ impl Engine {
             Some((lease, host)) => {
                 let placed = Placed { lease, operation };
                 self.hold_job(&walker.job, &host, walker.host_ports.clone(), placed);
+                self.room.add(&host, walker.booked);
                 self.sizes.placed(&walker.job, walker.booked);
                 Some(host)
             }
@@ -755,6 +742,7 @@ impl SchedPlacer {
             let mut engine = self.engine();
             engine.sync_jobs(live);
             engine.rank_hosts(hosts.open);
+            engine.set_room(Room::of(hosts.open, live));
             engine.whole_jobs(&input, now)
         };
         let mut noted = Noted {
@@ -789,9 +777,10 @@ impl SchedPlacer {
         }
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
         self.engine().take_refused().announce(metrics);
-        for (job, host, booked, mut placement) in decided {
+        for (job, host, booked, mut placement) in self.sized_from_of(queued, decided, now) {
             placement.queue = noted.placed(&job, &host);
             let capacity = capacity_of(hosts, &host);
+            let booked = room::booked_on(hosts.open, &host, booked);
             match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
                 Ok((record, _)) => {
                     self.log_sized(&record, &host, now);
@@ -858,9 +847,8 @@ impl SchedPlacer {
                     settings.map(|whole| Duration::from_millis(whole.prepare_timeout_ms));
                 let placement = Placement {
                     prepare_timeout,
-                    wall_limit_secs: None,
                     queue: noted.placed(job, host),
-                    start: None,
+                    ..Placement::default()
                 };
                 let capacity = capacity_of(hosts, host);
                 let placed = jobs.place_claimed(job, host, Booked::WholeHost, &placement, capacity);
@@ -874,6 +862,7 @@ impl SchedPlacer {
                 };
                 let mut engine = self.engine();
                 engine.whole_job_placed(job, host, allocation.host_ports);
+                engine.room_add(host, Booked::WholeHost);
                 drop(engine);
                 told(&record, host, (starts, metrics));
                 Ok(Some(job.clone()))

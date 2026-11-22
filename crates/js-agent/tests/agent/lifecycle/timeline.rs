@@ -3,7 +3,7 @@
 //! the runtime gives them. The clock moves only when a test moves it (and while the fake's
 //! create takes its scripted time), so every number here is the test's.
 
-use js_agent::lifecycle::{Clock, Event, StartTimeline};
+use js_agent::lifecycle::{Clock, Event, JobBooking, StartTimeline};
 use js_agent::{Machine, System};
 use js_agent_wire::Command;
 
@@ -14,12 +14,23 @@ use super::{Harness, job, names, reply};
 
 const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
-/// The one `Started` event of `run_id` with `timeline`.
-fn started(run_id: &str, timeline: StartTimeline) -> Vec<Event> {
+/// The one `Started` event of `run_id` with `timeline`, booked `cpu_millis` and the GiB every
+/// start here books, with no sizing (none of these starts says one).
+fn started_booking(run_id: &str, timeline: StartTimeline, cpu_millis: u64) -> Vec<Event> {
     vec![Event::Started {
         run_id: run_id.to_owned(),
         timeline,
+        booked: JobBooking {
+            cpu_millis,
+            memory_bytes: 1 << 30,
+            sizing: None,
+        },
     }]
+}
+
+/// [`started_booking`] of the one CPU most starts here book.
+fn started(run_id: &str, timeline: StartTimeline) -> Vec<Event> {
+    started_booking(run_id, timeline, 1000)
 }
 
 /// Asserts the timeline of a start that waits for nothing: it arrived at 4, the worker took
@@ -109,7 +120,7 @@ fn a_start_with_layers_shows_its_lookups_and_its_assembly() {
         ],
         runtime: Vec::new(),
     };
-    assert_eq!(h.life.step(), started("j1", timeline));
+    assert_eq!(h.life.step(), started_booking("j1", timeline, 100));
 }
 
 /// Asserts that a start whose create failed is logged with no `Started` line (so with no

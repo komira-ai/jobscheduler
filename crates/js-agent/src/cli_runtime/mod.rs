@@ -16,7 +16,7 @@
 //! ```text
 //! <bin> create --name js-<agent tag>-<run id> --label jobscheduler.dev/run-id=r1 ...
 //!   --label jobscheduler.dev/agent=<host> [--env <name>=<value> ...]
-//!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 32768
+//!   --cpu-shares 1536 --memory 1073741824 --memory-swap 1073741824 --pids-limit 32768
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
 //!   --mount type=bind,src=<scratch>,dst=/scratch,nosuid,nodev            (Podman)
 //!   --mount type=volume,dst=/scratch,volume-driver=local,volume-nocopy,
@@ -778,7 +778,13 @@ impl CliRuntime {
             let mountinfo = (self.proc_read)("/proc/self/mountinfo");
             check_submounts(spec, mountinfo.as_deref())?;
         }
-        args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
+        let ceiling = self.settings.cpu_ceiling();
+        args.extend(limits_to_args(
+            self.engine,
+            spec,
+            self.recursive_ro,
+            ceiling,
+        )?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
         args.extend(user_args(&self.settings, spec.slot));

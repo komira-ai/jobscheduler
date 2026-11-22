@@ -31,6 +31,9 @@ pub(crate) struct State {
     pub(crate) log: Vec<String>,
     /// Users by name.
     pub(crate) users: BTreeMap<String, NewUser>,
+    /// The names the directory says are in `admin`: put there by something other than the
+    /// helper, which never makes an administrator.
+    pub(crate) admins: BTreeSet<String>,
     /// The pool-owned attributes of a record, where they are not what a new user has
     /// (hidden, the shell, the group and home of its [`NewUser`]): a record someone
     /// changed, or one that is not the pool's.
@@ -53,7 +56,7 @@ pub(crate) struct State {
     /// Every `pause` so far.
     pub(crate) pauses: usize,
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
-    /// "delete_user", "user_record", "restore_user", "set_admin", "launchctl print", "bootout gui", "bootout user", "user_dir",
+    /// "delete_user", "user_record", "restore_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
     /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
     /// "term_group").
@@ -154,10 +157,10 @@ impl State {
         text
     }
 
-    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a user made an
-    /// administrator, else `no` and a failure, as `dseditgroup` answers.
+    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a name in
+    /// `admins`, else `no` and a failure, as `dseditgroup` answers.
     fn checkmember(&self, name: &str) -> CommandOutput {
-        let admin = self.users.get(name).is_some_and(|user| user.admin);
+        let admin = self.admins.contains(name);
         let (word, not) = [("no", "NOT "), ("yes", "")][usize::from(admin)];
         CommandOutput {
             success: admin,
@@ -345,6 +348,7 @@ impl Host for FakeHost {
         self.call("delete_user", format!("delete_user {name}"))?;
         let mut state = self.state();
         state.records.remove(name);
+        state.admins.remove(name);
         Ok(state.users.remove(name).is_some())
     }
 
@@ -373,24 +377,7 @@ impl Host for FakeHost {
         self.call("restore_user", format!("restore_user {}", user.name))?;
         let mut state = self.state();
         state.records.remove(&user.name);
-        let admin = state.users.get(&user.name).is_some_and(|held| held.admin);
-        state.users.insert(
-            user.name.clone(),
-            NewUser {
-                admin,
-                ..user.clone()
-            },
-        );
-        Ok(())
-    }
-
-    /// Changes the membership of the record `name` if it exists.
-    fn set_admin(&self, name: &str, admin: bool) -> io::Result<()> {
-        self.call("set_admin", format!("set_admin {name} {admin}"))?;
-        self.state()
-            .users
-            .entry(name.to_owned())
-            .and_modify(|user| user.admin = admin);
+        state.users.insert(user.name.clone(), user.clone());
         Ok(())
     }
 

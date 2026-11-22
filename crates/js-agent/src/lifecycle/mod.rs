@@ -329,7 +329,7 @@ use crate::platform::Backend;
 use crate::quota::ScratchQuota;
 
 pub use codes::{code, detail};
-pub use event::{CleanupTimeline, Event, Finding, Skip, StartTimeline};
+pub use event::{CleanupTimeline, Event, Finding, JobBooking, Skip, StartTimeline};
 pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,

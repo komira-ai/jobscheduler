@@ -8,10 +8,9 @@
 //!
 //! - [`lease`]: lease ids, the pool's slots, user names (`kbf-lease-pool-<slot>`) and the
 //!   uid range.
-//! - [`grant`]: the MDM gate's signed admin grant.
 //! - [`ledger`]: lease ids used and the state of each pool slot (free, leased,
-//!   resetting, broken), kept across reboots, so grants are used once and a user is lent
-//!   to one lease at a time.
+//!   resetting, broken), kept across reboots, so a lease id is used once and a user is
+//!   lent to one lease at a time.
 //! - [`groups`]: the group list a process started as a lease user holds.
 //! - [`limits`]: the file-size and process limits a `run` asks the helper to set.
 //! - [`helper`]: the verbs' rules, over a [`helper::Host`] that does the OS's part.
@@ -24,8 +23,8 @@
 //! - [`disclaim`]: the one way this crate and `js-agent` start a program; on macOS with
 //!   its privacy (TCC) responsibility disclaimed, so it never holds the helper's or the
 //!   agent's grants.
-//! - [`full_disk_access`]: whether the helper holds Full Disk Access, which the
-//!   `full-disk-access` verb answers.
+//! - [`full_disk_access`]: whether a process holds Full Disk Access, which `js-agent`
+//!   judges of itself at start and the `full-disk-access` verb answers for the helper.
 //! - [`proto`], [`server`], [`client`]: the socket, its wire format, the caller check.
 //! - [`start`]: flags and start-up.
 //! - [`node_admin`]: the `node-admin` mode, the verbs a node's administrator runs
@@ -41,7 +40,7 @@
 //! to what goes over its socket or onto its disk: the protocol, the ledger, the account
 //! names (`kbf-lease-<term>-<seq>` for a lease from before the pool, the role account
 //! `_kbf`), the default paths and the
-//! grant and scan-baseline headers keep the names they had, because the daemons and
+//! scan-baseline header keep the names they had, because the daemons and
 //! installers that use them name them. The program name in the diagnostics (`kbf-mac-session`)
 //! is kept too, although the binary file, and so the usage text, is now named
 //! `js-mac-session`. The `S<n>` and `fleet-updates` references in comments are sections
@@ -51,7 +50,6 @@ pub mod autologin;
 pub mod client;
 pub mod disclaim;
 pub mod full_disk_access;
-pub mod grant;
 pub mod groups;
 pub mod helper;
 pub mod lease;

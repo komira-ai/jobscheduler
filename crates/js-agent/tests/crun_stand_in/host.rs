@@ -53,7 +53,7 @@ fn started_and_up(node: &Node, runtime: &mut CrunRuntime, run: &str) -> RunHandl
 /// Proves the whole of a host run the runtime makes and reads. It becomes: the lease's
 /// directory alone (no overlay, home or input root), given to the agent itself, as are the
 /// run's scratch directory and the lease's cgroup, and nothing given to the job's ids; a cgroup limited by the booking as a contained run's (`memory.max`, no
-/// swap, `cpu.max`, `memory.oom.group`); a bundle with no namespace, the host's `/` as its
+/// swap, `cpu.weight` and no `cpu.max`, `memory.oom.group`); a bundle with no namespace, the host's `/` as its
 /// root, no mount, root with every capability, that runs the image's entrypoint with the
 /// run's arguments under the init at its host path, in the run's scratch directory. Its
 /// exit 3 polls as 3, and removing it leaves no directory, no cgroup and no listing.
@@ -73,7 +73,8 @@ fn a_host_run_is_made_started_read_and_removed() {
     let (lease, cgroup) = (node.lease_of(&id.0), node.cgroup_of(&id.0));
     assert_eq!(read(&cgroup.join("memory.max")), (1_u64 << 30).to_string());
     assert_eq!(read(&cgroup.join("memory.swap.max")), "0");
-    assert_eq!(read(&cgroup.join("cpu.max")), "150000 100000");
+    assert_eq!(read(&cgroup.join("cpu.weight")), "150");
+    assert!(!cgroup.join("cpu.max").exists(), "no CPU ceiling");
     assert_eq!(read(&cgroup.join("memory.oom.group")), "1");
     for dir in ["root", "upper", "work", "rw", "etc"] {
         assert!(!lease.join(dir).exists(), "{dir}");

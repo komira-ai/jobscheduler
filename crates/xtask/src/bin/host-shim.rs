@@ -15,13 +15,15 @@
 //!   or `!<path>`: the real program at that path is run with the call's arguments and its
 //!   exit status is the answer (used for the file tools whose answer is a real hash). The
 //!   effects are done before the answer. An effect is `append=<path>=<text>`, `write=<path>=<text>` (the file is made, with its
-//!   directories; any kind but `append` writes) or `copy-self=<path>` (a copy of the shim, executable, so a program the script
-//!   runs by an absolute path is a shim as well).
+//!   directories; any kind but `append` writes), `copy-self=<path>` (a copy of the shim, executable, so a program the script
+//!   runs by an absolute path is a shim as well) or `stdin=<path>` (what the call is given on its standard input, read to its
+//!   end and written to that file, so a stand-in at the end of a pipe takes all that is sent to it, as the real program
+//!   does, and the test sees it).
 //!
 //! A call with no `HOST_SHIM_DIR`, no answers file or no matching rule exits 97 and does nothing
 //! else: a shim nobody configured fails closed.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -60,6 +62,16 @@ fn append(path: &Path, text: &str) {
 
 /// Does one effect.
 fn effect(me: &Path, spec: &str) {
+    if let Some(path) = spec.strip_prefix("stdin=") {
+        let mut given = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut given)
+            .expect("read standard input");
+        let path = Path::new(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        std::fs::write(path, given).expect("write");
+        return;
+    }
     if let Some(path) = spec.strip_prefix("copy-self=") {
         let path = Path::new(path);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");

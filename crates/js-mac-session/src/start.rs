@@ -12,7 +12,6 @@ use std::io::Read as _;
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, Stat};
 
 use crate::autologin::SessionPaths;
-use crate::grant::GrantKeys;
 use crate::helper::{Helper, Host, ImageSettings, Settings};
 use crate::lease::{PoolSize, UidRange, VmUser};
 use crate::ledger::Ledger;
@@ -60,13 +59,6 @@ pub struct Args {
     /// the installed software set pins it (for example `cdhash H"..."`).
     #[arg(long)]
     pub daemon_requirement: String,
-    /// The MDM gate's public grant keys (one standard-base64 Ed25519 key per line, the
-    /// `key` of the gate's `grant-admin` answer). Without this file no lease user is ever
-    /// an administrator. It must be a regular file, not a link, the helper's own
-    /// (root's), and writable by no one else: whoever can write it can make
-    /// administrators.
-    #[arg(long)]
-    pub grant_keys: Option<PathBuf>,
     /// The file the login window reads the auto-login password from.
     #[arg(long, default_value = "/etc/kcpassword")]
     pub kcpassword: PathBuf,
@@ -131,7 +123,6 @@ pub struct Ready {
 pub fn prepare(
     args: &Args,
     host: Box<dyn Host>,
-    serial: String,
     schedules: SweepPlan,
     sweep: SweepPlan,
     scan: Vec<ScanFolder>,
@@ -144,13 +135,6 @@ pub fn prepare(
             args.socket_group
         ));
     }
-    let grant_keys = match &args.grant_keys {
-        None => None,
-        Some(path) => {
-            let text = read_trusted(path).map_err(|why| format!("{}: {why}", path.display()))?;
-            Some(GrantKeys::parse(&text).map_err(|why| format!("{}: {why}", path.display()))?)
-        }
-    };
     private_dir(&args.state_dir).map_err(|why| format!("{}: {why}", args.state_dir.display()))?;
     let ledger_path = args.state_dir.join("ledger");
     let trusted = match rustix::fs::statat(CWD, &ledger_path, AtFlags::SYMLINK_NOFOLLOW) {
@@ -171,8 +155,6 @@ pub fn prepare(
         schedules,
         sweep,
         user_folders: PathBuf::from("/private/var/folders"),
-        grant_keys,
-        serial,
         session: SessionPaths {
             intent: args.state_dir.join("session-intent"),
             kcpassword: args.kcpassword.clone(),
@@ -188,7 +170,6 @@ pub fn prepare(
         socket = %args.socket.display(),
         range = %args.uid_range,
         pool = %args.pool_size,
-        admin_grants = settings.grant_keys.is_some(),
         "kbf-mac-session ready"
     );
     Ok(Ready {
@@ -280,20 +261,6 @@ pub fn group_gid(name: &str) -> io::Result<u32> {
             io::ErrorKind::NotFound,
             format!("no group named {name:?} (getgrnam_r: {code})"),
         )
-    })
-}
-
-/// Reads this Mac's serial number from `ioreg -rd1 -c IOPlatformExpertDevice`'s
-/// output: the `"IOPlatformSerialNumber" = "..."` line.
-#[must_use]
-pub fn parse_serial(ioreg: &str) -> Option<String> {
-    ioreg.lines().find_map(|line| {
-        let value = line
-            .trim()
-            .strip_prefix("\"IOPlatformSerialNumber\" = \"")?
-            .strip_suffix('"')?;
-        (!value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric()))
-            .then(|| value.to_owned())
     })
 }
 

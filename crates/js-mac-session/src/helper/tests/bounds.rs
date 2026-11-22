@@ -262,7 +262,7 @@ fn a_held_uid_stays_held_across_a_restart_until_a_delete_completes() {
     rig.host.state().fail.clear();
     let reset = rig.helper.boot_reset(&[]).unwrap();
     assert_eq!(reset.deleted.len(), 1);
-    assert_eq!(rig.helper.user_create("46.2", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("46.2"), Ok(uid));
 
     // A pool user's lease ends, and the ledger cannot say so: nothing is reset, and the
     // slot stays the lease's, its uid held, across the restart until the reset ends it.
@@ -275,7 +275,7 @@ fn a_held_uid_stays_held_across_a_restart_until_a_delete_completes() {
     uid_held(&rig);
     let rig = restarted(rig, "bounds-restart", uid);
     rig.helper.boot_reset(&[]).unwrap();
-    assert_eq!(rig.helper.user_create("46.3", None), Ok(uid));
+    assert_eq!(rig.helper.user_create("46.3"), Ok(uid));
 }
 
 /// Catches a delete repeated after the record went that frees the uid while the uid's

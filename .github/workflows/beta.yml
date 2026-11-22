@@ -3,7 +3,9 @@
 # push to main, in parallel with `artifacts`, and holds back only the promotion of the macOS
 # assets to the release (release.yml's `promote-macos`); nothing of Linux x86_64 waits for it.
 # No pull request runs it: a pull request's checks are Linux x86_64 alone
-# (crates/xtask/tests/pr_linux_only holds every workflow to that).
+# (crates/xtask/tests/pr_linux_only holds every workflow to that). A manual run, on any branch,
+# runs the same job (`gh workflow run beta.yml --ref <branch>`), so a change whose macOS tests
+# matter can be seen green here before it merges; only main's run saves the Cargo cache.
 # A pull request compiles what this job tests, though: ci.yml's `lint` job runs clippy for
 # aarch64-apple-darwin on Linux over the same crates and features (crates/xtask/tests/
 # macos_clippy holds the two lists together), so code that does not compile for macOS fails its
@@ -22,6 +24,7 @@ name: beta
 
 on:
   workflow_call:
+  workflow_dispatch:
 
 permissions: {}
 
