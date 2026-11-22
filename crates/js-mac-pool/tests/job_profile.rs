@@ -303,6 +303,51 @@ fn the_floor_is_last_in_every_job_shape() {
     }
 }
 
+/// The devices a job may write are `/dev/null` and its own descriptors (`/dev/fd`), in
+/// every job shape: `/dev/zero` and `/dev/tty` are not granted. On a Mac the measured build
+/// set (clang, swiftc, python, git, xcrun) wrote neither: `/dev/tty` was touched only by a
+/// shell without a terminal, where the write fails without a profile too.
+///
+/// Catches a device grant widened to `/dev/zero`, `/dev/tty` or all of `/dev`.
+#[test]
+fn a_job_writes_no_device_but_dev_null_and_its_own_descriptors() {
+    let grant = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))\n";
+    for net in [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On] {
+        for mounts in [vec![], vec![put()]] {
+            let profile = profile(job(Some(trees(&[TREE_A])), mounts), net.clone());
+            let text = profile.text();
+            assert_eq!(text.matches(grant).count(), 1, "{net:?}:\n{text}");
+            for device in ["/dev/zero", "/dev/tty", "(subpath \"/dev\")"] {
+                assert!(!text.contains(device), "{net:?} grants {device}:\n{text}");
+            }
+        }
+    }
+}
+
+/// Every job shape denies process information about other processes, then allows it
+/// for the job's own (itself and its sandbox), in that order, so the allow cannot widen
+/// to others.
+///
+/// Catches the deny dropped, or placed after the allow it narrows.
+#[test]
+fn a_job_is_denied_other_processes_information_before_its_own_is_allowed() {
+    let deny = "(deny process-info* (target others))\n";
+    let allow = "(allow process-info* (target self) (target same-sandbox))\n";
+    for net in [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On] {
+        for set in [None, Some(trees(&[TREE_A, TREE_B]))] {
+            let profile = profile(job(set, vec![put()]), net.clone());
+            let text = profile.text();
+            assert_eq!(text.matches(deny).count(), 1, "{net:?}:\n{text}");
+            assert_eq!(text.matches(allow).count(), 1, "{net:?}:\n{text}");
+            assert_eq!(
+                text.find(allow).map(|at| at - deny.len()),
+                text.find(deny),
+                "the allow follows the deny:\n{text}"
+            );
+        }
+    }
+}
+
 /// `Remote` is above `Loopback` and below `On`; two port lists meet in the ports they
 /// share, and none shared is `Loopback`.
 ///

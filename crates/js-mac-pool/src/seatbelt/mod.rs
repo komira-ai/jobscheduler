@@ -37,9 +37,10 @@
 //!
 //! What it does not do:
 //!
-//! - `(deny process-info* (target others))` is in the profile as defence in depth but
-//!   does not hide processes: on a hosted runner `pgrep` listed the same processes with
-//!   and without it. Hiding another user's processes is the user boundary's job.
+//! - `(deny process-info* (target others))` refuses a run the path and the details of
+//!   another user's process (`proc_pidpath`, `proc_pidinfo`) but does not hide that the
+//!   process exists: the kernel's process list (`sysctl`, which `pgrep` reads) is the same
+//!   with and without it. Hiding another user's processes is the user boundary's job.
 //! - Loopback is shared by every user of the Mac; see [`Net`].
 //! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).
