@@ -12,6 +12,7 @@ use super::{OpState, Scheduler};
 use crate::admission::{LoadCounters, LoadView, Prediction};
 use crate::cordon::Cordon;
 use crate::input::Request;
+use crate::refusal::Refusals;
 use crate::unservable::Unservable;
 
 impl Scheduler {
@@ -222,6 +223,15 @@ impl Scheduler {
             counters.fallback_cpu_limited = u64::try_from(limited).unwrap_or(u64::MAX);
         }
         counters
+    }
+
+    /// The refusals of hosts to requests since the last call, with the figures each was
+    /// judged by, oldest first; the buffer is emptied. At most [`crate::MAX_KEPT_REFUSALS`]
+    /// are kept, the rest only counted in `dropped`. A caller that places one request at
+    /// a time takes after each to learn which hosts refused that request and why. The same
+    /// refusals are counted by kind in [`LoadCounters`].
+    pub fn take_refusals(&mut self) -> Refusals {
+        self.admission.take_refusals()
     }
 
     /// How `worker` is charged as of the newest input, if it is registered.

@@ -40,9 +40,20 @@ pub struct Run {
     pub swap_peak_bytes: u64,
     /// CPU time used (user plus system) in microseconds.
     pub cpu_usage_us: u64,
-    /// The node's CPU pressure (`avg10`, in tenths of a percent) when the run started,
-    /// if known.
+    /// The most CPU the run used over a short window of it (the job server's agent measures
+    /// five seconds), in millicores, if measured: when given, it is the run's CPU sample in
+    /// place of its mean (`cpu_usage_us` over `wall_us`), so the estimate is of the cores a run
+    /// of the key needs at its busiest.
+    pub cpu_peak_millis: Option<u32>,
+    /// The CPU contention the run met, in tenths of a percent, if known: the node's CPU
+    /// pressure (`avg10`) when the run started, or the run's own wait for a CPU per unit of
+    /// wall time (the job server passes the `some` total of the job group's `cpu.pressure`
+    /// over the run's wall time).
     pub node_cpu_pressure_permille: Option<u16>,
+    /// The run's CPU was held at a ceiling, so its mean CPU is a lower bound of what it
+    /// would have used. Such a sample is kept only when it exceeds the key's current
+    /// estimate, whatever the pressure.
+    pub cpu_held: bool,
 }
 
 /// The hard memory limit (`memory.max`) of a lease that booked `booked` bytes: the
@@ -123,11 +134,12 @@ pub struct Observed {
 pub enum CpuSample {
     /// Kept: the node's CPU pressure was known and below the threshold.
     Kept,
-    /// Kept although the pressure was high or unknown, because it exceeded the key's
-    /// current estimate (a cold key's estimate is its cold cost).
+    /// Kept although the pressure was high or unknown or the run was held at a CPU
+    /// ceiling, because it exceeded the key's current estimate (a cold key's estimate
+    /// is its cold cost).
     Raised,
-    /// Dropped: the pressure was high or unknown and the sample did not exceed the
-    /// estimate.
+    /// Dropped: the pressure was high or unknown, or the run was held, and the sample
+    /// did not exceed the estimate.
     Dropped,
     /// Not a CPU measurement: not a success, a wall time under one second, or no CPU
     /// time read.

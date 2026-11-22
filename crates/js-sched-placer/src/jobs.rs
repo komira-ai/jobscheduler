@@ -141,6 +141,9 @@ pub trait PassMetrics {
     fn store_write_failed(&self);
     /// The pass took the job tables `from` there ([`TablesFrom`]); by default, nothing is told.
     fn job_tables(&self, _from: TablesFrom) {}
+    /// A host refused a queued job for the predicate named `reason` (`cpu`, `predicted-memory`,
+    /// `booked-memory`, `cold-cap`); by default, nothing is told.
+    fn refused(&self, _host: &HostId, _reason: &'static str) {}
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -492,6 +495,7 @@ impl Engine {
         }
         let request = (operation, walker.request.clone());
         let granted = self.place_one(request, (walker.wall, walker.charge), only, now);
+        self.book_refusals(&walker.job);
         // A placement held below changes the scheduler; a round that placed nothing ticked it
         // at `now` and changed nothing after.
         *settled = granted.is_none();
@@ -784,6 +788,7 @@ impl SchedPlacer {
             }
         }
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
+        self.engine().take_refused().announce(metrics);
         for (job, host, booked, mut placement) in decided {
             placement.queue = noted.placed(&job, &host);
             let capacity = capacity_of(hosts, &host);
