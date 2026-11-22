@@ -121,6 +121,14 @@ pub struct Record {
     /// before the field existed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub handover: bool,
+    /// The hand-over is made in place: both agents list `in-place`, so `cutover` and `rollback`
+    /// signal the running agent (SIGHUP to the unit's main process) instead of stopping and
+    /// starting the unit, and wait until the agent has taken the request. Only an update that
+    /// hands over (`handover`) has it. Decided by `prepare` when it writes the record, and
+    /// never changed. Left out of the file when `false`, so such a record reads as it did before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub in_place: bool,
     /// The move of the link to the staged release is begun: written before the move, so a
     /// `cutover` killed at any later point leaves it set. The link itself says whether it
     /// happened.
@@ -159,6 +167,7 @@ impl Record {
             stop_begun: false,
             pre_stop_session_ms: None,
             handover: false,
+            in_place: false,
             link_moved: false,
             start_issued: false,
             verify_ok: false,

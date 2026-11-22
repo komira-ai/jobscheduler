@@ -348,6 +348,8 @@ fn cordon(record: &Record, params: &Params) -> Result<(), Invalid> {
 fn marks(record: &Record) -> Result<(), Invalid> {
     let rb = &record.rb;
     let rules = [
+        // Only an update that hands the runs over can hand them over in place.
+        ("in_place", record.in_place, "handover", record.handover),
         (
             "link_moved",
             record.link_moved,

@@ -11,8 +11,11 @@
 //!   against its length and digest; parses the config under the format's rules; and
 //!   extracts every layer into a scratch directory with the unprivileged extractor, which
 //!   checks the layer's diff id and the tree rules.
+//! - `push` reads a bundle as `inspect` does and publishes it to a registry under a tag
+//!   with [`js_oci::Repository::publish`]: a tag that names the same manifest is left as
+//!   it is, one that names another is refused and never moved.
 //!
-//! There is no registry push here, and no environment variable is read.
+//! No environment variable is read: `push`'s credentials come from a file a flag names.
 
 mod bundle;
 mod cli;
@@ -20,6 +23,7 @@ mod error;
 mod inspect;
 mod layout;
 mod pack;
+mod push;
 mod text;
 mod verify;
 
@@ -28,7 +32,7 @@ use std::process::ExitCode;
 
 use clap::Parser as _;
 
-pub use cli::{Cli, Command, EnvFlag, LayoutArgs, PackArgs, Pair, VerifyArgs};
+pub use cli::{Cli, Command, EnvFlag, LayoutArgs, PackArgs, Pair, PushArgs, VerifyArgs};
 pub use error::Error;
 
 /// Runs the command line: parses the arguments, writes results to standard output and a
@@ -51,7 +55,9 @@ pub fn main() -> ExitCode {
 /// The command's failure; nothing is written to the layout in that case when it is
 /// `pack` refusing a tree.
 pub fn execute(command: Command, out: &mut dyn Write) -> Result<(), Error> {
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(dispatch(command, out))
 }
 
@@ -60,5 +66,6 @@ async fn dispatch(command: Command, out: &mut dyn Write) -> Result<(), Error> {
         Command::Pack(args) => pack::pack(&args, out),
         Command::Inspect(args) => inspect::inspect(&args, out).await,
         Command::Verify(args) => verify::verify(&args, out).await,
+        Command::Push(args) => push::push(&args, out).await,
     }
 }
