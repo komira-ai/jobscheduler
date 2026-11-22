@@ -1,7 +1,7 @@
 //! The rules of a native (macOS) job's mounts that need no Mac to decide, built and tested on
 //! every platform: the system calls they rest on (`statfs`, the directory service) are passed
 //! in by the native runtime (`native/mounts.rs`) and the macOS platform (`platform/macos.rs`).
-//! The design is `docs/design/mac-input-trees.md` (komira-ai/jobscheduler#958), step 1.
+//! The design is that of komira-ai/jobscheduler#958, its step 1.
 //!
 //! - **A provider's tree is read-only** ([`check_provider_mode`]). The provider writes it
 //!   whole on the Mac's disk and every job that names the same tree is given the same
@@ -20,7 +20,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 use js_agent_wire::{JobMount, MountMode, MountSource, refusal};
@@ -189,13 +189,17 @@ impl Missing {
     /// Makes each missing directory below `root` (the mount's root, which the base lies
     /// beneath): those above the last given to the root's owner and group with the root's
     /// mode, the last to `uid` and the root's group with [`MOUNT_DIR_MODE`]; `chown` gives a
-    /// directory away (`lchown`, which needs root). A directory another start made meanwhile
-    /// is taken as it is; a name that is there as anything but a directory fails.
+    /// directory away (`lchown`, which needs root). The base is looked up again first and must
+    /// still be the canonical directory [`Missing::find`] found, beneath `root`, so a link put
+    /// in its place since is not followed; each mode is set on the directory opened without
+    /// following a link. A directory above the last that another start made meanwhile is
+    /// taken as it is, and so is the last when it is `uid`'s; a name that is there as anything
+    /// but a directory fails.
     ///
     /// # Errors
     ///
-    /// The root cannot be looked at, or a directory cannot be made or given away; the text
-    /// names the path.
+    /// The root cannot be looked at, the base changed, the last directory is there and is not
+    /// `uid`'s, or a directory cannot be made or given away; the text names the path.
     pub fn make(
         &self,
         root: &Path,
@@ -206,6 +210,17 @@ impl Missing {
             io::Error::new(why.kind(), format!("{}: {why}", path.display()))
         };
         let of_root = fs::metadata(root).map_err(|why| named(root, why))?;
+        let base = fs::canonicalize(&self.base).map_err(|why| named(&self.base, why))?;
+        if base != self.base || !base.starts_with(root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is no longer the directory below {} that was looked up",
+                    self.base.display(),
+                    root.display()
+                ),
+            ));
+        }
         let group = of_root.gid();
         let mut path = self.base.clone();
         for (at, name) in self.names.iter().enumerate() {
@@ -226,6 +241,16 @@ impl Missing {
                             format!("{} is there and is not a directory", path.display()),
                         ));
                     }
+                    if at + 1 == self.names.len() && there.uid() != uid {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "{} is there and is uid {}'s, not the run's ({uid})",
+                                path.display(),
+                                there.uid()
+                            ),
+                        ));
+                    }
                 }
                 Err(why) => return Err(named(&path, why)),
             }
@@ -235,14 +260,18 @@ impl Missing {
 }
 
 /// Gives the directory `path` that was just made to `owner` and `group` through `chown`, then
-/// sets its `mode`.
+/// sets its `mode` on the directory opened without following a link.
 fn give(
     path: &Path,
     (owner, group, mode): (u32, u32, u32),
     chown: &dyn Fn(&Path, u32, u32) -> io::Result<()>,
 ) -> io::Result<()> {
     chown(path, owner, group)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    let dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)?;
+    dir.set_permissions(fs::Permissions::from_mode(mode))
 }
 
 #[cfg(test)]
@@ -404,7 +433,8 @@ mod tests {
     /// Asserts that the missing part of a path is found below its deepest directory that is
     /// there, canonical (through a link), with the names to make in order; and that a path
     /// that is not absolute or in normal form, a link that leads nowhere (at the end or on
-    /// the way), and a deepest part that is a file are refused. Catches a directory made through a link or beside a file.
+    /// the way), and a deepest part that is a file are refused. Catches a directory made
+    /// through a link or beside a file.
     #[test]
     fn the_missing_part_of_a_put_directory_is_found_below_what_is_there() {
         let dir = TestDir::under(std::env::temp_dir(), "native-fs-missing");
@@ -439,9 +469,11 @@ mod tests {
 
     /// Asserts that the missing directories are made: each above the last given to the root's
     /// owner and group with the root's mode, the last to the run user and the root's group,
-    /// mode 0770; that a directory another start made meanwhile is kept as it is and not
-    /// given away again; and that a name there as a file or a link fails, and a directory
-    /// that cannot be given away fails, naming the path. Catches a put directory its job cannot
+    /// mode 0770; that a last directory another start made meanwhile is kept as it is and not
+    /// given away again when it is the run's, and refused when it is another uid's; that a
+    /// base replaced by a link since the lookup, or not beneath the root, makes nothing; and
+    /// that a name there as a file or a link fails, and a directory that cannot be given away
+    /// fails, naming the path. Catches a put directory its job cannot
     /// write, one the root's owner cannot empty, and a directory made through a link.
     #[test]
     fn the_missing_directories_are_made_with_the_roots_owner_and_the_users_last() {
@@ -477,13 +509,55 @@ mod tests {
         }
         assert_eq!(mode(&wanted), MOUNT_DIR_MODE);
 
-        // A second job of the same build: only its own directory is made and given away.
+        // A start of the same build that another start overtook: the directory is the run's,
+        // so it is taken and not given away again; one of another uid is refused.
         given.borrow_mut().clear();
         let other = root.join("cas/b/build/other");
         let missing = Missing::find(&other).unwrap();
-        fs::create_dir(root.join("cas/b/build/other")).unwrap();
-        missing.make(&root, 502, &chown).unwrap();
+        fs::create_dir(&other).unwrap();
+        let mine = fs::metadata(&other).unwrap().uid();
+        missing.make(&root, mine, &chown).unwrap();
         assert!(given.borrow().is_empty(), "{:?}", given.borrow());
+        let why = missing.make(&root, mine + 1, &chown).unwrap_err();
+        assert_eq!(
+            why.to_string(),
+            format!(
+                "{} is there and is uid {mine}'s, not the run's ({})",
+                other.display(),
+                mine + 1
+            )
+        );
+
+        // The base was replaced by a link since the lookup, or lies beneath another root:
+        // nothing is made.
+        let swapped = Missing::find(&root.join("cas/b/swap/nonce")).unwrap();
+        let moved = Missing::find(&root.join("cas/b/gone/nonce")).unwrap();
+        let base = root.join("cas/b");
+        fs::rename(&base, root.join("cas/b-old")).unwrap();
+        symlink(root.join("cas/b-old"), &base).unwrap();
+        let changed = |missing: &Missing, under: &Path| {
+            let why = missing.make(under, 501, &chown).unwrap_err();
+            assert_eq!(
+                why.to_string(),
+                format!(
+                    "{} is no longer the directory below {} that was looked up",
+                    base.display(),
+                    under.display()
+                )
+            );
+        };
+        changed(&swapped, &root);
+        fs::remove_file(&base).unwrap();
+        fs::rename(root.join("cas/b-old"), &base).unwrap();
+        changed(&moved, &root.join("cas/b/build"));
+        assert!(!base.join("swap").exists());
+        assert!(!base.join("gone").exists());
+
+        // A directory above the last that another start made since the lookup is taken.
+        let raced = Missing::find(&root.join("cas/b/raced/nonce")).unwrap();
+        fs::create_dir(root.join("cas/b/raced")).unwrap();
+        raced.make(&root, 501, &chown).unwrap();
+        assert_eq!(mode(&root.join("cas/b/raced/nonce")), MOUNT_DIR_MODE);
 
         fs::write(root.join("cas/b/file"), "").unwrap();
         let as_file = Missing::find(&root.join("cas/b/file2/nonce")).unwrap();
@@ -513,8 +587,8 @@ mod tests {
         );
     }
 
-    /// Asserts that a root that cannot be looked at, and a parent that cannot be written,
-    /// fail the making, naming the path. Catches an error passed over as a directory made.
+    /// Asserts that a root that cannot be looked at, a name the volume cannot hold, and a base
+    /// removed since the lookup fail the making, naming the path. Catches an error passed over as a directory made.
     #[test]
     fn a_directory_that_cannot_be_made_names_its_path() {
         let dir = TestDir::under(std::env::temp_dir(), "native-fs-unmade");
@@ -533,7 +607,18 @@ mod tests {
                 .starts_with(&format!("{}: ", gone.display())),
             "{why}"
         );
-        // The base was removed after the lookup: its child cannot be made.
+        // A name the volume cannot hold: the directory cannot be made.
+        let long = Missing {
+            base: root.clone(),
+            names: vec![OsString::from("n".repeat(300))],
+        };
+        let why = long.make(&root, 501, &chown).unwrap_err();
+        assert!(
+            why.to_string()
+                .starts_with(&format!("{}: ", long.path().display())),
+            "{why}"
+        );
+        // The base was removed after the lookup: nothing is made, and the error names it.
         let later = Missing::find(&root.join("a/b")).unwrap();
         fs::remove_dir(&root).unwrap();
         fs::create_dir(dir.path().join("elsewhere-root")).unwrap();
@@ -542,10 +627,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             why.to_string(),
-            format!(
-                "{}: No such file or directory (os error 2)",
-                root.join("a").display()
-            )
+            format!("{}: No such file or directory (os error 2)", root.display())
         );
     }
 }

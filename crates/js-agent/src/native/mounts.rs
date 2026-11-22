@@ -303,8 +303,9 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         }
         Some(root) => root,
     };
-    // What is there of the source: the directory, or the deepest part of a missing one, which
-    // must lie beneath the root (the root itself is never made).
+    // What is there of the source: the directory (beneath the root, as found above), or the
+    // deepest part of a missing one, which must lie beneath the root too: the root itself is
+    // never made, so only a missing directory can fail this.
     let there = missing.as_ref().map_or(host.as_path(), Missing::base);
     if !there.starts_with(&root.path) {
         return Err(refuse(
