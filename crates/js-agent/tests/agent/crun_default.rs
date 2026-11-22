@@ -318,8 +318,8 @@ fn the_agent_that_runs_no_job_is_named_and_takes_no_runtime_flag() {
             "js-agent: --job-user: not with --no-jobs (an agent that runs no job)\n",
         ),
         (
-            &["--native-helper-socket", "/native/helper.sock"],
-            "--native-helper-socket: macOS only (a flag of the native runtime): this Linux \
+            &["--native-accounts", "/native/accounts"],
+            "--native-accounts: macOS only (a flag of the native runtime): this Linux \
              build runs its jobs with crun, or with the container engine of \
              --allow-container-engine\n",
         ),
