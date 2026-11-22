@@ -3,8 +3,8 @@
 //! (never on a pull request), holds no secret and signs no package (its one signature is
 //! `js-vmm`'s ad hoc one from `pkg entitle-macos`, which needs no key), and builds a hostkeeper
 //! `macos-pkg` package (no script, the file `js-agent-<version>-macos-arm64.pkg`, the helper's
-//! plist naming the agent of the same package by its cdhash); `sign` runs only on main (by hand,
-//! or in the release's call that asks for it), in the protected environment `pkg-signing`, takes
+//! plist naming the agent of the same package by its cdhash); `sign` runs in the release's call that
+//! asks for it and in a signing run (signing_run.rs), in the environment `pkg-signing`, takes
 //! the checked unsigned package from `build` without rebuilding, and is the only place a secret
 //! is named, on the step that signs and nowhere else. Nothing is notarized. `first-install` calls
 //! the first-install workflow on a manual run alone (never in the release's call), with the
@@ -296,6 +296,11 @@ fn the_workflow_is_called_by_the_release_and_started_by_hand_but_never_by_a_pull
             "description: The package version, MAJOR.MINOR.PATCH",
             "required: true",
             "type: string",
+            "sign:",
+            "description: Sign the programs and the package (a signing run, on a branch of komira-ai/jobscheduler)",
+            "required: false",
+            "type: boolean",
+            "default: false",
         ]
     );
     assert!(!text.contains("pull_request"));
@@ -488,7 +493,7 @@ fn a_secret_is_named_only_in_the_environment_of_the_step_that_uses_it() {
 }
 
 #[test]
-fn the_sign_job_runs_only_on_main_by_hand_or_when_the_release_asks_in_the_protected_environment() {
+fn the_sign_job_runs_under_the_signing_condition_in_the_protected_environment() {
     let text = read(WORKFLOW);
     let sign = jobs(&text)["sign"].clone();
     let at_four: Vec<&str> = sign
@@ -517,10 +522,6 @@ fn the_sign_job_runs_no_cargo_and_rebuilds_nothing() {
 }
 
 const PRESENT: &str = "steps.signing.outputs.state == 'present'";
-
-/// The `if:` of the sign job: a manual run on main, or the release's call that sets `sign` (a
-/// push to main); a pull request is neither.
-const SIGN_IF: &str = "if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}";
 
 #[test]
 fn signing_is_one_step_gated_on_the_presence_check_and_nothing_is_notarized() {
@@ -966,27 +967,9 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
 }
 
 #[test]
-fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
-    // A manual run counts on main alone, and the release's call counts when it asks (`sign`),
-    // on main, for a push: no part of the condition is optional.
-    let text = read(WORKFLOW);
-    let sign = jobs(&text)["sign"].clone();
-    let line = sign
-        .iter()
-        .find(|l| indent(l) == 4 && l.trim().starts_with("if:"))
-        .expect("the sign job's condition")
-        .trim();
-    assert_eq!(line, SIGN_IF);
-    for part in [
-        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
-        "inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push'",
-    ] {
-        assert!(line.contains(part), "{part}");
-    }
-    // The condition is a disjunction of those two parts and nothing looser.
-    assert_eq!(line.matches("||").count(), 1, "{line}");
-    assert!(!line.contains("pull_request"));
-    // The release's call is the one that sets `sign`, and the other callers do not.
+fn the_release_is_the_one_caller_that_asks_to_sign() {
+    // When the condition signs is signing_run.rs's question; this is that the release's call
+    // asks it to.
     let release = std::fs::read_to_string(
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join(".github/workflows/release.yml"),
@@ -997,7 +980,11 @@ fn the_sign_condition_refuses_a_pull_request_and_a_push_that_does_not_ask() {
     ));
 }
 
+mod expr;
+mod signing_run;
 mod version_check;
+
+use signing_run::SIGN_IF;
 
 /// The line of the action's build step that gives js-vmm its entitlement.
 const ENTITLE: &str = "cargo xtask pkg entitle-macos --bin-dir target/release";

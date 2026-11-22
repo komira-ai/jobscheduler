@@ -28,23 +28,32 @@
 # call (a push) skips it, since release.yml's `beta-macos-first-install` runs it in its own job
 # and `pkg-upload` waits for `beta-macos-pkg`, which it would lengthen.
 #
-# `sign-code`, `package` and `sign` run only on main: by hand, or in the release's call (`sign:
-# true`, on a push, with `secrets: inherit`, without which a called workflow reads every secret as
-# empty). Between them the programs are signed first and the package is made of the signed
-# programs, so the package's own signature covers programs that carry theirs:
+# `sign-code`, `package` and `sign` run in the release's call (`sign: true`, on a push to main,
+# with `secrets: inherit`, without which a called workflow reads every secret as empty) and in a
+# signing run: a manual run with `sign` set, on a branch of this repository
+# (`gh workflow run js-agent-macos-pkg.yml --ref <branch> -f version=X -f sign=true`), which signs
+# and checks the programs and the package as the release does, so a change to the signing is
+# proved before it merges. A signing run publishes nothing (no job of this file does; the signed
+# files stay artifacts of the run), and anywhere else (a tag, a fork's copy) it fails by name at
+# the first step of `build`. A manual run without `sign` signs nothing. Between them the programs
+# are signed first and the package is made of the signed programs, so the package's own signature
+# covers programs that carry theirs:
 #
 # - `sign-code` runs in the environment `pkg-signing`, which a repository administrator creates
-#   with its secrets and a rule that only main may deploy to it. It takes the four programs from
-#   `build`, checks them against the sums `build` wrote, and signs each with `codesign` under the
-#   Developer ID Application identity of the team, a fixed identifier, the hardened runtime and a
-#   secure timestamp (the identifiers and the identity are the table of
-#   crates/xtask/src/release/mac_programs.rs), keeping each program's entitlements: js-vmm comes
-#   from `build` signed ad hoc with the virtualization entitlement (`pkg entitle-macos`), which
-#   starting a virtual machine needs, and the others with none. The identity is found in a temporary keychain by
-#   its name; Apple's Developer ID intermediate is fetched over HTTPS and held to its SHA-256
-#   before it is imported; the job fails when the identity expires within 30 days. Nothing built
-#   from the repository runs in it: no checkout, no cargo, and the system tools it calls are called
-#   by absolute path. It fails, naming the secret, when a signing secret is not set.
+#   with its secrets; it admits every branch of this repository, which a signing run needs. It
+#   takes the four programs from `build`, checks them against the sums `build` wrote, and signs
+#   each with `codesign` under the Developer ID Application identity of the team, a fixed
+#   identifier, the hardened runtime and a secure timestamp (the identifiers and the identity are
+#   the table of crates/xtask/src/release/mac_programs.rs), keeping each program's entitlements:
+#   js-vmm comes from `build` signed ad hoc with the virtualization entitlement (`pkg
+#   entitle-macos`), which starting a virtual machine needs, and the others with none. Apple's Developer ID intermediate is
+#   fetched over HTTPS and held to its SHA-256 before it is imported into a temporary keychain; a
+#   hosted runner that holds it already makes the import answer that the item exists, and that
+#   answer alone, exactly, passes. The identity is then found by its name among the keychain's
+#   valid code-signing identities (`find-identity -v`, which lists one only when its chain builds
+#   to Apple's root), and the job fails when it expires within 30 days. Nothing built from the
+#   repository runs in it: no checkout, no cargo, and the system tools it calls are called by
+#   absolute path. It fails, naming the secret, when a signing secret is not set.
 # - `package` holds no secret and has no environment. It checks the repository out, builds the
 #   package with the local action from the signed programs instead of building them (the action
 #   checks each staged program with `cargo xtask release check-code-signature`, so the package's
@@ -63,7 +72,8 @@
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
 # The release's call builds the release's version; a manual run builds the version typed.
-# crates/xtask/tests/macos_pkg_workflow/ and macos_code_signing.rs pin these rules.
+# crates/xtask/tests/macos_pkg_workflow/, macos_code_signing.rs and macos_sign_code_run.rs pin
+# these rules.
 name: js-agent-macos-pkg
 
 on:
@@ -85,6 +95,11 @@ on:
         description: The package version, MAJOR.MINOR.PATCH
         required: true
         type: string
+      sign:
+        description: Sign the programs and the package (a signing run, on a branch of komira-ai/jobscheduler)
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -109,6 +124,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      # A signing run anywhere but a branch of this repository (a tag, a fork's copy) fails here,
+      # by name, rather than going green with nothing signed. Every job that signs needs `build`.
+      - name: "Refused: a signing run (sign: true) runs only on a branch of komira-ai/jobscheduler"
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign && !(github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
+        run: exit 1
       - name: Check the version
         run: |
           set -euo pipefail
@@ -186,7 +206,7 @@ jobs:
 
   sign-code:
     needs: [build]
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
     environment: pkg-signing
     runs-on: macos-15
     timeout-minutes: 60
@@ -225,24 +245,42 @@ jobs:
           IDENTITY: "Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)"
           # Apple's Developer ID G2 intermediate, https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
           INTERMEDIATE_SHA256: f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+          # What `security import` answers when the runner holds that intermediate already.
+          ALREADY_EXISTS: "security: SecKeychainItemImport: The specified item already exists in the keychain."
         run: |
           set -euo pipefail
           keychain="$RUNNER_TEMP/js-agent-code-signing.keychain-db"
           password="$(/usr/bin/uuidgen)"
           cleanup() {
             /usr/bin/security delete-keychain "$keychain" || true
-            rm -f "$RUNNER_TEMP/application.p12" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+            rm -f "$RUNNER_TEMP/application.p12" "$RUNNER_TEMP/DeveloperIDG2CA.cer" "$RUNNER_TEMP/import-intermediate.txt"
           }
           trap cleanup EXIT
           /usr/bin/security create-keychain -p "$password" "$keychain"
           /usr/bin/security set-keychain-settings -lut 3600 "$keychain"
           /usr/bin/security unlock-keychain -p "$password" "$keychain"
           printf '%s' "$MACOS_APPLICATION_P12" | /usr/bin/base64 --decode > "$RUNNER_TEMP/application.p12"
-          /usr/bin/security import "$RUNNER_TEMP/application.p12" -P "$MACOS_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain"
+          /usr/bin/security import "$RUNNER_TEMP/application.p12" -P "$MACOS_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12 -k "$keychain"
           /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          # The job's keychain is the user's only keychain, so a lookup by name (the certificate
+          # of the identity, below) finds the identity there and nowhere else.
+          /usr/bin/security list-keychains -d user -s "$keychain"
           /usr/bin/curl --fail --silent --show-error --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
           echo "$INTERMEDIATE_SHA256  $RUNNER_TEMP/DeveloperIDG2CA.cer" | /usr/bin/shasum -a 256 --check
-          /usr/bin/security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -f x509 -k "$keychain"
+          # A hosted runner may hold the intermediate already, outside this keychain, and then the
+          # import fails with that one answer. That answer, byte for byte, is taken as success; any
+          # other failure stops the job once what security said is printed. Whether the chain
+          # builds is find-identity's question below: `-v` lists only a valid identity.
+          imported=true
+          /usr/bin/security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -t cert -f x509 -k "$keychain" > "$RUNNER_TEMP/import-intermediate.txt" 2>&1 || imported=false
+          /bin/cat "$RUNNER_TEMP/import-intermediate.txt"
+          if [ "$imported" = false ]; then
+            if ! printf '%s\n' "$ALREADY_EXISTS" | /usr/bin/cmp -s - "$RUNNER_TEMP/import-intermediate.txt"; then
+              echo "::error::the import of Apple's intermediate failed with the answer above"
+              exit 1
+            fi
+            echo "the runner holds Apple's intermediate already"
+          fi
           # The identity is the one valid Developer ID Application identity of the temporary
           # keychain that carries the team's name, found by its SHA-1.
           identity="$(/usr/bin/security find-identity -v -p codesigning "$keychain" | /usr/bin/awk -v name="$IDENTITY" 'index($0, "\"" name "\"") { print $2 }')"
@@ -281,7 +319,7 @@ jobs:
 
   package:
     needs: [build, sign-code]
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -316,7 +354,7 @@ jobs:
 
   sign:
     needs: [build, package]
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (inputs.sign && github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.sign) || (github.event_name == 'workflow_dispatch' && inputs.sign && github.repository == 'komira-ai/jobscheduler' && startsWith(github.ref, 'refs/heads/')) }}
     environment: pkg-signing
     runs-on: macos-15
     timeout-minutes: 60
