@@ -667,6 +667,7 @@ fn a_jobs_usage_reaches_its_result_and_an_unread_one_is_absent() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     h.fake.report_usage("j1", counted);
     h.fake.exit("j1", 0);
@@ -745,6 +746,7 @@ fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
         }),
         cpu_pressure_some_usec: Some(250_000),
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     h.fake.report_usage("j1", counted);
     for job in ["j1", "j2", "j3"] {

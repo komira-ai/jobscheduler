@@ -196,6 +196,16 @@ impl CrunSubject {
             .unwrap_or_else(|e| panic!("open as {host_id}: {e}"))
     }
 
+    /// Holds this subject's jobs together to `memory` bytes of memory and `swap` bytes of swap:
+    /// the `memory.max` and `memory.swap.max` of the cgroup its leases are made in, which stand
+    /// for the host's memory (or for one limit on the group of all jobs), so that a job that
+    /// grows without bound stops there and not at the runner's own memory.
+    pub fn hold_jobs_to(&self, memory: u64, swap: u64) {
+        let dir = cgroup_dir(&self.cgroup);
+        fs::write(dir.join("memory.max"), memory.to_string()).expect("memory.max");
+        fs::write(dir.join("memory.swap.max"), swap.to_string()).expect("memory.swap.max");
+    }
+
     /// [`CrunSubject::open_as`] with the hooks given: a clock a test sets, for the start the
     /// runtime lists a run's age from.
     pub fn open_with_hooks(&self, host_id: &str, hooks: Hooks) -> CrunRuntime {

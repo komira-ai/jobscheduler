@@ -563,6 +563,7 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
@@ -615,6 +616,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
         }),
         cpu_pressure_some_usec: Some(1_250_001),
         cpu_peak: None,
+        peak_swap_bytes: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &reported) else {
         panic!("a clean exit ends exited");
@@ -639,6 +641,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &older) else {
         panic!("a clean exit ends exited");
@@ -668,6 +671,7 @@ fn the_cpu_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak,
+        peak_swap_bytes: None,
     };
     let stored = |reported: JobUsage| {
         let mut result = ended(Outcome::Succeeded, Some(0));
