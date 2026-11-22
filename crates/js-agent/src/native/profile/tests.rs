@@ -9,8 +9,8 @@ use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::*;
 use crate::mac_accounts::Slots;
+use crate::native::Accounts;
 use crate::native::Ceiling;
-use crate::native::accounts::Accounts;
 use crate::native::fence::PRIVACY_ONLY_PLACES;
 
 /// The configuration of a run whose accounts' homes are below `/srv/homes`, with the agent's

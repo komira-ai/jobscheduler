@@ -109,9 +109,10 @@ pub(super) fn prepare(
     native: &NativeSpec,
     home: &Path,
     (uid, tmp, developer_dir): (u32, &Path, Option<&Path>),
+    hand_over: &super::HandOver,
 ) -> Result<Prepared, Prepare> {
     let under = home.join(super::profile::JOB_TREES_DIR);
-    super::make_dir(&under, uid)?;
+    super::make_dir(&under, uid, hand_over)?;
     let gid = fs::metadata(home)?.gid();
     let owner = Owner::new(uid, gid).ok_or(Prepare::Owner)?;
     let writable = pinned.clone_writable(&under, owner)?;

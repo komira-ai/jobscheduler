@@ -69,8 +69,9 @@ pub(super) fn retire(pool: &Pool, account: Account) -> Result<Retired, RuntimeEr
     pool.retire(account)
         .inspect(|retired| {
             tracing::info!(
-                "native: account {name} retired, {} processes killed, gone in {} ms",
-                retired.killed.len(),
+                "native: account {name} retired: killed {:?}, gone {:?}, in {} ms",
+                retired.killed,
+                retired.gone,
                 retired.delete_ms
             );
         })
