@@ -33,6 +33,13 @@ pub enum Request {
         #[serde(default)]
         wall_ms: u64,
     },
+    /// Run `args` in the guest itself (not in a container) as the guest program's user, wait
+    /// for it, and answer with its exit and output: the measurements' way in. The channel is
+    /// reached only through the owner's control socket, which only the owner's user can open.
+    Exec {
+        /// The program and its arguments.
+        args: Vec<String>,
+    },
     /// Send `signal` (a name `crun kill` takes, such as `KILL` or `TERM`) to the container `id`.
     Kill {
         /// The container's id.
@@ -228,6 +235,9 @@ mod tests {
                 signal: "KILL".into(),
             },
             Request::Wait { id: "c1".into() },
+            Request::Exec {
+                args: vec!["/bin/true".into()],
+            },
             Request::Hardened {
                 id: "h1".into(),
                 script: "nc -z 192.0.2.1 22".into(),

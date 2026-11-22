@@ -233,6 +233,27 @@ pub fn main() -> ExitCode {
     }
 }
 
+/// An `exec` request: `args` run in the guest, its exit and the ends of its output.
+fn exec(args: &[String]) -> Reply {
+    let Some((program, rest)) = args.split_first() else {
+        return Reply::refused("an exec takes a program");
+    };
+    match js_mac_session::disclaim::Program::new(program, rest).output() {
+        Ok(out) => {
+            use std::os::unix::process::ExitStatusExt as _;
+            Reply {
+                ok: true,
+                exit: out.status.code(),
+                signal: out.status.signal(),
+                stdout: wire::tail(&out.stdout, wire::OUTPUT_TAIL),
+                stderr: wire::tail(&out.stderr, wire::OUTPUT_TAIL),
+                ..Reply::default()
+            }
+        }
+        Err(why) => Reply::refused(format!("start {program}: {why}")),
+    }
+}
+
 /// One connection: one request, one reply.
 fn serve(stream: UnixStream, shared: &Shared) {
     let began = Instant::now();
@@ -269,6 +290,7 @@ fn serve(stream: UnixStream, shared: &Shared) {
         Ok(Request::Run { id, args, wall_ms }) => plain::run(shared, &id, &args, wall_ms),
         Ok(Request::Kill { id, signal }) => plain::kill(shared, &id, &signal),
         Ok(Request::Wait { id }) => plain::wait(shared, &id),
+        Ok(Request::Exec { args }) => exec(&args),
         Ok(Request::Hardened { id, script, allow }) => hardened::run(shared, &id, &script, &allow),
     };
     reply.guest_us = u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX);
