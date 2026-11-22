@@ -64,7 +64,7 @@ fn an_open_without_full_disk_access_makes_nothing() {
             && why
                 .to_string()
                 .contains("js-agent-full-disk-access.mobileconfig"),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert_eq!(rig.fake.take_calls(), ["full_disk_access"]);
     assert!(
@@ -256,7 +256,10 @@ fn a_loan_the_ledger_cannot_record_is_not_made() {
     pool.ledger().fail_writes(&rig.dir.join("state/accounts"));
     let why = pool.lend("job-1").unwrap_err();
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
-    assert!(why.to_string().contains("state/accounts: "), "{why}");
+    assert!(
+        why.to_string().contains("state/accounts: "),
+        "the error does not say what the test expects"
+    );
     assert_eq!(pool.ready_count(), 1);
 }
 
@@ -511,7 +514,7 @@ fn an_account_made_for_a_lend_is_never_ready_to_another_lend() {
     let lines = rig.lines();
     for (lent, job) in [(&first, "job-1"), (&second, "job-2")] {
         let line = format!("lent {} {job}", lent.account.name);
-        assert!(lines.contains(&line), "{line} in {lines:?}");
+        assert!(lines.contains(&line), "a loan is not in the ledger");
     }
     assert!(lines.iter().all(|line| !line.starts_with("gone")));
     assert!(lines.iter().all(|line| !line.starts_with("ready")));

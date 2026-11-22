@@ -45,7 +45,7 @@ fn the_record_has_the_attributes_of_a_hidden_account_that_cannot_log_in() {
     for (attribute, _) in attributes {
         assert!(
             !attribute.contains("Password") && !attribute.contains("Authentication"),
-            "{attribute}"
+            "an attribute gives a password or an authentication authority"
         );
     }
 }
@@ -87,7 +87,7 @@ fn a_slots_generated_uid_is_fixed_by_its_uid_and_given_at_creation() {
     for (attribute, _) in account_attributes(&user("kbf-acct-3")) {
         assert!(
             !attribute.contains("GeneratedUID") && !attribute.contains("RecordName"),
-            "{attribute} is set after creation, where the directory refuses it"
+            "an attribute is set after creation, where the directory refuses it"
         );
     }
 }

@@ -194,6 +194,31 @@ fn a_uid_that_owns_files_is_busy() {
     assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
 }
 
+/// Asserts that a slot whose deleted record the lookup cache (`getpw*`) still answers for, for
+/// a counted number of lookups after the retirement, is free: the refill after the
+/// retirement makes the next account on the same uid and a lend gets it, and the log says the
+/// cache answered. Catches a free check that reads a cached answer as a record, which fails
+/// the next job of a one-slot pool right after a retirement.
+#[test]
+fn a_slot_only_the_lookup_cache_still_names_is_free_again() {
+    let rig = Rig::new("free-cache", 1, 1);
+    rig.fake.state().getpw_lingers = 6;
+    let pool = rig.open();
+    let first = pool.lend("job-1").unwrap().account;
+    let uid = first.uid;
+    pool.retire(first).unwrap();
+    assert_eq!(pool.ready_count(), 1, "the refill made the next account");
+    let next = pool.lend("job-2").unwrap();
+    assert_eq!((next.account.uid, next.made_now), (uid, false));
+    let log = rig.log.text();
+    assert!(
+        log.contains(
+            "the directory has no record of the uid; a lookup still answers from its cache"
+        ),
+        "{log}"
+    );
+}
+
 /// Asserts that an error in looking at a uid is not "free": the uid is passed over and the
 /// refusal names why, for each way of looking.
 #[test]
@@ -208,6 +233,12 @@ fn an_error_in_looking_at_a_uid_is_not_free() {
         format!("{uid}: looking up its record: uid_taken {uid} failed")
     );
     rig.fake.heal(&format!("uid_taken {uid}"));
+    rig.fake.fail(&format!("uid_in_directory {uid}"));
+    assert_eq!(
+        why(&pool),
+        format!("{uid}: looking up its record: uid_in_directory {uid} failed")
+    );
+    rig.fake.heal(&format!("uid_in_directory {uid}"));
     rig.fake.fail(&format!("processes {uid}"));
     assert_eq!(
         why(&pool),
@@ -332,7 +363,10 @@ fn a_home_that_exists_refuses_the_account() {
         panic!("not a making error");
     };
     assert_eq!(step, Step::Home);
-    assert!(why.contains("File exists"), "{why}");
+    assert!(
+        why.contains("File exists"),
+        "the refusal does not say what the test expects"
+    );
     assert!(!rig.home(1).exists());
     assert_eq!(rig.open().ready_count(), 1);
 }
@@ -351,7 +385,7 @@ fn a_failed_making_that_cannot_be_deleted_is_held() {
     assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Record));
     assert!(
         why.ends_with("deleting what was made did not complete, at record: deleting the record kbf-acct-1: delete_account kbf-acct-1 failed"),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     assert_eq!(
         rig.lines(),
@@ -383,7 +417,10 @@ fn a_ledger_that_fails_while_making_is_named() {
         panic!("{error:?}");
     };
     assert_eq!((account.as_str(), *step), ("kbf-acct-1", Step::Ledger));
-    assert!(why.starts_with("recording made: "), "{why}");
+    assert!(
+        why.starts_with("recording made: "),
+        "the error does not say what the test expects"
+    );
     assert!(
         rig.fake
             .take_calls()
@@ -402,10 +439,13 @@ fn a_ledger_that_fails_while_making_is_named() {
         panic!("not a making error");
     };
     assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Ledger));
-    assert!(why.starts_with("recording lent: "), "{why}");
+    assert!(
+        why.starts_with("recording lent: "),
+        "the refusal does not say what the test expects"
+    );
     assert!(
         why.contains("deleting what was made did not complete, at ledger: recording gone: "),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     // The account was deleted all the same: only the ledger does not know.
     assert!(rig.fake.state().users.is_empty());
@@ -426,7 +466,10 @@ fn a_refill_whose_ready_cannot_be_recorded_is_named_and_deleted() {
         panic!("not a making error");
     };
     assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Ledger));
-    assert!(why.starts_with("recording ready: "), "{why}");
+    assert!(
+        why.starts_with("recording ready: "),
+        "the refusal does not say what the test expects"
+    );
     assert!(rig.fake.state().users.is_empty());
 }
 
@@ -502,11 +545,11 @@ fn a_record_that_does_not_have_the_slots_generated_uid_fails_the_making() {
             "the record's GeneratedUID is {other}, not the slot's {}; ",
             generated_uid(me())
         )),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     assert!(
         why.ends_with("what was made was deleted and shown gone"),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     assert_eq!(
         rig.lines(),
@@ -526,7 +569,7 @@ fn a_record_that_does_not_have_the_slots_generated_uid_fails_the_making() {
     assert_eq!(step, Step::Record);
     assert!(
         why.starts_with("reading the GeneratedUID of the record: record_guid kbf-acct-1 failed; "),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     assert!(rig.fake.state().users.is_empty());
 
@@ -540,7 +583,7 @@ fn a_record_that_does_not_have_the_slots_generated_uid_fails_the_making() {
     assert_eq!(step, Step::Record);
     assert!(
         why.starts_with("the record is not there after it was made; "),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
 }
 
@@ -628,10 +671,13 @@ fn a_folder_that_cannot_be_emptied_before_the_making_stops_it_at_folder() {
         panic!("not a making error");
     };
     assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Folder));
-    assert!(why.starts_with("emptying its per-user folders: "), "{why}");
+    assert!(
+        why.starts_with("emptying its per-user folders: "),
+        "the refusal does not say what the test expects"
+    );
     assert!(
         why.contains("deleting what was made did not complete, at folder: "),
-        "{why}"
+        "the refusal does not say what the test expects"
     );
     assert_eq!(
         rig.lines(),
@@ -790,7 +836,7 @@ fn a_failed_making_keeps_a_record_and_a_home_of_the_name_that_are_anothers() {
             "the record kbf-acct-1 has uid {theirs}, not {}: another's, not deleted",
             me()
         )),
-        "{why}"
+        "the refusal names the other's record"
     );
     assert!(
         rig.fake.state().users.contains_key("kbf-acct-1"),
@@ -801,4 +847,55 @@ fn a_failed_making_keeps_a_record_and_a_home_of_the_name_that_are_anothers() {
         "the other's home stays"
     );
     assert!(rig.lines().contains(&"held kbf-acct-1 record".to_owned()));
+}
+
+/// Asserts the other two ways a failed making leaves a name alone. A home of the name that
+/// another uid owns (here the test's own uid, while the account has the next one) stays, and
+/// the account is held at the home, naming the owner. A record that cannot be looked up holds
+/// the account at the record, and nothing is deleted on a failed look.
+#[test]
+fn a_failed_making_holds_on_another_uids_home_or_on_a_record_it_cannot_look_up() {
+    let rig = Rig::new("make-theirs-home", 2, 0);
+    let pool = rig.open();
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, me());
+    std::fs::create_dir(rig.home(2)).unwrap();
+    std::fs::write(rig.home(2).join("theirs"), "x").unwrap();
+    let AccountError::Make { step, why, .. } = pool.lend("job-2").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Home);
+    let owned = format!(
+        "deleting what was made did not complete, at home: {} is owned by uid {}, not {}: \
+         another's, not removed",
+        rig.home(2).display(),
+        me(),
+        me() + 1
+    );
+    assert!(why.ends_with(&owned), "the refusal names the other's home");
+    assert!(rig.home(2).join("theirs").exists());
+    assert!(rig.lines().contains(&"held kbf-acct-2 home".to_owned()));
+
+    let rig = rig.next("make-unlookable", 1, 0);
+    let pool = rig.open();
+    rig.fake.fail("create_account kbf-acct-1");
+    rig.fake.fail("account kbf-acct-1");
+    let AccountError::Make { step, why, .. } = pool.lend("job-1").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Record);
+    assert!(
+        why.ends_with(
+            "deleting what was made did not complete, at record: looking up the record \
+             kbf-acct-1: account kbf-acct-1 failed"
+        ),
+        "the refusal names the failed look"
+    );
+    assert!(rig.lines().contains(&"held kbf-acct-1 record".to_owned()));
+    assert!(
+        rig.fake
+            .take_calls()
+            .iter()
+            .all(|call| !call.starts_with("delete_account")),
+        "nothing is deleted on a failed look"
+    );
 }

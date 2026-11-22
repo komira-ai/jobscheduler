@@ -31,7 +31,7 @@
 //! removed, except what macOS's own per-user daemons seal there: after a real build the
 //! folder held Launch Services' data vault (`0/com.apple.LaunchServices.dv`) and the trust
 //! daemon's folder (`T/com.apple.trustd`), which root may not remove, list or even examine.
-//! Those two, when sealed, are kept with the folder (`tree::SYSTEM_KEPT`): a job cannot open
+//! Those two, when sealed, are kept with the folder (`tree::kept::SYSTEM_KEPT`): a job cannot open
 //! them, only the daemon can. A record made with its `GeneratedUID` from the start (the directory service takes
 //! it only at creation; root may not change it afterwards) and the same uid gets the same
 //! folder again, found empty once the last account's contents were removed. So the module

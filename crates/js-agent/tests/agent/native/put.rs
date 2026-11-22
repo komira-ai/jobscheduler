@@ -238,8 +238,9 @@ fn a_job_that_writes_no_pack_commits_nothing() {
 }
 
 /// Asserts that beneath the put root only a read-write mount of `cas/b/<build>/<nonce>` is
-/// taken: a read-only mount of a put directory, a read-write mount of `cas/b/<build>`, and a
-/// read-write mount elsewhere in the root whose link leads into the put root are refused
+/// taken: a read-only mount of a put directory, a read-write mount of `cas/b/<build>`, a
+/// read-write mount elsewhere in the root whose link leads into the put root, and a mount
+/// (read-only or read-write) of the directory that holds the put root are refused
 /// `input-not-allowed`, naming why. Catches a job given a way to read or write other builds'
 /// puts.
 #[test]
@@ -275,8 +276,22 @@ fn any_other_mount_beneath_the_put_root_is_refused() {
         (
             mount(&holder.join("to-put"), "/work/out", MountMode::ReadWrite),
             format!(
-                "{} lies beneath --native-put-root once its links are followed",
+                "{} holds or lies beneath --native-put-root once its links are followed",
                 holder.join("to-put").display()
+            ),
+        ),
+        (
+            mount(&holder, "/work/out", MountMode::ReadOnly),
+            format!(
+                "{} holds or lies beneath --native-put-root once its links are followed",
+                holder.display()
+            ),
+        ),
+        (
+            mount(&holder, "/work/out", MountMode::ReadWrite),
+            format!(
+                "{} holds or lies beneath --native-put-root once its links are followed",
+                holder.display()
             ),
         ),
     ];
