@@ -2,6 +2,8 @@
 
 Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root probe of section 4.3 (step 1) has held in the system domain. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
+Superseded in part by `mac-account-per-job.md` (built after this design was accepted): a native job now runs as a new account made for it and deleted afterwards, not as one of a pool of reused users. Every statement below about the pool of users, its slots, its `pool` file, `pool-create`, `pool-status`, `native/pool_user.rs` and the reset in place describes the code as it was when this was written. The plan of one program per Mac, the supervisor per run and the order of steps are unchanged.
+
 ## 1. What changes for an operator
 
 | | Today | After |
@@ -14,7 +16,7 @@ Status: accepted, 2026-11-22 (the owner's answers are in section 10); the root p
 | Socket, group, code-signature pin | `/var/run/js-mac-session/socket`, group `_jsagent`, the agent's cdhash baked into the helper's plist | none |
 | Flags in the agent's plist | `--native-helper-socket /var/run/js-mac-session/socket` turns native jobs on | no such flag: a macOS agent runs native jobs unless `--no-jobs` |
 
-Some things do not change: the pool of reused users (uids 600-699, `kbf-lease-pool-<n>`) and its ledger files, the Seatbelt profile of each run, the pf rules per uid, what a job sees, the wire to the lease server, and Linux.
+Some things do not change: the helper's uid range (600-699) and its ledger files (superseded: the pool of reused users, `kbf-lease-pool-<n>`, is gone, `mac-account-per-job.md`), the Seatbelt profile of each run, the pf rules per uid, what a job sees, the wire to the lease server, and Linux.
 
 **If accounts are made and deleted per job instead of reused.** A separate change proposes a new account for each job, deleted after it. That needs Full Disk Access for the agent's program, signed with a Developer ID Application certificate. This design holds either way, with these differences:
 
@@ -61,7 +63,7 @@ A third trait for "run a job on this host" would have one implementation per tar
 | `js-mac-provision` the library (`provision.rs`, `policy.rs`, `render.rs`, `pfctl.rs`, `daemon.rs`) | Stays as library code. The agent links the crate already, for the anchor check and its constants (`native/pf.rs:15-19`). |
 | `js-contain` `oci/supervise.rs` (770) | Split. The platform-free core moves to a new crate, `js-supervise` (layer `runtime`, added to `layers.toml` in the same pull request; `js-contain`, `js-mac-session` and `js-agent` are at that layer or above, and `js-supervise` depends on none of them). The crun arm stays in `js-contain`. Section 4.2 has the details. |
 
-**Pool users are permanent.** Measured on macOS 27: root cannot delete a pool user's account, its home or its per-user system folders under `/var/folders`. Root may empty them, and may write the account's shell, hidden flag and primary group and change its group membership. It may not write the account's home attribute. So the pool's users are made once and kept for good:
+**Pool users are permanent (superseded by `mac-account-per-job.md`: with Full Disk Access the helper deletes each lease's account, and the pool and the reset in place are gone).** Measured on macOS 27, without that access: root cannot delete a pool user's account, its home or its per-user system folders under `/var/folders`. Root may empty them, and may write the account's shell, hidden flag and primary group and change its group membership. It may not write the account's home attribute. So the pool's users are made once and kept for good:
 - A reset empties the home and the per-user folders in place. It never removes and recreates them; removing the home is the `EPERM` the first Mac installs hit.
 - The pool's `replace` (delete the user and make it again with the same name and uid, `helper/pool.rs:27`) is not possible. It becomes setting the attributes root may write back to the pool's values and emptying the home again. A slot whose reset still is not clean stays broken, as a failed replace leaves it today.
 - With no administrator lease there is no user to turn back from an administrator.
@@ -294,7 +296,7 @@ Each step is a pull request that leaves main shippable. Steps 2 and 3 depend on 
 
 - The update that brings step 5 drains each Mac, as every Mac update does today.
 - Its cutover retires the helper's job and plist.
-- The new agent opens the same ledger at the same path, and the pool users (600-699) and their homes stay.
+- The new agent opens the same ledger at the same path (superseded: the accounts it finds are per-lease accounts, which its boot reset deletes, not pool users that stay).
 - The group `_jsagent` and `/var/db/js-mac-session` stay. The second holds the ledger. `/var/run/js-mac-session` is gone at the next reboot.
 
 The fixes of komira-ai/jobscheduler#988 (open), which make the first install and the launchd states work on a Mac, must be released before step 5 reaches them.

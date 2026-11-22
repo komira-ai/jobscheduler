@@ -266,23 +266,11 @@ when the pool names it; every native agent of a release that takes mounts report
 at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The
 Macs' pool names `os_version = "26"` (`docs/design/mac-runtime.md`, section 5). The Macs must reach its agent listener.
 
-## The pool's users stay for good
+## A lease's account is deleted
 
-The helper (`js-mac-session`) makes the pool's users (`kbf-lease-pool-<n>`) once and never deletes one, nor a home, nor a
-per-user folder the system placed: measured on macOS 27.0.1 with System Integrity Protection on, root (from a launchd
-daemon and from an ssh root shell) may not delete a local user record, may not remove an existing account's home, and
-may not remove `/private/var/folders/<xx>/<hash>`, though everything can be emptied. A lease's end resets its user in
-place, and a first install on a Mac that already has the pool's users (an earlier install left them) adopts the ones
-that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
-users: a Mac that must lose them is reset by its administrator.
+The helper (`js-mac-session`) makes an account for each lease when it starts (`kbf-lease-<term>-<seq>`, hidden, no password, shell `/usr/bin/false`) and deletes it, its home and its per-user folder the system placed when the lease ends, then shows it gone before its uid is given again (`mac-lease-teardown.md`, `mac-account-per-job.md`). macOS 27 refuses root those deletions unless the process holds Full Disk Access (measured on macOS 27.0.1 with System Integrity Protection on: root, from a launchd daemon and from an ssh root shell, could not delete a local user record, remove an existing account's home, or remove `/private/var/folders/<xx>/<hash>`). The release signs the helper, and a management profile in the repository (a privacy-policy payload for the helper's installed path and its designated requirement, which needs device management) grants it that access. The helper's `full-disk-access` verb reports whether it holds the grant (it lists the privacy database's directory, which only a process with the grant may list), and the agent reports the answer as its capability `full-disk-access` and refuses native jobs on a Mac without it.
 
-The release signs the helper, and a management profile in the repository (a privacy-policy payload for the helper's
-installed path and its designated requirement, which needs device management) grants it Full Disk Access. With the grant
-the helper can delete a user's record and home, and the one deletion that is left, of a lease user from before the pool,
-would work. The helper's `full-disk-access` verb reports whether it holds the grant (it lists the privacy database's
-directory, which only a process with the grant may list), and the agent reports the answer as its capability
-`full-disk-access`. The pool's reset described here is unchanged by the grant; deleting an account per job is the next
-step (`mac-account-per-job.md`).
+A release before the account per job kept a pool of accounts, `kbf-lease-pool-<n>`, for good. The first boot reset of this release with the grant deletes each of them by name, and removes the pool file first so a rollback to that release makes its pool afresh. Without the grant they stay and native jobs are refused.
 
 ## Platform properties
 

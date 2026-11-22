@@ -667,7 +667,7 @@ tree must be readable and the rest of the mount must not:
   checked at `:85`); the agent canonicalises `--tierstore-fs` once at start and builds each tree path as
   `<mount>/trees/<64 hex>` from it, so no per-run `realpath` is needed. A `subpath` rule matches the resolved path, so a
   symbolic link in a tree that points outside it leads to a denied path (tierstore Measured: macos E15, E18a).
-- A tree path is never a write grant: the profile's head denies `file-write*` everywhere but the run directory (`exec/` in the pool user's home).
+- A tree path is never a write grant: the profile's head denies `file-write*` everywhere but the run directory (`exec/` in the run's account's home).
 
 The builder bounds each list at 64 entries (`MAX_LISTED`, `policy.rs:16`). The read-only list of a run holds its files
 directory, its mount inputs and, with this design, its tree links (4.3); the agent checks that sum at admission and
@@ -675,7 +675,7 @@ refuses a start over it (`too-many-inputs-here`), and the tree grants are a seco
 
 ### 4.3 Where the tree appears
 
-The run's working directory is `exec/` in the pool user's home. A `ReadOnly` tree at `dest` appears as a symbolic link
+The run's working directory is `exec/` in the run's account's home. A `ReadOnly` tree at `dest` appears as a symbolic link
 `exec/<dest>` → `/private/var/tierstore/fs/trees/<64 hex>`, made by the agent before the job's first process. The link
 is in the run's read-only list (`IN_i`, `profile.rs:129-132`), which keeps the job from removing or replacing the link
 itself; writes through it already land outside the run directory, where the profile's head denies them. A job that
@@ -698,19 +698,19 @@ before C9 (open question Q1):
   (tierstore 6.8), so (c) would be refused at admission for a run with more network, which would use (a). The run's
   working directory would be in the view, so the working-directory check above would have to accept the view's path.
 
-### 4.4 Detach, restart and the pool user
+### 4.4 Detach, restart and the run's account
 
 The lifecycle builds the result when `poll` sees the run's main process exit, before `remove`, on macOS as on Linux
 (`cleanup.rs:64-96`). So the exit-time detach of 3.5 is made there too. Unlike Linux, the run's user may still have
 processes at that moment (`kill_uid` runs only in `remove`, `native/mod.rs:723-744`); after the detach, a stray process
 that looks up a name of the tree fails, which is harmless since the job has ended and `remove` kills it next.
 
-`remove` then kills the user's processes (`kill_uid`), collects declared outputs, and returns the pool user to the pool
-(`user_delete`, a reset: `docs/design/mac-lease-teardown.md`). The agent sends its second detach **after `kill_uid` and
-before `user_delete`**: after, so that no process of the run still reads the tree; before, so that the pool user,
-which another lease will be lent next, holds no attachment. This corrects one assumption of tierstore 6.8, which says
-jobscheduler creates a fresh user for each run: it lends a pool user per lease and resets it after, so the uid that a
-view's server-side check compares with is reused. Under option (c) the order above is what keeps a view from outliving
+`remove` then kills the user's processes (`kill_uid`), collects declared outputs, and deletes the run's account
+(`user_delete`, which deletes it and shows it gone: `docs/design/mac-lease-teardown.md`). The agent sends its second detach **after `kill_uid` and
+before `user_delete`**: after, so that no process of the run still reads the tree; before, so that the account,
+which is deleted next, holds no attachment. This agrees with tierstore 6.8, which says
+jobscheduler creates a fresh user for each run: each run's account is new (`mac-account-per-job.md`), and its uid is used again only after the account is shown gone, so the uid that a
+view's server-side check compares with is not reused soon. Under option (c) the order above is what keeps a view from outliving
 its run's use of the uid; under (a) and (b) there is no per-uid check in the server, and the order only keeps the
 attachments tidy.
 
@@ -1098,8 +1098,8 @@ Each was not decided by the tierstore design, and is decided here; the owner may
 - **TI12. An unanswered detach after a failed job is an input failure** (section 5).
 - **TI13. On macOS, one policy item after the read denies grants the trees under both read models** (4.2), rather than
   moving the agent to the allow-list model, which it does not use today.
-- **TI14. On macOS, the second detach is between `kill_uid` and `user_delete`**, since pool users and their uids are
-  reused (4.4).
+- **TI14. On macOS, the second detach is between `kill_uid` and `user_delete`**, since an account's uid is used again
+  only after the account is deleted (4.4).
 - **TI15. The tierstore client is a module of `js-agent`**, not a crate: it has one user (R9).
 - **TI16. Run ids go to tierstore with a `js.` prefix** (3.3, section 12), so that this agent's `detach-all-except`
   cannot touch another client's attachments on the same node.

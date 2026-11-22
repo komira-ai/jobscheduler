@@ -1,6 +1,6 @@
 # Restarting a Mac and updating its macOS (js-agent in pool mode)
 
-A Mac that runs js-agent in native pool mode (`sandbox-exec`, the pool users 600-699) is built to
+A Mac that runs js-agent in native mode (`sandbox-exec`, an account made for each job, uids 600-699) is built to
 come back into service after a restart with no step by hand: launchd starts the three daemons of
 the package again, the agent says hello again, and the lease server places on it again. This page
 says why (and which parts have not yet run on a Mac, [below](#what-has-been-checked-on-a-mac)), what a Mac must keep for that to stay true, how to check a Mac after a restart, how to
@@ -48,7 +48,7 @@ seconds later. So the first one or two starts after a boot may fail and the host
 within about a minute; this is expected and needs nothing.
 
 The helper's boot reset (`crates/js-mac-session/src/helper/switch.rs`, `boot_reset`) ends every
-lease its ledger holds, resets the pool users a lease left and makes the pool's missing users. A
+lease its ledger holds except the one the session switch names, deleting each lease's account and showing it gone (a lease whose account is not shown gone stays live, its uid held, and the agent retries it), and, with Full Disk Access, deletes any `kbf-lease-*` account the ledger does not know, the pool accounts of an earlier release among them. A
 job that ran when the Mac stopped has no process after the boot: the agent finds its run gone
 (`crates/js-agent/src/native/adopt.rs`), ends it and tells the server.
 
@@ -70,8 +70,8 @@ retry policy says.
   whichever of its keep-awake settings differ (`sleep 0`, `disksleep 0`, `autorestart 1`, `womp 1`
   and the rest of its list, with `pmset -a`), unless its configuration turns that off. `pmset -g`
   shows the result.
-- **No auto-login, and no console session needed.** Pool mode runs every job as a pool user that
-  the root helper makes and spawns; nothing of it needs a user logged in at the console or a GUI
+- **No auto-login, and no console session needed.** Native mode runs every job as an account that
+  the root helper makes for it and spawns; nothing of it needs a user logged in at the console or a GUI
   session, and the daemons run as root from boot. The helper clears auto-login in its boot reset
   (`defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser` and the removal of
   `/etc/kcpassword`, `crates/js-mac-session/src/helper/switch.rs`, `boot_reset`), because the
@@ -182,7 +182,7 @@ What an update can change, and what puts it right:
 ## A restart while a job is being cleaned up (`check-owed`)
 
 The agent writes `owed-<run>` in its state root before the first step of a job's cleanup (the
-removal of its pool user's lease and its run directories) and removes it once the job's post-job
+removal of its lease's account and its run directories) and removes it once the job's post-job
 checks have run (they check nothing on a Mac). A restart between the two leaves the record, and the next start
 taints the host `check-owed`, which the agent never clears itself
 (`crates/js-agent/src/lifecycle/taint.rs`): the host is listed with that `taint_reason` and runs no

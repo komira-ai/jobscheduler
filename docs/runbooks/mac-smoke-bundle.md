@@ -42,10 +42,10 @@ No `--spec.command`: the program is the bundle's entrypoint named as the bundle,
 What `js` prints: the job's stdout, one line, on stdout, for instance
 
 ```
-js-smoke host=mac-1.example.com user=kbf-lease-pool-3 uid=603 macos=15.6 args=proof
+js-smoke host=mac-1.example.com user=kbf-lease-704123456789-1 uid=603 macos=15.6 args=proof
 ```
 
-and on stderr the job id it drew (`js: job id <id>`) and the end, `job <id> succeeded`; `js` exits 0. The `host=` field names the host that ran the job; the user is one of the host's pool users and the uid one of the helper's `--uid-range`.
+and on stderr the job id it drew (`js: job id <id>`) and the end, `job <id> succeeded`; `js` exits 0. The `host=` field names the host that ran the job; the user is the account the helper made for this job (`kbf-lease-<term>-<seq>`, deleted after the job) and the uid one of the helper's `--uid-range`.
 
 What a failure says, and what to look at:
 

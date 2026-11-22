@@ -33,7 +33,7 @@ clears itself when all of these hold (the taints the checks can still make are l
 
 When it clears: the agent logs a finding naming the taint and the two passing checks, renames `taint.json` to
 `taint.json.cleared-<time>` (the file is kept, as an operator's clear keeps it), and accepts jobs again. A taint whose reason is
-`cleanup-failed`, `check-owed` or `host-job` is not cleared by the agent: those are state the host really holds, and a re-check
+`cleanup-failed`, `check-owed`, `host-job` or `account-not-deleted` is not cleared by the agent: those are state the host really holds, and a re-check
 does not prove that it is undone. (This paragraph once also named a change of mounts, users, groups, modules or a watched
 directory. No check taints for those now; a marker written before that change clears, see "After a restart".)
 
@@ -59,12 +59,13 @@ after every later job.
 | `watch-dir-changed` | no: a `--watch-dir` may not hold or lie in a mount root, the scratch root or the state root, so no contained job can write it; a package install changes `/etc` | note |
 | `processes-unreadable` | the process check cannot run | **taint** (unchecked); clears itself |
 | `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable`, `watch-over-bound` | the input of a check that no longer taints | note; the input's value is taken as unchanged (the baseline's) |
-| `scan-residue` (Mac) | yes: a run as a pool user can make its own login item or Background Task Management entry, which the reset does not remove (mac-lease-teardown.md, "After the run: the leak scan") | **taint** (residue); stays until an operator clears it |
+| `scan-residue` (Mac) | yes: a run can make its own login item or Background Task Management entry, which deleting its account does not remove (mac-lease-teardown.md, "After the run: the leak scan") | **taint** (residue); stays until an operator clears it |
+| `account-held` (Mac) | a native job's account was not shown gone (the helper refused `kill-uid` or `user-delete`); the lease stays live in the journal, its uid is held, and the agent retries at the next job's end and at its start | note; the second held account taints `account-not-deleted` |
 | `scan-unreadable`, `scan-failed` (Mac) | the helper's leak scan could not read an item, or could not be asked | **taint** (unchecked); clears itself |
 | `scan-host-changed`, `scan-no-baseline` (Mac) | no: a root-owned item changed, or the node has no leak-scan baseline | note |
 
 A host job taints `host-job` whatever the checks say (the agent and the server both do it), so nothing is lost for it: it runs as the
-host's root and can change anything the notes look at. `cleanup-failed` and `check-owed` are the lifecycle's and are unchanged.
+host's root and can change anything the notes look at. `cleanup-failed`, `check-owed` and `account-not-deleted` are the lifecycle's: the last is set when two native-job accounts are held at once (`account-held` findings), and the agent never clears it itself, because a re-check of the host does not prove an account is gone.
 Only at start is an input that cannot be read still an error (the agent does not start, naming its code): the baseline cannot be
 taken without it.
 
@@ -97,7 +98,7 @@ clear ends it.
   `process-as-job-user` and `processes-unreadable` (and `cgroup-not-found`, below); the other codes are on markers
   written before the checks were narrowed (see "What taints and what is noted"), and a re-check of such a marker
   passes unless a process of a job user is left, so they clear like any other. Everything else stays: `cleanup-failed`,
-  `check-owed`, `host-job`, `marker-unreadable`, and
+  `check-owed`, `host-job`, `account-not-deleted`, `marker-unreadable`, and
   `unchecked` with `host-not-visible` (that taint says the agent cannot see the host its jobs run on; a re-check of
   what the agent can see does not show that it now can). `cgroup-not-found` is the crun runtime's own blindness and is
   different: a run the runtime reports running whose container group (`<lease cgroup>/ctr`) does not exist a settle
@@ -130,7 +131,7 @@ clear ends it.
   residue written before the checks were narrowed) passes unless a process of a job user is left: it clears after the two
   clean re-checks and the server's acknowledgement. Every other restored taint stays pinned until an operator moves the marker
   aside: `unchecked` of any kind, `cleanup-failed`,
-  `check-owed`, `host-job` and `marker-unreadable`. A restored
+  `check-owed`, `host-job`, `account-not-deleted` and `marker-unreadable`. A restored
   taint beside which a non-clearable one is sealed at start (owed records make `check-owed`, a host job taken over) is
   pinned too: the seal pins it. So is one the pin file names: when the pin happened in an earlier process, `taint.pinned`
   holds the marker's taint, and a restored residue equal to it, field for field, stays pinned; a pin file that cannot be
@@ -244,7 +245,7 @@ the restarted agent restores it, and its own re-checks clear it. Every unchecked
 not read its input, `watch-over-bound`, `cgroup-not-found`) still halts the hook, because a restart restores
 it pinned and it never clears; so does a residue the pin file names. A halt there would keep the release that carries
 the clearing from reaching the host, so one tainted host would stop every release of the group. A
-taint the restarted agent does not re-check (`cleanup-failed`, `check-owed`, `host-job`, an unchecked taint, a taint with no
+taint the restarted agent does not re-check (`cleanup-failed`, `check-owed`, `host-job`, `account-not-deleted`, an unchecked taint, a taint with no
 check named) still halts the hook with reason `tainted` (76). An `owed-*` record halts it (`owed_check`,
 76) only where no running agent can settle it: a first install, and the steps after the update stopped
 the agent. Before the stop it is a job of the running agent whose post-job checks have not run yet, which
@@ -301,7 +302,7 @@ js-agent `tests/agent/lifecycle/taint_clear.rs` (a residue taint on an idle host
 acknowledgement, and the file is kept as `taint.json.cleared-<time>`; a restored residue taint clears the same way, including a
 marker of a demoted check (`kernel-module-changed`, `group-changed`) written before the checks were narrowed, and a restored
 non-residue taint stays pinned; a re-check that still finds the process keeps the
-taint and the count starts again; `cleanup-failed`, `check-owed` and `host-job` never clear; a run held keeps the re-checks
+taint and the count starts again; `cleanup-failed`, `check-owed`, `host-job` and `account-not-deleted` never clear; a run held keeps the re-checks
 off), `tests/agent/lifecycle/` (a note is logged and taints nothing; the tainted line and the health reason name the detail),
 `tests/agent/integrity/` (each note kind with its exact detail, an unreadable input other than the processes a note, an
 unreadable process table the unchecked finding, the baseline taking a noted change after a clean check and after a dirty one, the

@@ -184,10 +184,10 @@ The design also places a service's payload under `/Library/Application Support/<
 
 Apple's package has identifier `com.apple.container-installer`, `install-location` `/usr/local` and Apple's Developer ID leaf. As shipped it therefore fails the identifier and location checks and needs Apple's leaf in the signers file. Its Bom was not checked against the ownership rule. Because the files run from any directory, the same files can be repackaged under our own identifier and path, or shipped inside the `js-agent` payload. Either way, the release's checksum is the pin, and an update replaces the files and restarts the per-user services.
 
-**Pool users instead of the logged-in user.** This was not run as a pool user: creating users needs root. Measured and read:
+**Lease accounts instead of the logged-in user.** This was not run as a lease account: creating users needs root. Measured and read:
 - The services are per-user launchd agents in `user/<uid>` and accept `Background` sessions. Every call here came from an SSH session, not the GUI session. Whether they start for a uid that has never had a console login was not tested.
-- Everything is per user: the app root (images, snapshots, containers, kernel), the API server and the vmnet network service. N pool users would mean N image stores and N service sets, unless one dedicated user runs the tool for every lease.
-- A pool user's reset (`docs/design/mac-lease-teardown.md`) kills every process of the uid, boots out its launchd domains and removes and remakes its home. That would stop that user's container services and, if the app root is under the home, delete its image store, so the next lease pulls and unpacks again.
+- Everything is per user: the app root (images, snapshots, containers, kernel), the API server and the vmnet network service. N lease accounts would mean N image stores and N service sets, unless one dedicated user runs the tool for every lease.
+- A lease account's deletion (`docs/design/mac-lease-teardown.md`) kills every process of the uid, boots out its launchd domains and removes its home. That would stop that user's container services and, if the app root is under the home, delete its image store, so the next lease pulls and unpacks again.
 - Jobs started through `NativeRuntime` run under a Seatbelt profile that grants writes to the home only. The VM itself is started by the per-user service over XPC, not by the job's process, so the profile does not cover it. How the two interact was not tested.
 
 ## 8. What did not map
@@ -208,7 +208,7 @@ These are listed in the order a job would meet them. None is resolved here.
 4. **Shared directories.** Ownership is not modelled on virtiofs: files appear owned by the reader. Writing many small files through a share is slow (26 s for 46,362 files).
 5. **Memory accounting.** A VM keeps its high-water mark of host memory after the guest frees it.
 6. **Exit codes.** Without `--init`, signals do not end a PID-1 job. "Not found" and "not runnable" are both exit 1.
-7. **Per-user runtime.** Everything the tool keeps is per uid, and a pool user's reset would remove it.
+7. **Per-user runtime.** Everything the tool keeps is per uid, and a lease account's deletion would remove it.
 
 ## 9. Reproducing
 

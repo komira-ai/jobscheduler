@@ -111,28 +111,26 @@ hostkeeper lists the three labels in the manifest's `run` and enables them, and 
 them at every boot. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
 
-The helper's pool users (`kbf-lease-pool-<n>`, hidden) are made once, by the helper's boot reset,
-and stay for good: the system refuses root the deletion of a local user record, of an existing
-home and of the per-user folders it placed (all can be emptied), so the helper never deletes one
-and resets a user in place when a lease ends. A first install on a Mac that already has them (an
-earlier install left them, even with `/var/db/js-mac-session` gone) adopts each that is the pool's
-own (its name, uid, hidden flag and home `/Users/kbf-lease-pool-<n>` match), resets it and
-makes the slot free; a record on a pool uid that is not the pool's is refused and the slot is
-left unmade, which the helper's log and `pool-status` name. Removing the package leaves the users.
+The helper makes an account for each lease when it starts (`kbf-lease-<term>-<seq>`, hidden, no
+password, shell `/usr/bin/false`, home `/Users/<name>`, mode 0700) and deletes it, its home and the
+per-user folders the system placed for it when the lease ends, then shows it gone before its uid is
+given again. macOS 27 refuses root those deletions unless the process holds Full Disk Access, which
+the profile `mdm/js-agent-full-disk-access.mobileconfig` grants the helper, so a Mac without the
+grant refuses native jobs (`no-full-disk-access`) and the helper's boot reset deletes nothing. With
+the grant, the boot reset of the first start after a release that kept a pool deletes each of that
+release's accounts, `kbf-lease-pool-<n>`, by name (and removes `/var/db/js-mac-session/pool` first, so
+a rollback to that release makes its pool afresh); a deletion that fails fails the boot reset. The
+helper still accepts `--pool-size` and ignores it, so an older flags file starts. A lease whose
+account is not shown gone stays live with its uid held; the agent retries it and a second one taints
+the host `account-not-deleted`.
 
 A job writes only in its run directory, `<home>/exec`: the profile grants nothing else in the
 account's home, and the job's `HOME` and `CFFIXED_USER_HOME` are `<home>/exec/.home` and its `TMPDIR`
 is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there and the account's
 real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
 whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
-inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
-home even against root without Full Disk Access (the helper is given it by the profile above, but the pool reset of this release does not rely on it):
-a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
-system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
-it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
-`~/Library/Preferences` is what a job of an agent before this change left in a slot's home. Only a
-process with Full Disk Access (a person at a Terminal that was granted it, as an act on that Mac)
-could remove it, or nothing; the pool tolerates it as it is, and a job can no longer make one.
+inside the profile. This keeps the account's real home empty, so the account's home holds only the run
+directory when the helper deletes it.
 
 ## Signing
 
@@ -255,7 +253,7 @@ process shows its `responsible pid` equal to its own pid.
 ## Network
 
 A Mac has no network namespace, so a native job's network level maps onto the Seatbelt
-profile and the pool's pf anchor (`crates/js-mac-provision`, its README has the rules). The
+profile and the pf anchor (`crates/js-mac-provision`, its README has the rules). The
 agent's ceiling is `--native-network`:
 
 | Job level | `--native-network` value | What the job gets | Needs |
@@ -277,12 +275,12 @@ Known limits:
 - Declared ports are refused (`ports-not-supported`, before any user is made). The root test
   `crates/js-agent/tests/native_inbound_pf/`, built by the manual workflow
   `js-agent-native-inbound-pf-test` and run by an operator as root on a provisioned Mac, asks
-  whether the anchor filters inbound traffic to a pool uid's listener; the refusal stands
+  whether the anchor filters inbound traffic to a job uid's listener; the refusal stands
   until it passes.
 - `open` leaves the network unfiltered: the scheduler, the cloud metadata address and every
   other address the Mac reaches are reachable from the job.
 - DNS through the system resolver (mDNSResponder, a unix socket) is outside the filter.
-- pf matches `user` on TCP and UDP only, and loopback between pool users cannot be narrowed by
+- pf matches `user` on TCP and UDP only, and loopback between jobs' users cannot be narrowed by
   the sender's uid.
 
 ## Not done yet
