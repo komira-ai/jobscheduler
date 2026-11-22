@@ -110,7 +110,7 @@ pub fn limits_to_args(
     engine: Engine,
     spec: &RunSpec,
     recursive_ro: bool,
-    ceiling: Option<js_contain::CpuCeiling>,
+    ceiling: Option<js_types::CpuCeiling>,
 ) -> Result<Vec<String>, ArgsError> {
     if spec.cpu_millis == 0 || spec.memory_bytes == 0 || spec.pids == Some(0) {
         return Err(ArgsError::ZeroLimit);

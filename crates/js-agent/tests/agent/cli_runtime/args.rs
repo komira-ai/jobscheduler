@@ -634,7 +634,7 @@ fn add_hosts_reach_create() {
 fn an_operators_ceiling_adds_cpus_of_the_booking_times_it() {
     let mut job = spec("r1");
     (job.cpu_millis, job.memory_bytes, job.pids) = (1500, 1 << 30, Some(100));
-    let ceiling = |text: &str| Some(text.parse::<js_contain::CpuCeiling>().expect("a ceiling"));
+    let ceiling = |text: &str| Some(text.parse::<js_types::CpuCeiling>().expect("a ceiling"));
     for engine in [Engine::Docker, Engine::Podman] {
         let none = limits_to_args(engine, &job, true, None).unwrap();
         assert!(!none.contains(&"--cpus".to_owned()), "{none:?}");

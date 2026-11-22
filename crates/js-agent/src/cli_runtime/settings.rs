@@ -187,7 +187,7 @@ pub struct Settings {
     chown: Option<(u32, u32)>,
     /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
     /// none by default, and a job's CPU booking is then a share alone.
-    cpu_ceiling: Option<js_contain::CpuCeiling>,
+    cpu_ceiling: Option<js_types::CpuCeiling>,
     /// Set for the crun runtime: what it is opened from.
     crun: Option<Box<CrunPlan>>,
 }
@@ -242,7 +242,7 @@ pub struct CrunPlan {
     pub layered: bool,
     /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
     /// none by default.
-    pub cpu_ceiling: Option<js_contain::CpuCeiling>,
+    pub cpu_ceiling: Option<js_types::CpuCeiling>,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -426,7 +426,7 @@ impl Settings {
     /// of each job's booked CPU, for whichever runtime they are: none (the default) leaves a
     /// job's CPU booking a share alone.
     #[must_use]
-    pub fn with_cpu_ceiling(mut self, ceiling: Option<js_contain::CpuCeiling>) -> Self {
+    pub fn with_cpu_ceiling(mut self, ceiling: Option<js_types::CpuCeiling>) -> Self {
         self.cpu_ceiling = ceiling;
         self.crun_mut()
             .into_iter()
@@ -436,7 +436,7 @@ impl Settings {
 
     /// The operator's CPU ceiling (`--cpu-ceiling`), none by default.
     #[must_use]
-    pub fn cpu_ceiling(&self) -> Option<js_contain::CpuCeiling> {
+    pub fn cpu_ceiling(&self) -> Option<js_types::CpuCeiling> {
         self.cpu_ceiling
     }
 
