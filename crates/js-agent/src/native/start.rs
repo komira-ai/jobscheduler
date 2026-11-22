@@ -230,6 +230,7 @@ impl NativeRuntime {
         // The job start's environment over the agent's (its values win), then the account's
         // names, which no job may set.
         let mut env = env::with_job(base, &spec.env);
+        env.retain(|(name, _)| !env::ACCOUNT_ENV.contains(&name.as_str()));
         env.extend(env::account(&job_home, &tmp, &account.name));
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
         let records = spec.scratch.join(RECORDS_DIR);

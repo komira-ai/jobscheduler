@@ -35,8 +35,8 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::test_build::{self, Built, Error};
 
-/// The uids the agent's helper lends to jobs (its default `--uid-range`): a user with one
-/// is a lease user of a farm Mac.
+/// The uids the root helper `js-mac-session` of an earlier release lends to jobs (its default
+/// `--uid-range`): a user with one is a lease user of a farm Mac.
 pub const PRODUCTION_UIDS: RangeInclusive<i64> = 600..=699;
 /// Every uid the tests use: the account pool of `native_privileged` ([`NATIVE_PRIVILEGED_UIDS`]),
 /// the accounts of `native_isolation` and `native_inbound_pf`, and the unprivileged uid of
@@ -79,7 +79,7 @@ pub struct Target {
     pub package: &'static str,
     /// Its integration test target.
     pub test: &'static str,
-    /// Whether it is a `js-agent` target, whose helper makes users the verb deletes after.
+    /// Whether it is a `js-agent` target, whose account pool makes accounts the verb deletes after.
     pub makes_users: bool,
 }
 

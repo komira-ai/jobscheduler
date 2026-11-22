@@ -5,7 +5,8 @@
 //! - `__supervise-native`: the start of one native Mac job in a process of its own, with one
 //!   thread, which opens the job's audit session, drops to its slot user, sets its limits and
 //!   applies its profile, then starts it and records how it went
-//!   ([`crate::mac_supervisor`]). Nothing starts it yet.
+//!   ([`crate::mac_supervisor`]). The native runtime starts it for every native job and for
+//!   its self-test ([`crate::native`]).
 //! - `image-pull` (Linux): pulls an image into the image store ([`crate::image::pull`]).
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
 //!   Mac account pool once, to prove it on a Mac ([`crate::mac_accounts::cycle`]). It runs no

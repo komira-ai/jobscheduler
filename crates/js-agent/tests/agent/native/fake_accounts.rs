@@ -22,13 +22,6 @@ struct State {
     users: BTreeMap<String, NewUser>,
     /// Names whose record cannot be deleted: a retirement holds their account.
     undeletable: BTreeSet<String>,
-    /// No record can be made: a lend with none ready fails.
-    no_records: bool,
-    /// A home made from now on holds a file named `exec`, so the run directory cannot be
-    /// made.
-    exec_in_home: bool,
-    /// Whether Full Disk Access is held (`None`) or refused how.
-    refused: Option<io::ErrorKind>,
 }
 
 /// The fake host. Shared by the pool and the test.
@@ -61,22 +54,6 @@ impl FakeAccounts {
     /// The record named `name` can be deleted again.
     pub fn free_record(&self, name: &str) {
         self.state().undeletable.remove(name);
-    }
-
-    /// No record can be made from now on.
-    pub fn refuse_records(&self) {
-        self.state().no_records = true;
-    }
-
-    /// Every home made from now on holds a file named `exec`.
-    pub fn plant_exec(&self) {
-        self.state().exec_in_home = true;
-    }
-
-    /// Full Disk Access is refused with `kind` from now on (`PermissionDenied` is "not
-    /// granted").
-    pub fn refuse_access(&self, kind: io::ErrorKind) {
-        self.state().refused = Some(kind);
     }
 }
 
@@ -139,19 +116,11 @@ impl AccountHost for FakeAccounts {
     fn make_home(&self, homes: &Path, name: &str, _uid: u32, _gid: u32) -> io::Result<()> {
         let home = homes.join(name);
         fs::create_dir(&home)?;
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
-        if self.state().exec_in_home {
-            fs::write(home.join("exec"), b"")?;
-        }
-        Ok(())
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
     }
 
     fn create_account(&self, user: &NewUser) -> io::Result<()> {
-        let mut state = self.state();
-        if state.no_records {
-            return Err(io::Error::other("the directory refused the record"));
-        }
-        state.users.insert(user.name.clone(), user.clone());
+        self.state().users.insert(user.name.clone(), user.clone());
         Ok(())
     }
 
