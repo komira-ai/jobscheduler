@@ -3,6 +3,7 @@
 //! one until a later reset succeeds.
 
 use super::tests::slots;
+use crate::helper::Host as _;
 use crate::helper::tests::{log, rig};
 
 /// What `user-delete` answers when the reset of slot 0's user fails for `why`.
@@ -83,4 +84,36 @@ fn a_reset_whose_record_cannot_be_read_or_is_not_there_breaks_the_slot() {
 
     rig.host.state().recordless.clear();
     assert_eq!(rig.helper.pool_create().free, slots(&[0]));
+}
+
+/// Catches a reset that rewrites, or takes as the slot's, a record whose uid is not the
+/// slot's: the slot is broken naming the uid it has and the one it should have, and no
+/// attribute is written.
+#[test]
+fn a_record_whose_uid_is_not_the_slot_s_leaves_the_slot_broken() {
+    let rig = rig("pool-reset-uid", 1);
+    let uid = rig.helper.user_create("93.1", None).unwrap();
+    let mut record = rig.host.user_record("kbf-lease-pool-0").unwrap().unwrap();
+    record.uid = uid + 7;
+    rig.host
+        .state()
+        .records
+        .insert("kbf-lease-pool-0".to_owned(), record);
+    log(&rig);
+    let error = rig.helper.user_delete("93.1").unwrap_err();
+    assert_eq!(
+        error,
+        broken(&format!(
+            "setting back the record of user kbf-lease-pool-0: its uid is {}, not {uid}; \
+             macOS lets no process rewrite these on an existing account, so the slot \
+             cannot be repaired",
+            uid + 7
+        ))
+    );
+    let calls = log(&rig);
+    assert!(
+        !calls.iter().any(|c| c.starts_with("restore_user")),
+        "{calls:#?}"
+    );
+    assert_eq!(rig.helper.pool_status().broken, slots(&[0]));
 }
