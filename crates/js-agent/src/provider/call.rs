@@ -18,7 +18,7 @@ use crate::lifecycle::{ProviderAnswer, ProviderCall};
 
 /// The id a run has in a provider's calls: the job's id after `js.`, so a provider that other
 /// clients use too keeps this agent's runs apart from theirs.
-fn run_name(run_id: &str) -> String {
+pub(crate) fn run_name(run_id: &str) -> String {
     format!("js.{run_id}")
 }
 

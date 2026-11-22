@@ -229,7 +229,7 @@ impl NativeRuntime {
             .chain(mounts::read_only_links(&plans, &exec))
             .collect();
         let grants = mounts::grants(&plans);
-        let trees = mounts::trees_of(&plans)
+        let trees = mounts::trees_of(&self.config.mount_roots, &plans)
             .map(|rules| rules.mount_trees())
             .transpose()
             .map_err(|why| fail(&"the trees", &why))?;

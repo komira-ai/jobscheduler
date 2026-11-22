@@ -215,7 +215,7 @@ fn trees_rig(name: &str) -> Rig {
 fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
     let mut rig = trees_rig("mounts-trees");
     let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
-    let tree = root.join("mount-provider/aa/r1/0");
+    let tree = root.join("mount-provider/aa/6a732e7231/0");
     fs::create_dir_all(&tree).unwrap();
     let input = dir_in(&rig, "ro", "input");
     let mounts = fs_of(vec![
@@ -272,15 +272,20 @@ fn a_tree_is_linked_and_read_through_the_runs_trees_not_a_grant() {
 
 /// Asserts that the lookup holds a run's mounts to the trees root's rules, refused
 /// `input-not-allowed` naming the path by exact equality, and that no plan is kept: a tree
-/// without `no_exec`, and the trees root itself (the holding case and the escapes are the
-/// Linux tests of `native_fs::tree_rules`). Catches a tree a job could run, a mount that
-/// opens every run's trees, and a refusal found only when the profile is built at the start.
+/// without `no_exec`, the trees root itself, and another run's tree named as a host path (the
+/// holding case and the escapes are the Linux tests of `native_fs::tree_rules`). Catches a
+/// tree a job could run, a mount that opens every run's trees, a job that reads another run's
+/// tree, and a refusal found only when the profile is built at the start.
 #[test]
 fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
     let mut rig = trees_rig("mounts-tree-rules");
     let root = fs::canonicalize(rig.dir.path("roots").join("trees")).unwrap();
-    let tree = root.join("mount-provider/aa/r1/0");
-    fs::create_dir_all(&tree).unwrap();
+    let tree = root.join("mount-provider/aa/6a732e7231/0");
+    // Run r2's tree, which run r1 names as a host path.
+    let other = root.join("mount-provider/aa/6a732e7232/0");
+    for dir in [&tree, &other] {
+        fs::create_dir_all(dir).unwrap();
+    }
     let shown = root.display();
     let cases = [
         (
@@ -294,6 +299,14 @@ fn the_lookup_refuses_a_set_that_breaks_the_trees_roots_rules() {
         (
             mount(&root, "/work/t", MountMode::ReadOnly, true),
             format!("{shown}: the tree {shown} is the mount root itself"),
+        ),
+        (
+            mount(&other, "/work/t", MountMode::ReadOnly, true),
+            format!(
+                "{}: below the trees root {shown}, a job mounts only a tree the provider \
+                 answered for its own run (mount-provider/<provider>/<run>/<index>)",
+                other.display()
+            ),
         ),
     ];
     for (one, why) in cases {
@@ -620,9 +633,11 @@ fn a_link_whose_name_is_taken_fails_the_start_and_removes_its_user() {
 }
 
 /// Asserts that the mount roots of the agent's flags become read denies of every run and the
-/// roots a job's mounts must lie beneath, once and in addition to the agent's own denies, and
-/// that a root the profile cannot name is refused naming the flag. Catches a mount root that
-/// a run can read whole, one listed twice, and a root of a path that would break every start.
+/// roots a job's mounts must lie beneath, once and in addition to the agent's own denies, but
+/// for the trees root, which is a root and no read deny; and that a root the profile cannot
+/// name is refused naming the flag. Catches a mount root that a run can read whole, one listed
+/// twice, a trees root whose late deny hides every tree, and a root of a path that would
+/// break every start.
 #[test]
 fn the_mount_roots_are_read_denies_of_every_run() {
     let dir = Scratch::new("native-mount-roots");
@@ -658,6 +673,29 @@ fn the_mount_roots_are_read_denies_of_every_run() {
         .count();
     assert_eq!(once, 1, "{denied:?}");
     assert_eq!(config.mount_roots, roots);
+
+    // The trees root is the one root left out: the trees' rules deny it and grant back each
+    // tree before the read denies, which a deny of it would undo.
+    fs::create_dir(dir.path("trees")).unwrap();
+    let trees = fs::canonicalize(dir.path("trees")).unwrap();
+    let with_trees = vec![
+        roots[0].clone(),
+        MountRoot {
+            path: trees.clone(),
+            read_only: true,
+            trees: true,
+        },
+    ];
+    let config = settings
+        .clone()
+        .with_mount_roots(with_trees.clone())
+        .unwrap()
+        .config()
+        .clone();
+    let denied: Vec<&str> = config.read_denies.iter().map(AbsPath::as_str).collect();
+    assert!(denied.contains(&root.to_str().unwrap()), "{denied:?}");
+    assert!(!denied.contains(&trees.to_str().unwrap()), "{denied:?}");
+    assert_eq!(config.mount_roots, with_trees);
 
     let bad = vec![MountRoot {
         path: PathBuf::from("/tmp/root"),
