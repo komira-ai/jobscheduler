@@ -5,9 +5,9 @@
 //!   `--native-put-user` (the user the node runs as, by name or number) are given together or
 //!   not at all. The root must be a directory that a read-write `--mount-root` holds (the
 //!   lifecycle admits a mount's source only beneath a mount root, and every mount root is a
-//!   read deny of every run, so no run reads the root), and with them the largest file a run
-//!   may write (`--native-max-file-mib`) must be at least [`MIN_FILE_MIB`], the build
-//!   service's largest pack.
+//!   read deny of every run, so no run reads the root). The largest file a run may write is
+//!   at least the build service's largest pack whatever the flags say
+//!   ([`super::MIN_MAX_FILE_MIB`]).
 //! - **Target.** A read-write host-path mount whose source lies beneath the put root is the
 //!   run's put target when it is exactly `cas/b/<build>/<nonce>` below it, whether or not it
 //!   exists yet (`native/mounts.rs`); it is never linked into the run's folder nor granted in
@@ -39,9 +39,6 @@ use super::run::Run;
 use crate::lifecycle::{OutputsReport, RuntimeError};
 use crate::mac_put::{self, Committed, Node, PutTarget};
 
-/// The least `--native-max-file-mib` beside the put flags: the build service's largest pack.
-pub const MIN_FILE_MIB: u64 = 128;
-
 /// The name of the one output a put mount gives a run, below the mount's target.
 const PACK: &str = "pack";
 
@@ -70,18 +67,16 @@ pub struct PutConfig {
     pub node: Node,
 }
 
-/// Checks `flags` against the agent's `roots` and its largest file (`max_file_bytes`); a
-/// user named by name is looked up with `user_of` (its uid and group, or `None`).
+/// Checks `flags` against the agent's mount `roots`; a user named by name is looked up with
+/// `user_of` (its uid and group, or `None`).
 ///
 /// # Errors
 ///
 /// The text names the flag at fault: one flag without the other, a root that is not an
-/// absolute directory or that no read-write mount root holds, a user that is not known, or
-/// a largest file below [`MIN_FILE_MIB`].
+/// absolute directory or that no read-write mount root holds, or a user that is not known.
 pub fn put_of(
     flags: &PutFlags,
     roots: &[MountRoot],
-    max_file_bytes: u64,
     user_of: &dyn Fn(&str) -> io::Result<Option<Node>>,
 ) -> Result<Option<PutConfig>, String> {
     let (root, user) = match (&flags.native_put_root, &flags.native_put_user) {
@@ -109,12 +104,6 @@ pub fn put_of(
             .map_err(|why| format!("--native-put-user: {user}: {why}"))?
             .ok_or_else(|| format!("--native-put-user: no user {user:?}"))?,
     };
-    if max_file_bytes < MIN_FILE_MIB << 20 {
-        return Err(format!(
-            "--native-max-file-mib: at least {MIN_FILE_MIB} beside --native-put-root (the \
-             build service's largest pack)"
-        ));
-    }
     Ok(Some(PutConfig { root, node }))
 }
 
@@ -173,9 +162,11 @@ pub(super) fn commit_run(
     if put.done.is_some() {
         return;
     }
-    let collected = run.collected.clone().unwrap_or_default();
-    let copied = collected.copied.iter().any(|(path, _)| *path == put.output);
-    if !collected.failed.is_empty() || !copied {
+    let (failed, copied) = run.collected.as_ref().map_or((false, false), |done| {
+        let copied = done.copied.iter().any(|(path, _)| *path == put.output);
+        (!done.failed.is_empty(), copied)
+    });
+    if failed || !copied {
         put.done = Some(Ok(None));
         return;
     }
