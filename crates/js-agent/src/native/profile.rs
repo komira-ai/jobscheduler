@@ -73,8 +73,28 @@ pub(super) fn argv_of(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,
-    (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
+    grants: (&[(&str, PathBuf)], &[MountGrant]),
 ) -> Result<Vec<String>, RuntimeError> {
+    let (profile, command) = confinement_of(config, native, home, grants)?;
+    let none = String::new();
+    let (program, args) = command.split_first().unwrap_or((&none, &[]));
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    Ok(profile
+        .argv(program, &args)
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect())
+}
+
+/// The profile of [`argv_of`] and the command it confines (`/usr/bin/env HOME=<job home>
+/// <program> <args>`): what `sandbox-exec` is given, for a start that applies the profile
+/// itself (`native/one_program.rs`).
+pub(super) fn confinement_of(
+    config: &NativeConfig,
+    native: &NativeSpec,
+    home: &Path,
+    (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
+) -> Result<(Profile, Vec<String>), RuntimeError> {
     let run_path = run_dir(home);
     let run = AbsPath::new(&run_path).map_err(|why| fail(&run_path.display(), &why))?;
     let inputs = read_only
@@ -109,20 +129,17 @@ pub(super) fn argv_of(
     // here, inside the profile, by `env`, which executes the program. The value is a path
     // of the run, which every user may read on a command line; no secret goes here.
     AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let program = AbsPath::new(Path::new(ENV_PROGRAM)).map_err(|why| fail(&ENV_PROGRAM, &why))?;
+    AbsPath::new(Path::new(ENV_PROGRAM)).map_err(|why| fail(&ENV_PROGRAM, &why))?;
     let job_home = run_path.join(JOB_HOME_DIR);
-    let args: Vec<OsString> = [
-        OsString::from(format!("HOME={}", job_home.display())),
-        OsString::from(&native.program),
+    let command: Vec<String> = [
+        ENV_PROGRAM.to_owned(),
+        format!("HOME={}", job_home.display()),
+        native.program.clone(),
     ]
     .into_iter()
-    .chain(native.args.iter().map(OsString::from))
+    .chain(native.args.iter().cloned())
     .collect();
-    let argv = profile.argv(&program, &args);
-    Ok(argv
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect())
+    Ok((profile, command))
 }
 
 /// Runs `/usr/bin/true` under the profile of `config` with `sandbox_exec`, as the agent:

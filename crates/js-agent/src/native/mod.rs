@@ -126,6 +126,7 @@
 //! macOS agent makes one.
 
 mod adopt;
+mod backend;
 mod bound;
 mod bundle;
 mod cwd;
@@ -136,6 +137,7 @@ mod journal;
 mod logs;
 mod mounts;
 mod network;
+pub mod one_program;
 mod outputs;
 mod pf;
 mod pool_user;
@@ -156,16 +158,18 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use backend::Backend;
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
-use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
+use js_mac_session::client::{ClientError, Exit as HelperExit};
 use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::Dotted;
 use js_mac_session::proto::Limits;
 use js_types::LeaseId;
+pub use settings::Accounts;
 
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
@@ -276,7 +280,7 @@ impl Run {
 
 /// Runs native jobs as users of the root helper.
 pub struct NativeRuntime {
-    helper: Client,
+    backend: Backend,
     config: NativeConfig,
     /// The limits of every run, checked when the runtime opens.
     limits: Limits,
@@ -332,14 +336,14 @@ impl NativeRuntime {
     ///
     /// A configured limit is zero or above the helper's cap (nothing is sent to the helper),
     /// the helper cannot be reached or its boot reset failed.
-    pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
+    pub fn open(backend: Backend, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
         if config.network == Ceiling::On && config.egress.is_none() {
             return Err(RuntimeError::new(
                 "--native-network: on needs the check of the pf anchor of the pool \
                  (--native-pf-uid-start and --native-pf-uid-count)",
             ));
         }
-        Self::open_ungated(helper, config, term)
+        Self::open_ungated(backend, config, term)
     }
 
     /// As [`NativeRuntime::open`], without refusing a cap of `on` that has no check. For
@@ -351,15 +355,15 @@ impl NativeRuntime {
     /// As [`NativeRuntime::open`], but for the missing check.
     #[doc(hidden)]
     pub fn open_ungated(
-        helper: Client,
+        backend: Backend,
         config: NativeConfig,
         term: u64,
     ) -> Result<Self, RuntimeError> {
         let limits = limits_of(&config)?;
-        reset(&helper)?;
+        reset(&backend)?;
         let journal = Journal::new(&config.journal);
         Ok(Self {
-            helper,
+            backend,
             config,
             limits,
             term,
@@ -439,7 +443,7 @@ impl NativeRuntime {
     /// Asks for the boot reset again when the helper said it needs it.
     fn ready(&mut self) -> Result<(), RuntimeError> {
         if self.reset_needed {
-            reset(&self.helper)?;
+            reset(&self.backend)?;
             self.reset_needed = false;
         }
         Ok(())
@@ -462,7 +466,7 @@ impl NativeRuntime {
         (id, lease, uid): (LeaseId, &str, u32),
         (pinned, plans, dev): (Option<Pinned>, &[mounts::MountPlan], Option<PathBuf>),
     ) -> Result<Run, RuntimeError> {
-        let user = pool_user::user_of(&self.helper, id, lease)?;
+        let user = pool_user::user_of(&self.backend, id, lease)?;
         let home = self.config.homes.join(user);
         let exec = profile::run_dir(&home);
         let (tmp, job_home) = (
@@ -516,7 +520,8 @@ impl NativeRuntime {
         // The job start's environment last, over the agent's: its values win.
         let env = env::with_job(env, &spec.env);
         let grants = mounts::grants(plans);
-        let argv = profile::argv_of(&self.config, &native, &home, (&read_only, &grants))?;
+        let (profile, command) =
+            profile::confinement_of(&self.config, &native, &home, (&read_only, &grants))?;
         let logs = logs::open(&spec.scratch).map_err(RuntimeError::new)?;
         let fds = [
             logs[0].as_fd(),
@@ -525,10 +530,14 @@ impl NativeRuntime {
             cwd.as_fd(),
         ];
         let (running, deadline_ms) = self
-            .start((spec, lease), (&argv, &env), fds)
+            .start(
+                (spec, lease, &exec.join(&native.cwd)),
+                (&profile, &command, &env),
+                fds,
+            )
             .map_err(|why| fail(&"run", &why))?;
         let record = RunRecord {
-            pid: running.pid,
+            pid: running.pid(),
             started_ms: (self.now_ms)(),
             deadline_ms,
             labels: spec.labels.clone(),
@@ -630,12 +639,12 @@ impl NativeRuntime {
     /// but a user that is left is a uid held in the helper's range.
     fn discard(&self, lease: &str) -> Vec<String> {
         let killed = self
-            .helper
+            .backend
             .kill_uid(lease)
             .err()
             .map(|why| format!("kill-uid: {why}"));
         let deleted = self
-            .helper
+            .backend
             .user_delete(lease)
             .err()
             .map(|why| format!("user-delete: {why}"));
@@ -644,8 +653,8 @@ impl NativeRuntime {
 }
 
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
-fn reset(helper: &Client) -> Result<(), RuntimeError> {
-    match helper.boot_reset(&[]) {
+fn reset(backend: &Backend) -> Result<(), RuntimeError> {
+    match backend.boot_reset() {
         Ok(_) => Ok(()),
         Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
         Err(why) => Err(fail(&"the boot reset", &why)),
@@ -698,7 +707,7 @@ impl Runtime for NativeRuntime {
             .map_err(|why| fail(&"the lease journal", &why))?;
         // The helper records the lease, and the uid of the pool user it lends, before it
         // finishes, so a refusal may leave a live lease: it is removed again.
-        let uid = match self.helper.user_create(&lease) {
+        let uid = match self.backend.user_create(&lease) {
             Ok(uid) => uid,
             Err(why) => {
                 self.learn(&why);
@@ -754,14 +763,14 @@ impl Runtime for NativeRuntime {
     /// them again), deletes the user, and only then reports outputs that could not be copied.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.ready()?;
-        let killed = self.helper.kill_uid(&id.0);
+        let killed = self.backend.kill_uid(&id.0);
         self.ended(killed, "kill-uid")?;
         let max_file_bytes = self.config.max_file_bytes;
         if let Some(run) = self.runs.get_mut(&id.0) {
             run.collect(&id.0, max_file_bytes);
             logs::close(&mut run.logs, &run.scratch);
         }
-        let deleted = self.helper.user_delete(&id.0).map(|_| ());
+        let deleted = self.backend.user_delete(&id.0).map(|_| ());
         self.ended(deleted, "user-delete")?;
         let run = self.runs.remove(&id.0);
         let _ = self.journal.done(&id.0);
@@ -792,9 +801,9 @@ impl Runtime for NativeRuntime {
         let mut lines = Vec::new();
         let mut retired = Vec::new();
         for lease in live {
-            let killed = self.helper.kill_uid(&lease);
+            let killed = self.backend.kill_uid(&lease);
             let ended = self.ended(killed, "kill-uid").and_then(|()| {
-                let deleted = self.helper.user_delete(&lease).map(|_| ());
+                let deleted = self.backend.user_delete(&lease).map(|_| ());
                 self.ended(deleted, "user-delete")
             });
             match ended {

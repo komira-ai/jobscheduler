@@ -209,14 +209,20 @@ fn a_runtime_whose_cap_is_on_does_not_open_without_a_check() {
     let fake = FakeHelper::start(&dir);
     let mut cfg = config(&fake);
     cfg.network = Ceiling::On;
-    let Err(why) = NativeRuntime::open(fake.client(), cfg.clone(), TERM) else {
+    let Err(why) = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        cfg.clone(),
+        TERM,
+    ) else {
         panic!("no check, no runtime");
     };
     let why = why.to_string();
     assert!(why.contains("--native-network"), "{why}");
     assert!(fake.verbs().is_empty(), "the helper was not asked");
     cfg.egress = Some(Fake::new(Verdict::Enforced));
-    assert!(NativeRuntime::open(fake.client(), cfg, TERM).is_ok());
+    assert!(
+        NativeRuntime::open(js_agent::native::Backend::Helper(fake.client()), cfg, TERM).is_ok()
+    );
 }
 
 /// The settings of a native agent over `fake` with the cap `network`, checked by `check`.
@@ -287,12 +293,18 @@ fn the_runtime_asks_only_when_its_cap_is_on() {
     let asks = job_at("r1", NetworkLevel::On).native.unwrap();
     let mut cfg = config(&fake);
     cfg.egress = Some(check.clone());
-    let below = NativeRuntime::open(fake.client(), cfg.clone(), TERM).unwrap();
+    let below = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        cfg.clone(),
+        TERM,
+    )
+    .unwrap();
     assert!(below.check_egress().is_ok());
     assert!(below.check_native_egress(&asks).is_ok());
     assert_eq!(check.calls(), 0);
     cfg.network = Ceiling::On;
-    let on = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
+    let on =
+        NativeRuntime::open(js_agent::native::Backend::Helper(fake.client()), cfg, TERM).unwrap();
     assert!(on.check_egress().is_err());
     assert!(on.check_native_egress(&asks).is_err());
     assert_eq!(check.calls(), 2);
@@ -332,6 +344,8 @@ fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
     let fake = FakeHelper::start(&dir);
     let mut cfg = config(&fake);
     cfg.network = Ceiling::On;
-    let runtime = NativeRuntime::open_ungated(fake.client(), cfg, TERM).unwrap();
+    let runtime =
+        NativeRuntime::open_ungated(js_agent::native::Backend::Helper(fake.client()), cfg, TERM)
+            .unwrap();
     assert!(runtime.check_egress().is_err());
 }

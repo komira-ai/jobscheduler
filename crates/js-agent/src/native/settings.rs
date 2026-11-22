@@ -66,6 +66,20 @@ pub struct NativeSettings {
     xcodes: Vec<Xcode>,
     /// Live logs: the file cap of a run with a sink and the host's credential.
     logs: LogPlan,
+    /// The agent's own slot accounts, when it runs jobs without the helper
+    /// (`native/one_program.rs`).
+    accounts: Option<Accounts>,
+}
+
+/// The slot pool the agent lends its runs' accounts from, in place of the helper's pool users.
+#[derive(Debug, Clone)]
+pub struct Accounts {
+    /// The pool's state folder (its ledger).
+    pub state: PathBuf,
+    /// The slots' uids.
+    pub slots: crate::mac_accounts::Slots,
+    /// How many accounts are kept ready.
+    pub ready: usize,
 }
 
 impl NativeSettings {
@@ -185,7 +199,21 @@ impl NativeSettings {
             bundles: None,
             xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
+            accounts: None,
         }))
+    }
+
+    /// The same settings, lending the runs' accounts from the agent's own slot pool.
+    #[must_use]
+    pub fn with_accounts(mut self, accounts: Option<Accounts>) -> Self {
+        self.accounts = accounts;
+        self
+    }
+
+    /// The agent's own slot pool, when it has one.
+    #[must_use]
+    pub fn accounts(&self) -> Option<&Accounts> {
+        self.accounts.as_ref()
     }
 
     /// The same settings with `placer` as the bundle store of the runtime they make.

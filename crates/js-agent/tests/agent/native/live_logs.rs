@@ -340,9 +340,13 @@ fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
     print(&dir, "stdout", b"FGH");
 
     fake.refuse("boot-reset", RESET_ALREADY);
-    let mut again = NativeRuntime::open(fake.client(), config(&fake), TERM + 1)
-        .unwrap()
-        .with_live_logs(live.logs.clone());
+    let mut again = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(&fake),
+        TERM + 1,
+    )
+    .unwrap()
+    .with_live_logs(live.logs.clone());
     assert!(again.reclaim().is_empty(), "the run is adopted, not ended");
     assert_eq!(again.list_labelled().unwrap().len(), 1);
     assert_eq!(live.made(), 2, "the adopted run has an uploader again");

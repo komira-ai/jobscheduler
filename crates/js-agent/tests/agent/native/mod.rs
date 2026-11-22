@@ -105,7 +105,12 @@ impl Rig {
         let fake = FakeHelper::start(&dir);
         let mut config = config(&fake);
         adjust(&mut config, &dir);
-        let rt = NativeRuntime::open(fake.client(), config, TERM).unwrap();
+        let rt = NativeRuntime::open(
+            js_agent::native::Backend::Helper(fake.client()),
+            config,
+            TERM,
+        )
+        .unwrap();
         Self { fake, rt, dir }
     }
 

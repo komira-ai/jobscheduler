@@ -532,15 +532,27 @@ fn opening_asks_for_the_reset_and_takes_one_that_ran_already() {
     let rig = Rig::new("open");
     assert_eq!(rig.fake.verbs(), ["boot-reset"]);
     rig.fake.refuse("boot-reset", RESET_ALREADY);
-    let again = NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 1);
+    let again = NativeRuntime::open(
+        js_agent::native::Backend::Helper(rig.fake.client()),
+        config(&rig.fake),
+        TERM + 1,
+    );
     assert!(again.is_ok(), "a reset that ran already is fine");
     rig.fake.refuse("boot-reset", "no");
-    let refused = NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 2);
+    let refused = NativeRuntime::open(
+        js_agent::native::Backend::Helper(rig.fake.client()),
+        config(&rig.fake),
+        TERM + 2,
+    );
     let error = refused.err().unwrap();
     assert!(error.0.starts_with("the boot reset: "), "{}", error.0);
     assert!(error.0.contains("no"));
     let nowhere = Client::new(PathBuf::from("/nonexistent/js-helper"));
-    let lost = NativeRuntime::open(nowhere, config(&rig.fake), TERM + 3);
+    let lost = NativeRuntime::open(
+        js_agent::native::Backend::Helper(nowhere),
+        config(&rig.fake),
+        TERM + 3,
+    );
     assert!(lost.err().unwrap().0.starts_with("the boot reset: "));
 }
 
@@ -702,7 +714,7 @@ fn the_configured_limits_travel_to_the_helper_as_fields() {
         let mut bad = config(&fake);
         bad.max_file_bytes = bytes;
         bad.max_processes = procs;
-        let why = NativeRuntime::open(fake.client(), bad, TERM)
+        let why = NativeRuntime::open(js_agent::native::Backend::Helper(fake.client()), bad, TERM)
             .err()
             .expect("a limit the helper would refuse was taken");
         assert!(why.0.contains("limit"), "{bytes} {procs}: {}", why.0);

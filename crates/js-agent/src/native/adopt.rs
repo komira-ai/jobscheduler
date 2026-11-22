@@ -48,7 +48,12 @@ impl NativeRuntime {
     /// The run of `lease`, found again through the helper's `watch`.
     fn adopt(&mut self, lease: &str, record: RunRecord) -> Result<Run, RuntimeError> {
         let (sender, waiter) = channel();
-        let ended = match self.helper.watch(lease) {
+        let watched = match self.backend.helper() {
+            Some(helper) => helper.watch(lease),
+            // The agent's own engine adopts nothing yet: the run is ended.
+            None => Err(ClientError::Refused(format!("lease {lease} has no user"))),
+        };
+        let ended = match watched {
             Ok(running) => {
                 tracing::info!("native {lease}: adopted the run of pid {}", running.pid);
                 thread::spawn(move || {

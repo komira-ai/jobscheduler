@@ -69,6 +69,17 @@ pub struct Flags {
     /// native job (`no-full-disk-access`).
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
+    /// The agent's own slot pool: its state folder. With it the agent lends each run an
+    /// account of its own, starts the run itself and retires the account after it, and asks
+    /// the helper for nothing (`native/one_program.rs`; a prototype).
+    #[arg(long, value_name = "DIR", requires = "native_account_range")]
+    pub native_accounts: Option<PathBuf>,
+    /// The uids of the slot pool's slots, `<first>-<last>`.
+    #[arg(long, value_name = "FIRST-LAST", requires = "native_accounts")]
+    pub native_account_range: Option<crate::mac_accounts::Slots>,
+    /// How many accounts the slot pool keeps ready; 1 when not given.
+    #[arg(long, value_name = "N", requires = "native_accounts")]
+    pub native_account_ready: Option<usize>,
     /// The directory the helper makes its lease users' homes in (its `--homes`), by default
     /// `/Users`. It must exist; the agent canonicalises it. Needs `--native-helper-socket`.
     #[arg(long, value_name = "PATH")]
@@ -152,7 +163,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 15] {
+    pub fn given(&self) -> [(&'static str, bool); 18] {
         [
             (
                 "--native-helper-socket",
@@ -175,6 +186,15 @@ impl Flags {
             ("--native-pfctl", self.native_pfctl.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
+            ("--native-accounts", self.native_accounts.is_some()),
+            (
+                "--native-account-range",
+                self.native_account_range.is_some(),
+            ),
+            (
+                "--native-account-ready",
+                self.native_account_ready.is_some(),
+            ),
         ]
     }
 
@@ -423,9 +443,18 @@ impl Jobs {
         euid: u32,
     ) -> Result<(), String> {
         let journal = state.map_or_else(PathBuf::new, |state| state.path().join(NATIVE_JOURNAL));
+        let accounts = match (&cli.os.native_accounts, &cli.os.native_account_range) {
+            (Some(state), Some(slots)) => Some(native::Accounts {
+                state: state.clone(),
+                slots: *slots,
+                ready: cli.os.native_account_ready.unwrap_or(1),
+            }),
+            _ => None,
+        };
         let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?
             .map(|native| native.with_mount_roots(self.mounts.clone()))
-            .transpose()?;
+            .transpose()?
+            .map(|native| native.with_accounts(accounts));
         if native.is_some() && euid != 0 {
             return Err(
                 "--native-helper-socket: the agent must run as root: it gives each run's \
@@ -597,8 +626,14 @@ pub(crate) fn runtime(
     let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
     native::self_test(native.config(), native.sandbox_exec())
         .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
-    let helper = js_mac_session::client::Client::new(native.socket());
-    let opened = NativeRuntime::open(helper, native.config().clone(), term);
+    let backend = match native.accounts() {
+        Some(pool) => native::Backend::OneProgram(Arc::new(
+            native::one_program::OneProgram::open(&pool.state, pool.slots, pool.ready)
+                .map_err(|why| format!("--native-accounts: {why}"))?,
+        )),
+        None => native::Backend::Helper(js_mac_session::client::Client::new(native.socket())),
+    };
+    let opened = NativeRuntime::open(backend, native.config().clone(), term);
     let runtime = opened
         .map_err(|why| format!("--native-helper-socket: {why}"))?
         .with_stop_grace(build.stop_grace);
@@ -628,6 +663,11 @@ pub(crate) fn checks(
     _watch: Vec<PathBuf>,
     _settle: Duration,
 ) -> Result<Checks, String> {
+    // The agent's own pool sweeps and retires each run's account; the helper's leak scan is
+    // the helper's.
+    if backend.settings().accounts().is_some() {
+        return Ok((Box::new(crate::lifecycle::NoChecks), Err(NO_NATIVE_USAGE)));
+    }
     let helper = js_mac_session::client::Client::new(backend.settings().socket());
     Ok((Box::new(NativeChecks::over(helper)), Err(NO_NATIVE_USAGE)))
 }

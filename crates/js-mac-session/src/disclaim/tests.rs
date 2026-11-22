@@ -44,6 +44,17 @@ fn the_program_gets_its_arguments_and_the_environment_it_is_given() {
     assert_eq!(inherited.trim_end(), env!("CARGO_MANIFEST_DIR"));
 }
 
+/// A program started with its responsibility kept (not disclaimed) runs as any other: off
+/// macOS the call changes nothing, and on macOS it skips only the disclaim.
+#[test]
+fn a_program_that_keeps_its_responsibility_still_runs_with_its_arguments() {
+    let out = Program::new("/bin/echo", ["kept"])
+        .keep_responsibility()
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"kept\n");
+}
+
 /// The environment is the calls applied in order: the last value set wins, whether by
 /// `env` or `envs`; `env_clear` drops what was set before it; an empty value is a value.
 /// Catches an environment rebuilt from the calls out of order, or one that keeps a
@@ -645,4 +656,12 @@ fn an_exec_of_a_program_that_is_not_there_returns_the_error() {
     let missing = OsStr::new("/nonexistent/js-mac-session-exec-test");
     let why = super::exec(missing, &[OsString::from("--flag")]);
     assert_eq!(why.kind(), io::ErrorKind::NotFound, "{why}");
+}
+
+/// A program that cannot be executed in this process's place is an error, and the process goes
+/// on (a test cannot run the success, which replaces the test process).
+#[test]
+fn an_exec_kept_of_a_missing_program_returns_its_error() {
+    let why = super::exec_kept(OsStr::new("/nonexistent/program"), &[]);
+    assert_eq!(why.kind(), io::ErrorKind::NotFound);
 }

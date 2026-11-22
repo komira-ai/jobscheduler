@@ -21,7 +21,12 @@ fn live(rig: &Rig) -> Vec<String> {
 /// A runtime of the same helper and journal as `rig`'s, as a later process of the agent
 /// makes one.
 fn later(rig: &Rig) -> NativeRuntime {
-    NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 1).unwrap()
+    NativeRuntime::open(
+        js_agent::native::Backend::Helper(rig.fake.client()),
+        config(&rig.fake),
+        TERM + 1,
+    )
+    .unwrap()
 }
 
 fn seed(rig: &Rig, text: &str) {
@@ -171,7 +176,12 @@ fn a_run_an_earlier_process_left_is_ended_when_the_next_runtime_reclaims() {
     rig.fake.refuse("boot-reset", RESET_ALREADY);
     let Rig { fake, rt, dir } = rig;
     drop(rt);
-    let mut next = NativeRuntime::open(fake.client(), config(&fake), TERM + 1).unwrap();
+    let mut next = NativeRuntime::open(
+        js_agent::native::Backend::Helper(fake.client()),
+        config(&fake),
+        TERM + 1,
+    )
+    .unwrap();
     let lines = next.reclaim();
     assert_eq!(lines, ["ended the lease user 7.0 an earlier process left"]);
     let verbs = fake.verbs();

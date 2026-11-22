@@ -284,7 +284,12 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         full_disk_access: FullDiskAccess::Granted,
     };
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
-    NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
+    NativeRuntime::open(
+        js_agent::native::Backend::Helper(Client::new(&fixture.socket)),
+        config,
+        term,
+    )
+    .unwrap()
 }
 
 /// A run of this binary's `child_of_the_runs` in `role`; its scratch directory (the log

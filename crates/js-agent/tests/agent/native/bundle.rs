@@ -481,7 +481,14 @@ fn an_adopted_run_has_its_bundle_pinned_again() {
         "the pins end with the process"
     );
     fake.refuse("boot-reset", RESET_ALREADY);
-    let open = |term| NativeRuntime::open(fake.client(), super::config(&fake), term).unwrap();
+    let open = |term| {
+        NativeRuntime::open(
+            js_agent::native::Backend::Helper(fake.client()),
+            super::config(&fake),
+            term,
+        )
+        .unwrap()
+    };
     let mut next = open(super::TERM + 1).with_bundles(Arc::clone(&store));
     assert_eq!(next.list_labelled().unwrap().len(), 1);
     assert!(
