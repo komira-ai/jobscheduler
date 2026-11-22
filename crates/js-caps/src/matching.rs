@@ -33,7 +33,9 @@
 //!
 //! The reserved keys ([`RESERVED_KEYS`]: `kbf-lease`, `kbf-cpu`, `kbf-mac-admin`,
 //! `kbf-book-cpus`, `kbf-book-mem-gib`) ask for a kind or a size of capacity, not a
-//! capability; [`Request::parse`] skips them for the scheduler.
+//! capability; [`Request::parse`] skips them for the scheduler. `kbf-mac-admin` is
+//! reserved and has no meaning: no Mac lease user is ever an administrator (a job that
+//! needs administrator rights runs in a VM), so nothing books it.
 //!
 //! `ios.device=1` asks for one iOS device (`docs/design/ios-devices.md`, section 5.3).
 //! Its attributes are [`DEVICE_ATTRIBUTES`] (`ios.device.class=iPhone`,

@@ -17,7 +17,7 @@ fn a_run_holds_the_lease_user_s_groups_and_cannot_read_what_only_wheel_may() {
     write_root(&wheel_only, "only wheel may read this\n");
     std::os::unix::fs::chown(&wheel_only, Some(0), Some(0)).expect("root:wheel");
     set_mode(&wheel_only, 0o440);
-    let lease = mac.create("19.1", None);
+    let lease = mac.create("19.1");
     let name = lease.name();
     let client = path_str(&mac.client);
     let held = lease.run(&dir, &[client, "groups"]);

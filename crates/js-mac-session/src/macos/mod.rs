@@ -42,13 +42,11 @@ pub fn main(args: &Args) -> ExitCode {
         tracing::error!("kbf-mac-session must run as root");
         return ExitCode::from(2);
     }
-    let started = read_serial().and_then(|serial| {
-        let check: Arc<dyn CallerCheck> =
-            Arc::new(CodeSignatureCheck::new(&args.daemon_requirement)?);
+    let started = CodeSignatureCheck::new(&args.daemon_requirement).and_then(|check| {
+        let check: Arc<dyn CallerCheck> = Arc::new(check);
         let ready = start::prepare(
             args,
             Box::new(MacHost),
-            serial,
             SweepPlan::macos_schedules(),
             SweepPlan::macos(),
             ScanFolder::macos(),
@@ -66,17 +64,6 @@ pub fn main(args: &Args) -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-/// This Mac's serial number, from the I/O Registry.
-fn read_serial() -> Result<String, String> {
-    let output =
-        crate::disclaim::Program::new("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"])
-            .env_clear()
-            .output()
-            .map_err(|why| format!("ioreg: {why}"))?;
-    start::parse_serial(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| "ioreg named no IOPlatformSerialNumber".to_owned())
 }
 
 /// The user flags that block removing an entry or a directory's entries.
