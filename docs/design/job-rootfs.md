@@ -885,8 +885,9 @@ The profile of a run with mounts (reads stay open, `ReadModel::Open`), whichever
   profile denies reads below the root (`MOUNT`), then grants each tree's reads (`MT_i`) and the metadata of its
   ancestors (js-mac-pool `MountTrees`), so a run reads its own trees and cannot read or list another run's or the root.
   The builder renders these rules before the read denies, so the trees root is the one mount root left out of
-  `read_denies` (a later deny of it would hide every tree). The builder adds no exec deny for a tree; `no_exec` is
-  required of a tree at admission because a tree is granted for reading.
+  `read_denies` (a later deny of it would hide every tree). The trees' rules begin with a deny of `process-exec*`
+  and `file-map-executable` below the root, which no later rule allows, so no tree is ever run or mapped executable;
+  `no_exec` is required of a tree at admission so that a start asking otherwise is refused before it runs.
 - Each read-only or read-write mount of the run, and each host path a candidate reads through, is **granted** by a new
   policy item emitted after the read denies and before the floor: `(allow file-read* (subpath (param "GR_i")))`, and
   `(allow file-read-metadata (path-ancestors (param "GR_i")))`, so that `realpath` and

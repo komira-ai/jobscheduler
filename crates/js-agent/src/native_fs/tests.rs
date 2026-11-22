@@ -410,11 +410,11 @@ fn param<'a>(profile: &'a Profile, name: &str) -> Option<&'a str> {
 }
 
 /// Asserts, on the real profile builder, that a run's profile with the read denies the
-/// agent makes of its roots denies the mount root (`MOUNT`) and grants back its one tree
-/// (`MT_0`), that no read deny (`RD_`) is the trees root while the other root is one, and
+/// agent makes of its roots denies the mount root (`MOUNT`) its reads, every exec and every
+/// executable mapping, and grants back the reads of its one tree (`MT_0`), that no read deny (`RD_`) is the trees root while the other root is one, and
 /// that run A's profile names its own tree and never run B's. Catches the trees root among
 /// the read denies: the builder renders the read denies after the trees' grants, so that
-/// later deny would hide every tree from its job.
+/// later deny would hide every tree from its job; and a tree a job could run.
 #[test]
 fn a_runs_profile_reads_its_own_tree_and_denies_no_tree_after_the_grant() {
     let roots = mac_roots();
@@ -435,6 +435,10 @@ fn a_runs_profile_reads_its_own_tree_and_denies_no_tree_after_the_grant() {
         a.text()
             .contains("(allow file-read* (subpath (param \"MT_0\")))")
     );
+    for deny in ["process-exec*", "file-map-executable"] {
+        let line = format!("(deny {deny} (subpath (param \"MOUNT\")))");
+        assert!(a.text().contains(&line), "{line}");
+    }
     for (profile, own, other) in [(&a, TREE_A, TREE_B), (&b, TREE_B, TREE_A)] {
         let values: Vec<&str> = profile.params().iter().map(|(_, v)| v.as_str()).collect();
         assert!(values.contains(&own), "{values:?}");
