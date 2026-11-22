@@ -1254,7 +1254,9 @@ name = "js-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "block2",
  "clap",
+ "dispatch2",
  "getrandom 0.2.17",
  "hex",
  "hostkeeper-hook",
@@ -1287,6 +1289,9 @@ dependencies = [
  "js-update-hook",
  "js-vm-lease",
  "libc",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
  "plist",
  "prost",
  "rcgen",

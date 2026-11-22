@@ -26,6 +26,12 @@ name = "js-launch-measure"
 path = "tests/bin/launch_measure.rs"
 test = false
 
+# The Linux VM prototype's program in the guest (tests/bin/vm_guest.rs): takes "start this
+# container" over the VM's virtio socket and answers with the exit. A measurement, not shipped.
+[[bin]]
+name = "js-vm-guest"
+path = "tests/bin/vm_guest.rs"
+
 [dependencies]
 js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
@@ -88,6 +94,15 @@ ureq.workspace = true
 # and is not built for the macOS target.
 [target.'cfg(target_os = "linux")'.dependencies]
 js-contain = { path = "../js-contain" }
+
+# The Linux VM prototype's owner (src/linux_vm/vm.rs, `js-agent __linux-vm run`): Apple's
+# Virtualization framework through objc2, on the VM's dispatch queue.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError", "NSArray", "NSData", "NSObject"] }
+objc2-virtualization.workspace = true
 
 [dev-dependencies]
 # The `js join-token` verb's library entry point mints the join tokens the join round trip

@@ -316,6 +316,7 @@ mod credential;
 pub mod crun;
 #[cfg(target_os = "linux")]
 pub mod crun_host;
+pub mod dev_exec;
 pub mod disk;
 pub mod dispatch;
 pub mod egress;
@@ -337,6 +338,7 @@ pub mod in_place;
 pub mod integrity;
 mod jobs;
 pub mod leak_scan;
+pub mod linux_vm;
 pub mod lifecycle;
 mod login;
 pub mod logs;
@@ -523,6 +525,22 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    // The prototype's development verb for the Full Disk Access proof: answered first, as it
+    // only starts one program and waits for it.
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(dev_exec::VERB))
+    {
+        return dev_exec::run(&args, err);
+    }
+    // The Linux VM prototype's development verb: answered before anything else starts a
+    // thread or a runtime, as it runs its own.
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(linux_vm::VERB))
+    {
+        return linux_vm::run(&args, out, err);
+    }
     #[cfg(target_os = "linux")]
     if args
         .get(1)
