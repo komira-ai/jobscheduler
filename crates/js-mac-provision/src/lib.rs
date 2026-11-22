@@ -12,8 +12,10 @@
 //! - [`counters`]: the per-rule packet counters of the anchor, which show pf blocked a packet.
 //! - [`agent_flags`]: the anchor the macOS agent's flags file names, which `install
 //!   --flags-file` loads.
+//! - [`keep`]: the agent's keeper, which loads the anchor at the agent's start and again
+//!   every 30 seconds.
 //! - [`launchd`]: the property list of the LaunchDaemon that keeps the anchor loaded.
-//! - [`daemon`]: the property lists of the js-agent package's three LaunchDaemons.
+//! - [`daemon`]: the property lists of the js-agent package's LaunchDaemons.
 //! - [`probe()`]: one connect and its outcome, for the operator and the root test.
 //! - [`cli`]: the verbs of the `js-mac-provision` program.
 //!
@@ -24,6 +26,7 @@ pub mod agent_flags;
 pub mod cli;
 pub mod counters;
 pub mod daemon;
+pub mod keep;
 pub mod launchd;
 pub mod pfctl;
 pub mod policy;
@@ -34,6 +37,7 @@ pub mod render;
 #[cfg(test)]
 mod testing;
 
+pub use keep::{Applied, apply};
 pub use policy::{AnchorName, Endpoint, PolicyError, UidRange};
 pub use probe::probe;
 pub use provision::{Config, enforced};

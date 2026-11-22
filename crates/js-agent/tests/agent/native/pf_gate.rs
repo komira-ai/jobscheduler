@@ -3,15 +3,18 @@
 //! then. The check is a fake that answers as the real one does and counts its calls; the
 //! runtime, the lifecycle and the worker are the real ones over the fake helper.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use js_agent::lifecycle::{Event, Runtime};
 use js_agent::native::{
-    Ceiling, Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
+    Applied, Ceiling, Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags,
+    ProvisionError, Ticks,
 };
 use js_agent::{Backend, Worker};
 use js_agent_wire::{Command, JobSpec, NetworkLevel};
@@ -36,11 +39,29 @@ pub enum Verdict {
     PfctlMissing,
 }
 
-/// A check that answers `verdict` and counts how often it was asked.
+/// A check that answers `verdict`, counts how often it was asked, and keeps an ordered log of
+/// its calls (`"apply"`, `"enforced"`). Its `apply` answers from a script (`InForce` when the
+/// script is empty); its clock has `ticks` ticks, then stops.
 #[derive(Debug)]
 pub struct Fake {
     verdict: Mutex<Verdict>,
     calls: AtomicUsize,
+    applies: Mutex<VecDeque<Result<Applied, Verdict>>>,
+    log: Mutex<Vec<&'static str>>,
+    ticks: AtomicUsize,
+}
+
+/// The clock `Fake::ticks` gives: `left` ticks, then a stop.
+struct Counted {
+    left: usize,
+}
+
+impl Ticks for Counted {
+    fn wait(&mut self, _stop: &Receiver<()>) -> bool {
+        let tick = self.left > 0;
+        self.left = self.left.saturating_sub(1);
+        tick
+    }
 }
 
 impl Fake {
@@ -48,6 +69,9 @@ impl Fake {
         Arc::new(Self {
             verdict: Mutex::new(verdict),
             calls: AtomicUsize::new(0),
+            applies: Mutex::new(VecDeque::new()),
+            log: Mutex::new(Vec::new()),
+            ticks: AtomicUsize::new(0),
         })
     }
 
@@ -55,34 +79,72 @@ impl Fake {
         *self.verdict.lock().unwrap() = verdict;
     }
 
+    /// The answers of the next applies, in order.
+    pub fn script_applies(&self, answers: Vec<Result<Applied, Verdict>>) {
+        *self.applies.lock().unwrap() = answers.into();
+    }
+
+    /// How many ticks the keeper's clock gives.
+    pub fn give_ticks(&self, n: usize) {
+        self.ticks.store(n, Ordering::SeqCst);
+    }
+
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// The calls of `apply` and `enforced`, in the order they were made.
+    pub fn log(&self) -> Vec<&'static str> {
+        self.log.lock().unwrap().clone()
+    }
+
+    /// How many times `apply` was called.
+    pub fn applies(&self) -> usize {
+        self.log().iter().filter(|call| **call == "apply").count()
+    }
+}
+
+fn fault(verdict: Verdict) -> Result<(), ProvisionError> {
+    match verdict {
+        Verdict::Enforced => Ok(()),
+        Verdict::PfDisabled => Err(ProvisionError::PfDisabled),
+        Verdict::NotReferenced => Err(ProvisionError::NotReferenced("com.apple/pool".to_owned())),
+        Verdict::Drift => Err(ProvisionError::Drift {
+            expected: "block".to_owned(),
+            loaded: String::new(),
+        }),
+        Verdict::PfctlExited => Err(ProvisionError::Failed {
+            args: "-s info".to_owned(),
+            code: "1".to_owned(),
+            stderr: "Permission denied".to_owned(),
+        }),
+        Verdict::PfctlMissing => Err(ProvisionError::Run {
+            args: "-s info".to_owned(),
+            source: io::Error::new(io::ErrorKind::NotFound, "no pfctl"),
+        }),
     }
 }
 
 impl Enforcer for Fake {
     fn enforced(&self) -> Result<(), ProvisionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        match *self.verdict.lock().unwrap() {
-            Verdict::Enforced => Ok(()),
-            Verdict::PfDisabled => Err(ProvisionError::PfDisabled),
-            Verdict::NotReferenced => {
-                Err(ProvisionError::NotReferenced("com.apple/pool".to_owned()))
-            }
-            Verdict::Drift => Err(ProvisionError::Drift {
-                expected: "block".to_owned(),
-                loaded: String::new(),
-            }),
-            Verdict::PfctlExited => Err(ProvisionError::Failed {
-                args: "-s info".to_owned(),
-                code: "1".to_owned(),
-                stderr: "Permission denied".to_owned(),
-            }),
-            Verdict::PfctlMissing => Err(ProvisionError::Run {
-                args: "-s info".to_owned(),
-                source: io::Error::new(io::ErrorKind::NotFound, "no pfctl"),
-            }),
+        self.log.lock().unwrap().push("enforced");
+        fault(*self.verdict.lock().unwrap())
+    }
+
+    fn apply(&self) -> Result<Applied, ProvisionError> {
+        self.log.lock().unwrap().push("apply");
+        match self.applies.lock().unwrap().pop_front() {
+            None => Ok(Applied::InForce),
+            Some(Ok(applied)) => Ok(applied),
+            Some(Err(verdict)) => fault(verdict).map(|()| Applied::InForce),
         }
+    }
+
+    fn ticks(&self) -> Box<dyn Ticks> {
+        Box::new(Counted {
+            left: self.ticks.load(Ordering::SeqCst),
+        })
     }
 }
 
@@ -334,4 +396,119 @@ fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
     cfg.network = Ceiling::On;
     let runtime = NativeRuntime::open_ungated(fake.client(), cfg, TERM).unwrap();
     assert!(runtime.check_egress().is_err());
+}
+
+/// Asserts that a worker over a native backend whose cap is `on` loads the anchor before it
+/// checks it (the log is `apply`, `enforced`), and that a cap below `on` does neither. It
+/// catches an agent that checks an anchor it has not loaded, which stops at every start
+/// until something else loads it, and one that loads an anchor it does not keep.
+#[test]
+fn the_agent_loads_the_anchor_before_it_checks_it() {
+    let dir = Scratch::new("native-pf-load");
+    let fake = FakeHelper::start(&dir);
+    let machine = FakeMachine::new();
+    let cases = [
+        ("on", vec!["apply", "enforced"]),
+        ("loopback", vec![]),
+        ("off", vec![]),
+    ];
+    for (n, (network, log)) in cases.into_iter().enumerate() {
+        let check = Fake::new(Verdict::Enforced);
+        let roots = Scratch::new(&format!("native-pf-load{n}"));
+        let mut plan = plan(&roots, &machine, STEP_NEVER);
+        plan.backend = Backend::Native(settings(&fake, network, &check));
+        let started = Worker::start(plan);
+        assert!(started.is_ok(), "{network}");
+        drop(started);
+        assert_eq!(check.log(), log, "{network}");
+    }
+}
+
+/// Asserts that a first load the system refuses (the main ruleset does not reach the anchor
+/// yet) is made once more on the next tick, and the worker then starts: the log is `apply`,
+/// `apply`, `enforced`; and that with no tick the refused load is not repeated and the
+/// check decides (here it fails, so the worker does not start). It catches an agent that
+/// stops at every boot that is faster than the system's own pf start, and one that retries
+/// without waiting.
+#[test]
+fn a_first_refusal_is_retried_on_the_next_tick() {
+    let dir = Scratch::new("native-pf-retry");
+    let fake = FakeHelper::start(&dir);
+    let machine = FakeMachine::new();
+    let cases = [
+        (
+            1,
+            Verdict::Enforced,
+            vec!["apply", "apply", "enforced"],
+            true,
+        ),
+        (0, Verdict::NotReferenced, vec!["apply", "enforced"], false),
+    ];
+    for (n, (ticks, verdict, log, starts)) in cases.into_iter().enumerate() {
+        let check = Fake::new(verdict);
+        check.script_applies(vec![Err(Verdict::NotReferenced), Ok(Applied::Installed)]);
+        check.give_ticks(ticks);
+        let roots = Scratch::new(&format!("native-pf-retry{n}"));
+        let mut plan = plan(&roots, &machine, STEP_NEVER);
+        plan.backend = Backend::Native(settings(&fake, "on", &check));
+        let started = Worker::start(plan);
+        assert_eq!(started.is_ok(), starts, "case {n}");
+        drop(started);
+        assert_eq!(check.log(), log, "case {n}");
+    }
+}
+
+/// Asserts that, once the agent's start check ran, the anchor is loaded again at every tick
+/// until the runtime is dropped (the loads are one for the start plus one for each tick), and
+/// that a tick whose load fails is followed by another load. It catches a keeper that loads
+/// once, stops at its first failure, or outlives the runtime.
+#[test]
+fn the_anchor_is_loaded_again_at_every_tick_until_the_runtime_ends() {
+    let dir = Scratch::new("native-pf-keep");
+    let fake = FakeHelper::start(&dir);
+    let check = Fake::new(Verdict::Enforced);
+    check.script_applies(vec![
+        Ok(Applied::InForce),
+        Err(Verdict::PfctlExited),
+        Ok(Applied::Installed),
+    ]);
+    check.give_ticks(3);
+    let mut cfg = config(&fake);
+    cfg.network = Ceiling::On;
+    cfg.egress = Some(check.clone());
+    let runtime = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
+    assert!(runtime.check_egress().is_ok());
+    drop(runtime);
+    assert_eq!(check.applies(), 4);
+    assert_eq!(check.calls(), 1);
+}
+
+/// Asserts that the checks of a network job never load the anchor: with the anchor not
+/// enforced, jobs refused at admission leave the loads at the start's count, on a runtime
+/// and on a lifecycle. It catches an admission that repairs the limit it is to enforce,
+/// which would let a job in on the strength of its own load.
+#[test]
+fn a_network_job_never_loads_the_anchor() {
+    let dir = Scratch::new("native-pf-admit");
+    let fake = FakeHelper::start(&dir);
+    let check = Fake::new(Verdict::Enforced);
+    let asks = job_at("r1", NetworkLevel::On).native.unwrap();
+    let mut cfg = config(&fake);
+    cfg.network = Ceiling::On;
+    cfg.egress = Some(check.clone());
+    let runtime = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
+    assert!(runtime.check_egress().is_ok());
+    check.answer(Verdict::NotReferenced);
+    assert!(runtime.check_native_egress(&asks).is_err());
+    assert!(runtime.check_native_egress(&asks).is_err());
+    drop(runtime);
+    assert_eq!(check.applies(), 1);
+
+    let refused = Fake::new(Verdict::NotReferenced);
+    let mut h = gated("pf-admit", Ceiling::On, &refused);
+    assert_eq!(
+        h.start(job_at("r2", NetworkLevel::On)),
+        ["refused r2 egress-unchecked"]
+    );
+    assert_eq!(refused.applies(), 0);
 }

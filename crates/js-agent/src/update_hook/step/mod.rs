@@ -19,9 +19,9 @@ mod held;
 mod helper;
 mod host_setup;
 mod in_place;
-mod pf;
 mod prepare;
 mod resume;
+mod retired;
 mod rollback;
 mod supersede;
 mod verify;
@@ -49,6 +49,7 @@ pub use host_setup::{
 };
 pub use prepare::prepare;
 pub use resume::{RESTART_HELLO_SECS, RESTART_STOP_SECS, resume};
+pub use retired::PF_PLIST;
 pub use rollback::rollback;
 pub use verify::verify;
 
@@ -85,9 +86,9 @@ pub struct Env<'a> {
     /// The unit manager, the release link, the lease server, the agent's state root, time and
     /// the kill points.
     pub ports: Ports<'a>,
-    /// Runs the staged agent's `--version`, the staged `js-mac-provision` that loads the pool's
-    /// pf anchor on a Mac, `launchctl bootstrap`, and `systemctl` where the unit manager is
-    /// systemd.
+    /// Runs the staged agent's `--version`, the previous release's `js-mac-provision` that
+    /// loads the pool's pf anchor on a Mac when a rollback restores the retired pf job,
+    /// `launchctl bootstrap`, and `systemctl` where the unit manager is systemd.
     pub runner: &'a dyn CommandRunner,
     /// Which unit manager runs the agent, and so which unit file a release carries.
     pub manager: Manager,
@@ -112,6 +113,9 @@ pub struct Env<'a> {
     /// The copy of the file system table an earlier release's host setup left beside it, which
     /// the host setup removes: [`FSTAB_LEFTOVER`] on a Mac.
     pub fstab_leftover: &'a Path,
+    /// The plist of the pf job an earlier release ran, which `cutover` removes and `rollback`
+    /// puts back when the previous release carries it: [`PF_PLIST`] on a Mac.
+    pub pf_plist: &'a Path,
 }
 
 /// Everything `drain` and `resume` touch: the lease server's own-host routes, the hold file
@@ -190,7 +194,6 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
 /// [`open_state`] without the rules: the record as it was loaded, for `prepare` to judge.
 fn open_unchecked(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
     helper::refuse_without_launchd(env, params)?;
-    pf::refuse_without_launchd(env, params)?;
     let held = Held::open_or_make(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;
     Ok((held, record))

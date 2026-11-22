@@ -2,7 +2,7 @@
 
 A signed installer package (`js-agent-<version>-macos-arm64.pkg`, identifier
 `com.komira.js-agent`) that lays down the agent, its root helper and the pf tool
-(`js-mac-provision`), and the plists of the three LaunchDaemons that run them. It is a hostkeeper `macos-pkg`
+(`js-mac-provision`), and the plists of the two LaunchDaemons that run them. It is a hostkeeper `macos-pkg`
 service: hostkeeper downloads it from the release's desired state, checks its digest, and
 installs it. The package runs no script (no preinstall, no postinstall), so installing it
 changes nothing but its files.
@@ -21,7 +21,6 @@ what the package holds (`crates/xtask/src/macpkg.rs`).
 | `/Library/Application Support/js-agent/update/` | 0700, empty; the update hook's state directory |
 | `/Library/LaunchDaemons/js-agent.plist` | 0644 |
 | `/Library/LaunchDaemons/js-agent.session.plist` | 0644 |
-| `/Library/LaunchDaemons/js-agent.pf-pool.plist` | 0644 |
 
 Everything is owned by root:wheel. The programs are the package's own files; there is no
 release directory and no link of the package's own. The release that hostkeeper keeps is
@@ -33,8 +32,8 @@ the update hook's `release_link` names.
 `js-agent.session` (the root helper) and `js-agent` are described by flags only
 (`js-mac-provision agent-plist`, `js-mac-provision session-plist --daemon-requirement <req>`;
 the goldens are in `crates/js-mac-provision/tests/golden`). Both plists are complete as
-shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
-(`js-mac-provision pf-pool-plist`), is described below.
+shipped: nothing in them is a placeholder. The package ships no daemon for the pool's pf anchor:
+the agent loads it, as described below.
 
 - The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
   /etc/js-agent/token`, and the fixed state root, scratch root and helper socket. The host's
@@ -74,16 +73,18 @@ exists, so the daemons start when the host has its flags, and launchd starts one
 every exit, at most once in 30 seconds (`ThrottleInterval`). A refusal is read from
 `/Library/Application Support/js-agent/log/js-agent.err.log`.
 
-`js-agent.pf-pool` keeps the pool's pf anchor loaded, which the agent checks at its start and
-before every job with the network `on` (see Network). Its plist is fixed too
-(`js-mac-provision pf-pool-plist`, golden `crates/js-mac-provision/tests/golden/pf-pool.plist`):
-as root, at load and every 30 seconds (`RunAtLoad`, `StartInterval`), it runs
-`js-mac-provision install --flags-file /etc/js-agent/flags`, which reads the anchor from the
-agent's own `--native-network` and `--native-pf-*` flags, loads it unless it is in force already,
-and does nothing while the flags file is absent or sets no `--native-network=on`. So the anchor
-comes back within 30 seconds of anything that drops it (a reboot, an OS update that reloads
-`/etc/pf.conf`), and a config package that changes the pf flags changes the anchor with them. Its
-errors go to `/var/log/js-mac-provision.log`.
+An agent started with `--native-network=on` loads the pool's pf anchor itself, from its own
+`--native-network` and `--native-pf-*` flags, the policy its checks read. At its start, before it
+checks the anchor, it checks whether the anchor is in force and installs it if not, as
+`js-mac-provision install` does; if pf refuses that first apply (before the system's own pf start
+at boot, for example), it applies once more on the next tick, 30 seconds later. Then it makes the
+check it always made, and a check that fails still ends the start (launchd starts the agent again
+after its throttle), so the agent registers for no job with the anchor missing. Every 30 seconds
+after that, on a thread of its own, it applies again until it exits: a failed tick is logged as a
+warning and the next one tries again, and an install is logged. So the anchor comes back within
+30 seconds of anything that drops it (an OS update that reloads `/etc/pf.conf`), and a config
+package that changes the pf flags changes the anchor when the agent next starts. The check before
+each job only checks. The rules stay in the kernel while the agent is down.
 
 ## What hostkeeper does
 
@@ -92,7 +93,7 @@ update hook's `prepare` from the staged package tree, then installs the package 
 installer and points its `current` link at the release, then runs the hook's `cutover`, `verify`
 and `cleanup` (`/Library/Application Support/js-agent/bin/js-agent update-hook`), with the
 params of the manifest: the unit
-`js-agent`, the helper unit `js-agent.session`, the pf job `js-agent.pf-pool`, the state directory above, the release link
+`js-agent`, the helper unit `js-agent.session`, the state directory above, the release link
 under `/var/lib/hostkeeper/packages/js-agent`, the flags and token files, the state root, the
 helper's socket group and the scratch root (the last two name the host setup `prepare` makes,
 see "Not done yet").
@@ -102,11 +103,13 @@ root's. A Mac joins by hostkeeper's host certificate: the flags file names it (`
 `--host-key`, hostkeeper's copy under `/var/lib/hostkeeper/identity`), and then no token file is
 needed. The hook cordons and drains the agent; on a Mac the cutover, and the rollback, then replace
 the helper's daemon and the agent's from the release tree with `launchctl` while the agent
-is stopped, the helper before the agent. Between the two, the cutover boots the pf job out, runs
-the staged release's `js-mac-provision install --flags-file /etc/js-agent/flags` to its end (so
-the anchor is in force before the agent's start checks it, rather than racing the job's first
-run), and bootstraps the pf job from the staged release; the rollback leaves the pf job as it is.
-hostkeeper lists the three labels in the manifest's `run` and enables them, and launchd loads
+is stopped, the helper before the agent. Between the two, the cutover retires the pf job an
+earlier release ran: it boots `js-agent.pf-pool` out if launchd has it loaded and removes
+`/Library/LaunchDaemons/js-agent.pf-pool.plist` if it is there (a first install has neither). The
+rollback, when the previous release's tree carries that plist, boots the job out, runs the
+previous tree's `js-mac-provision install --flags-file /etc/js-agent/flags` to its end, puts the
+plist back at `/Library/LaunchDaemons` if it is absent and bootstraps it from the previous tree.
+hostkeeper lists the two labels in the manifest's `run` and enables them, and launchd loads
 them at every boot. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
 
@@ -272,14 +275,12 @@ Known limits:
   package's own sealed tree only; the manifest above names the installed agent instead. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
-- The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake
-  `pfctl` and a fake `launchctl` in their unit tests; the first-install run is the only run of
-  them on a Mac.
-- The config hook (`js-agent config-hook`) restarts the agent without loading the anchor first:
-  a config package that changes the `--native-pf-*` flags of a running Mac leaves the new anchor
-  to the pf job's next run (within 30 seconds), and an agent that starts before it refuses to
-  start (`--native-network: on needs the pf anchor of the pool in force`) until launchd starts it
-  again.
+- The agent's loading of the anchor and the hook's retiring of the pf job have run against a
+  fake `pfctl` and a fake `launchctl` in their unit tests; the first-install run is the only run
+  of them on a Mac.
+- The config hook (`js-agent config-hook`) restarts the agent: a config package that changes the
+  `--native-pf-*` flags of a running Mac changes the anchor at the agent's start, which loads it
+  with the new flags before it checks it.
 - The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
   root, from its params (`socket_group`, `scratch_root`): the helper's socket group
   `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root

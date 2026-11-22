@@ -2,8 +2,9 @@
 //! `/Library/LaunchDaemons`. It runs `install` at boot and again every `interval`
 //! seconds, so a rule set that something reloaded (an OS update replaces `/etc/pf.conf`),
 //! or an install that ran before the system's own pf start-up, is put back. `install` is
-//! safe to repeat. The js-agent package ships one with fixed arguments
-//! ([`crate::daemon::pf_pool_plist`]); `launchd-plist` prints one for any policy.
+//! safe to repeat. An earlier release of the js-agent package shipped one with fixed arguments
+//! ([`crate::daemon::pf_pool_plist`]); the package now ships none, as the agent loads the anchor
+//! itself. `launchd-plist` prints one for any policy, for a host without the package.
 
 use std::fmt::Write as _;
 

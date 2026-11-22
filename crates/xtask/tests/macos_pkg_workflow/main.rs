@@ -741,9 +741,8 @@ fn package_problems(text: &str, action: &str) -> Vec<String> {
         "the helper's plist does not name the agent by its cdhash",
     );
     want(
-        build.contains("target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist")
-            && build.contains("--pf-pool-plist inputs/pf-pool.plist"),
-        "the pf daemon's plist is not the fixed one",
+        !build.contains("pf-pool"),
+        "the package's build step renders a pf-pool plist or passes --pf-pool-plist",
     );
     want(
         build.contains("cdhash=\"$(/usr/bin/codesign --display --verbose=4 target/release/js-agent 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')\""),
@@ -824,14 +823,14 @@ fn each_way_of_leaving_the_hostkeeper_package_shape_is_named() {
             "the helper's plist does not name the agent by its cdhash",
         ),
         (
-            "pf-pool-plist > inputs/pf-pool.plist",
-            "launchd-plist --program /x --uid-start 600 --uid-count 100 > inputs/pf-pool.plist",
-            "the pf daemon's plist is not the fixed one",
+            "target/release/js-mac-provision agent-plist > inputs/agent.plist\n",
+            "target/release/js-mac-provision agent-plist > inputs/agent.plist\n        target/release/js-mac-provision pf-pool-plist > inputs/pf-pool.plist\n",
+            "the package's build step renders a pf-pool plist",
         ),
         (
-            "--pf-pool-plist inputs/pf-pool.plist",
-            "--pf-pool-plist inputs/other.plist",
-            "the pf daemon's plist is not the fixed one",
+            "--session-plist inputs/session.plist --out stage",
+            "--session-plist inputs/session.plist --pf-pool-plist inputs/pf-pool.plist --out stage",
+            "the package's build step renders a pf-pool plist or passes --pf-pool-plist",
         ),
         (
             "codesign --display --verbose=4 target/release/js-agent 2>&1",

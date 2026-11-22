@@ -2,7 +2,7 @@
 //! package the release builds, staged, sealed, installed and switched by hostkeeper's own code,
 //! then the update hook's `prepare`, `cutover`, `verify` and `cleanup` (and `rollback`) run by
 //! hostkeeper's step runner as transient launchd jobs, with launchd loading the agent, its root
-//! helper and the pf anchor's job from the installed plists, and the agent joining a lease server
+//! helper from the installed plists, and the agent joining a lease server
 //! by its host certificate. On the host that install leaves, the host group's config package is
 //! rolled over the running agent (the config hook restarts it onto the new flags) and then the
 //! agent itself is updated to the next version. What of hostkeeper's daemon is reproduced, and
@@ -145,6 +145,36 @@ fn assert_agent_runs() {
             "{label} runs under launchd"
         );
     }
+}
+
+/// The label of the pf job an earlier release ran, which the agent replaced.
+const RETIRED_PF_JOB: &str = "js-agent.pf-pool";
+
+/// The plist of the retired pf job.
+const RETIRED_PF_PLIST: &str = "/Library/LaunchDaemons/js-agent.pf-pool.plist";
+
+/// The pool's pf anchor is in force although no pf job runs: the retired job is not loaded and
+/// its plist is gone, and `pfctl` lists rules in the anchor the agent loads.
+fn assert_anchor_is_the_agents() {
+    assert_eq!(
+        launchd_state(RETIRED_PF_JOB),
+        None,
+        "{RETIRED_PF_JOB} is not loaded"
+    );
+    assert!(
+        !Path::new(RETIRED_PF_PLIST).exists(),
+        "{RETIRED_PF_PLIST} does not exist"
+    );
+    let rules = std::process::Command::new("/sbin/pfctl")
+        .args(["-a", js_mac_provision::cli::DEFAULT_ANCHOR, "-sr"])
+        .output()
+        .unwrap_or_else(|e| panic!("run pfctl: {e}"));
+    assert!(rules.status.success(), "pfctl -sr: {rules:?}");
+    assert!(
+        !rules.stdout.is_empty(),
+        "the anchor {} holds rules: the agent loaded it",
+        js_mac_provision::cli::DEFAULT_ANCHOR
+    );
 }
 
 /// The first install as the Studios had it: hostkeeper stages and seals the package, the hook's
@@ -319,7 +349,7 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// The first install is as the Studios had it: the update fails `link_failed` and is taken away,
 /// leaving the group, the scratch volume, the staged version and its seal, and no `current`, no
 /// receipt, no job loaded. The next order installs from that host with the daemon's real switch,
-/// to `Succeeded`: the agent, its helper and the pf job running under launchd, and the lease
+/// to `Succeeded`: the agent and its helper running under launchd, and the lease
 /// server showing the host live with the agent of this version on the native runtime.
 ///
 /// The config package (`/etc/js-agent/flags`, built with `pkgbuild` and `productbuild`) is staged,
@@ -331,6 +361,9 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// The update orders the second package over the first: `Succeeded` with no reason, `current`
 /// naming the next version and `previous` the first, the agent and its helper running, and the
 /// lease server showing the host live with the agent of the next version.
+///
+/// The retired pf job is not loaded and its plist is not on the host after the install and after
+/// the update, and the pool's anchor holds rules both times: the agent loads it itself.
 ///
 /// Catches a hook that holds `/var/lib/hostkeeper/packages/js-agent/current -> <version>` to be
 /// off the staged release `/private/var/lib/hostkeeper/packages/js-agent/<version>`, and every
@@ -359,6 +392,7 @@ fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_packag
     let failed = failed_first_install(&daemon, &versions.version);
     let installed = good_first_install(&daemon, &failed, &versions.version);
     assert_agent_runs();
+    assert_anchor_is_the_agents();
     let seen = server.host(HOST_ID);
     assert_eq!(seen["state"], "live", "{seen}");
     assert_eq!(seen["agent_version"], versions.version.as_str(), "{seen}");
@@ -368,4 +402,5 @@ fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_packag
 
     config_update(&daemon, &server, &dir.path().join("config-pkg"));
     agent_update(&daemon, &server, &installed, &versions);
+    assert_anchor_is_the_agents();
 }

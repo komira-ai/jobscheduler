@@ -95,7 +95,6 @@ fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
                 state_dir: PathBuf::from("/var/lib/js-agent-update"),
                 unit: "js-agent-crun.service".to_owned(),
                 helper_unit: None,
-                pf_unit: None,
                 socket_group: None,
                 runtime: "crun".to_owned(),
                 timeouts: Timeouts {
@@ -626,37 +625,17 @@ fn a_helper_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
     assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "helper_unit"));
 }
 
+/// A params table that still names `pf_unit` (an older manifest's, the label of a job no release
+/// carries any more) parses, and the key is ignored whatever its value: a text, a number or a
+/// name that is no file name. Catches a new hook that refuses the table an older release's
+/// manifest writes.
 #[test]
-fn the_pf_unit_is_optional_and_read_as_given() {
-    let with_pf = good_but(
-        "unit",
-        "unit = \"js-agent\"\nhelper_unit = \"js-agent.session\"\npf_unit = \"js-agent.pf-pool\"",
-    );
-    let params = Params::parse(&with_pf).unwrap();
-    assert_eq!(params.settings.pf_unit.as_deref(), Some("js-agent.pf-pool"));
-    assert_eq!(
-        params.settings.helper_unit.as_deref(),
-        Some("js-agent.session")
-    );
-    assert_eq!(Params::parse(&good()).unwrap().settings.pf_unit, None);
-}
-
-/// Catches a pf job's label that would put its plist outside the release tree's
-/// `Library/LaunchDaemons`: the rule is `helper_unit`'s.
-#[test]
-fn a_pf_unit_that_is_not_a_plain_file_name_or_not_text_is_refused() {
-    for name in ["", ".", "..", "a/b", "/js-agent.pf-pool", "../js-agent"] {
-        let text = good_but(
-            "unit",
-            &format!("unit = \"js-agent\"\npf_unit = \"{name}\""),
-        );
-        assert!(
-            matches!(refused(&text), ParamsError::NotFileName(key) if key == "pf_unit"),
-            "{name:?}"
-        );
+fn a_pf_unit_of_an_older_manifest_is_ignored_whatever_it_holds() {
+    let without = Params::parse(&good_but("unit", "unit = \"js-agent\"")).unwrap();
+    for value in ["\"js-agent.pf-pool\"", "7", "\"a/b\"", "\"\"", "\"..\""] {
+        let text = good_but("unit", &format!("unit = \"js-agent\"\npf_unit = {value}"));
+        assert_eq!(Params::parse(&text).unwrap(), without, "{value}");
     }
-    let text = good_but("unit", "unit = \"js-agent\"\npf_unit = 7");
-    assert!(matches!(refused(&text), ParamsError::NotText(key) if key == "pf_unit"));
 }
 
 /// `good()` with the Mac's host setup keys `extra` (whole lines) added.

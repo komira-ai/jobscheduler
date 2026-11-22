@@ -9,7 +9,7 @@ use js_agent::update_hook::step::{self, Env};
 use js_agent::update_hook::{Class, Done, LaunchUnits, Outcome, Reason};
 use js_testkit::dir::TestDir;
 
-use super::step_rig::{MAC_UNIT, Rig, Spy, as_root, running};
+use super::step_rig::{MAC_PF, MAC_UNIT, Rig, Spy, as_root, running};
 use super::unit_conformance::{Exit, Launchctl, Service, Then};
 
 /// A Mac whose agent runs under the fake launchd.
@@ -54,6 +54,41 @@ fn a_mac_cutover_stops_boots_out_and_starts_the_agent_again() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert_eq!(tool.launches.borrow().get(MAC_UNIT), Some(&1));
     assert_eq!(tool.loaded.borrow()[MAC_UNIT].state, "running");
+}
+
+/// Asserts that a cutover over the real unit port boots a loaded `js-agent.pf-pool` out, so that
+/// launchd no longer holds it, and starts the agent. Catches a retired job that stays loaded
+/// beside the agent that loads the anchor itself.
+#[test]
+fn a_mac_cutover_boots_a_loaded_retired_pf_job_out() {
+    let (rig, tool) = mac("hook-launchd-pf-loaded");
+    tool.load(MAC_PF, Service::running());
+    let gate = with_gate_file(&rig.tmp);
+    let done = cutover(&rig, &tool, &gate);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(!tool.loaded.borrow().contains_key(MAC_PF));
+    assert_eq!(tool.loaded.borrow()[MAC_UNIT].state, "running");
+}
+
+/// Asserts that a cutover of a host whose launchd has no `js-agent.pf-pool` loaded asks launchd
+/// to boot nothing out for it. Catches a bootout of a label that is not loaded, which fails.
+#[test]
+fn a_mac_cutover_issues_no_bootout_for_an_unloaded_retired_pf_job() {
+    let (rig, tool) = mac("hook-launchd-pf-unloaded");
+    let gate = with_gate_file(&rig.tmp);
+    let done = cutover(&rig, &tool, &gate);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let calls = tool.calls();
+    assert!(
+        calls.iter().any(|call| call.contains(MAC_PF)),
+        "the job is looked at: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !(call.contains("bootout") && call.contains(MAC_PF))),
+        "{calls:?}"
+    );
 }
 
 #[test]

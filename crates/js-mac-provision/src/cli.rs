@@ -12,11 +12,12 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::agent_flags::{self, AgentPf, FlagsError};
 use crate::daemon::{Daemon, pf_pool_plist};
+use crate::keep::{Applied, apply};
 use crate::launchd::render_plist;
 use crate::pfctl::{Pfctl, SYSTEM_PFCTL, SystemPfctl};
 use crate::policy::{AnchorName, Endpoint, PolicyError, UidRange};
 use crate::probe::{Probe, probe};
-use crate::provision::{ProvisionError, Provisioner};
+use crate::provision::{Config, ProvisionError, Provisioner};
 use crate::render::render;
 
 /// The anchor when none is named: a child of `com.apple`, which the stock `/etc/pf.conf`
@@ -109,7 +110,9 @@ pub enum Verb {
     /// in the flags file.
     AgentPlist,
     /// Print the property list of the js-agent.pf-pool LaunchDaemon: fixed, it runs
-    /// `install --flags-file` with the agent's flags file at load and every 30 seconds.
+    /// `install --flags-file` with the agent's flags file at load and every 30 seconds. The
+    /// package no longer ships it (the agent loads the anchor itself); the verb stays for the
+    /// host of an earlier release and for a rollback to one.
     PfPoolPlist,
     /// Print the property list of the js-agent.session LaunchDaemon.
     SessionPlist {
@@ -231,13 +234,17 @@ fn install_from(
         named = SystemPfctl::new(policy.pfctl.clone());
         &named
     };
-    let provisioner = Provisioner::new(pf, &policy.anchor, &policy.state_dir);
     let (uids, anchor) = (policy.uids, &policy.anchor);
-    if provisioner.check(uids, &policy.endpoints).is_ok() {
-        writeln!(out, "in force: {anchor} holds the rules for uids {uids}")?;
-    } else {
-        provisioner.install(uids, &policy.endpoints)?;
-        writeln!(out, "installed {anchor} for uids {uids}")?;
+    let config = Config {
+        pf,
+        anchor,
+        dir: &policy.state_dir,
+        uids,
+        endpoints: &policy.endpoints,
+    };
+    match apply(&config)? {
+        Applied::InForce => writeln!(out, "in force: {anchor} holds the rules for uids {uids}")?,
+        Applied::Installed => writeln!(out, "installed {anchor} for uids {uids}")?,
     }
     Ok(())
 }

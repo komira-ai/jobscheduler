@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use js_agent::update_hook::{Class, Lease, Outcome, Reason, Units};
 
 use super::rollback_entries::verify_failed_on;
-use super::step_rig::{MAC_HELPER, MAC_UNIT, Rig, Spy, end_state, killable, running};
+use super::step_rig::{MAC_HELPER, MAC_PF, MAC_UNIT, Rig, Spy, end_state, killable, running};
 
 /// A Mac host with a helper, after `prepare`, the old helper running.
 fn host(name: &str) -> Rig {
@@ -48,7 +48,10 @@ fn a_cutover_of_a_host_with_no_helper_touches_only_the_agent() {
     let spy = Spy::new(&rig);
     let done = spy.cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(spy.act_names(), [stop(MAC_UNIT), start(MAC_UNIT)]);
+    assert_eq!(
+        spy.act_names(),
+        [stop(MAC_UNIT), stop(MAC_PF), start(MAC_UNIT)]
+    );
     assert!(spy.log().iter().all(|call| !call.contains("launchctl")));
 }
 
@@ -65,6 +68,7 @@ fn a_cutover_stops_the_agent_then_the_helper_and_starts_the_staged_helper_then_t
             stop(MAC_HELPER),
             bootstrap(rig.params.staged_release.clone()),
             start(MAC_HELPER),
+            stop(MAC_PF),
             start(MAC_UNIT),
         ]
     );
@@ -95,6 +99,7 @@ fn a_first_install_starts_the_helper_from_the_staged_tree_before_the_agent() {
             stop(MAC_HELPER),
             bootstrap(rig.params.staged_release.clone()),
             start(MAC_HELPER),
+            stop(MAC_PF),
             start(MAC_UNIT),
         ]
     );

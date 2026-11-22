@@ -533,6 +533,15 @@ fn the_machine_looks_at_a_root_as_the_system_does_and_names_the_macs_fstab_lefto
     );
 }
 
+/// Asserts that the machine names the plist of the retired pf job where the package installed it.
+#[test]
+fn the_machine_names_the_plist_of_the_retired_pf_job() {
+    assert_eq!(
+        Machine::system().pf_plist,
+        Path::new("/Library/LaunchDaemons/js-agent.pf-pool.plist")
+    );
+}
+
 #[test]
 fn the_machines_own_host_id_is_the_agents_from_the_machine_id_it_reads() {
     let host = linux_host();

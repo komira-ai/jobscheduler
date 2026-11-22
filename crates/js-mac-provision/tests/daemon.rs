@@ -1,5 +1,5 @@
-//! The property lists of the package's three LaunchDaemons, against golden files, and the
-//! rules every one of them keeps.
+//! The property lists of the package's two LaunchDaemons and of the pf daemon an earlier release
+//! shipped, against golden files, and the rules every one of them keeps.
 
 use js_mac_provision::daemon::{
     AGENT_LABEL, BIN_DIR, Daemon, FLAGS_FILE, GATE, LOG_DIR, PF_POOL_INTERVAL_SECS, PF_POOL_LABEL,

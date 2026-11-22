@@ -4,7 +4,8 @@
 //! is a scalar and writes the table to a file. The file is TOML, a flat table of scalars. The
 //! updater adds reserved keys ([`PROMOTION_CEILING_KEY`], the staged and previous release, the
 //! versions and [`ARTIFACT_DIGEST_KEY`]). The keys the manifest gives are [`KEYS`]; every one is
-//! required, and any other scalar key is ignored:
+//! required, and any other scalar key is ignored (an older manifest's `pf_unit`, the label of a job
+//! that no release carries any more, is one of them):
 //!
 //! - `unit`, `state_dir`, `runtime` and the five `*_timeout_secs` and `verify_deadline_secs`:
 //!   the [`Settings`] (the unit the hook manages, its record's directory, the runtime the agent
@@ -12,10 +13,6 @@
 //! - `helper_unit` (optional, launchd only): the label of the agent's root helper job, which the
 //!   package's release tree carries as `tree/Library/LaunchDaemons/<helper_unit>.plist`; the hook
 //!   boots it out and bootstraps it again with each agent start (a file name: no `/`);
-//! - `pf_unit` (optional, launchd only): the label of the job that keeps the pool's pf anchor
-//!   loaded, carried as `tree/Library/LaunchDaemons/<pf_unit>.plist`; `cutover` boots it out,
-//!   loads the anchor of the host's flags file with the staged release's `js-mac-provision` and
-//!   bootstraps it again before the agent starts (a file name: no `/`);
 //! - `socket_group` (optional, launchd only): the group the root helper gives its socket, which
 //!   `prepare` makes when the host has none (a name of letters, digits, `_`, `-` and `.`);
 //! - `scratch_root` (optional, launchd only): the agent's `--scratch-root`, which `prepare` makes
@@ -102,9 +99,6 @@ pub const UNIT_KEY: &str = "unit";
 
 /// The key of the launchd job of the agent's root helper (optional).
 pub const HELPER_UNIT_KEY: &str = "helper_unit";
-
-/// The key of the launchd job that keeps the pool's pf anchor loaded (optional).
-pub const PF_UNIT_KEY: &str = "pf_unit";
 
 /// The key of the group the root helper gives its socket (optional).
 pub const SOCKET_GROUP_KEY: &str = "socket_group";
@@ -211,8 +205,8 @@ pub enum ParamsError {
     /// `unit` is empty.
     #[error("params key {0:?} must not be empty")]
     Empty(String),
-    /// `helper_unit` or `pf_unit` is not a plain file name: it becomes part of the path of a plist
-    /// in the release tree.
+    /// `helper_unit` is not a plain file name: it becomes part of the path of a plist in the release
+    /// tree.
     #[error("params key {0:?} must be a plain file name: not empty, not . or .., no /")]
     NotFileName(String),
     /// `socket_group` is not a group name: empty, or with a character other than an ASCII
@@ -453,7 +447,6 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
     }
     let unit = unit_of(table)?;
     let helper_unit = file_name_of(table, HELPER_UNIT_KEY)?;
-    let pf_unit = file_name_of(table, PF_UNIT_KEY)?;
     let socket_group = string_of(table, SOCKET_GROUP_KEY)?;
     if socket_group
         .as_deref()
@@ -486,7 +479,6 @@ fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
         state_dir,
         unit,
         helper_unit,
-        pf_unit,
         socket_group,
         runtime,
         timeouts,

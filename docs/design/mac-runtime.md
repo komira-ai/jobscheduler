@@ -23,7 +23,7 @@ The four macOS parts are one feature, the macOS backend. They are split where th
 | `js-agent/src/native` | The `Runtime` implementation: run directory, input copies, cwd, env, outputs, logs, journal, the calls to the helper | It is built from the lifecycle's types (`RunSpec`, `Status`, `Found`). Moving it out would mean moving the trait and those types to a lower crate for no other caller. | none |
 | `js-mac-pool` | The Seatbelt profile builder and the Xcode catalog | It is a pure crate (R4): no clock, sockets or process starts, so its profile text and goldens are tested on Linux in every pull request | none |
 | `js-mac-session` | The root helper: the user pool and its ledger, starting a program as a pool user, `kill-uid`, the reset, plus the VM user, image set-up and the leak scan | It is a separate process with root, behind a socket that checks its caller's code signature. The agent's process holds no right to create users or kill other uids. | none |
-| `js-mac-provision` | The pf anchor (render, install, check; `install --flags-file` reads the agent's flags file), the three LaunchDaemon plists the package ships (the agent, the helper and the pf job) | It runs at install and at boot (the pf LaunchDaemon), before and beside the agent | none |
+| `js-mac-provision` | The pf anchor (render, install, check; `install --flags-file` reads the agent's flags file), the two LaunchDaemon plists the package ships (the agent and the helper) | The agent runs its anchor install itself, at its start and every 30 seconds, from the same crate | none |
 
 No crate needs to merge or split.
 

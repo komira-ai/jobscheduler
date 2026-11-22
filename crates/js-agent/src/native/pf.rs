@@ -5,17 +5,26 @@
 //! users is limited by a pf anchor keyed on their uids (`js-mac-provision`). The agent runs
 //! no job with the network on unless that anchor is enforced right now.
 //!
-//! The check is made at admission. The window from there to the helper's `run` (the slot,
-//! the user, the launch) is not checked again, and a run that is under way is not checked
-//! again after a reload of the pf ruleset.
+//! The agent loads the anchor itself: at its start, before the check it makes then (when
+//! that first load is refused it waits one tick and loads once more), and every 30 seconds
+//! after that on a thread of its own (`js_mac_provision::keep`). The check is made at the
+//! agent's start, after that load, and at every admission; it only checks, never loads. The
+//! window from admission to the helper's `run` (the slot, the user, the launch) is not
+//! checked again, and a run that is under way is not checked again after a reload of the pf
+//! ruleset.
 
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use js_mac_provision::cli::{DEFAULT_ANCHOR, DEFAULT_STATE_DIR};
+use js_mac_provision::keep::{self, Every, INTERVAL, Keeper};
 use js_mac_provision::pfctl::{SYSTEM_PFCTL, SystemPfctl};
-use js_mac_provision::{AnchorName, Config, Endpoint, UidRange, enforced};
+use js_mac_provision::{AnchorName, Config, Endpoint, UidRange, apply, enforced};
 
+use super::{Ceiling, RuntimeError, fail};
+
+pub use js_mac_provision::keep::{Applied, Ticks};
 pub use js_mac_provision::provision::ProvisionError;
 
 /// Whether the egress limit of the pool is in force: [`PfPolicy`] on a Mac, a fake in tests.
@@ -26,6 +35,17 @@ pub trait Enforcer: Debug + Send + Sync {
     ///
     /// The limit is not enforced, or it could not be told.
     fn enforced(&self) -> Result<(), ProvisionError>;
+
+    /// Loads the anchor unless it is in force.
+    ///
+    /// # Errors
+    ///
+    /// The anchor could not be loaded.
+    fn apply(&self) -> Result<Applied, ProvisionError>;
+
+    /// The clock of the keeper that loads the anchor again: every 30 seconds for the real
+    /// policy; a test gives its own.
+    fn ticks(&self) -> Box<dyn Ticks>;
 }
 
 /// The pf flags as the command line gave them.
@@ -145,10 +165,11 @@ impl PfPolicy {
     }
 }
 
-impl Enforcer for PfPolicy {
-    fn enforced(&self) -> Result<(), ProvisionError> {
+impl PfPolicy {
+    /// Runs `f` over the config of this policy, with its `pfctl`.
+    fn with_config<T>(&self, f: impl FnOnce(&Config<'_>) -> T) -> T {
         let pf = SystemPfctl::new(&self.pfctl);
-        enforced(&Config {
+        f(&Config {
             pf: &pf,
             anchor: &self.anchor,
             dir: &self.state_dir,
@@ -156,4 +177,68 @@ impl Enforcer for PfPolicy {
             endpoints: &self.endpoints,
         })
     }
+}
+
+impl Enforcer for PfPolicy {
+    fn enforced(&self) -> Result<(), ProvisionError> {
+        self.with_config(enforced)
+    }
+
+    fn apply(&self) -> Result<Applied, ProvisionError> {
+        self.with_config(apply)
+    }
+
+    fn ticks(&self) -> Box<dyn Ticks> {
+        Box::new(Every(INTERVAL))
+    }
+}
+
+/// Starts the keeper of `egress` at the agent's start: the first load (made once more on the
+/// next tick when it is refused), then a load at every tick on a thread of its own, until the
+/// returned [`Keeper`] is dropped. A refused first load does not fail the start by itself: the
+/// check that follows decides. Each load that installed is logged, and each that failed.
+pub(super) fn keep(egress: &Arc<dyn Enforcer>) -> Keeper {
+    let check = Arc::clone(egress);
+    let apply = move || {
+        let applied = check.apply();
+        match &applied {
+            Ok(Applied::Installed) => tracing::info!("the pf anchor was loaded"),
+            Ok(Applied::InForce) => {}
+            Err(why) => tracing::warn!("the pf anchor could not be loaded: {why}"),
+        }
+        applied
+    };
+    keep::start(Box::new(apply), egress.ticks()).1
+}
+
+/// Whether the pf anchor of the pool is in force right now, when the ceiling `network` is `on`
+/// (the one value whose jobs the anchor limits; an `open` ceiling has no filter to check),
+/// by `egress`. Asked afresh at every call: a reload of the main ruleset can drop the anchor
+/// at any time, so no answer is kept. The text is the first line of what the provisioner said,
+/// with the flag that makes the check necessary. It only checks, never loads.
+pub(super) fn in_force(
+    network: Ceiling,
+    egress: Option<&dyn Enforcer>,
+) -> Result<(), RuntimeError> {
+    if network != Ceiling::On {
+        return Ok(());
+    }
+    // Fails closed: `open` refuses a cap of `on` with no check, and this does not rely on it.
+    let Some(check) = egress else {
+        return Err(fail(
+            &"--native-network",
+            &"on has no check of the pf anchor of the pool",
+        ));
+    };
+    check.enforced().map_err(|why| {
+        tracing::warn!("the pf anchor is not in force: {why}");
+        let said = why.to_string();
+        fail(
+            &"--native-network",
+            &format!(
+                "on needs the pf anchor of the pool in force: {}",
+                said.lines().next().unwrap_or_default()
+            ),
+        )
+    })
 }

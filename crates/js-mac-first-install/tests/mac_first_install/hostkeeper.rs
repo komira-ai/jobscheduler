@@ -51,8 +51,8 @@ use sha2::{Digest as _, Sha256};
 /// The agent's service, as the Mac's hostgroup names it.
 pub const SERVICE: &str = "js-agent";
 
-/// The manifest's `run` of the agent: the agent, its root helper and the pf anchor's job.
-pub const RUN: [&str; 3] = ["js-agent", "js-agent.session", "js-agent.pf-pool"];
+/// The manifest's `run` of the agent: the agent and its root helper.
+pub const RUN: [&str; 2] = ["js-agent", "js-agent.session"];
 
 /// The config package's service, as the Mac's hostgroup names it: `js-agent-config-<group>`.
 pub const CONFIG_SERVICE: &str = "js-agent-config-mac-build";
@@ -148,7 +148,6 @@ const BOUNDS: Bounds = Bounds {
 /// (crates/xtask/src/release/desired/manifest.rs, `MAC_PARAMS`).
 const MAC_PARAMS: &str = r#"unit                  = "js-agent"
 helper_unit           = "js-agent.session"
-pf_unit               = "js-agent.pf-pool"
 socket_group          = "_jsagent"
 scratch_root          = "/var/db/js-agent/scratch/runs"
 state_dir             = "/Library/Application Support/js-agent/update"

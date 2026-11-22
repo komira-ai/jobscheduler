@@ -57,8 +57,9 @@
 //!    that the link is on the previous release (`rb.link_restored`, first), the start
 //!    (`rb.start_issued` first, and before it, with a `helper_unit` in the params, the helper
 //!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
-//!    does for the staged one) and the wait for the previous agent's hello, and then
-//!    `rb.hello_ok`, after it;
+//!    does for the staged one, and then, when that tree carries the plist of the pf job an
+//!    earlier release ran, that job restored: see `retired`) and the wait for the previous
+//!    agent's hello, and then `rb.hello_ok`, after it;
 //!    An update that hands the runs over in place (the record's `in_place`, see `prepare`)
 //!    does not stop the new agent when it runs: the record gets `rb.stop_begun` and
 //!    `rb.link_restored`, the handover file is written, the record gets `rb.start_issued`, and
@@ -120,7 +121,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::update_hook::{
-    Cordon, Done, Held, HostReading, LeaseError, POLL_SECS, Params, ROLLBACK_HELLO_SECS,
+    Cordon, Done, Held, HostReading, LeaseError, Manager, POLL_SECS, Params, ROLLBACK_HELLO_SECS,
     ROLLBACK_MARGIN_SECS, Reason, Record, Report, START_WAIT_SECS,
 };
 
@@ -130,7 +131,7 @@ use super::cutover::{
 };
 use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
-use super::{helper, in_place};
+use super::{helper, in_place, retired};
 use crate::cordon::CREDENTIAL_CODES;
 
 /// Runs `rollback`.
@@ -316,10 +317,13 @@ fn restore(
         mark_act(env, params, held, record, set_link_restored)?;
     }
     refuse_host_in(env, record.handover)?;
-    // The helper of the previous release runs before its agent starts; a rerun that finds the
-    // start issued has done this already.
+    // The helper of the previous release runs before its agent starts, and so does the pf job
+    // that release's tree carries; a rerun that finds the start issued has done this already.
     if !record.rb.start_issued {
         helper::replace(env, held, record, params, previous)?;
+        if env.manager == Manager::Launchd {
+            retired::restore(env, params, previous)?;
+        }
     }
     refuse_host_in(env, record.handover)?;
     if !record.rb.start_issued {

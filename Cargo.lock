@@ -1678,6 +1678,7 @@ dependencies = [
  "hostkeeper-steps",
  "js-client",
  "js-lease-server",
+ "js-mac-provision",
  "js-testkit",
  "js-types",
  "rcgen",

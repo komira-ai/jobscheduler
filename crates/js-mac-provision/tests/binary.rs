@@ -149,15 +149,16 @@ fn launchd_plist_prints_a_property_list() {
 }
 
 #[test]
-fn pf_pool_plist_prints_the_packages_fixed_property_list() {
+fn pf_pool_plist_prints_the_earlier_releases_fixed_property_list() {
     let out = run(&["pf-pool-plist"]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(text(&out.stdout), include_str!("golden/pf-pool.plist"));
 }
 
-/// The pf daemon runs every 30 seconds from the package's install on, before the host's flags file
-/// arrives: a run with no flags file, or with a flags file that names no anchor, succeeds and
-/// runs no `pfctl` (the one named here is not there). A refused flags file exits 1.
+/// `install --flags-file` is what the pf daemon of an earlier release runs every 30 seconds, and a
+/// rollback to that release runs once, possibly before the host's flags file arrives: a run with
+/// no flags file, or with a flags file that names no anchor, succeeds and runs no `pfctl` (the
+/// one named here is not there). A refused flags file exits 1.
 #[test]
 fn install_from_an_absent_or_off_flags_file_exits_0_and_a_refused_one_exits_1() {
     let dir =

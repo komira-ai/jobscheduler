@@ -3,9 +3,10 @@
 //! A Mac's agent reads its host's own flags from a file (`js-agent --flags-file
 //! /etc/js-agent/flags`, one argument per line, such as `--native-pf-uid-start=600`). Its
 //! `--native-network` and `--native-pf-*` flags name the anchor the agent checks before it runs a
-//! job with the network on. [`read`] takes the same flags from the same file, so that the anchor
-//! the LaunchDaemon loads is the one the agent checks, and a configuration package that changes
-//! the file changes both:
+//! job with the network on, and loads at its start and every 30 seconds from the same flags. [`read`]
+//! takes the same flags from the same file for the `install --flags-file` verb (a host of an
+//! earlier release runs it from a LaunchDaemon, and a rollback to one does), so that the anchor
+//! the verb loads is the one the agent checks:
 //!
 //! - the file is trusted as the agent trusts it: a regular file (a link is followed), owned by
 //!   root or by the user running this program, not writable by group or others, at most

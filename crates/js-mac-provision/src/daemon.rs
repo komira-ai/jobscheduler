@@ -1,5 +1,6 @@
-//! The LaunchDaemons of the js-agent package: the agent, the root helper it dials, and the
-//! daemon that keeps the pool's pf anchor loaded ([`pf_pool_plist`]).
+//! The LaunchDaemons of the js-agent package: the agent and the root helper it dials. The
+//! agent loads the pool's pf anchor itself. The pf daemon ([`pf_pool_plist`]) is no longer
+//! shipped; it stays for a host on an earlier release, which the update hook retires.
 //!
 //! The agent and the helper are described by flags and nothing else: no environment variable;
 //! the agent's plist names a flags file ([`FLAGS_FILE`]), which holds only more flags. Neither of
@@ -14,7 +15,7 @@
 //! agent's host-specific flags (server, pool, network mode) are read from [`FLAGS_FILE`],
 //! which a per-group configuration package installs.
 //!
-//! The pf daemon is of another kind: it runs at load and every [`PF_POOL_INTERVAL_SECS`]
+//! The pf daemon of an earlier release is of another kind: it runs at load and every [`PF_POOL_INTERVAL_SECS`]
 //! seconds, and each run is `js-mac-provision install --flags-file` [`FLAGS_FILE`], which loads
 //! the anchor the agent's own flags name unless it is in force already, and does nothing while
 //! the file is absent or sets no `--native-network=on` (see [`crate::agent_flags`]).
@@ -55,12 +56,13 @@ pub const THROTTLE_SECS: u32 = 30;
 pub const SESSION_SOCKET: &str = "/var/run/js-mac-session/socket";
 /// The group that may reach the helper's socket.
 pub const SOCKET_GROUP: &str = "_jsagent";
-/// The label of the daemon that keeps the pool's pf anchor loaded.
+/// The label of the pf daemon an earlier release shipped (no longer in the package).
 pub const PF_POOL_LABEL: &str = LABEL;
 /// Seconds between two runs of the pf daemon, after the one at load.
 pub const PF_POOL_INTERVAL_SECS: u32 = 30;
 
-/// The property list of the pf daemon: `js-mac-provision install --flags-file` with the agent's
+/// The property list of the pf daemon an earlier release shipped (no longer in the package):
+/// `js-mac-provision install --flags-file` with the agent's
 /// flags file, at load and every [`PF_POOL_INTERVAL_SECS`] seconds, as root. Fixed, like the
 /// agent's: the policy is read from the flags file at each run, never written into the plist.
 #[must_use]

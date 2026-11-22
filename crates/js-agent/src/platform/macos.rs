@@ -104,8 +104,9 @@ pub struct Flags {
     /// The first uid of the pool whose egress the pf anchor limits: the helper's
     /// `--uid-range` start. With `--native-network on` the agent refuses to start, and
     /// refuses every job that asks for the network (`egress-unchecked`), unless the anchor
-    /// `js-mac-provision` installed is in force (pf enabled, the main ruleset reaches the
-    /// anchor, the loaded rules are the ones these flags render); required then, and
+    /// is in force (pf enabled, the main ruleset reaches the anchor, the loaded rules are
+    /// the ones these flags render); the agent loads the anchor itself from these flags, at
+    /// its start and every 30 seconds; required then, and
     /// refused otherwise (with `--native-network open` the agent does not start). Needs
     /// `--native-network on`.
     #[arg(long, value_name = "UID")]
@@ -114,9 +115,9 @@ pub struct Flags {
     /// `--native-network on`; see `--native-pf-uid-start`.
     #[arg(long, value_name = "N")]
     pub native_pf_uid_count: Option<u32>,
-    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. These must
-    /// be the `--endpoint` flags `js-mac-provision install` was given, or the anchor reads
-    /// back as different and every job is refused. Needs `--native-network on`.
+    /// An endpoint the pool may reach over TCP, as `192.0.2.10:443`; repeatable. The agent
+    /// loads the anchor with these endpoints, so an edit takes effect at the agent's next
+    /// start. Needs `--native-network on`.
     #[arg(long = "native-pf-endpoint", value_name = "IPV4:PORT")]
     pub native_pf_endpoints: Vec<String>,
     /// The pf anchor the rules are loaded under (the `--anchor` of `js-mac-provision`); by

@@ -33,6 +33,8 @@ hostkeeper-steps.workspace = true
 # (started in the test process).
 js-client = { path = "../js-client" }
 js-lease-server = { path = "../js-lease-server" }
+# The pool's default pf anchor, which the test finds loaded by the agent.
+js-mac-provision = { path = "../js-mac-provision" }
 # The hex of a package's SHA-256.
 hex.workspace = true
 # The scratch directories.

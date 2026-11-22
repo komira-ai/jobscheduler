@@ -1,7 +1,7 @@
 # Restarting a Mac and updating its macOS (js-agent in pool mode)
 
 A Mac that runs js-agent in native pool mode (`sandbox-exec`, the pool users 600-699) is built to
-come back into service after a restart with no step by hand: launchd starts the three daemons of
+come back into service after a restart with no step by hand: launchd starts the two daemons of
 the package again, the agent says hello again, and the lease server places on it again. This page
 says why (and which parts have not yet run on a Mac, [below](#what-has-been-checked-on-a-mac)), what a Mac must keep for that to stay true, how to check a Mac after a restart, how to
 take one out of service for a restart or a macOS update and put it back, and what is still to be
@@ -21,28 +21,31 @@ In short:
 
 ## What comes back by itself, and in what order
 
-The package installs three LaunchDaemons into `/Library/LaunchDaemons`, and launchd loads every
+The package installs two LaunchDaemons into `/Library/LaunchDaemons`, and launchd loads every
 plist of that directory at boot, before anyone logs in. Nothing else starts them: hostkeeper
 enables the labels when it installs the package (`launchctl enable`, which launchd keeps across
 restarts) and starts nothing at its own start for a `macos-pkg` service, and the update hook's
 `launchctl bootout` of an update is not kept across a restart. What each daemon does at boot
 (`crates/js-mac-provision/src/daemon.rs`, `crates/js-mac-provision/src/launchd.rs`):
 
-- `js-agent.pf-pool` runs at load and every 30 seconds (`RunAtLoad`, `StartInterval`), and loads
-  the pool's pf anchor from the agent's flags when it is not in force. A restart drops the anchor
-  and resets pf; the first run puts both back.
 - `js-agent.session`, the root helper, and `js-agent`, the agent, do not run at load: each has
   `KeepAlive` with `PathState` on `/etc/js-agent/flags`, so launchd starts it at load when the
   flags file is there, and again after every exit, at most once in 30 seconds
   (`ThrottleInterval`). The flags file is the group's configuration package's, and a restart
   keeps it.
 
-The three start together; launchd orders none of them. The agent's start
+The pool's pf anchor has no daemon of its own: an agent started with `--native-network=on` loads
+it itself, from its own pf flags (the ones it checks the anchor against). A restart drops the
+anchor and resets pf; the agent's start puts both back, and every 30 seconds after that it loads
+the anchor again if it is not in force. The two daemons start together; launchd orders neither of
+them. The agent's start
 (`crates/js-agent/src/platform/macos.rs`, `crates/js-agent/src/native/mod.rs`) mounts the scratch
 volume `js-agent-scratch` on `/var/db/js-agent/scratch` (no `/etc/fstab` line names it, so every
 boot needs this mount), dials the helper's socket, asks the helper for its boot reset, and, with
-`--native-network=on`, checks that the pool's anchor is in force. An agent that starts before the
-helper has made its socket, or before the pf job has loaded the anchor, ends with the reason in
+`--native-network=on`, loads the pool's anchor (a first apply that pf refuses, as it does before the
+system's own pf start at boot, is tried once more 30 seconds later) and then checks that it is in
+force. An agent that starts before the helper has made its socket, or whose anchor cannot be
+loaded, ends with the reason in
 `/Library/Application Support/js-agent/log/js-agent.err.log`, and launchd starts it again 30
 seconds later. So the first one or two starts after a boot may fail and the host says its hello
 within about a minute; this is expected and needs nothing.
@@ -96,17 +99,15 @@ logs with `sudo` if their mode does not let you):
 ```text
 launchctl print system/js-agent | grep -E 'state =|runs =|last exit code'
 launchctl print system/js-agent.session | grep -E 'state =|runs =|last exit code'
-launchctl print system/js-agent.pf-pool | grep -E 'state =|runs =|last exit code'
 tail -n 20 '/Library/Application Support/js-agent/log/js-agent.err.log'
 tail -n 20 '/Library/Application Support/js-agent/log/js-mac-session.err.log'
-tail -n 20 /var/log/js-mac-provision.log
 ```
 
-The agent's reasons for ending are in its `err.log`, the helper's in `js-mac-session.err.log`, and
-the pf job's in `js-mac-provision.log`.
+The agent's reasons for ending, and a warning for every 30-second load of the pool's anchor that
+failed, are in its `err.log`; the helper's are in `js-mac-session.err.log`.
 
-`js-agent` and `js-agent.session` are `state = running`; `js-agent.pf-pool` is `not running`
-between its runs with `last exit code = 0`. A `runs` count above 1 for the agent with a running
+`js-agent` and `js-agent.session` are `state = running`; `launchctl print system/js-agent.pf-pool`
+finds no job on a host that runs this package. A `runs` count above 1 for the agent with a running
 state is the start order of the boot above, not a fault. `Could not find service` for a label
 whose plist is in `/Library/LaunchDaemons` means launchd did not load it: see
 [Background items](#background-items).
@@ -171,7 +172,7 @@ which runs `resume`), not by removing the hold file by hand.
 
 What an update can change, and what puts it right:
 
-- `/etc/pf.conf` is the system's and an update may write it again; the pf job loads the anchor
+- `/etc/pf.conf` is the system's and an update may write it again; the agent loads the anchor
   again within 30 seconds.
 - The major version the agent reports (`os_version`) changes with a major upgrade; a pool or a
   job that names a least `os_version` places by the new one at the next hello.
@@ -220,7 +221,7 @@ Read the state as root:
 sfltool dumpbtm
 ```
 
-Each of `js-agent`, `js-agent.session` and `js-agent.pf-pool` is listed with its plist under
+Each of `js-agent` and `js-agent.session` is listed with its plist under
 `/Library/LaunchDaemons` and a disposition that includes `enabled` and `allowed`. Check it once
 after the first install and after every macOS update. A `disallowed` item, or a label whose plist
 is installed and that `launchctl print` cannot find after a boot, needs the switch at the console;
@@ -246,5 +247,5 @@ On one idle Mac of the pool, once js-agent runs there and says its hello:
 2. Restart it (`shutdown -r now` as root).
 3. Touch nothing. Once the Mac answers again, read the same state. The drill passes when, with no
    step by hand, the host is `HOST_STATE_LIVE` with no taint and no cordon at the same
-   `agent_version`, both gated daemons run, the pf job's last exit is 0, and no background item
+   `agent_version`, both gated daemons run, the pool's anchor is in force, and no background item
    is switched off.

@@ -370,9 +370,9 @@ pub struct Config<'a> {
 }
 
 /// Whether the policy of `config` is enforced right now. **Call it at agent start and
-/// before every `Net::On` job, and refuse on any error**: the LaunchDaemon's interval is
-/// not the guard, this call is (a reload of the main ruleset can drop the anchor between
-/// two ticks). The errors that mean "not enforced" are [`ProvisionError::PfDisabled`],
+/// before every `Net::On` job, and refuse on any error**: the agent's keeper is not the
+/// guard, this call is (a reload of the main ruleset can drop the anchor between two ticks).
+/// The errors that mean "not enforced" are [`ProvisionError::PfDisabled`],
 /// [`ProvisionError::NotReferenced`] and [`ProvisionError::Drift`]; `Run`, `Failed` and
 /// `State` mean it could not be told, which is a refusal too.
 ///

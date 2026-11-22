@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use js_mac_provision::daemon::{BIN_DIR, Daemon, PF_POOL_LABEL, pf_pool_plist};
+use js_mac_provision::daemon::{BIN_DIR, Daemon};
 use js_testkit::dir::TestDir;
 use xtask::macpkg::{
     Entry, Error, IDENTIFIER, Inspected, Kind, StageArgs, entries, problems, stage, verdict,
@@ -49,11 +49,20 @@ fn the_payload_holds_the_programs_the_plists_and_two_directories() {
         "Library/Application Support/js-agent/LICENSE",
         "Library/LaunchDaemons/js-agent.plist",
         "Library/LaunchDaemons/js-agent.session.plist",
-        "Library/LaunchDaemons/js-agent.pf-pool.plist",
     ]
     .into_iter()
     .collect();
     assert_eq!(files, want);
+    let daemons: Vec<&str> = files
+        .iter()
+        .copied()
+        .filter(|p| p.starts_with("Library/LaunchDaemons/"))
+        .collect();
+    assert_eq!(daemons.len(), 2, "{daemons:?}");
+    assert!(
+        !files.contains("Library/LaunchDaemons/js-agent.pf-pool.plist"),
+        "the agent loads the pf anchor itself; no daemon of the package does"
+    );
     for dir in [
         "Library/Application Support/js-agent/log",
         "Library/Application Support/js-agent/update",
@@ -79,11 +88,7 @@ fn programs_are_0755_data_is_0644_and_the_hooks_state_directory_is_0700() {
         assert_eq!(entry(&all, &format!("{prefix}/bin/{program}")).mode, 0o755);
     }
     assert_eq!(entry(&all, &format!("{prefix}/LICENSE")).mode, 0o644);
-    for plist in [
-        "js-agent.plist",
-        "js-agent.session.plist",
-        "js-agent.pf-pool.plist",
-    ] {
+    for plist in ["js-agent.plist", "js-agent.session.plist"] {
         assert_eq!(
             entry(&all, &format!("Library/LaunchDaemons/{plist}")).mode,
             0o644
@@ -143,10 +148,6 @@ fn the_plists_programs_are_payload_files() {
         assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
         assert_eq!(entry(&all, path).mode, 0o755);
     }
-    let pf_pool = program_arguments(&pf_pool_plist());
-    let path = pf_pool[0].trim_start_matches('/');
-    assert_eq!(entry(&all, path).kind, Kind::File, "{path}");
-    assert_eq!(entry(&all, path).mode, 0o755);
     assert!(js_mac_provision::daemon::UPDATE_DIR.ends_with("/js-agent/update"));
     assert_eq!(
         entry(
@@ -183,7 +184,7 @@ fn sources(name: &str) -> Sources {
         std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o600))
             .unwrap();
     }
-    for file in ["LICENSE", "agent.plist", "session.plist", "pf-pool.plist"] {
+    for file in ["LICENSE", "agent.plist", "session.plist"] {
         std::fs::write(at.join(file), format!("bytes of {file}")).unwrap();
     }
     let args = Stage::parse_from([
@@ -198,8 +199,6 @@ fn sources(name: &str) -> Sources {
         at.join("agent.plist").to_str().unwrap(),
         "--session-plist",
         at.join("session.plist").to_str().unwrap(),
-        "--pf-pool-plist",
-        at.join("pf-pool.plist").to_str().unwrap(),
         "--out",
         at.join("out").to_str().unwrap(),
     ])
@@ -255,10 +254,6 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
             "session.plist",
             "Library/LaunchDaemons/js-agent.session.plist",
         ),
-        (
-            "pf-pool.plist",
-            "Library/LaunchDaemons/js-agent.pf-pool.plist",
-        ),
     ] {
         assert_eq!(
             std::fs::read_to_string(root.join(to)).unwrap(),
@@ -307,8 +302,6 @@ fn the_program_stages_the_package_when_asked_to() {
         .arg(&a.agent_plist)
         .arg("--session-plist")
         .arg(&a.session_plist)
-        .arg("--pf-pool-plist")
-        .arg(&a.pf_pool_plist)
         .arg("--out")
         .arg(&a.out)
         .output()
@@ -550,6 +543,21 @@ fn the_verdict_is_a_line_for_the_package_and_the_problems_for_anything_else() {
     );
 }
 
+/// Asserts that a package whose listing carries the retired pf daemon's plist is refused,
+/// naming that path. Catches a package built with the pf job's plist still in its payload, which
+/// would load the job the agent replaced.
+#[test]
+fn a_package_that_carries_the_retired_pf_plist_is_refused() {
+    let mut p = good();
+    p.bom
+        .push_str("./Library/LaunchDaemons/js-agent.pf-pool.plist\t100644\t0/0\t12\t3456\n");
+    let err = verdict(&p, VERSION, Path::new("/x/js-agent.pkg")).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "the package is not the js-agent package: not part of the package: Library/LaunchDaemons/js-agent.pf-pool.plist"
+    );
+}
+
 #[test]
 fn every_part_of_an_lsbom_line_is_needed() {
     let mut p = good();
@@ -703,55 +711,4 @@ fn the_helpers_plist_names_flags_the_helper_accepts_and_a_socket_the_agent_dials
         .map(|at| PathBuf::from(&agent[at + 1]))
         .unwrap();
     assert_eq!(args.socket, socket);
-}
-
-/// The pf daemon's plist parses as a command line of the `js-mac-provision` the package carries,
-/// names the same flags file as the agent's plist, and reads from the Mac flags file the anchor of
-/// the pool the agent's `--native-pf-*` flags name; its label is the plist's file name in the
-/// payload. Catches a plist whose daemon would load another anchor than the agent checks, or a
-/// verb or flag the program refuses.
-#[test]
-fn the_pf_daemons_plist_installs_the_anchor_the_agents_flags_name() {
-    use js_mac_provision::agent_flags::{AgentPf, FileFacts, read};
-    use js_mac_provision::cli::{Cli, Verb};
-    let words = program_arguments(&pf_pool_plist());
-    assert_eq!(words[0], format!("{BIN_DIR}/js-mac-provision"));
-    let cli = Cli::try_parse_from(words.iter().cloned()).unwrap_or_else(|e| panic!("{e}"));
-    let Verb::Install(install) = &cli.verb else {
-        panic!("not install: {:?}", cli.verb);
-    };
-    let agent = program_arguments(&Daemon::agent().render());
-    let agent_file = agent
-        .iter()
-        .position(|w| w == "--flags-file")
-        .map(|at| PathBuf::from(&agent[at + 1]))
-        .unwrap();
-    assert_eq!(install.flags_file.as_ref(), Some(&agent_file));
-    let facts = FileFacts {
-        regular: true,
-        mode: 0o644,
-        uid: 0,
-        bytes: MAC_FLAGS.as_bytes().to_vec(),
-    };
-    let AgentPf::On(policy) = read(&agent_file, 501, &move |_| Ok(facts.clone())).unwrap() else {
-        panic!("the Mac flags name no anchor");
-    };
-    assert_eq!(policy.uids.first(), 600);
-    assert_eq!(policy.uids.last(), 699);
-    assert_eq!(
-        policy
-            .endpoints
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        ["192.0.2.10:443", "192.0.2.11:443"]
-    );
-    assert_eq!(policy.anchor.as_str(), cli.anchor);
-    assert_eq!(policy.state_dir, cli.state_dir);
-    assert_eq!(policy.pfctl, cli.pfctl);
-    assert!(
-        entries()
-            .iter()
-            .any(|e| e.path == format!("Library/LaunchDaemons/{PF_POOL_LABEL}.plist"))
-    );
 }

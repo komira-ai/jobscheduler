@@ -35,7 +35,7 @@ pub const UNIT: &str = "js-agent-crun.service";
 pub const MAC_UNIT: &str = "js-agent";
 /// The launchd label of the agent's root helper on a Mac.
 pub const MAC_HELPER: &str = "js-agent.session";
-/// The launchd label of the job that keeps the pool's pf anchor loaded on a Mac.
+/// The launchd label of the pf job an earlier release of the Mac package ran.
 pub const MAC_PF: &str = "js-agent.pf-pool";
 pub const HOST: &str = "burst-1";
 pub const LEASE_SECS: u64 = 300;
@@ -127,9 +127,9 @@ impl Rig {
         )
     }
 
-    /// The same update on a Mac whose package carries the helper and the job that keeps the pool's
-    /// pf anchor loaded, as the macOS package does: the params name both.
-    pub fn mac_with_helper_and_pf(name: &str) -> Rig {
+    /// The same update on a Mac from a release of two daemons and a pf job: the previous release's
+    /// tree carries the plist of the pf job and the staged one does not.
+    pub fn mac_with_helper_from_pf_release(name: &str) -> Rig {
         Rig::build_for(name, true, LEASE_SECS, MAX_SECS, Some(MAC_UNIT), true, true)
     }
 
@@ -143,19 +143,6 @@ impl Rig {
             Some(MAC_UNIT),
             true,
             false,
-        )
-    }
-
-    /// The first install on a Mac whose package carries the helper and the pf job.
-    pub fn mac_first_install_with_helper_and_pf(name: &str) -> Rig {
-        Rig::build_for(
-            name,
-            false,
-            LEASE_SECS,
-            MAX_SECS,
-            Some(MAC_UNIT),
-            true,
-            true,
         )
     }
 
@@ -196,14 +183,12 @@ impl Rig {
         let unit = mac.unwrap_or(UNIT);
         let text = if mac.is_some() { PLIST_TEXT } else { UNIT_TEXT };
         for release in [&staged, &old] {
-            if helper || pf {
+            if helper {
                 let jobs = release.join("tree/Library/LaunchDaemons");
                 fs::create_dir_all(&jobs).unwrap();
                 fs::write(jobs.join(manager.file_name(unit)), text).unwrap();
-                if helper {
-                    fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
-                }
-                if pf {
+                fs::write(jobs.join(manager.file_name(MAC_HELPER)), text).unwrap();
+                if pf && release == &old {
                     fs::write(jobs.join(manager.file_name(MAC_PF)), text).unwrap();
                 }
             } else {
@@ -219,14 +204,11 @@ impl Rig {
         let runtime = if mac.is_some() { "native" } else { "crun" };
         let token = root.join("token");
         fs::write(&token, "tok-0123456789\n").unwrap();
-        let mut helper_line = if helper {
+        let helper_line = if helper {
             format!("helper_unit = \"{MAC_HELPER}\"\n")
         } else {
             String::new()
         };
-        if pf {
-            helper_line.push_str(&format!("pf_unit = \"{MAC_PF}\"\n"));
-        }
         let previous = if previous {
             format!(
                 "\"updater.previous_release\" = \"{}\"\n\"updater.previous_version\" = \"1.3.0\"\n",
@@ -485,6 +467,9 @@ pub struct Spy<'a> {
     /// The copy of the file system table an earlier release's host setup left, which the host
     /// setup removes: `etc/fstab.js-agent` in the rig's tree (no `etc` is made).
     pub fstab_leftover: PathBuf,
+    /// The plist of the retired pf job on this host: `Library/LaunchDaemons/js-agent.pf-pool.plist`
+    /// in the rig's tree (no directory is made, and no file).
+    pub pf_plist: PathBuf,
 }
 
 /// The certificate file a flags file names in the tests that give the host an identity.
@@ -540,6 +525,10 @@ impl<'a> Spy<'a> {
                 }
             }),
             fstab_leftover: rig.tmp.path().join("etc/fstab.js-agent"),
+            pf_plist: rig
+                .tmp
+                .path()
+                .join("Library/LaunchDaemons/js-agent.pf-pool.plist"),
             token,
             host_identity: None,
             egress: Cell::new(false),
@@ -683,6 +672,7 @@ impl<'a> Spy<'a> {
             stat,
             look: &*self.look_fn,
             fstab_leftover: &self.fstab_leftover,
+            pf_plist: &self.pf_plist,
         }
     }
 

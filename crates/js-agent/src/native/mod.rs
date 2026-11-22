@@ -165,9 +165,9 @@ use std::io;
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -175,6 +175,7 @@ use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_provision::keep::Keeper;
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::Dotted;
@@ -194,7 +195,7 @@ pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
-pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
+pub use pf::{Applied, Enforcer, PfFlags, PfPolicy, ProvisionError, Ticks};
 pub use profile::{profile_argv, self_test};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
@@ -314,6 +315,8 @@ pub struct NativeRuntime {
     /// The helper refused a deadline or `stop` as a request it cannot read: it predates them,
     /// and neither is sent to it again (`native/bound.rs`).
     old_helper: AtomicBool,
+    /// The keeper of the pf anchor, started by the start check; it ends with the runtime.
+    keeper: OnceLock<Keeper>,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -385,6 +388,7 @@ impl NativeRuntime {
             now_ms: system_clock(),
             stop_grace: Duration::ZERO,
             old_helper: AtomicBool::new(false),
+            keeper: OnceLock::new(),
         })
     }
 
@@ -605,34 +609,9 @@ impl NativeRuntime {
         }
     }
 
-    /// Whether the pf anchor of the pool is in force right now, when the ceiling is `on`
-    /// (the one value whose jobs the anchor limits; an `open` ceiling has no filter to
-    /// check). Asked afresh at every call: a reload of the main ruleset can drop the anchor
-    /// at any time, so no answer is kept. The text is the first line of what the provisioner
-    /// said, with the flag that makes the check necessary.
+    /// Whether the pf anchor of the pool is in force right now ([`pf::in_force`]).
     fn pf_in_force(&self) -> Result<(), RuntimeError> {
-        if self.config.network != Ceiling::On {
-            return Ok(());
-        }
-        // Fails closed: `open` refuses a cap of `on` with no check, and this does not rely
-        // on it.
-        let Some(check) = &self.config.egress else {
-            return Err(fail(
-                &"--native-network",
-                &"on has no check of the pf anchor of the pool",
-            ));
-        };
-        check.enforced().map_err(|why| {
-            tracing::warn!("the pf anchor is not in force: {why}");
-            let said = why.to_string();
-            fail(
-                &"--native-network",
-                &format!(
-                    "on needs the pf anchor of the pool in force: {}",
-                    said.lines().next().unwrap_or_default()
-                ),
-            )
-        })
+        pf::in_force(self.config.network, self.config.egress.as_deref())
     }
 
     /// Ends the user of `lease` after a start that failed, so none is left behind, and says
@@ -850,8 +829,12 @@ impl Runtime for NativeRuntime {
         false
     }
 
-    /// At the agent's start: with a ceiling of `on`, the pf anchor must be in force.
+    /// At the agent's start: with a ceiling of `on`, the agent loads the pf anchor first
+    /// ([`pf::keep`]), and then the anchor must be in force; the check decides.
     fn check_egress(&self) -> Result<(), RuntimeError> {
+        if let (Ceiling::On, Some(egress)) = (self.config.network, &self.config.egress) {
+            self.keeper.get_or_init(|| pf::keep(egress));
+        }
         self.pf_in_force()
     }
 
