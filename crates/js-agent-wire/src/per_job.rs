@@ -459,8 +459,13 @@ pub struct JobUsage {
     /// How often the group's CPU was throttled ([`CpuThrottle`]), when the agent could read
     /// it; absent otherwise, and left out of the text. An agent from before the field sends
     /// none: its jobs' groups had a `cpu.max` of their booking, so a run without it may have
-    /// been held to what it booked. A server from before the field ignores it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// been held to what it booked. A server from before the field ignores it. A value that
+    /// does not decode reads as absent and leaves the rest of the usage as sent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
     pub cpu_throttle: Option<CpuThrottle>,
 }
 

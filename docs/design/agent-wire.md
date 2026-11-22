@@ -292,7 +292,7 @@ digits), with the comma that joins it to the message. Derived, and measured by t
 - `usage` in a job's result, `,"usage":{"peak_memory_bytes":N,"cpu_usage_usec":N}`: 1 + 7 + 1 + 1 + (20 + 20) + 1 + (17 + 20) + 1 =
   **89** bytes per result (measured by `usage_at_its_widest_adds_89_bytes_to_a_result`), and `cpu_throttle` in it,
   `,"cpu_throttle":{"periods":N,"throttled_periods":N}`, 89 more: **178** (measured by
-  `throttle_counts_at_their_widest_add_89_bytes_to_a_usage`). The agent's `results_budget` counts it with the rest of the result.
+  `throttle_counts_at_their_widest_make_a_usage_178_bytes`). The agent's `results_budget` counts it with the rest of the result.
 
 The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
 `log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).

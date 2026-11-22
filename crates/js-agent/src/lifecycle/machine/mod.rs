@@ -43,7 +43,7 @@ pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::hold;
 use super::quota::QuotaHealth;
-use super::runtime::{ResolvedMount, RunHandle, Runtime, RuntimeError};
+use super::runtime::{ResolvedMount, Runtime, RuntimeError};
 use super::taint::TaintState;
 use super::{
     Capacity, CheckHook, Clock, Config, Event, Finding, Skip, StartTimeline, Wake, code, detail,
@@ -950,63 +950,5 @@ impl Lifecycle {
         }
         let made = (mounts, slot, booked);
         self.prepare_or_begin((spec, keyed), given, made, received, events);
-    }
-
-    /// Records how a start went: a running job (its wall-time limit begins now, after any
-    /// wait for the image, and ends no later than `cap`, the end of its lease), or a
-    /// `failed_to_start` result whose cleanup is owed. It takes the place of the job at
-    /// `replace` (a start that waited), or is added.
-    fn settle(
-        &mut self,
-        (spec, keyed): (&JobSpec, Keyed),
-        started: Result<RunHandle, Failure>,
-        (slot, booked): (u32, u64),
-        (replace, cap): (Option<usize>, u64),
-        events: &mut Vec<Event>,
-    ) {
-        let run_id = &spec.run_id;
-        let mut job = match started {
-            Ok(id) => {
-                self.mark(run_id, "created");
-                let timeline = self.take_timeline(run_id, &id);
-                let now = self.clock.now_ms();
-                let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
-                let cgroup = self.runtime.cgroup(&id);
-                let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
-                job.started_at(now);
-                job.cgroup = cgroup;
-                job.sizing = self.sizing.remove(run_id);
-                events.push(Event::Started {
-                    run_id: run_id.clone(),
-                    timeline,
-                    booked: job.booked(),
-                });
-                job
-            }
-            Err((why, finding, message, blind)) => {
-                let sizing = self.sizing.remove(run_id);
-                self.drop_timeline(run_id);
-                let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
-                job.sizing = sizing;
-                // A host the agent cannot see is not known to be checkable: tainted as
-                // unchecked, before the finding that follows from it.
-                if blind {
-                    job.taint(&mut self.taint, blind_taint(run_id), events);
-                }
-                job.result = Some(job.report(Outcome::FailedToStart, None, Some(why)));
-                job.note(finding, message, events);
-                events.push(Event::ResultReady {
-                    run_id: run_id.clone(),
-                    booked: job.booked(),
-                    usage: None,
-                });
-                job
-            }
-        };
-        job.keyed = keyed;
-        match replace {
-            Some(index) => self.jobs[index] = job,
-            None => self.jobs.push(job),
-        }
     }
 }

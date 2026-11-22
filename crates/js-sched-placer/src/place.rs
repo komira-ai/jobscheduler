@@ -32,11 +32,11 @@
 //! of removed hosts has a lock of its own, a leaf, and so have the calls kept for the engine
 //! and the record of what pass 2 told of the queued jobs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
-use js_jobs::JobId;
+use js_jobs::{JobId, JobRecord, SizedFrom};
 use js_registry::Placer;
 use js_sched::queue_status::Outcome;
 use js_types::Clock;
@@ -45,8 +45,10 @@ use js_types::Shape;
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 
+use super::engine::jobs::Decided;
 use super::engine::jobs_seen::{Kept, Seen};
 use super::engine::{Engine, Settings};
+use super::sizes::day_of;
 
 /// The placer the registry is given: it keeps the engine, the scheduler that places the
 /// queued jobs, and follows the registry's hosts.
@@ -107,6 +109,25 @@ impl SchedPlacer {
             #[cfg(any(test, feature = "test-support"))]
             skipped: AtomicU64::new(0),
         }
+    }
+
+    /// Which history sized each job of `decided` that the history sized, read from its record
+    /// in `queued` (what the walk that decided it sized it from) as that walk saw the history
+    /// on the day of `now`; a job that named both its CPU and its memory has none.
+    pub(crate) fn sized_from_of(
+        &self,
+        queued: &[JobRecord],
+        decided: &[Decided],
+        now: FarmTime,
+    ) -> BTreeMap<JobId, SizedFrom> {
+        let ids: BTreeSet<&JobId> = decided.iter().map(|(job, ..)| job).collect();
+        let (day, mut engine) = (day_of(now), self.engine());
+        let sizes = engine.sizes();
+        queued
+            .iter()
+            .filter(|record| ids.contains(&record.id))
+            .filter_map(|record| Some((record.id.clone(), sizes.sized_from(record, day)?)))
+            .collect()
     }
 
     /// The engine, under its lock, told first of the registry's calls that found it held

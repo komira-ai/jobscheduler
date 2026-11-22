@@ -115,7 +115,7 @@ fn usage_at_its_widest_adds_89_bytes_to_a_result() {
 /// usage with no throttle counts writes none of it. Catches a field whose size the heartbeat
 /// budget no longer allows for, and an absent count written as a zero.
 #[test]
-fn throttle_counts_at_their_widest_add_89_bytes_to_a_usage() {
+fn throttle_counts_at_their_widest_make_a_usage_178_bytes() {
     let widest = JobUsage {
         peak_memory_bytes: u64::MAX,
         cpu_usage_usec: u64::MAX,
@@ -178,5 +178,63 @@ fn a_malformed_usage_reads_as_absent() {
         let read: JobResult = serde_json::from_value(text).unwrap();
         assert_eq!(read, result(None), "{bad}");
         assert_eq!(beat_with(read).validate(), Ok(()), "{bad}");
+    }
+}
+
+/// The usage of a server from before `cpu_throttle`: the two counters, and nothing else read.
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+struct UsageBeforeThrottle {
+    peak_memory_bytes: u64,
+    cpu_usage_usec: u64,
+}
+
+/// Asserts that a server from before `cpu_throttle` reads a usage that carries it as the two
+/// counters it knows, that this version reads that release's usage with no throttle counts,
+/// and that throttle counts that do not decode read as absent and leave the counters as sent.
+/// Catches a field an older server cannot skip, an absent count read as a zero, and a
+/// malformed count that costs the job its whole usage.
+#[test]
+fn throttle_counts_are_skipped_by_an_older_server_and_read_leniently() {
+    let throttled = JobUsage {
+        peak_memory_bytes: 7,
+        cpu_usage_usec: 9,
+        cpu_throttle: Some(js_agent_wire::CpuThrottle {
+            periods: 5597,
+            throttled_periods: 5585,
+        }),
+    };
+    let wire = serde_json::to_value(throttled).unwrap();
+    assert_eq!(
+        wire["cpu_throttle"],
+        json!({"periods": 5597, "throttled_periods": 5585})
+    );
+    let old: UsageBeforeThrottle = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        old,
+        UsageBeforeThrottle {
+            peak_memory_bytes: 7,
+            cpu_usage_usec: 9,
+        }
+    );
+    let before = json!({"peak_memory_bytes": 7, "cpu_usage_usec": 9});
+    let read: JobUsage = serde_json::from_value(before.clone()).unwrap();
+    assert_eq!(read.cpu_throttle, None);
+    for bad in [
+        json!({"periods": -1, "throttled_periods": 0}),
+        json!({"periods": 1}),
+        json!("throttled"),
+    ] {
+        let mut text = before.clone();
+        text["cpu_throttle"] = bad.clone();
+        let read: JobUsage = serde_json::from_value(text).unwrap();
+        assert_eq!(
+            read,
+            JobUsage {
+                peak_memory_bytes: 7,
+                cpu_usage_usec: 9,
+                cpu_throttle: None,
+            },
+            "{bad}"
+        );
     }
 }

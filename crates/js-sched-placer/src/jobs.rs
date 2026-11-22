@@ -784,14 +784,10 @@ impl SchedPlacer {
             }
         }
         let (decided, waiting) = self.engine().walk_jobs(queued, hosts.open, now);
-        let queued_by_id: BTreeMap<&JobId, &JobRecord> =
-            queued.iter().map(|record| (&record.id, record)).collect();
+        let sized = self.sized_from_of(queued, &decided, now);
         for (job, host, booked, mut placement) in decided {
             placement.queue = noted.placed(&job, &host);
-            // Which history sized it, as the walk that just sized it saw the history.
-            placement.sized_from = queued_by_id
-                .get(&job)
-                .and_then(|record| self.engine().sizes().sized_from(record, day_of(now)));
+            placement.sized_from = sized.get(&job).copied();
             let capacity = capacity_of(hosts, &host);
             match jobs.place_claimed(&job, &host, booked, &placement, capacity) {
                 Ok((record, _)) => {

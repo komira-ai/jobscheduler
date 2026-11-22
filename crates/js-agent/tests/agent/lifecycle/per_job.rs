@@ -798,3 +798,30 @@ fn a_refused_starts_sizing_is_not_kept_for_a_later_start() {
     assert_eq!(booked.len(), 1, "{again:?}");
     assert_eq!(booked[0].1.sizing, None);
 }
+
+/// Proves a job stopped while its start waits for its image is logged with where its booking
+/// came from: its `ResultReady` carries the sizing its start said. Catches a sizing kept only
+/// for a start that reaches its create, which a start stopped while it waits would be
+/// logged without.
+#[test]
+fn a_job_stopped_while_its_image_is_pulled_is_logged_with_its_sizing() {
+    use js_agent_wire::{BookedFrom, StartSizing};
+    let mut h = Harness::new("job-sizing-waiting");
+    h.fake.pull_pending(COLD);
+    let sizing = StartSizing {
+        class: Some("a.class".to_owned()),
+        cpu: BookedFrom::Cold,
+        memory: BookedFrom::OverCap,
+    };
+    let waiting = h.apply(vec![job_start(JobStartSpec {
+        image: COLD.to_owned(),
+        sizing: Some(sizing.clone()),
+        ..start("j1")
+    })]);
+    assert!(booked_in(&waiting).is_empty(), "{waiting:?}");
+    h.apply(vec![job_stop("j1")]);
+    let ended = h.life.step();
+    let booked = booked_in(&ended);
+    assert_eq!(booked.len(), 1, "{ended:?}");
+    assert_eq!(booked[0].1.sizing, Some(sizing));
+}
