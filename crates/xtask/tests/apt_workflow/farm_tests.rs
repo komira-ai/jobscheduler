@@ -6,8 +6,8 @@
 //! committed workflow and reading the exact problems the lint reports.
 
 use super::farm::{
-    BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, RUNNER,
-    TOP_PERMISSIONS_PROBLEM, problems, token_problems,
+    BUILD_RUN, CONNECT_INPUTS, FARM_CONNECT, FILE, JOB_IF, ON_PROBLEM, PATCH_ARTIFACT, RUNNER,
+    TOP_PERMISSIONS_PROBLEM, UPLOAD_IF, patch_file, problems, token_problems, upload_inputs,
 };
 use super::support::{text_of, workflows};
 use super::yaml;
@@ -242,6 +242,107 @@ fn the_job_runs_farm_build_of_ci_after_farm_connect() {
         problems_of(&moved),
         ["job build: the build does not come after the farm-connect step"]
     );
+}
+
+/// The upload step of the committed file.
+const UPLOAD_STEP: &str = "      - name: Upload the regenerated build table as a patch
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buildrules-sync
+          path: ${{ runner.temp }}/buildrules-sync/buildrules-sync.patch
+          if-no-files-found: ignore
+          retention-days: 30
+";
+
+#[test]
+fn the_build_writes_the_patch_the_upload_takes() {
+    // Catches: the build step writing the patch to one file and the upload taking another, so a
+    // stale table's summary names an artifact that holds nothing.
+    assert!(BUILD_RUN.contains(&format!("--patch \"{}\"", patch_file(true))));
+    assert_eq!(
+        upload_inputs().get("path").map(String::as_str),
+        Some(patch_file(false).as_str())
+    );
+    assert_eq!(
+        patch_file(false),
+        "${{ runner.temp }}/buildrules-sync/buildrules-sync.patch"
+    );
+    assert_eq!(
+        patch_file(true),
+        "$RUNNER_TEMP/buildrules-sync/buildrules-sync.patch"
+    );
+}
+
+#[test]
+fn the_patch_is_uploaded_once_after_a_failed_build_under_its_name() {
+    // Catches: no upload of the patch, two of them, one under another artifact name (the summary's
+    // command would download nothing), one before the build (there is no patch yet), one that
+    // runs on a passing build only or always, and one of another file or kept another time.
+    let none = format!(
+        "job build: exactly one step must upload the artifact {PATCH_ARTIFACT} with \
+         actions/upload-artifact@<commit>"
+    );
+    assert_eq!(problems_with(UPLOAD_STEP, ""), std::slice::from_ref(&none));
+    assert_eq!(
+        problems_with(UPLOAD_STEP, &UPLOAD_STEP.repeat(2)),
+        std::slice::from_ref(&none)
+    );
+    assert_eq!(
+        problems_with("name: buildrules-sync\n", "name: patch\n"),
+        std::slice::from_ref(&none)
+    );
+    assert_eq!(
+        problems_with(
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+        ),
+        std::slice::from_ref(&none)
+    );
+    let moved = with(UPLOAD_STEP, "").replace(
+        "      - name: Connect to the build farm\n",
+        &format!("{UPLOAD_STEP}      - name: Connect to the build farm\n"),
+    );
+    assert_eq!(
+        problems_of(&moved),
+        [format!(
+            "job build: the upload of {PATCH_ARTIFACT} does not come after the build"
+        )]
+    );
+    let wrong_if = format!(
+        "job build: the upload of {PATCH_ARTIFACT} must run under exactly `if: {UPLOAD_IF}`"
+    );
+    for to in [
+        "        if: ${{ always() }}\n",
+        "        if: ${{ success() }}\n",
+        "",
+    ] {
+        assert_eq!(
+            problems_with("        if: ${{ failure() }}\n", to),
+            std::slice::from_ref(&wrong_if),
+            "{to:?}"
+        );
+    }
+    let wanted = upload_inputs();
+    let wanted: std::collections::BTreeMap<&str, &str> =
+        wanted.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let wrong_with =
+        format!("job build: the upload of {PATCH_ARTIFACT}'s `with:` must be exactly {wanted:?}");
+    for (from, to) in [
+        (
+            "path: ${{ runner.temp }}/buildrules-sync/buildrules-sync.patch",
+            "path: ${{ runner.temp }}/buildrules-sync/",
+        ),
+        ("if-no-files-found: ignore", "if-no-files-found: error"),
+        ("retention-days: 30", "retention-days: 90"),
+        ("          retention-days: 30\n", ""),
+    ] {
+        assert_eq!(
+            problems_with(from, to),
+            std::slice::from_ref(&wrong_with),
+            "{to:?}"
+        );
+    }
 }
 
 #[test]
