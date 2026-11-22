@@ -2,9 +2,14 @@
 //! step is one command (the alias is in `.cargo/config.toml`).
 //!
 //! - `fetch --url <url> --sha256 <hex> --out <path> [--extract tar.gz|tar.xz --member <path>
-//!   [--tree]] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over HTTPS (or taken from the
-//!   file the actions cache restored at `--cache`) and refused unless its SHA-256 matches,
-//!   before anything is unpacked or written.
+//!   [--tree] | --extract zst] [--cache <path>]` ([`fetch`]): a pinned tool, downloaded over
+//!   HTTPS (or taken from the file the actions cache restored at `--cache`) and refused unless
+//!   its SHA-256 matches, before anything is unpacked or written; `--extract zst` is one
+//!   zstd-compressed file (buck2's release form), decompressed whole.
+//! - `farm-build --buck2 <path> --target <label>` ([`farm`]): the build of the farm lane
+//!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set, then
+//!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
+//!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
@@ -79,9 +84,9 @@
 //!   records the demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`:
 //!   builds the server and the client, starts the server with the job service on and a pool no agent
 //!   joins, submits a GPU job (refused, since no host could serve it) and lists the jobs.
-//! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
+//! - `site-changed --event <name> --base <ref> [--group-base <commit>] --paths <file> --github-output <file>`
 //!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
-//!   files a pull request changes against the entries of `site/ci-paths`.
+//!   files a pull request or a merge group changes against the entries of `site/ci-paths`.
 //! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
 //!   service's descriptor set into the two checked-in files, and the generated blocks of
@@ -126,6 +131,7 @@ pub mod debs;
 pub mod deploy;
 pub mod determinism;
 pub mod doc_refs;
+pub mod farm;
 pub mod fetch;
 pub mod image;
 pub mod job_surface;
@@ -162,6 +168,9 @@ pub enum Error {
     /// The determinism lint failed, or could not read the tree.
     #[error(transparent)]
     Determinism(#[from] determinism::Error),
+    /// The farm lane's build failed.
+    #[error(transparent)]
+    Farm(#[from] farm::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -236,7 +245,7 @@ enum Verb {
         #[arg(long, value_enum)]
         extract: Option<fetch::Format>,
         /// The file to take out of a tar (`--extract`): its path inside the archive; with
-        /// `--tree`, the directory to take.
+        /// `--tree`, the directory to take. Not given with `--extract zst`.
         #[arg(long)]
         member: Option<PathBuf>,
         /// Install the directory `--member` and everything under it as the directory `--out`.
@@ -246,6 +255,16 @@ enum Verb {
         /// used in place of the download; when it does not, the checked download is kept there.
         #[arg(long)]
         cache: Option<PathBuf>,
+    },
+    /// Build a target with buck2 on the build farm, failing unless every action ran there or
+    /// came from its cache (the `farm` workflow's one step).
+    FarmBuild {
+        /// The buck2 program.
+        #[arg(long)]
+        buck2: PathBuf,
+        /// The label to build, `//:ci` for the lane.
+        #[arg(long)]
+        target: String,
     },
     /// Make a directory hold exactly the pinned Debian packages of this host's architecture,
     /// each checked against its SHA-256: those already there, the rest downloaded.
@@ -440,6 +459,9 @@ fn run(cli: Cli) -> Result<String, Error> {
                 cache.as_deref(),
                 &roots,
             )?)
+        }
+        Verb::FarmBuild { buck2, target } => {
+            Ok(farm::build(&buck2, &target, &mut std::io::stderr())?)
         }
         Verb::Debs { pins, dir } => {
             let roots = fetch::host_roots();

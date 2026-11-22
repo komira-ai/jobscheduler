@@ -49,6 +49,27 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
     e.finish().expect("gzip")
 }
 
+/// `bytes` as one zstd frame.
+fn zst(bytes: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// The first half of a zstd frame of 4 KiB of xorshift output (which does not compress), so the
+/// frame header is whole and the cut falls inside the block's data.
+fn cut_zst() -> Vec<u8> {
+    let mut state = 0x9e37_79b9u32;
+    let data: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state.to_le_bytes()[0]
+        })
+        .collect();
+    let full = zst(&data);
+    full[..full.len() / 2].to_vec()
+}
+
 fn member(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
@@ -155,6 +176,38 @@ fn a_tar_gz_yields_the_tool() {
     assert_eq!(std::fs::read(&out).expect("read"), TOOL);
 }
 
+/// Asserts that a zstd download is installed as the file it decompresses to.
+#[test]
+fn a_zst_yields_the_tool() {
+    let (result, out) = install_own("zst", &zst(TOOL), &Unpack::Zst);
+    result.expect("install");
+    assert_eq!(std::fs::read(&out).expect("read"), TOOL);
+}
+
+/// Asserts that a download that is not zstd, an empty one and a cut frame are unpack errors
+/// with nothing written, and that a cut frame (whose header is whole) is refused while its
+/// data is read, not as a frame that is not zstd.
+#[test]
+fn a_zst_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
+    for (name, bytes) in [
+        ("zst", b"not zstd".to_vec()),
+        ("zst-empty", Vec::new()),
+        ("zst-cut", cut_zst()),
+    ] {
+        let (result, out) = install_own(&format!("undecodable-{name}"), &bytes, &Unpack::Zst);
+        assert!(
+            matches!(result, Err(Error::Unpack(_))),
+            "{name}: {result:?}"
+        );
+        assert!(!out.exists(), "{name}");
+        assert!(!part_path(&out).exists(), "{name}");
+    }
+    let (result, _) = install_own("undecodable-zst-cut-why", &cut_zst(), &Unpack::Zst);
+    let why = format!("{result:?}");
+    assert!(why.starts_with("Err(Unpack("), "{why}");
+    assert!(!why.contains("not a zstd frame"), "{why}");
+}
+
 /// Asserts that a gzip stream that does not decode, and a tar whose header is not a
 /// tar's, are unpack errors with nothing written.
 #[test]
@@ -248,14 +301,19 @@ fn extract_member_and_tree_must_agree() {
             })
         );
     }
+    assert_eq!(Unpack::new(Some(Format::Zst), None, false), Ok(Unpack::Zst));
     let no_member = "--extract needs --member, the file to take (with --tree, the directory)";
     let no_extract = "--member and --tree name what to take out of a tar: they need --extract";
+    let zst_alone = "--extract zst is one compressed file: it takes no --member or --tree";
     let refused = [
         (Some(Format::TarGz), None, false, no_member),
         (Some(Format::TarXz), None, true, no_member),
         (None, Some(member("d/tool")), false, no_extract),
         (None, Some(member("d")), true, no_extract),
         (None, None, true, no_extract),
+        (Some(Format::Zst), Some(member("d/tool")), false, zst_alone),
+        (Some(Format::Zst), Some(member("d")), true, zst_alone),
+        (Some(Format::Zst), None, true, zst_alone),
     ];
     for (extract, path, tree, expected) in refused {
         assert_eq!(
