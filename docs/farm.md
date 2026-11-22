@@ -24,8 +24,9 @@ The members listed below leave out some of these steps. The summary line must re
 `Commands: N (cached: N, remote: N, local: 0)`: no action ran on the runner.
 
 `farm.yml` runs the build as one command, `cargo xtask farm-build` (`crates/xtask/src/farm.rs`). It
-refuses to start without the build farm's worker property set, fails a build that does not say
-`local: 0`, and stops buck2's daemon however the build ended.
+refuses to start without the build farm's worker property set, refuses a stale generated table
+and hands over its fix (below), fails a build that does not say `local: 0`, and stops buck2's
+daemon however the build ended.
 
 The files of the build, all generated or written once by `buildrules`:
 
@@ -37,8 +38,44 @@ The files of the build, all generated or written once by `buildrules`:
 | `buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/` | Cargo's unit graph of every member; every crates.io crate as a unit pinned by SHA-256 and size; the git dependency (hostkeeper's crates) as GitHub's archive of its pinned commit, by SHA-256 and size (`git_archives.tsv`) | `buildrules sync`; never edited by hand |
 
 `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` stay the source. `//:check` fails every
-target when the generated table no longer matches them, and prints `buildrules sync` as the fix.
-After a change to a manifest or the lock, run `buildrules sync` and commit what it wrote.
+target when the generated table no longer matches them.
+
+## A stale table: the fix is a patch of the run
+
+A pull request that changes a manifest or the lock and not the table makes the table stale. You
+do not need `buildrules` to fix it: the job makes the fix and hands it to you
+(`crates/xtask/src/farm/table.rs`).
+
+1. Before the build, the job builds the `buildrules` command line from the pinned buildrules cell
+   on the build farm (`buildrules//cli:buildrules`) and runs `buildrules check`.
+2. When check finds the table stale or a generated file missing, the job runs that
+   `buildrules sync` on the runner, checks the table again, and writes what sync changed as a patch
+   (`git diff --binary` of the paths sync writes, new files included). It
+   fails without building. Its error and the job's summary name the inputs that changed, say
+   that the table is generated from them, list the files the patch changes, and give the one
+   command that applies it; the patch is the run's artifact `buildrules-sync`.
+3. You read the patch and apply it from a checkout of the branch, then commit and push:
+
+   ```sh
+   gh run download <run id> -R komira-ai/jobscheduler -n buildrules-sync -D buck-out/buildrules-sync-<run id> && git apply buck-out/buildrules-sync-<run id>/buildrules-sync.patch
+   ```
+
+   The summary prints it with the run's id filled in. `buck-out/` is ignored by git, so the
+   download leaves nothing to commit. On a pull request the job's checkout is the merge of the
+   branch into main, so the patch is made against that merge. If `git apply` refuses it, main has
+   changed the table too: merge main into the branch and push, and the next run carries a new
+   patch.
+
+A problem sync does not fix (a member with no `cargo_package` in its BUCK file, a floating
+`rust-toolchain.toml`) is still there when the job checks again after sync: the job fails with what
+check said, and hands over no patch.
+
+The job does not push the regenerated files to the branch itself. A job that pushes needs a token
+that can write to the repository, in the one job of this repository that already holds an OIDC
+token and runs a pull request's code; a push made with the job's own token starts no workflow, so
+the branch's new head would carry no CI run until someone pushed again; and a generated change of
+a few thousand lines would land on the branch unread. A fork's pull request does not run this job
+at all. A patch the contributor applies keeps the job read-only and the change reviewed.
 
 A Buck2 action sees only its declared inputs. A library unit sees `src/` and `build.rs`, a test
 target `tests/`, and a build script its whole package. A file a unit reads beyond that is declared
