@@ -1,4 +1,4 @@
-//! A native Mac run's collected outputs committed to tierstore's put ingest by the agent,
+//! A native Mac run's collected output committed to tierstore's put ingest by the agent,
 //! after the run's processes are swept, so the job itself never holds a writable put
 //! directory.
 //!
@@ -14,13 +14,12 @@
 //!    have the declared digest (it refuses and removes them otherwise), then removes the
 //!    file and the empty job directory.
 //!
-//! What is committed is read from the agent's own copy of the run's outputs
-//! (`<scratch>/outputs`, which the runtime collects before it commits), never from the
-//! job's folder: a directory is one tar of the regular files and directories under it, a
-//! single file is committed as it is. Nothing is followed: a link, or anything that is not
-//! a regular file or a directory, is refused with its path and nothing is published.
-//! `pack` is written mode `0640`, so the node's group, which the job's put directory
-//! belongs to, can read it whatever the agent's umask.
+//! What is committed is the run's one output, read from the agent's own copy of it (the
+//! runtime collects it into `<scratch>/outputs` before it commits), never from the job's
+//! folder: one regular file, committed as it is (the build service reads the key as its
+//! pack). Nothing is followed: a link, or anything that is not a regular file, is refused
+//! with its path and nothing is published. `pack` is written mode `0640`, so the node's
+//! group, which the job's put directory belongs to, can read it whatever the agent's umask.
 //!
 //! [`target_of`] says whether a directory is a job's put directory: strictly beneath the
 //! put root, exactly `cas/b/<build>/<nonce>`, with no link on the way. [`commit`] makes it,
@@ -30,7 +29,7 @@
 //!
 //! The module is free of `cfg(target_os)` and uses Unix file calls only, so its tests run
 //! on Linux; the macOS runtime (`native/put.rs`) gives it the put root, the node's user and
-//! the run's collected outputs.
+//! the run's collected output.
 
 mod commit;
 mod target;

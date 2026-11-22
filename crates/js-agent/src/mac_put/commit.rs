@@ -1,7 +1,6 @@
-//! The commit of one run's collected outputs to its put directory: `pack.part`, then
+//! The commit of one run's collected output to its put directory: `pack.part`, then
 //! `pack.sha256-<hex>.part`, then `pack` (the module text says why in this order).
 
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -9,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest as _, Sha256};
-use tar::{Builder, Header, HeaderMode};
 
 /// The name the node takes: the commit's last name.
 const PACK: &str = "pack";
@@ -61,18 +59,16 @@ impl<W: Write> Write for Hashing<W> {
     }
 }
 
-/// Commits `collected` to `target` as the object `<key_prefix>/pack`: a directory as one tar
-/// of the regular files and directories under it, each at its path below `collected`; a
-/// regular file as it is. `target.dir` is made when missing and must hold nothing; `ready` is
+/// Commits the regular file `collected` to `target` as it is, as the object
+/// `<key_prefix>/pack`. `target.dir` is made when missing and must hold nothing; `ready` is
 /// called on it before anything is written in it (on a Mac it gives the directory to the
 /// node's group). On a failure `pack.part` and the declared name are removed and `pack` is
 /// never made.
 ///
 /// # Errors
 ///
-/// `target.dir` already holds something, `ready` failed, something under `collected` is a
-/// link or neither a regular file nor a directory (the error names its path), or a read, a
-/// write or a rename failed.
+/// `target.dir` already holds something, `ready` failed, `collected` is missing, a link or
+/// not a regular file (the error names it), or a read, a write or a rename failed.
 pub fn commit(
     collected: &Path,
     target: &PutTarget,
@@ -139,15 +135,7 @@ fn publish(
         hash: Sha256::new(),
         bytes: 0,
     };
-    match fs::symlink_metadata(collected)
-        .map_err(|why| named(collected, why))?
-        .is_dir()
-    {
-        true => out = tar_of(collected, out)?,
-        false => {
-            io::copy(&mut open_regular(collected)?, &mut out)?;
-        }
-    }
+    io::copy(&mut open_regular(collected)?, &mut out)?;
     out.flush()?;
     out.inner.sync_all()?;
     seen(dir);
@@ -161,48 +149,12 @@ fn publish(
     Ok((sha256, out.bytes))
 }
 
-/// Writes the tar of the tree `collected` to `out` and answers `out`.
-fn tar_of<W: Write>(collected: &Path, out: W) -> io::Result<W> {
-    let mut tar = Builder::new(out);
-    // No owner, no time, and every file as a plain entry, holes or not: the same outputs
-    // make the same bytes, and so the same digest.
-    tar.mode(HeaderMode::Deterministic);
-    tar.sparse(false);
-    tar.follow_symlinks(false);
-    append_tree(&mut tar, collected, Path::new(""))?;
-    tar.into_inner()
-}
-
-/// Appends what the directory `dir` holds, under `below` in the tar, in name order.
-fn append_tree<W: Write>(tar: &mut Builder<W>, dir: &Path, below: &Path) -> io::Result<()> {
-    let listed = fs::read_dir(dir).and_then(Iterator::collect::<io::Result<Vec<_>>>);
-    let entries = listed.map_err(|why| named(dir, why))?;
-    let mut names: Vec<OsString> = entries.iter().map(fs::DirEntry::file_name).collect();
-    names.sort();
-    for name in names {
-        let path = dir.join(&name);
-        let inside = below.join(&name);
-        let meta = fs::symlink_metadata(&path).map_err(|why| named(&path, why))?;
-        if meta.is_dir() {
-            let mut header = Header::new_gnu();
-            header.set_metadata_in_mode(&meta, HeaderMode::Deterministic);
-            tar.append_data(&mut header, &inside, io::empty())?;
-            append_tree(tar, &path, &inside)?;
-        } else if meta.is_symlink() {
-            return Err(refused(&path, "a link, not followed"));
-        } else {
-            tar.append_file(&inside, &mut open_regular(&path)?)?;
-        }
-    }
-    Ok(())
-}
-
 /// Opens `path` to read when it is a regular file, never through a link.
 ///
 /// # Errors
 ///
-/// `path` is a link (`O_NOFOLLOW`), neither a regular file nor a directory, or cannot be
-/// opened; the error names it.
+/// `path` is missing, a link (`O_NOFOLLOW`) or not a regular file, or cannot be opened;
+/// the error names it.
 fn open_regular(path: &Path) -> io::Result<File> {
     // `NONBLOCK`: opening a pipe someone left there does not wait for a writer.
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
@@ -210,7 +162,7 @@ fn open_regular(path: &Path) -> io::Result<File> {
     let file = File::from(opened.map_err(|why| named(path, why.into()))?);
     match file.metadata()?.is_file() {
         true => Ok(file),
-        false => Err(refused(path, "not a regular file or a directory")),
+        false => Err(refused(path, "not a regular file")),
     }
 }
 

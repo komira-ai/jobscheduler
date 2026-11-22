@@ -1,12 +1,11 @@
-//! The commit of a run's collected outputs to a put directory, on a scratch directory with a
+//! The commit of a run's collected output to a put directory, on a scratch directory with a
 //! `ready` that records what it saw.
 
 use std::cell::RefCell;
-use std::fs::{self, File};
-use std::io::{self, Read as _};
+use std::fs;
+use std::io;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use js_testkit::dir::TestDir;
 use rustix::fs::{CWD, FileType, Mode, mknodat};
@@ -34,34 +33,16 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// A collected tree as the runtime leaves it: a file at the top, a directory holding a file,
-/// an empty directory.
-fn collected(dir: &Path) -> PathBuf {
-    let into = dir.join("outputs");
-    fs::create_dir_all(into.join("sub")).unwrap();
-    fs::create_dir_all(into.join("empty")).unwrap();
-    fs::write(into.join("a.txt"), "alpha").unwrap();
-    fs::write(into.join("sub/b.txt"), "beta").unwrap();
-    into
+/// A collected output as the runtime leaves it: `outputs/.kbf-out/pack` holding `bytes`.
+fn collected(dir: &Path, bytes: &[u8]) -> PathBuf {
+    let out = dir.join("outputs/.kbf-out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(out.join("pack"), bytes).unwrap();
+    out.join("pack")
 }
 
 fn none(_: &Path) -> io::Result<()> {
     Ok(())
-}
-
-/// Each entry of the tar `bytes`: its path, whether it is a directory, and what it holds.
-fn entries(bytes: &[u8]) -> Vec<(String, bool, String)> {
-    let mut archive = tar::Archive::new(bytes);
-    let mut seen = Vec::new();
-    for entry in archive.entries().unwrap() {
-        let mut entry = entry.unwrap();
-        let path = entry.path().unwrap().display().to_string();
-        let dir = entry.header().entry_type().is_dir();
-        let mut text = String::new();
-        entry.read_to_string(&mut text).unwrap();
-        seen.push((path, dir, text));
-    }
-    seen
 }
 
 /// Proves the three names come in the order tierstore's put ingest needs, each alone in the
@@ -74,7 +55,7 @@ fn entries(bytes: &[u8]) -> Vec<(String, bool, String)> {
 #[test]
 fn commit_renames_in_the_order_the_ingest_needs() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-order");
-    let from = collected(scratch.path());
+    let from = collected(scratch.path(), b"the pack");
     let to = target(&scratch.path().join("put"), "n1");
     let handed = RefCell::new(Vec::new());
     let ready = |dir: &Path| {
@@ -87,8 +68,7 @@ fn commit_renames_in_the_order_the_ingest_needs() {
         handed.into_inner(),
         [(to.dir.clone(), Vec::<String>::new())]
     );
-    let bytes = fs::read(to.dir.join("pack")).unwrap();
-    let sha256 = hex::encode(Sha256::digest(&bytes));
+    let sha256 = hex::encode(Sha256::digest(b"the pack"));
     assert_eq!(
         steps,
         [
@@ -100,225 +80,68 @@ fn commit_renames_in_the_order_the_ingest_needs() {
     let want = Committed {
         key: "cas/b/r1/n1/pack".to_owned(),
         sha256,
-        bytes: bytes.len() as u64,
+        bytes: 8,
     };
     assert_eq!(done, want);
 }
 
-/// Proves the tar holds exactly the collected tree, each entry at its path below the
-/// collected directory, in name order: the empty directory, the file at the top, the
-/// directory and its file, with what each file holds. Catches a missing, renamed or extra
-/// entry (the collected directory itself among them).
+/// Proves the output is committed as it is, not in a tar or any other wrapping: `pack` holds
+/// exactly its bytes, for an empty file and for one of a megabyte and a bit (more than one
+/// buffer of the copy). Catches a wrapped or cut copy, which the build service would read as
+/// a broken pack.
 #[test]
-fn the_tar_holds_the_collected_files_at_their_paths() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-tar");
-    let from = collected(scratch.path());
-    let to = target(&scratch.path().join("put"), "n1");
-    commit(&from, &to, &none).unwrap();
-    let bytes = fs::read(to.dir.join("pack")).unwrap();
-    let entry = |path: &str, dir: bool, text: &str| (path.to_owned(), dir, text.to_owned());
-    assert_eq!(
-        entries(&bytes),
-        [
-            entry("a.txt", false, "alpha"),
-            entry("empty", true, ""),
-            entry("sub", true, ""),
-            entry("sub/b.txt", false, "beta"),
-        ]
-    );
-}
-
-/// A collected tree holding `names` made in the order given (a name ending in `/` is a
-/// directory holding a file `f`) and a 1 MiB file of zeros; when `other` is set, every file
-/// and directory has another time, the files another mode, and the zeros are a hole.
-fn tree_in(dir: &Path, names: &[&str], other: bool) -> PathBuf {
-    let into = dir.join("outputs");
-    fs::create_dir_all(&into).unwrap();
-    let mut made = Vec::new();
-    for name in names {
-        match name.strip_suffix('/') {
-            Some(sub) => {
-                fs::create_dir(into.join(sub)).unwrap();
-                fs::write(into.join(sub).join("f"), *name).unwrap();
-                made.push(into.join(sub).join("f"));
-                made.push(into.join(sub));
-            }
-            None => {
-                fs::write(into.join(name), *name).unwrap();
-                made.push(into.join(name));
-            }
-        }
-    }
-    let zeros = into.join("zeros");
-    match other {
-        true => File::create(&zeros).unwrap().set_len(1 << 20).unwrap(),
-        false => fs::write(&zeros, vec![0u8; 1 << 20]).unwrap(),
-    }
-    made.push(zeros);
-    if other {
-        let later = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
-        for path in &made {
-            File::open(path).unwrap().set_modified(later).unwrap();
-            if path.is_file() {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
-            }
-        }
-    }
-    into
-}
-
-/// Proves the same collected outputs make the same bytes, and so the same digest, however
-/// they were made: names made in other orders (the tar lists them in name order), files and
-/// directories with other times, files with other modes, and a file of zeros written out or
-/// left as a hole (every file is a plain entry, never a sparse one). Catches a tar whose
-/// digest changes from run to run of one build, with the file system's listing order, or
-/// with how a file was written.
-#[test]
-fn the_same_outputs_make_the_same_digest() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-same");
-    let first = tree_in(&scratch.path().join("one"), &["b", "d/", "a", "c/"], false);
-    let second = tree_in(&scratch.path().join("two"), &["c/", "a", "d/", "b"], true);
+fn the_output_is_committed_as_it_is() {
+    let scratch = TestDir::under(std::env::temp_dir(), "put-as-is");
     let root = scratch.path().join("put");
-    let one = commit(&first, &target(&root, "n1"), &none).unwrap();
-    let two = commit(&second, &target(&root, "n2"), &none).unwrap();
-    assert_eq!(one.sha256, two.sha256);
-    assert_eq!(one.bytes, two.bytes);
-    let bytes = fs::read(target(&root, "n2").dir.join("pack")).unwrap();
-    let mut archive = tar::Archive::new(bytes.as_slice());
-    let listed: Vec<(String, tar::EntryType)> = archive
-        .entries()
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let path = entry.path().unwrap().display().to_string();
-            (path, entry.header().entry_type())
-        })
-        .collect();
-    let file = tar::EntryType::Regular;
-    let dir = tar::EntryType::Directory;
-    let want = [
-        ("a", file),
-        ("b", file),
-        ("c", dir),
-        ("c/f", file),
-        ("d", dir),
-        ("d/f", file),
-        ("zeros", file),
-    ]
-    .map(|(path, kind)| (path.to_owned(), kind));
-    assert_eq!(listed, want);
+    let big: Vec<u8> = (0..(1 << 20) + 7).map(|n: u32| (n % 251) as u8).collect();
+    for (nonce, bytes) in [("empty", Vec::new()), ("big", big)] {
+        let from = collected(&scratch.path().join(nonce), &bytes);
+        let to = target(&root, nonce);
+        let done = commit(&from, &to, &none).unwrap();
+        assert_eq!(fs::read(to.dir.join("pack")).unwrap(), bytes, "{nonce}");
+        assert_eq!(done.sha256, hex::encode(Sha256::digest(&bytes)), "{nonce}");
+        assert_eq!(done.bytes, bytes.len() as u64, "{nonce}");
+    }
 }
 
-/// Proves an empty collected directory (a declared directory the job left empty) is still
-/// committed, as the empty tar: 1024 zero bytes, declared and published like any other.
-/// Catches a commit that refuses, or publishes nothing, for a run that made no files.
+/// Proves an output that is a link (to a host file) is refused by its path and not followed,
+/// and one that is a directory or a named pipe is refused as not a regular file: each commit
+/// fails and leaves the put directory holding nothing (its `pack.part` removed). Catches a
+/// commit that carries a host file a link names, a half-written part left behind, and a
+/// commit that waits on a pipe.
 #[test]
-fn an_empty_collected_directory_is_the_empty_tar() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-empty");
-    let from = scratch.path().join("outputs");
-    fs::create_dir_all(&from).unwrap();
-    let to = target(&scratch.path().join("put"), "n1");
-    let done = commit(&from, &to, &none).unwrap();
-    let bytes = fs::read(to.dir.join("pack")).unwrap();
-    assert_eq!(bytes, vec![0u8; 1024]);
-    assert_eq!(done.sha256, hex::encode(Sha256::digest(&bytes)));
-    assert_eq!(done.bytes, 1024);
-}
-
-/// Proves a path longer than a tar header's 100-byte name field is kept whole, the directory
-/// and the file in it, when the tar is read back. Catches a long output path cut short.
-#[test]
-fn a_long_path_is_kept_whole() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-long");
-    let from = scratch.path().join("outputs");
-    let long = "d".repeat(120);
-    fs::create_dir_all(from.join(&long)).unwrap();
-    fs::write(from.join(&long).join("file"), "deep").unwrap();
-    let to = target(&scratch.path().join("put"), "n1");
-    commit(&from, &to, &none).unwrap();
-    let bytes = fs::read(to.dir.join("pack")).unwrap();
-    let want = [
-        (long.clone(), true, String::new()),
-        (format!("{long}/file"), false, "deep".to_owned()),
-    ];
-    assert_eq!(entries(&bytes), want);
-}
-
-/// Proves a collected path that is not there fails the commit naming it, with the put
-/// directory left holding nothing. Catches a missing source turned into an empty object.
-#[test]
-fn a_missing_collected_path_is_named_and_nothing_is_left() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-missing");
-    let from = scratch.path().join("outputs");
-    let to = target(&scratch.path().join("put"), "n1");
-    let why = commit(&from, &to, &none).unwrap_err();
-    assert_eq!(why.kind(), io::ErrorKind::NotFound);
-    let said = format!("{}: {}", from.display(), io::Error::from(Errno::NOENT));
-    assert_eq!(why.to_string(), said);
-    assert_eq!(names(&to.dir), Vec::<String>::new());
-}
-
-/// Proves one collected file is committed as it is, not in a tar: `pack` holds exactly its
-/// bytes and the digest is theirs. Catches a tar around a single output, which the build
-/// service would read as a broken pack.
-#[test]
-fn a_single_file_is_committed_as_it_is() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-file");
-    let from = collected(scratch.path()).join("sub/b.txt");
-    let to = target(&scratch.path().join("put"), "n1");
-    let done = commit(&from, &to, &none).unwrap();
-    assert_eq!(fs::read(to.dir.join("pack")).unwrap(), b"beta");
-    assert_eq!(done.sha256, hex::encode(Sha256::digest(b"beta")));
-    assert_eq!(done.bytes, 4);
-}
-
-/// Proves a link in the collected tree to a file outside it is refused, by its path, and not
-/// followed: the commit fails and the put directory holds nothing (no `pack`, no `.part`
-/// name). A collected single file that is a link is refused the same way. Catches a tar that
-/// carries a host file the link names.
-#[test]
-fn a_link_in_the_collected_tree_is_not_followed_and_is_refused() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-link");
-    let from = collected(scratch.path());
+fn an_output_that_is_not_a_regular_file_is_refused() {
+    let scratch = TestDir::under(std::env::temp_dir(), "put-not-file");
+    let root = scratch.path().join("put");
     let host = scratch.path().join("host-secret");
     fs::write(&host, "secret").unwrap();
-    let link = from.join("sub/to-host");
+    let link = scratch.path().join("link");
     symlink(&host, &link).unwrap();
-    let to = target(&scratch.path().join("put"), "n1");
-    let why = commit(&from, &to, &none).unwrap_err();
-    assert_eq!(
-        why.to_string(),
-        format!("{}: a link, not followed", link.display())
-    );
-    assert_eq!(names(&to.dir), Vec::<String>::new());
-
-    let to = target(&scratch.path().join("put"), "n2");
-    let why = commit(&link, &to, &none).unwrap_err();
-    assert!(
-        why.to_string()
-            .starts_with(&format!("{}: ", link.display())),
-        "{why}"
-    );
-    assert_eq!(names(&to.dir), Vec::<String>::new());
-}
-
-/// Proves something in the collected tree that is neither a regular file nor a directory (a
-/// named pipe) is refused by its path once `pack.part` was begun, and the part is removed:
-/// the put directory holds nothing. Catches a half-written part left behind, and a commit
-/// that waits on a pipe.
-#[test]
-fn a_pipe_in_the_collected_tree_is_refused_and_its_part_removed() {
-    let scratch = TestDir::under(std::env::temp_dir(), "put-pipe");
-    let from = collected(scratch.path());
-    let pipe = from.join("sub/pipe");
+    let dir = scratch.path().join("a-dir");
+    fs::create_dir(&dir).unwrap();
+    let pipe = scratch.path().join("pipe");
     mknodat(CWD, &pipe, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
-    let to = target(&scratch.path().join("put"), "n1");
-    let why = commit(&from, &to, &none).unwrap_err();
-    assert_eq!(
-        why.to_string(),
-        format!("{}: not a regular file or a directory", pipe.display())
-    );
-    assert_eq!(names(&to.dir), Vec::<String>::new());
+
+    let loop_said = io::Error::from(Errno::LOOP);
+    let cases = [
+        ("link", &link, format!("{}: {loop_said}", link.display())),
+        (
+            "dir",
+            &dir,
+            format!("{}: not a regular file", dir.display()),
+        ),
+        (
+            "pipe",
+            &pipe,
+            format!("{}: not a regular file", pipe.display()),
+        ),
+    ];
+    for (nonce, from, said) in cases {
+        let to = target(&root, nonce);
+        let why = commit(from, &to, &none).unwrap_err();
+        assert_eq!(why.to_string(), said, "{nonce}");
+        assert_eq!(names(&to.dir), Vec::<String>::new(), "{nonce}");
+    }
 }
 
 /// Proves a commit that fails leaves nothing the node could take: when `ready` fails nothing
@@ -329,7 +152,7 @@ fn a_pipe_in_the_collected_tree_is_refused_and_its_part_removed() {
 #[test]
 fn a_failed_write_leaves_no_pack_and_no_declared_name() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-failed");
-    let from = collected(scratch.path());
+    let from = collected(scratch.path(), b"the pack");
     let root = scratch.path().join("put");
     let to = target(&root, "n1");
     let refuse = |_: &Path| Err(io::Error::other("not the node's"));
@@ -358,7 +181,7 @@ fn a_failed_write_leaves_no_pack_and_no_declared_name() {
 #[test]
 fn the_pack_is_readable_by_its_group() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-mode");
-    let from = collected(scratch.path());
+    let from = collected(scratch.path(), b"the pack");
     let to = target(&scratch.path().join("put"), "n1");
     commit(&from, &to, &none).unwrap();
     let mode = fs::metadata(to.dir.join("pack"))
@@ -374,11 +197,10 @@ fn the_pack_is_readable_by_its_group() {
 #[test]
 fn commit_twice_to_the_same_dir_fails_before_it_writes() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-twice");
-    let from = collected(scratch.path());
+    let from = collected(scratch.path(), b"first");
     let to = target(&scratch.path().join("put"), "n1");
     commit(&from, &to, &none).unwrap();
-    let first = fs::read(to.dir.join("pack")).unwrap();
-    fs::write(from.join("a.txt"), "changed").unwrap();
+    fs::write(&from, "second").unwrap();
     let handed = RefCell::new(0);
     let ready = |_: &Path| {
         *handed.borrow_mut() += 1;
@@ -392,5 +214,19 @@ fn commit_twice_to_the_same_dir_fails_before_it_writes() {
     );
     assert_eq!(handed.into_inner(), 0);
     assert_eq!(names(&to.dir), ["pack"]);
-    assert_eq!(fs::read(to.dir.join("pack")).unwrap(), first);
+    assert_eq!(fs::read(to.dir.join("pack")).unwrap(), b"first");
+}
+
+/// Proves a collected output that is not there fails the commit naming it, with the put
+/// directory left holding nothing. Catches a missing output turned into an empty object.
+#[test]
+fn a_missing_output_is_named_and_nothing_is_left() {
+    let scratch = TestDir::under(std::env::temp_dir(), "put-missing");
+    let from = scratch.path().join("outputs/.kbf-out/pack");
+    let to = target(&scratch.path().join("put"), "n1");
+    let why = commit(&from, &to, &none).unwrap_err();
+    assert_eq!(why.kind(), io::ErrorKind::NotFound);
+    let said = format!("{}: {}", from.display(), io::Error::from(Errno::NOENT));
+    assert_eq!(why.to_string(), said);
+    assert_eq!(names(&to.dir), Vec::<String>::new());
 }
