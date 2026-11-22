@@ -194,6 +194,19 @@ fn apply() -> String {
     )
 }
 
+/// The calls of a run that built twice.
+const BUILT_TWICE: [&str; 5] = [AUDIT, TOOL, "build //:ci", "build //:ci", "kill"];
+/// A build that failed only because its connection to the farm was cut, twice, as buck2 printed
+/// it (an excerpt of a failed run of farm.yml; src/farm/cuts/).
+const CUT_LOG: &str = include_str!("../src/farm/cuts/build_cut.log");
+/// A build whose cuts sat beside a real failure.
+const CUT_AND_FAILED_LOG: &str = include_str!("../src/farm/cuts/build_cut_and_failed_test.log");
+/// A build whose failures were real: the table check and a test.
+const TEST_FAILED_LOG: &str = include_str!("../src/farm/cuts/test_failed.log");
+/// What the job summary and the log get when the first run of `//:ci` was cut twice.
+const RERUN: &str = "xtask: every failure of `buck2 build //:ci` was a cut connection to the farm \
+                     (2 reported); running it once more\n";
+
 /// The log of a passing build.
 const BUILD_LOG: &str = "[t] Waiting on 3 actions\n[t] Commands: 474 (cached: 0, remote: 474, local: 0)\nBUILD SUCCEEDED\n";
 /// The answers of a passing build.
@@ -546,6 +559,153 @@ fn a_patch_or_summary_that_cannot_be_written_fails() {
         )
     );
     assert!(d.patch().exists());
+}
+
+/// The answers of a build whose first run printed `first` and ended with `status`, and whose
+/// second printed `second` and ended with `second_status`; a third run, if one came, would pass.
+fn runs<'a>(
+    first: &'a str,
+    status: &'a str,
+    second: &'a str,
+    second_status: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("buck2-audit.stdout", SET),
+        ("buck2-build.1.stderr", first),
+        ("buck2-build.1.status", status),
+        ("buck2-build.2.stderr", second),
+        ("buck2-build.2.status", second_status),
+        ("buck2-build.3.stderr", BUILD_LOG),
+    ]
+}
+
+#[test]
+fn a_build_whose_only_failures_are_cuts_runs_once_more_and_passes_saying_so() {
+    // Catches: a cut connection failing the job though the farm answered at once after it, the
+    // second run's summary not the one read, or the rerun hidden from the log and the job
+    // summary (written after what the summary held).
+    let d = Rig::new("cut-once", false, &runs(CUT_LOG, "3", BUILD_LOG, "0"));
+    std::fs::create_dir_all(d.out.path()).expect("out");
+    std::fs::write(d.summary(), "earlier\n").expect("summary");
+    let o = d.farm_build();
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o), format!("{FARM}\n"));
+    assert_eq!(stderr(&o), format!("{CUT_LOG}{RERUN}{BUILD_LOG}"));
+    assert_eq!(calls(&d.repo.dir), BUILT_TWICE);
+    assert_eq!(
+        std::fs::read_to_string(d.summary()).expect("summary"),
+        format!("earlier\n{RERUN}")
+    );
+    assert!(!d.patch().exists());
+}
+
+#[test]
+fn a_build_cut_twice_fails_after_two_runs_and_never_runs_a_third() {
+    // Catches: a farm that is down retried without end (the fixture has a passing third run
+    // ready), or a second cut reported as an ordinary failure, not by name.
+    let d = Rig::new("cut-twice", false, &runs(CUT_LOG, "3", CUT_LOG, "3"));
+    let o = d.farm_build();
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stdout(&o), "");
+    assert_eq!(
+        stderr(&o),
+        format!(
+            "{CUT_LOG}{RERUN}{CUT_LOG}xtask: `buck2 build //:ci` failed (exit status: 3) on its \
+             second run too, every failure again a cut connection to the farm: the farm or the \
+             network to it is down; run the job again once the farm answers\n"
+        )
+    );
+    assert_eq!(calls(&d.repo.dir), BUILT_TWICE);
+}
+
+#[test]
+fn a_cut_then_a_real_failure_fails_with_the_second_runs_failure() {
+    // Catches: the failure of the second run excused by the cut of the first.
+    let d = Rig::new(
+        "cut-then-test",
+        false,
+        &runs(CUT_LOG, "3", TEST_FAILED_LOG, "3"),
+    );
+    let o = d.farm_build();
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        stderr(&o),
+        format!(
+            "{CUT_LOG}{RERUN}{TEST_FAILED_LOG}xtask: `buck2 build //:ci` failed (exit status: 3)\n"
+        )
+    );
+    assert_eq!(calls(&d.repo.dir), BUILT_TWICE);
+}
+
+#[test]
+fn a_cut_then_a_build_with_local_actions_fails_on_the_second_runs_summary() {
+    // Catches: the summary line of the first run, not the last, held to `local: 0`.
+    let line = "Commands: 5 (cached: 2, remote: 1, local: 2)";
+    let local = format!("{line}\nBUILD SUCCEEDED\n");
+    let d = Rig::new("cut-then-local", false, &runs(CUT_LOG, "3", &local, "0"));
+    let o = d.farm_build();
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        stderr(&o),
+        format!(
+            "{CUT_LOG}{RERUN}{local}xtask: `{line}`: actions ran on this machine, not on the farm \
+             (local must be 0)\n"
+        )
+    );
+    assert_eq!(calls(&d.repo.dir), BUILT_TWICE);
+}
+
+#[test]
+fn a_real_failure_is_never_run_again_even_beside_cuts() {
+    // Catches: a failing test, or a failed action beside cuts, run again as if the farm had
+    // failed it, and a summary line written for a build that was not run again.
+    for (name, log) in [
+        ("test-failed", TEST_FAILED_LOG),
+        ("cut-and-failed", CUT_AND_FAILED_LOG),
+    ] {
+        let d = Rig::new(name, false, &runs(log, "3", BUILD_LOG, "0"));
+        let o = d.farm_build();
+        assert_eq!(o.status.code(), Some(1), "{name}");
+        assert_eq!(
+            stderr(&o),
+            format!("{log}xtask: `buck2 build //:ci` failed (exit status: 3)\n"),
+            "{name}"
+        );
+        assert_eq!(calls(&d.repo.dir), BUILT, "{name}");
+        assert!(!d.summary().exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_buck2_ended_by_a_signal_is_not_run_again_though_its_output_reads_as_a_cut() {
+    // Catches: a buck2 killed (by the runner, or out of memory) taken for a cut and run again.
+    let d = Rig::new("cut-killed", false, &runs(CUT_LOG, "abort", BUILD_LOG, "0"));
+    let o = d.farm_build();
+    assert_eq!(o.status.code(), Some(1));
+    let words = stderr(&o);
+    assert!(
+        words.starts_with(&format!(
+            "{CUT_LOG}xtask: `buck2 build //:ci` failed (signal: 6 (SIGABRT)"
+        )),
+        "{words}"
+    );
+    assert_eq!(calls(&d.repo.dir), BUILT);
+}
+
+#[test]
+fn a_cut_build_whose_job_summary_cannot_be_written_fails_before_its_second_run() {
+    // Catches: a second run made without the job summary saying so.
+    let d = Rig::new("cut-no-summary", false, &runs(CUT_LOG, "3", BUILD_LOG, "0"));
+    let o = xtask(&d.repo.dir, &args(&d.buck2(), &d.patch(), d.out.path()));
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        stderr(&o),
+        format!(
+            "{CUT_LOG}xtask: cannot write {:?}: Is a directory (os error 21)\n",
+            d.out.path()
+        )
+    );
+    assert_eq!(calls(&d.repo.dir), BUILT);
 }
 
 #[test]

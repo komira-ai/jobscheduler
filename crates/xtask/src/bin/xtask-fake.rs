@@ -34,7 +34,10 @@
 //!   for any other: it prints the first (when there is none: for `audit`, `{}`, buck2's answer for a
 //!   key that is not set; for `tool`, the line `buildrules//cli:buildrules <its own directory>/buildrules`;
 //!   for any other, nothing), prints the second on stderr, and exits with the number in the third
-//!   (0 when there is none). It answers from files, not from the environment.
+//!   (0 when there is none; `abort` makes it abort, ended by a signal with no status of its own).
+//!   The n-th `build` of a target that is not the tool (from 1) answers from `buck2-build.<n>.stdout`,
+//!   `.stderr` and `.status` when the directory holds one of them, so a test says what each run of
+//!   the build printed. It answers from files, not from the environment.
 //! - Run as `buildrules`, it is the command line `farm-build` builds, over a table of its own: it
 //!   appends its arguments as one line to `buildrules.calls` of its working directory. `sync` writes
 //!   what a sync of the working directory writes: `buildrules.lock.bzl`, one line `<file> <sha256>`
@@ -241,8 +244,25 @@ fn buck2(me: &Path, args: &[String]) -> ExitCode {
     } else {
         verb
     };
+    // The n-th build of a target that is not the tool (from 1) answers from `buck2-build.<n>.*`
+    // when the working directory has such a file, so a test says what each run printed.
+    let step = match key {
+        "build" => {
+            let n = std::fs::read_to_string("buck2.calls")
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("build ") && !l.contains(TOOL))
+                .count();
+            let own = format!("build.{n}");
+            let any = ["stdout", "stderr", "status"]
+                .iter()
+                .any(|s| Path::new(&format!("buck2-{own}.{s}")).exists());
+            if any { own } else { key.to_owned() }
+        }
+        _ => key.to_owned(),
+    };
     let read = |suffix: &str, default: &str| {
-        std::fs::read_to_string(format!("buck2-{key}.{suffix}"))
+        std::fs::read_to_string(format!("buck2-{step}.{suffix}"))
             .unwrap_or_else(|_| default.to_owned())
     };
     let tool = format!("{TOOL} {}\n", me.with_file_name("buildrules").display());
@@ -253,7 +273,15 @@ fn buck2(me: &Path, args: &[String]) -> ExitCode {
     };
     print!("{}", read("stdout", stdout));
     eprint!("{}", read("stderr", ""));
-    ExitCode::from(read("status", "0").trim().parse().unwrap_or(2))
+    let status = read("status", "0");
+    // `abort` ends this process by a signal (SIGABRT), not with a status of its own. Every answer
+    // sends a signal to itself through `kill`, signal 0 (which does nothing) unless it is
+    // `abort`, so the line that ends the process runs, and is measured, in the answers that live.
+    let signal = ["0", "ABRT"][usize::from(status.trim() == "abort")];
+    let _ = std::process::Command::new("kill")
+        .args(["-s", signal, &std::process::id().to_string()])
+        .status();
+    ExitCode::from(status.trim().parse().unwrap_or(2))
 }
 
 /// The fake table.

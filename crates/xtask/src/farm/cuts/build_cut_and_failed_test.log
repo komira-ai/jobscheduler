@@ -1,0 +1,63 @@
+[2026-11-22T05:37:41.912+00:00] Build ID: 00000000-0000-0000-0000-000000000000
+[2026-11-22T05:37:42.808+00:00] RE Session: GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_5ffa66c10a (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_5ffa66c10a)
+[2026-11-22T05:39:28.227+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.227+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.227+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.227+00:00] Stderr: <empty>
+
+[2026-11-22T05:39:28.227+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_e60f1419d1 (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_e60f1419d1)
+[2026-11-22T05:39:28.227+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.227+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.227+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.227+00:00] Stderr: <empty>
+
+[2026-11-21T23:37:20.332+00:00] Action failed: jobscheduler//crates/js-coverage:js-coverage-0.1.0_cc4ae23515 (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-coverage-0.1.0_cc4ae23515)
+[2026-11-21T23:37:20.332+00:00] Remote command returned non-zero exit code 101
+[2026-11-21T23:37:20.332+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-21T23:37:20.332+00:00] Stdout:
+
+running 49 tests
+test base::tests::a_new_crate_enters_at_zero ... ok
+test base::tests::a_rise_in_either_metric_is_reported ... ok
+test base::tests::equal_lower_and_removed_pass ... ok
+test baseline::tests::refuses_malformed_lines ... ok
+test baseline::tests::render_then_parse_round_trips ... ok
+test baseline::tests::the_checked_in_file_is_in_render_format ... FAILED
+
+failures:
+
+---- baseline::tests::the_checked_in_file_is_in_render_format stdout ----
+
+thread 'baseline::tests::the_checked_in_file_is_in_render_format' (13) panicked at crates/js-coverage/src/baseline.rs:363:9:
+assertion `left == right` failed
+  left: "# Coverage ratchet, checked by the CI coverage job (crates/js-coverage)..."
+  right "# Coverage ratchet, checked by the CI coverage job (crates/js-coverage)..."
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    baseline::tests::the_checked_in_file_is_in_render_format
+
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+[2026-11-21T23:37:20.332+00:00] Stderr:
+check marker: TEST FAILED: /work/buck-out/test
+
+[2026-11-22T05:39:28.240+00:00] Cache hits: 98%
+[2026-11-22T05:39:28.240+00:00] Commands: 2085 (cached: 2050, remote: 35, local: 0)
+[2026-11-22T05:39:28.240+00:00] Network: up 732KiB  down 45MiB  session GRPC-SESSION-ID
+[2026-11-22T05:39:28.241+00:00]
+[2026-11-22T05:39:28.241+00:00] BUILD ERRORS (35)
+[2026-11-22T05:39:28.241+00:00] The following actions failed during the execution of this command:
+[2026-11-22T05:39:28.241+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_5ffa66c10a (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_5ffa66c10a)
+[2026-11-22T05:39:28.241+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.241+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.241+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.241+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.241+00:00] Stderr: <empty>
+
+BUILD FAILED
+Failed to build 'jobscheduler//crates/js-pool-fake:js-pool-fake-0.1.0_c4127c1f79 (buildrules//platforms:linux_x86_64#27db57317ae2fec7)'

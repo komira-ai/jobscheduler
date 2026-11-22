@@ -13,18 +13,25 @@
 //!    and fails without building.
 //! 3. `buck2 build <label>`. What buck2 prints on its standard error (its progress, the output of
 //!    a failed action, its summary) is written to the log line by line as buck2 prints it, so a
-//!    long build shows its progress in the job's log; a failed build is a failure.
-//! 4. The build's summary line, `Commands: N (cached: N, remote: N, local: N)`, must be there and
-//!    say `local: 0`: every action ran on the farm or came from its cache, none on this machine.
-//!    The line is what the verb prints.
+//!    long build shows its progress in the job's log; a failed build is a failure, but for one
+//!    case: when buck2 ended with a status of its own and every failure in what it printed is a
+//!    cut connection to the farm ([`cuts`]), the same build runs once more, at once, and a line in
+//!    the log and in the job summary says so. The second run is final. Cut again, it fails with
+//!    [`Error::CutTwice`]: one cut is a moment's break in the way to the farm, but a second in a
+//!    row means the farm or the network to it is down, and a third try would only spend the job's
+//!    time and hide an outage behind a slow green.
+//! 4. The summary line of the last run, `Commands: N (cached: N, remote: N, local: N)`, must be
+//!    there and say `local: 0`: every action ran on the farm or came from its cache, none on this
+//!    machine. The line is what the verb prints.
 //!
 //! Whatever happened, it then runs `buck2 kill`, so no daemon outlives the job; that command's own
 //! outcome changes nothing.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
+mod cuts;
 pub mod table;
 
 pub use table::Handoff;
@@ -68,6 +75,18 @@ pub enum Error {
         /// How the build ended.
         status: String,
     },
+    /// The build was run again after a cut and failed again with every failure a cut.
+    #[error(
+        "`buck2 build {target}` failed ({status}) on its second run too, every failure again a \
+         cut connection to the farm: the farm or the network to it is down; run the job again \
+         once the farm answers"
+    )]
+    CutTwice {
+        /// The label that was built.
+        target: String,
+        /// How the second run ended.
+        status: String,
+    },
     /// The build passed and printed no readable summary line.
     #[error("the build printed no summary line (`Commands: N (cached: N, remote: N, local: N)`)")]
     NoSummary,
@@ -100,9 +119,18 @@ pub fn summary(log: &str) -> Option<(&str, u64)> {
     })
 }
 
+/// The line the log and the job summary get when a build cut `cuts` times runs once more.
+pub fn rerun_line(target: &str, cuts: usize) -> String {
+    format!(
+        "xtask: every failure of `buck2 build {target}` was a cut connection to the farm ({cuts} \
+         reported); running it once more\n"
+    )
+}
+
 /// Builds `target` with the buck2 at `buck2`, writing buck2's standard error to `log` as it
 /// comes, once the generated build table is fresh, and stops buck2's daemon after: the summary
-/// line, or why the build is not a farm build. A stale table leaves its fix where `handoff` says.
+/// line, or why the build is not a farm build. A stale table leaves its fix where `handoff` says;
+/// a build run again after a cut says so in `handoff`'s job summary.
 ///
 /// # Errors
 /// buck2 cannot be started, names no worker property set, the table is stale or its check
@@ -154,6 +182,36 @@ fn tee(from: impl std::io::Read, log: &mut dyn Write) -> Vec<u8> {
     text
 }
 
+/// One `buck2 build <target>`: how it ended and what it printed on its standard error, which is
+/// written to `log` as it comes. What it prints on its standard output goes to this program's
+/// standard error, so the verb's own standard output stays the summary line.
+fn build_once(
+    buck2: &Path,
+    target: &str,
+    log: &mut dyn Write,
+) -> Result<(ExitStatus, String), Error> {
+    let mut child = Command::new(buck2)
+        .args(["build", target])
+        .stdin(Stdio::null())
+        .stdout(std::io::stderr())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(start_error(buck2))?;
+    let text = child
+        .stderr
+        .take()
+        .map(|stderr| tee(stderr, log))
+        .unwrap_or_default();
+    let status = child.wait().map_err(start_error(buck2))?;
+    Ok((status, String::from_utf8_lossy(&text).into_owned()))
+}
+
+/// How many cuts a failed run reports when it may run again: it ended with a status of its own
+/// (a buck2 ended by a signal is never run again) and every failure it printed is a cut.
+fn cut(status: ExitStatus, text: &str) -> Option<usize> {
+    status.code().and(cuts::only_cuts(text))
+}
+
 /// The checks and the build, without the daemon's stop.
 fn build_and_check(
     buck2: &Path,
@@ -175,25 +233,28 @@ fn build_and_check(
         return Err(Error::NoWorkers);
     }
     table::ensure_fresh(buck2, handoff, log)?;
-    let mut child = Command::new(buck2)
-        .args(["build", target])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(start_error(buck2))?;
-    let text = child
-        .stderr
-        .take()
-        .map(|stderr| tee(stderr, log))
-        .unwrap_or_default();
-    let status = child.wait().map_err(start_error(buck2))?;
+    let (mut status, mut text) = build_once(buck2, target, log)?;
+    if !status.success()
+        && let Some(cuts) = cut(status, &text)
+    {
+        let line = rerun_line(target, cuts);
+        // The job summary says so first: a green build that needed a second run is not hidden.
+        table::write(&handoff.summary, line.as_bytes(), true)?;
+        let _ = log.write_all(line.as_bytes());
+        (status, text) = build_once(buck2, target, log)?;
+        if !status.success() && cut(status, &text).is_some() {
+            return Err(Error::CutTwice {
+                target: target.to_owned(),
+                status: status.to_string(),
+            });
+        }
+    }
     if !status.success() {
         return Err(Error::Build {
             target: target.to_owned(),
             status: status.to_string(),
         });
     }
-    let text = String::from_utf8_lossy(&text);
     let (line, local) = summary(&text).ok_or(Error::NoSummary)?;
     if local != 0 {
         return Err(Error::Local(line.to_owned()));

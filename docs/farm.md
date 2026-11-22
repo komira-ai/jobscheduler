@@ -84,6 +84,39 @@ that includes the goldens of `tests/`, a test that includes `src/` or another me
 an example that takes a module from `tests/`. A file of another member, or of the repository root,
 is exported by reference in its owner's BUCK file, so it stays at its path.
 
+## A cut connection: one more run
+
+The build is long, and the way from the runner to the farm is a network. When it breaks for a
+moment, buck2 reports every action that was in flight as failed, each with the same words: `Error:
+(Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2
+protocol error: ... BrokenPipe ...")` under `Action failed:` and `Internal error (stage:
+remote_call_error): Remote Execution Error on Execute ...`. Nothing was wrong with the change.
+
+`cargo xtask farm-build` runs `buck2 build //:ci` once more, at once, when its failures are cuts
+and nothing else, and says so: one line in the log and one in the job summary, written before the
+second run. The rule is the one of komira-ai/buildrules#172 and komira-ai/komira#2155.
+
+- A failure is a **cut** when it is buck2's own `Error:` line holding `RE channel error: code:`,
+  and a failed action's report is one when its reason is an `Internal error (stage: ...)` naming a
+  `Remote Execution Error on ...` and the line after it is a cut.
+- Anything else makes the failure real, and a real failure is never run again, even beside any
+  number of cuts: a test or a compile error (`returned non-zero exit code`), a timeout, a panic, a
+  line starting `Error` that is not a cut (an analysis or load error, or `Failed to make
+  BatchReadBlobs request ... operation was cancelled` standing alone, which is final), a line of
+  buck2's remote client that says a call `timed out`, and a test that only prints the cut's words.
+- A buck2 that ended by a signal (killed by the runner, out of memory) is not run again, whatever
+  it printed first. Neither is the build of the `buildrules` command line, which is not
+  `//:ci`.
+- The second run is final, and its summary line is the one held to `local: 0`. A second run that
+  fails for a real reason fails with that reason. A second run that is all cuts again fails the job
+  by name (`on its second run too, every failure again a cut connection to the farm`): one cut is a
+  moment's break, but two in a row mean the farm or the way to it is down, and a third try would
+  only spend the job's timeout and hide an outage behind a slow green. Run the job again once the
+  farm answers.
+
+The farm's cache keeps what the first run finished, so the second run asks for little more than the
+actions the cut interrupted.
+
 ## What stays in ci.yml, and why
 
 A farm action has its declared inputs and nothing else: no network, no `PATH` but buildrules'
