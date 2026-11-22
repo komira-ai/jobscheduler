@@ -86,11 +86,14 @@ impl NativeRuntime {
         logs::close(&mut run.logs, &run.scratch);
         if let Some(job) = run.job.take() {
             // A job exists only on a runtime whose pool is open.
-            if let Some(pool) = &self.pool
-                && let Err(why) = accounts::retire(pool, job.account.clone())
-            {
-                run.job = Some(job);
-                return Err(why);
+            if let Some(pool) = &self.pool {
+                match accounts::retire(pool, job.account.clone()) {
+                    Ok(retired) => self.last_retired = Some((job.account.name.clone(), retired)),
+                    Err(why) => {
+                        run.job = Some(job);
+                        return Err(why);
+                    }
+                }
             }
         }
         let run = self.runs.remove(&id.0);
