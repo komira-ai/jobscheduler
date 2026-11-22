@@ -13,6 +13,7 @@ fn path(text: &str) -> AbsPath {
 
 fn layout() -> SlotLayout {
     SlotLayout {
+        trees: None,
         run: path("/Volumes/work/slot1/run"),
         uid_entry: Some(path("/private/var/folders/ab/cdef0123")),
         inputs: vec![path("/Volumes/work/slot1/run/in")],
