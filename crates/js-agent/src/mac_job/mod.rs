@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! js-agent __mac-job (--job <file> | --job-inline <json>)
-//!     (--accounts <dir> --account-uids <first>-<last> | --user <name>)
+//!     (--accounts <dir> --account-range <first>-<last> | --user <name>)
 //!     --root <dir> --out <dir> [--ready <n>] [--spawn ordinary|disclaimed]
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
@@ -18,7 +18,7 @@
 //!    and its wall limit. A job for another operating system or architecture is refused.
 //! 2. takes the job's user: with `--accounts`, an account lent by the account pool
 //!    ([`crate::mac_accounts::Pool`], its ledger in that folder, its uids those of
-//!    `--account-uids`, a setting with no default), which has never run a job;
+//!    `--account-range`, a setting with no default), which has never run a job;
 //!    with `--user`, one existing account, for measurement. Either way it checks the user is not
 //!    root, not an administrator, and runs no process.
 //! 3. makes the job folder `<root>/<id>` ([`layout::Layout`]) owned by that user, copies the
@@ -138,13 +138,13 @@ pub struct Args {
         long,
         required_unless_present = "user",
         conflicts_with = "user",
-        requires = "account_uids"
+        requires = "account_range"
     )]
     pub accounts: Option<PathBuf>,
     /// The uids the lent accounts take, `<first>-<last>` both included: required with
     /// `--accounts`, with no default, so a Mac's earlier accounts are never touched by chance.
     #[arg(long, value_name = "FIRST-LAST", conflicts_with = "user")]
-    pub account_uids: Option<Slots>,
+    pub account_range: Option<Slots>,
     /// One existing ordinary user the job runs as, in place of a lent account.
     #[arg(long)]
     pub user: Option<String>,

@@ -24,7 +24,7 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             job: Some(PathBuf::from("j.json")),
             job_inline: None,
             accounts: None,
-            account_uids: None,
+            account_range: None,
             user: Some("u".to_owned()),
             ready: 1,
             spawn: Spawn::Ordinary,
@@ -136,7 +136,7 @@ fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
     let mut pooled = vec![
         "--accounts",
         "/s",
-        "--account-uids",
+        "--account-range",
         "700-799",
         "--ready",
         "3",
@@ -152,7 +152,7 @@ fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
     let mut both = vec![
         "--accounts",
         "/s",
-        "--account-uids",
+        "--account-range",
         "700-799",
         "--user",
         "u",
@@ -215,31 +215,31 @@ fn only_the_mode_word_is_dispatched() {
 const POOLED: [&str; 6] = ["--job", "j.json", "--root", "/r", "--out", "/o"];
 
 #[test]
-fn the_account_uids_are_the_slots_given_and_passed_to_the_pool() {
-    let mut list = vec!["--accounts", "/s", "--account-uids", "700-799"];
+fn the_account_range_is_the_slots_given_and_passed_to_the_pool() {
+    let mut list = vec!["--accounts", "/s", "--account-range", "700-799"];
     list.extend(POOLED);
     let args = parse(&words(&list)).expect("parses");
     assert_eq!(
-        args.account_uids,
+        args.account_range,
         Some(Slots::new(700, 100).expect("slots"))
     );
-    assert_eq!(args.account_uids.expect("given").range(), 700..=799);
+    assert_eq!(args.account_range.expect("given").range(), 700..=799);
 }
 
 #[test]
-fn accounts_without_account_uids_is_a_usage_error_naming_the_flag() {
+fn accounts_without_account_range_is_a_usage_error_naming_the_flag() {
     let mut list = vec!["js-agent", VERB, "--accounts", "/s"];
     list.extend(POOLED);
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(&words(&list), &mut out, &mut err);
     assert_eq!(code, std::process::ExitCode::from(status::USAGE));
     let err = String::from_utf8(err).expect("utf-8");
-    assert!(err.contains("--account-uids"), "{err}");
+    assert!(err.contains("--account-range"), "{err}");
     assert!(out.is_empty());
 }
 
 #[test]
-fn account_uids_that_are_not_a_range_slots_may_take_is_a_usage_error_naming_it() {
+fn an_account_range_slots_may_not_take_is_a_usage_error_naming_it() {
     for (wrong, why) in [
         ("700", "is not <first>-<last>, two uids"),
         ("799-700", "the first uid, 799, is above the last, 700"),
@@ -251,7 +251,7 @@ fn account_uids_that_are_not_a_range_slots_may_take_is_a_usage_error_naming_it()
             VERB,
             "--accounts",
             "/s",
-            "--account-uids",
+            "--account-range",
             wrong,
         ];
         list.extend(POOLED);
@@ -259,15 +259,15 @@ fn account_uids_that_are_not_a_range_slots_may_take_is_a_usage_error_naming_it()
         let code = run(&words(&list), &mut out, &mut err);
         assert_eq!(code, std::process::ExitCode::from(status::USAGE), "{wrong}");
         let err = String::from_utf8(err).expect("utf-8");
-        assert!(err.contains("--account-uids"), "{err}");
+        assert!(err.contains("--account-range"), "{err}");
         assert!(err.contains(why), "{err}");
         assert!(out.is_empty());
     }
 }
 
 #[test]
-fn account_uids_are_for_a_pool_and_not_for_a_named_user() {
+fn an_account_range_is_for_a_pool_and_not_for_a_named_user() {
     let mut list = MINIMAL.to_vec();
-    list.extend(["--account-uids", "700-799"]);
+    list.extend(["--account-range", "700-799"]);
     assert!(parse(&words(&list)).is_err());
 }
