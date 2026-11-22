@@ -123,6 +123,7 @@ mod remove;
 mod run;
 mod settings;
 mod start;
+pub mod trees_proof;
 mod xcode;
 
 use std::collections::BTreeMap;
@@ -147,7 +148,7 @@ use crate::lifecycle::{
     RuntimeError, Status,
 };
 use crate::logs::LiveLogs;
-use crate::mac_accounts::Pool;
+use crate::mac_accounts::{Pool, Retired};
 use crate::mac_supervisor::Launcher;
 
 pub use accounts::Accounts;
@@ -158,8 +159,8 @@ pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use put::{MIN_FILE_MIB, PutConfig, PutFlags, put_of};
 pub use settings::{
-    DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
-    NativeSettings,
+    DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS,
+    MIN_MAX_FILE_MIB, NativeFlags, NativeSettings,
 };
 pub use start::STEPS;
 
@@ -231,6 +232,8 @@ pub struct NativeRuntime {
     now_ms: Clock,
     /// Whether each run's supervisor opens an audit session of its own (which needs root).
     new_session: bool,
+    /// The account the last removal retired, and what its retirement showed.
+    last_retired: Option<(String, Retired)>,
     /// The put ingest runs' outputs are committed to, when the agent was given one
     /// (`native/put.rs`).
     put: Option<PutConfig>,
@@ -320,10 +323,19 @@ impl NativeRuntime {
             logs: None,
             now_ms: system_clock(),
             new_session: true,
+            last_retired: None,
             put: None,
             puts: BTreeMap::new(),
             committed: BTreeMap::new(),
         })
+    }
+
+    /// The account the last removal retired and what its retirement showed (the processes it
+    /// killed, each item of the proof that it is gone): what the development verb prints.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_retired(&self) -> Option<&(String, Retired)> {
+        self.last_retired.as_ref()
     }
 
     /// Whether the runtime has an account pool: the agent holds Full Disk Access.

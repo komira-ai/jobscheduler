@@ -26,8 +26,8 @@
 //!    text of the path only, so a link inside a root that leads out is caught here. Then the
 //!    whole set is held to the trees root's rules ([`native_fs::tree_rules`]): a mount
 //!    below `--native-trees-root` is one of the run's trees, read-only and `no_exec`, never
-//!    the root itself, and no mount holds the root. The plans are kept by run id until [`NativeRuntime::create_and_start`] takes them, or
-//!    [`discard`] drops them.
+//!    the root itself, and no mount holds the root. The plans are kept by run id until
+//!    [`NativeRuntime::create_and_start`] takes them, or [`discard`] drops them.
 //! 3. [`link_all`], in the start, after `exec/` is made and before the working directory is
 //!    opened: the parent directories of each link are made as the run's user's, the link is
 //!    made and given to the user. A name that is there already fails the start.

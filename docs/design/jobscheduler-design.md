@@ -357,7 +357,7 @@ The scheduler owns one set of terms for what a request needs and what a host, an
 | ISA level | `x86-64-v1` to `v4`, or an Armv8 version | at least, within the family |
 | `cpu` | cores (thousandths of a core in `Requirements`) | at least |
 | `memory`, `disk` | bytes (GiB in request syntax) | at least |
-| `exec` | `container` or `sandbox-exec` | exact |
+| `exec` | `container` or `sandbox-exec`; a request need not name it (`how-a-job-runs.md`) | exact |
 | `accelerator` | `vendor` (open set of lower-case strings, `nvidia` first); `model` (canonical lower-case family name, such as `nvidia-gb300`); `count` (integer); `memory per device` (GiB); `interconnect` (optional, a kind and a size, for example `nvlink-domain>=72`) | `model` exact after alias resolution; `count` and `memory per device` at least; `interconnect` at least when given. A field the request omits matches anything |
 
 **What is built.**

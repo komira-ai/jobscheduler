@@ -59,13 +59,7 @@ impl FakeAccounts {
 
 impl AccountHost for FakeAccounts {
     fn full_disk_access(&self) -> io::Result<()> {
-        match self.state().refused {
-            None => Ok(()),
-            Some(kind) => Err(io::Error::new(
-                kind,
-                "the privacy database cannot be listed",
-            )),
-        }
+        Ok(())
     }
 
     fn account(&self, name: &str) -> io::Result<Option<UserRecord>> {

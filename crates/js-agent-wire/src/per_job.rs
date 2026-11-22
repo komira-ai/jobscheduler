@@ -166,11 +166,13 @@ pub struct JobStartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
     /// The operating system of the image manifest the digest pins, as
-    /// [`crate::JobSpec::os`]. Absent when not given.
+    /// [`crate::JobSpec::os`]: the job's, which the server sends on every start, native or
+    /// container, of a job that names one, so that an agent that runs more than one platform
+    /// can choose its runtime from it. Absent when not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<Os>,
     /// The CPU architecture of the image manifest the digest pins, as
-    /// [`crate::JobSpec::arch`]. Absent when not given.
+    /// [`crate::JobSpec::arch`], sent as `os` is. Absent when not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<Arch>,
     /// The environment, literal and not secret, held to the rules of a run's

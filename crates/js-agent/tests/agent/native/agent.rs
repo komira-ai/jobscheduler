@@ -252,7 +252,7 @@ fn a_mac_agent_advertises_its_native_network_ceiling() {
 /// `--mount-provider-wait`, the agent starts and its hello reports `mount-provider.tierstore`
 /// beside `layered-rootfs`; without them it reports no provider; a user the directory service
 /// does not know ends the agent with status 2 before anything is sent, naming the flag; and
-/// `--no-jobs` refuses each of the three flags by name. Catches a Mac agent that drops the
+/// `--no-jobs` refuses each of the three flags, and `--native-trees-root`, by name. Catches a Mac agent that drops the
 /// flags, one never placed a provider's job, a provider's socket judged against root for a
 /// name the agent could not look up, and a no-job agent that silently ignores the flags.
 #[test]
@@ -320,6 +320,7 @@ fn a_mac_agent_takes_the_provider_flags_and_reports_the_provider() {
         ("--mount-provider", provider.as_str()),
         ("--mount-provider-user", "tierstore=nobody"),
         ("--mount-provider-wait", "60"),
+        ("--native-trees-root", "/private/var/tierstore/fs"),
     ] {
         let args = flags(&["--no-jobs", flag, value]);
         let (script, sent) = Script::new(vec![welcome(1)]);
@@ -342,6 +343,67 @@ fn a_mac_agent_takes_the_provider_flags_and_reports_the_provider() {
         );
         assert!(sent.borrow().is_empty(), "{flag}: something was sent");
     }
+}
+
+/// Asserts through the whole macOS agent that `--native-trees-root` is refused before the
+/// hello, with status 2 and the reason naming the flag by exact equality, when no
+/// `--mount-provider` is given and when it names a directory that is no `--mount-root-ro`;
+/// and that a trees root that is a `--mount-root-ro`, beside a provider, starts the agent,
+/// whose hello reports the provider. Catches a Mac agent that takes a trees root whose reads
+/// it would open to every run's trees, and one that refuses the shape the proof Mac runs.
+#[test]
+fn a_mac_agent_takes_a_trees_root_only_as_a_read_only_root_beside_a_provider() {
+    let dir = Scratch::new("native-agent-trees-root");
+    let base = native_flags(&dir);
+    let trees = private(&dir, "trees");
+    fs::create_dir(dir.path("provider")).unwrap();
+    let provider = format!(
+        "tierstore={}",
+        dir.path("provider").join("provider.sock").display()
+    );
+    let run = |extra: &[&str]| {
+        let mut given = base.clone();
+        given.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        hello_on(&mac_host(), &given, welcome(1))
+    };
+    let canonical = fs::canonicalize(&trees).unwrap();
+    let refused = [
+        (
+            vec!["--native-trees-root", trees.as_str()],
+            "--native-trees-root: needs --mount-provider: the trees root is where a provider \
+             serves its trees"
+                .to_owned(),
+        ),
+        (
+            vec!["--native-trees-root", &trees, "--mount-provider", &provider],
+            format!(
+                "--native-trees-root: {} is no --mount-root-ro",
+                canonical.display()
+            ),
+        ),
+    ];
+    for (extra, why) in refused {
+        let (ran, hello) = run(&extra);
+        assert_eq!(ran.status(), code(2), "{}", ran.err);
+        assert_eq!(
+            ran.err.lines().last(),
+            Some(format!("js-agent: {why}").as_str()),
+            "{}",
+            ran.err
+        );
+        assert_eq!(hello, Value::Null);
+    }
+    let root = format!("trees={trees}");
+    let (ran, hello) = run(&[
+        "--native-trees-root",
+        &trees,
+        "--mount-provider",
+        &provider,
+        "--mount-root-ro",
+        &root,
+    ]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(hello["capabilities"]["mount-provider.tierstore"], "true");
 }
 
 /// Asserts that an agent given `--native-accounts` and no `--native-account-range`, one given a

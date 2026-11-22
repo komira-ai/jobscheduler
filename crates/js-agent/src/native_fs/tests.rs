@@ -158,6 +158,41 @@ fn the_trees_root_is_one_read_only_mount_root_beside_a_provider() {
     }
 }
 
+/// Asserts that a trees root with another mount root above it, or one below it, is refused
+/// naming both paths by exact equality, and that a root beside it is not. Catches a root
+/// whose read deny, rendered after the trees' grants, would hide every tree.
+#[test]
+fn the_trees_root_holds_no_other_root_and_lies_below_none() {
+    let dir = TestDir::under(std::env::temp_dir(), "native-fs-trees-nested");
+    let base = fs::canonicalize(dir.path()).unwrap();
+    let (trees, below, beside) = (
+        base.join("trees"),
+        base.join("trees/mount-provider"),
+        base.join("beside"),
+    );
+    for path in [&below, &beside] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let named = |name: &str, path: &Path| (name.to_owned(), path.to_path_buf());
+    let check = |others: &[(String, PathBuf)]| {
+        let mut read_only = vec![named("trees", &trees)];
+        read_only.extend_from_slice(others);
+        let roots = MountRoots::with_read_only(&[], &read_only).unwrap();
+        trees_root(Some(&trees), &roots, true)
+    };
+    let held = |other: &Path| {
+        Err(format!(
+            "--native-trees-root: {} and the mount root {} hold one another: every other mount \
+             root is a read deny of every run, which would hide the trees",
+            trees.display(),
+            other.display()
+        ))
+    };
+    assert_eq!(check(&[named("above", &base)]), held(&base));
+    assert_eq!(check(&[named("below", &below)]), held(&below));
+    assert_eq!(check(&[named("beside", &beside)]), Ok(Some(trees.clone())));
+}
+
 /// Asserts that the roots are listed once by path, in path order, writable when any name of
 /// the path is, with only the trees root marked; and that every root but the trees root is a
 /// read deny, and with no trees root every root is. Catches a trees root denied to every run
