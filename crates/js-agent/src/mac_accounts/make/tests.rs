@@ -779,3 +779,38 @@ fn a_failed_making_ends_a_stray_process_and_is_shown_gone() {
     assert!(rig.fake.state().processes.is_empty());
     assert!(rig.fake.state().users.is_empty());
 }
+
+/// Asserts that a failed making never deletes what another ledger on the host made under the
+/// same name: with a record `kbf-acct-1` of a uid outside the range (the other ledger's) and
+/// its home there, the making fails at the home, the record and the home stay, and the account
+/// is held at the record.
+#[test]
+fn a_failed_making_keeps_a_record_and_a_home_of_the_name_that_are_anothers() {
+    let rig = Rig::new("make-theirs", 3, 0);
+    let theirs = me() + 10;
+    rig.fake
+        .add_user("kbf-acct-1", theirs, my_gid(), &rig.settings.homes);
+    std::fs::create_dir(rig.home(1)).unwrap();
+    std::fs::write(rig.home(1).join("theirs"), "x").unwrap();
+    let pool = rig.open();
+    let AccountError::Make { step, why, .. } = pool.lend("job").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Home);
+    assert!(
+        why.contains(&format!(
+            "the record kbf-acct-1 has uid {theirs}, not {}: another's, not deleted",
+            me()
+        )),
+        "{why}"
+    );
+    assert!(
+        rig.fake.state().users.contains_key("kbf-acct-1"),
+        "the other's record stays"
+    );
+    assert!(
+        rig.home(1).join("theirs").exists(),
+        "the other's home stays"
+    );
+    assert!(rig.lines().contains(&"held kbf-acct-1 record".to_owned()));
+}
