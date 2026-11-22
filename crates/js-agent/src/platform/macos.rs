@@ -287,13 +287,6 @@ impl Backend {
     pub(crate) fn flag(&self) -> &'static str {
         "--native-accounts"
     }
-
-    /// The root only the agent writes beneath, whatever mount root holds it: the put root
-    /// (`--native-put-root`), where a job is given nothing and the agent commits a run's
-    /// output.
-    pub(crate) fn agent_only_root(&self) -> Option<&Path> {
-        self.settings().put().map(|put| put.root.as_path())
-    }
 }
 
 /// What the start check found, which the rest of the start is made with.
