@@ -1,42 +1,65 @@
 //! The pool of lease users: `pool-create` and `pool-status`, a lease taking a free pool
-//! user (`user-create`), and the end of a lease (`user-delete`), which resets the user,
-//! or replaces it when the reset is not clean.
+//! user (`user-create`), and the end of a lease (`user-delete`), which resets the user in
+//! place.
+//!
+//! The pool's users are made once and are permanent: the helper never deletes a pool
+//! user's record, its home or a folder the system placed for it (macOS 27 refuses root
+//! all three, with System Integrity Protection on; everything can be emptied). A slot is
+//! reused by being reset where it is.
 //!
 //! - `pool-create` makes each slot of the pool (`--pool-size`, slot `n` with the uid
 //!   `<first uid of the range> + n` and the name `kbf-lease-pool-<n>`) that the ledger
-//!   does not hold, and replaces the user of each broken slot. A slot the ledger holds is
-//!   adopted as it is: running it again makes nothing new. A slot is made only when no
-//!   live lease holds its uid, no user record has the uid and no process runs as it: a
-//!   user the ledger does not hold is never adopted. The slot is recorded first (as
-//!   resetting), then its home and its record are made, then it is recorded free; a
-//!   failure leaves it broken. The boot reset runs it last, so the daemon's own start
-//!   makes the pool; a failed slot is named and the rest still made.
+//!   does not hold, and resets again the user of each broken slot. A slot the ledger
+//!   holds is kept as it is: running it again makes nothing new. A slot is made only when
+//!   no live lease holds its uid, and either no user record has the uid and no process
+//!   runs as it (the user is made), or the record that has it is the pool's own: named
+//!   `kbf-lease-pool-<n>`, with that uid, hidden, and the home `<homes>/kbf-lease-pool-<n>`
+//!   (a first install on a Mac whose earlier install left its users, with or without the
+//!   ledger). That record is adopted after a clean reset in place; a record that differs
+//!   in any of those is refused, naming how, and the slot is left unmade. The slot is
+//!   recorded first (as resetting), then its home and its record are made (or the
+//!   adopted user is reset), then it is recorded free; a failure leaves it broken. The
+//!   boot reset runs it last, so the daemon's own start makes the pool; a failed slot is
+//!   named and the rest still made.
 //! - `user-create <lease>` takes the free slot with the lowest index and records it
 //!   leased to the lease, then the lease with the slot's uid. No user is made or deleted
 //!   for it. With no free slot it fails with [`PoolExhausted`], which the caller can
 //!   retry once a lease ends; it never makes a user to make up for one. With a valid gate
-//!   grant, the slot's user is replaced by an administrator for the lease.
+//!   grant, the slot's user is added to the `admin` group for the lease.
 //! - `user-delete <lease>` records the lease over (then the slot resetting) and resets the
 //!   user ([`Helper::reset`]): the uid's processes killed and its launchd domains booted
 //!   out (the teardown of `kill-uid`), its crontab and `at` jobs removed, its System V IPC
 //!   objects removed, its files in the places `user-delete` sweeps removed, its home
-//!   removed whole and made again empty, and its `DARWIN_USER_DIR` entry emptied (its
-//!   `0`, `C` and `T` kept), and last the directory asked that the user is not in
-//!   `admin`. Each step is judged by its outcome, as the teardown's are; only a reset
-//!   with every step clean returns the slot to free.
-//! - A reset that is not clean replaces the user ([`Helper::replace`]): the uid's
-//!   processes killed again, the user deleted as `user-delete` deleted a lease's user
-//!   (its `DARWIN_USER_DIR` entry and its home removed whole), then a new user made in the
-//!   slot, with the same name and uid, and the directory asked that it is not in `admin`
-//!   (a membership the deletion left would make it one). The slot is free only once the
-//!   new user exists and is not.
-//!   A replacement that fails too leaves the slot broken: no lease gets it, `pool-status`
-//!   and an exhausted pool name it, and the next `pool-create` (or boot reset) replaces it
-//!   again. The lease of an administrator is always replaced, never reset, also after a
-//!   crash: its `resetting` record says so.
+//!   emptied (every entry below it removed; the folder itself is kept; its owner, group,
+//!   mode, flags, ACL and extended attributes given back), its `DARWIN_USER_DIR` entry
+//!   emptied (its `0`, `C` and `T` kept), the attributes of its record that the pool owns
+//!   set back where root may write them on an existing account (primary group, shell,
+//!   hidden; its uid and home path are compared, not written, and a record whose uid or
+//!   home is not the slot's leaves the slot broken), the user taken out of
+//!   `admin`, and last the directory asked that the user is not in `admin`. Each step is
+//!   judged by its outcome, as the teardown's are; only a reset with every step clean
+//!   returns the slot to free.
+//! - A reset that is not clean leaves the slot broken ([`Helper::reset_or_make`] is the
+//!   same reset, which first makes a user that has no record): no lease gets it,
+//!   `pool-status` and an exhausted pool name it, the refusal and the `pool-create` log
+//!   line name the entry or step that blocked it, and the next `pool-create` (or boot
+//!   reset) resets it again.
+//! - The lease of an administrator ends as any other: it is not replaced, there being no
+//!   deletion to replace it with. Its user was added to `admin` at the start; the reset
+//!   takes it out and the directory is asked that it is out, so a slot whose user stays
+//!   an administrator is broken, never free. A slot is not retired for having been an
+//!   administrator's: a retired slot could never be reclaimed (its user cannot be
+//!   deleted), so a few grants would end the pool, and the reset removes what a
+//!   replacement would have (the uid's processes, files, domains, IPC objects, record
+//!   attributes and membership), though not what an administrator may have put in root's
+//!   own places, which a replacement never reached either. The `resetting <slot> replace`
+//!   ledger record is still written and read (the ledger's format only grows), and is
+//!   reset like any other.
 //! - The boot reset ends every live lease but the one whose session it keeps (as above),
 //!   and then resets every slot that is resetting or leased to a lease that is not live
 //!   (a crash between two records, or during a reset), before `pool-create`.
+
+use std::io;
 
 use js_types::LeaseId;
 
@@ -45,7 +68,7 @@ use super::teardown::TeardownError;
 use crate::lease::{Dotted, Slot, pool_user_name, user_name};
 use crate::ledger::Ledger;
 use crate::ledger::pool::{SlotEntry, SlotState};
-use crate::sweep::{SweepPlan, empty_keeping, sweep};
+use crate::sweep::{SweepPlan, empty, empty_keeping, sweep};
 
 /// What every [`PoolExhausted`] says first: a caller can tell the refusal by it.
 pub const POOL_EXHAUSTED: &str = "the pool has no free user";
@@ -120,33 +143,12 @@ impl From<&str> for LeaseError {
     }
 }
 
-/// How a slot's use ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum End {
-    /// Reset the user, and replace it if the reset is not clean.
-    Reset,
-    /// Replace the user (an administrator's lease ended).
-    Replace,
-    /// Replace the user of a broken slot; it stays broken if that fails.
-    Repair,
-}
-
-impl End {
-    /// [`End::Replace`] when `replace`, else [`End::Reset`].
-    fn of(replace: bool) -> Self {
-        match replace {
-            true => Self::Replace,
-            false => Self::Reset,
-        }
-    }
-}
-
 /// How the end of a slot's use came out.
 #[derive(Debug)]
 pub(super) enum Settled {
-    /// The user is clean (or new): the slot is free.
+    /// The user is clean: the slot is free.
     Free,
-    /// Neither the reset nor the replacement succeeded: the slot is broken, and why.
+    /// The reset in place did not come out clean: the slot is broken, and what blocked it.
     Broken(String),
 }
 
@@ -212,14 +214,14 @@ impl Helper {
         status
     }
 
-    /// Makes each slot the ledger does not hold and replaces each broken slot's user;
-    /// what failed, slot by slot.
+    /// Makes each slot the ledger does not hold and resets each broken slot's user again
+    /// in place; what failed, slot by slot.
     pub(super) fn make_pool(&self, ledger: &mut Ledger) -> Vec<String> {
         let mut errors = Vec::new();
         for slot in self.settings.pool.slots() {
             let result = match ledger.slot(slot).map(|entry| entry.state) {
                 None => self.make_slot(ledger, slot),
-                Some(SlotState::Broken) => match self.settle(ledger, slot, End::Repair) {
+                Some(SlotState::Broken) => match self.settle(ledger, slot, true) {
                     Ok(Settled::Free) => Ok(()),
                     Ok(Settled::Broken(why)) | Err(why) => Err(why),
                 },
@@ -234,7 +236,49 @@ impl Helper {
         errors
     }
 
-    /// Makes the user of `slot`, which the ledger does not hold.
+    /// Whether the record that has `uid` is the pool's own user of `slot`: named
+    /// `kbf-lease-pool-<slot>`, with that uid, hidden, and the home `<homes>/<name>`.
+    /// Whatever else it has (its group, shell, membership of `admin`) is set back by the
+    /// reset that follows.
+    ///
+    /// # Errors
+    /// Why it is not adopted: another record has the uid (the name, uid, hidden flag or
+    /// home differ), or the directory could not be asked.
+    fn adoptable(&self, slot: Slot, uid: u32) -> Result<(), String> {
+        let name = pool_user_name(slot);
+        let record = self
+            .host
+            .user_record(&name)
+            .map_err(|why| format!("reading the record {name}: {why}"))?;
+        let home = self.settings.homes.join(&name);
+        let Some(record) = record else {
+            return Err(format!(
+                "a user record the ledger does not hold has uid {uid} and is not {name}; it is not adopted"
+            ));
+        };
+        let mut differs = Vec::new();
+        if record.uid != uid {
+            differs.push(format!("its uid is {}", record.uid));
+        }
+        if !record.hidden {
+            differs.push("it is not hidden".to_owned());
+        }
+        if record.home != home {
+            differs.push(format!("its home is {}", record.home.display()));
+        }
+        match differs.is_empty() {
+            true => Ok(()),
+            false => Err(format!(
+                "a user record the ledger does not hold has uid {uid} and is not the pool's own {name} ({}); it is not adopted",
+                differs.join(", ")
+            )),
+        }
+    }
+
+    /// Makes the user of `slot`, which the ledger does not hold: a new user, or the
+    /// pool's own record of it that is already there ([`Self::adoptable`]; a first
+    /// install on a Mac whose earlier install left the users, which can never be deleted),
+    /// reset in place before the slot is free.
     fn make_slot(&self, ledger: &mut Ledger, slot: Slot) -> Result<(), String> {
         let range = self.settings.range;
         let uid = range
@@ -248,17 +292,25 @@ impl Helper {
             .uid_taken(uid)
             .map_err(|why| format!("looking up uid {uid}: {why}"))?;
         if taken {
-            return Err(format!(
-                "a user record the ledger does not hold has uid {uid}; it is not adopted"
-            ));
-        }
-        let left = self.live(uid)?;
-        if !left.is_empty() {
-            return Err(format!("{} processes run as uid {uid}", left.len()));
+            self.adoptable(slot, uid)?;
+        } else {
+            let left = self.live(uid)?;
+            if !left.is_empty() {
+                return Err(format!("{} processes run as uid {uid}", left.len()));
+            }
         }
         ledger
             .record_slot(slot, uid)
             .map_err(|why| format!("recording slot {slot}: {why}"))?;
+        if taken {
+            return match self.settle(ledger, slot, false)? {
+                Settled::Free => {
+                    tracing::info!(%slot, uid, "adopted pool user {}", pool_user_name(slot));
+                    Ok(())
+                }
+                Settled::Broken(why) => Err(why),
+            };
+        }
         let name = pool_user_name(slot);
         match self.create_account(&name, uid, false) {
             Ok(()) => {
@@ -308,7 +360,7 @@ impl Helper {
             .map_err(|why| format!("recording lease {}: {why}", Dotted(lease)))?;
         let name = pool_user_name(slot);
         if admin {
-            self.replace(&name, uid, true).map_err(|why| {
+            self.host.set_admin(&name, true).map_err(|why| {
                 format!(
                     "making {name} an administrator for lease {}: {why}",
                     Dotted(lease)
@@ -320,25 +372,19 @@ impl Helper {
     }
 
     /// `user-delete`'s part for the pool: the live `lease`, which holds `slot`, is over,
-    /// and the slot's user is reset (replaced, for an administrator's lease).
+    /// and the slot's user is reset in place (an administrator's too: its membership of
+    /// `admin` is taken away by the reset).
     pub(super) fn release(
         &self,
         ledger: &mut Ledger,
         lease: LeaseId,
         slot: Slot,
     ) -> Result<Settled, String> {
-        let end = End::of(matches!(
-            ledger.slot(slot),
-            Some(SlotEntry {
-                state: SlotState::Leased { admin: true, .. },
-                ..
-            })
-        ));
         ledger
             .record_released(slot, lease)
             .map_err(|why| format!("recording the end of lease {}: {why}", Dotted(lease)))?;
         tracing::info!(lease = %Dotted(lease), %slot, "lease over; resetting its pool user");
-        self.settle(ledger, slot, end)
+        self.settle(ledger, slot, false)
     }
 
     /// Resets every slot that is resetting, or leased to a lease that is not live; what
@@ -347,15 +393,14 @@ impl Helper {
         let mut errors = Vec::new();
         for (slot, entry) in ledger.slots() {
             let result = match entry.state {
-                SlotState::Resetting { replace } => self.settle(ledger, slot, End::of(replace)),
-                SlotState::Leased { lease, admin }
+                SlotState::Resetting { .. } => self.settle(ledger, slot, false),
+                SlotState::Leased { lease, .. }
                     if ledger.get(lease).is_none_or(|entry| entry.deleted) =>
                 {
-                    let end = End::of(admin);
                     ledger
                         .record_orphan_reset(slot)
                         .map_err(|why| format!("recording slot {slot} resetting: {why}"))
-                        .and_then(|()| self.settle(ledger, slot, end))
+                        .and_then(|()| self.settle(ledger, slot, false))
                 }
                 _ => continue,
             };
@@ -368,23 +413,17 @@ impl Helper {
         errors
     }
 
-    /// Ends the use of the resetting (or, for [`End::Repair`], broken) `slot`, as `end`
-    /// says. Records the slot free, or broken.
+    /// Ends the use of the resetting (or, when `was_broken`, broken) `slot`: resets its
+    /// user in place ([`Self::reset_or_make`]). Records the slot free, or broken (a slot
+    /// that was broken stays so, as the ledger holds it).
     ///
     /// # Errors
     /// The ledger could not record the outcome.
-    fn settle(&self, ledger: &mut Ledger, slot: Slot, end: End) -> Result<Settled, String> {
+    fn settle(&self, ledger: &mut Ledger, slot: Slot, was_broken: bool) -> Result<Settled, String> {
         let name = pool_user_name(slot);
         // A slot is made with the uid of its index, and keeps it.
         let uid = ledger.slot(slot).map_or(0, |entry| entry.uid);
-        let outcome = match end {
-            End::Reset => self.reset(&name, uid).or_else(|why| {
-                tracing::warn!(%slot, uid, "the reset of {name} is not clean ({why}); replacing it");
-                self.replace(&name, uid, false)
-            }),
-            End::Replace | End::Repair => self.replace(&name, uid, false),
-        };
-        match outcome {
+        match self.reset_or_make(&name, uid) {
             Ok(()) => {
                 ledger
                     .record_free(slot)
@@ -393,63 +432,114 @@ impl Helper {
                 Ok(Settled::Free)
             }
             Err(why) => {
-                if end != End::Repair {
+                if !was_broken {
                     ledger
                         .record_broken(slot)
                         .map_err(|e| format!("{why}; and recording slot {slot} broken: {e}"))?;
                 }
                 Ok(Settled::Broken(format!(
-                    "slot {slot}'s user {name} could be neither reset nor replaced, so the slot \
-                     is broken and lent to no one until pool-create replaces it: {why}"
+                    "slot {slot}'s user {name} could not be reset in place, so the slot \
+                     is broken and lent to no one until pool-create resets it again: {why}"
                 )))
             }
         }
     }
 
-    /// Resets the pool user `name`, with `uid`, for the next lease: see the module
-    /// documentation. Each step is judged by its outcome; the first that does not hold
+    /// Resets the pool user `name`, with `uid`, whose account exists, for the next lease:
+    /// see the module documentation. Each step is judged by its outcome; the first that does not hold
     /// fails the reset.
     pub(super) fn reset(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         self.kill_pool_user(name, uid)?;
-        if self
-            .host
-            .account(name)
-            .map_err(|source| TeardownError::Lookup {
-                name: name.to_owned(),
-                source,
-            })?
-            .is_none()
-        {
-            return Err(TeardownError::Missing {
-                name: name.to_owned(),
-            });
-        }
+        // The account is there: [`Self::reset_or_make`], the one caller, looked it up and
+        // made it when it was not.
         let entries = self.user_entries(name, uid)?;
         self.settled(uid)?;
         Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
         self.none_left(uid)?;
         self.remove_ipc(name, uid)?;
-        Self::swept(sweep(&self.with_home(), name, uid), name)?;
-        self.make_home(name, uid)?;
+        Self::swept(sweep(&self.settings.sweep, name, uid), name)?;
+        self.empty_home(name, uid)?;
         for entry in &entries {
             Self::swept(empty_keeping(entry, uid, &KEPT_FOLDERS), name)?;
         }
+        self.restore_record(name, uid)?;
         // The kill discharged any GUI domain owed; this last look judges the domains again.
         self.settled(uid)?;
         self.not_admin(name)
     }
 
-    /// Replaces the pool user `name`, with `uid`: kills its processes, deletes it (and
-    /// what it leaves, as `user-delete` did a lease's user), and makes a new one with the
-    /// same name and uid, an administrator when `admin`.
-    pub(super) fn replace(&self, name: &str, uid: u32, admin: bool) -> Result<(), TeardownError> {
-        self.kill_pool_user(name, uid)?;
-        self.remove_account(name, uid)?;
-        self.create_account(name, uid, admin)?;
-        match admin {
-            true => Ok(()),
-            false => self.not_admin(name),
+    /// Resets the pool user `name`, with `uid`, in place; a user with no record (a slot
+    /// whose making failed) is made first, as `pool-create` makes one. Nothing is ever
+    /// deleted. The slot is free only when every step of the reset is clean.
+    pub(super) fn reset_or_make(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        let made = self
+            .host
+            .account(name)
+            .map_err(|source| TeardownError::Lookup {
+                name: name.to_owned(),
+                source,
+            })?;
+        if made.is_none() {
+            self.create_account(name, uid, false)?;
         }
+        self.reset(name, uid)
+    }
+
+    /// Sets back the attributes of the record of the pool user `name`, with `uid`, that
+    /// the pool owns and macOS lets root write on an existing account (its primary group,
+    /// shell and hidden flag), and takes the user out of `admin` (a lease's grant put it
+    /// there); the directory is asked last, by [`Self::not_admin`]. The record's uid and
+    /// home path are read and compared, never written: macOS 27 refuses root a write of an
+    /// existing account's home attribute (as it refuses the account's deletion), so a
+    /// record whose uid or home is not the slot's cannot be repaired, and its slot stays
+    /// broken, naming what differs.
+    fn restore_record(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        let failed = |source: io::Error| TeardownError::Restore {
+            name: name.to_owned(),
+            source,
+        };
+        let home = self.settings.homes.join(name);
+        let record = self
+            .host
+            .user_record(name)
+            .map_err(failed)?
+            .ok_or_else(|| failed(io::Error::other("there is no record")))?;
+        let mut differs = Vec::new();
+        if record.uid != uid {
+            differs.push(format!("its uid is {}, not {uid}", record.uid));
+        }
+        if record.home != home {
+            differs.push(format!(
+                "its home is {}, not {}",
+                record.home.display(),
+                home.display()
+            ));
+        }
+        if !differs.is_empty() {
+            return Err(failed(io::Error::other(format!(
+                "{}; macOS lets no process rewrite these on an existing account, so the slot cannot be repaired",
+                differs.join(", ")
+            ))));
+        }
+        let user = super::NewUser {
+            name: name.to_owned(),
+            uid,
+            gid: self.settings.gid,
+            home,
+            admin: false,
+        };
+        self.host
+            .restore_user(&user)
+            .map_err(|source| TeardownError::Restore {
+                name: name.to_owned(),
+                source,
+            })?;
+        self.host
+            .set_admin(name, false)
+            .map_err(|why| TeardownError::Admin {
+                name: name.to_owned(),
+                why: why.to_string(),
+            })
     }
 
     /// Whether `name` is in no way a member of `admin`, as the directory answers
@@ -503,7 +593,18 @@ impl Helper {
         plan
     }
 
-    /// Makes the home folder of `name`, with `uid`.
+    /// Empties the home of the pool user `name`, with `uid`, and gives it back (owner,
+    /// group, mode 0700, no flag, ACL or extended attribute): the folder itself is never
+    /// removed or made again, which macOS refuses for a folder of `/Users`. Fails only
+    /// if an entry below it cannot be removed (named) or the folder cannot be given back.
+    /// An empty folder below it that the system refuses root the removal of (an account's
+    /// `Library/Preferences`) is kept, not a failure.
+    fn empty_home(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        Self::swept(empty(&self.settings.homes.join(name), uid), name)?;
+        self.make_home(name, uid)
+    }
+
+    /// Makes the home folder of `name`, with `uid`, or takes the one that is there.
     fn make_home(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
         self.host
             .make_home(&self.settings.homes, name, uid, self.settings.gid)
@@ -537,5 +638,11 @@ impl Helper {
     }
 }
 
+#[cfg(test)]
+mod adopt_tests;
+#[cfg(test)]
+mod home_tests;
+#[cfg(test)]
+mod reset_tests;
 #[cfg(test)]
 mod tests;

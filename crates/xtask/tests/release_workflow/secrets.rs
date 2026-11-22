@@ -143,7 +143,12 @@ fn the_release_passes_secrets_to_the_package_call_alone() {
         named_secrets(&read_workflow("js-agent-macos-pkg.yml")),
         want
     );
-    for file in ["artifacts.yml", "beta.yml", "macos-probe.yml"] {
+    for file in [
+        "artifacts.yml",
+        "beta.yml",
+        "js-agent-macos-first-install.yml",
+        "macos-probe.yml",
+    ] {
         assert_eq!(
             named_secrets(&read_workflow(file)),
             BTreeSet::new(),
@@ -196,6 +201,23 @@ fn a_call_passing_secrets_to_a_workflow_that_names_none_is_refused() {
     assert_eq!(
         errors(&text),
         ["beta-macos: passes secrets to beta.yml, which names none"]
+    );
+}
+
+/// The first-install call passing the caller's secrets is refused: the workflow it calls names
+/// none, and it installs a package built from the branch's code.
+#[test]
+fn the_first_install_call_passing_secrets_is_refused() {
+    let text = edit(
+        &workflow(),
+        "    uses: ./.github/workflows/js-agent-macos-first-install.yml\n",
+        "    uses: ./.github/workflows/js-agent-macos-first-install.yml\n    secrets: inherit\n",
+    );
+    assert_eq!(
+        errors(&text),
+        [
+            "beta-macos-first-install: passes secrets to js-agent-macos-first-install.yml, which names none"
+        ]
     );
 }
 

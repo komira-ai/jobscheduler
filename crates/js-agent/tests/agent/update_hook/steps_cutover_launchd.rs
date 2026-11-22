@@ -66,6 +66,14 @@ fn a_mac_agent_that_starts_and_dies_is_a_failure_of_the_release() {
         assert_eq!(done.outcome, Outcome::Failure, "{exit:?}");
         assert_eq!(done.report.reason, Some(Reason::StartFailed), "{exit:?}");
         assert_eq!(done.report.class, Class::Release, "{exit:?}");
+        // No systemd to retry the unit: the report says only what is installed and that no
+        // agent runs.
+        let detail = done.report.detail.unwrap();
+        assert!(
+            detail
+                .ends_with("; the staged release 1.4.0 is installed and its agent is not running"),
+            "{exit:?}: {detail}"
+        );
         assert!(!done.report.reversible);
     }
 }

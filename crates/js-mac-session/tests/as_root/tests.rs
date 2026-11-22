@@ -419,9 +419,13 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     );
 
     says(&lease.call("delete"), "existed", "user-delete");
-    assert!(!user_exists(&name), "the user record survived");
+    // A pool user is permanent: macOS refuses root the deletion of its record and home.
+    assert!(user_exists(&name), "the pool user's record was deleted");
+    assert!(
+        root("/bin/ls", &["-A", &home(&name)]).said().is_empty(),
+        "the pool user's home was not emptied"
+    );
     let mut gone = vec![
-        home(&name),
         tabs,
         format!("{shared}/kbf-ci-owned"),
         format!("{shared}/kbf-ci-dir"),
@@ -431,7 +435,11 @@ fn user_delete_waits_for_the_uid_s_processes_and_sweeps_without_following_links(
     gone.extend(override_plist);
     let survived: Vec<&String> = gone.iter().filter(|path| exists(path)).collect();
     assert!(survived.is_empty(), "survived the sweep: {survived:?}");
-    let files = root("/usr/bin/find", &["/private/var/folders", "-user", &uid]);
+    // The folders the system placed stay (emptied); no file is left in them.
+    let files = root(
+        "/usr/bin/find",
+        &["/private/var/folders", "-user", &uid, "-type", "f"],
+    );
     assert_eq!(
         files.said(),
         "",
@@ -667,7 +675,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
             &held.name(),
         ],
     );
-    write_root(&kcpassword(), "x\n");
+    write_root(&autologin_cipher_path(), "x\n");
     assert_eq!(
         mac.restart(&["15.1"]),
         "kept 15.1 deleted 15.2",
@@ -677,9 +685,10 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         user_exists(&held.name()),
         "the held session's user was deleted"
     );
+    // The pool's users are permanent: the leftover lease is over, its user stays, reset.
     assert!(
-        !user_exists(&leftover.name()),
-        "the leftover user survived the reset"
+        user_exists(&leftover.name()),
+        "the leftover pool user was deleted"
     );
     says(
         &root(
@@ -689,7 +698,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         &held.name(),
         "auto-login",
     );
-    assert!(exists(&kcpassword()), "kcpassword was not kept");
+    assert!(exists(&autologin_cipher_path()), "kcpassword was not kept");
     refused(
         &held.call("delete"),
         "holds the GUI session",
@@ -702,9 +711,8 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "reset, nothing held"
     );
     assert!(
-        !user_exists(&held.name()),
-        "{} survived the reset",
-        held.name()
+        user_exists(&held.name()),
+        "the held session's pool user was deleted by the reset"
     );
     let auto_login = root(
         "/usr/bin/defaults",
@@ -715,7 +723,7 @@ fn the_boot_reset_keeps_the_held_session_and_deletes_every_other_leftover() {
         "auto-login survived the reset: {}",
         auto_login.all()
     );
-    for gone in [kcpassword(), intent()] {
+    for gone in [autologin_cipher_path(), intent()] {
         assert!(!exists(&gone), "{gone} survived the reset");
     }
 }
@@ -893,13 +901,14 @@ fn a_gui_spawn_lands_in_aqua_and_a_background_one_in_the_system_session() {
     assert_eq!(gui, want, "the GUI spawn");
 }
 
-/// Catches: a GUI run that keeps root's supplementary groups. Under sudo, root holds
-/// its whole group list (initgroups), which this process passes on; the GUI run's
-/// process must hold the user's primary group alone (the kernel's list, `getgroups`,
-/// not `id -G`, which asks the directory).
+/// Catches: a GUI run that keeps root's supplementary groups, or loses the user's own.
+/// Under sudo, root holds its whole group list (initgroups), which this process passes
+/// on; the GUI run's process must hold the user's groups as the directory lists them, and
+/// none of root's that the user is not in (the kernel's list, `getgroups`, not `id -G`,
+/// which asks the directory).
 #[test]
 #[ignore = "needs root: run the test binary through `sudo` (see the header of tests/as_root.rs)"]
-fn a_gui_run_holds_no_group_but_its_own() {
+fn a_gui_run_holds_the_user_s_groups_and_no_other() {
     let (_serial, mac) = mac();
     let client = path_str(&mac.client);
     let root_groups = succeeds(client, &["groups"]);
@@ -916,12 +925,22 @@ fn a_gui_run_holds_no_group_but_its_own() {
         &["spawn", "gui", &me, &gid, name, &dir, client, "groups"],
     );
     let lines: Vec<&str> = held.lines().collect();
-    // Its own primary group, or none at all, as the kernel keeps an empty list.
-    assert!(
-        matches!(lines.first(), Some(&first) if first == gid || first.is_empty()),
-        "the GUI run kept groups: {held:?}"
-    );
     assert_eq!(lines.last(), Some(&"exit 0"), "{held:?}");
+    let sorted = |text: &str| {
+        let mut ids: Vec<u32> = text
+            .split_whitespace()
+            .map(|g| g.parse().expect("a group id"))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let want = sorted(&succeeds("/usr/bin/id", &["-G", name]));
+    assert_eq!(
+        sorted(lines.first().copied().unwrap_or_default()),
+        want,
+        "the GUI run's groups are not the user's: {held:?}"
+    );
 }
 
 /// Catches: the macOS host's account lookup (the VM user's uid and gid come from it, and

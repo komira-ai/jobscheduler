@@ -18,10 +18,12 @@
 //!   cache restored into `--dir` when they match, and otherwise each downloaded from the pinned
 //!   mirrors in turn, in bounded rounds, and refused unless its SHA-256 matches.
 //!
-//! - `release plan --head <sha>`, `release stamp --to <version>` and `release stage --bin <name>
+//! - `release plan --head <sha>`, `release stamp --to <version>`,
+//!   `release next-version --version <version>` and `release stage --bin <name>
 //!   --target <triple> --version <version> --out <dir>` ([`release`]): whether a commit of main
 //!   is released and as which version, setting that version in the CI checkout before the build,
-//!   and laying down the files of each release archive (docs/release.md).
+//!   the patch version after a version (the macOS update package's), and laying down the files
+//!   of each release archive (docs/release.md).
 //!
 //! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
@@ -44,6 +46,12 @@
 //!   ([`release::image_digest`]): the manifest digest of the release's linux-x86_64 image of
 //!   js-lease-server, held to `SHA256SUMS`, and the release's addresses of the image and its bundle:
 //!   what the control plane's deploy of `js-server` is given.
+//! - `release smoke-bundle pack --tree <dir> --out <dir>`, `release smoke-bundle push --layout
+//!   <dir> --user <name> --password-file <file>` and `release smoke-bundle check --tree <dir>
+//!   --scratch <dir>` ([`release::smoke_bundle`]): the smoke bundle packed from its committed
+//!   tree and refused unless it gives the digest its recipe names, pushed to the recipe's
+//!   repository and tag (a held tag is never moved), and pulled back by digest anonymously and
+//!   compared with the tree, every byte.
 //! - `merge-profiles --dir <dir> --out <file> [--rustc <program>]` ([`merge_profiles`]): one
 //!   indexed coverage profile from the raw ones a coverage shard wrote at the top of `--dir`,
 //!   merged by the toolchain's llvm-profdata from a list file.
@@ -165,6 +173,9 @@ pub enum Error {
     /// `release image-digest` gave no digest.
     #[error(transparent)]
     ImageDigest(#[from] release::image_digest::Error),
+    /// `release smoke-bundle` failed.
+    #[error(transparent)]
+    SmokeBundle(#[from] release::smoke_bundle::Error),
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
@@ -435,6 +446,8 @@ enum ReleaseVerb {
     Plan(release::plan::PlanArgs),
     /// Set the release version in this checkout (not committed).
     Stamp(release::stamp::StampArgs),
+    /// The version after a package's: its patch plus one.
+    NextVersion(release::next_version::NextVersionArgs),
     /// Lay down the files of one release archive.
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
@@ -450,6 +463,12 @@ enum ReleaseVerb {
     ImageDigest(release::image_digest::DigestArgs),
     /// Wait for this run's turn to publish and deploy, or skip it when a newer one has it.
     Turn(release::turn::TurnArgs),
+    /// Pack, push or check the smoke bundle (`packaging/js-smoke-bundle/`).
+    SmokeBundle {
+        /// Which step.
+        #[command(subcommand)]
+        verb: release::smoke_bundle::Verb,
+    },
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -588,6 +607,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+            ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
@@ -601,6 +621,7 @@ fn run(cli: Cli) -> Result<String, Error> {
                 release::turn::Error::Usage(why) => Error::Usage(why),
                 other => Error::Turn(other),
             })?,
+            ReleaseVerb::SmokeBundle { verb } => release::smoke_bundle::run(&verb)?,
         }),
     }
 }

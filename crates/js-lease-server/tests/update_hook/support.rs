@@ -23,7 +23,7 @@ use js_lease_server::update_hook::{
     Record, Schema, Step, StoreUnreachable, StoreView, Units, Writer,
 };
 use js_testkit::dir::TestDir;
-use js_update_hook::{DirStat, PortError, UnitState, peek};
+use js_update_hook::{DirStat, PortError, UnitState, peek, real_path};
 
 /// The unit the declaration names.
 pub const UNIT: &str = DEFAULT_UNIT;
@@ -162,6 +162,11 @@ impl Link for FakeLink {
         }
         *self.target.borrow_mut() = Some(target.to_owned());
         Ok(())
+    }
+
+    /// The real path on the test's own scratch directory, as on the machine.
+    fn real(&self, path: &Path) -> Result<Option<PathBuf>, PortError> {
+        Ok(real_path(path)?)
     }
 }
 
@@ -376,6 +381,17 @@ impl Rig {
     /// A path in the rig's tree.
     pub fn path(&self, rel: &str) -> PathBuf {
         self.dir.path().join(rel)
+    }
+
+    /// The release directory `rel` (`1.0.0`, `2.0.0`) spelt through a symbolic link to the
+    /// releases directory (`<root>/aliased -> releases`), as `/var/lib/x` is `/private/var/lib/x`
+    /// on macOS: the same directory by another name.
+    pub fn aliased(&self, rel: &str) -> PathBuf {
+        let aliased = self.path("aliased");
+        if !aliased.exists() {
+            std::os::unix::fs::symlink("releases", &aliased).expect("the symbolic link");
+        }
+        aliased.join(rel)
     }
 
     /// The staged release.

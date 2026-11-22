@@ -37,542 +37,62 @@
 //! the supervisor's process group (unless the supervisor has written its record, and so only
 //! exits), and the container is ended, as for every run, by the kill of the lease's cgroup
 //! and [`Oci::remove`].
+//!
+//! The parts every supervisor shares (the exit record, the handshake, the supervisor's
+//! process identity, the handle and the signal mask) are the crate `js-supervise`, and the
+//! items of it this module has always offered are re-exported here. What is here is the crun
+//! arm: the start of the supervisor and the supervise mode that runs `crun run`.
 
 use std::ffi::OsString;
-use std::io::{Read as _, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+pub use js_supervise::{
+    ExitRecord, READY_WAIT, SUPERVISED_POLL, Supervised, SupervisorId, end_supervisor,
+    exit_record_path, read_exit_record, recorded_supervisor, supervisor_path,
+};
+use js_supervise::{READY, note_supervisor, write_record};
 
 use super::crun::{Crun, RunEnd, no_scrub};
-use super::logs::{Capture, Launch, LogLimits, LogTail, StreamTail};
+use super::logs::{Capture, Launch, LogLimits};
 use super::{Oci, init, logs};
 use crate::container::ContainerSpec;
 
-/// The word a supervisor writes to its standard output once it has made its files.
-pub(crate) const READY: &[u8] = b"supervising\n";
-
-/// How often [`Supervised::wait`] looks for the end of the run.
-pub const SUPERVISED_POLL: Duration = Duration::from_millis(50);
-
-/// How a run ends whose supervisor is gone and left no exit record.
-const GONE: &str = "the supervisor ended without an exit record";
-
-/// Why a start fails whose supervisor said something else than the ready word.
-const WRONG_WORD: &str = "the supervisor said something other than its ready word";
-
-/// The most bytes of each stream's tail an exit record holds: the writer keeps the last
-/// bytes of a longer tail, so that a record is always one [`read_exit_record`] accepts.
-pub(crate) const MAX_TAIL_RECORDED: usize = 4 * 1024 * 1024;
-
-/// The most bytes of an exit record that are read: two streams of [`MAX_TAIL_RECORDED`]
-/// bytes in two hexadecimal digits each, and 64 KiB for the rest.
-const MAX_RECORD: u64 = (2 * 2 * MAX_TAIL_RECORDED + 64 * 1024) as u64;
-
-/// How long [`Oci::start_supervised`] waits for the ready word before it gives up on the
-/// supervisor, kills its process group and fails the start.
-pub const READY_WAIT: Duration = Duration::from_secs(30);
-
-/// The exit record of the lease directory `lease`: `<lease>/exit.json`.
-pub fn exit_record_path(lease: &Path) -> PathBuf {
-    lease.join("exit.json")
-}
-
-/// The file the record is written to before it is renamed into place.
-fn staged_record_path(lease: &Path) -> PathBuf {
-    lease.join(".exit.json.tmp")
-}
-
-/// The identity of a supervisor process: its pid and its start time in clock ticks since
-/// boot (field 22 of `/proc/<pid>/stat`), which together name one process for as long as the
-/// host runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SupervisorId {
-    /// The process id.
-    pub pid: u32,
-    /// The start time of the process, in clock ticks since boot.
-    pub start: u64,
-}
-
-impl SupervisorId {
-    /// The identity of the process `pid` now, `None` when `/proc` has no such process.
-    pub(crate) fn of(pid: u32) -> Option<Self> {
-        stat_of(pid).map(|(_, start)| Self { pid, start })
-    }
-
-    /// Whether the process it names still runs (its `/proc/<pid>/stat` has the same start
-    /// time, and it is not a zombie).
-    #[must_use]
-    pub fn alive(&self) -> bool {
-        names(stat_of(self.pid), self.start)
-    }
-
-    /// Whether the process it names runs as the user `uid` (the owner of its `/proc` entry).
-    #[must_use]
-    pub fn runs_as(&self, uid: u32) -> bool {
-        std::fs::metadata(format!("/proc/{}", self.pid)).is_ok_and(|meta| meta.uid() == uid)
-    }
-
-    /// Whether the process it names is the supervisor of the lease directory `lease`: its
-    /// command line, which [`Oci::start_supervised`] sets, names `lease` as the lease
-    /// (`<daemon> <mode> <crun> <lease> ...`). Another lease's supervisor names its own.
-    #[must_use]
-    pub fn supervises(&self, lease: &Path) -> bool {
-        std::fs::read(format!("/proc/{}/cmdline", self.pid)).is_ok_and(|cmdline| {
-            cmdline.split(|byte| *byte == 0).nth(3) == Some(lease.as_os_str().as_bytes())
-        })
-    }
-}
-
-/// The file in the lease directory `lease` that names the supervisor started for it.
-#[must_use]
-pub fn supervisor_path(lease: &Path) -> PathBuf {
-    lease.join("supervisor")
-}
-
-/// The supervisor the lease directory `lease` names: the pid and start time
-/// [`Oci::start_supervised`] wrote there, for a teardown that has no other record of the
-/// lease. `None` when there is no such file or it names none. It is opened without following
-/// a link or waiting on a pipe. The directory is the job user's: a caller signals the process
-/// only when it runs as the job user ([`SupervisorId::runs_as`]) and supervises this lease
-/// ([`SupervisorId::supervises`]).
-#[must_use]
-pub fn recorded_supervisor(lease: &Path) -> Option<SupervisorId> {
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(flags.bits().cast_signed())
-        .open(supervisor_path(lease))
-        .ok()?;
-    let mut text = String::new();
-    file.take(64).read_to_string(&mut text).ok()?;
-    let mut words = text.split_whitespace();
-    let pid = words.next()?.parse().ok()?;
-    let start = words.next()?.parse().ok()?;
-    Some(SupervisorId { pid, start })
-}
-
-/// Writes `id` to the supervisor file of `lease`, as root into a directory the job user
-/// writes: what is in its place is removed (a link is removed, not followed) and the file is
-/// made new, so a link put there cannot send the write elsewhere. Best effort: the ledger's
-/// record is the agent's own, and this file only serves a teardown that has lost that.
-fn note_supervisor(lease: &Path, id: SupervisorId) {
-    let path = supervisor_path(lease);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&path)
-        .and_then(|mut file| file.write_all(format!("{} {}\n", id.pid, id.start).as_bytes()));
-}
-
-/// Whether a process whose `/proc` entry says `found` (its state letter and start time) is
-/// the live process that started at `start`.
-fn names(found: Option<(char, u64)>, start: u64) -> bool {
-    found.is_some_and(|(state, at)| at == start && state != 'Z')
-}
-
-/// The state letter and the start time of the process `pid`, from `/proc`.
-fn stat_of(pid: u32) -> Option<(char, u64)> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_stat(&text)
-}
-
-/// The state (field 3) and the start time (field 22) of a `/proc/<pid>/stat` line. The
-/// name (field 2) is in parentheses and may hold anything, so the fields are counted from
-/// the last closing parenthesis.
-fn parse_stat(text: &str) -> Option<(char, u64)> {
-    let (_, after) = text.rsplit_once(')')?;
-    let mut fields = after.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let start = fields.nth(18)?.parse().ok()?;
-    Some((state, start))
-}
-
-/// `SIGKILL`s the process group of the supervisor `id` (the supervisor and its `crun run`)
-/// when `id.alive()` and the lease directory `lease` holds no exit record; nothing otherwise.
-/// A supervisor that wrote its record has finished its run and only exits after it, so it is
-/// left to exit: a kill then would cut its exit short (in a coverage build, the profile it
-/// writes as it exits, which then cannot be read). A record that cannot be read does not
-/// count. Never signals a pid whose start time differs (a reused pid).
-pub fn end_supervisor(id: SupervisorId, lease: &Path) {
-    if matches!(read_exit_record(lease), Ok(Some(_))) {
-        return;
-    }
-    // A pid that is not a positive `i32` names no process: `alive` is false for it too.
-    let group = i32::try_from(id.pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw);
-    if let (true, Some(group)) = (id.alive(), group) {
-        // The process may have ended since `alive` looked: there is then nothing to kill.
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    }
-}
-
-/// How a supervised container ended, as its supervisor wrote it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExitRecord {
-    /// How `crun run` ended: the container's exit status, or why `crun` could not be run.
-    pub end: RunEnd,
-    /// What the container wrote, as the supervisor's capture ended with it.
-    pub tail: LogTail,
-    /// The wall clock, in milliseconds since the Unix epoch, when the supervisor wrote it.
-    pub finished_ms: u64,
-}
-
-/// The record as the JSON of its form version 1.
-/// Each stream's tail is cut to its last `max_tail` bytes.
-fn encode(record: &ExitRecord, max_tail: usize) -> String {
-    let end = match &record.end {
-        RunEnd::Exited(code) => json!({ "exited": code }),
-        RunEnd::Failed(why) => json!({ "failed": why }),
-    };
-    json!({
-        "version": 1,
-        "end": end,
-        "finished_ms": record.finished_ms,
-        "stdout": encode_stream(&record.tail.stdout, max_tail),
-        "stderr": encode_stream(&record.tail.stderr, max_tail),
-    })
-    .to_string()
-}
-
-fn encode_stream(stream: &StreamTail, max_tail: usize) -> Value {
-    let kept = stream.bytes.len().saturating_sub(max_tail);
-    json!({
-        "tail": hex(&stream.bytes[kept..]),
-        "total": stream.total,
-        "file_cut": stream.file_cut,
-    })
-}
-
-/// The bytes as lowercase hexadecimal.
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    bytes
-        .iter()
-        .flat_map(|&b| [DIGITS[usize::from(b >> 4)], DIGITS[usize::from(b & 15)]])
-        .map(char::from)
-        .collect()
-}
-
-/// The bytes of lowercase hexadecimal `text`.
-fn unhex(text: &str) -> Result<Vec<u8>, String> {
-    let nibble = |b: u8| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    };
-    let digits: Vec<u8> = text
-        .bytes()
-        .map(nibble)
-        .collect::<Option<_>>()
-        .ok_or("the tail is not lowercase hexadecimal".to_owned())?;
-    if !digits.len().is_multiple_of(2) {
-        return Err("the tail has an odd number of digits".to_owned());
-    }
-    Ok(digits
-        .chunks(2)
-        .map(|pair| (pair[0] << 4) | pair[1])
-        .collect())
-}
-
-/// The member `name` of the object `value`.
-fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
-    value.get(name).ok_or(format!("{name} is missing"))
-}
-
-/// The number in the member `name` of `value`.
-fn number(value: &Value, name: &str) -> Result<u64, String> {
-    field(value, name)?
-        .as_u64()
-        .ok_or(format!("{name} is not a number"))
-}
-
-/// One stream of a record: the member `name` of `value`.
-fn decode_stream(value: &Value, name: &str) -> Result<StreamTail, String> {
-    let stream = field(value, name)?;
-    let tail = field(stream, "tail")?
-        .as_str()
-        .ok_or(format!("{name}.tail is not text"))?;
-    Ok(StreamTail {
-        bytes: unhex(tail)?,
-        total: number(stream, "total")?,
-        file_cut: field(stream, "file_cut")?
-            .as_bool()
-            .ok_or(format!("{name}.file_cut is not true or false"))?,
-    })
-}
-
-/// The record in `bytes`, of form version 1; members it does not know are ignored.
-fn decode(bytes: &[u8]) -> Result<ExitRecord, String> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("not JSON: {e}"))?;
-    let version = value.get("version").and_then(Value::as_u64);
-    if version != Some(1) {
-        return Err(format!("the form version is {version:?}, not 1"));
-    }
-    let end = field(&value, "end")?;
-    let end = match (end.get("exited"), end.get("failed")) {
-        (Some(code), _) => RunEnd::Exited(
-            code.as_i64()
-                .and_then(|code| i32::try_from(code).ok())
-                .ok_or("end.exited is not an exit status".to_owned())?,
-        ),
-        (None, Some(why)) => RunEnd::Failed(
-            why.as_str()
-                .ok_or("end.failed is not text".to_owned())?
-                .to_owned(),
-        ),
-        (None, None) => return Err("end is neither exited nor failed".to_owned()),
-    };
-    Ok(ExitRecord {
-        end,
-        tail: LogTail {
-            stdout: decode_stream(&value, "stdout")?,
-            stderr: decode_stream(&value, "stderr")?,
-        },
-        finished_ms: number(&value, "finished_ms")?,
-    })
-}
-
-/// The bytes of the record file of `lease`, `None` when there is none.
-fn load(lease: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    let opened = std::fs::OpenOptions::new()
-        .read(true)
-        // A link is refused, and a pipe is opened without waiting for a writer.
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
-                .bits()
-                .cast_signed(),
-        )
-        .open(exit_record_path(lease));
-    let file = match opened {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_RECORD {
-        return Err(std::io::Error::other("longer than an exit record can be"));
-    }
-    Ok(Some(bytes))
-}
-
-/// Reads the exit record of `lease`: `Ok(None)` when there is none yet; `Err(text)` when the
-/// file is a link, not a regular file, longer than an exit record can be, or not a record.
-/// Opened without following a link.
+/// Starts `command` as a supervisor (stdin and stderr null, stdout a pipe, a process
+/// group of its own) and returns once it has written `ready` to its stdout. A child
+/// that does not say it within `limit` is killed (its process group) and reaped. A
+/// thread waits for the child, so it never stays a zombie ([`Supervised::handshake`]).
 ///
 /// # Errors
-/// The text says which, and names the file.
-pub fn read_exit_record(lease: &Path) -> Result<Option<ExitRecord>, String> {
-    let path = exit_record_path(lease);
-    let loaded = load(lease).map_err(|e| format!("{}: {e}", path.display()))?;
-    match loaded {
-        None => Ok(None),
-        Some(bytes) => decode(&bytes)
-            .map(Some)
-            .map_err(|e| format!("{}: {e}", path.display())),
-    }
-}
-
-/// Writes the exit record of `lease` whole: a temporary file in the directory (mode 0600),
-/// synced, renamed over `exit.json`, and the directory synced.
-pub(crate) fn write_record(lease: &Path, record: &ExitRecord) -> std::io::Result<()> {
-    let staged = staged_record_path(lease);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&staged)?;
-    file.write_all(encode(record, MAX_TAIL_RECORDED).as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&staged, exit_record_path(lease))?;
-    std::fs::File::open(lease)?.sync_all()
-}
-
-/// A container run by a supervisor process: the agent's handle on it. Dropping it does
-/// nothing to the supervisor or the container (they outlive the handle, and the agent).
-#[derive(Debug)]
-pub struct Supervised {
-    id: SupervisorId,
+/// The command could not be run, its answer is not `ready`, or it gave none within
+/// `limit`.
+fn spawn(
+    command: Command,
     lease: PathBuf,
-}
-
-impl Supervised {
-    /// Starts `command` as a supervisor (stdin and stderr null, stdout a pipe, a process
-    /// group of its own) and returns once it has written `ready` to its stdout. A child
-    /// that does not say it within `limit` is killed (its process group) and reaped. A
-    /// thread waits for the child, so it never stays a zombie.
-    ///
-    /// # Errors
-    /// The command could not be run, its answer is not `ready`, or it gave none within
-    /// `limit`.
-    pub(crate) fn spawn(
-        command: Command,
-        lease: PathBuf,
-        ready: &[u8],
-        limit: Duration,
-    ) -> Result<Self, String> {
-        Self::start(command, ready, limit)
-            .map(|id| Self { id, lease })
-            .map_err(|e| e.to_string())
-    }
-
-    fn start(mut command: Command, ready: &[u8], limit: Duration) -> std::io::Result<SupervisorId> {
-        let (from_child, to_child) = std::io::pipe()?;
-        command
-            .stdin(Stdio::null())
-            .stdout(to_child)
-            .stderr(Stdio::null())
-            .process_group(0);
-        let spawned = command.spawn();
-        // The command holds the write end of the pipe: closed, the child's exit ends the
-        // read.
-        drop(command);
-        let mut child = spawned?;
-        match answer(child.id(), from_child, ready, limit) {
-            Ok(id) => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                Ok(id)
-            }
-            Err(e) => {
-                give_up(child);
-                Err(e)
-            }
-        }
-    }
-
-    /// The supervisor process.
-    #[must_use]
-    pub fn id(&self) -> SupervisorId {
-        self.id
-    }
-
-    /// The lease directory whose exit record this handle reads.
-    #[must_use]
-    pub fn lease(&self) -> &Path {
-        &self.lease
-    }
-
-    /// How the run ended, or `None` while it runs (without waiting): the exit record's
-    /// end; or, when the supervisor is gone and wrote no record,
-    /// `RunEnd::Failed("the supervisor ended without an exit record")`; a record that
-    /// cannot be read is `RunEnd::Failed("the exit record cannot be read: <why>")`.
-    #[must_use]
-    pub fn try_end(&self) -> Option<RunEnd> {
-        // Looked at before the record: a supervisor that is gone has written its record
-        // already, so a record not there then is a record that never will be.
-        let alive = self.id.alive();
-        match read_exit_record(&self.lease) {
-            Ok(Some(record)) => Some(record.end),
-            Ok(None) if alive => None,
-            Ok(None) => Some(RunEnd::Failed(GONE.to_owned())),
-            Err(why) => Some(RunEnd::Failed(format!(
-                "the exit record cannot be read: {why}"
-            ))),
-        }
-    }
-
-    /// [`Supervised::try_end`], or `RunEnd::Failed("the run has not ended")` while it runs.
-    #[must_use]
-    pub fn run_end(&self) -> RunEnd {
-        self.try_end()
-            .unwrap_or_else(|| RunEnd::Failed("the run has not ended".to_owned()))
-    }
-
-    /// Waits until [`Supervised::try_end`] is `Some`, looking every [`SUPERVISED_POLL`].
-    /// Cancel-safe; may be called again.
-    pub async fn wait(&mut self) {
-        while self.try_end().is_none() {
-            tokio::time::sleep(SUPERVISED_POLL).await;
-        }
-    }
-
-    /// Ends the supervisor by force ([`end_supervisor`], which leaves one that has written
-    /// its exit record to exit), then waits. The container itself is ended by the caller's
-    /// cgroup kill and [`Oci::remove`], as before.
-    pub async fn force(&mut self) {
-        end_supervisor(self.id, &self.lease);
-        self.wait().await;
-    }
-
-    /// What the container wrote, from the exit record; empty while there is none.
-    #[must_use]
-    pub fn tail(&self) -> LogTail {
-        self.record().map_or_else(LogTail::default, |r| r.tail)
-    }
-
-    /// When the supervisor wrote the exit record (wall clock, milliseconds since the Unix
-    /// epoch), `None` while there is none.
-    #[must_use]
-    pub fn finished_ms(&self) -> Option<u64> {
-        self.record().map(|r| r.finished_ms)
-    }
-
-    /// The exit record, if there is a readable one.
-    fn record(&self) -> Option<ExitRecord> {
-        read_exit_record(&self.lease).ok().flatten()
-    }
-}
-
-/// Reads the ready word from the child `pid`'s `from_child` and says who the child is. The
-/// read is on a thread of its own, so that a child silent for `limit` ends the wait (the
-/// thread then ends with the child, when the caller kills it and the pipe closes).
-fn answer(
-    pid: u32,
-    mut from_child: impl std::io::Read + Send + 'static,
     ready: &[u8],
     limit: Duration,
-) -> std::io::Result<SupervisorId> {
-    let unreadable = std::io::Error::other("the start time of the supervisor cannot be read");
-    let id = SupervisorId::of(pid).ok_or(unreadable)?;
-    let mut word = vec![0_u8; ready.len()];
-    let (said, heard) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let read = from_child.read_exact(&mut word).map(|()| word);
-        // The waiter may have given up: nobody then wants the word.
-        let _ = said.send(read);
-    });
-    let word = heard
-        .recv_timeout(limit)
-        .map_err(|_| {
-            std::io::Error::other(format!(
-                "the supervisor did not say it is ready within {limit:?}"
-            ))
-        })?
-        .map_err(|e| {
-            std::io::Error::other(format!("the supervisor did not say it is ready: {e}"))
-        })?;
-    if word == ready {
-        Ok(id)
-    } else {
-        Err(std::io::Error::other(WRONG_WORD))
-    }
+) -> Result<Supervised, String> {
+    let (child, from_child) = start(command).map_err(|e| e.to_string())?;
+    Supervised::handshake(child, from_child, lease, ready, limit).map_err(|e| e.to_string())
 }
 
-/// Kills the child's process group (the child is its leader) and the child, and waits for
-/// it.
-fn give_up(mut child: Child) {
-    let group = rustix::process::Pid::from_child(&child);
-    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    // It may have ended already: both calls then say so, and there is nothing to do.
-    let _ = child.kill();
-    let _ = child.wait();
+/// Starts `command` with stdin and stderr null, stdout the write end of a new pipe, in a
+/// process group of its own: the child and the read end of the pipe.
+fn start(mut command: Command) -> std::io::Result<(Child, std::io::PipeReader)> {
+    let (from_child, to_child) = std::io::pipe()?;
+    command
+        .stdin(Stdio::null())
+        .stdout(to_child)
+        .stderr(Stdio::null())
+        .process_group(0);
+    let spawned = command.spawn();
+    // The command holds the write end of the pipe: closed, the child's exit ends the
+    // read.
+    drop(command);
+    Ok((spawned?, from_child))
 }
 
 impl Oci {
@@ -615,7 +135,7 @@ impl Oci {
             .arg(limits.drain_grace.as_millis().to_string());
         // As the job user, or as the daemon for a host container (`Oci::crun_of`).
         self.crun_of(spec).prepare(&mut command);
-        let supervised = Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)?;
+        let supervised = spawn(command, spec.dir.clone(), READY, READY_WAIT)?;
         note_supervisor(&spec.dir, supervised.id());
         Ok(supervised)
     }
@@ -624,10 +144,7 @@ impl Oci {
     /// lease directory is `lease`. Starts nothing.
     #[must_use]
     pub fn adopt_supervised(&self, lease: &Path, id: SupervisorId) -> Supervised {
-        Supervised {
-            id,
-            lease: lease.to_owned(),
-        }
+        Supervised::adopt(lease, id)
     }
 }
 
@@ -679,17 +196,8 @@ impl Request {
 /// arguments it cannot read.
 #[must_use]
 pub fn run(args: &[OsString]) -> u8 {
-    // Before anything makes a thread, so that every thread has the mask. The set is valid,
-    // so the call cannot fail.
-    let mut set = nix::sys::signal::SigSet::empty();
-    for signal in [
-        nix::sys::signal::Signal::SIGHUP,
-        nix::sys::signal::Signal::SIGINT,
-        nix::sys::signal::Signal::SIGTERM,
-    ] {
-        set.add(signal);
-    }
-    let _ = set.thread_block();
+    // Before anything makes a thread, so that every thread has the mask.
+    js_supervise::block_stop_signals();
     run_with(args, &mut std::io::stdout().lock(), one_thread_runtime)
 }
 

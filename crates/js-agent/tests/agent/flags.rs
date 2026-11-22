@@ -258,7 +258,7 @@ fn usage_errors_and_help() {
     let after: &[&str] = match cfg!(target_os = "linux") {
         true => &[
             "runtimes: docker crun",
-            "stops: drain handover egress-handover",
+            "stops: drain handover egress-handover in-place",
         ],
         false => &["runtimes: native"],
     };

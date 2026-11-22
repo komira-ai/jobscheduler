@@ -75,7 +75,7 @@ Read in code; every later section builds on these facts.
   `PortMap { host, container }`) are the other direction: a forward from a host port into the job.
 - **macOS has no root to replace.** A native job runs as a pool user under `sandbox-exec`, in `exec/` of the user's
   home, with reads open except listed denies (`ReadModel::Open`, `crates/js-agent/src/native/settings.rs`) and writes
-  only in the home. A `Mount` input is copied into `exec/<dest>` (`crates/js-agent/src/native/files.rs`). The Seatbelt
+  only in the run directory `exec/` (`HOME` is `exec/.home`, `TMPDIR` `exec/.tmp`; the account's home is never written). A `Mount` input is copied into `exec/<dest>` (`crates/js-agent/src/native/files.rs`). The Seatbelt
   builder can already allow single loopback ports (`Net::Ports`, `crates/js-mac-pool/src/seatbelt/profile.rs:191-195`),
   which no job reaches yet.
 - **The preparing stage is image-only.** A contained start whose image is not on the host waits in `Stage::Preparing`

@@ -1,14 +1,18 @@
 //! The jobs of the release that call a workflow instead of running steps of their own.
 
 /// The jobs of the release that call a workflow, and the workflow each calls: artifacts.yml, the
-/// three workflows of the beta stage (the platforms other than Linux x86_64), and
+/// four workflows of the beta stage (the platforms other than Linux x86_64), and
 /// docker-swarm-updater's deploy workflow at the full commit its allow-list names.
-pub const CALLERS: [(&str, &str); 5] = [
+pub const CALLERS: [(&str, &str); 6] = [
     ("artifacts", "./.github/workflows/artifacts.yml"),
     ("beta-macos", "./.github/workflows/beta.yml"),
     (
         "beta-macos-pkg",
         "./.github/workflows/js-agent-macos-pkg.yml",
+    ),
+    (
+        "beta-macos-first-install",
+        "./.github/workflows/js-agent-macos-first-install.yml",
     ),
     ("beta-macos-probe", "./.github/workflows/macos-probe.yml"),
     (

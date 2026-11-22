@@ -244,7 +244,7 @@ fn the_job_environment_steers_no_shell_because_there_is_none() {
     let home = rig.fake.homes().join("kbf-lease-pool-0");
     let exec = home.join("exec");
     fs::create_dir_all(&exec).unwrap();
-    fs::create_dir_all(home.join("tmp")).unwrap();
+    fs::create_dir_all(exec.join(".home")).unwrap();
     let config = super::config(&rig.fake);
     let argv = js_agent::native::profile_argv(&config, &body, &home).unwrap();
     let out = std::process::Command::new(&argv[0])

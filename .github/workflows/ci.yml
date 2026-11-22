@@ -162,7 +162,7 @@ jobs:
           path: ${{ runner.temp }}/pinned/cargo-zigbuild.tar.xz
           key: ${{ steps.zigbuild-cache.outputs.cache-primary-key }}
       - run: echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
-      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mdm -- -D warnings
+      - run: cargo-zigbuild clippy --workspace --all-targets --locked --target aarch64-apple-darwin --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm -- -D warnings
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

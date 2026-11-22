@@ -296,3 +296,64 @@ fn a_different_device_id_is_another_filesystem() {
     // Seen from the other side: the folders on another device than the entry.
     assert!(elsewhere(&stat, other.st_dev, &path));
 }
+
+/// Asserts that an entry the system placed is emptied and kept, with the folders the system
+/// placed in it, and that the removal is clean: a lease's files and directories in it go,
+/// the entry and its `0`, `C`, `T` and `X` stay and are empty, and each kept directory is
+/// named. On macOS the entry `<xx>/<hash>` and its four folders carry `sunlnk`, which root
+/// may not remove either, so the replacement of a broken pool slot, which removes the uid's
+/// entry, failed on it for good. Catches a removal that tries the system's directories and
+/// takes their refusal as an incomplete sweep.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_entry_the_system_placed_is_emptied_and_kept_with_its_folders() {
+    let dir = scratch("placed");
+    let entry = dir.join("ab/cdef");
+    for folder in ["0", "C/com.example.cache", "T/build", "X"] {
+        fs::create_dir_all(entry.join(folder)).unwrap();
+    }
+    fs::write(entry.join("C/com.example.cache/db"), "x").unwrap();
+    fs::write(entry.join("T/build/out"), "x").unwrap();
+    fs::write(entry.join("X/left"), "x").unwrap();
+    fs::write(entry.join("stray"), "x").unwrap();
+    crate::sweep::pretend_placed(&["cdef", "0", "C", "T", "X"]);
+    let swept = remove_owned(&entry, me());
+    crate::sweep::pretend_placed(&[]);
+    assert_eq!(swept.errors, Vec::<String>::new());
+    assert_eq!(swept.kept, std::slice::from_ref(&entry));
+    let mut left: Vec<String> = fs::read_dir(&entry)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["0", "C", "T", "X"]);
+    for folder in ["0", "C", "T", "X"] {
+        assert_eq!(
+            fs::read_dir(entry.join(folder)).unwrap().count(),
+            0,
+            "{folder}"
+        );
+    }
+}
+
+/// Asserts that an entry the system did not place, holding a folder it did, is not taken as
+/// removed: the folder is emptied and stays, and the removal names the entry it could not
+/// remove. Catches a keep that spreads from a placed folder to the entry around it.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_entry_of_the_user_s_holding_a_placed_folder_is_not_taken_as_removed() {
+    let dir = scratch("placed-inside");
+    let entry = dir.join("ab/cdef");
+    fs::create_dir_all(entry.join("X")).unwrap();
+    fs::write(entry.join("X/left"), "x").unwrap();
+    crate::sweep::pretend_placed(&["X"]);
+    let swept = remove_owned(&entry, me());
+    crate::sweep::pretend_placed(&[]);
+    assert_eq!(swept.errors.len(), 1, "{swept:?}");
+    assert!(
+        swept.errors[0].starts_with(&format!("{}: ", entry.display())),
+        "{swept:?}"
+    );
+    assert!(entry.join("X").is_dir());
+    assert_eq!(fs::read_dir(entry.join("X")).unwrap().count(), 0);
+}

@@ -44,7 +44,7 @@ js job list [--states S ...] [--labels K=V ...]</pre></div>
 <thead><tr><th>Resource</th><th>Estimate</th></tr></thead>
 <tbody>
 <tr><td>Memory</td><td><code>round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))</code>, where <code>M</code> is the largest uncensored sample of the last 256 or more runs, and at least 1 GiB</td></tr>
-<tr><td>CPU</td><td><code>round_up_250m(P90(cpu_usage / wall))</code>, clamped to 250 m and the node's cores; 2000 m for a key with no CPU sample</td></tr>
+<tr><td>CPU</td><td><code>round_up_250m(P90(sample))</code>, clamped to 250 m and the node's cores; 2000 m for a key with no CPU sample</td></tr>
 </tbody></table></div>
 <p>A booking at or above the memory of the largest matching live node owns the host: the estimate never reaches a whole host, and the caller books cold instead.</p>
 <div class="notice notice-warn"><p><strong>Where it stops.</strong> <code>js-lease-server</code> places every job with <code>js-sched</code>, the only placement; <code>--placement</code> is deprecated and does nothing. The server keeps one scheduler for its life, told of every hello, accepted heartbeat (with its load reading) and stop. A pass over the queue on each tick walks the queued jobs in order, one placement round of the scheduler per job, over the hosts that could take a job now. A host's free capacity is what its shape leaves after the job allocations on it. Mode <code>off</code> of the load rule is a rollback switch to the booked rule, and not a supported mode.</p></div>

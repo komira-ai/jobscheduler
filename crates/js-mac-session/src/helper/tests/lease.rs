@@ -1,6 +1,6 @@
 //! `user-create` against the pool: a lease takes the lowest free pool user and makes no
 //! user, a lease id is used once, an administrator needs a valid grant (and its user is
-//! replaced, before and after), and a ledger that cannot record stops the verb.
+//! added to `admin` for the lease and taken out at its end), and a ledger that cannot record stops the verb.
 
 use super::*;
 
@@ -95,7 +95,7 @@ fn a_lease_id_is_never_used_twice() {
 
 /// Catches: an administrator made on the daemon's word (S10: "trust an admin flag
 /// from the daemon"), a grant used twice, or a grant for another lease or Mac; and a pool
-/// user left an administrator, or reset rather than replaced, after its lease.
+/// user left an administrator after its lease, or a record deleted or made for the grant.
 #[test]
 fn an_administrator_needs_a_valid_unused_grant() {
     let rig = rig("admin", 4);
@@ -107,13 +107,10 @@ fn an_administrator_needs_a_valid_unused_grant() {
         .iter()
         .filter(|c| c.starts_with("delete_user") || c.starts_with("create_user"))
         .collect();
-    assert_eq!(
-        made,
-        [
-            "delete_user kbf-lease-pool-0",
-            "create_user kbf-lease-pool-0"
-        ],
-        "the slot's user is replaced by an administrator"
+    assert_eq!(made, Vec::<&String>::new(), "no record is made or deleted");
+    assert!(
+        calls.contains(&"set_admin kbf-lease-pool-0 true".to_owned()),
+        "the slot's user is added to admin for the lease: {calls:#?}"
     );
     // Single use: the lease id is spent.
     assert!(
@@ -150,15 +147,16 @@ fn an_administrator_needs_a_valid_unused_grant() {
     assert_eq!(rig.helper.user_create("3.2", None), Ok(me() + 1));
     assert!(!rig.host.state().users["kbf-lease-pool-1"].admin);
 
-    // The administrator's lease ends: its user is replaced, never reset, by one that is
-    // not an administrator.
+    // The administrator's lease ends: its user is reset in place, taken out of `admin`
+    // and asked about, and nothing is deleted.
     log(&rig);
     assert_eq!(rig.helper.user_delete("3.1"), Ok(true));
     let calls = log(&rig);
     assert!(
-        calls.contains(&"delete_user kbf-lease-pool-0".to_owned()),
+        calls.contains(&"set_admin kbf-lease-pool-0 false".to_owned()),
         "{calls:#?}"
     );
+    assert!(!calls.iter().any(|c| c.starts_with("delete_user")));
     assert!(!rig.host.state().users["kbf-lease-pool-0"].admin);
     assert_eq!(
         rig.helper.pool_status().free,
@@ -166,7 +164,7 @@ fn an_administrator_needs_a_valid_unused_grant() {
     );
 
     // An administrator that cannot be made leaves the lease live, to be ended.
-    rig.host.state().fail.insert("create_user");
+    rig.host.state().fail.insert("set_admin");
     let grant = sign(7, &text("SERIAL1", "3.4", NOW_SECS));
     let error = rig
         .helper
@@ -175,8 +173,7 @@ fn an_administrator_needs_a_valid_unused_grant() {
         .to_string();
     assert_eq!(
         error,
-        "making kbf-lease-pool-0 an administrator for lease 3.4: creating user \
-         kbf-lease-pool-0: create_user failed"
+        "making kbf-lease-pool-0 an administrator for lease 3.4: set_admin failed"
     );
     rig.host.state().fail.clear();
     assert_eq!(rig.helper.user_delete("3.4"), Ok(true));

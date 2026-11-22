@@ -635,3 +635,14 @@ fn an_empty_program_is_not_found_without_a_search() {
     let error = Program::new("", [""; 0]).spawn().unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
 }
+
+/// Catches: an `exec` off macOS that executes something other than the program it is given,
+/// or that does not return the error when the program cannot be executed (it runs in this
+/// test's own process, so only the failing call is one a test can make).
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_exec_of_a_program_that_is_not_there_returns_the_error() {
+    let missing = OsStr::new("/nonexistent/js-mac-session-exec-test");
+    let why = super::exec(missing, &[OsString::from("--flag")]);
+    assert_eq!(why.kind(), io::ErrorKind::NotFound, "{why}");
+}

@@ -829,6 +829,9 @@ fn a_leases_usage_is_both_counters_or_none() {
         Some(JobUsage {
             peak_memory_bytes: 3_221_225_472,
             cpu_usage_usec: 4_500_000,
+            cpu_throttle: None,
+            cpu_pressure_some_usec: None,
+            cpu_peak: None,
         })
     );
     fs::write(dir.join("memory.peak"), "max\n").expect("peak");

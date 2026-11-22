@@ -88,6 +88,9 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     let counted = JobUsage {
         peak_memory_bytes: 7,
         cpu_usage_usec: 9,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
     };
     fake.report_usage("run-plain", counted);
     fake.set_cgroup("run-plain", "/sys/fs/cgroup/run-plain");

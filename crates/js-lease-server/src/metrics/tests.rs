@@ -135,6 +135,17 @@ async fn fixture(name: &str) -> Fixture {
     for (from, times) in sources.into_iter().zip(1..) {
         (0..times).for_each(|_| recorder.job_tables(from));
     }
+    let (host_a, host_b) = (
+        HostId::new("host-a").unwrap(),
+        HostId::new("host-b").unwrap(),
+    );
+    for (host, reason, times) in [
+        (&host_a, "cpu", 3),
+        (&host_a, "predicted-memory", 1),
+        (&host_b, "booked-memory", 2),
+    ] {
+        (0..times).for_each(|_| recorder.placement_refused(host, reason));
+    }
     let capacity = Acquired::Refused(Refusal {
         code: RefusalCode::Capacity,
         reason: Reason::Api("no capacity in the zone".to_owned()),
@@ -282,6 +293,42 @@ fn only_a_capacity_or_quota_refusal_fails_over() {
     };
     let expected = BTreeMap::from([("cpu".to_owned(), cpu), ("gpu".to_owned(), gpu)]);
     assert_eq!(recorder.acquires(), expected);
+}
+
+/// Asserts that the placer's pass tells the recorder each refusal through the pass sink, and
+/// that the recorder keeps them by host and reason: two for `cpu` on one host, one for
+/// `cold-cap` on it and one for `cpu` on another. It catches a pass sink that does not
+/// forward, and counts kept under the wrong host or reason.
+#[test]
+fn the_pass_sink_counts_each_refusal_by_host_and_reason() {
+    use js_sched_placer::engine::jobs::PassMetrics;
+    let recorder = Recorder::default();
+    let sink = PassSink(&recorder);
+    let (a, b) = (HostId::new("a").unwrap(), HostId::new("b").unwrap());
+    sink.refused(&a, "cpu");
+    sink.refused(&a, "cpu");
+    sink.refused(&a, "cold-cap");
+    sink.refused(&b, "cpu");
+    let expected = BTreeMap::from([
+        (("a".to_owned(), "cold-cap"), 1),
+        (("a".to_owned(), "cpu"), 2),
+        (("b".to_owned(), "cpu"), 1),
+    ]);
+    assert_eq!(recorder.refusals(), expected);
+}
+
+/// Asserts that a refusal is one line of the counter, labelled with its host and reason.
+#[test]
+fn a_refusal_is_written_with_its_host_and_reason_labels() {
+    let recorder = Recorder::default();
+    recorder.placement_refused(&HostId::new("h").unwrap(), "cpu");
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+    };
+    let text = render(&seen, &recorder);
+    let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
+    assert!(text.contains(line), "{line} is not in:\n{text}");
 }
 
 /// Asserts that a pool's name is written escaped in the text, so a name with a quote or a line
