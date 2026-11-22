@@ -127,8 +127,9 @@
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
 //!   from (themselves and their path dependencies built for macOS) start goes through
-//!   `js_mac_session::disclaim`, used by a test rather than a verb: `cargo test -p xtask
-//!   --test spawn_sites`.
+//!   `js_mac_session::disclaim`, and only the files of `KEEPERS` keep a program's privacy
+//!   responsibility, used by tests rather than a verb: `cargo test -p xtask --test
+//!   spawn_sites` and `--test spawn_sites_keepers`.
 //!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.

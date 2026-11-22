@@ -10,7 +10,8 @@
 //! argument vector (`crate::groups`; resolved once, in the helper, so the two ways to
 //! start a process hold the same list, and no directory lookup runs here), and only then executes the action's
 //! argument vector, with its responsibility disclaimed (`crate::disclaim::exec`), so it
-//! answers to the privacy controls (TCC) for itself. The working directory, the
+//! answers to the privacy controls (TCC) for itself; whether this path should keep the
+//! responsibility is not decided. The working directory, the
 //! environment and the descriptors `crate::spawn` set up pass through both executions
 //! unchanged.
 
