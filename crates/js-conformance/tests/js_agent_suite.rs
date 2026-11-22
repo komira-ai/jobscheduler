@@ -286,6 +286,7 @@ fn job_start(job: &str, allocation: &str) -> JobStartSpec {
         placed_at_ms: None,
         fuse: false,
         xcode: None,
+        sizing: None,
     }
 }
 

@@ -6,8 +6,8 @@
 //! ([`APPLICATION_IDENTITY`]) in the workflow `js-agent-macos-pkg.yml`, and
 //! [`super::code_signature`] reads the signature back against this table. The privacy
 //! profile `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` grants Full
-//! Disk Access to one of the programs, [`FULL_DISK_ACCESS_PROGRAM`], by its installed path and
-//! its requirement; [`privacy_profile`] renders the profile from this table, and
+//! Disk Access to one of the programs, [`FULL_DISK_ACCESS_PROGRAM`] (the agent itself, the one
+//! program of `docs/design/mac-one-program.md`), by its installed path and its requirement; [`privacy_profile`] renders the profile from this table, and
 //! [`profile_problems`] says how a committed file differs from it, so the file and the table
 //! cannot drift apart.
 //!
@@ -31,10 +31,10 @@ pub const AUTHORITIES: [&str; 3] = [
 /// The directory the package installs the programs in, which updates replace them in place.
 pub const INSTALL_DIR: &str = "/Library/Application Support/js-agent/bin";
 
-/// The program that holds the Full Disk Access grant: the root helper, which is its own
-/// launchd job and starts everything it runs with the responsibility disclaimed, so the
-/// grant never reaches a job.
-pub const FULL_DISK_ACCESS_PROGRAM: &str = "js-mac-session";
+/// The program that holds the Full Disk Access grant: the agent, which is its own launchd
+/// job and starts every program it runs with the responsibility disclaimed, as the root
+/// helper starts every process of a job, so the grant never reaches a job.
+pub const FULL_DISK_ACCESS_PROGRAM: &str = "js-agent";
 
 /// One program of the package and the identifier it is signed under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +95,7 @@ impl Program {
 /// Never: [`FULL_DISK_ACCESS_PROGRAM`] is in [`PROGRAMS`], which a test holds.
 #[must_use]
 pub fn grant_holder() -> Program {
-    program(FULL_DISK_ACCESS_PROGRAM).unwrap_or(PROGRAMS[1])
+    program(FULL_DISK_ACCESS_PROGRAM).unwrap_or(PROGRAMS[0])
 }
 
 /// The profile that grants Full Disk Access to [`grant_holder`], as the file
@@ -117,15 +117,15 @@ pub fn privacy_profile() -> String {
 	<array>
 		<dict>
 			<key>PayloadDescription</key>
-			<string>Grants Full Disk Access to the root helper of js-agent and to nothing else.</string>
+			<string>Grants Full Disk Access to js-agent and to nothing else.</string>
 			<key>PayloadDisplayName</key>
-			<string>js-agent root helper: Full Disk Access</string>
+			<string>Full Disk Access for js-agent</string>
 			<key>PayloadIdentifier</key>
 			<string>com.komira.js-agent.full-disk-access.policy</string>
 			<key>PayloadType</key>
 			<string>com.apple.TCC.configuration-profile-policy</string>
 			<key>PayloadUUID</key>
-			<string>5C0E7A52-6B1D-4B7E-9C47-2D1F3A8E9B10</string>
+			<string>8D4B2F61-3C7E-4A95-B1D8-E6F02A7C5B93</string>
 			<key>PayloadVersion</key>
 			<integer>1</integer>
 			<key>Services</key>
@@ -138,7 +138,7 @@ pub fn privacy_profile() -> String {
 						<key>CodeRequirement</key>
 						<string>{requirement}</string>
 						<key>Comment</key>
-						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and manages the accounts native jobs run as. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<string>js-agent lists the privacy database's directory to learn whether it holds this grant, which it holds to delete the accounts native jobs run as. Every program it starts, and every process of a job, is started with the responsibility disclaimed, so the grant never reaches a job.</string>
 						<key>Identifier</key>
 						<string>{path}</string>
 						<key>IdentifierType</key>
@@ -151,7 +151,7 @@ pub fn privacy_profile() -> String {
 		</dict>
 	</array>
 	<key>PayloadDescription</key>
-	<string>Full Disk Access for the root helper of js-agent, by its installed path and its signature.</string>
+	<string>Full Disk Access for js-agent, by its installed path and its signature.</string>
 	<key>PayloadDisplayName</key>
 	<string>js-agent: Full Disk Access</string>
 	<key>PayloadIdentifier</key>
@@ -163,7 +163,7 @@ pub fn privacy_profile() -> String {
 	<key>PayloadType</key>
 	<string>Configuration</string>
 	<key>PayloadUUID</key>
-	<string>A3F1D2C4-8E65-4F0B-B7A9-6D52E0C14F38</string>
+	<string>F2A6C9D7-5E13-4B8A-9F04-7C1D3E8B6A25</string>
 	<key>PayloadVersion</key>
 	<integer>1</integer>
 </dict>

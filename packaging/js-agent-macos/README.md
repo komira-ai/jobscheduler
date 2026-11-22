@@ -128,7 +128,7 @@ is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there a
 real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
 whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
 inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
-home even against root without Full Disk Access (the helper is given it by the profile above, but the pool reset of this release does not rely on it):
+home even against root without Full Disk Access (the profile below grants it to the agent, not the helper, and the pool reset of this release does not rely on it):
 a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
 system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
 it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
@@ -231,15 +231,15 @@ exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the updat
 
 ## Privacy grants (TCC)
 
-The root helper `js-mac-session` is granted Full Disk Access (the privacy service
-`SystemPolicyAllFiles`), and nothing else is granted anything. The grant is given by the profile
+The agent `js-agent` is granted Full Disk Access (the privacy service `SystemPolicyAllFiles`), and
+nothing else is granted anything. The grant is given by the profile
 `mdm/js-agent-full-disk-access.mobileconfig` of this directory, which the owner installs through
 device management (see `mdm/README.md`): one entry, for the path
-`/Library/Application Support/js-agent/bin/js-mac-session` (where the package lays the program
-and updates replace it in place) and the program's designated requirement, which names the
-identifier `com.komira.js-agent.session`, Apple's Developer ID chain and the team and no hash, so
-every release of the program meets it. That is why the release signs the programs (see
-Signing), and `cargo test -p xtask` holds the profile to the table the signing uses. The agent and
+`/Library/Application Support/js-agent/bin/js-agent` (where the package lays the program and
+updates replace it in place) and the program's designated requirement, which names the identifier
+`com.komira.js-agent`, Apple's Developer ID chain and the team and no hash, so every release of
+the program meets it. That is why the release signs the programs (see Signing), and `cargo test -p
+xtask` holds the profile to the table the signing uses. The root helper `js-mac-session` and
 `js-mac-provision` need no grant. A grant given to the helper or the agent, by hand or by a
 profile, never reaches a job. macOS lets a
 process use the grants of its *responsible* process, which is whoever started it, unless

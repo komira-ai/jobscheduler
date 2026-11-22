@@ -5,9 +5,10 @@
 //! Pass 1 (the placement walk over the open hosts) reaches [`Outcome::Waiting`],
 //! [`Outcome::WholeHost`] and [`Outcome::Placed`]; pass 2 (the acquire of a machine, with its
 //! failover) reaches [`Outcome::Refused`] and [`Outcome::Launched`]; a failed whole-host prepare
-//! reaches [`Outcome::Requeued`], and a start a held host refused [`Outcome::HeldRequeued`]. A pass-2 reason outlives pass 1's "nothing is free": a job
-//! that shows [`QueueCode::QuotaBackoff`], [`QueueCode::FailingOver`] or
-//! [`QueueCode::WaitingForMachine`] keeps it through
+//! reaches [`Outcome::Requeued`], a start a held host refused [`Outcome::HeldRequeued`] and a
+//! start a host refused for capacity [`Outcome::CapacityRequeued`]. A pass-2 reason outlives
+//! pass 1's "nothing is free": a job that shows [`QueueCode::QuotaBackoff`],
+//! [`QueueCode::FailingOver`] or [`QueueCode::WaitingForMachine`] keeps it through
 //! [`Outcome::Waiting`], and through an [`Outcome::WholeHost`] with no host being emptied for
 //! it, until it is placed, a host is emptied or a machine is launched for it, or another
 //! refusal comes. An event is appended on every change of code, and on every attempt and requeue even
@@ -60,6 +61,12 @@ pub enum Outcome {
         host: HostId,
         /// Whether the job books the whole host.
         whole_host: bool,
+    },
+    /// `host` had no room for the placed job when its start reached it (the agent's code
+    /// `no-capacity`), and the job went back to the queue.
+    CapacityRequeued {
+        /// The host that refused the start.
+        host: HostId,
     },
 }
 
@@ -133,6 +140,17 @@ pub fn note(outcome: &Outcome, current: QueueCode) -> Option<QueueNote> {
                 code,
                 detail: format!(
                     "host {host} is held for maintenance and refused the start; the job is queued again"
+                ),
+                event: Some(Kind::Requeued),
+                host: Some(host.clone()),
+                attempt: false,
+            });
+        }
+        Outcome::CapacityRequeued { host } => {
+            return Some(QueueNote {
+                code: QueueCode::WaitingForCapacity,
+                detail: format!(
+                    "host {host} had no room for the job when its start reached it; the job is queued again"
                 ),
                 event: Some(Kind::Requeued),
                 host: Some(host.clone()),

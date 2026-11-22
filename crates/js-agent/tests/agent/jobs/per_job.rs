@@ -51,6 +51,7 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 host_ports: Vec::new(),
                 placed_at_ms: None,
                 xcode: None,
+                sizing: None,
             }))
         })
         .collect();

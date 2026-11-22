@@ -106,15 +106,17 @@ fn a_replace_request_from_another_thread_ends_the_wait() {
     asker.join().expect("the asker ended");
 }
 
-/// The signals this process ignores, from `/proc/self/status` (a bit per signal, bit 0 for
-/// signal 1).
-fn ignored() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").expect("the status of the process");
-    let mask = status
-        .lines()
-        .find_map(|line| line.strip_prefix("SigIgn:"))
-        .expect("an ignore mask");
-    u64::from_str_radix(mask.trim(), 16).expect("a hexadecimal mask")
+/// Whether this process ignores `signal`, asked of `sigaction(2)` (which reads the disposition
+/// and changes nothing), so it reads the same on Linux and macOS.
+fn ignored(signal: libc::c_int) -> bool {
+    let mut old = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: a null new action makes `sigaction` only write the current one into `old`, which
+    // points at memory of the right type that lives past the call; it installs nothing.
+    let status = unsafe { libc::sigaction(signal, std::ptr::null(), old.as_mut_ptr()) };
+    assert_eq!(status, 0, "the disposition of signal {signal}");
+    // SAFETY: `sigaction` returned 0, so it wrote the whole of `old`.
+    let old = unsafe { old.assume_init() };
+    old.sa_sigaction == libc::SIG_IGN
 }
 
 /// Asserts that the system sleeper readies an exec: SIGHUP ignored (a disposition the exec
@@ -126,9 +128,9 @@ fn readying_an_exec_ignores_sighup_and_a_stop_on_the_line_wins() {
     let mut sleeper = sleeper();
     ask_replace(&sleeper);
     assert!(sleeper.ready_to_run_again());
-    let bit = |signal: i32| 1_u64 << (signal - 1);
-    assert_ne!(ignored() & bit(libc::SIGHUP), 0);
-    assert_eq!(ignored() & (bit(libc::SIGTERM) | bit(libc::SIGINT)), 0);
+    assert!(ignored(libc::SIGHUP));
+    assert!(!ignored(libc::SIGTERM));
+    assert!(!ignored(libc::SIGINT));
     ask_stop(&sleeper);
     assert!(!sleeper.ready_to_run_again());
 }

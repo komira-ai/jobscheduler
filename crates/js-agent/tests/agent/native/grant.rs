@@ -1,26 +1,20 @@
-//! Full Disk Access on the native path: the question the agent asks its root helper at
-//! start, the capability that reports the answer, and the refusal of every native job
-//! unless the helper holds the grant. The helper is the fake that speaks the real protocol.
+//! Full Disk Access on the native path: the question the agent answers for itself at start,
+//! the capability that reports the answer, and the refusal of every native job unless the
+//! agent holds the grant. The helper is the fake that speaks the real protocol; the agent
+//! never asks it about the grant.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::{fs, io};
 
 use js_agent::lifecycle::Runtime as _;
 use js_agent::native::grant;
 use js_agent_wire::{Hello, Outcome, Phase, ProtocolRange, WireShape, refusal};
 use js_caps::FULL_DISK_ACCESS;
-use js_mac_session::client::Client;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::lifecycle::{Native, job};
 use super::{Rig, native};
 use crate::support::Scratch;
-
-const STATES: [FullDiskAccess; 3] = [
-    FullDiskAccess::Granted,
-    FullDiskAccess::NotGranted,
-    FullDiskAccess::Undetermined,
-];
 
 /// A hello of a Mac host with no capabilities but its os.
 fn hello() -> Hello {
@@ -50,58 +44,56 @@ fn hello() -> Hello {
     }
 }
 
-/// Asserts that the agent takes the helper's answer as it is for each of the three states,
-/// asks the helper once per call (nothing is remembered between calls) and sends no other
-/// verb. Catches an agent that reads a not-granted helper as granted, or that asks a verb
-/// the helper does not answer before its reset.
+/// Asserts that the agent judges its own listing of the privacy database's directory: a
+/// listing that worked is `granted`, a refusal for want of permission is `not-granted`, and a
+/// missing directory or any other failure is `undetermined`. Catches an agent that reads a
+/// refusal as a grant, or a missing directory (a host where the check cannot work) as one
+/// that lacks the grant.
 #[test]
-fn the_agent_takes_the_helpers_answer_as_it_is() {
-    let dir = Scratch::new("grant-ask");
-    let fake = super::fake_helper::FakeHelper::start(&dir);
-    for state in STATES {
-        fake.full_disk_access(state);
-        assert_eq!(grant::ask(&fake.client()), Ok(state));
+fn the_agent_judges_its_own_listing() {
+    assert_eq!(grant::ask(Ok(())), FullDiskAccess::Granted);
+    for (kind, state) in [
+        (io::ErrorKind::PermissionDenied, FullDiskAccess::NotGranted),
+        (io::ErrorKind::NotFound, FullDiskAccess::Undetermined),
+        (io::ErrorKind::NotADirectory, FullDiskAccess::Undetermined),
+        (io::ErrorKind::Other, FullDiskAccess::Undetermined),
+    ] {
+        assert_eq!(grant::ask(Err(kind.into())), state, "{kind:?}");
     }
-    assert_eq!(fake.verbs(), ["full-disk-access"; 3]);
 }
 
-/// Asserts that a helper from before the verb, which refuses it as unknown, is read as
-/// `undetermined` and not as a failure to start. Catches an agent that does not start beside
-/// a helper that predates the question, and one that takes the silence for a grant.
+/// Asserts that the listing reads a directory, with or without entries, and that a missing
+/// path and a file are errors of their own kind, which the judgement then calls
+/// `undetermined`. The directory it lists on a Mac is the privacy database's. Catches a
+/// listing that answers `Ok` for a path that is not there or for a file, and one that fails
+/// on an empty directory.
 #[test]
-fn a_helper_from_before_the_question_is_undetermined() {
-    let dir = Scratch::new("grant-old");
-    let fake = super::fake_helper::FakeHelper::start(&dir);
-    fake.be_old();
-    assert_eq!(grant::ask(&fake.client()), Ok(FullDiskAccess::Undetermined));
-}
-
-/// Asserts that a helper that fails the verb for another reason, and a socket nothing
-/// listens on, are errors that name `--native-helper-socket` and the cause, so the agent
-/// does not start on a guess. Catches a failure read as `undetermined`, which would let the
-/// agent start and report a state it never learned, and an error that does not say which
-/// flag to look at.
-#[test]
-fn a_helper_that_cannot_be_asked_stops_the_start_by_name() {
-    let dir = Scratch::new("grant-fail");
-    let fake = super::fake_helper::FakeHelper::start(&dir);
-    fake.refuse("full-disk-access", "the privacy database is busy");
+fn the_listing_reads_the_directory_and_nothing_in_it() {
+    let dir = Scratch::new("grant-list");
+    let empty = dir.path("empty");
+    fs::create_dir(&empty).unwrap();
+    assert_eq!(grant::list(&empty).map_err(|e| e.kind()), Ok(()));
+    let full = dir.path("full");
+    fs::create_dir(&full).unwrap();
+    fs::write(full.join("TCC.db"), "x").unwrap();
+    assert_eq!(grant::list(&full).map_err(|e| e.kind()), Ok(()));
+    let missing = dir.path("missing");
     assert_eq!(
-        grant::ask(&fake.client()),
-        Err(
-            "--native-helper-socket: asking the helper whether it holds Full Disk Access: \
-             kbf-mac-session refused: the privacy database is busy"
-                .to_owned()
-        )
+        grant::list(&missing).map_err(|e| e.kind()),
+        Err(io::ErrorKind::NotFound)
     );
-    let dead = Client::new(Path::new("/nonexistent/js-agent-helper.sock"));
-    let why = grant::ask(&dead).unwrap_err();
-    assert!(
-        why.starts_with(
-            "--native-helper-socket: asking the helper whether it holds Full Disk Access: \
-             kbf-mac-session: "
-        ),
-        "{why}"
+    assert_eq!(
+        grant::ask(grant::list(&missing)),
+        FullDiskAccess::Undetermined
+    );
+    let file = full.join("TCC.db");
+    assert_eq!(
+        grant::list(&file).map_err(|e| e.kind()),
+        Err(io::ErrorKind::NotADirectory)
+    );
+    assert_eq!(
+        grant::PRIVACY_DIR,
+        "/Library/Application Support/com.apple.TCC"
     );
 }
 
@@ -127,7 +119,7 @@ fn the_state_is_reported_as_a_capability() {
     assert_eq!(FULL_DISK_ACCESS, "full-disk-access");
 }
 
-/// Asserts that admission refuses a native body on a runtime whose helper lacks the grant
+/// Asserts that admission refuses a native body on a runtime whose agent lacks the grant
 /// with `no-full-disk-access`, naming the state and the profile to install, and that it does
 /// so before every other check: a program under no tool root, a network level above the
 /// ceiling and a bundle program on a runtime with no store are all answered the same way. A
@@ -150,9 +142,8 @@ fn a_runtime_without_the_grant_refuses_every_native_body_first() {
             assert_eq!(
                 refused.why,
                 format!(
-                    "the root helper js-mac-session does not hold Full Disk Access ({}): \
-                     install the privacy profile \
-                     packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig \
+                    "js-agent does not hold Full Disk Access ({}): install the privacy \
+                     profile packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig \
                      through device management and restart the agent",
                     state.as_str()
                 )

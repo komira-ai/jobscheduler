@@ -1,6 +1,6 @@
 # A new account per native job on a Mac
 
-Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants the root helper Full Disk Access, the agent reports whether the grant is in force and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is designed here and lands in its own change once the grant has been seen in force on a Mac and step 4's measurements are in.
+Status: steps 1 and 3 are built (the release signs the macOS programs, a privacy profile grants `js-agent` Full Disk Access, the agent reports whether it holds the grant and refuses native jobs without it). Step 2, a new account for every native job that is deleted afterwards, is designed here and lands in its own change once the grant has been seen in force on a Mac and step 4's measurements are in.
 
 Today a native job runs as one of a fixed pool of hidden accounts (`kbf-lease-pool-<slot>`), which the root helper `js-mac-session` resets in place after the job and lends again (`mac-lease-teardown.md`). The pool exists because macOS 27 refuses root, without the privacy grant Full Disk Access, the deletion of an account record, of an account's home and of the per-user folders the system placed for it, so nothing of an account could be removed. A reset in place empties what it can and keeps the rest: an empty `~/Library/Preferences` that the system guards, the `/var/folders/<xx>/<hash>` entry with its `0`, `C` and `T`, the record itself and every attribute of it root may not write. A job leaves behind whatever the reset does not reach, and the next job of the same slot inherits it.
 
@@ -11,7 +11,7 @@ The aim is that no job inherits anything of an account: each job gets an account
 | | Before | After this change (steps 1 and 3) | After step 2 |
 |---|---|---|---|
 | Signature of `js-agent`, `js-mac-session`, `js-mac-provision` | the linker's ad hoc signature, an identifier that changes with every build | Developer ID Application, team `U7RTX4XD3X`, fixed identifiers, hardened runtime, trusted timestamp | same |
-| Full Disk Access | held by nothing | granted to `js-mac-session` alone by a profile the owner installs through device management | same |
+| Full Disk Access | held by nothing | granted to `js-agent` alone by a profile the owner installs through device management | same |
 | What the host list says | nothing | the host's capability `full-disk-access`: `granted`, `not-granted` or `undetermined` | same |
 | A native job on a Mac without the grant | runs as a pool account that is reset in place | refused before anything is made, `no-full-disk-access` | same |
 | A native job on a Mac with the grant | runs as a pool account that is reset in place | same: the reset does not use the grant | runs as a new account, deleted after the job (home, `~/Library/Preferences` and per-user folders included) and shown gone before its uid is used again |
@@ -22,9 +22,7 @@ What does not change: the Seatbelt profile every job runs under, the kill of the
 
 ### The program that holds it
 
-The account operations run in the root helper `js-mac-session`, a launchd daemon of its own (`js-agent.session`). macOS's privacy control judges an access by the responsible process, and a launchd daemon is its own, so the grant must name the helper. The agent never touches an account: it asks the helper over its socket. Everything the helper starts (the job's `sandbox-exec`, `launchctl`, `getconf`) is started disclaimed (`spawn-disclaim.md`): the started program answers for itself, so the grant never reaches a job. The profile names that one program and no other: the agent, which talks to the network, gets no grant it does not need.
-
-When the helper's work moves into the agent (`mac-one-program.md`, komira-ai/jobscheduler#991), the program that deletes accounts becomes `js-agent`. The switch release changes the profile's one entry to `js-agent`'s path and identifier, and the owner installs the new profile before that release reaches a Mac; the profile's pin test (below) makes the switch change both together.
+The account operations move into `js-agent` with the helper's work (`mac-one-program.md`, komira-ai/jobscheduler#991), so the program that deletes accounts is `js-agent`, a launchd daemon of its own (`js-agent`). macOS's privacy control judges an access by the responsible process, and a launchd daemon is its own, so the grant names the agent. The profile names `js-agent` already, ahead of the switch release, so the owner installs it once and it holds through the switch: a profile names a program by its path and its signature, not its version. Until the switch the helper `js-mac-session` holds no grant, and the pool's reset in place, which it does, needs none. Everything the agent starts (its probes, `pfctl`) and everything the helper starts for a job (the job's `sandbox-exec`, `launchctl`, `getconf`) is started disclaimed (`spawn-disclaim.md`): the started program answers for itself, so the grant never reaches a job. The profile names that one program and no other.
 
 ### Signing
 
@@ -40,17 +38,17 @@ On a push to main the package workflow (`.github/workflows/js-agent-macos-pkg.ym
 
 ### The profile
 
-`packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` is one Privacy Preferences Policy Control payload with one `SystemPolicyAllFiles` entry: the helper by its path, `/Library/Application Support/js-agent/bin/js-mac-session`, and its designated requirement. A program that is not an app bundle is named by its path (Apple's schema for the payload). The path is fixed: the package lays its programs there and an update replaces them in place. The requirement keeps another program put at that path from inheriting the grant. A test renders the profile from the signing table and holds the committed file to it byte for byte.
+`packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` is one Privacy Preferences Policy Control payload with one `SystemPolicyAllFiles` entry: the agent by its path, `/Library/Application Support/js-agent/bin/js-agent`, and its designated requirement. A program that is not an app bundle is named by its path (Apple's schema for the payload). The path is fixed: the package lays its programs there and an update replaces them in place. The requirement keeps another program put at that path from inheriting the grant. A test renders the profile from the signing table and holds the committed file to it byte for byte.
 
 ### Knowing
 
-The helper answers a verb, `full-disk-access`, by listing the privacy database's directory (`/Library/Application Support/com.apple.TCC`), which only a process with Full Disk Access may list: success is `granted`, a refusal is `not-granted`, any other error `undetermined` (logged). It opens no file and reads no database. The agent asks at its start, before its first hello, and reports the answer as the detected capability `full-disk-access`, which the job service's host list (`GET /v1/hosts`) shows. A helper from before the verb is `undetermined`. A helper the agent cannot reach ends the agent's start, as a helper that cannot be reached for the boot reset does, and launchd starts it again.
+The agent lists the privacy database's directory (`/Library/Application Support/com.apple.TCC`) itself, which only a process with Full Disk Access may list: success is `granted`, a refusal is `not-granted`, any other error `undetermined` (logged). It opens no file and reads no database. The agent does this at its start, before its first hello, and reports the answer as the detected capability `full-disk-access`, which the job service's host list (`GET /v1/hosts`) shows. The helper still answers its verb `full-disk-access` for itself (it holds no grant); the agent no longer asks it.
 
-The agent asks once per start: a profile installed while the agent runs takes effect at the agent's next start (an update, or `launchctl kickstart -k system/js-agent`). The helper itself needs no restart: the privacy control judges each access as it is made.
+The agent looks once per start: a profile installed while the agent runs takes effect at the agent's next start (an update, or `launchctl kickstart -k system/js-agent`).
 
 ## Step 3: without the grant, one mode
 
-A Mac agent whose helper does not hold the grant (`not-granted` or `undetermined`) refuses every native job, by the code `no-full-disk-access`, at admission and before anything is made for it: no account, no journal line, no bundle. The alternative was to keep today's reset as a named weaker mode. It is not kept, because two modes drift and the weaker one could then run by accident, on a Mac whose profile was never installed or was removed, with nothing but a log line to say so. The four Macs that run native jobs will hold the grant; a Mac without it says so in the host list and in the refusal of each job sent to it.
+A Mac agent that does not hold the grant (`not-granted` or `undetermined`) refuses every native job, by the code `no-full-disk-access`, at admission and before anything is made for it: no account, no journal line, no bundle. The alternative was to keep today's reset as a named weaker mode. It is not kept, because two modes drift and the weaker one could then run by accident, on a Mac whose profile was never installed or was removed, with nothing but a log line to say so. The four Macs that run native jobs will hold the grant; a Mac without it says so in the host list and in the refusal of each job sent to it.
 
 ## Step 2: a new account per job
 
@@ -119,17 +117,17 @@ Stays:
 - the sweep of the shared places and the IPC removal, which reach what the job left outside its account;
 - the leak scan after each job and the taint it sets: a login item, a Background Task Management entry or a launch daemon a job left outside its account is not undone by deleting the account.
 
-It fits the one-program design: no new daemon, and no new helper verb but `full-disk-access`, which goes with the socket when the helper's work moves into the agent (the agent then checks its own grant in-process).
+It fits the one-program design: no new daemon, and no new helper verb: the agent checks its own grant in-process, and the helper's `full-disk-access` verb, which the agent no longer asks, goes with the socket when the helper's work moves into the agent.
 
 ## Step 6: the proof
 
 The isolation probe's two-phase persistence half (a job leaves a marker of every kind it may make; a later job looks for each) judges a new account per job: the `find` job runs as another account by construction, and every marker kind must come back `gone`. One row stays open: a POSIX named semaphore outlives every account change until the Mac restarts, because macOS has no interface that lists or removes another process's semaphores by owner; the profile cannot deny creating one without breaking Python's `multiprocessing` locks. A semaphore holds a count, not data.
 
-The tests of the change run on Linux against the helper's fakes (the account's shape, the uid choice, each step's failure, each crash point, the ledger read by the previous release). The root test that installs the package on the hosted macOS runner proves the side it can: the runner's helper is unsigned and holds no grant, so the host list says `not-granted`. A deletion with the grant can only be shown on a Mac with the profile.
+The tests of the change run on Linux against the helper's fakes (the account's shape, the uid choice, each step's failure, each crash point, the ledger read by the previous release). The root test that installs the package on the hosted macOS runner proves the side it can: the runner's agent is unsigned and holds no grant, so the host list says `not-granted`. A deletion with the grant can only be shown on a Mac with the profile.
 
 ## Step 7: the owner's steps
 
 1. Merge; the release on main signs the programs. Nothing on a Mac changes until the profile is installed.
 2. In Apple Business, upload `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` as a custom profile and assign it to the Macs that run native jobs. hostkeeper ships its own profile for its own program; one profile can carry both entries (one `SystemPolicyAllFiles` list with two entries), but each repository's test pins its own file, so a merged file would be pinned by neither. Upload the two files in the same sitting: their payload identifiers differ, so neither replaces the other.
-3. On each Mac, once the release with the signed programs is installed and the profile is listed (`profiles list` as root): restart the agent (`launchctl kickstart -k system/js-agent`). The helper logs `full disk access: granted`, and the host list shows `full-disk-access: granted`. `codesign --display --requirements - "/Library/Application Support/js-agent/bin/js-mac-session"` prints the pinned requirement.
+3. On each Mac, once the release with the signed programs is installed and the profile is listed (`profiles list` as root): restart the agent (`launchctl kickstart -k system/js-agent`). The agent logs `full disk access: granted`, and the host list shows `full-disk-access: granted`. `codesign --display --requirements - "/Library/Application Support/js-agent/bin/js-agent"` prints the pinned requirement.
 4. After step 2 is released: run one native job, then, as root, look for its account by its uid: no record (`dscl . -search /Users UniqueID <uid>`), no home, no directory under `/private/var/folders` owned by the uid (`find /private/var/folders -maxdepth 2 -uid <uid>`).

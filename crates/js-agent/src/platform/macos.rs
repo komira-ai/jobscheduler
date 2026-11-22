@@ -64,8 +64,8 @@ pub struct Flags {
     /// semaphores or message queues (which the helper's reset removes) nor POSIX named
     /// semaphores, and the helper reuses uids, so a named semaphore a run leaves can be
     /// opened by a later run that gets the same uid, until the Mac restarts.
-    /// At start the agent asks the helper whether it holds Full Disk Access, reports the
-    /// answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
+    /// At start the agent lists the privacy database's directory to learn whether it holds
+    /// Full Disk Access itself (the helper is not asked), reports the answer as the capability `full-disk-access` and, unless it is `granted`, refuses every
     /// native job (`no-full-disk-access`).
     #[arg(long, value_name = "PATH")]
     pub native_helper_socket: Option<PathBuf>,
@@ -497,9 +497,12 @@ pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<()
                 Some(store) => native.with_bundles(Arc::clone(store))?,
                 None => native,
             };
-            // The helper is asked once, here: the state it answers is the one the hello
-            // reports and the runtime refuses jobs by.
-            let held = native::grant::ask(&js_mac_session::client::Client::new(native.socket()))?;
+            // The agent asks itself once, here: the state its listing of the privacy
+            // database's directory shows is the one the hello reports and the runtime
+            // refuses jobs by.
+            let held = native::grant::ask(native::grant::list(std::path::Path::new(
+                native::grant::PRIVACY_DIR,
+            )));
             let native = native
                 .with_full_disk_access(held)
                 .with_xcodes(start.xcodes.clone());
@@ -637,7 +640,7 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
 /// `open`), with no `egress-ports`, since a Mac forwards no port, `full-disk-access` (the state
-/// the helper answered at start: [`native::grant::report`]), and `log-upload`, since the
+/// the agent found at start: [`native::grant::report`]), and `log-upload`, since the
 /// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
 /// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
@@ -725,6 +728,10 @@ mod tests {
             flag(js_agent_wire::DISPATCH_CAPABILITY).as_deref(),
             Some(FLAG_SET)
         );
+        assert_eq!(
+            flag(js_agent_wire::LOAD_ADMISSION_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
         assert_eq!(flag(js_caps::LAYERED_ROOTFS).as_deref(), Some(FLAG_SET));
         assert_eq!(native.validate(), Ok(()));
     }
@@ -757,12 +764,12 @@ mod tests {
         }
     }
 
-    /// Asserts that a native agent's hello carries the state its helper answered as the
+    /// Asserts that a native agent's hello carries the state it found at start as the
     /// capability `full-disk-access`, spelled `granted`, `not-granted` or `undetermined`, and
     /// still validates. Catches a host listing that shows no grant state, or one that shows
     /// a state other than the one the agent refuses jobs by.
     #[test]
-    fn a_native_agent_reports_whether_its_helper_holds_full_disk_access() {
+    fn a_native_agent_reports_whether_it_holds_full_disk_access() {
         for (state, text) in [
             (FullDiskAccess::Granted, "granted"),
             (FullDiskAccess::NotGranted, "not-granted"),

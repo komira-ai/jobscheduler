@@ -267,6 +267,7 @@ pub fn open(
             read: read_node,
         }),
         image_budget: plan.image_budget,
+        cpu_ceiling: plan.cpu_ceiling,
         host_jobs: plan.host_jobs,
         host_ports: HostPorts {
             allowed: plan.host_ports.clone(),
