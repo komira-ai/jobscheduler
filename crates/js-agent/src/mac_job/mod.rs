@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! js-agent __mac-job (--job <file> | --job-inline <json>) (--accounts <dir> | --user <name>)
-//!     --root <dir> --out <dir> [--ready <n>] [--spawn ordinary|disclaimed]
+//!     --root <dir> --out <dir> [--ready <n>] [--account-range <first>-<last>]
+//!     [--spawn ordinary|disclaimed]
 //!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
 //!     [--profile-add <file>]
 //!     [--mount-provider <socket> --mount-root <dir> [--mount-provider-user <user>] [--agent-id <id>]]
@@ -75,6 +76,7 @@ mod macos;
 
 use std::ffi::OsString;
 use std::io::Write;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -138,6 +140,10 @@ pub struct Args {
     /// How many ready accounts the pool keeps.
     #[arg(long, default_value_t = 1)]
     pub ready: usize,
+    /// The uids the pool's slots take, `<first>-<last>`, in place of its own range: beside an
+    /// earlier release's accounts, which fill that range on a Mac that ran it.
+    #[arg(long, value_parser = uid_range)]
+    pub account_range: Option<RangeInclusive<u32>>,
     /// How the job is started.
     #[arg(long, value_enum, default_value = "ordinary")]
     pub spawn: Spawn,
@@ -174,6 +180,16 @@ pub struct Args {
     /// The user the put ingest's node runs as: a name, or `uid:gid`.
     #[arg(long, default_value = "_tierstore")]
     pub put_user: String,
+}
+
+/// The range `<first>-<last>` of `text`: two uids, the first not above the last.
+pub fn uid_range(text: &str) -> Result<RangeInclusive<u32>, String> {
+    let bad = || format!("{text:?}: not <first>-<last>, two uids, the first not above the last");
+    let (first, last) = text.split_once('-').ok_or_else(bad)?;
+    match (first.parse::<u32>(), last.parse::<u32>()) {
+        (Ok(first), Ok(last)) if first <= last => Ok(first..=last),
+        _ => Err(bad()),
+    }
 }
 
 /// Parses the command line after the mode word.

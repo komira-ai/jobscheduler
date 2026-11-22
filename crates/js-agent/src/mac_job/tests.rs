@@ -25,6 +25,7 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             accounts: None,
             user: Some("u".to_owned()),
             ready: 1,
+            account_range: None,
             spawn: Spawn::Ordinary,
             root: PathBuf::from("/r"),
             out: PathBuf::from("/o"),
@@ -192,4 +193,28 @@ fn only_the_mode_word_is_dispatched() {
     assert!(super::dispatch(&words(&["js-agent", "cordon"]), &mut out, &mut err).is_none());
     assert!(super::dispatch(&words(&["js-agent"]), &mut out, &mut err).is_none());
     assert!(out.is_empty() && err.is_empty());
+}
+
+#[test]
+fn an_account_range_is_two_uids_in_order() {
+    assert_eq!(super::uid_range("700-709"), Ok(700..=709));
+    assert_eq!(super::uid_range("700-700"), Ok(700..=700));
+    for bad in ["709-700", "700", "a-b", "700-", "-700", "1-2-3"] {
+        assert_eq!(
+            super::uid_range(bad),
+            Err(format!(
+                "{bad:?}: not <first>-<last>, two uids, the first not above the last"
+            )),
+            "{bad}"
+        );
+    }
+    let mut list = MINIMAL.to_vec();
+    list.extend(["--account-range", "700-709"]);
+    assert_eq!(
+        parse(&words(&list)).expect("parses").account_range,
+        Some(700..=709)
+    );
+    let mut list = MINIMAL.to_vec();
+    list.extend(["--account-range", "9-1"]);
+    assert!(parse(&words(&list)).is_err());
 }

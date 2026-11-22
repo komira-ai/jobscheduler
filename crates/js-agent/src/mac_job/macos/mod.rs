@@ -12,6 +12,7 @@ use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as 
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,7 +99,11 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
     };
     let pool = match &args.accounts {
         Some(state) => Some(make_private(state).and_then(|()| {
-            Pool::open(state, args.ready)
+            let mut settings = crate::mac_accounts::Settings::macos(args.ready);
+            if let Some(range) = &args.account_range {
+                settings.range = range.clone();
+            }
+            Pool::with_settings(state, settings, Arc::new(crate::mac_accounts::MacHost))
                 .map_err(|why| Stop::Setup(format!("the account pool: {why}")))
         })?),
         None => None,
