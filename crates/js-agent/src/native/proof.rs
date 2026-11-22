@@ -7,8 +7,9 @@
 //! the real supervisor ([`SystemLauncher`]) and runs one start through `create_and_start`,
 //! `poll` (with a `stop` after `--stop-after` seconds, with `--grace`, when asked) and
 //! `remove`. It prints the start's steps, how the job ended, the tails of its output and
-//! error, and the outcome of the removal with the retirement's proof. Real seconds are fine
-//! here: it is not the agent.
+//! error, the outcome of the removal with the retirement's proof, and each sweep of the run's
+//! processes (`sweep: <lease> <tally as JSON>`). Real seconds are fine here: it is not the
+//! agent.
 //!
 //! ```text
 //! js-agent __native-proof --accounts <dir> --range <first>-<last> --state <dir>
@@ -256,6 +257,10 @@ fn prove(args: &Args, open: Opener<'_>, out: &mut dyn Write, err: &mut dyn Write
         Err(why) => {
             let _ = writeln!(out, "remove: {}", why.0);
         }
+    }
+    for (lease, tally) in runtime.sweeps() {
+        let tally = serde_json::to_string(tally).unwrap_or_else(|why| why.to_string());
+        let _ = writeln!(out, "sweep: {lease} {tally}");
     }
     let exited_0 = matches!(ended, Status::Exited(exit) if exit.code == 0);
     match exited_0 && removed.is_ok() {

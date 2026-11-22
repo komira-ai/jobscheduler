@@ -27,16 +27,17 @@
 //!   outputs that could not be copied, or a commit that failed, fail it only as
 //!   [`RuntimeError::outputs`], after everything else is done.
 
+use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
 use rustix::process::Signal;
 
 use super::run::{Job, exit_of};
-use super::{NativeRuntime, accounts, end, logs, outputs, put};
+use super::{NativeRuntime, SWEEPS_KEPT, accounts, end, logs, outputs, put};
 use crate::lifecycle::{RunHandle, RuntimeError, Status};
 use crate::mac_supervisor::ExitRecord;
-use crate::mac_sweep::ProcessTable;
+use crate::mac_sweep::{ProcessTable, Tally};
 
 impl NativeRuntime {
     /// How the run `id` is now.
@@ -48,11 +49,13 @@ impl NativeRuntime {
         if run.ended.is_none() {
             run.ended = match &mut run.job {
                 None => Some(Status::Gone),
-                Some(job) if job.sweeping => swept_then_told(&id.0, job, &*self.table),
+                Some(job) if job.sweeping => {
+                    swept_then_told(&id.0, job, &*self.table, &mut self.sweeps)
+                }
                 Some(job) => match told(&id.0, job.supervised.try_exit()) {
                     None if job.kill_after.is_some_and(|after| now >= after) => {
                         job.sweeping = true;
-                        swept_then_told(&id.0, job, &*self.table)
+                        swept_then_told(&id.0, job, &*self.table, &mut self.sweeps)
                     }
                     seen => seen,
                 },
@@ -91,7 +94,8 @@ impl NativeRuntime {
         // First, so nothing the job left writes into its folder while the outputs are copied.
         // A sweep that is not clean goes on to the retirement, which kills the uid again.
         if let Some(job) = &run.job {
-            let _ = end::end_processes(&id.0, job, &*self.table);
+            let tally = end::end_processes(&id.0, job, &*self.table);
+            kept(&mut self.sweeps, &id.0, tally);
         }
         run.collect(&id.0, max_file_bytes);
         logs::close(&mut run.logs, &run.scratch);
@@ -124,11 +128,27 @@ impl NativeRuntime {
 
 /// Sweeps `job`'s processes, and once none is left reads how the job ended (still `None`
 /// when the supervisor's end cannot be read yet: the next poll sweeps and reads again).
-fn swept_then_told(lease: &str, job: &mut Job, table: &dyn ProcessTable) -> Option<Status> {
-    if !end::end_processes(lease, job, table).clean {
+fn swept_then_told(
+    lease: &str,
+    job: &mut Job,
+    table: &dyn ProcessTable,
+    sweeps: &mut VecDeque<(String, Tally)>,
+) -> Option<Status> {
+    let tally = end::end_processes(lease, job, table);
+    let clean = tally.clean;
+    kept(sweeps, lease, tally);
+    if !clean {
         return None;
     }
     told(lease, job.supervised.try_exit())
+}
+
+/// Keeps `tally`, the sweep of the run `lease`, among the last [`SWEEPS_KEPT`] sweeps.
+fn kept(sweeps: &mut VecDeque<(String, Tally)>, lease: &str, tally: Tally) {
+    if sweeps.len() == SWEEPS_KEPT {
+        sweeps.pop_front();
+    }
+    sweeps.push_back((lease.to_owned(), tally));
 }
 
 /// How the run ended, as the supervisor was `asked`: `None` while the job runs; a setup that
