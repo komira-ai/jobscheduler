@@ -14,7 +14,7 @@ The aim is that no job inherits anything of an account: each job gets an account
 | Full Disk Access | held by nothing | granted to `js-mac-session` alone by a profile the owner installs through device management | same |
 | What the host list says | nothing | the host's capability `full-disk-access`: `granted`, `not-granted` or `undetermined` | same |
 | A native job on a Mac without the grant | runs as a pool account that is reset in place | refused before anything is made, `no-full-disk-access` | same |
-| A native job on a Mac with the grant | runs as a pool account that is reset in place (the reset now also removes what only the grant allows, such as `~/Library/Preferences`) | same | runs as a new account, deleted after the job and shown gone before its uid is used again |
+| A native job on a Mac with the grant | runs as a pool account that is reset in place | same: the reset does not use the grant | runs as a new account, deleted after the job (home, `~/Library/Preferences` and per-user folders included) and shown gone before its uid is used again |
 
 What does not change: the Seatbelt profile every job runs under, the kill of the uid's processes, the leak scan after each job and the taint it sets, the wire between the agent and the job service, Linux hosts.
 

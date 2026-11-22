@@ -134,7 +134,7 @@ pub fn privacy_profile() -> String {
 						<key>CodeRequirement</key>
 						<string>{requirement}</string>
 						<key>Comment</key>
-						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and removes accounts. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and manages the accounts native jobs run as. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
 						<key>Identifier</key>
 						<string>{path}</string>
 						<key>IdentifierType</key>

@@ -27,7 +27,7 @@
 						<key>CodeRequirement</key>
 						<string>identifier "com.komira.js-agent.session" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X</string>
 						<key>Comment</key>
-						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and removes accounts. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<string>The root helper js-mac-session lists the privacy database's directory to learn whether it holds this grant, and manages the accounts native jobs run as. Every process it starts for a job is started with the responsibility disclaimed, so the grant never reaches a job.</string>
 						<key>Identifier</key>
 						<string>/Library/Application Support/js-agent/bin/js-mac-session</string>
 						<key>IdentifierType</key>

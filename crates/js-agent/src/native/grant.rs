@@ -7,8 +7,9 @@
 //! launchd job, so it answers for itself, and it is the one program of the agent that holds
 //! a grant: the release signs it, and a privacy profile that device management installs
 //! (`packaging/js-agent-macos/mdm/`) gives Full Disk Access to it by its installed path and
-//! its designated requirement. The helper needs the grant to examine and delete what a job
-//! leaves in a user's home, which root without it cannot reach in Apple's data vaults.
+//! its designated requirement. The helper holds it for deleting a job's account, its home
+//! and its per-user folders (`docs/design/mac-account-per-job.md`), which root without it
+//! may not do; the pool's reset in place neither needs nor uses it.
 //!
 //! The grant never reaches a job. Every process of a run is started through
 //! `js_mac_session::disclaim`, which disclaims the responsibility, so the run's processes,
@@ -31,7 +32,8 @@
 //!
 //! There is one mode. Only `granted` runs native jobs: on any other state every start is
 //! refused first, `no-full-disk-access`, before a user, a journal line or a bundle pin is
-//! made ([`admit`]), so the weaker reset of the pool can never run by accident. The state is
+//! made ([`admit`]), so a Mac whose helper cannot delete what a job leaves never runs one, by
+//! accident or otherwise. The state is
 //! the one found at start: a grant given or taken away afterwards is seen at the agent's
 //! next start, which the operator makes by restarting the agent.
 

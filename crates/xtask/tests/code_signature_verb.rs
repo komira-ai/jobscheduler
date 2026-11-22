@@ -5,13 +5,19 @@
 //! workflow that signs the programs is read in macos_code_signing.rs.
 
 use std::cell::RefCell;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
+
+use js_testkit::act;
+use js_testkit::dir::TestDir;
 
 use xtask::release::code_signature::{self, Codesign, Error, SystemCodesign};
 use xtask::release::mac_programs::{
     self, APPLICATION_IDENTITY, AUTHORITIES, FULL_DISK_ACCESS_PROGRAM, INSTALL_DIR, PROGRAMS,
     TEAM_ID,
 };
+
+js_testkit::act_test_hook!();
 
 const PROFILE: &str = "packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig";
 
@@ -402,6 +408,20 @@ fn a_program_signed_under_another_programs_identifier_is_refused() {
     );
 }
 
+/// A scratch directory for one test, under Cargo's per-target temporary directory.
+fn scratch(name: &str) -> TestDir {
+    TestDir::under(env!("CARGO_TARGET_TMPDIR"), name)
+}
+
+/// A `codesign` in `dir`: this test binary, run through a link named for one of the testkit's
+/// fakes, answering every call with the act `steps` (`$*` is the arguments it was given).
+fn fake_codesign(dir: &Path, steps: &str) -> PathBuf {
+    let link = dir.join("xcrun");
+    act::link_self(&link).expect("link the test binary");
+    std::fs::write(dir.join("xcrun.rules"), format!("*\t-\t{steps}\n")).expect("write rules");
+    link
+}
+
 /// The system adapter runs the program it is given with the reads' arguments and the binary,
 /// and returns what it prints.
 ///
@@ -409,8 +429,9 @@ fn a_program_signed_under_another_programs_identifier_is_refused() {
 /// a display without the requirement) or drops the binary.
 #[test]
 fn the_system_adapter_passes_the_arguments_of_each_read() {
+    let dir = scratch("codesign-arguments");
     let tool = SystemCodesign {
-        program: PathBuf::from("/bin/echo"),
+        program: fake_codesign(&dir, "echo $*"),
     };
     assert_eq!(tool.verify(Path::new("/x/b")), Ok(()));
     assert_eq!(
@@ -423,34 +444,64 @@ fn the_system_adapter_passes_the_arguments_of_each_read() {
     );
 }
 
-/// An adapter whose program fails or cannot start reports the command and the reason.
+/// The adapter returns what the program wrote on standard error followed by what it wrote on
+/// standard output, as `codesign` writes its report on standard error.
 ///
-/// Catches an adapter that takes a failed `codesign` for a signature that verified.
+/// Catches an adapter that drops standard error (every `--display` read would come back empty
+/// on a real `codesign`) or puts it after standard output.
 #[test]
-fn the_system_adapter_reports_a_failure_and_a_program_that_does_not_start() {
-    let failing = SystemCodesign {
-        program: PathBuf::from("/bin/false"),
+fn the_system_adapter_returns_standard_error_then_standard_output() {
+    let dir = scratch("codesign-streams");
+    let tool = SystemCodesign {
+        program: fake_codesign(&dir, "echo out ; echo --stderr err"),
     };
-    match failing.verify(Path::new("/x/b")) {
-        Err(Error::Tool { command, why }) => {
-            assert_eq!(command, "/bin/false --verify --strict --verbose=2 /x/b");
-            assert!(
-                why.contains("exit status: 1") || why.contains("exit code: 1"),
-                "{why}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
-    let missing = SystemCodesign {
-        program: PathBuf::from("/nonexistent/codesign"),
+    assert_eq!(tool.display(Path::new("/x/b")).as_deref(), Ok("err\nout\n"));
+}
+
+/// An adapter whose program fails reports the command and the exit status, with what the
+/// program printed.
+///
+/// Catches an adapter that takes a failed `codesign` for a signature that verified, or one that
+/// loses the command or the reason.
+#[test]
+fn the_system_adapter_reports_a_failing_program() {
+    let dir = scratch("codesign-failing");
+    let program = fake_codesign(&dir, "echo --stderr rejected ; exit 1");
+    let tool = SystemCodesign {
+        program: program.clone(),
     };
-    match missing.display(Path::new("/x/b")) {
-        Err(Error::Tool { command, why }) => {
-            assert_eq!(command, "/nonexistent/codesign --display --verbose=2 /x/b");
-            assert!(why.contains("No such file"), "{why}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let status = std::process::ExitStatus::from_raw(1 << 8);
+    assert_eq!(
+        tool.verify(Path::new("/x/b")),
+        Err(Error::Tool {
+            command: format!("{} --verify --strict --verbose=2 /x/b", program.display()),
+            why: format!("{status}: rejected"),
+        })
+    );
+}
+
+/// An adapter whose program cannot start reports the command and the reason the system gives.
+///
+/// Catches an adapter that takes a program it could not run for a signature that verified, or
+/// one that loses the command or the reason.
+#[test]
+fn the_system_adapter_reports_a_program_that_does_not_start() {
+    let dir = scratch("codesign-missing");
+    let program = dir.join("codesign");
+    let why = std::process::Command::new(&program)
+        .output()
+        .expect_err("no program there")
+        .to_string();
+    let tool = SystemCodesign {
+        program: program.clone(),
+    };
+    assert_eq!(
+        tool.display(Path::new("/x/b")),
+        Err(Error::Tool {
+            command: format!("{} --display --verbose=2 /x/b", program.display()),
+            why,
+        })
+    );
 }
 
 /// The verb's arguments name the binary, the program and the `codesign` to run, and `run`
@@ -460,6 +511,8 @@ fn the_system_adapter_reports_a_failure_and_a_program_that_does_not_start() {
 #[test]
 fn the_verb_runs_the_given_codesign_and_refuses_output_that_is_no_signature() {
     use clap::Parser;
+    let dir = scratch("codesign-verb");
+    let codesign = fake_codesign(&dir, "echo $*");
     #[derive(Parser)]
     struct Cli {
         #[command(flatten)]
@@ -471,10 +524,10 @@ fn the_verb_runs_the_given_codesign_and_refuses_output_that_is_no_signature() {
         "--program",
         "js-agent",
         "--codesign",
-        "/bin/echo",
+        codesign.to_str().expect("utf-8 path"),
     ]);
     assert_eq!(cli.args.binary, PathBuf::from("/x/b"));
-    assert_eq!(cli.args.codesign, PathBuf::from("/bin/echo"));
+    assert_eq!(cli.args.codesign, codesign);
     let problems = refusal(code_signature::run(&cli.args));
     assert!(
         problems
@@ -599,7 +652,15 @@ fn the_command_line_refuses_with_status_1_and_names_the_reason() {
         String::from_utf8_lossy(&out.stderr),
         "xtask: \"js-vmm\" is not a program of the js-agent package\n"
     );
-    let out = xtask(&["/x/bin", "--program", "js-agent", "--codesign", "/bin/echo"]);
+    let dir = scratch("codesign-command-line");
+    let codesign = fake_codesign(&dir, "echo $*");
+    let out = xtask(&[
+        "/x/bin",
+        "--program",
+        "js-agent",
+        "--codesign",
+        codesign.to_str().expect("utf-8 path"),
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&out.stderr)
