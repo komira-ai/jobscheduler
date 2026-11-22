@@ -31,6 +31,21 @@ pub struct Leftovers {
 }
 
 impl Leftovers {
+    /// What is left once the job's account was retired and shown gone: the retirement's proof
+    /// covers the account's home and its per-user folders under `user_folders` (which keep the
+    /// system's own items, see `mac_accounts`), so a file found before the retirement counts
+    /// only when it is still there (`exists`) and outside `user_folders`.
+    #[must_use]
+    pub fn after_retirement(
+        mut self,
+        user_folders: &std::path::Path,
+        exists: impl Fn(&str) -> bool,
+    ) -> Self {
+        self.files
+            .retain(|file| !std::path::Path::new(file).starts_with(user_folders) && exists(file));
+        self
+    }
+
     /// Whether nothing is left.
     #[must_use]
     pub fn is_clean(&self) -> bool {

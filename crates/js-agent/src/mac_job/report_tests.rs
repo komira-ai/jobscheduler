@@ -206,3 +206,31 @@ fn a_failed_commit_of_the_outputs_is_a_job_failure_and_a_made_one_is_reported() 
     };
     assert_eq!(failed.status(), status::JOB_FAILED);
 }
+
+/// Asserts what a retirement shown gone leaves of the files a run found before it: a file
+/// still there outside the per-user folders counts, one under them (judged by the
+/// retirement's proof) and one no longer there (removed with the home) do not, and nothing
+/// else of the leftovers changes.
+#[test]
+fn after_a_retirement_only_files_still_there_outside_the_per_user_folders_are_left() {
+    let leftovers = Leftovers {
+        processes: vec![7],
+        files: vec![
+            "/Users/kbf-acct-1/Library".to_owned(),
+            "/private/var/folders/9d/hash/T/com.apple.trustd".to_owned(),
+            "/private/tmp/stray".to_owned(),
+        ],
+        folder: None,
+        unchecked: None,
+    };
+    let after = leftovers
+        .clone()
+        .after_retirement(std::path::Path::new("/private/var/folders"), |file| {
+            file != "/Users/kbf-acct-1/Library"
+        });
+    assert_eq!(after.files, ["/private/tmp/stray"]);
+    assert_eq!(after.processes, [7]);
+    let none_there =
+        leftovers.after_retirement(std::path::Path::new("/private/var/folders"), |_| false);
+    assert!(none_there.files.is_empty());
+}

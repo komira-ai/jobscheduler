@@ -127,10 +127,22 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         retired,
     };
     match run {
-        Ok(report) => Ok(Report {
-            account: Some(account),
-            ..report
-        }),
+        Ok(report) => {
+            // A retirement shown gone judged the home and the per-user folders after the
+            // look the run made before it: only what is still there outside them counts.
+            let leftovers = match (&account.retired, args.account_range) {
+                (Ok(_), Some(slots)) => report.leftovers.after_retirement(
+                    &crate::mac_accounts::Settings::macos(slots, args.ready).user_folders,
+                    |file| fs::symlink_metadata(file).is_ok(),
+                ),
+                _ => report.leftovers,
+            };
+            Ok(Report {
+                account: Some(account),
+                leftovers,
+                ..report
+            })
+        }
         Err(Stop::Usage(why)) => Err(Stop::Usage(format!("{why}; account: {account:?}"))),
         Err(Stop::Setup(why)) => Err(Stop::Setup(format!("{why}; account: {account:?}"))),
     }
