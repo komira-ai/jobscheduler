@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, agent_args, join};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
-use crate::jobs_support::{JobBody, job_of, submit, submit_body};
+use crate::jobs_support::{JobBody, job_of, left_the_queue, submit, submit_body};
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 
 /// The clouds of these tests, by the path of the key file that names them: a kind is a
@@ -241,11 +241,13 @@ fn refused(reply: &Reply) {
     assert_eq!(reply.json(), json!({ "error": "no-capable-host" }));
 }
 
-/// Asserts that `reply` admitted a job (201) and answered it in `state`: `JOB_STATE_PLACED`
-/// when a registered host had room for it, `JOB_STATE_QUEUED` when none had.
-fn admitted(reply: &Reply, state: &str) {
+/// Asserts that `reply` admitted a job (201) and answered it `JOB_STATE_QUEUED` with no host:
+/// a submit only queues the job, and a host with room for it takes it afterwards.
+fn admitted(reply: &Reply) {
     assert_eq!(reply.status, 201, "{}", reply.body);
-    assert_eq!(reply.json()["job"]["state"], state);
+    let job = &reply.json()["job"];
+    assert_eq!(job["state"], "JOB_STATE_QUEUED");
+    assert!(job["hostId"].as_str().unwrap_or("").is_empty(), "{job}");
 }
 
 /// The jobs `GET /v1/jobs` lists on the job port of `h`, by id.
@@ -270,10 +272,11 @@ fn jobs_without_static(scratch: &Scratch) -> Vec<std::ffi::OsString> {
 /// Asserts, through the job service, that a pool whose only machine provider is `static`
 /// (hosts that register themselves) refuses `no-capable-host` with no host registered, and
 /// with a registered host too small for the job, each time recording nothing; and that a
-/// capable host admits the job: the first job is answered `JOB_STATE_PLACED` (the host has
-/// the room, and the submit places it) and a second, for which the host's one GPU is taken,
-/// `JOB_STATE_QUEUED`. Catches a static provider counted as one that may offer, and a
-/// submit that answers queued over a host with room or placed over one with none.
+/// capable host admits the job: the first job is answered `JOB_STATE_QUEUED` and then, the
+/// host having the room, leaves the queue `JOB_STATE_PLACED` on that host; a second, for which
+/// the host's one GPU is taken, is answered `JOB_STATE_QUEUED` and still reads so. Catches a
+/// static provider counted as one that may offer, and a host with room that never takes the
+/// job or one with none that does.
 #[tokio::test]
 async fn a_static_only_pool_without_a_capable_host_refuses() {
     let scratch = Scratch::new("admission_static_only");
@@ -286,17 +289,20 @@ async fn a_static_only_pool_without_a_capable_host_refuses() {
     refused(&submit_body(&h, &too_big).await);
     assert_eq!(job_of(&h, "two-gpus").await.status, 404);
     assert_eq!(listed(&h).await, Vec::<String>::new());
-    admitted(&submit_body(&h, &one_gpu("fits")).await, "JOB_STATE_PLACED");
-    admitted(
-        &submit_body(&h, &one_gpu("fits-too")).await,
-        "JOB_STATE_QUEUED",
-    );
+    admitted(&submit_body(&h, &one_gpu("fits")).await);
+    let placed = left_the_queue(&h, "fits").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
+    assert_eq!(placed["hostId"], "h1");
+    admitted(&submit_body(&h, &one_gpu("fits-too")).await);
+    let waiting = job_of(&h, "fits-too").await;
+    assert_eq!(waiting.json()["job"]["state"], "JOB_STATE_QUEUED");
     assert_eq!(listed(&h).await, ["fits", "fits-too"]);
 }
 
 /// Asserts that a refusal at admission records nothing: after a job nothing could ever
 /// serve is refused, the job reads 404 and the list of jobs is empty, and the next job that
-/// a host can serve is admitted and answered `JOB_STATE_PLACED` on the host with room.
+/// a host can serve is admitted, answered `JOB_STATE_QUEUED`, and then placed on the host with
+/// room.
 #[tokio::test]
 async fn a_refusal_records_nothing() {
     let scratch = Scratch::new("admission_records_nothing");
@@ -307,10 +313,10 @@ async fn a_refusal_records_nothing() {
     refused(&submit_body(&h, &too_big).await);
     assert_eq!(job_of(&h, "sixteen").await.status, 404);
     assert_eq!(listed(&h).await, Vec::<String>::new());
-    admitted(
-        &submit_body(&h, &one_gpu("after")).await,
-        "JOB_STATE_PLACED",
-    );
+    admitted(&submit_body(&h, &one_gpu("after")).await);
+    let placed = left_the_queue(&h, "after").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
+    assert_eq!(placed["hostId"], "h1");
     assert_eq!(listed(&h).await, ["after"]);
 }
 
@@ -370,8 +376,5 @@ async fn an_offer_outside_the_pool_limits_does_not_count() {
     let (h, cloud) = over("admission_limits_in", "gpu-host", &[], allowed).await;
     cloud.set(Ok(vec![a100(true)]));
     h.ticks.step().await;
-    admitted(
-        &submit_body(&h, &one_gpu("limits-in")).await,
-        "JOB_STATE_QUEUED",
-    );
+    admitted(&submit_body(&h, &one_gpu("limits-in")).await);
 }

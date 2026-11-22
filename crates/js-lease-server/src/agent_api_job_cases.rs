@@ -269,12 +269,13 @@ async fn a_late_start_after_a_cancel_does_not_run() {
     assert_eq!(agent.launched, ["job-b"]);
 }
 
-/// Under `--placement js-sched`, a heartbeat through the route places a job only queued (no
-/// test places it): after the beat the job is placed on the beating host with its allocation
-/// booked, in the one commit the pass makes; the reply to that beat, built before the pass,
-/// carries no start, and the next beat's reply carries the job's start. Under the registry's
-/// placement the same beat places nothing. It catches a heartbeat that does not run the pass,
-/// a pass that does not commit, and a start sent before the placement is committed.
+/// Under `--placement js-sched`, a heartbeat through the route, with the poller's turn the
+/// server runs right after it, places a job only queued (no test places it): after the beat the
+/// job is placed on the beating host with its allocation booked, in the one commit the pass
+/// makes; the reply to that beat, built before the pass, carries no start, and the next beat's
+/// reply carries the job's start. Under the registry's placement the same beat places nothing.
+/// It catches a heartbeat that does not poke the poller, a pass that does not commit, and a
+/// start sent before the placement is committed.
 #[tokio::test]
 async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
     let queue = |rig: &super::job_rig::Rig| {

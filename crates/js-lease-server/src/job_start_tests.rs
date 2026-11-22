@@ -82,6 +82,7 @@ fn build_for(
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
     )
 }
@@ -324,6 +325,7 @@ fn build_layered(
             layered_rootfs,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
     )
 }
@@ -510,6 +512,7 @@ fn build_providers(
             layered_rootfs: true,
             mount_providers: reported,
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
     )
 }
@@ -599,6 +602,7 @@ fn build_xcodes(
             mount_providers: &[],
             xcodes: reported,
             polls_dispatch: false,
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
     )
 }
