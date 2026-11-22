@@ -7,6 +7,7 @@ use super::ledger::{Record, name};
 use super::pool::Pool;
 use super::teardown::Launchd;
 use super::{Account, AccountError, Step, folder, generated_uid, tree, uid};
+use std::os::unix::fs::MetadataExt as _;
 
 /// How many uids a refusal for want of a free one names; it counts the rest.
 const REASONS: usize = 8;
@@ -201,7 +202,8 @@ impl Pool {
     fn unmake(&self, n: u64, uid: u32, failed: &Failure) -> AccountError {
         let name = name(n);
         let done = self
-            .launchd_for(&name, uid)
+            .not_anothers(&name, uid, failed.step)
+            .and_then(|()| self.launchd_for(&name, uid))
             .and_then(|ask| self.kill_rounds(uid, &mut Vec::new(), ask))
             .and_then(|()| self.cleanup(&name, uid));
         let ended = match self.settle(n, done) {
@@ -212,6 +214,45 @@ impl Pool {
             ),
         };
         make_error(&name, failed.step, format!("{}; {ended}", failed.why))
+    }
+}
+
+impl Pool {
+    /// Before a failed making deletes by name: when it failed at the home or the record (one
+    /// of the name may have been there already, made by another ledger on the host), a record
+    /// of `name` with another uid, or (failed at the home) a home of `name` another uid owns,
+    /// is another's and is not deleted: the account is held at that step instead. Seen on the proof Mac: two
+    /// ledgers both named an account `kbf-acct-2`, and a refill that found the other's home
+    /// deleted the other's record and home.
+    fn not_anothers(&self, name: &str, uid: u32, step: Step) -> Result<(), Failure> {
+        if !matches!(step, Step::Home | Step::Record) {
+            return Ok(());
+        }
+        let record = self.host.account(name).map_err(|why| {
+            Failure::new(Step::Record, format!("looking up the record {name}: {why}"))
+        })?;
+        if let Some(theirs) = record.filter(|record| record.uid != uid) {
+            return Err(Failure::new(
+                Step::Record,
+                format!(
+                    "the record {name} has uid {}, not {uid}: another's, not deleted",
+                    theirs.uid
+                ),
+            ));
+        }
+        // A making that failed at the record made the home itself: only one that failed at
+        // the home found one there.
+        let home = self.settings.homes.join(name);
+        match std::fs::symlink_metadata(&home).map(|found| found.uid()) {
+            Ok(owner) if step == Step::Home && owner != uid => Err(Failure::new(
+                Step::Home,
+                format!(
+                    "{} is owned by uid {owner}, not {uid}: another's, not removed",
+                    home.display()
+                ),
+            )),
+            _ => Ok(()),
+        }
     }
 }
 

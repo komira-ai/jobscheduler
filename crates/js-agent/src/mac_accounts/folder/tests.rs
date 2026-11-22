@@ -305,47 +305,75 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
     assert_emptied(&second);
 }
 
-/// Asserts what is kept of the items macOS's own daemons seal in a per-user folder: Launch
-/// Services' data vault in `0`, sealed, stays with what is in it, and a look does not count
-/// it; the trust daemon's folder in `T`, not sealed, is removed like anything else; a sealed
-/// item that is not one of the system's (a name of the list in another top-level directory,
-/// another name) is refused and named, and a look counts it. Without the seal (`System` off
-/// macOS) the vault is an ordinary leftover.
+/// Asserts what is kept of the items macOS's own daemons make in a per-user folder that root
+/// may not remove: Launch Services' data vault in `0`, sealed, stays with what is in it, and a
+/// look does not count it; the trust daemon's folder in `T`, pinned, stays and what was in it
+/// goes, and a look counts what is in it, not it; a listed item that is neither is removed; a
+/// sealed or pinned item that is not one of the system's (a name of the list in another
+/// top-level directory, another name) is refused and named, and a look counts it. Without the
+/// seal (`System` off macOS) the vault is an ordinary leftover.
 #[test]
-fn only_a_sealed_system_item_is_kept_in_a_folder() {
+fn only_a_sealed_or_pinned_system_item_is_kept_in_a_folder() {
     let dir = scratch("sealed");
     let folders = dir.join("folders");
     let hash = folder(&folders, "ab", "hash");
     fs::create_dir_all(hash.join("0/com.apple.LaunchServices.dv")).unwrap();
     fs::write(hash.join("0/com.apple.LaunchServices.dv/db"), "x").unwrap();
-    fs::create_dir_all(hash.join("T/com.apple.trustd")).unwrap();
+    fs::create_dir_all(hash.join("T/com.apple.trustd/sub")).unwrap();
     fs::write(hash.join("T/com.apple.trustd/cache"), "x").unwrap();
+    fs::create_dir_all(hash.join("C/com.apple.trustd")).unwrap();
     fs::write(hash.join("X/com.apple.LaunchServices.dv"), "x").unwrap();
     fs::write(hash.join("C/vault"), "x").unwrap();
     let os = FakeOs::new();
     os.seal("com.apple.LaunchServices.dv");
     os.seal("vault");
 
+    // Not pinned yet: the trust daemon's folder is removed like anything else.
     let why = empty(&folders, me(), &os).unwrap_err().to_string();
-    for refused in ["X/com.apple.LaunchServices.dv", "C/vault"] {
+    assert!(names(&hash.join("T")).is_empty(), "{why}");
+    fs::create_dir_all(hash.join("T/com.apple.trustd/sub")).unwrap();
+    fs::write(hash.join("T/com.apple.trustd/cache"), "x").unwrap();
+    fs::create_dir_all(hash.join("C/com.apple.trustd")).unwrap();
+    os.pin("com.apple.trustd");
+
+    let mut found = left(&folders, me(), &os).unwrap();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            hash.join("C/com.apple.trustd"),
+            hash.join("C/vault"),
+            hash.join("T/com.apple.trustd/cache"),
+            hash.join("T/com.apple.trustd/sub"),
+            hash.join("X/com.apple.LaunchServices.dv"),
+        ]
+    );
+    let why = empty(&folders, me(), &os).unwrap_err().to_string();
+    for refused in [
+        "X/com.apple.LaunchServices.dv",
+        "C/vault",
+        "C/com.apple.trustd",
+    ] {
         assert!(
             why.contains(&hash.join(refused).display().to_string()),
             "{why}"
         );
     }
     assert!(!why.contains("0/com.apple"), "{why}");
+    assert!(!why.contains("T/com.apple"), "{why}");
     assert_eq!(names(&hash.join("0/com.apple.LaunchServices.dv")), ["db"]);
-    assert!(names(&hash.join("T")).is_empty());
+    assert_eq!(names(&hash.join("T")), ["com.apple.trustd"]);
+    assert!(names(&hash.join("T/com.apple.trustd")).is_empty());
     let mut found = left(&folders, me(), &os).unwrap();
     found.sort();
     assert_eq!(
         found,
         [
+            hash.join("C/com.apple.trustd"),
             hash.join("C/vault"),
             hash.join("X/com.apple.LaunchServices.dv")
         ]
     );
-    assert!(os.calls().contains(&"sealed com.apple.trustd".to_owned()));
     let unsealed = left(&folders, me(), &System).unwrap();
     assert!(unsealed.contains(&hash.join("0/com.apple.LaunchServices.dv")));
 }
