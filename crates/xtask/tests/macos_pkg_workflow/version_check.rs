@@ -7,9 +7,13 @@ use super::*;
 /// first (after the presence check, in `sign`). `build` and `sign` check it in a step of their own;
 /// `build-update` builds the next version, and the one command that names it checks the version
 /// (`cargo xtask release next-version`), after the checkout and the toolchain it needs.
+/// `sign-code` signs the programs `build` made and names no version, so it checks none.
 fn version_check_problems(text: &str, next_action: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (name, job) in step_jobs(text) {
+        if name == "sign-code" {
+            continue;
+        }
         let all = steps(&job);
         if name == "build-update" {
             let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();

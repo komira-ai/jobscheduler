@@ -96,6 +96,7 @@ use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 use lines::{Kind, Line, Verdict, parse_lines};
 use look::Outcome;
@@ -281,6 +282,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     };
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()

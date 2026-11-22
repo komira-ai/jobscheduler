@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
+use js_mac_session::full_disk_access::FullDiskAccess;
 
 use super::*;
 use crate::native::Ceiling;
@@ -21,6 +22,7 @@ fn config() -> NativeConfig {
         max_file_bytes: 1 << 30,
         max_processes: 512,
         egress: None,
+        full_disk_access: FullDiskAccess::Granted,
     }
 }
 
