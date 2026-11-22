@@ -12,6 +12,8 @@
 //!   run holds the turn, and skips a run that a newer release or run has overtaken.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-lease-server`, the host updater's declaration.
+//! - [`smoke_bundle`]: the smoke bundle, packed from its committed tree, pushed to the
+//!   registry under its tag, and pulled back by digest and compared with the tree.
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
 //! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mac-provision`, `js-mdm`) depend on, through normal and build
@@ -19,8 +21,10 @@
 //! `build.rs`, an `include_str!`'d sample configuration) except its `tests/`, `benches/`,
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
 //! `rust-toolchain.toml` and everything under `.cargo/`, the host updater's declarations
-//! ([`stage::DECLARATIONS`]), which the js-lease-server archives carry as they are, and the
-//! files of the js-agent .deb ([`DEB_DIRS`], [`DEB_FILES`]), which `release deb` compiles in.
+//! ([`stage::DECLARATIONS`]), which the js-lease-server archives carry as they are, the
+//! files of the js-agent .deb ([`DEB_DIRS`], [`DEB_FILES`]), which `release deb` compiles in,
+//! and the smoke bundle's tree and recipe ([`SMOKE_BUNDLE_DIR`]), which the release publishes
+//! (a change to the bundle is a release, as the bundle's digest is in its recipe).
 //! Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
@@ -48,6 +52,7 @@ pub mod include;
 pub mod macos_leg;
 pub mod plan;
 pub mod server_image;
+pub mod smoke_bundle;
 pub mod stage;
 pub mod stamp;
 pub mod turn;
@@ -363,15 +368,23 @@ impl Metadata {
 const ROOT_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"];
 
 /// Whether `path` is a file outside the crates that an archive carries as it is
-/// ([`stage::members`]), the binary and `LICENSE` aside: a change to one is a change of a
-/// release asset.
+/// ([`stage::members`]), the binary and `LICENSE` aside, or that the smoke bundle is made of:
+/// a change to one is a change of a release asset.
 fn is_archived(path: &str) -> bool {
     stage::DECLARATIONS
         .iter()
         .any(|(_, source)| *source == path)
         || (DEB_DIRS.iter().any(|dir| path.starts_with(dir)) && !path.ends_with(".md"))
         || DEB_FILES.contains(&path)
+        || (path.starts_with(SMOKE_BUNDLE_DIR) && path != SMOKE_BUNDLE_README)
 }
+
+/// The directory of the smoke bundle's tree and recipe ([`smoke_bundle`]): the release
+/// publishes the bundle, so a change to either is a change of what it publishes.
+pub const SMOKE_BUNDLE_DIR: &str = "packaging/js-smoke-bundle/";
+
+/// The smoke bundle's README, which is in no bundle.
+const SMOKE_BUNDLE_README: &str = "packaging/js-smoke-bundle/README.md";
 
 /// The directories of the files the js-agent .deb is made of (the units and the tmpfiles file):
 /// `release deb` compiles them in, so a change to one is a change of a release asset; the

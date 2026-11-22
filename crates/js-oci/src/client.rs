@@ -1,11 +1,17 @@
 //! Pulling from a registry: manifests, configs and blobs, each checked against the
-//! digest it is named by before anyone uses it.
+//! digest it is named by before anyone uses it. The requests of a push go through the same
+//! [`Repository`] (see `push.rs`).
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use hyper::header::{ACCEPT, AUTHORIZATION, HeaderName, WWW_AUTHENTICATE};
+use bytes::Bytes;
+use hyper::body::Incoming;
+use hyper::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, WWW_AUTHENTICATE,
+};
+use hyper::{Method, Response, StatusCode};
 use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
@@ -166,7 +172,41 @@ pub struct Repository<'c> {
     /// For the registry's own token realm ([`crate::Allow::with_credentials`]).
     credentials: Option<Credentials>,
     location: Location,
-    token: Mutex<Option<String>>,
+    /// The last token the registry issued, and what it was asked for.
+    token: Mutex<Option<(String, Access)>>,
+}
+
+/// What a token is asked for: to read the repository, or to read and write it. A token
+/// asked for to pull is never sent with a write, so a push asks for its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Access {
+    /// `repository:<name>:pull`, or the scope the registry's challenge names.
+    Pull,
+    /// `repository:<name>:pull,push`, whatever the challenge names.
+    Push,
+}
+
+/// One request of a [`Repository`]: its method, its `Accept` and `Content-Type`, its body,
+/// and the token it needs.
+pub(crate) struct Call<'a> {
+    pub(crate) method: Method,
+    pub(crate) accept: Option<&'a str>,
+    pub(crate) content_type: Option<&'a str>,
+    pub(crate) body: Bytes,
+    pub(crate) access: Access,
+}
+
+impl Call<'_> {
+    /// A GET that reads with a pull token.
+    fn read(accept: Option<&str>) -> Call<'_> {
+        Call {
+            method: Method::GET,
+            accept,
+            content_type: None,
+            body: Bytes::new(),
+            access: Access::Pull,
+        }
+    }
 }
 
 /// Prints the repository and never the token or the credentials: a caller logs
@@ -180,7 +220,7 @@ impl std::fmt::Debug for Repository<'_> {
 }
 
 impl Repository<'_> {
-    fn url(&self, kind: &str, reference: &str) -> String {
+    pub(crate) fn url(&self, kind: &str, reference: &str) -> String {
         let (scheme, default) = self.scheme();
         format!(
             "{scheme}://{}/v2/{}/{kind}/{reference}",
@@ -190,7 +230,7 @@ impl Repository<'_> {
     }
 
     /// The URL scheme this repository is reached with, and the port it implies.
-    fn scheme(&self) -> (&'static str, u16) {
+    pub(crate) fn scheme(&self) -> (&'static str, u16) {
         if self.plain {
             ("http", HTTP_PORT)
         } else {
@@ -207,43 +247,64 @@ impl Repository<'_> {
         }
     }
 
-    fn token(&self) -> Option<String> {
+    /// The registry's repository: where it is, and its name there.
+    pub(crate) fn location(&self) -> &Location {
+        &self.location
+    }
+
+    /// The HTTP client the repository's requests go through.
+    pub(crate) fn http(&self) -> &Http {
+        self.http
+    }
+
+    /// The token held for `access`: one asked for that, or for more.
+    fn token(&self, access: Access) -> Option<String> {
         self.token
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+            .filter(|(_, held)| *held >= access)
+            .map(|(token, _)| token)
     }
 
     /// GETs `url`, answering a Bearer challenge once, and returns a 2xx response.
-    async fn get(
+    async fn get(&self, url: &str, accept: Option<&str>) -> Result<Response<Incoming>, Error> {
+        let response = self.call(url, &Call::read(accept)).await?;
+        success(url, response)
+    }
+
+    /// Sends `call` to `url`, answering a Bearer challenge once, and returns the response
+    /// whatever its status but 401. A GET follows redirects ([`Http::get`]); any other
+    /// method goes to `url` alone.
+    pub(crate) async fn call(
         &self,
         url: &str,
-        accept: Option<&str>,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, Error> {
+        call: &Call<'_>,
+    ) -> Result<Response<Incoming>, Error> {
         let mut challenged = false;
         loop {
             let mut headers: Vec<(HeaderName, String)> = Vec::new();
-            if let Some(accept) = accept {
+            if let Some(accept) = call.accept {
                 headers.push((ACCEPT, accept.to_owned()));
             }
-            if let Some(token) = self.token() {
+            if let Some(content_type) = call.content_type {
+                headers.push((CONTENT_TYPE, content_type.to_owned()));
+                headers.push((CONTENT_LENGTH, call.body.len().to_string()));
+            }
+            if let Some(token) = self.token(call.access) {
                 headers.push((AUTHORIZATION, format!("Bearer {token}")));
             }
-            let response = self
-                .http
-                .get(url, &headers, self.reach(self.location.endpoint()))
-                .await?;
-            let status = response.status();
-            if status.is_success() {
+            let reach = self.reach(self.location.endpoint());
+            let response = if call.method == Method::GET {
+                self.http.get(url, &headers, reach).await?
+            } else {
+                let (method, body) = (call.method.clone(), call.body.clone());
+                self.http.once(method, url, &headers, body, reach).await?
+            };
+            if response.status() != StatusCode::UNAUTHORIZED {
                 return Ok(response);
             }
             let what = text::url(url);
-            if status != hyper::StatusCode::UNAUTHORIZED {
-                return Err(Error::Status {
-                    url: what,
-                    status: status.as_u16(),
-                });
-            }
             if challenged {
                 return Err(Error::Auth(format!(
                     "{what}: the registry refused the token it issued"
@@ -256,20 +317,20 @@ impl Repository<'_> {
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| Error::Auth(format!("{what}: 401 with no WWW-Authenticate")))?
                 .to_owned();
-            let token = self.fetch_token(&challenge).await?;
+            let token = self.fetch_token(&challenge, call.access).await?;
             *self
                 .token
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((token, call.access));
         }
     }
 
-    /// The pull token a `Bearer` challenge asks for, from an endpoint on the registry's
-    /// host or another allow-listed one: asked anonymously, or with the entry's
+    /// The token a `Bearer` challenge asks for, for `access`, from an endpoint on the
+    /// registry's host or another allow-listed one: asked anonymously, or with the entry's
     /// credentials when [`Repository::basic_auth`] says they may go there.
-    async fn fetch_token(&self, challenge: &str) -> Result<String, Error> {
+    async fn fetch_token(&self, challenge: &str, access: Access) -> Result<String, Error> {
         let params = Challenge::parse(challenge)?;
-        let (url, realm) = self.token_url(&params)?;
+        let (url, realm) = self.token_url(&params, access)?;
         let what = text::url(&url);
         let headers = self.basic_auth(&realm);
         let response = self.http.get(&url, &headers, self.reach(&realm)).await?;
@@ -316,7 +377,9 @@ impl Repository<'_> {
     /// URL on the registry's host or a listed one (for a plain-http entry, an http URL
     /// with exactly the registry's authority and no other); its fragment (never sent) is dropped
     /// before the service and scope are added to its query, so they cannot end up in it.
-    fn token_url(&self, params: &Challenge) -> Result<(String, Authority), Error> {
+    /// The scope is the challenge's for a pull (the repository's pull scope if it names
+    /// none) and the repository's `pull,push` for a push.
+    fn token_url(&self, params: &Challenge, access: Access) -> Result<(String, Authority), Error> {
         let bad = || Error::Realm(text::url(&params.realm));
         let base = params.realm.split('#').next().unwrap_or_default();
         let uri: hyper::Uri = base.parse().map_err(|_| bad())?;
@@ -340,10 +403,14 @@ impl Repository<'_> {
         if let Some(service) = &params.service {
             query.push_str(&format!("service={}&", query_escape(service)));
         }
-        let scope = params
-            .scope
-            .clone()
-            .unwrap_or_else(|| format!("repository:{}:pull", self.location.repository()));
+        let repository = self.location.repository();
+        let scope = match access {
+            Access::Pull => params
+                .scope
+                .clone()
+                .unwrap_or_else(|| format!("repository:{repository}:pull")),
+            Access::Push => format!("repository:{repository}:pull,push"),
+        };
         query.push_str(&format!("scope={}", query_escape(&scope)));
         let url = format!(
             "{scheme}://{}{}?{query}",
@@ -400,6 +467,21 @@ impl BundleSource for Repository<'_> {
     }
 }
 
+/// `response` when its status is a success; [`Error::Status`] naming `url` otherwise.
+pub(crate) fn success(
+    url: &str,
+    response: Response<Incoming>,
+) -> Result<Response<Incoming>, Error> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    Err(Error::Status {
+        url: text::url(url),
+        status: status.as_u16(),
+    })
+}
+
 /// The parameters of a `WWW-Authenticate: Bearer` challenge.
 #[derive(Debug, PartialEq, Eq)]
 struct Challenge {
@@ -454,7 +536,7 @@ fn parameters(text: &str) -> Vec<(String, String)> {
 
 /// `value` as a URL query component: everything but unreserved characters and `:` `/`
 /// percent-encoded.
-fn query_escape(value: &str) -> String {
+pub(crate) fn query_escape(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
         match byte {

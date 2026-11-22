@@ -7,8 +7,8 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The one registry client of this repository: verified pulls of OCI artifacts by digest,
-# over hyper and rustls (no HTTP client crate, so a daemon links nothing it does not use).
+# The one registry client of this repository: verified pulls of OCI artifacts by digest, and
+# the publish of one under a tag, over hyper and rustls (no HTTP client crate, so a daemon links nothing it does not use).
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
