@@ -1,31 +1,148 @@
 # Input trees on a Mac: provider mounts and copy-on-write mounts
 
-Status: **decided for the owner's review; nothing here is built.** It settles question Q1 of
-`docs/design/job-rootfs.md` (section 13): how a native macOS job gets a `COPY_ON_WRITE` mount. It also settles what the
-macOS agent needs to take a mount provider's tree at all, which Q1 depends on, because the tree a client most wants on
-a Mac is a provider's. The wire, the proto, the server and placement do not change (section 6). job-rootfs.md 5.3
-keeps the three candidates it compared and points here for the choice.
+Status: **for the owner's decision; nothing here is built.** It settles question Q1 of `docs/design/job-rootfs.md`
+(section 13): how a native macOS job gets a `COPY_ON_WRITE` mount. It also settles how the macOS agent takes a mount
+provider's tree at all, because the tree a client most wants on a Mac is a provider's. The wire, the proto, the server
+and placement do not change (section 6). It is written to two rulings of the owner:
 
-**What changes for a user.** Today a native job on a Mac (a pool user under `sandbox-exec`, in `exec/` of its home)
-can have `READ_ONLY` and `READ_WRITE` mounts of host paths, as links in `exec/` (job-rootfs.md 5.2). It is refused a
-mount whose source is a provider (`input-not-allowed`, "a Mac is given no mount provider") and every `COPY_ON_WRITE`
-mount (`rootfs-unsupported-here`). After this design:
+- **One agent program per Mac**, with a root supervisor per run and no helper. Its design is
+  `docs/design/mac-one-program.md`, in komira-ai/jobscheduler#991, not yet merged.
+- **A new account per job**, deleted afterwards, in place of the pool of reused accounts. Its design is
+  `docs/design/mac-account-per-job.md`, not yet merged.
 
-- a `READ_ONLY` mount may name a provider, as on Linux. It is the same link, to a directory the provider has written
-  whole on the Mac's own disk (2.1);
-- a `COPY_ON_WRITE` mount at `/work` or below it, of a host path or of a provider's tree, is a **private copy** of the
-  tree. The agent makes it before the job's first process, in the job's own home, and the job's user owns it. The job
-  may change anything in it. Nothing it does reaches the source. The copy goes with the home;
+Both land before this design's agent items (section 10), so the files they name will be there when it is built.
+
+**This design adds no privacy grant and no device-management profile, for any program.** The one grant native jobs
+need at all is the account-per-job design's Full Disk Access for the agent's program, which deletes accounts. This
+design neither adds to it nor needs it for the trees.
+
+## Decisions for the owner
+
+Each decision gives the options and the recommendation; the sections cited hold the evidence.
+
+**D1. A provider's tree is not read lazily on a Mac: a job's start waits until the whole tree is on the Mac's disk.**
+
+- Options:
+  - (i) accept that; or
+  - (ii) keep the lazy NFS mount and grant every program a job runs the right to read it; or
+  - (iii) build a lazy local file system of our own (an FSKit module).
+- Recommendation: (i).
+  - (ii) cannot be done. macOS refuses reads of a network volume to Apple's own programs (section 1), every job
+    program answers for itself, and a program a build has just made has no signature to grant (2.1).
+  - (iii) is a signed system extension on every Mac, a file system with overlay semantics of our own, and an unknown
+    answer from the privacy control. It is the next step only if section 11's bound is passed.
+- Cost, from a stand-in measured on two Macs (section 11):
+  - A warm tree of 46,362 files takes about 6 s to write.
+  - A tree the cache does not hold costs its download, as on any route.
+  - A tree already written for an earlier job costs nothing more (D3).
+
+**D2. tierstore writes each tree whole, as plain files, on the Mac's own disk, and answers the agent with that
+directory.** This needs the tierstore owner's agreement.
+
+- What tierstore decided: C9 (komira-ai/tierstore `docs/design/virtual-build-fs.md`) reads "NFSv3 now, FSKit later if
+  it measures better" for the macOS frontend, and "the writable directory of a run is the client's, not the core's".
+- What D2 changes: for jobs on a Mac, a written local tree replaces the NFS frontend. The trees stay read-only and the
+  writable directory stays the client's, so that half of C9 holds. The frontend half does not: the NFS frontend
+  cannot serve a job.
+- Options:
+  - (i) tierstore writes local trees;
+  - (ii) the agent fetches each tree through the cache's S3 front;
+  - (iii) no provider trees on a Mac.
+- Recommendation: (i).
+  - (ii) would make jobscheduler a client of one store's interface and tree format, which job-rootfs.md keeps out of
+    its code, wire, flags and capabilities. It would also do the provider's work a second time at the same cost.
+  - (iii) leaves the Macs without the trees clients build with.
+- No protocol change: `Mount` already answers "an absolute path of a directory on the host" (`provider.proto`).
+
+**D3. The trees directory is `/usr/local/tierstore/job-trees`, counted in tierstore's one cache budget.**
+
+- The directory is on the Mac's data volume, the volume of the homes. It sits beside the cache directory, not in it,
+  and is named apart from the cache's own `trees/`.
+- Options:
+  - (i) one budget: the cache's `local_cache.budget`, 200 GiB in the Mac's file; or
+  - (ii) a second budget of its own.
+- Recommendation: (i). Both hold bytes of the same trees, and a second number is a second thing to size on Macs whose
+  disks are small.
+- Counting: each written tree counts at its logical size, whether its files are clones that share blocks with the cache
+  or copies. That overstates the space and never understates it. Counting the directory against the budget is a change
+  to tierstore's accounting (section 5).
+- Use of space:
+  - one written tree per tree key, shared by every job that names it;
+  - a tree is held while any job holds it, and is never evicted then;
+  - once no job holds it, it stays for the next job until space is needed;
+  - when the budget is reached, unheld trees go first, oldest release first, then cache objects by the cache's own
+    marks.
+- At the cap: if the trees that jobs hold fill the budget alone, `Mount` answers `UNAVAILABLE` ("no space"). The
+  start fails `input-unavailable` when the agent's `--mount-provider-wait` ends, 120 s by default, and the client runs
+  it again.
+  - The wait is accepted. A distinct answer would be a new provider code, and a full cache on a Mac is a configuration
+    to fix, not a state to optimise (B20).
+
+**D4. Do not wait for the measurement of what a program that is not Apple's gets from the privacy control.**
+
+- Options:
+  - (i) decide now; or
+  - (ii) wait.
+- Recommendation: (i). Whatever the agent's program is allowed, a job's programs are refused. No job reads a network
+  volume under this design, and no process of the agent does either (2.1). The answer can change only how a client
+  outside jobs reads the mount.
+
+**D5. A copy-on-write mount is one clone of the whole tree into the job's new home, then one walk that gives every
+entry to the job's account. The source must be on the homes' volume.**
+
+- Options:
+  - (i) this, candidate (b) of job-rootfs.md 5.3;
+  - (ii) a union file system of our own, (a);
+  - (iii) per-file links with copy on first write, (c).
+- Recommendation: (i).
+  - It is an ordinary tree, so every program sees ordinary semantics.
+  - Nothing is mounted in the home, and nothing is installed.
+  - It measured 3.5 to 3.9 s for 46,362 files (section 11).
+  - The walk is the existing `clone_writable` of `js-treestore`, extended to remove extended attributes (3.2).
+  - A source on another volume would need a byte copy, a second path that no Mac needs: each Mac has one data volume.
+    It is refused instead (section 7).
+  - (ii) is the lazy file system of D1 (iii).
+  - (iii) denies a program that opens an input for writing instead of giving it a copy (2.2).
+
+## What changes for a user
+
+Today a native job on a Mac (sandboxed under `sandbox-exec`, in `exec/` of its account's home) can have `READ_ONLY` and
+`READ_WRITE` mounts of host paths, as links in `exec/` (job-rootfs.md 5.2). It is refused a mount whose source is a
+provider (`input-not-allowed`, "a Mac is given no mount provider") and every `COPY_ON_WRITE` mount
+(`rootfs-unsupported-here`). After this design:
+
+- a `READ_ONLY` mount may name a provider, as on Linux. It is a link to the provider's written tree (D2);
+- a `COPY_ON_WRITE` mount at `/work` or below it, of a host path or of a provider's tree, is a **private copy**, made
+  in the job's own new home before its first process and owned by the job's account (D5). The job may change anything
+  in it. Nothing it does reaches the source. The copy goes when the account is deleted;
 - no job, and no process of the agent, reads a network volume. The agent refuses at start a mount root on one, and
   refuses a start whose source is on one (2.1).
 
-What does not change: layers stay refused on a Mac (`rootfs-unsupported-here`, and placement never sends them,
-job-rootfs.md 2.6). The rules for mount targets change in two ways only: a copy-on-write mount at `/work` or below it
-is taken, and a read-only or read-write mount may lie below a copy-on-write target (3.1). The Seatbelt view of the other
-mounts and every Linux behaviour stay the same. A job that names none of these runs as today.
+**An example.** A client that wants a tree from tierstore as its writable working directory, and a second tree
+read-only inside it, passes this file as `--spec.mounts-file`. It uses the existing fields (`docs/job-surface.md`),
+with the job's other fields as for any native Mac job:
 
-What a Mac gives up: a provider's tree is not read lazily on a Mac. The provider writes it whole before the job's first
-process (2.1).
+```json
+[
+  {"provider": {"provider": "tierstore", "ref": "cas/l/<64 hex digits of the tree list>"}, "target": "/work",
+   "mode": "MOUNT_MODE_COPY_ON_WRITE"},
+  {"provider": {"provider": "tierstore", "ref": "cas/l/<64 hex digits of the SDK's tree list>"}, "target": "/work/sdk"}
+]
+```
+
+Once tierstore takes `COPY_ON_WRITE` (section 5, change 1), the same file runs on a Linux host. On a Mac:
+
+- the job starts in a copy of the first tree;
+- the second is a read-only link at `sdk` inside the copy;
+- the job requires `mount-provider.tierstore`, as on Linux.
+
+What does not change:
+
+- Layers stay refused on a Mac (`rootfs-unsupported-here`; placement never sends them, job-rootfs.md 2.6).
+- The rules for mount targets change in two ways only: a copy-on-write mount at `/work` or below it is taken, and a
+  read-only or read-write mount may lie below a copy-on-write target (3.1).
+- The Seatbelt view of the other mounts, and every Linux behaviour, stay the same.
+- A job that names none of these runs as today.
 
 Marks used below: *read* means read in code, a doc or a Mac; *measured* means measured on a Mac and cited; *inferred*
 means reasoning.
@@ -33,292 +150,242 @@ means reasoning.
 ## 1. What a Mac has today
 
 - **macOS refuses reads of a network volume to Apple's programs.**
-  - *Measured* on a Mac Studio with macOS 27.0.1, on tierstore's loopback NFS mount. `ls`, `sh`, `shasum` and
+  - *Measured* on a Mac Studio with macOS 27.0.1, on tierstore's loopback NFS mount: `ls`, `sh`, `shasum` and
     `python3` get `EPERM` for every user, from a shell and from a launchd job alike.
   - No request reaches the file-system service. The privacy daemon (TCC) logs its Network Volumes service with
     "Platform binary prompting is Deny".
-  - What a program that is not Apple's gets, and what a device-management profile would have to grant, is being
-    measured. Section 2.1 does not depend on the answer.
-- **Every job program is started with its privacy responsibility disclaimed** (`docs/design/spawn-disclaim.md`): today
-  by the helper's `run` verb, and by the agent program once the helper is folded into it.
-  - A job answers for itself, so no grant of the agent's reaches it.
-  - macOS therefore checks the job's own program: `/bin/sh`, `python3`, Apple's toolchain, or a program a build has
-    just made.
+- **Every job program answers for itself.** Each is started with its privacy responsibility disclaimed
+  (`docs/design/spawn-disclaim.md`; under the one-program ruling the run's supervisor starts the job so,
+  the one-program design, 4.2). No grant of the agent's reaches it, and macOS checks the job's own program: `/bin/sh`,
+  `python3`, Apple's toolchain, or a program a build has just made.
 - **tierstore on a Mac serves read-only trees, through that NFS mount.**
-  - Its provider accepts `MOUNT_MODE_READ_ONLY` and `UNSPECIFIED`. It refuses every other mode `FAILED_PRECONDITION`
-    with "tierstore makes read-only trees" (*read*: komira-ai/tierstore `crates/tierstore/src/server/provider/sources.rs`).
-  - It answers `Mount` with a directory `<mountpoint>/mount-provider/<agent>/<run>/<index>` of its NFSv3 loopback
-    mount, the agent and the run in hex (`provider/names.rs`).
-  - The mount is `vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard` (*read*:
-    `crates/tierstore/src/server/treefs/nfs/mount.rs`). It is hard: a read waits for the server for good.
-  - Its owner decided that a job's writable directory is the client's, not the store's (tierstore
-    `docs/design/virtual-build-fs.md`, decision C9). tierstore will build no writable view on macOS.
-  - The macOS package installs and starts the cache alone (`packaging/macos-pkg/tierstore.plist`). The NFS frontend
-    (`tierstore fs`) is not in it.
+  - Its provider accepts `MOUNT_MODE_READ_ONLY` and `UNSPECIFIED`, and refuses every other mode `FAILED_PRECONDITION`
+    (*read*: komira-ai/tierstore `crates/tierstore/src/server/provider/sources.rs`).
+  - It answers `Mount` with a directory of its NFSv3 loopback mount, `<mountpoint>/mount-provider/<agent>/<run>/<index>`,
+    the agent and the run in hex (`provider/names.rs`). The mount is
+    `vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard` (`treefs/nfs/mount.rs`).
+  - Its cache keeps an object either as a whole file (`obj/<aa>/<bb>/<hex>`) or as a span of a pack file, and a file
+    of a tree list of version 2 is a span (tierstore `crates/tierstore/docs/operations.md`, the `span` request).
+  - Its macOS package installs and starts the cache alone (`packaging/macos-pkg/tierstore.plist`). The cache's budget in
+    the Mac's file is 200 GiB (`packaging/macos/tierstore.toml`).
 - **The OS has no union mount to build on.**
-  - `MNT_UNION` gives lookup fallthrough only: no merged listing, no copy-up, no delete of a lower file.
-  - A second NFS server of ours with tierstore below it measured 1.6 times slower on a cold `stat`, 25 times slower
-    with eight threads, 1.8 times slower for `clang` and 1.5 times slower for `cargo` (*measured*: virtual-build-fs.md
-    section 8, macos E18c). `MNT_UNION` is in its section 4.2.
-  - The Macs have no third-party FSKit module, no FUSE-T and no macFUSE, and 0 system extensions (*read*:
-    `systemextensionsctl list`, `pluginkit -m -p com.apple.fskit.fsmodule` and `/Library/Filesystems` on a macOS 26.4
-    and a 27.0.1 host).
-- **Clones work within one volume.**
-  - Within one APFS volume a clone takes 8 to 12 µs per file: 1.5 s for 190,000 files (*measured*: macos E3,
-    virtual-build-fs.md section 1).
-  - `clonefile(2)` from the NFS mount to APFS is `EXDEV` (*measured*: macos E18).
-  - `/Users`, `/private/var`, `/usr/local` and `/tmp` are one APFS volume on these hosts (*read*: `stat -f %d`). That
-    volume holds both the homes and tierstore's directories.
+  - `MNT_UNION` gives lookup fallthrough only (virtual-build-fs.md section 4.2).
+  - A second NFS server of ours over tierstore measured 1.6 times slower on a cold `stat` and 25 times with eight
+    threads (*measured*: virtual-build-fs.md section 8, macos E18c).
+  - The Macs have no third-party FSKit module, no FUSE-T and no macFUSE (*read*: `systemextensionsctl list`,
+    `pluginkit -m -p com.apple.fskit.fsmodule`, `/Library/Filesystems` on a macOS 26.4 and a 27.0.1 host).
+- **Clones work within one volume, and a whole tree clones in one call.**
+  - `clonefile(2)` of a directory clones its whole tree. *Measured* for 46,362 files in 12,394 directories (section
+    11): 0.5 to 0.9 s. One call per file took 6.7 to 7.6 s.
+  - `js-treestore` already clones a tree writable for a job: `FlagSealer::clone_writable` (`mac/seal.rs`).
+    - It clones with one call, then, top-down by descriptor, clears flags and the ACL, gives each entry to an owner, and
+      sets directories 0700 and files 0700 or 0600, dropping setuid and setgid.
+    - It refuses a hard link, a device or a pipe, and nesting past `js_bundle::MAX_DEPTH` (64).
+    - The agent uses it for bundles today (`native/bundle.rs`).
+  - `/Users`, `/private/var`, `/usr/local` and `/tmp` are one APFS volume on these hosts (*read*: `stat -f %d`).
 - **The native runtime already has the hooks a copy needs.**
-  - `Runtime::resolve_fs` and `Runtime::assemble_fs` run off the lifecycle's worker and answer `Pending` until they are
-    done (`crates/js-agent/src/lifecycle/runtime.rs`).
-  - The native runtime implements the first. It answers `Ready` at once, after `canonicalize` calls made on the worker
-    (`native/mod.rs`, `mounts::resolve`). It has the default of the second.
-  - The lifecycle waits for an assembly under way rather than discard it (runtime.rs, `discard_fs`;
-    `lifecycle/machine/prepare.rs`, `ending`). `assemble_fs` is given no stop.
-  - `discard_fs` is called at the cleanup of every run that reached the preparing stage, including a run that ran
+  - `Runtime::resolve_fs` and `Runtime::assemble_fs` run off the lifecycle's worker and answer `Pending` until done
+    (`crates/js-agent/src/lifecycle/runtime.rs`). The native runtime implements the first, answered at once, and has
+    the default of the second.
+  - The lifecycle waits for an assembly under way rather than discard it (`lifecycle/machine/prepare.rs`, `ending`);
+    `assemble_fs` is given no stop. `discard_fs` is called at the cleanup of every run that reached the preparing stage
     (`lifecycle/machine/cleanup.rs`).
-  - The pool user is lent only when the run is created, in `create_and_start` before `launch`, through the helper's
-    `user-create` today. The uid that will own the copy is therefore not known while the start is preparing.
-  - `create_and_start` and `launch` run on the lifecycle's worker (`native/mod.rs`).
+  - Today the account is lent from the pool in `create_and_start`, on the worker (`native/mod.rs`). Before it, the
+    start's own checks run (`check_run_env`, the body, the working directory, the Xcode, the bundle), and the journal
+    line is synced before any account exists.
+  - A run with no mounts and no images never reaches `resolve_fs` or `assemble_fs` (`prepare.rs`).
 - **The provider client is not tied to Linux.**
-  - `crate::provider`, `lifecycle/mount_providers.rs` and the lifecycle's `providing` stage have no `cfg` gate.
-  - Only the three flags are Linux-only (`platform/mod.rs`, `LINUX_ONLY`; declared in `platform/linux.rs`).
-  - So is the hello key `mount-provider.<name>`, reported from `contract/container.rs`.
-  - On a Mac, `Jobs::providers` answers none (`platform/macos.rs`).
-  - The lifecycle sends a mount's own mode in `Prepare` (`providing.rs`). A `COPY_ON_WRITE` mount of a tierstore tree
-    is therefore refused `provider-refused` today, on Linux as well.
-
-**One agent program per Mac.** The owner ruled that a Mac runs one agent program, with no separate helper. The model
-is the Linux agent, whose runs are kept by "a supervisor of its own (the agent binary in helper mode) that outlives the
-agent" (`jobscheduler-design.md`, the Linux runtime). How the Mac's supervisor is built is designed apart from this
-document. This design needs only two things of it: the agent's own process does every step of section 3, and the job is
-started in `exec/` after step 4 of 3.1. Today the helper's `run` verb does that.
+  - `crate::provider`, `lifecycle/mount_providers.rs` and the `providing` stage have no `cfg` gate.
+  - The three flags (`platform/mod.rs`, `LINUX_ONLY`) and the hello key `mount-provider.<name>`
+    (`contract/container.rs`) are Linux-only, and on a Mac `Jobs::providers` answers none (`platform/macos.rs`).
+  - The lifecycle sends a mount's own mode in `Prepare` (`providing.rs`). A `COPY_ON_WRITE` mount of a tierstore tree is
+    therefore refused `provider-refused` today, on Linux as well.
 
 ## 2. The decision
 
 ### 2.1 Who reads a provider's tree, and the privacy control
 
-Four processes could read a tree on a Mac:
-
-| Process | What it reads | Through the NFS mount, it needs |
+| Process | What it reads | What it would need through the NFS mount |
 |---|---|---|
-| the provider (tierstore's cache, its own program, as `_tierstore`) | its cache, on the local disk | nothing: it never reads its own mount |
-| the agent (root, a launchd daemon) | the source of a copy-on-write mount, to copy it (3.2) | a Network Volumes grant for the agent's program, by a device-management profile naming its code signature. Whether a program that is not Apple's is refused like Apple's is being measured |
-| the run's supervisor (the agent program; today the helper's `run` verb) | nothing of the tree: it starts the job in `exec/` | nothing |
-| the job | a `READ_ONLY` link's target; nothing of a copy-on-write source | a grant for **every program the job runs**: `sh`, `python3`, the compiler, and programs the build itself has just made. Each answers for itself (section 1). A grant names a code signature, and a program a build has just made has no stable one. A grant to `/bin/sh` would reach every job of the Mac. This cannot be given |
+| the provider (tierstore's cache, as `_tierstore`) | its own cache, on the local disk | nothing: it never reads its own mount |
+| the agent (`js-agent`, root, a launchd daemon) | the source of a copy-on-write mount, to copy it (3.1) | a Network Volumes grant for its program, by a profile naming its signature |
+| the run's supervisor (`js-agent __supervise-native`, root, one per run) | nothing of the tree: it starts the job in `exec/` | nothing |
+| the job (its own account) | a `READ_ONLY` link's target | a grant for every program it runs, including one a build has just made, which has no stable signature to grant. A grant to `/bin/sh` would reach every job of the Mac. This cannot be given |
 
-So a job can never read through the mount. With the mount kept, every provider tree would have to be copied by the
-agent, the read-only ones too. The agent would need a device-management grant, the Mac a root daemon serving the hard
-mount, and every copy a full read through the network file system. The copy would also be a byte copy, never a clone
-(`EXDEV`, section 1).
+So no job can read through the mount. With the mount kept, every tree would have to be copied by the agent, the
+read-only ones too. That copy would need a grant for the agent, a root daemon for the hard mount, and a full NFS read of
+every tree, never a clone (`EXDEV`).
 
-**Decision: no network volume on the path. The provider writes each tree whole, as plain files, into a directory on
-the Mac's local disk, and answers `Mount` with that directory.**
+**The decision (D2): no network volume on the path.**
 
-- The provider reads only its own cache. The agent and the job read only local APFS files. Nothing is granted, and the
-  NFS frontend is not run on a Mac.
-- The directory lies on the homes' volume. It is beneath a root the operator lists to the agent with `--mount-root-ro`,
-  and tierstore's directories are already on that volume (section 1). For tierstore it is a new directory
-  `/usr/local/tierstore/trees`, which its package makes `_tierstore`'s, mode 0755. Every directory above it is mode
-  0755, so a pool user can reach the one tree Seatbelt grants it (section 5).
-- A `READ_ONLY` mount is the link of job-rootfs.md 5.2 to that directory. The files are the provider's (`_tierstore`),
-  modes 0644 and 0755, so the job reads and cannot write them. Seatbelt grants the run that one directory, and denies
-  it the rest of the root (job-rootfs.md 5.4).
-- A `COPY_ON_WRITE` mount is the agent's copy of it (2.2). Because the source is on the homes' volume, the copy is a
-  clone per file.
-- The protocol does not change. `Mount` answers "an absolute path of a directory on the host, beneath a directory the
-  operator lists to the agent as a mount root" (`provider.proto`). It answers once the directory holds the whole tree,
-  within the agent's `--mount-provider-wait`.
-- This is tierstore's change, on macOS only (build item 4). Its trees stay read-only, so decision C9 stands.
+- The provider writes each tree whole into a directory on the Mac's local disk, and answers `Mount` with it.
+- The provider reads only its cache. The agent and the job read only local APFS files.
+- The directory is beneath a root the operator lists with `--mount-root-ro`, on the homes' volume, so a copy of it is a
+  clone (D5). For tierstore it is `/usr/local/tierstore/job-trees/<key>`.
+- A `READ_ONLY` mount is the link of job-rootfs.md 5.2 to it. Its files are `_tierstore`'s, modes 0644 and 0755, so a
+  job reads and cannot write them. Seatbelt grants the run that one directory and denies it the rest of the root
+  (job-rootfs.md 5.4).
+- None of these reads needs Full Disk Access (*inferred*).
+  - The provider's trees are not in a place the privacy control protects, and writing in a home the agent made needs
+    none either, as the agent's `exec/` does today.
+  - A copy-on-write source that an operator's root puts under a protected folder (Desktop, Documents) would need one.
+    After the one-program switch the agent's program holds Full Disk Access for the account-per-job design anyway, so
+    that case needs nothing more.
+  - Deleting an account's home and per-user folders does need the grant. That is the account-per-job design's grant,
+    not this one's.
 
-**The agent enforces the rule generically.** Every root of `--mount-root` and `--mount-root-ro` must be on a local
-volume (`statfs`, `MNT_LOCAL`); the agent refuses to start otherwise, naming the flag. A source whose resolved directory
-is not on a local volume (a network mount below a root) is refused `input-not-allowed` at the lookup. Either way, a
-configuration that no job could use fails by name, once, instead of as `EPERM` inside each job.
+**The agent enforces the rule generically.**
 
-Rejected:
+- Every root of `--mount-root` and `--mount-root-ro` must be on a local volume (`statfs`, `MNT_LOCAL`), or the agent
+  refuses to start, naming the flag.
+- A source whose resolved directory is not on a local volume is refused `input-not-allowed` at the lookup.
+- A configuration that no job could use therefore fails by name, once, instead of as `EPERM` inside each job.
 
-- **Keeping the mount, with device-management grants.** As the table shows, the jobs cannot be granted. It would also
-  need a grant for the agent, a root daemon for the mount, and a full NFS read of every tree. tierstore's NFS frontend
-  measured about 20 times slower than APFS on a cold `stat` (virtual-build-fs.md section 8).
-- **The agent fetching trees through the cache's S3 front** into the run's directory. The agent would become a client
-  of one store's object interface and tree-list format. job-rootfs.md keeps every such name out of jobscheduler's code,
-  wire, flags and capabilities, and the provider interface exists so that it stays out. It would also do the
-  provider's work a second time. It is rejected on that ground alone: its cost, a full read of the tree into the local
-  disk, is the same as the decision's.
+### 2.2 Copy-on-write: candidate (b), the whole tree in one clone
 
-**What it costs.**
+A copy-on-write mount must give the job, at `exec/<rest>`, a tree that reads as the source. The job may create, change,
+rename and delete anything in it. No change may reach the source. The tree is owned and writable by the job's account,
+and goes with the run.
 
-- **Laziness.** On a Mac a provider's tree is fetched and written whole before the job's first process, the files the
-  job never reads included. The mount was the only lazy route, and the privacy control closes it to jobs.
-- **Time.** A tree cold in the cache costs its fetch from upstream, as on any route. A warm tree costs a local write of
-  its bytes and entries, which is not yet measured (build item 5). Inferred from the measured figures for a tree of
-  46,362 files: 0.45 s to clone it, and 2.0 s to build it as one link per file, which is about what making its entries
-  costs. A copy-on-write mount adds one clone per file on top.
-- **Disk.** One more copy of each tree's bytes while a run holds it, beside the cache, unless the provider shares one
-  written tree between runs (its choice). The clones of copy-on-write mounts share blocks. Disk caps are exempt from
-  B14.
-
-### 2.2 Copy-on-write: candidate (b), made per file
-
-**Candidate (b) of job-rootfs.md 5.3, made per file: a private copy, built by the agent off the worker.**
-
-- A `READ_ONLY` or `READ_WRITE` mount stays the link of job-rootfs.md 5.2. A provider's tree is the directory of 2.1.
-- A `COPY_ON_WRITE` mount is copied whole into the run's home before the job runs. Each regular file is cloned when the
-  source is on the volume of the homes (a provider's tree, by 2.1, and a host path on that volume), and its bytes are
-  copied otherwise.
-
-Why, against each candidate's tests (job-rootfs.md 5.3, tests 1 to 5):
-
-1. **Semantics.**
-   - The copy is an ordinary APFS tree that the job's user owns. Opening an input read-write, truncating, appending,
-     renaming a file or a directory, deleting, hard-linking, changing a mode and `mmap`ing for writing all behave as on
-     any directory.
-   - Nothing reaches the source, because the source is never opened for writing.
-   - It passes test 1 by construction. It renames a directory where the Linux overlay answers `EXDEV`
-     (job-rootfs.md 4.4): a superset of the overlay's behaviour, not a different answer.
-   - (a) passes test 1 only once we have written copy-up, whiteouts and rename into a file system of our own.
-   - (c) fails test 1 by construction: Seatbelt cannot turn a write through a link into a copy.
-2. **Laziness.**
-   - None of the three can be lazy on a Mac. (a) would serve a network file system, which the privacy control refuses
-     to the job's programs as it refuses tierstore's (2.1). Kept lazy, (c) would link into that mount.
-   - A client that wants to avoid copying a large tree mounts it `READ_ONLY` and makes its own writable directory
-     beside it (virtual-build-fs.md). That is (c), done by the client, which knows which files it writes.
-3. **Cost.** One clone per file for a tree on the homes' volume: 1.5 s for 190,000 files (*measured*). A host path on
-   another local volume costs a byte copy.
-4. **Teardown.**
-   - Nothing is mounted in the home, so `user-delete`, which refuses to cross a mount
-     (`docs/design/mac-lease-teardown.md`), and `kill-uid` stay as they are.
-   - No process blocks in a hard mount: nothing on the path is one (2.1).
-   - (a) needs an unmount before `user-delete`, and a way to end processes blocked mid-read in a hard mount. Those stay
-     in state `U` until a forced unmount (*measured*: macos E16).
-5. **Fleet.**
-   - Nothing is installed or approved for (b): `clonefile`, `read`/`write` and `lchown` are the OS's own.
-   - (a) needs a signed FSKit module enabled on every Mac, or FUSE-T, whose licence is not permissive.
-
-Rejected besides:
-
-- **A provider-made writable tree** (the provider answers `COPY_ON_WRITE` with a per-run directory the job may write):
-  it contradicts tierstore's decision C9. The protocol also carries no uid to give the tree to. The agent's clone of
-  the provider's local tree (2.1) costs one clone per file and needs neither.
-- **Hard links into the source**: a write through one changes the source's inode.
-- **Sending `READ_ONLY` to the provider for a copy-on-write mount**: the agent would tell a provider something other
-  than what the job asked, on one platform only. Section 5 changes the provider instead.
+- **(b), chosen.** One `clonefile(2)` of the source directory into the job's new home, then one walk over the copy
+  (3.2). The source must be on the homes' volume.
+  - The result is an ordinary APFS tree. Opening an input read-write, truncating, appending, renaming a file or a
+    directory, deleting, hard-linking, changing a mode and `mmap`ing for writing all behave as on any directory. Renaming
+    a directory succeeds where the Linux overlay answers `EXDEV` (job-rootfs.md 4.4).
+  - Nothing is mounted in the home, so the account's deletion crosses no mount (mac-lease-teardown.md, the deletion's
+    step 1).
+  - Nothing is installed.
+- **(a), rejected: a union view.** It is a file system of ours with copy-up, whiteouts and rename, served from FSKit or
+  FUSE-T. That means a signed system extension approved on every Mac, or FUSE-T, whose licence is not permissive, and an
+  unmount before the account's deletion. A hung mount leaves job processes in state `U` until a forced unmount
+  (*measured*: macos E16).
+- **(c), rejected: per-file links with copy on first write.** Seatbelt cannot turn a write through a link into a copy,
+  so a program that opens an input for writing is denied rather than given a copy. A client that knows which files it
+  writes can still do this itself, over a `READ_ONLY` mount.
+- **A provider-made writable tree, rejected.** It contradicts C9's "the writable directory of a run is the client's",
+  and the protocol carries no account to give it to.
+- **Hard links into the source, rejected.** A write through one changes the source's inode.
+- **Sending `READ_ONLY` to the provider for a copy-on-write mount, rejected.** The agent would tell a provider something
+  other than what the job asked, on one platform only. Section 5 changes the provider instead.
 
 ## 3. The mechanism
 
-### 3.1 Where each step runs
+### 3.1 The flow of one run
 
-1. **Admission** (`native/mounts.rs`, `check`, no I/O).
+Every step is the agent's program, `js-agent`, as root, except where it says the supervisor or the job.
+
+1. **Admission** (`check`, no I/O).
    - A `COPY_ON_WRITE` mount is no longer refused for its mode. Its target must be `/work` or strictly below it
-     (`mount-target-unsupported-here` otherwise). `/work` itself is taken for this mode only: `plan_target` refuses it
-     for every mode today.
-   - Nesting is refused `mount-target-unsupported-here`, as now, with one change. A `READ_ONLY` or `READ_WRITE` mount
-     may lie below a `COPY_ON_WRITE` target: the copy is a real directory of the home, and the link is made inside it
-     after the copy (step 4).
-   - A mount below a link, and a copy-on-write mount below another copy-on-write mount, stay refused. So does a
-     `READ_ONLY` or `READ_WRITE` mount at `/work` itself.
-   - Every mount counts toward `MAX_LISTED`, as now (`fs.mounts.len()`).
-2. **Lookup** (`resolve_fs`, on the worker, as now).
-   - The host path, or the directory the provider answered, is canonicalised. It must be a directory beneath a root of
-     the agent, and on a local volume (2.1).
-   - A copy-on-write mount needs only a read-only root (`--mount-root-ro`), as on Linux.
-   - A provider's source is resolved at the ask whose `fs` carries the provider's directory. The first ask carries only
-     the host paths (`lifecycle/job_fs.rs`, `JobFs::without_providers`).
-   - The lookups stay metadata calls on local volumes, answered at once.
-3. **Copy** (`assemble_fs`, new for the native runtime).
-   - The first ask starts one copy per copy-on-write mount, on a pool of 4 threads of the agent's own (`js-copies`).
-     The ask answers `Pending` until every copy has ended.
-   - The lifecycle ignores the first ask's answer and asks again (`prepare.rs`). A failure is therefore kept by run id
-     and given at every later ask. The state of a run's copies is kept by run id until `discard_fs`.
-   - Each copy builds the tree in `<native-homes>/.js-agent-copies/<run>/<index>`. Its parent is made by the agent:
-     root's, mode 0700, never through a link.
-   - The parent is in the directory of the homes, so step 4's rename is one metadata operation. The agent refuses to
-     start when `.js-agent-copies` and `--native-homes` have different `st_dev` (a volume mounted at that name).
-   - No code lists the homes directory, so the extra entry meets no sweep. No run can read it: its user is not root,
-     and the parent is 0700.
-4. **Placing** (`launch`, after `exec/` and the staged inputs are made, before `link_all`):
-   - Each staged tree is renamed to `exec/<rest>`. A copy at `/work` itself moves each top-level entry of the staged
-     tree into `exec/`.
-   - Each entry is then given to the run's user and the group `link_all` gives, with the existing hand-over
-     (`HandOver`, `lchown`, never through a link). This is on the worker, as all of `launch` is. Its cost for a large
-     tree is measured in build item 5 (section 11).
-   - A name that is there already fails the start, as `link_all` does.
-   - The links of the other mounts are made after the copies, so a link below a copy-on-write target lands in the copy.
-   - The run's supervisor then starts the job in `exec/`; it reads nothing of the trees.
+     (`mount-target-unsupported-here` otherwise). `/work` itself is taken for this mode only.
+   - A `READ_ONLY` or `READ_WRITE` mount may lie below a `COPY_ON_WRITE` target. A mount below a link, a copy-on-write
+     mount below another, and a read-only or read-write mount at `/work` stay refused `mount-target-unsupported-here`.
+   - Every mount counts toward `MAX_LISTED`, as now.
+2. **Providers** (the lifecycle's `providing` stage, as on Linux). `Prepare` at admission, then `Mount` until the
+   provider answers its written tree, within `--mount-provider-wait`.
+3. **Lookup** (`resolve_fs`, on the worker). Each source is canonicalised. It must be a directory beneath a root of the
+   agent, on a local volume (2.1). A copy-on-write mount needs only a read-only root, and its source must be on the
+   homes' volume (`statfs`). These are metadata calls on local volumes, answered at once.
+4. **The account, for a run with a copy-on-write mount** (`assemble_fs`, first ask, on the agent's pool `js-copies` of
+   4 threads; the account-per-job design, step 2).
+   - First, the start's own checks that `create_and_start` runs today: the environment, the body, the working
+     directory, the Xcode, the bundle. A start they refuse makes no account.
+   - Then, in today's order: the lease is named and journalled and the journal synced, the ledger's
+     `created <lease> <uid>` is written, and the account and its home are made (mode 0700, the account's, the lease
+     group).
+   - The account is made here because its copy needs it, and here is off the worker. `create_and_start` finds the lease
+     and the account by run id.
+   - A run with no copy-on-write mount gets its account in `create_and_start`, as the account-per-job design builds it.
+     A run without mounts never reaches `assemble_fs` (section 1). Both places call one function.
+5. **The copy** (the same `assemble_fs`, after step 4, on the same pool), for each copy-on-write mount:
+   - The source must be on the homes' volume. A provider's tree on a Mac is, by D2. A host path on another volume is
+     refused `input-not-allowed` at step 3.
+   - The agent, as root, clones the source into `<home>/exec/<rest>` with `clone_writable`, owner the account and the
+     lease group (3.2). For a mount at `/work` the clone is `<home>/exec` itself.
+   - No process of the account exists yet, so nothing can race the walk.
+   - The source is read as root and never written.
+   - The lifecycle ignores the first ask's answer and asks again (`prepare.rs`), so a failure is kept by run id and
+     given at every later ask.
+6. **The start** (`create_and_start`, on the worker).
+   - The agent makes `exec/` and `tmp/` where no copy made them, stages the start's `Mount` inputs into `exec/`, and
+     makes the links of the other mounts. A link below a copy-on-write target lands in the copy. A name that the copy
+     already holds fails the start, as `link_all` does today.
+   - It starts the run's supervisor: `js-agent __supervise-native`, root, in a process group of its own (the
+     one-program design, 4.2).
+   - The supervisor starts the job as the account, in `exec/`, with its responsibility disclaimed. It reads nothing of
+     the trees.
+7. **The end** (`remove`, as the one-program and account-per-job designs give it).
+   - The agent ends the supervisor, kills the account's processes, collects outputs, and deletes the account. The
+     deletion takes the home whole, copy included, and needs Full Disk Access, which is that design's grant.
+   - Only once the account is shown gone is its uid free.
+   - The provider's sources are released after the run's directories are removed (`cleanup.rs`, `Stage::Scratch`), as
+     on Linux.
+   - `discard_fs`, which the lifecycle calls at every cleanup, finds nothing left for such a run.
+8. **A run that never starts, after step 4** (refused, cancelled or failed).
+   - `discard_fs` hands the account's deletion, copy included, to the pool. It answers at once, because it is called on
+     the worker (`cleanup.rs`).
+   - The lifecycle then frees the run's slot, while the deletion may still run.
+   - A deletion that fails holds the account, as the account-per-job design says for any deletion: its lease stays
+     live, its uid is not given again, and the agent admits one native job fewer until the deletion is repeated and
+     shown complete. Two held accounts taint the host.
+9. **The agent's start.** The agent adopts first and resets second (the one-program design, 4.2).
+   - A run whose supervisor outlived the agent is adopted. Its account and its copy are left as they are. They go at
+     the run's `remove` (step 7), and that holds also when the supervisor dies later and the run ends `GONE`.
+   - A lease whose `supervisor` file names a live supervisor that the journal does not know (a crash between the
+     supervisor's start and the journal line) has that supervisor ended first. Then its uid is killed and its account
+     deleted.
+   - A lease the server still holds for the host is kept until the server lets it go, as the boot reset keeps a held
+     lease.
+   - Every other account the ledger names is deleted, home and copy included. That covers an account made at step 4
+     whose run never started, and a copy cut off half-way by a crash.
+   - No copy lives outside a home, so there is no other sweep.
 
 ### 3.2 What the copy makes
 
-The walk is one function over an injected file-system port. It lives in a module of `js-agent` that is built on every
-platform, so its rules are tested in the Linux pull request check, where coverage is measured. The same module takes
-the rules of admission (3.1 step 1, moved out of the macOS-only `native/mounts.rs`), the local-volume rule over an
-injected `statfs`, and the staging, placing and sweep steps over the port. The macOS side is the port alone.
+- The copy is `js-treestore`'s `FlagSealer::clone_writable` (`mac/seal.rs`): one `clonefile`, then a walk by
+  descriptor. It is extended in one way: the walk also removes each entry's extended attributes. It is not written a
+  second time.
+- Admission's rules, the local-volume and same-volume rules, and the order of steps 4 to 9 move into a module of
+  `js-agent` that is built on every platform, over an injected port. They are tested in the Linux pull request check,
+  where coverage is measured. The macOS side of the port is `clone_writable`, account creation and `statfs`.
 
-- Only the system calls are behind the port's macOS side: the clone, the clearing after it, and the hand-over.
-- The macOS side clones a file with the `Cloner` of `js-treestore` (`mac/seal.rs`, `clone_file`; `js-agent` depends
-  on the crate already) rather than add a second binding. A clone keeps the source's owner, mode, flags and extended
-  attributes (the `Cloner` doc). So after each clone the port sets the mode of the table below, clears the flags,
-  removes the ACL and every extended attribute, and the hand-over sets the owner. A byte copy is made with those
-  results directly.
-- It does not use `Sealer::clone_writable`: that clones a whole tree in one call, so it cannot treat entries one by
-  one, and it refuses hard links.
-
-| Source entry | Copy |
+| Source entry | In the copy |
 |---|---|
-| directory | a directory, mode 0700 |
-| regular file | a clone (`clonefile`, no follow) when `statfs` of the source root and of the staging parent name one volume; else a byte copy. Mode 0700 if the owner's execute bit was set, else 0600, as `clone_writable` gives. setuid and setgid are dropped |
-| symbolic link | a link with the same text, never followed |
-| hard links (one inode, two names) | two independent files |
+| directory | mode 0700, the account's |
+| regular file | mode 0700 if the owner's execute bit was set, else 0600, the account's; setuid and setgid dropped |
+| symbolic link | the same text, never followed; the account's |
+| a file with more than one link (a hard link) | refused `invalid-mount`, naming it, as `clone_writable` refuses it. A provider's written tree has none (section 5) |
 | FIFO, socket, device | refused `invalid-mount`, naming the entry |
-| two names that differ only in case | refused `invalid-mount`, naming both. The homes' volume ignores case, and a source on a case-sensitive volume may not |
-| modification time | kept, for files and directories, so tools that compare times (make, ninja, cargo) see the source's order |
-| extended attributes, ACLs, file flags | removed after a clone and never written by a byte copy: a tree a job may change keeps none of its source's quarantine or provenance marks |
+| nesting deeper than 64 directories | refused `invalid-mount`, as `clone_writable` refuses it |
+| modification time | kept: a clone keeps it, and the walk changes only owner, mode, flags and attributes |
+| file flags, ACL | cleared, as `clone_writable` does |
+| extended attributes | removed (the extension). An attribute the system will not let root remove is left, and the agent's log names it (*inferred* that some, such as `com.apple.provenance`, are so protected) |
 
-The modes follow the ones the bundle store's writable clones already use (`js-treestore`, `clone_writable`). The
-staged tree is root's until step 4 gives it away.
+- Names: the source and the copy are on one volume, so the copy has the source's names and the volume's handling of
+  case, and no collision can arise.
+- *Inferred*, to be pinned by the macOS tests: a clone keeps the source's owner when root makes it, because
+  `clone_writable` passes no `CLONE_NOOWNERCOPY`. It also keeps extended attributes, as `clonefile(2)` does.
+- The agent refuses to start when the homes' volume ignores ownership (`MNT_IGNORE_OWNERSHIP`), the check
+  `js-treestore`'s `mac/volume.rs` already makes for its own volume.
 
 ### 3.3 The Seatbelt view
 
-- The copy is in the run's home, which the profile lets the run write already. It is not in the run's read-only list,
-  which keeps the files, the staged inputs and the links.
-- No read grant of the source is emitted, because the run never reads the source. The source's root stays a read deny
-  of every run (job-rootfs.md 5.4).
-- A `no_exec` copy-on-write mount is a `MountGrant` of the copy's path, read-only, with `no_exec`.
-  - It emits the `(deny process-exec* ...)` and `(deny file-map-executable ...)` of a `no_exec` link.
-  - It also emits that grant's read and ancestor-metadata allows, for a path in the run's own home. The run may read
-    that path already, so they change nothing.
+- The copy is in the run's home, which the profile lets the run write already. It is not in the run's read-only list.
+- No read grant of the source is emitted. The source's root stays a read deny of every run (job-rootfs.md 5.4).
+- A `no_exec` copy-on-write mount is a `MountGrant` of the copy's path with `write` false and `no_exec`.
+  - It emits the two denies of a `no_exec` link, and read allows of a path the run may read already.
+  - `write` false does not make the copy read-only: the home's own grant keeps it writable.
+  - For a mount at `/work` the path is `exec/` itself, so nothing in the working directory may be run.
   - No new policy item is needed.
 
-### 3.4 How long a copy may take
+### 3.4 How long it takes
 
-- A copy is bounded by the server's start timeout, which bounds the whole preparing stage from placement (900 s by
-  default, `crates/js-lease-server/src/job_expiry.rs`). It has no bound of its own.
-  - Every source is on a local volume (2.1), so a copy ends, or fails with the error the disk gives.
-  - A bound on progress would guard against a hung network mount, which the local-volume rule keeps off the path
-    (B20).
-- A provider's own wait, before the copy, is bounded by `--mount-provider-wait`, as on Linux: it is 120 s by default
-  and at most 900 s. An operator whose trees take longer to write raises it.
-- **A stop waits for the copy.** The lifecycle waits for an assembly under way, and `assemble_fs` is given no stop.
-  - A job cancelled while its copy runs therefore ends when the copy ends or fails.
-  - For a clone that is about 1.5 s per 190,000 files.
-  - If byte copies of host paths prove long, the next step is a stop that the lifecycle gives the runtime's assembly.
-    That is a change to `Runtime`, which this design does not take now.
-
-### 3.5 Cleanup
-
-- A start that ends before step 4 (refused, cancelled, failed) has its staged trees removed after `discard_fs`, once
-  the assembly has answered (3.4). `discard_fs` answers at once, on the worker (`cleanup.rs`), so it hands the removal
-  to the copy pool and does not wait for it. A removal that fails is logged. The sweep when the agent starts is the
-  backstop. `discard_fs` also removes the run's empty staging directory after step 4 has moved the trees out.
-- After step 4 the copy is in the home and goes with it at `user-delete`, as the links do. That includes a copy that
-  failed half-way through the hand-over, which is root's in part.
-- An agent that starts removes everything under `<native-homes>/.js-agent-copies`, on the copy pool. No start is
-  adopted before its copy is placed.
-- A provider's source is released as on Linux: after the run is removed (`kill-uid`, `user-delete`), after
-  `discard_fs`, and after the run's directories are removed (`cleanup.rs`, `Stage::Scratch`). The provider then removes
-  the directory it wrote. The copy no longer needs the source once it is placed. Releasing the source earlier is an
-  optimisation this design does not take.
+- A copy is bounded by the server's start timeout over the whole preparing stage (900 s by default,
+  `crates/js-lease-server/src/job_expiry.rs`), and by nothing of its own.
+  - Every source is local, so a copy ends, or fails with the disk's error.
+  - A progress bound would guard against a hung network mount, which 2.1 keeps off the path (B20).
+- The provider's write is bounded by `--mount-provider-wait` (120 s by default, at most 900 s), as on Linux.
+- **A stop waits for the copy.** The lifecycle waits for an assembly under way, and `assemble_fs` is given no stop. A
+  job cancelled during its copy ends when the copy does: 3.5 to 3.9 s for 46,362 files (section 11).
 
 ## 4. Flags
 
@@ -327,38 +394,60 @@ No new flag. On a Mac:
 | Flag | Change |
 |---|---|
 | `--mount-provider NAME=SOCKET` | taken on macOS, with the Linux meaning (`crates/js-agent/src/lib.rs`); leaves `LINUX_ONLY` |
-| `--mount-provider-user NAME=USER` | taken on macOS. A user named by name is looked up with `getpwnam_r` (Directory Services), the call the Mac code already uses for its users (`js-mac-session`, `macos/host.rs`). A Mac's service accounts are not in `/etc/passwd`, and tierstore's `_tierstore` gets the highest free id from 399 down to 300, so its uid differs from Mac to Mac |
+| `--mount-provider-user NAME=USER` | taken on macOS. A name is looked up with `getpwnam_r` (Directory Services): a Mac's service accounts are not in `/etc/passwd`, and `_tierstore`'s uid is the highest free from 399 down to 300, so it differs from Mac to Mac |
 | `--mount-provider-wait SECS` | taken on macOS, unchanged (1 to 900, 120 by default) |
-| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | the root must be on a local volume on macOS, or the agent refuses to start, naming the flag (2.1). The operator lists the provider's tree directory as a read-only root, and it is a read deny of every run (job-rootfs.md 5.4) |
-| `--native-homes PATH` | unchanged. It also holds the agent's `.js-agent-copies` |
+| `--mount-root NAME=PATH`, `--mount-root-ro NAME=PATH` | must be on a local volume on macOS, or the agent refuses to start (2.1). The operator lists `/usr/local/tierstore/job-trees` as a read-only root |
 
-The socket check needs nothing new. tierstore's socket on a Mac is `_tierstore`'s, mode 0600, in a directory of
-`_tierstore` with mode 0700 (*read*: komira-ai/tierstore `packaging/macos/README.md`), which the check takes
+The socket check needs nothing new. tierstore's socket is `_tierstore`'s, mode 0600, in a directory of `_tierstore`
+with mode 0700 (*read*: komira-ai/tierstore `packaging/macos/README.md`), which the check takes
 (`crates/js-agent/src/provider/socket.rs`).
 
 ## 5. What the provider side must do
 
-These are requirements of the provider interface, stated for any provider; tierstore is the one there is.
+These are requirements of the provider interface, for any provider; tierstore is the one there is. Each is tierstore's
+to build and test (build item 5).
 
 1. **Accept `COPY_ON_WRITE` as it accepts `READ_ONLY`.**
-   - The agent keeps the job's changes on every platform: an overlay upper on Linux, the copy on a Mac. A provider that
-     makes read-only trees therefore serves a copy-on-write mount with the same tree.
+   - The agent keeps the job's changes on every platform, so a provider of read-only trees serves the same tree.
    - This also fixes the same refusal on Linux.
-   - It changes no field: the value exists, and the proto's comment ("its changes are its own and never reach the
-     tree") already says it.
-2. **On a Mac, answer `Mount` with a local directory that holds the whole tree** (2.1).
-   - The directory is plain files, owned by the provider, files 0644 or 0755 and directories 0755.
-   - It is on the volume of the homes, beneath the directory the operator lists as a read-only mount root. For
-     tierstore that is `/usr/local/tierstore/trees`, made by the package's `postinstall` (`_tierstore`, 0755) with the
-     other directories it makes. Its parents are 0755.
-   - The provider writes it from its cache. It answers `UNAVAILABLE` until it is whole, and the agent asks again within
-     its wait.
-   - It removes the directory at `Release` and `Sweep`.
-   - It never answers with a directory of a network file system, which the agent refuses (2.1).
+   - No field changes.
+2. **On a Mac, answer `Mount` with a local directory that holds the whole tree** (D2, D3).
+   - **Where:** `/usr/local/tierstore/job-trees/<key>`, one directory per tree key, shared by every source that names the
+     key. The package's `postinstall` makes `job-trees` (`_tierstore`, 0755) beside the directories it makes today. Its
+     parents are 0755. The name keeps it apart from the cache's own `trees/`.
+   - **How it is written:** from the cache, on the same volume.
+     - A file that the cache holds as a whole object is cloned from it (`clonefile`).
+     - A file that is a span of a pack is copied from the span.
+     - Either way the file ends `_tierstore`'s, 0644 or 0755, with no extended attribute. A tree list names files, not
+       inodes, so the written tree has no hard links.
+     - The tree is written into `job-trees/.partial-<key>` and renamed to `job-trees/<key>` when whole, so no reader
+       ever sees part of a tree.
+   - **Answers and concurrency:**
+     - `Prepare` answers at once and works in the background, as the protocol says.
+     - There is one writer per key. A second `Prepare` of a key being written joins the write in progress.
+     - `Mount` answers `UNAVAILABLE` until the rename, within tierstore's 25 s (the protocol allows 30), and the agent
+       asks again until its `--mount-provider-wait` ends.
+   - **Sharing and space:**
+     - A source holds its key's tree from `Prepare` to `Release` or `Sweep`, and never longer than the placement's life
+       (`trees.ttl_max`, 24 hours), as a placement is held today.
+     - A held tree is never evicted.
+     - An unheld one stays until space is needed, oldest release first.
+     - The written trees count at their logical size against `local_cache.budget`, which is a change to the cache's
+       accounting: the directory is outside `local_cache.path` (D3).
+   - **At the cap:** when the trees held by sources fill the budget alone, `Mount` answers `UNAVAILABLE` ("no space").
+     The agent's wait ends `input-unavailable`.
+   - **Never** a directory of a network file system, which the agent refuses (2.1).
 
-Rollout order: the provider side (1 and 2), then the agent's build items, then each Mac's flags.
+Rollout order:
 
-- An agent of the previous release still refuses each of these mounts by name at start (`rootfs-unsupported-here`,
+1. The provider side (1 and 2).
+2. The two designs this one rests on: one program, then accounts per job.
+3. The agent's build items.
+4. Each Mac's flags.
+
+During the roll:
+
+- An agent of the previous release refuses each of these mounts by name (`rootfs-unsupported-here`,
   `input-not-allowed`). Placement does not filter it out, as today.
 - A provider of the previous release answers with its NFS directory, and the new agent refuses it by name
   (`input-not-allowed`, "not on a local volume").
@@ -366,57 +455,67 @@ Rollout order: the provider side (1 and 2), then the agent's build items, then e
 ## 6. Wire, capabilities and placement
 
 - **No wire change.** The fields, the mode, the refusal codes and the provider protocol are all as they are.
-  `MOUNT_MODE_COPY_ON_WRITE` exists in both the job proto and `provider.proto`.
 - **One existing key, now reported on a Mac.** `mount-provider.<name>` is reported by the native hello for each
-  `--mount-provider`, as the container hello reports it today. Its report moves out of `contract/container.rs` into
-  the shared contract.
+  `--mount-provider`. Its report moves out of `contract/container.rs` into the shared contract.
 - **Placement is unchanged.**
   - A copy-on-write mount does not require `exec=container`. Only layers and a remapped host port do (`rootfs.rs`,
     `needs_container`).
-  - A Mac already reports `layered-rootfs`, so such a job could already be placed there. What changes is that the
-    agent no longer refuses it.
   - A provider's mount goes only to a host that reports the provider's key (`job_start.rs`, `MountProviderNotReported`).
-- **No new key for copy-on-write on a Mac.** The agents of one pool are rolled together by one host group. During the
-  roll an agent of the previous release refuses by name, and a client runs the job again (job-rootfs.md, Q3). A key
-  for one roll would be machinery for a configuration window (B20).
+- **No new key for copy-on-write on a Mac.** During the roll an agent of the previous release refuses by name, and a
+  client runs the job again (job-rootfs.md, Q3); a key for one roll would be machinery for a configuration window
+  (B20).
 
 ## 7. Refusals and failures
 
-No new code. Every case below has a named refusal, and none gives a different answer silently.
+No new code. Every case has a named refusal; none gives a different answer silently.
 
 | Case | Learnt | Result |
 |---|---|---|
-| A mount root on a network volume | agent start | the agent does not start; the error names the flag and the volume |
+| A mount root on a network volume; a homes' volume that ignores ownership | agent start | the agent does not start; the error names the flag and the volume |
+| The account-per-job design's Full Disk Access not in force | admission | `no-full-disk-access`, that design's refusal of every native job, unchanged here |
 | A provider the agent was not given | admission | `input-not-allowed`, as on Linux |
 | A copy-on-write target outside `/work`; a `READ_ONLY`/`READ_WRITE` mount at `/work`; a mount below a link; a copy-on-write mount below another | admission | `mount-target-unsupported-here` |
 | Layers | admission | `rootfs-unsupported-here`, unchanged |
 | More mounts than `MAX_LISTED` | admission | `too-many-inputs-here`, unchanged |
-| The source, or the provider's directory, missing, not a directory, or beneath no root | preparing | `input-unavailable` / `input-not-allowed`, as job-rootfs.md section 8 |
-| The source, or the provider's directory, on a volume that is not local | preparing | `input-not-allowed`, naming the path and its file system |
 | The provider refuses the ref or the mode (a provider before section 5's change 1, for a copy-on-write mount) | preparing | `provider-refused`, as on Linux |
-| The provider's tree is not whole within `--mount-provider-wait` | preparing | `input-unavailable`, as on Linux |
+| The provider's tree is not whole within `--mount-provider-wait`, the cap included | preparing | `input-unavailable`, as on Linux |
+| A source missing, not a directory, or beneath no root | preparing | `input-unavailable` / `input-not-allowed`, as job-rootfs.md section 8 |
+| A source on a volume that is not local | preparing | `input-not-allowed`, naming the path and its file system |
+| A copy-on-write source on a local volume other than the homes' | preparing | `input-not-allowed`, naming the path and both volumes |
+| The account cannot be made | preparing | the start fails with the runtime's failure, naming the step |
 | A read of the source fails during the copy, or the homes' volume is full | preparing | `input-unavailable`, naming the entry and the error |
-| A FIFO, socket or device in the source; two names that differ only in case | preparing | `invalid-mount`, naming the entries |
-| The rename into `exec/` fails (another volume under the homes) | creating | the start fails with the runtime's failure, naming the path: the host's configuration |
+| A hard link, FIFO, socket or device in a copy-on-write source, or nesting deeper than 64 | preparing | `invalid-mount`, naming the entry |
 | The job's reads through a `READ_ONLY` link fail while it runs | the job | the job's own result, then the after-exit check (job-rootfs.md section 8) |
 
-## 8. Differences from Linux a client may meet
+## 8. What a submitter sees on a Mac, and how it differs from Linux
 
-The spec is the same on both platforms. A client that relies on any of these runs only in a container:
+The spec is the same on both platforms. On a Mac:
 
-- **Laziness.** On a Mac a provider's tree is written whole before the job's first process (2.1). A copy-on-write
-  mount of a host path is read whole as well.
-- **Hard links** in the source are separate files in the copy. On Linux they stay one inode until written.
-- **Renaming a directory** of the source succeeds on a Mac. On Linux it is `EXDEV`.
-- **Case.** Two names that differ only in case are refused on a Mac.
-- **Ownership.** The copy is the run's user's on a Mac. On Linux a writable tree is presented by its provider owned by
-  the job's container identity (job-rootfs.md LR5).
-- **Extended attributes** are not copied.
-- **Network volumes** cannot be a mount's source on a Mac.
+- **The start waits for the whole tree.** A provider's tree is written whole before the job's first process (D1).
+  - Warm, by the stand-in of section 11, that is about 6 s for 46,362 files the first time the Mac meets the tree, and
+    nothing for later jobs while it is kept.
+  - A copy-on-write mount adds 3.5 to 3.9 s for the same tree.
+  - Making and deleting the job's account cost more on top. They are measured in the account-per-job design, not
+    here.
+- **A cancel during the copy waits for the copy** (3.4).
+- **Modes.**
+  - In a copy, directories are 0700 and files 0600, or 0700 when the owner could execute them.
+  - setuid and setgid are dropped.
+  - Every entry is the job's account's.
+  - On Linux a writable tree keeps its modes, owned as its provider presents it (job-rootfs.md LR5).
+- **Hard links, FIFOs, sockets, devices** and nesting deeper than 64 in a copy-on-write source are refused. A
+  provider's written tree has none of them. On Linux an overlay keeps hard links one inode until written.
+- **Renaming a directory** of the source succeeds. On Linux it is `EXDEV`.
+- **Extended attributes, ACLs and file flags** are not in the copy.
+- **Sources** must be on a local volume, and a copy-on-write source on the homes' volume.
+
+A client that needs the Linux behaviour (laziness, kept modes, hard links, overlay semantics) asks for
+`exec=container`. Placement then sends the job only to a host that runs containers, never to a Mac's native agent. When
+no such host reports the provider's key, the submit is refused `no-capable-host`, as for any constraint no host meets.
 
 ## 9. Tests
 
-Each is a Rust behaviour test. None asserts a time: the copy pool is driven step by step.
+Each is a Rust behaviour test. None asserts a time: the pool is driven step by step and the clock is injected.
 
 **Where they run.**
 
@@ -425,124 +524,158 @@ Each is a Rust behaviour test. None asserts a time: the copy pool is driven step
 - The macOS tests run today in the beta stage on Apple silicon, after a push to main. B9 and B9-linux keep macOS out of
   pull request checks.
 - The owner has ruled that once the Macs are on the farm, Mac tests run in every pull request. The pull request that
-  adds that job changes these rules in the same pull request:
-  - B9, a shared-core rule: `AGENTS.md`, its canonical copy `docs/agents/shared-core.md`, and
-    `docs/agents/shared-core.sha256`, held together by `cargo test -p xtask --test agents_md`, and the same core in
-    every repository that carries it;
+  adds that job also changes, in the same pull request:
+  - B9, a shared-core rule: `AGENTS.md`, `docs/agents/shared-core.md` and `docs/agents/shared-core.sha256`, held
+    together by `cargo test -p xtask --test agents_md`, and the same core in every repository that carries it;
   - B10, if the job runs on our own Macs rather than a hosted runner;
-  - B9-linux and its check (`cargo test -p xtask --test pr_linux_only`).
+  - B9-linux and its check, `cargo test -p xtask --test pr_linux_only`.
 - From then on the macOS tests below run in every pull request.
 
-**Shared module (every pull request, covered):**
+Every test below uses the repository's scratch helpers for its directories (T12). None touches the host's real homes,
+`/usr/local/tierstore` or a service's directory, and the package test runs `postinstall` against a scratch target.
+
+**Owner: jobscheduler, shared module (`js-agent`; every pull request, covered).** These run over the injected port:
 
 | Test | Asserts |
 |---|---|
-| `copy_leaves_the_source_unchanged_after_the_copy_is_changed` | after the copy is written, truncated, appended to, renamed and deleted in, the source's listing and bytes are equal to before |
-| `copy_gives_dirs_0700_files_0600_and_0700_for_an_execute_bit_and_drops_setuid` | the modes of the table in 3.2 |
-| `copy_keeps_link_text_and_never_follows_a_link` | a link to a file outside the source is a link in the copy, and the outside file is not read |
-| `copy_makes_hard_links_independent` | a write to one name leaves the other |
-| `copy_keeps_modification_times` | files and directories keep the source's times |
-| `copy_refuses_a_fifo_socket_or_device_as_invalid_mount` | the refusal and its exact detail |
-| `copy_refuses_names_equal_but_for_case` | `invalid-mount` naming both entries, exact text |
-| `copy_clones_on_one_volume_and_copies_bytes_across` | the port is asked to clone when the volumes match and never otherwise |
-| `copy_read_error_is_input_unavailable_naming_the_entry` | `EIO`, `EACCES` and `ENOSPC` each give the exact detail |
-| `copy_discarded_removes_its_staged_tree` | `discard_fs` after a failed copy and after a placed one; a failed removal is logged and found by the sweep |
-| `clone_is_cleared_of_flags_acl_and_extended_attributes` | through the port, a source file with a quarantine attribute, a flag, an ACL and mode 0755 gives a copy with none of them and mode 0700 |
-| `first_ask_failure_is_given_again` | a copy that fails at the first ask fails every later ask of the same run |
-| `agent_refuses_a_copies_directory_on_another_device` | the start check, exact message |
-| `agent_refuses_a_mount_root_on_a_network_volume` | the start check for `--mount-root` and `--mount-root-ro`, exact message, and a local root taken |
-| `source_on_a_network_volume_is_input_not_allowed` | a host path, and a provider's directory, below a local root but on a network file system, exact detail |
-| `staged_copies_removed_when_the_agent_starts` | leftovers of a previous process are removed, others' files are not |
-| `copy_at_work_fills_the_working_directory` | each top-level entry is in `exec/`, and a name already there fails |
 | `copy_on_write_target_outside_work_refused` | `mount-target-unsupported-here`, exact text, and `/work` itself taken for this mode only |
-| `rename_into_exec_across_volumes_fails_naming_the_path` | the port's `EXDEV` at step 4 fails the start with the path |
-| `provider_tree_not_whole_within_the_wait_is_input_unavailable` | `Mount` answering `UNAVAILABLE` past `--mount-provider-wait` |
-| `link_below_a_copy_on_write_target_lands_in_the_copy` | the link is made after the copy, inside it |
 | `mount_below_a_link_and_copy_below_copy_still_refused` | `mount-target-unsupported-here`, exact text |
+| `agent_refuses_a_mount_root_on_a_network_volume` | the start check for `--mount-root` and `--mount-root-ro`, exact message, and a local root taken |
+| `agent_refuses_a_homes_volume_that_ignores_ownership` | the start check, exact message |
+| `source_on_a_network_volume_is_input_not_allowed` | a host path, and a provider's directory, below a local root but on a network file system, exact detail |
+| `copy_on_write_source_off_the_homes_volume_is_input_not_allowed` | exact detail, naming both volumes |
+| `start_checks_run_before_the_account_is_made` | a start refused for its environment, working directory, Xcode or bundle makes no account and writes no ledger line |
+| `journal_then_ledger_then_account_then_copy` | the order of step 4, and every entry of the copy is the account's |
+| `run_without_copy_on_write_gets_its_account_at_the_start` | no `assemble_fs` account; `create_and_start` makes it through the same function |
+| `first_ask_failure_is_given_again` | a copy that fails at the first ask fails every later ask of the same run |
+| `copy_failure_is_named` | a refused entry gives `invalid-mount` naming it; `EIO`, `EACCES` and `ENOSPC` give `input-unavailable` with the exact detail |
+| `run_never_started_has_its_account_and_copy_deleted` | `discard_fs` after a failed copy and after a cancel hands the deletion to the pool; a failed deletion holds the account |
+| `discard_after_remove_does_nothing` | `discard_fs` of a run whose account `remove` deleted |
+| `agent_start_keeps_an_adopted_runs_copy_and_deletes_the_rest` | an adopted run keeps its account and copy; a lease with an unjournalled live supervisor has it ended before its account goes; a lease the server holds is kept; an account whose run never started, and one cut off half-way, are deleted |
+| `copy_at_work_is_the_working_directory` | the clone is `exec/` itself; a staged input or link whose name the copy holds fails the start |
+| `link_below_a_copy_on_write_target_lands_in_the_copy` | the link is made after the copy, inside it |
+| `provider_tree_not_whole_within_the_wait_is_input_unavailable` | `Mount` answering `UNAVAILABLE` past `--mount-provider-wait` |
 
-**Placement (every pull request):** in `agent_api_job_cases.rs`,
-`copy_on_write_provider_job_goes_only_to_a_host_reporting_the_key`.
+**Owner: jobscheduler, placement (`js-lease-server`; every pull request):**
+`copy_on_write_provider_job_goes_only_to_a_host_reporting_the_key`, in `agent_api_job_cases.rs`.
 
-**macOS (the beta stage now, every pull request once the Macs are on the farm).** These are the macOS-only glue, behind
-the `cfg(target_os = "macos")` of `native` and `platform/macos.rs`, so the Linux check cannot run them:
+**Owner: jobscheduler, macOS (`js-agent`, `js-treestore`; the beta stage now, every pull request once the Macs are on
+the farm).** These are the macOS-only parts, behind `cfg(target_os = "macos")`:
 
-- `macos_takes_the_provider_flags`, which holds `LINUX_ONLY` and the macOS flag list to clap;
-- `native_hello_reports_the_provider_key`;
-- `native_start_naming_an_unconfigured_provider_is_input_not_allowed`;
+- `js-agent`:
+  - `macos_takes_the_provider_flags`, which holds `LINUX_ONLY` and the macOS flag list to clap;
+  - `native_hello_reports_the_provider_key`;
+  - `native_start_naming_an_unconfigured_provider_is_input_not_allowed`;
+  - `copy_on_write_is_planned_not_refused`;
+  - `copy_is_not_in_the_read_only_list`, with the profile text asserted whole;
+  - `no_exec_copy_is_denied_exec`;
+  - `statfs_reads_a_local_directory_as_local`.
+- `js-treestore`, `clone_writable` with the real `clonefile`:
+  - `clone_writable_removes_extended_attributes`, with a real quarantine attribute;
+  - `clone_writable_keeps_link_text_and_modification_times`;
+  - the existing tests of its modes, owner, flags, ACL and refusals of hard links, devices, pipes and depth, which stay
+    as they are.
+- The semantics test, as a `sandbox-exec` behaviour test: a program that opens an input read-write and changes it,
+  truncates and appends, renames a file and a directory, deletes both, changes a mode and `mmap`s a file for writing.
+  The source is unchanged after.
 
-- `copy_on_write_is_planned_not_refused`;
-- `copy_is_not_in_the_read_only_list`, with the profile text asserted whole;
-- `no_exec_copy_is_denied_exec`;
-- `same_volume_copy_is_a_clone`: the real port takes the clone path, not the byte copy, for a source on the homes'
-  volume, and the copy's bytes equal the source's;
-- `statfs_names_a_network_volume_not_local`: the real `statfs` of a local directory is local;
-- job-rootfs.md 5.3 test 1, as a `sandbox-exec` behaviour test run against a host-path tree.
-
-**tierstore (its repository):**
+**Owner: tierstore (its repository, tierstore's maintainers):**
 
 - `prepare_accepts_copy_on_write_as_read_only`;
 - `prepare_still_refuses_read_write`, with the reason asserted by exact equality;
-- on macOS, `mount_answers_a_local_directory_holding_the_whole_tree`, which also asserts the tree's modes and that
-  `Release` removes it;
-- the package test that the `postinstall` makes `/usr/local/tierstore/trees` with its owner and mode.
+- on macOS:
+  - `mount_answers_the_whole_written_tree_and_never_a_part`;
+  - `mount_answers_unavailable_within_25_s_while_the_tree_is_written`;
+  - `whole_objects_are_cloned_and_spans_copied`;
+  - `concurrent_prepares_of_one_key_write_once`;
+  - `a_held_tree_is_never_evicted_and_unheld_trees_go_oldest_release_first`;
+  - `written_trees_count_at_logical_size_in_the_budget`;
+  - `mount_at_the_cap_with_every_tree_held_is_unavailable_no_space`;
+- the package test that the `postinstall` makes `job-trees` with its owner and mode, against a scratch target.
 
 **Why this list covers the failure and boundary cases.**
 
 - It takes each row of section 7, and each entry kind of the table in 3.2.
-- It takes each place a copy ends: placed, discarded, failed, and found by a new agent.
+- It takes each place a run's account and copy end: removed after the job, discarded before it, held after a failed
+  deletion, and found by a new agent with a live supervisor, with an unjournalled one, and with none.
 - It takes each nesting of the new mount below another.
-- It takes both sides of the local-volume rule, at agent start and at the lookup.
+- It takes both sides of the local-volume and same-volume rules.
+- For the provider it takes the first writer and a concurrent one, a tree still being written, a held and an unheld
+  tree, and the cap.
 - It takes the one compatibility edge: a previous-release agent's refusal, which is unchanged and already tested.
 
 ## 10. Build items
 
-One subject per pull request, in this order:
+One subject per pull request, in this order. Items 3 and 4 come after the one-program switch (the one-program design,
+section 7). Item 4 also comes after accounts per job (the account-per-job design, step 2), whose account it makes at
+assembly.
 
-1. **The copy module** (`js-agent`, shared): the walk of 3.2 over its port; the admission rules of `native/mounts.rs`
-   `check` moved into it unchanged; and the shared-module tests. No behaviour change.
-2. **Providers on a Mac** (`js-agent`):
+1. **The shared module** (`js-agent`): the admission rules of `native/mounts.rs` `check`, moved into it unchanged; the
+   port; and the shared-module tests that need no later item. No behaviour change.
+2. **`clone_writable` removes extended attributes** (`js-treestore`), with its macOS tests.
+3. **Providers on a Mac** (`js-agent`):
    - the three flags on macOS, and `getpwnam_r` for a user named by name;
    - `Jobs::providers` from the flags, and the hello key moved to the shared contract;
-   - the local-volume rule for roots and sources;
+   - the local-volume rule;
    - `plan_of` taking a provider's directory.
 
    The "No provider reaches a Mac" text of `native/mounts.rs` goes. So do three phrases of `js-agent`'s rustdoc flag
    table: the three flags' "Linux build only", `--mount-provider`'s "taken with the crun runtime only", and
-   `--mount-provider-user`'s "looked up in `/etc/passwd`", which becomes Directory Services on a Mac. The item gives
-   `READ_ONLY` provider mounts.
-3. **Copy-on-write on a Mac** (`js-agent`, `js-mac-pool`):
-   - `check`, and `assemble_fs` driving the pool;
-   - the staging parent and its start check;
-   - placing and hand-over in `launch`;
-   - `discard_fs`, and the sweep at start;
+   `--mount-provider-user`'s "looked up in `/etc/passwd`".
+4. **Copy-on-write on a Mac** (`js-agent`, `js-mac-pool`):
+   - `check`, and the same-volume and ownership rules;
+   - `assemble_fs` running the start's checks, then making the account and the copy on the pool;
+   - `create_and_start` finding them;
+   - `discard_fs` and the agent's start;
    - the `no_exec` grant of 3.3.
 
-   The module docs of `native/mounts.rs` lose "its mechanism is not chosen". job-rootfs.md 5.1's row changes with it,
-   and `docs/job-surface.md` gains the differences of section 8 (T19).
-4. **tierstore** (komira-ai/tierstore, before 2 is used):
-   - `Prepare` accepts `COPY_ON_WRITE`;
-   - on macOS, `Mount` answers a local directory holding the whole tree (section 5);
-   - the macOS package's `postinstall` makes `/usr/local/tierstore/trees`, and its documentation names that directory
-     as the agent's read-only root.
+   The module docs of `native/mounts.rs` lose "its mechanism is not chosen". job-rootfs.md 5.1's rows and
+   `docs/job-surface.md` gain the differences of section 8 (T19).
+5. **tierstore** (komira-ai/tierstore, before item 3 is used): section 5 and its tests, owned by tierstore's
+   maintainers. D2 needs the agreement of tierstore's owner, who owns C9.
+6. **A measurement with the real programs on one idle Mac** (a runbook under `docs/runbooks/`, not a test of the pull
+   request set).
+   - It repeats section 11 with tierstore writing the tree from its cache, cold and warm, and with the agent's copy made
+     as root to another account.
+   - Neither can be measured now: the provider's local write does not exist until item 5. Handing a tree to another
+     account needs root, which the measurement's user did not have.
 
-   The NFS frontend is not installed on a Mac for jobs.
-5. **A measurement on one Mac** (a runbook under `docs/runbooks/`, not a test of the pull request set): for a
-   provider's tree of 46,362 files, cold and warm, the time from `Prepare` to a whole local tree; the clone of it; and
-   the hand-over's time for the same tree. Run by the owner on an idle Mac.
+## 11. Measured, and the bound past which this design is wrong
 
-Every item is the agent's: the one-program ruling adds no helper verb. If the helper still exists when items 2 and 3
-are built, the hand-over and the `user-create` they call are the steps that move into the agent with it.
+*Measured* on two idle Macs (macOS 27.0.1 and 26.4), as an unprivileged user, by a Python stand-in, not by tierstore or
+the agent. The real programs cannot be measured yet: the provider's local write is build item 5, and the walk to
+another account needs root (build item 6). The tree was synthetic but of a large build's shape: 46,362 files in 12,394 directories, 463 MB of data, one
+file in ten executable. The source was in the page cache. Three runs on each Mac:
 
-## 11. What is still measured, and what would change the decision
+| Step | 27.0.1 | 26.4 |
+|---|---|---|
+| the provider's write, stood in for by a byte copy of every file (read, write, mode, times) | 5.5 to 6.0 s | 5.3 to 6.6 s |
+| the same with `cp -R` | 8.0 to 8.6 s | 7.1 to 8.5 s |
+| one `clonefile` of the whole tree | 0.5 s | 0.8 to 0.9 s |
+| the walk of 3.2 over the clone (`lchown` to the same user, mode, flags, attribute check; 58,755 entries, the root excluded) | 3.0 to 3.1 s | 2.8 to 3.0 s |
+| one `clonefile` per file, for comparison | 6.7 s | 7.5 to 7.6 s |
+| removing a cloned tree | 3.1 to 3.2 s | 4.2 to 5.4 s |
 
-- **What a program that is not Apple's gets from the privacy control on the NFS mount**, and what a device-management
-  profile would have to grant, is being measured.
-  - It does not change 2.1: a job's programs cannot be granted, so the mount stays off a job's path whatever the agent
-    is allowed.
-  - If a granted agent could read the mount, it would allow a copy through the mount. That copy would be a full NFS
-    read and never a clone, so it is still worse than the local tree.
-- **The time to write a warm tree locally** (build item 5) decides how large a provider tree is worth sending to a Mac.
-  It does not change the mechanism. If it is too long for the trees clients send, the provider can keep one written
-  tree per tree key and share it between runs (its choice, no protocol change).
-- **The hand-over's cost** for a large tree, on the worker. If it is large, the hand-over moves into the copy. The copy
-  then needs the run's uid before the user is made: the agent would make the run's user at the start of preparing.
+Read as:
+
+- **The provider's write** of a warm tree of this size is about 6 s. A tree the cache does not hold costs its download
+  on top, as on any route.
+- **The copy of a copy-on-write mount** is one clone and the walk: 3.5 to 3.9 s, summed run by run. An `lchown` to
+  another account as root is *inferred* to cost about the same.
+- **The removal** is part of the account's deletion.
+- A compiled walk is expected to be faster than Python's (*inferred*). Build item 6 measures the real programs.
+
+**The bound.** This design is wrong for a client when the time from the provider's `Prepare` to the end of the copy,
+on these Macs and warm, for that client's median tree, passes **30 s**.
+
+- The time excludes making the job's account, which the account-per-job design measures and every native job pays
+  with or without trees.
+- 30 s is three times what the stand-in measured for a tree of 46,362 files (about 6 s to write and 4 s to copy).
+- It is about seventeen times the 99th percentile from placement to running of a Linux container start, 1.8 s
+  (`docs/design/start-latency.md`). That is a different stretch of a start, given for scale.
+- Past it, the start costs more than many build actions take. The answer is then the lazy local file system of D1
+  (iii), not a faster copy.
+- Below it the mechanism stands. A tree that several jobs share costs its write once.
+
+**Still being measured, not waited for (D4):** what a program that is not Apple's gets from the privacy control on the
+NFS mount. Under this design no job and no process of the agent reads that mount, so the answer cannot change it.
