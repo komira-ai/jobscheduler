@@ -2,7 +2,6 @@
 //! `work` before the start; each released after the sweep.
 
 use std::fs;
-use std::os::unix::fs::{lchown, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -115,27 +114,7 @@ fn link_one(
             root.display()
         ));
     }
-    // Each part of the place is walked without following a link: the inputs copied into work may
-    // hold links, and root must make nothing through one.
-    let mut link = layout.work();
-    let parts: Vec<&str> = tree.at.split('/').collect();
-    let (last, parents) = parts.split_last().unwrap_or((&"", &[]));
-    for part in parents {
-        link.push(part);
-        match fs::symlink_metadata(&link) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Err(format!("{} is not a folder", link.display())),
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&link).map_err(|why| format!("{}: {why}", link.display()))?;
-                lchown(&link, Some(uid), Some(gid))
-                    .map_err(|why| format!("{}: {why}", link.display()))?;
-            }
-            Err(why) => return Err(format!("{}: {why}", link.display())),
-        }
-    }
-    link.push(last);
-    symlink(&resolved, &link).map_err(|why| format!("{}: {why}", link.display()))?;
-    lchown(&link, Some(uid), Some(gid)).map_err(|why| format!("{}: {why}", link.display()))?;
+    super::files::link_at(&layout.work(), &tree.at, &resolved, (uid, gid))?;
     let entry = TreeUse {
         reference: tree.reference.clone(),
         at: tree.at.clone(),

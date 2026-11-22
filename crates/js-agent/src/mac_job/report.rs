@@ -66,8 +66,9 @@ pub struct Report {
     pub outputs: Outputs,
     /// What was left.
     pub leftovers: Leftovers,
-    /// The outputs committed to the put ingest, or why they were not, when one was named.
-    pub put: Option<Result<super::put::Committed, String>>,
+    /// The job's put directories, and what was in each when the job's cleanup ended (the node
+    /// stores a committed object and removes it).
+    pub put_dirs: Vec<PutUse>,
     /// The trees the job read, where they were mounted, and their release.
     pub trees: Vec<TreeUse>,
     /// The lent account and what its retirement did, when the pool lent one.
@@ -94,6 +95,19 @@ pub struct TreeUse {
     pub mount_ms: u64,
     /// The release after the job, or why it failed.
     pub released: Result<(), String>,
+}
+
+/// A put directory of the job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PutUse {
+    /// The directory.
+    pub path: String,
+    /// Where it appeared, under `work`.
+    pub at: String,
+    /// Its entries once the job's cleanup ended.
+    pub left: Vec<String>,
+    /// Why it could not be read then, if it could not.
+    pub error: Option<String>,
 }
 
 /// An account the pool lent for the job.
@@ -135,7 +149,7 @@ impl Report {
             status::LEFT_BEHIND
         } else if self.ended == Ended::Exited(0)
             && self.outputs.missing.is_empty()
-            && !self.put.as_ref().is_some_and(Result::is_err)
+            && self.put_dirs.iter().all(|dir| dir.error.is_none())
         {
             status::OK
         } else {

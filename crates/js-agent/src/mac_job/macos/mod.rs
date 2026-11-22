@@ -1,6 +1,7 @@
 //! `__mac-job` on macOS: the set-up, the start, the sweep and the check (see [`super`]).
 
 mod files;
+mod puts;
 mod sys;
 mod trees;
 
@@ -22,7 +23,6 @@ use crate::mac_accounts::Pool;
 
 use super::layout::{Layout, SUBFOLDERS};
 use super::profile::{self, JOB_PARAM};
-use super::put;
 use super::report::{self, AccountUse, Ended, Leftovers, Report};
 use super::spec::JobFile;
 use super::start::StartFile;
@@ -169,7 +169,11 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         }
     };
 
-    let (mount_text, mount_params) = match trees::rules(args, &mounted) {
+    let rules = trees::rules(args, &mounted).and_then(|(text, params)| {
+        let made = puts::make(args, &job, &layout, user.uid)?;
+        Ok((text, params, made))
+    });
+    let (mount_text, mount_params, put_dirs) = match rules {
         Ok(rules) => rules,
         Err(why) => {
             let _ = trees::release(args, &job, mounted);
@@ -177,7 +181,14 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
             return Err(Stop::Setup(why));
         }
     };
-    let profile_text = profile::render(args.profile, &job.network, &mount_text, added);
+    let (put_text, put_params) = profile::put_rules(&put_dirs);
+    let mount_params: Vec<(String, String)> = mount_params.into_iter().chain(put_params).collect();
+    let profile_text = profile::render(
+        args.profile,
+        &job.network,
+        &format!("{mount_text}{put_text}"),
+        added,
+    );
     let new_session = args.audit_session == AuditSession::New;
     let started = Instant::now();
     let profile_of = Profile {
@@ -210,10 +221,7 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
     };
     let sweep = sweep_job(&ids);
     let trees = trees::release(args, &job, mounted);
-    let put = args
-        .put_ingest
-        .as_ref()
-        .map(|root| commit_outputs(args, root, &job, &layout));
+    let put_dirs = puts::report(&job, &put_dirs);
     let outputs = files::collect(&layout.work(), &job.outputs, &args.out.join("outputs"));
     let folder = files::remove_folder(&layout.folder)
         .err()
@@ -245,51 +253,13 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         sweep,
         outputs,
         leftovers,
-        put,
+        put_dirs,
         trees,
         account: None,
         spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
-}
-
-/// Commits the job's outputs to the put ingest at `root`, its directories given to the node's
-/// user as the node needs them: the key's folders its, the job's put directory root's with the
-/// node's group able to write it (the node removes the file and the directory).
-fn commit_outputs(
-    args: &Args,
-    root: &Path,
-    job: &JobFile,
-    layout: &Layout,
-) -> Result<put::Committed, String> {
-    let ids = args
-        .put_user
-        .split_once(':')
-        .map(|(uid, gid)| (uid.parse::<u32>(), gid.parse::<u32>()));
-    let node = match ids {
-        Some((Ok(uid), Ok(gid))) => (uid, gid),
-        Some(_) => return Err(format!("--put-user {}: a name or uid:gid", args.put_user)),
-        None => {
-            let user =
-                sys::user(&args.put_user).map_err(|why| format!("{}: {why}", args.put_user))?;
-            (user.uid, user.gid)
-        }
-    };
-    let mut nonce = [0u8; 8];
-    getrandom::getrandom(&mut nonce).map_err(|why| format!("a nonce: {why}"))?;
-    let nonce = hex::encode(nonce);
-    let ready = |dir: &Path| -> std::io::Result<()> {
-        let mut at = root.to_owned();
-        for part in ["cas", "b", job.id.as_str()] {
-            at.push(part);
-            std::os::unix::fs::chown(&at, Some(node.0), Some(node.1))?;
-        }
-        std::os::unix::fs::chown(dir, Some(0), Some(node.1))?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o770))
-    };
-    put::commit(&layout.work(), &job.outputs, root, &job.id, &nonce, &ready)
-        .map_err(|why| why.to_string())
 }
 
 /// Makes `state`, root's and closed to everyone else, when it is missing.

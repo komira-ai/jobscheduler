@@ -116,6 +116,36 @@ fn clear_tree_flags(path: &Path) {
     }
 }
 
+/// Makes `work/<at>` a link to `target`, the link and the folders it needs `owner`'s. Each part
+/// of the place is walked without following a link: the inputs copied into work may hold links,
+/// and root must make nothing through one.
+pub(super) fn link_at(
+    work: &Path,
+    at: &str,
+    target: &Path,
+    (uid, gid): (u32, u32),
+) -> Result<(), String> {
+    let mut link = work.to_owned();
+    let parts: Vec<&str> = at.split('/').collect();
+    let (last, parents) = parts.split_last().unwrap_or((&"", &[]));
+    for part in parents {
+        link.push(part);
+        match fs::symlink_metadata(&link) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(format!("{} is not a folder", link.display())),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&link).map_err(|why| format!("{}: {why}", link.display()))?;
+                lchown(&link, Some(uid), Some(gid))
+                    .map_err(|why| format!("{}: {why}", link.display()))?;
+            }
+            Err(why) => return Err(format!("{}: {why}", link.display())),
+        }
+    }
+    link.push(last);
+    symlink(target, &link).map_err(|why| format!("{}: {why}", link.display()))?;
+    lchown(&link, Some(uid), Some(gid)).map_err(|why| format!("{}: {why}", link.display()))
+}
+
 /// Copies the tree at `from` into the existing folder `to`, links as links, and gives every
 /// entry to `owner` when one is named. Set-id bits are dropped; other file types are skipped.
 pub(super) fn copy_tree(from: &Path, to: &Path, owner: Option<(u32, u32)>) -> io::Result<()> {

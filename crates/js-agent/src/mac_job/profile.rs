@@ -193,6 +193,26 @@ pub fn mount_rules(
     Ok((text, params))
 }
 
+/// The rules that let a job write its put directories, and the parameters they name (`PUT0`,
+/// ...): every other write outside the job folder stays refused. Every path is absolute and
+/// resolved.
+#[must_use]
+pub fn put_rules(dirs: &[PathBuf]) -> (String, Vec<(String, String)>) {
+    if dirs.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let mut text = String::from("; the put directories: the job commits its outputs there\n");
+    let mut params = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        let name = format!("PUT{i}");
+        text.push_str(&format!(
+            "(allow file-write* (subpath (param \"{name}\")))\n"
+        ));
+        params.push((name, dir.to_string_lossy().into_owned()));
+    }
+    (text, params)
+}
+
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod tests;

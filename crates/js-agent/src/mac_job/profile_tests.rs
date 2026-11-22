@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{JOB_PARAM, Kind, mount_rules, render};
+use super::{JOB_PARAM, Kind, mount_rules, put_rules, render};
 use crate::mac_job::spec::Network;
 
 const KINDS: [Kind; 2] = [Kind::ConfinedWrites, Kind::DenyDefault];
@@ -181,5 +181,27 @@ fn the_mount_rules_come_after_the_network_and_before_what_a_run_adds() {
     assert_eq!(
         text,
         format!("{base}(mount)\n; added for this run\n(added)\n")
+    );
+}
+
+#[test]
+fn the_put_rules_allow_writes_in_each_put_directory_and_none_without_one() {
+    assert_eq!(put_rules(&[]), (String::new(), Vec::new()));
+    let (text, params) = put_rules(&[
+        PathBuf::from("/put/cas/b/r/n"),
+        PathBuf::from("/put/cas/b/r/m"),
+    ]);
+    assert_eq!(
+        text,
+        "; the put directories: the job commits its outputs there\n\
+         (allow file-write* (subpath (param \"PUT0\")))\n\
+         (allow file-write* (subpath (param \"PUT1\")))\n"
+    );
+    assert_eq!(
+        params,
+        [
+            ("PUT0".to_owned(), "/put/cas/b/r/n".to_owned()),
+            ("PUT1".to_owned(), "/put/cas/b/r/m".to_owned()),
+        ]
     );
 }

@@ -51,10 +51,13 @@
 //! profile lets the job read it and write nothing there; the deny-default one has no rule for it,
 //! so a job with trees is refused under it. Each tree is released after the sweep.
 //!
-//! With `--put-ingest`, the declared outputs also go back to tierstore: after the sweep the agent
-//! commits one tar of them to the put directory `<dir>/cas/b/<job id>/<nonce>` ([`put`]), whose
-//! directories it gives to `--put-user`, the node's user, as the node needs them; the job is
-//! never given a writable put directory. The report names the key and the digest.
+//! A job's `put_dirs` are tierstore's put directories, the way the build service sends a Mac job
+//! its output directory (a read-write mount `<put root>/cas/b/<run>/<nonce>`): each must lie
+//! beneath `--put-ingest` (the put ingest's root). The agent makes it, the key's folders given to
+//! `--put-user` (the node's user) and the put directory itself the job's with the node's group, as
+//! the node needs them; links `work/<at>` to it; and the profile lets the job write there. The job
+//! commits its objects itself (`pack.part`, renamed to `pack.sha256-<hex>.part`, renamed to
+//! `pack`), and the node stores and removes them. The report lists what is left in each.
 //!
 //! `--job-inline` takes the job's JSON as the argument itself, for a run that can pass arguments
 //! to the program but no file; the job then fetches its own inputs. `--root` is made (root's,
@@ -68,7 +71,6 @@
 
 pub mod layout;
 pub mod profile;
-pub mod put;
 pub mod report;
 pub mod spec;
 pub mod start;
@@ -183,7 +185,7 @@ pub struct Args {
     /// The id the provider calls carry as the agent's.
     #[arg(long, default_value = "mac-job")]
     pub agent_id: String,
-    /// The put ingest's root, to commit the outputs to.
+    /// The put ingest's root, beneath which the job's put directories lie.
     #[arg(long)]
     pub put_ingest: Option<PathBuf>,
     /// The user the put ingest's node runs as: a name, or `uid:gid`.

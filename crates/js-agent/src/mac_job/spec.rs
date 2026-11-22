@@ -11,6 +11,7 @@
 //!   "inputs": "/Users/adi/bringup/70-c-hello.files/src",
 //!   "outputs": ["out"],
 //!   "trees": [{"ref": "cas/l/<sha256 hex>", "at": "src"}],
+//!   "put_dirs": [{"path": "/usr/local/tierstore/put/cas/b/<run>/<nonce>", "at": ".kbf-out"}],
 //!   "network": {"loopback": true, "outbound_ports": [8980]},
 //!   "wall_limit_secs": 600
 //! }
@@ -79,6 +80,11 @@ pub struct JobFile {
     /// Trees of the mount provider, linked read-only into `work`.
     #[serde(default)]
     pub trees: Vec<Tree>,
+    /// Put directories of tierstore's put ingest, made by the agent, writable by the job and
+    /// linked into `work`: the job commits its output objects there, as the build service's
+    /// task program does.
+    #[serde(default)]
+    pub put_dirs: Vec<PutDir>,
     /// Paths under `work` to copy to the output folder at the end.
     #[serde(default)]
     pub outputs: Vec<String>,
@@ -97,6 +103,16 @@ pub struct Tree {
     /// [`REF_MAX`] bytes, no control character.
     #[serde(rename = "ref")]
     pub reference: String,
+    /// Where it appears: a relative path of plain parts under `work`.
+    pub at: String,
+}
+
+/// A put directory the job commits its output objects to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutDir {
+    /// The directory: absolute, beneath the put ingest's root (`<root>/cas/b/<run>/<nonce>`).
+    pub path: String,
     /// Where it appears: a relative path of plain parts under `work`.
     pub at: String,
 }
@@ -157,6 +173,12 @@ pub enum SpecError {
     /// More trees than [`TREES_MAX`].
     #[error("{0} trees; at most 16")]
     Trees(usize),
+    /// A put directory is not an absolute path.
+    #[error("put dir {0:?} is not an absolute path")]
+    PutPath(String),
+    /// More put directories than [`TREES_MAX`].
+    #[error("{0} put dirs; at most 16")]
+    PutDirs(usize),
     /// Port 0 cannot be connected to.
     #[error("outbound port 0")]
     Port,
@@ -231,13 +253,28 @@ impl JobFile {
         if let Some(tree) = self.trees.iter().find(|t| !ref_ok(&t.reference)) {
             return Err(SpecError::TreeRef(tree.reference.clone()));
         }
+        if self.put_dirs.len() > TREES_MAX {
+            return Err(SpecError::PutDirs(self.put_dirs.len()));
+        }
+        if let Some(dir) = self
+            .put_dirs
+            .iter()
+            .find(|d| d.path.contains('\0') || !Path::new(&d.path).is_absolute())
+        {
+            return Err(SpecError::PutPath(dir.path.clone()));
+        }
+        // Every place, a tree's or a put directory's, is a plain relative path named once.
         let mut seen = std::collections::BTreeSet::new();
-        if let Some(tree) = self
+        let places = self
             .trees
             .iter()
-            .find(|t| !relative_ok(&t.at) || !seen.insert(t.at.as_str()))
+            .map(|t| &t.at)
+            .chain(self.put_dirs.iter().map(|d| &d.at));
+        if let Some(at) = places
+            .into_iter()
+            .find(|at| !relative_ok(at) || !seen.insert(at.as_str()))
         {
-            return Err(SpecError::TreeAt(tree.at.clone()));
+            return Err(SpecError::TreeAt(at.clone()));
         }
         Ok(())
     }

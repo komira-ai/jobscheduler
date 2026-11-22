@@ -1,6 +1,6 @@
 //! The report: its status and its JSON.
 
-use super::{AccountUse, Ended, Leftovers, Outputs, Report, TAIL_MAX, TreeUse, tail};
+use super::{AccountUse, Ended, Leftovers, Outputs, PutUse, Report, TAIL_MAX, TreeUse, tail};
 use crate::mac_job::status;
 use crate::mac_job::sweep::Tally;
 
@@ -20,7 +20,7 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
-        put: None,
+        put_dirs: Vec::new(),
         trees: Vec::new(),
         account: None,
         spawn: "ordinary".to_owned(),
@@ -158,22 +158,23 @@ fn a_tree_reports_its_reference_place_path_and_release() {
 }
 
 #[test]
-fn a_failed_put_is_a_job_failure_and_a_committed_one_is_not() {
-    let committed = crate::mac_job::put::Committed {
-        key: "cas/b/j/n/pack".to_owned(),
-        sha256: "ab".to_owned(),
-        bytes: 3,
+fn a_put_directory_that_cannot_be_read_is_a_job_failure_and_one_with_entries_is_not() {
+    let dir = |error: Option<&str>| PutUse {
+        path: "/put/cas/b/r/n".to_owned(),
+        at: ".kbf-out".to_owned(),
+        left: vec!["pack".to_owned()],
+        error: error.map(str::to_owned),
     };
     assert_eq!(
         Report {
-            put: Some(Ok(committed)),
+            put_dirs: vec![dir(None)],
             ..report()
         }
         .status(),
         status::OK
     );
     let failed = Report {
-        put: Some(Err("no root".to_owned())),
+        put_dirs: vec![dir(Some("gone"))],
         ..report()
     };
     assert_eq!(failed.status(), status::JOB_FAILED);

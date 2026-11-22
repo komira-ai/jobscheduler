@@ -2,7 +2,9 @@
 
 use js_types::{Arch, Os};
 
-use super::{ID_MAX, JobFile, Network, REF_MAX, SpecError, TREES_MAX, Tree, WALL_LIMIT_MAX_SECS};
+use super::{
+    ID_MAX, JobFile, Network, PutDir, REF_MAX, SpecError, TREES_MAX, Tree, WALL_LIMIT_MAX_SECS,
+};
 
 /// A job file with `extra` fields, the program and wall limit given.
 fn file(extra: &str) -> String {
@@ -27,6 +29,7 @@ fn the_smallest_job_takes_the_defaults() {
             env: Default::default(),
             inputs: None,
             trees: Vec::new(),
+            put_dirs: Vec::new(),
             outputs: Vec::new(),
             network: Network::default(),
             wall_limit_secs: 60,
@@ -358,4 +361,55 @@ fn a_job_missing_a_required_field_or_with_a_bad_value_does_not_decode() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn put_directories_are_absolute_and_their_places_named_once_with_the_trees() {
+    let job = parse(r#","put_dirs":[{"path":"/put/cas/b/r/n","at":".kbf-out"}],"trees":[{"ref":"r","at":".kbf-tree"}]"#)
+        .expect("decodes");
+    assert_eq!(
+        job.put_dirs,
+        [PutDir {
+            path: "/put/cas/b/r/n".to_owned(),
+            at: ".kbf-out".to_owned()
+        }]
+    );
+    for bad in ["put/cas/b/r/n", "/put\u{0}"] {
+        let extra = format!(
+            r#","put_dirs":[{{"path":{},"at":"o"}}]"#,
+            serde_json::to_string(bad).unwrap()
+        );
+        assert_eq!(
+            parse(&extra),
+            Err(SpecError::PutPath(bad.to_owned())),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        parse(r#","put_dirs":[{"path":"/p","at":"x"}],"trees":[{"ref":"r","at":"x"}]"#),
+        Err(SpecError::TreeAt("x".to_owned()))
+    );
+    assert_eq!(
+        parse(r#","put_dirs":[{"path":"/p","at":"../x"}]"#),
+        Err(SpecError::TreeAt("../x".to_owned()))
+    );
+    let many: Vec<String> = (0..=TREES_MAX)
+        .map(|i| format!(r#"{{"path":"/p{i}","at":"o{i}"}}"#))
+        .collect();
+    assert_eq!(
+        parse(&format!(r#","put_dirs":[{}]"#, many.join(","))),
+        Err(SpecError::PutDirs(TREES_MAX + 1))
+    );
+    assert_eq!(
+        SpecError::PutPath("p".to_owned()).to_string(),
+        r#"put dir "p" is not an absolute path"#
+    );
+    assert_eq!(
+        SpecError::PutDirs(17).to_string(),
+        "17 put dirs; at most 16"
+    );
+    assert!(matches!(
+        parse(r#","put_dirs":[{"path":"/p","at":"o","mode":"rw"}]"#),
+        Err(SpecError::Decode(_))
+    ));
 }
