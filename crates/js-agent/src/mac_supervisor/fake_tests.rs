@@ -62,7 +62,8 @@ fn the_fake_launcher_runs_its_text_and_writes_the_records() {
     let dir = fs::canonicalize(owner.path()).unwrap();
     let env = [("JS_MARK".to_owned(), "marked".to_owned())];
     let (reader, mut writer): (_, PipeWriter) = std::io::pipe().unwrap();
-    let text = r#"read line; printf '%s %s %s\n' "$JS_MARK" "$HOME" "$(pwd)"; exit "$1""#;
+    let text =
+        r#"read line; printf '%s %s %s\n' "$JS_MARK" "${JS_ABSENT-unset}" "$(pwd)"; exit "$1""#;
     let request = request(&dir, &env, text, &["5"], reader.into());
     let mut run = FakeLauncher.launch(request).unwrap();
 
@@ -90,7 +91,7 @@ fn the_fake_launcher_runs_its_text_and_writes_the_records() {
     assert_eq!(parse_exit(&on_disk), Some(want));
     assert_eq!(
         fs::read_to_string(dir.join("out")).unwrap(),
-        format!("marked  {}\n", dir.display())
+        format!("marked unset {}\n", dir.display())
     );
 }
 

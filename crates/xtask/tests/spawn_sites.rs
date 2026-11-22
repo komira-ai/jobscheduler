@@ -23,8 +23,8 @@ fn starter(tree: &Tree, krate: &str) {
 }
 
 /// The repository as it is: nothing in the crates the agent and the helper are built from
-/// starts a program but the spawner, and nothing keeps a program's responsibility (no file
-/// is a keeper yet).
+/// starts a program but the spawner, and nothing keeps a program's responsibility outside the
+/// supervisor's two starts (the files of `KEEPERS`).
 /// It catches a job, a helper or a probe started with `Command::new` (or `pre_exec`,
 /// `exec`, a C library `exec*` or `posix_spawn*`) instead of the spawner: on macOS that
 /// process would answer for the helper or the agent, and hold their privacy grants.
