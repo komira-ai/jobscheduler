@@ -34,6 +34,7 @@ pub(super) fn full_result() -> JobResult {
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_secs(7),
             peak_memory_bytes: 4096,
+            cpu_throttle: None,
         }),
         logs: Some(LogLengths {
             stdout_bytes: 2_621_440,
@@ -134,6 +135,7 @@ pub(super) fn allocation(booked: Booked) -> AllocationRecord {
         end_reason: Some(EndReason::Exited),
         prepare_deadline: None,
         wall_limit_secs: None,
+        sized_from: None,
         carried: Carried::default(),
     }
 }

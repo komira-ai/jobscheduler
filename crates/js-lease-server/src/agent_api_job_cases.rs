@@ -51,7 +51,11 @@ async fn a_start_is_resent_until_listed() {
         placed_at_ms: Some(millis(rig.job(&id).placed_at.unwrap())),
         fuse: false,
         xcode: None,
-        sizing: None,
+        sizing: Some(js_agent_wire::StartSizing {
+            class: Some(js_sched_placer::sizes::class_name(&rig.job(&id))),
+            cpu: js_agent_wire::BookedFrom::Named,
+            memory: js_agent_wire::BookedFrom::Named,
+        }),
     };
     let mut last = None;
     for _ in 0..3 {

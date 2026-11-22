@@ -420,6 +420,7 @@ fn a_job_row_holds_the_peak_and_the_cpu_its_host_reported() {
     let usage = ResourceUsage {
         cpu_time: Duration::from_secs(30),
         peak_memory_bytes: 3 << 30,
+        cpu_throttle: None,
     };
     let output = Output {
         usage: Some(usage),
@@ -504,6 +505,7 @@ fn a_repeat_run_of_one_build_writes_its_row_under_the_same_name() {
         let usage = ResourceUsage {
             cpu_time: Duration::from_secs(20),
             peak_memory_bytes: peak,
+            cpu_throttle: None,
         };
         let output = Output {
             usage: Some(usage),

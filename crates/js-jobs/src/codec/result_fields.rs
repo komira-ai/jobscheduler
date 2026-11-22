@@ -2,7 +2,8 @@
 //! lengths) and 58 (the code of an input that failed, `rootfs_fields`). They are written only when the job has a result, and the reason is what says it
 //! has one: a row without it, as every row written before results were stored, reads with no
 //! result. A result without tag 43, as every result written before the lengths were stored,
-//! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
+//! reads with none; the usage's throttle counts are tag 60, one value of two `u64`, written when
+//! the usage has them; a build from before tag 43 keeps it as a field it does not know and writes
 //! it back unchanged.
 
 use js_state::StoreTime;
@@ -12,7 +13,12 @@ use super::{
     DecodeError, Fields, Writer, bool_of, byte_of, i32_of, job_tag as t, text, text_of, time,
     time_of, u64_of,
 };
-use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
+use crate::result::{CpuThrottle, JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
+
+/// The tag of a job's CPU throttle counts (two `u64`: periods, then throttled periods), after
+/// the tags of `job_tag`; written when the agent sent them, and a value of another length reads
+/// as none.
+const CPU_THROTTLE: u16 = 60;
 
 /// The bytes of a time value: whole seconds (`u64`) and nanoseconds (`u32`).
 const TIME_LEN: usize = 12;
@@ -39,6 +45,8 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
     row.put_opt(t::RESULT_STARTED_AT, timing.started_at.map(time));
     row.put(t::RESULT_ENDED_AT, time(timing.ended_at));
     row.put_opt(t::RESULT_USAGE, result.usage.map(usage));
+    let throttle = result.usage.and_then(|usage| usage.cpu_throttle);
+    row.put_opt(CPU_THROTTLE, throttle.map(throttle_value));
     row.put_opt(t::RESULT_LOGS, result.logs.map(lengths));
     row.put_opt(INPUT_FAILURE, result.input_failure.as_deref().map(text));
 }
@@ -48,6 +56,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
     let Some(reason) = fields.opt(t::RESULT_REASON, reason_of)? else {
         return Ok(None);
     };
+    let throttle = fields.opt(CPU_THROTTLE, throttle_of)?.flatten();
     Ok(Some(JobResult {
         exit_code: fields.opt(t::RESULT_EXIT_CODE, i32_of)?,
         reason,
@@ -60,7 +69,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
             started_at: fields.opt(t::RESULT_STARTED_AT, time_of)?,
             ended_at: fields.need(t::RESULT_ENDED_AT, time_of)?,
         },
-        usage: fields.opt(t::RESULT_USAGE, usage_of)?,
+        usage: with_throttle(fields.opt(t::RESULT_USAGE, usage_of)?, throttle),
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
         input_failure: fields.opt(INPUT_FAILURE, text_of)?,
     }))
@@ -111,6 +120,7 @@ fn usage_of(tag: u16, value: Vec<u8>) -> Result<ResourceUsage, DecodeError> {
     Ok(ResourceUsage {
         cpu_time: time_of(tag, cpu.to_vec())?.as_duration(),
         peak_memory_bytes: u64_of(tag, peak.to_vec())?,
+        cpu_throttle: None,
     })
 }
 
@@ -133,4 +143,34 @@ fn reason_of(tag: u16, value: Vec<u8>) -> Result<ResultReason, DecodeError> {
         4 => Ok(ResultReason::InputFailed),
         _ => Err(DecodeError::Newer),
     }
+}
+
+/// The usage with the throttle counts the row held; a row holds them only beside a usage.
+fn with_throttle(
+    usage: Option<ResourceUsage>,
+    cpu_throttle: Option<CpuThrottle>,
+) -> Option<ResourceUsage> {
+    usage.map(|usage| ResourceUsage {
+        cpu_throttle,
+        ..usage
+    })
+}
+
+/// A throttle value: the periods, then the throttled periods, each a `u64`.
+fn throttle_value(throttle: CpuThrottle) -> Vec<u8> {
+    let mut out = throttle.periods.to_be_bytes().to_vec();
+    out.extend_from_slice(&throttle.throttled_periods.to_be_bytes());
+    out
+}
+
+/// The throttle counts a value holds; a value of another length is none, never an error.
+fn throttle_of(_tag: u16, value: Vec<u8>) -> Result<Option<CpuThrottle>, DecodeError> {
+    let Ok(words) = <[u8; 16]>::try_from(value) else {
+        return Ok(None);
+    };
+    let (periods, throttled) = words.split_at(8);
+    Ok(Some(CpuThrottle {
+        periods: u64::from_be_bytes(periods.try_into().unwrap_or_default()),
+        throttled_periods: u64::from_be_bytes(throttled.try_into().unwrap_or_default()),
+    }))
 }

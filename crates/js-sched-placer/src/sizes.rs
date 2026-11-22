@@ -158,32 +158,7 @@ impl ColdSize {
     }
 }
 
-/// Which history sized a job that books nothing ([`JobSizes::sized_from`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizedFrom {
-    /// Its own class's estimate.
-    Class,
-    /// Its fallback class's estimate, in place of the cold size, raised by its own class's
-    /// runs and floor.
-    Fallback,
-    /// The cold size: neither its class nor a fallback class has an estimate.
-    Cold,
-    /// The whole of the most bookable memory a host has: its class's runs reach it.
-    OverCap,
-}
-
-impl SizedFrom {
-    /// The name a placement's log gives it: `class`, `fallback`, `cold` or `over-cap`.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Class => "class",
-            Self::Fallback => "fallback",
-            Self::Cold => "cold",
-            Self::OverCap => "over-cap",
-        }
-    }
-}
+pub use js_jobs::SizedFrom;
 
 /// The history of every class the server has seen, and the job allocations live at the last
 /// pass.

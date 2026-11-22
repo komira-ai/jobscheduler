@@ -4,11 +4,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_agent_wire::{
-    BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, HostPort, Isolation, JobMount,
-    Layer, MountMode, MountSource, NetworkCeiling, NetworkLevel, PortProtocol, Propagation,
-    RunFile,
+    BookedFrom, BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, HostPort, Isolation,
+    JobMount, Layer, MountMode, MountSource, NetworkCeiling, NetworkLevel, PortProtocol,
+    Propagation, RunFile,
 };
-use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
+use js_jobs::{
+    AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, Needs, NetworkPolicy,
+    SizedFrom,
+};
 use js_state::StoreTime;
 use js_types::{
     Arch, ExecMode, HostId, ImageDigestRef, JobNetwork as Level, Os, PortMap, Resources,
@@ -837,4 +840,105 @@ fn a_native_program_the_wire_refuses_is_unsendable() {
             field: "run.program",
         })
     );
+}
+
+/// A placed job asking `cpu_millis` and `memory_bytes` (zero: unnamed), and its allocation as
+/// `sized_from` sized it.
+fn sized(
+    (cpu_millis, memory_bytes): (u64, u64),
+    sized_from: Option<SizedFrom>,
+) -> (JobRecord, AllocationRecord) {
+    let (mut job, mut allocation) = records();
+    job.spec.needs = Needs::Shape(Resources::new(cpu_millis, memory_bytes, 0, None).unwrap());
+    allocation.sized_from = sized_from;
+    (job, allocation)
+}
+
+/// The cpu and memory sources of the sizing of `job` for `allocation`.
+fn sources(job: &JobRecord, allocation: &AllocationRecord) -> (BookedFrom, BookedFrom) {
+    let sizing = super::sizing_of(job, allocation).expect("a share carries a sizing");
+    (sizing.cpu, sizing.memory)
+}
+
+/// A job that names both its CPU and its memory has both from the job, whatever the
+/// allocation records. It catches a named dimension credited to a history.
+#[test]
+fn a_job_that_names_both_has_both_named() {
+    let (job, allocation) = sized((2000, 1 << 30), Some(SizedFrom::Cold));
+    assert_eq!(
+        sources(&job, &allocation),
+        (BookedFrom::Named, BookedFrom::Named)
+    );
+}
+
+/// A job that names its CPU only has its memory from the history that sized the allocation,
+/// each history as itself. It catches a mapping that swaps two histories or credits the memory
+/// the job did not name to the job.
+#[test]
+fn a_job_that_names_its_cpu_has_its_memory_from_the_history() {
+    for (from, want) in [
+        (SizedFrom::Class, BookedFrom::Class),
+        (SizedFrom::Fallback, BookedFrom::Fallback),
+        (SizedFrom::Cold, BookedFrom::Cold),
+        (SizedFrom::OverCap, BookedFrom::OverCap),
+    ] {
+        let (job, allocation) = sized((2000, 0), Some(from));
+        assert_eq!(sources(&job, &allocation), (BookedFrom::Named, want));
+    }
+}
+
+/// A job that names its memory only has its CPU from the history. It catches the two
+/// dimensions read from each other's field.
+#[test]
+fn a_job_that_names_its_memory_has_its_cpu_from_the_history() {
+    let (job, allocation) = sized((0, 1 << 30), Some(SizedFrom::Class));
+    assert_eq!(
+        sources(&job, &allocation),
+        (BookedFrom::Class, BookedFrom::Named)
+    );
+}
+
+/// A job that names neither, on an allocation that records no history (a row from before the
+/// field), has both unknown. It catches a guess in place of the unknown.
+#[test]
+fn a_job_that_names_neither_on_an_allocation_without_history_is_unknown() {
+    let (job, allocation) = sized((0, 0), None);
+    assert_eq!(
+        sources(&job, &allocation),
+        (BookedFrom::Unknown, BookedFrom::Unknown)
+    );
+}
+
+/// A job that books the whole host, by its needs or by its allocation, sends no sizing. It
+/// catches a sizing sent for a booking no history sized.
+#[test]
+fn a_whole_host_job_sends_no_sizing() {
+    let (mut job, allocation) = sized((0, 0), Some(SizedFrom::Cold));
+    job.spec.needs = Needs::WholeHost;
+    assert_eq!(super::sizing_of(&job, &allocation), None);
+    let (job, mut allocation) = sized((0, 0), None);
+    allocation.booked = Booked::WholeHost;
+    assert_eq!(super::sizing_of(&job, &allocation), None);
+}
+
+/// The sizing names the job's size-class label when it has one, else the class the placement
+/// keys its runs under; and the start carries it. It catches a class that is not the key the
+/// history is learned under.
+#[test]
+fn the_sizing_names_the_jobs_size_class() {
+    let (mut job, allocation) = sized((0, 0), Some(SizedFrom::Class));
+    let labels = BTreeMap::from([("size-class".to_owned(), "compile".to_owned())]);
+    job.spec.labels = js_types::Labels::from_caller(&labels).unwrap();
+    let sizing = super::sizing_of(&job, &allocation).unwrap();
+    assert_eq!(sizing.class.as_deref(), Some("compile"));
+    let start = build(&job, &allocation, &allow_list()).unwrap();
+    assert_eq!(start.sizing, Some(sizing));
+
+    job.spec.labels = js_types::Labels::default();
+    let unlabelled = super::sizing_of(&job, &allocation).unwrap();
+    assert_eq!(
+        unlabelled.class,
+        Some(js_sched_placer::sizes::class_name(&job))
+    );
+    assert!(unlabelled.class.unwrap().starts_with("run-"));
 }

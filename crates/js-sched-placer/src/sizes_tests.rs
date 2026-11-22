@@ -75,6 +75,7 @@ fn output(peak: u64, cpu: Duration) -> Output {
         usage: Some(ResourceUsage {
             cpu_time: cpu,
             peak_memory_bytes: peak,
+            cpu_throttle: None,
         }),
         ..Output::default()
     }

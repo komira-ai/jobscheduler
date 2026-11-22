@@ -564,6 +564,7 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
         peak_memory_bytes: 3 << 30,
+        cpu_throttle: None,
     };
     let mut measured = ended(Outcome::Succeeded, Some(0));
     measured.usage = Some(counted);
@@ -589,4 +590,44 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         panic!("a clean exit ends exited");
     };
     assert_eq!(output.usage, None);
+}
+
+/// A result whose usage carries the group's throttle counts stores them with the job's usage,
+/// periods and throttled periods each as the agent counted; a usage without them (an older
+/// agent) stores none, and a count of zero periods stays a count. It catches the counts dropped
+/// on the way to the stored result, the two numbers swapped, and an absence made into zeros.
+#[test]
+fn the_cpu_throttle_of_a_result_is_stored_with_the_jobs_usage() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let usage_of = |throttle: Option<(u64, u64)>| {
+        let mut measured = ended(Outcome::Succeeded, Some(0));
+        measured.usage = Some(JobUsage {
+            peak_memory_bytes: 1 << 20,
+            cpu_usage_usec: 1_000,
+            cpu_throttle: throttle.map(|(periods, throttled_periods)| js_agent_wire::CpuThrottle {
+                periods,
+                throttled_periods,
+            }),
+        });
+        let Some(JobEnd::Exited { output, .. }) = end_of(&job, &measured) else {
+            panic!("a clean exit ends exited");
+        };
+        output.usage.expect("the usage is stored").cpu_throttle
+    };
+    assert_eq!(
+        usage_of(Some((120, 7))),
+        Some(js_jobs::CpuThrottle {
+            periods: 120,
+            throttled_periods: 7,
+        })
+    );
+    assert_eq!(
+        usage_of(Some((0, 0))),
+        Some(js_jobs::CpuThrottle {
+            periods: 0,
+            throttled_periods: 0,
+        })
+    );
+    assert_eq!(usage_of(None), None);
 }

@@ -242,11 +242,11 @@ pub use record::{
     AllocationRecord, AllocationStep, Booked, Capacity, Constraints, DeclaredPort, DispatchKind,
     DispatchMessage, EndReason, Exclusion, FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint,
     Isolation, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs, NetworkPolicy, ScaleMark,
-    StartFailure,
+    SizedFrom, StartFailure,
 };
 pub use result::{
-    BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,
-    Retention, RetentionError, SWEEP_BATCH, sweep,
+    BOOT_GRACE, CpuThrottle, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage,
+    ResultReason, Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,

@@ -13,10 +13,12 @@
 //! else the job's.
 
 use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, BookedResources, Isolation, JobStartSpec, NetworkLevel, RunFile, RunSpec,
+    BUNDLE_PROGRAM_PREFIX, BookedFrom, BookedResources, Isolation, JobStartSpec, NetworkLevel,
+    RunFile, RunSpec, StartSizing,
 };
 use js_caps::{XCODE, is_mount_provider_key};
-use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, NetworkPolicy};
+use js_jobs::{AllocationRecord, Booked, JobRecord, JobSpec, Needs, NetworkPolicy, SizedFrom};
+use js_sched_placer::sizes::class_name;
 use js_types::{Arch, ExecMode, Os, PortMap, Resources};
 
 use crate::job_api::read::view::millis;
@@ -112,6 +114,9 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// each such key ([`BeatContext::mount_providers`]); a job that names an Xcode build (the
 /// capability `xcode`) is sent only to a host whose agent listed that build
 /// ([`BeatContext::xcodes`]), and its start carries it as `xcode`.
+///
+/// A start for a job that books a share carries its sizing ([`StartSizing`]): its size class and
+/// which history gave its CPU and its memory, for the agent's journal.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -255,7 +260,7 @@ pub(crate) fn start_of(
         placed_at_ms: job.placed_at.map(millis),
         fuse: false,
         xcode,
-        sizing: None,
+        sizing: sizing_of(job, allocation),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);
@@ -267,6 +272,33 @@ pub(crate) fn start_of(
             field: error.field(),
         })?;
     Ok(start)
+}
+
+/// What the start says of where the booking came from, for the agent's journal: `None` for a
+/// job that books the whole host. Otherwise the job's size class ([`class_name`]) and, for each
+/// of CPU and memory, [`BookedFrom::Named`] when the job's own needs name it (non-zero), else
+/// the history that sized the allocation ([`AllocationRecord::sized_from`]), or
+/// [`BookedFrom::Unknown`] when the allocation records none.
+fn sizing_of(job: &JobRecord, allocation: &AllocationRecord) -> Option<StartSizing> {
+    let Needs::Shape(asked) = &job.spec.needs else {
+        return None;
+    };
+    if allocation.booked == Booked::WholeHost {
+        return None;
+    }
+    let sized = match allocation.sized_from {
+        Some(SizedFrom::Class) => BookedFrom::Class,
+        Some(SizedFrom::Fallback) => BookedFrom::Fallback,
+        Some(SizedFrom::Cold) => BookedFrom::Cold,
+        Some(SizedFrom::OverCap) => BookedFrom::OverCap,
+        None => BookedFrom::Unknown,
+    };
+    let from = |named: u64| if named > 0 { BookedFrom::Named } else { sized };
+    Some(StartSizing {
+        class: Some(class_name(job)),
+        cpu: from(asked.cpu_millis()),
+        memory: from(asked.memory_bytes()),
+    })
 }
 
 /// The network level of a native job's [`RunSpec`]: none is off, an allow-list is on (limited

@@ -74,6 +74,7 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
+            cpu_throttle: None,
         }),
         logs: None,
         input_failure: None,

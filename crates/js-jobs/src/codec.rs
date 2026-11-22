@@ -159,7 +159,7 @@ pub(crate) mod job_tag {
     pub const FILE_DIGESTS: u16 = 44;
 }
 
-/// The tags of an allocation row (the whole-host tags 14 and 15 are in `whole_fields`).
+/// The tags of an allocation row (tags 14 to 16 are in `whole_fields`).
 pub(crate) mod alloc_tag {
     /// The job (text).
     pub const JOB: u16 = 1;
@@ -973,7 +973,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
     let end_reason = fields.opt(t::END_REASON, reason_of)?;
-    let (prepare_deadline, wall_limit_secs) = whole_fields::take_allocation(&mut fields)?;
+    let (prepare_deadline, wall_limit_secs, sized_from) = whole_fields::take_alloc(&mut fields)?;
     Ok(AllocationRecord {
         job,
         allocation_id,
@@ -986,6 +986,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         end_reason,
         prepare_deadline,
         wall_limit_secs,
+        sized_from,
         carried: fields.carried(),
     })
 }

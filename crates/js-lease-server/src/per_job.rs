@@ -47,8 +47,8 @@ use js_agent_wire::{
     Outcome, refusal,
 };
 use js_jobs::{
-    AllocationId, AllocationRecord, AllocationStep, Booked, DispatchKind, JobEnd, JobId, JobRecord,
-    JobState, JobStoreError, LogLengths, Output, ResourceUsage, StartFailure,
+    AllocationId, AllocationRecord, AllocationStep, Booked, CpuThrottle, DispatchKind, JobEnd,
+    JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage, StartFailure,
 };
 use js_types::{HostId, Resources};
 use tracing::warn;
@@ -433,6 +433,10 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     let usage = result.usage.map(|used| ResourceUsage {
         cpu_time: Duration::from_micros(used.cpu_usage_usec),
         peak_memory_bytes: used.peak_memory_bytes,
+        cpu_throttle: used.cpu_throttle.map(|throttle| CpuThrottle {
+            periods: throttle.periods,
+            throttled_periods: throttle.throttled_periods,
+        }),
     });
     let output = Output {
         stdout: tail.stdout,
