@@ -150,7 +150,7 @@ fn a_planted_link_is_removed_and_its_target_kept() {
     let why = owned_in(&dir.join("a-file"), me()).unwrap_err().to_string();
     assert!(
         why.starts_with(&format!("{}: ", dir.join("a-file").display())),
-        "{why}"
+        "the error does not say what the test expects"
     );
 }
 
@@ -184,7 +184,10 @@ fn a_named_entry_goes_whole_and_an_absent_one_is_fine() {
     let why = remove_named(&dir.join("elsewhere/none"), me())
         .unwrap_err()
         .to_string();
-    assert!(why.contains("elsewhere: "), "{why}");
+    assert!(
+        why.contains("elsewhere: "),
+        "the error does not say what the test expects"
+    );
 }
 
 /// Asserts that a look at a named entry sees whatever is there, a link included and not
@@ -204,7 +207,10 @@ fn a_named_entry_exists_when_anything_is_there() {
         io::ErrorKind::InvalidInput
     );
     let why = exists(&dir.join("file/none")).unwrap_err().to_string();
-    assert!(why.contains("file: "), "{why}");
+    assert!(
+        why.contains("file: "),
+        "the error does not say what the test expects"
+    );
 }
 
 /// Asserts that the places of an account are swept with its name and uid put in, that what
@@ -276,7 +282,11 @@ fn a_failing_place_does_not_hide_the_others() {
         owned: vec![file.clone(), dir.join("Shared")],
     };
     let why = sweep(&places, "kbf-acct-1", me()).unwrap_err().to_string();
-    assert_eq!(why.matches("a-file").count(), 3, "{why}");
+    assert_eq!(
+        why.matches("a-file").count(),
+        3,
+        "the error does not say what the test expects"
+    );
     assert!(
         names(&dir.join("Shared")).is_empty(),
         "the place that works was swept"
@@ -285,7 +295,11 @@ fn a_failing_place_does_not_hide_the_others() {
     let why = left_in(&places, Some("kbf-acct-1"), me())
         .unwrap_err()
         .to_string();
-    assert_eq!(why.matches("a-file").count(), 3, "{why}");
+    assert_eq!(
+        why.matches("a-file").count(),
+        3,
+        "the error does not say what the test expects"
+    );
 }
 
 /// Asserts that the per-user folders are searched two levels down for directories the uid
@@ -313,7 +327,7 @@ fn the_per_user_folders_are_searched_two_levels_down_for_directories_of_the_uid(
         .to_string();
     assert!(
         why.starts_with(&format!("{}: ", folders.join("not-a-shard").display())),
-        "{why}"
+        "the error does not say what the test expects"
     );
 }
 
@@ -333,7 +347,7 @@ fn a_shard_that_cannot_be_read_fails_the_search() {
     chmod(&folders.join("ab"), 0o755);
     assert!(
         why.starts_with(&format!("{}: ", folders.display())),
-        "{why}"
+        "the error does not say what the test expects"
     );
 }
 
@@ -422,7 +436,10 @@ fn a_folder_is_emptied_and_kept_and_only_the_uids_directory() {
     let why = empty_folder(&folders.join("ab/file/none"), me(), &System)
         .unwrap_err()
         .to_string();
-    assert!(why.contains("file: "), "{why}");
+    assert!(
+        why.contains("file: "),
+        "the error does not say what the test expects"
+    );
 }
 
 /// Asserts that a folder or a top-level directory that cannot be opened or listed is named,
@@ -437,15 +454,21 @@ fn a_folder_that_cannot_be_read_is_named() {
     if !root() {
         chmod(&hash, 0o000);
         let why = empty_folder(&hash, me(), &System).unwrap_err().to_string();
-        assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
+        assert!(
+            why.starts_with(&format!("{}: ", hash.display())),
+            "the error does not say what the test expects"
+        );
         let why = leftovers(&hash, &System).unwrap_err().to_string();
-        assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
+        assert!(
+            why.starts_with(&format!("{}: ", hash.display())),
+            "the error does not say what the test expects"
+        );
         chmod(&hash, 0o755);
         chmod(&hash.join("T"), 0o000);
         let why = leftovers(&hash, &System).unwrap_err().to_string();
         assert!(
             why.starts_with(&format!("{}: ", hash.join("T").display())),
-            "{why}"
+            "the error does not say what the test expects"
         );
         chmod(&hash.join("T"), 0o755);
     }
@@ -522,7 +545,7 @@ fn a_removal_the_system_still_refuses_after_the_acl_is_stripped_is_named() {
             "{}: Permission denied",
             hash.join("stray").display()
         )),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert!(names(&hash.join("0")).is_empty(), "the rest was emptied");
 }
@@ -688,11 +711,15 @@ fn a_refusal_is_named_for_every_entry_and_the_rest_goes() {
     let why = remove_named(&base, me()).unwrap_err().to_string();
     assert!(
         why.contains("closed/a: ") && why.contains("closed/b: "),
-        "{why}"
+        "the error does not say what the test expects"
     );
     // Each path once: a directory that holds a failure is not named again at every level.
     let closed = format!("{}/closed", base.display());
-    assert_eq!(why.matches(&closed).count(), 2, "{why}");
+    assert_eq!(
+        why.matches(&closed).count(),
+        2,
+        "the error does not say what the test expects"
+    );
     assert_eq!(
         names(&base),
         ["closed"],
@@ -912,4 +939,23 @@ fn an_entry_not_there_is_none_and_one_that_cannot_be_examined_is_an_error() {
     let long = "n".repeat(300);
     let why = examine(&place, OsStr::new(&long)).unwrap_err();
     assert_eq!(why.raw_os_error(), Some(libc::ENAMETOOLONG));
+}
+
+/// Asserts that a park that does not lift (the sweep of the shared places) gives a refused
+/// removal back as the system's error, with nothing stripped and nothing tried again, and the
+/// entry left where it was.
+#[test]
+fn a_park_that_does_not_lift_gives_a_refusal_back() {
+    let dir = scratch("park-no-lift");
+    fs::write(dir.join("denied"), "x").unwrap();
+    let place = open_dir(&dir).unwrap().unwrap();
+    let os = crate::mac_accounts::tests::os::FakeOs::new();
+    os.deny("denied");
+    let park = Park::with(&place, &os, false);
+    let why = park
+        .unlink(&place, OsStr::new("denied"), AtFlags::empty())
+        .unwrap_err();
+    assert_eq!(why.raw_os_error(), Some(libc::EACCES));
+    assert_eq!(os.calls(), ["unlink denied"]);
+    assert!(dir.join("denied").is_file());
 }

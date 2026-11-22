@@ -257,8 +257,10 @@ impl Os for System {
 
     fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool {
         let refused = |result: Result<(), Errno>| result == Err(Errno::PERM);
-        refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop))
-            || refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop))
+        // Both are asked, whatever the first answers: either refusal is a seal.
+        let examined = refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop));
+        let opened = refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop));
+        examined | opened
     }
 
     #[cfg(target_os = "macos")]
@@ -376,11 +378,16 @@ impl<'a> Park<'a> {
     /// lifts and the system refuses (`EPERM`, `EACCES`: an ACL that denies the removal),
     /// the ACL is stripped and the removal tried once more.
     fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> io::Result<()> {
-        let refused = match self.os.unlink(dir, name, flags) {
+        let why = match self.os.unlink(dir, name, flags) {
             Ok(()) => return Ok(()),
-            Err(why @ (Errno::PERM | Errno::ACCESS)) if self.lift => io::Error::from(why),
-            Err(why) => return Err(why.into()),
+            Err(why) => why,
         };
+        // Only a refusal of the system (`EPERM`, `EACCES`) is got past, and only here.
+        let liftable = [Errno::PERM, Errno::ACCESS].contains(&why) & self.lift;
+        if !liftable {
+            return Err(why.into());
+        }
+        let refused = io::Error::from(why);
         self.os.strip_acl(dir, name).map_err(|why| {
             io::Error::new(
                 refused.kind(),
