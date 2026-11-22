@@ -66,6 +66,8 @@ rustix = { workspace = true, features = ["fs", "net", "process", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# The tar of a native Mac run's collected outputs, committed to the put ingest (src/mac_put).
+tar.workspace = true
 thiserror.workspace = true
 # `fs`: the layer files of the image source (src/image). `net` and `time`: the runtime of
 # the `image-pull` verb (src/image/pull.rs). `rt-multi-thread`: the runtime the image
@@ -122,7 +124,6 @@ clap.workspace = true
 # `net`: a socket bound and never listening, for a server that is down (update_hook/lease_port).
 # `event`: the bounded waits of the stand-in host-port tests (crun_stand_in/host_ports.rs).
 rustix = { workspace = true, features = ["event", "net", "process", "thread"] }
-tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 # hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
 hostkeeper-hook = { workspace = true, features = ["conformance"] }

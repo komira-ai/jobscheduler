@@ -340,6 +340,7 @@ pub mod leak_scan;
 pub mod lifecycle;
 mod login;
 pub mod logs;
+pub mod mac_put;
 #[cfg(target_os = "macos")]
 pub mod native;
 mod os_version;
