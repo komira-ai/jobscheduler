@@ -4,12 +4,12 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "432a34d9bd62a39918891503a082a4c447dfb9a76d5c5217a933a9f2302d6a3b"
+CARGO_LOCK_SHA256 = "3ce356ec458ab0597e96b9df0684176acb32277e3e2aedc9adb4d34145e3d949"
 MANIFEST_SHA256 = {
     "Cargo.toml": "d252e4502dcfae5da0f5569b09226675be01d54e298bac739231ccf1dbefc177",
     "crates/js-agent-usage/Cargo.toml": "eb4f33ee86f779ec8745bcaf2419317e1dd8d97b148bad2fa2d8019b6726f147",
     "crates/js-agent-wire/Cargo.toml": "22099db6711d6c4a5c4a37c98fab41552ea087c9db1e610511d5ed2ec722f82b",
-    "crates/js-agent/Cargo.toml": "11af25318914e6f7985bb9b59d50f0d26183e98188c012b5f2538caae37e0c15",
+    "crates/js-agent/Cargo.toml": "7da25923ec5fbf2f4a30b9b0ffba36155bf28f5061e0da57005cbb513113fd42",
     "crates/js-alert/Cargo.toml": "643847634b5bd4e252707143bd488c0e8ebfa8dba974de43fe1f4452ee231eb1",
     "crates/js-analysis/Cargo.toml": "64f41142f7ff29b2af9064469d5ae8c4e7b4c79d8340e183618e90eed527b2f5",
     "crates/js-api-gateway/Cargo.toml": "6e3f1fd3cf53ebc8ee65294e36823d3033c6ac242ff5655d10d7625e8f1a6e42",
@@ -1920,9 +1920,9 @@ MEMBERS = {
             "roots": ["xtask-0.1.0:0ce91f6439", "xtask-0.1.0:8629987247", "xtask-0.1.0:914f0c2aa3", "xtask-0.1.0:c7f1d00034"],
         },
         "test": {
-            "units": 495,
-            "graph_units": 495,
-            "roots": ["xtask-0.1.0:0022ae5e41", "xtask-0.1.0:008fe8f1a7", "xtask-0.1.0:038216741e", "xtask-0.1.0:1367a5936b", "xtask-0.1.0:15a253dbfc", "xtask-0.1.0:15d7275471", "xtask-0.1.0:199a658f1b", "xtask-0.1.0:1b4b80fd8f", "xtask-0.1.0:20d902342b", "xtask-0.1.0:22ce9dbf3c", "xtask-0.1.0:264441a224", "xtask-0.1.0:26ee5108f9", "xtask-0.1.0:2db833b93c", "xtask-0.1.0:3104c47fd3", "xtask-0.1.0:3276d148ef", "xtask-0.1.0:37fb362c20", "xtask-0.1.0:38f91b1d87", "xtask-0.1.0:3c387a8af5", "xtask-0.1.0:496d4207cc", "xtask-0.1.0:5057adc11e", "xtask-0.1.0:55cf2b867b", "xtask-0.1.0:55ef61da98", "xtask-0.1.0:5609f55b2c", "xtask-0.1.0:5d8218f4a9", "xtask-0.1.0:6d6c262be3", "xtask-0.1.0:70838195c9", "xtask-0.1.0:74bb27a352", "xtask-0.1.0:75646ed648", "xtask-0.1.0:75733b22a7", "xtask-0.1.0:77eca167a8", "xtask-0.1.0:81021cd7c1", "xtask-0.1.0:816b577843", "xtask-0.1.0:82d587655c", "xtask-0.1.0:82dba1c3b7", "xtask-0.1.0:8a7d5a4f24", "xtask-0.1.0:8f12348212", "xtask-0.1.0:94069e50ea", "xtask-0.1.0:979718bc08", "xtask-0.1.0:97f1a60cb4", "xtask-0.1.0:9efde65378", "xtask-0.1.0:a5164ce1fd", "xtask-0.1.0:a90276a472", "xtask-0.1.0:a9408cd3e7", "xtask-0.1.0:aa83274a49", "xtask-0.1.0:abee02f40b", "xtask-0.1.0:aca09ecc1d", "xtask-0.1.0:af27ef9ff5", "xtask-0.1.0:b1db631c82", "xtask-0.1.0:bbbb1911af", "xtask-0.1.0:c0d065a843", "xtask-0.1.0:d0c4df45c0", "xtask-0.1.0:d2cfb0d989", "xtask-0.1.0:dc0f24dfbd", "xtask-0.1.0:ef7e93d6c7", "xtask-0.1.0:f04158761e", "xtask-0.1.0:f23748b7b6", "xtask-0.1.0:fae42dc42e", "xtask-0.1.0:fb2f388a9c", "xtask-0.1.0:fd45c37f96", "xtask-0.1.0:fedbd468fb"],
+            "units": 496,
+            "graph_units": 496,
+            "roots": ["xtask-0.1.0:0022ae5e41", "xtask-0.1.0:008fe8f1a7", "xtask-0.1.0:038216741e", "xtask-0.1.0:1367a5936b", "xtask-0.1.0:15a253dbfc", "xtask-0.1.0:15d7275471", "xtask-0.1.0:199a658f1b", "xtask-0.1.0:1b4b80fd8f", "xtask-0.1.0:20d902342b", "xtask-0.1.0:22ce9dbf3c", "xtask-0.1.0:264441a224", "xtask-0.1.0:26ee5108f9", "xtask-0.1.0:2db833b93c", "xtask-0.1.0:3104c47fd3", "xtask-0.1.0:3276d148ef", "xtask-0.1.0:37fb362c20", "xtask-0.1.0:38f91b1d87", "xtask-0.1.0:3c387a8af5", "xtask-0.1.0:496d4207cc", "xtask-0.1.0:5057adc11e", "xtask-0.1.0:55cf2b867b", "xtask-0.1.0:55ef61da98", "xtask-0.1.0:5609f55b2c", "xtask-0.1.0:5d8218f4a9", "xtask-0.1.0:6d6c262be3", "xtask-0.1.0:70838195c9", "xtask-0.1.0:74bb27a352", "xtask-0.1.0:75646ed648", "xtask-0.1.0:75733b22a7", "xtask-0.1.0:777c7c53a5", "xtask-0.1.0:77eca167a8", "xtask-0.1.0:81021cd7c1", "xtask-0.1.0:816b577843", "xtask-0.1.0:82d587655c", "xtask-0.1.0:82dba1c3b7", "xtask-0.1.0:8a7d5a4f24", "xtask-0.1.0:8f12348212", "xtask-0.1.0:94069e50ea", "xtask-0.1.0:979718bc08", "xtask-0.1.0:97f1a60cb4", "xtask-0.1.0:9efde65378", "xtask-0.1.0:a5164ce1fd", "xtask-0.1.0:a90276a472", "xtask-0.1.0:a9408cd3e7", "xtask-0.1.0:aa83274a49", "xtask-0.1.0:abee02f40b", "xtask-0.1.0:aca09ecc1d", "xtask-0.1.0:af27ef9ff5", "xtask-0.1.0:b1db631c82", "xtask-0.1.0:bbbb1911af", "xtask-0.1.0:c0d065a843", "xtask-0.1.0:d0c4df45c0", "xtask-0.1.0:d2cfb0d989", "xtask-0.1.0:dc0f24dfbd", "xtask-0.1.0:ef7e93d6c7", "xtask-0.1.0:f04158761e", "xtask-0.1.0:f23748b7b6", "xtask-0.1.0:fae42dc42e", "xtask-0.1.0:fb2f388a9c", "xtask-0.1.0:fd45c37f96", "xtask-0.1.0:fedbd468fb"],
         },
         "release": {
             "units": 424,
@@ -51515,6 +51515,24 @@ UNITS = {
         "side": "target",
         "edition": "2024",
         "crate_root": "tests/job_surface.rs",
+        "features": [],
+        "cfgs": [],
+        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
+        "deps": [["clap", "clap-4.6.7:e95053f2df"], ["flate2", "flate2-1.1.10:61f8aa4b36"], ["hex", "hex-0.4.3:40d02ced6b"], ["host_shim", "xtask-0.1.0:45871d45be"], ["js_agent", "js-agent-0.1.0:1f136ca231"], ["js_api_gateway", "js-api-gateway-0.1.0:a1837f4dc8"], ["js_bundle", "js-bundle-0.1.0:cb47d2c280"], ["js_bundle_cli", "js-bundle-cli-0.1.0:7f19c17216"], ["js_cli", "js-cli-0.1.0:481984bc6a"], ["js_client", "js-client-0.1.0:1a27520bf9"], ["js_elastic", "js-elastic-0.1.0:1195762e40"], ["js_lease_server", "js-lease-server-0.1.0:59a92a006f"], ["js_mac_provision", "js-mac-provision-0.1.0:bf240bd810"], ["js_mac_session", "js-mac-session-0.1.0:f0c63f85c3"], ["js_oci", "js-oci-0.1.0:fa88a56177"], ["js_proto", "js-proto-0.1.0:1b8383fff3"], ["js_testkit", "js-testkit-0.1.0:ae4e00a243"], ["js_update_hook", "js-update-hook-0.1.0:544a006635"], ["lzma_rs", "lzma-rs-0.3.0:f546d9eb51"], ["md5", "md-5-0.11.0:d7ee057d9f"], ["proc_macro2", "proc-macro2-1.0.107:859b73239c"], ["prost", "prost-0.14.4:556740e45e"], ["prost_types", "prost-types-0.14.4:b32ff9ab4f"], ["protox", "protox-0.10.0:2b8306eff7"], ["rcgen", "rcgen-0.14.10:767927b3c8"], ["rustix", "rustix-1.1.6:041ffcb630"], ["rustls", "rustls-0.23.46:2b9128312b"], ["rustls_native_certs", "rustls-native-certs-0.8.5:b9b4747947"], ["ruzstd", "ruzstd-0.9.1:f9c5eb6094"], ["saphyr_parser", "saphyr-parser-0.1.2:38cdb9af93"], ["serde", "serde-1.0.229:e4b160defd"], ["serde_json", "serde_json-1.0.154:5f35ed99b8"], ["sha2", "sha2-0.11.1:dfcd53b417"], ["syn", "syn-2.0.119:549862ebfb"], ["tar", "tar-0.4.46:df4384e246"], ["thiserror", "thiserror-2.0.21:f04e19db16"], ["tokio", "tokio-1.54.1:0de551ed35"], ["toml", "toml-1.1.8+spec-1.1.0:2d632fd8df"], ["ureq", "ureq-3.5.0:a538ad41fd"], ["xtask", "xtask-0.1.0:65aecf435b"], ["xtask", "xtask-0.1.0:cc725aa10e"], ["xtask_fake", "xtask-0.1.0:a0b31dbfe8"]],
+        "path": "crates/xtask",
+        "test_flags": {"test": True, "doctest": False},
+    },
+    "xtask-0.1.0:777c7c53a5": {
+        "crate": "xtask",
+        "version": "0.1.0",
+        "source": "path",
+        "target_kind": ["test"],
+        "crate_types": ["bin"],
+        "target_name": "macos_sign_code_run",
+        "mode": "test",
+        "side": "target",
+        "edition": "2024",
+        "crate_root": "tests/macos_sign_code_run.rs",
         "features": [],
         "cfgs": [],
         "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},

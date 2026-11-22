@@ -32,8 +32,11 @@ pub const AUTHORITIES: [&str; 3] = [
 pub const INSTALL_DIR: &str = "/Library/Application Support/js-agent/bin";
 
 /// The program that holds the Full Disk Access grant: the agent, which is its own launchd
-/// job and starts every program it runs with the responsibility disclaimed, as the root
-/// helper starts every process of a job, so the grant never reaches a job.
+/// job. Every program the agent starts today is started with the responsibility disclaimed
+/// (`js_mac_session::disclaim`), and the helper, which starts every native job today, holds no
+/// grant. A native job's supervisor and the job's program are to be started keeping the
+/// responsibility, so that a job answers for the agent and holds the grant, within its slot
+/// user's Unix permissions and its Seatbelt profile.
 pub const FULL_DISK_ACCESS_PROGRAM: &str = "js-agent";
 
 /// One program of the package and the identifier it is signed under.
@@ -134,7 +137,7 @@ pub fn privacy_profile() -> String {
 						<key>CodeRequirement</key>
 						<string>{requirement}</string>
 						<key>Comment</key>
-						<string>js-agent lists the privacy database's directory to learn whether it holds this grant, which it holds to delete the accounts native jobs run as. Every program it starts, and every process of a job, is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<string>js-agent lists the privacy database's directory to learn whether it holds this grant, which it holds to delete the accounts native jobs run as, and so that a native job it starts through a supervisor, as its own slot user under a sandbox profile, can read the build trees tierstore mounts: that supervisor and that job are to answer for js-agent. Every other program js-agent starts is started with the responsibility disclaimed.</string>
 						<key>Identifier</key>
 						<string>{path}</string>
 						<key>IdentifierType</key>
