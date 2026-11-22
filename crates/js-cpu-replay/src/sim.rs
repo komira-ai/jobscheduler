@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::shape::{self, Phase, Shape};
 use crate::sizing::{Booking, Sizer, day_of};
 use crate::trace::{End, Job};
+use js_sched_placer::sizes::DEFAULT_COLD_CPU_MILLIS;
 
 /// One tick, in milliseconds.
 pub const TICK_MS: u64 = 1000;
@@ -58,6 +59,57 @@ pub enum Bookings {
     Recorded,
     /// What the placer's sizing books it from the history the replay has seen so far.
     Learned,
+    /// The placer's memory, and a CPU from the class's last runs (else its fallback's, else
+    /// its client's) weighted by `2^(-age / half_life_ms)`, as Autopilot weights its samples:
+    /// their weighted mean, or with `quantile_permille` the load-weighted quantile of their
+    /// means (each run counts by its CPU time, as Autopilot counts a sample by its load).
+    /// Rounded up to a quarter core and held to a quarter of the host, as the placer's.
+    Decayed {
+        /// The age at which a run counts half, in milliseconds.
+        half_life_ms: u64,
+        /// The quantile, in thousandths; `None` for the weighted mean.
+        quantile_permille: Option<u64>,
+    },
+}
+
+/// One run a class's decayed estimate is taken over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Past {
+    /// When it ended.
+    end: u64,
+    /// Its mean CPU, in millicores.
+    mean: u64,
+    /// Its CPU time, in milliseconds.
+    cpu: u64,
+}
+
+/// The runs a class's decayed estimate keeps: the last 64.
+const HISTORY: usize = 64;
+
+/// The decayed estimate of `past` (never empty) at `now` (see [`Bookings::Decayed`]).
+fn decayed(past: &VecDeque<Past>, now: u64, half_life_ms: u64, quantile: Option<u64>) -> u64 {
+    let weight = |run: &Past| {
+        let age = now.saturating_sub(run.end) as f64 / half_life_ms.max(1) as f64;
+        0.5f64.powf(age)
+    };
+    let Some(permille) = quantile else {
+        let total: f64 = past.iter().map(weight).sum();
+        let sum: f64 = past.iter().map(|run| weight(run) * run.mean as f64).sum();
+        return (sum / total) as u64;
+    };
+    let mut runs: Vec<&Past> = past.iter().collect();
+    runs.sort_by_key(|run| run.mean);
+    let mut seen = 0.0;
+    let cumulative: Vec<f64> = runs
+        .iter()
+        .map(|run| {
+            seen += weight(run) * run.cpu as f64;
+            seen
+        })
+        .collect();
+    let goal = seen * permille as f64 / 1000.0;
+    let at = cumulative.iter().position(|sum| *sum >= goal);
+    runs[at.unwrap_or(runs.len() - 1)].mean
 }
 
 /// How a host decides whether it takes one more job; every rule also keeps the memory
@@ -340,6 +392,7 @@ struct World<'a> {
     queue: VecDeque<usize>,
     sizer: Sizer,
     spreads: BTreeMap<u32, Spread>,
+    histories: BTreeMap<u32, VecDeque<Past>>,
     outcome: Outcome,
     /// Whether anything that can change a placement happened since the last pass: a job
     /// joined an empty queue, a job ended or the hosts were read.
@@ -388,6 +441,7 @@ impl<'a> World<'a> {
             queue: VecDeque::new(),
             sizer: Sizer::new(farm.milli, farm.bytes),
             spreads: BTreeMap::new(),
+            histories: BTreeMap::new(),
             outcome: Outcome {
                 slowed: vec![0; jobs.len()],
                 waited: vec![0; jobs.len()],
@@ -454,6 +508,26 @@ impl<'a> World<'a> {
                 bytes: u64::from(job.booked_mib) << 20,
             },
             Bookings::Learned => self.sizer.book(job, day_of(now)),
+            Bookings::Decayed {
+                half_life_ms,
+                quantile_permille,
+            } => {
+                let share = farm.milli / 4 / 250 * 250;
+                let learned = [Some(job.class), job.fallback, Some(job.client)]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|class| {
+                        let past = self.histories.get(&class)?;
+                        Some(decayed(past, now, half_life_ms, quantile_permille))
+                    });
+                let milli = learned.map_or(DEFAULT_COLD_CPU_MILLIS.min(share), |milli| {
+                    milli.div_ceil(250) * 250
+                });
+                Booking {
+                    milli: milli.min(share).max(250),
+                    bytes: self.sizer.book(job, day_of(now)).bytes,
+                }
+            }
         };
         let run = shape::own_wall_ms(job.wall_ms, job.cpu_ms, farm.milli);
         // Its start holds its booking and asks for no CPU.
@@ -636,6 +710,15 @@ impl<'a> World<'a> {
                     spread.runs.pop_front();
                 }
                 spread.runs.push_back((mean, peak));
+                let history = self.histories.entry(class).or_default();
+                if history.len() == HISTORY {
+                    history.pop_front();
+                }
+                history.push_back(Past {
+                    end,
+                    mean,
+                    cpu: job.cpu_ms,
+                });
             }
         }
     }

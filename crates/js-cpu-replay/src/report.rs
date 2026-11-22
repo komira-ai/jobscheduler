@@ -9,7 +9,7 @@ use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
 /// The ways of packing the report compares, in its order.
-pub const ARMS: [Arm; 9] = [
+pub const ARMS: [Arm; 12] = [
     Arm {
         name: "recorded bookings",
         bookings: Bookings::Recorded,
@@ -33,6 +33,33 @@ pub const ARMS: [Arm; 9] = [
         bookings: Bookings::Learned,
         rule: Rule::Booked,
         limit_permille: 900,
+    },
+    Arm {
+        name: "A decayed mean 12 h, 1.1",
+        bookings: Bookings::Decayed {
+            half_life_ms: 12 * HOUR_MS,
+            quantile_permille: None,
+        },
+        rule: Rule::Booked,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A decayed mean 1 h, 1.1",
+        bookings: Bookings::Decayed {
+            half_life_ms: HOUR_MS,
+            quantile_permille: None,
+        },
+        rule: Rule::Booked,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A load-weighted p90 1 h, 1.1",
+        bookings: Bookings::Decayed {
+            half_life_ms: HOUR_MS,
+            quantile_permille: Some(900),
+        },
+        rule: Rule::Booked,
+        limit_permille: 1100,
     },
     Arm {
         name: "B reserve z=2, 1.1",
@@ -65,6 +92,9 @@ pub const ARMS: [Arm; 9] = [
         limit_permille: 1100,
     },
 ];
+
+/// An hour, in milliseconds.
+const HOUR_MS: u64 = 3_600_000;
 
 /// The arrival speeds the options are replayed at: as recorded, and four times as fast (the
 /// same jobs in a quarter of the time, to see where each way of packing saturates).
@@ -453,9 +483,9 @@ fn options(text: &mut String, jobs: &[Job], farm: Farm) {
             text,
             "## Options, arrivals at {speed}x\n\n\
              | arm | shape | jobs/h | wait p50 s | p90 s | p99 s | jobs per host | host-time over \
-             cores % | asked past cores, mean | slowdown % | CPU used % | booked/used | used above \
+             cores % | asked past cores, mean | slowdown % | time in system, mean s | CPU used % | booked/used | used above \
              booking % | plan error % | host-time above plan % |\n\
-             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
         let mut alone = 0;
         for arm in ARMS {
@@ -486,7 +516,7 @@ fn row(text: &mut String, arm: Arm, shape: Shape, outcome: &Outcome, (farm, cpu)
     };
     let _ = writeln!(
         text,
-        "| {} | {} | {:.0} | {} | {} | {} | {:.1} | {} | {} | {} | {} | {:.2} | {} | {} | {} |",
+        "| {} | {} | {:.0} | {} | {} | {} | {:.1} | {} | {} | {} | {:.1} | {} | {:.2} | {} | {} | {} |",
         arm.name,
         shape.name(),
         outcome.waits.len() as f64 * 3_600_000.0 / span,
@@ -497,6 +527,9 @@ fn row(text: &mut String, arm: Arm, shape: Shape, outcome: &Outcome, (farm, cpu)
         percent(outcome.over_ms as f64, host_time),
         over,
         percent(outcome.slowed_ms as f64, outcome.own_ms as f64),
+        (outcome.waits.iter().sum::<u64>() + outcome.own_ms + outcome.slowed_ms) as f64
+            / 1000.0
+            / outcome.waits.len().max(1) as f64,
         percent(outcome.used, capacity),
         outcome.booked as f64 / cpu.max(1) as f64,
         percent(outcome.above_booking as f64, cpu as f64),

@@ -160,7 +160,7 @@ fn a_row_says_each_figure_of_an_outcome() {
     );
     assert_eq!(
         text,
-        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 2.5 | 10.0 | 4.0 | 10.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 |\n"
+        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 2.5 | 10.0 | 4.0 | 10.0 | 12.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 |\n"
     );
     outcome.over_ms = 0;
     let mut text = String::new();
@@ -171,7 +171,7 @@ fn a_row_says_each_figure_of_an_outcome() {
         &outcome,
         (farm, 20_000_000),
     );
-    assert!(text.contains("| 0.0 | - | 10.0 |"), "{text}");
+    assert!(text.contains("| 0.0 | - | 10.0 | 12.0 |"), "{text}");
 }
 
 #[test]

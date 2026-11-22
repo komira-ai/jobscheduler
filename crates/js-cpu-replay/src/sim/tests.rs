@@ -454,3 +454,51 @@ fn a_jobs_start_holds_its_booking_asks_for_no_cpu_and_is_not_slowed() {
     assert_eq!(outcome.slowed[0], 2000);
     assert_eq!(outcome.own_ms, 5000 + 20_000);
 }
+
+#[test]
+fn a_decayed_estimate_weights_recent_runs_and_a_quantile_weights_by_load() {
+    let hour = 3_600_000;
+    let past = VecDeque::from([
+        // An hour old: half the weight of the run that just ended.
+        Past {
+            end: 0,
+            mean: 1000,
+            cpu: 1000,
+        },
+        Past {
+            end: hour,
+            mean: 4000,
+            cpu: 3000,
+        },
+    ]);
+    // The mean: (1000 x 0.5 + 4000 x 1) / 1.5 = 3000.
+    assert_eq!(decayed(&past, hour, hour, None), 3000);
+    // By load: 500 core-ms at 1 core, 3000 at 4 cores; the 10th percentile is the first run,
+    // the 50th already the second.
+    assert_eq!(decayed(&past, hour, hour, Some(100)), 1000);
+    assert_eq!(decayed(&past, hour, hour, Some(500)), 4000);
+    // No CPU at all: the lowest.
+    let idle = VecDeque::from([Past {
+        end: 0,
+        mean: 7,
+        cpu: 0,
+    }]);
+    assert_eq!(decayed(&idle, 0, hour, Some(900)), 7);
+}
+
+#[test]
+fn decayed_bookings_start_cold_then_follow_the_class() {
+    // The first run of a class books the cold 22 cores; the second books the mean of the
+    // first, two cores; a third of another class falls back to the client's.
+    let jobs = [
+        job(0, 10_000, 20_000, 1),
+        job(20_000, 10_000, 20_000, 1),
+        job(40_000, 10_000, 20_000, 2),
+    ];
+    let decayed = Bookings::Decayed {
+        half_life_ms: 3_600_000,
+        quantile_permille: None,
+    };
+    let outcome = replay(&jobs, arm(decayed, Rule::Booked, 1100), flat(Farm::OURS));
+    assert_eq!(outcome.booked, (22_000 + 2000 + 2000) * 10_000);
+}

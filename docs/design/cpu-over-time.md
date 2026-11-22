@@ -4,14 +4,10 @@ Status: design for review. Nothing here is built except the replay (`crates/js-c
 [sizing.md](sizing.md) (how a class's CPU is booked) and [placement-by-load.md](placement-by-load.md) (the
 load rule and the time profiles designed for leases, never wired to jobs).
 
-Labels used throughout:
-- **READ**: read in the code.
-- **REPLAY**: printed by `js-cpu-replay` from a trace committed in this pull request. `tests/farm.rs` pins the
-  figures: the summary of the three-day export (`tests/fixtures/export.trace.gz`), and the report of the window
-  with no CPU limit (`tests/fixtures/farm.trace.gz` gives `tests/fixtures/farm.report.md`).
-- **MEASURED**: counted from the three-day export or from the farm's metrics, without a test pinning it.
-- **ASSUMED**: a choice or belief not yet tested.
-- **UNKNOWN**: not known; the build step that measures it is named.
+Labels: **READ**, read in the code. **REPLAY**, printed by `js-cpu-replay` from a trace in this pull request and
+pinned by `tests/farm.rs` (the three-day `export.trace.gz`, and `farm.trace.gz` giving `farm.report.md`, the hours
+with no CPU limit). **MEASURED**, counted from the export or the farm's metrics, with no test pinning it.
+**ASSUMED**, a choice not yet tested. **UNKNOWN**, with the build step that measures it.
 
 ## 1. First page
 
@@ -47,16 +43,12 @@ Labels used throughout:
   - Bookings learned from held runs are about four times too low for the runs now free to burst. That alone puts
     30 to 36 jobs on a host asking for well over 88 cores, before any burst. The level error may be most of
     today's overload; the shape is the second question.
-- On those six hours replayed, today's rule at a limit of 1.0 (instead of 1.1) gets most of what a perfect per-job
-  curve buys, with jobs spread flat over their runs (REPLAY, 4x arrivals). The flat bracket is the only one the
-  file allows today: it records no peaks. The rows of the job store hold a five-second peak, and the
-  recording-only change gives the per-second series.
-
-  | rule | slowdown | host-time over the cores | jobs per hour |
-  |---|---|---|---|
-  | limit 1.1 (today) | 19.7% | 51% | 9,192 |
-  | limit 1.0 | 3.3% | 16% | 9,152 |
-  | perfect curve, limit 1.0 | 0% | 0% | 9,211 |
+- **Size of the prize, against the owner's 20%.** At steady load, jobs waited for a CPU 11 to 15% of the time
+  (MEASURED). On the six hours replayed with jobs flat over their runs, a perfect per-job curve cuts mean time in
+  system (wait plus run) from 65.1 s to 59.5 s, 8.6% (REPLAY, recorded arrival speed). At saturation, the replay's
+  sharing loses no CPU to overcommit, so there the rules that overcommit most finish soonest. The rest of the 20% can
+  only come from what the model leaves out: cache and switching cost at 3x, and bursts the flat data hides. Step 1
+  measures both (section 10).
 - The replay's own check is not yet met (section 10). Replayed with the recorded bookings, its waits are 2.3x
   shorter than the recorded ones (median 575 s against 1,322 s after the first hour, REPLAY). Absolute waits below
   are optimistic; the comparisons between rules on the same arrivals are what to read.
@@ -80,7 +72,9 @@ Labels used throughout:
 7. A job that does not fit stays queued and is retried on the existing triggers (heartbeat change, submit, 5-second
    tick). As running jobs age past their bursts, hosts open up. Queue order stays binding.
 8. The measured host CPU enters as a correction that fades in 10 s, so a wrong prediction is noticed within one
-   heartbeat. Nothing is killed or throttled.
+   heartbeat. Nothing is ever killed, throttled or moved because an estimate was wrong: a host that turns out
+   overcommitted runs overcommitted until its jobs finish (the owner's ruling; heavy overcommit is an accepted
+   fallback, not an emergency). Only a job that has not started is ever held.
 9. A class uses its curve only while the curve predicts its recent runs better than a flat line does; otherwise it
    is flat, as today.
 10. A job is never held on a forecast for more than a set time (default 30 s); after that today's rule alone
@@ -95,59 +89,72 @@ Labels used throughout:
 | Placer | A profile per class (about 4.5 KB), a 65-slot table per host, one extra test in the fit check. Memory, disk, GPUs and the queue rules are unchanged. |
 
 ### Build steps, each behind a flag and each useful alone
-1. **Record.** Per-second series, host busy and pressure, agent run length. No placement change. Alone it answers
-   "are jobs phased or flat?" and fixes short-job timing.
-2. **Learn, in shadow.** The server builds profiles and the per-class self-check, and logs how well each profile
-   predicted each run.
-3. **Decide in shadow.** At every placement, log what the curve rule would have done beside what the flat rule did,
-   and the predicted against the actual host load. **The replay gate is here** (section 10).
-4. **Enforce**, on a named list of hosts first, then all six. Off returns to today's rule at once.
-5. Later, only if measurement says so (section 11): a horizon of minutes, credit for jobs about to end, delay on
-   purpose.
+1. **Record.** Per-second series, host busy and pressure, agent run length; no placement change. Alone it says
+   whether jobs are phased, sizes the prize (decision 2) and fixes short-job timing.
+2. **Learn, in shadow.** Per-class distributions and the self-check, logged against each run.
+3. **Decide in shadow.** Log what the curve rule would have done beside the flat rule. **The replay gate is here.**
+4. **Enforce**, on named hosts first, then all six. Off returns to today's rule at once.
+5. Later, only if measured worth it (section 11): a horizon of minutes, credit for jobs about to end.
 
 ### Decisions needed
 1. **Approve step 1 now.** Recommend yes. It is cheap (no new file read per job), reversible, and the only way to
    learn whether jobs are phased. Cost of no: any later design is guesswork, and short-job timing stays wrong.
-2. **Success measure.** Recommend run time over uncontended run time (median and p90), time in system (queue wait
-   plus run time), and the share of host-seconds above cores x 1.1. Throughput must not fall by more than 2%. Cost
-   of choosing jobs per hour instead: it barely moves at 99% busy (REPLAY: every rule with learned bookings finishes
-   within 1% of the same jobs per hour at 4x but one, the limit 0.9 at 7.7% fewer), so nothing would ever pass.
+2. **Success measure: total time**, queue wait plus run time summed over a build's actions (the replay's "time in
+   system"). Pass mark: 10% less total time than today's rule on recorded series (half the owner's expected 20%),
+   throughput within 2%. The machinery of steps 2 to 4 is worth weeks only at that size; if step 1's data bounds the
+   prize below it, stop at step 1.
 3. **Keep today's flat ceiling beside the curve rule** (the curve rule can only hold a job, never admit more).
    Recommend yes for step 4. Since the overshoot comes with bursts of arrivals, the curve rule's value is in
    spreading a burst of starts. At steady load the flat ceiling already holds pressure near 11 to 15%.
 4. **Hold bound: 30 s** (setting). A job can be held at most that long on the forecast. Recommend 30 s. A burst of
    hundreds of arrivals is released over several passes, so the bound must cover the spreading of one burst:
    about 30 s in the worked example (section 6). A shorter bound gives the burst back to today's rule.
-5. **Gate on the replay, and stop if shape does not pay.** Recommend yes, with the pass mark in section 10. The
-   replay now exists and must also beat today's rule at a limit of 1.0, which on flat data gets most of the gain.
+5. **Gate on the replay, and stop if shape does not pay.** Recommend yes, with the pass mark of decision 2. On flat
+   data a lower limit is not the cheap answer: at 1.0 it cuts slowdown but adds more wait than it saves (section 10).
 
 ## 2. Why this shape
 
 Three designs were compared. All three start with the same recording; they differ in what placement does with it.
 - **Direct curves** (laying each class's mean-by-age profile over the host's other jobs): closest to the owner's
   idea; conditioning on age is exact; with flat profiles it equals today's rule. This is the base of this document.
-- **Statistical bound** (expected level plus a spread term): needs a variance from 32 runs and an independence
-  assumption that jobs placed in the same second break. Deferred. REPLAY: a reserve of twice the root of the summed
-  class variances over today's rule cut slowdown from 19.7% to 14.4% at 4x, less than the limit of 1.0 did.
+- **Statistical bound** (expected level plus a spread term): it assumes jobs are independent, which jobs placed in
+  the same second are not. Deferred. REPLAY: 2% less total time than today's rule at the recorded speed, 6% more at
+  4x.
 - **Minimal** (host pressure gate plus a 30-second start charge): its strongest point is that measured busy cores
   cannot show overload (line 3 above). That point is adopted: pressure is recorded from step 1.
 
 ### What others do
 Read from the papers' and projects' own text, except where marked "abstract only" or "unverified".
 - **For long recurring jobs, a curve over time is established practice.**
-  - **Morpheus** (Microsoft, OSDI 2016): over 60% of the jobs in the busiest clusters recur. A job's "skyline" is
-    the resources it held at each step, "typically one minute". A linear program fits one provisioned skyline to
-    about a month of runs, weighing over-allocation against under-allocation that a run can catch up on later.
-    That skyline is reserved for every future run. When a run falls behind, it gets extra resources for up to a
-    minute at a time ("dynamic reprovisioning").
-  - **Rayon** (Microsoft, SoCC 2014; part of Apache Hadoop 2.6): production jobs reserve resources that vary over
-    time, in a reservation language (a bundle, a parallelism range, a minimum lease, total work). A planner places
-    the reservations in the future. Capacity a reservation leaves idle goes to best-effort jobs.
-  - Both deal in jobs of minutes to hours, at a minute's resolution, and in reservations made before the job runs.
+  - **Morpheus** (Microsoft, OSDI 2016): over 60% of jobs in the busiest clusters recur. A linear program fits one
+    "skyline" (resources at each step, "typically one minute") to about a month of runs, and reserves it for every
+    later run; a run that falls behind gets extra resources a minute at a time.
+  - **Rayon** (Microsoft, SoCC 2014; in Apache Hadoop 2.6): production jobs reserve resources that vary over time; a
+    planner places the reservations ahead, and capacity a reservation leaves idle goes to best-effort jobs.
+  - Both deal in jobs of minutes to hours, at a minute's resolution, reserved before the job runs.
 - **For short tasks, a level from history plus feedback on the host.**
-  - **Borg, Autopilot, Kubernetes VPA, Azure Resource Central:** per-class levels or histograms from history, plus
-    measured machine state, with no per-task curve (abstracts and documentation only; VPA's 90th percentile target
-    and Resource Central's percentile are unverified).
+  - **Borg** (EuroSys 2015, section 5.5): a task's reservation "is set equal to the resource request (the limit);
+    after 300 s, to allow for startup transients, it decays slowly towards the actual usage plus a safety margin",
+    and "is rapidly increased if the usage exceeds it". Non-prod work is placed on reservations. When they are
+    wrong, Borg will "kill or throttle nonprod tasks, never prod ones". About 20% of a median cell's work runs in
+    reclaimed resources.
+  - **Autopilot** (EuroSys 2020, section 3.2):
+    - samples: 1 s, kept as a histogram of about 400 buckets per 5-minute window;
+    - decay: weights 2^(-age / half-life), "tuned to long-running jobs: we use a 12 hour half life for the CPU
+      signal";
+    - batch CPU: the weighted mean, "since if a job tolerates CPU throttling, the most efficient limit for the
+      infrastructure is the job's average load";
+    - serving CPU: the 90th or 95th percentile of load-weighted usage;
+    - then a 10 to 15% margin, and the maximum over the last hour.
+  - **What carries over to jobs of seconds:** the per-second sample, a decayed distribution per class, the mean for
+    batch CPU, and load weighting.
+  - **What does not:**
+    - Borg's 300 s startup grace: 92.5% of our jobs end within 128 s.
+    - Autopilot's 12 h half-life and hour of smoothing: our classes run many times an hour.
+    - Their remedy for a wrong estimate (throttle or kill): the owner rules it out, so here a wrong estimate only
+      overcommits a host.
+  - **Kubernetes VPA, Azure Resource Central:** per-class histograms from history, no per-task curve (documentation
+    and abstracts only; their percentile targets are unverified).
   - **Mesos oversubscription:** it stops offering revocable resources when the host is loaded, then evicts.
   - **`make -l`:** a lagging load average stalls or oscillates.
   - No system was found that schedules jobs of seconds on a per-job curve; that is a negative search, not proof.
@@ -210,22 +217,39 @@ ignores unknown fields; precedent `cpu_peak`, with a test that the previous rele
 7 days, which is also how profiles are rebuilt after a restart.
 
 ## 4. What the server learns per class
+Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`: class, fallback class, client, cold 22 cores).
 
-Class and fallbacks are unchanged (READ: `sizes.rs` `key_under`; class, fallback class, client, cold 22 cores). Per
-class, the ring of the last 32 successful runs' series, each resampled to 64 slots of 2 s (ages 0 to 128 s), slots
-after a run's end counting 0. From it:
-- `p[s]`, the average rate in slot s;
-- `n[s]`, the runs still alive at slot s;
-- `tail`, the average rate after 128 s over runs that got there (the flat booking if fewer than 4 did);
-- `lambda`, the median of the runs' means (today's booking) over the average of them, clamped to 0.5 to 2.
+**The estimate is a distribution, not a number.**
+- **Samples.** Every point of a run's series (section 3) is a sample of its class's per-second CPU. A point of
+  granularity g counts g times.
+- **Decay.** A run's samples are weighted 2^(-age / 6 h) by the run's end, with at most the last 64 runs.
+  - 6 h, not Autopilot's 12 h, because a class here runs tens of times an hour and changes with a commit. Over a
+    working day a run's weight falls to 1/4.
+  - REPLAY: as a whole-run booking, a decayed mean with a 1 h and with a 12 h half-life gave the same total time
+    within 0.4% (64.5 s and 64.8 s), so the choice is not sensitive.
+- **Kept per class:**
+  - a histogram of all its samples, in 64 log-spaced buckets from 1/16 core to 88 cores;
+  - for each 2 s slot of ages 0 to 128 s, the decayed mean and the decayed load-weighted 90th percentile;
+  - after 128 s, the decayed mean of its points.
 
-A run under 5 s teaches nothing, as today.
+**What placement takes from it, and for what:**
+- **The level:** the decayed mean of the samples (Autopilot's rule for batch CPU). It is the charge of a job beyond
+  its first 128 s, and of a class with no shape. REPLAY: as a whole-run booking it matches today's median in total
+  time (64.8 s against 65.1 s).
+- **The start:** for each 2 s slot of the first 128 s, the load-weighted 90th percentile. This is what a new job is
+  checked against at admission, the only moment placement acts, and so the only place a high quantile pays.
+  REPLAY: used for a whole run, the load-weighted 90th percentile packs far less (2.1% slowdown, against 15.7%) but
+  adds 2.5% total time, so it is kept to the start.
+- **The tail:** the decayed mean after 128 s. A burst shorter than a point is averaged away, and the host reading
+  (`B_h`) catches it.
+- **Today's median stays the flat ceiling** (decision 3). The distribution feeds only the curve rule.
 
-**Self-check.** When a run ends, compare how well the profile predicted its per-slot CPU with a flat line at its
-mean. A moving score over 16 runs keeps the curve only while its error is at most 80% of the flat error.
+**A wrong estimate.** It is never acted on against a running job. It overcommits its host until the jobs end, and it
+teaches the class: a run slowed by contention may only raise it, as today.
 
-**Cold start and few runs.** No runs: cold, flat 22 cores, as today. Fewer than 8 runs, or fewer than 4 alive at a
-given age: the flat booking at that age. About 4.5 KB per class, at most 4,096 profiled classes.
+**Self-check, cold start.** A class keeps its shape only while its slots predict its runs better than a flat line
+(error at most 80% of the flat one, over 16 runs). With no runs it is cold (flat 22 cores, as today); with fewer than
+8 runs, it is flat.
 
 ## 5. The placement rule
 
@@ -261,15 +285,13 @@ second, each 1 core for ages 0 to 20 s, 20 cores for 20 to 24 s, then 1 core, so
   the compile is flat in reality, the self-check sets the class flat and all 16 start at once.
 
 ## 7. When the prediction is wrong
-- **A job runs longer than every recorded run:** it is charged its flat booking until it ends.
-- **A job bursts at another time or harder:** the measured busy rises above the expectations, and `B_h` charges the
-  difference for 10 s. The profile learns it after the run ends.
+Nothing running is ever killed, throttled or moved: the host runs overcommitted until its jobs end, which the owner
+accepts. What corrects is the next placement:
+- **A job runs longer than every recorded run, or bursts at another time:** it is charged flat; the measured busy
+  above the expectations enters `B_h` for 10 s; the profile learns it when the run ends.
 - **A class whose curve misfits:** the self-check turns it flat within about 16 runs.
-- **Overload busy cores cannot show:** pressure can. Step 1 records it, and a pressure gate is built in shadow only.
-
-**No oscillation, no starvation** (argued, not shown): the only action is holding the next job; placements enter the
-table at once; each slot is capped at 22 cores, so an empty host fits any job; queue order is binding; after 30 s the
-curve test is skipped. The replay shows the same for the rules it runs: every arm finishes every job.
+- **No oscillation, no starvation** (argued, not shown): only the next job is held; an empty host fits any job;
+  queue order binds; after 30 s the curve test is skipped. In the replay every arm finishes every job.
 
 ## 8. Unknowns that change the design
 1. **Learning from held and contended runs.** A run with pressure of 10% of its wall time or more only raises its
@@ -281,86 +303,73 @@ curve test is skipped. The replay shows the same for the rules it runs: every ar
 4. **The class count.** The replay's stand-in classes are booking pairs; `convert --rows` reads the real keys.
 
 ## 9. Where the data disagrees with the draft this document began as
-- **The draft said** jobs of 30 s or more had a mean CPU of 1.4 to 2.5 cores, "fits steady use". That figure is
-  from runs that were mostly held at their booking.
-  - REPLAY over the three days: median 1.0 core (p25 0.7, p75 1.2).
-  - REPLAY over the six hours after the limit went: median 4.2 cores (p25 2.8, p75 5.0), from 6,932 runs.
-  - The worked example's 3.5-core compile is closer to the free runs than to the history.
-- **Bookings are low by about four times for free runs.** Consequence: the 3x load after the median change needs no
-  burst at all to explain it. Test: with the rows, compare each live class's booking with its free runs' median. If
-  most of the gap is level, step 1 still pays (it measures shape and pressure). But the first gain is the rings
-  filling with free runs, which the 1.1 limit and the p50 rule do by themselves.
-- **The draft said** 36% of jobs run under 5 s and carry 0.3% of the CPU. MEASURED here: 41% and 0.23%. Jobs of 30 s
-  or more carry 96.2% (REPLAY), against 94.6% in the draft. Neither changes the design.
-- **The draft said** the existing data cannot replay anything. It replays levels: the rules on identical arrivals,
-  with each job's CPU flat over its run. Section 10 has the numbers. It cannot replay shapes until step 1 records
-  them.
-- **Today's rule at a limit of 1.0 is the alternative to beat.** On flat data it reaches 3.3% slowdown against
-  today's 19.7%, at 0.4% fewer jobs per hour. A curve rule earns its machinery only by beating that on recorded
-  shapes. (The owner keeps 1.1 for now; this is a measurement, not a proposal.)
+- **The draft said** jobs of 30 s or more averaged 1.4 to 2.5 cores, "fits steady use". REPLAY: a median of 1.0 core
+  (p25 0.7, p75 1.2) over the three days, mostly runs held at their booking. In the six hours with no limit it was
+  4.2 cores (p25 2.8, p75 5.0, 6,932 runs).
+  - So bookings are about four times low for free runs, and the 3x load after the median change needs no burst to
+    explain it.
+  - Test with the rows: compare each live class's booking with its free runs' median.
+- **The draft said** 36% of jobs run under 5 s with 0.3% of the CPU. MEASURED here: 41% and 0.23%. Jobs of 30 s or
+  more carry 96.2% (REPLAY), not 94.6%.
+- **The draft said** the existing data cannot replay anything. It replays levels (section 10); shapes need step 1.
 
 ## 10. How it is proven
 
 **The replay** (`crates/js-cpu-replay`, kept Rust, no clock or random source).
-- **Input.** An export of `GET /v1/usage`, and optionally the job store's rows, becomes an anonymised trace: no job
-  id, host name, label, image or command; times relative to the first arrival; classes as dense indices.
-- **Placement**, on six hosts of 88 threads and 251 GiB: the job service's walk in arrival order (it stops at the
-  first job no host takes); the placer's sizing (mirrored from `JobSizes` over `js-sizing`); its score (keys 1, 3
-  and 5 of `js-sched` `Scorer`); host readings every 5 s, the larger of the last two; the memory rule unchanged.
+- It turns an export of `GET /v1/usage`, and optionally the store's rows, into an anonymised trace.
+- It replays the trace on six hosts of 88 threads and 251 GiB, with:
+  - the job service's walk, in arrival order;
+  - the placer's sizing (mirrored from `JobSizes` over `js-sizing`) and its score (keys 1, 3, 5);
+  - host readings every 5 s;
+  - the memory rule.
 - **Contention** (ASSUMED): a host asked for more than its cores gives each job cores/demand of what it asks, and the
-  job runs longer by that factor. Cache effects and context switching are ignored.
-- **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak, the rest at the level that keeps
-  its mean) and a "burst" (its peak while its CPU lasts, idle otherwise). Without a recorded peak both are flat.
-- **Arms** (`report::ARMS`): recorded bookings; learned bookings at limits 1.1, 1.0 and 0.9; a variance reserve;
-  measured load alone at 1.0 and 1.1; a perfect per-job curve at 1.0 and 1.1, the upper bound of any curve rule.
-  Each runs at the recorded arrival speed and at 4x, which reaches saturation.
+  job runs longer by that factor. Nothing is lost to cache or switching.
+- **Shapes:** each job's CPU is bracketed by a "blip" (five seconds at its peak) and a "burst" (its peak while its
+  CPU lasts). Without a recorded peak both are flat.
+- **Arms:** listed in the table below. Each runs at the recorded arrival speed and at 4x.
 
 **The window.** The jobs that started from 16:00 UTC on 2026-11-22, the first hour in which no job ran above its
 booking (REPLAY trace: 14,140 jobs, 5.9 h, 19.8% of the farm's cores on average). Before then every job ran under a
 `cpu.max` of its booking, so its CPU is a lower bound.
 
-**First check, on the replay itself: not yet met.**
-- Replayed with the recorded bookings, the median wait is 505 s against a recorded 1,232 s; after the first hour,
-  575 s against 1,322 s (REPLAY).
-- The time from placement to start is not in the usage export (section 8, point 2). The rows carry it, and the
-  replay holds a job's booking through it (`start_ms`).
-- A replayed job is placed at the next one-second tick, which adds up to a second to each wait.
-- Until the check holds within 20%, read the differences between arms, not the absolute waits.
+**First check, on the replay itself: not yet met.** Replayed with the recorded bookings, the median wait is 575 s
+against 1,322 s recorded after the first hour (REPLAY). The time from placement to start is not in the usage export
+(section 8); the rows carry it. A replayed job also waits up to a second for its tick. Until the check holds within
+20%, read the differences between rules, not absolute waits.
 
-**Results on that window, jobs flat over their runs** (REPLAY, `farm.report.md`, 4x arrivals). Slowdown is the time
-lost to contention over the jobs' own time.
+**Results on that window, jobs flat over their runs** (REPLAY, `farm.report.md`).
+- Time in system is mean wait plus run, in seconds.
+- Slowdown is the time lost to contention, over the jobs' own time.
+- 1x is the recorded arrival speed; 4x reaches saturation.
 
-| rule | jobs/h | wait p50 / p99 s | jobs per host | host-time over cores | slowdown |
+| rule | time in system 1x | 4x | slowdown 1x | 4x | jobs/h 4x |
 |---|---|---|---|---|---|
-| today, learned bookings, 1.1 | 9,192 | 369 / 570 | 24.5 | 50.8% | 19.7% |
-| today, 1.0 | 9,152 | 526 / 849 | 21.1 | 15.8% | 3.3% |
-| today, 0.9 | 8,481 | 656 / 1,228 | 19.3 | 6.1% | 2.3% |
-| reserve z=2, 1.1 | 9,189 | 386 / 629 | 23.4 | 43.5% | 14.4% |
-| measured load only, 1.0 | 9,158 | 507 / 800 | 21.7 | 19.5% | 6.4% |
-| measured load only, 1.1 | 9,192 | 301 / 510 | 32.2 | 63.0% | 57.6% |
-| perfect curve, 1.0 | 9,211 | 434 / 689 | 20.5 | 0% | 0% |
-| perfect curve, 1.1 | 9,217 | 380 / 624 | 21.6 | 61.4% | 4.9% |
+| today: median, 1.1 | 65.1 | 351.3 | 15.7% | 19.7% | 9,192 |
+| median, 1.0 | 66.9 | 494.6 | 10.4% | 3.3% | 9,152 |
+| median, 0.9 | 68.7 | 740.4 | 5.5% | 2.3% | 8,481 |
+| decayed mean (12 h), 1.1 | 64.8 | 339.5 | 13.1% | 21.6% | 9,195 |
+| decayed mean (1 h), 1.1 | 64.5 | 337.6 | 12.5% | 22.0% | 9,187 |
+| load-weighted p90 (1 h), 1.1 | 66.7 | 563.8 | 2.1% | 4.5% | 8,878 |
+| reserve z=2, 1.1 | 63.7 | 372.3 | 10.4% | 14.4% | 9,189 |
+| measured load only, 1.0 | 66.1 | 473.0 | 17.8% | 6.4% | 9,158 |
+| measured load only, 1.1 | 66.5 | 318.3 | 28.0% | 57.6% | 9,192 |
+| perfect curve, 1.0 | 59.5 | 387.8 | 0% | 0% | 9,211 |
+| perfect curve, 1.1 | 58.7 | 347.9 | 1.7% | 4.9% | 9,217 |
 
-At the recorded speed every learned rule waits a median of 1 s, and today's rule loses 15.7% to contention against
-0% for the perfect curve. Three points to read from the table:
-- Measured load alone at 1.1 is the worst arm: the measurement lags and cannot read above the cores.
-- The perfect curve's gain over today's rule at 1.0 is small with flat jobs; bursts are what could make it large.
-- Today's rule in the replay holds 24.5 jobs per host against 30 to 36 live. Its bookings are learned from the
-  window's own free runs, not from the held history, which agrees with section 9.
+What to read from the table:
+- **At the recorded speed only the perfect curve clearly wins**: 8.6% less total time than today. Lower limits and
+  higher quantiles cut slowdown but add more wait than they save.
+- **At saturation the model rewards overcommit.** Its sharing loses no CPU, so measured load at 1.1 finishes
+  soonest despite 57.6% slowdown. That is the owner's view of heavy overcommit, and it is also the model's limit:
+  any cost of overcommit beyond slowdown (cache, switching, memory bandwidth) is not in it.
+- **Fewer jobs per host than live.** Today's rule in the replay holds 24.5 jobs per host against 30 to 36 live,
+  because its bookings come from free runs only (section 9).
 
-**What the replay needs next, in order:**
-1. The job store's rows for the window (`convert --rows`), for real classes, five-second peaks, contention and start
-   times. Then the burst bracket is filled in, and the first check is run again.
-2. The per-second series from step 1. Then the curve rule itself, with learned profiles, is an arm; its per-class
-   curves would be learned from the first two days and replayed on a held-out third.
+**Next:** the job store's rows (`convert --rows`: real classes, peaks, contention, start times), then step 1's
+series, with curves learned on two days and replayed on a held-out third.
 
-**Pass mark** (the owner sets it):
-- The curve rule beats today's rule on the share above 1.1x and on stretch, by more than the spread between two
-  held-out days.
-- It also beats today's rule at a limit of 1.0, the cheap alternative.
-- Throughput is no more than 2% lower, and queue-wait p90 and p99 are no worse.
-- The perfect curve clearly beats today's rule.
-- If today's rule at 1.0 gets most of the gain, that is the cheaper change.
+**Pass mark** (decision 2): on held-out recorded days the curve rule takes 10% or more off total time against today's
+rule, by more than the spread between two days, with throughput within 2%; and the perfect curve does better still.
 
 **Kept Rust tests asserting behaviour** (injected clock, no sleeps), for the curve rule when it is built: flat profiles
 give the flat rule's decisions; a burst-first and a quiet-first job fit where two burst-first jobs do not; a job older
@@ -371,29 +380,21 @@ a series off by more than 5% is ignored; `B_h` is never negative and fades; each
 - **A horizon of minutes.** Decided by the share of CPU time, in jobs over 60 s, spent after 128 s in bursts at least
   twice the job's mean and lasting 3 s or more. If it is under about 20% (ASSUMED threshold), 128 s is enough.
 - **Credit for jobs about to end.** Decided by whether the step 3 shadow shows the flat sum over-counting hosts.
-- **Delay on purpose.** Decided by the perfect-curve arm against the 5-second-tick version of the curve rule.
-- **A spread term.** Decided by step 3's calibration.
+- **Delay on purpose** (a job not yet started), decided by the perfect-curve arm; **a spread term**, by step 3.
 
 ## 12. Mac hosts, settings
-- **Mac hosts:** the Mac runtime has no `usage` method (READ), so a Mac job's result carries no CPU time. Mac
-  classes stay flat until the Linux replay shows a gain.
-- **Settings** (flags; no environment variables), each off or at today's value by default:
-  - agent `--cpu-series` (the per-job series) and `--host-second-samples` (per-second host busy and pressure);
-  - server `--placement-curves` `off|shadow|on`, and `--curve-hosts`, the hosts that use the rule;
-  - `--curve-horizon-seconds` 128, `--curve-slot-seconds` 2, `--curve-min-runs` 8, `--curve-fit-ratio` 0.8,
-    `--curve-bias-fade-seconds` 10 and `--curve-max-hold-seconds` 30;
-  - the CPU slack stays 1.1.
-- **Off equals today's behaviour exactly.**
-Off equals today's behaviour exactly.
+- **Mac hosts:** the Mac runtime has no `usage` method (READ), so Mac classes stay flat until Linux shows a gain.
+- **Settings** (flags, each off or at today's value by default): agent `--cpu-series`, `--host-second-samples`;
+  server `--placement-curves off|shadow|on`, `--curve-hosts`, `--curve-horizon-seconds 128`, `--curve-slot-seconds
+  2`, `--curve-min-runs 8`, `--curve-fit-ratio 0.8`, `--curve-bias-fade-seconds 10`, `--curve-max-hold-seconds 30`
+  (held jobs are only ones not yet started); the CPU slack stays 1.1. Off equals today's behaviour exactly.
 
 ## 14. Considered and not chosen
-- **A burst reserve per host from the classes' spread:** less gain than today's rule at 1.0 (REPLAY).
-- **Measured host load as the only rule:** the worst arm at 1.1 (REPLAY); the reading lags and cannot exceed the
-  cores.
-- **A pressure gate and a 30-second start charge only:** the lightest design, but it drops the owner's idea before
-  there is data; its gate is built in shadow.
-- **Sampled recording:** it starves rare classes.
-- **The minute-slot admission in `js-sched`:** unused by jobs.
-- **A one-second heartbeat:** it multiplies passes.
-- **CPU quotas or cpusets:** against the owner's ruling.
-- **Memory curves:** there is no per-job memory limit, by ruling.
+- **A reserve from the classes' spread:** 2% less total time than today's rule at the recorded speed, 6% more at 4x
+  (REPLAY).
+- **Measured host load alone:** it lags and cannot read above the cores.
+- **A pressure gate and a start charge only:** the lightest design; it drops the owner's idea before there is data.
+  Its gate is built in shadow.
+- **Others:** sampled recording (starves rare classes); `js-sched`'s minute slots (unused by jobs); a one-second
+  heartbeat (more passes); CPU quotas or cpusets and memory curves (against the owner's rulings).
+- **Killing, throttling or moving a running job on a wrong estimate:** ruled out by the owner.
