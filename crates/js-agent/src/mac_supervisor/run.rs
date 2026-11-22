@@ -124,12 +124,12 @@ pub fn supervise(host: &dyn SuperviseHost, spec: &SuperviseSpec, err: &mut dyn W
     status_of(&record)
 }
 
+/// A started job and the audit session it runs in.
+type Started = (Box<dyn JobChild>, Option<i32>);
+
 /// The steps up to the job's start: the job and the audit session it runs in, or the step that
 /// failed and why.
-fn start(
-    host: &dyn SuperviseHost,
-    spec: &SuperviseSpec,
-) -> Result<(Box<dyn JobChild>, Option<i32>), (Step, io::Error)> {
+fn start(host: &dyn SuperviseHost, spec: &SuperviseSpec) -> Result<Started, (Step, io::Error)> {
     let asid = if spec.new_session {
         Some(
             host.audit_session(spec.uid)
