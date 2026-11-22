@@ -250,9 +250,11 @@ the network-volumes privacy service denied; started as ordinary children of the 
 profile-granted `js-agent`, the same reads as the same pool user succeed.
 
 What keeps a job from using the rest of the grant is the slot user it runs as (Unix
-permissions) and the Seatbelt profile applied in the job's child before its program runs. A
-proof run measures whether the profile keeps a slot-user job out of places only the privacy
-controls protect; its result is pending, and the profile is what is relied on.
+permissions) and the Seatbelt profile applied in the job's child before its program runs.
+Measured on a Mac, the prototype's profile does not keep such a job out of three places only
+the privacy controls protect: the system privacy database's directory, the database, and
+`/Library/Preferences/com.apple.TimeMachine.plist`. How that is closed is not decided
+(`docs/design/spawn-disclaim.md`, "The fence, measured").
 
 Every other program `js-agent` starts stays disclaimed, which is the default of
 `js_mac_session::disclaim::Program` (`crates/js-mac-session/src/disclaim.rs`; the design is in
@@ -278,8 +280,8 @@ To see by hand whose grants a process uses, run a native job and run `sudo launc
 equals the job's own pid. Once the supervisor starts jobs, the `responsible pid` is the agent's
 pid. To see the effect, run a native job whose program is `/bin/ls` with the argument
 `/Library/Application Support/com.apple.TCC`: it fails with `Operation not permitted` today,
-and once the supervisor starts jobs it lists the directory only if the Seatbelt profile lets
-the read through, which is what the pending proof run measures.
+and once the supervisor starts jobs it lists the directory unless the Seatbelt profile refuses
+the read, which the prototype's profile, measured, does not.
 
 ## Network
 

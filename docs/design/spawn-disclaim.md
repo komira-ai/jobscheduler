@@ -10,7 +10,7 @@ macOS's privacy controls (TCC: Full Disk Access, the camera, other apps' data) d
 
 **A job keeps the responsibility.** A native job and its supervisor are started without the disclaim, so they answer for `js-agent` and hold what it holds, Full Disk Access included. Every process between `js-agent` and the job is started so, and a job's own children (compilers, shells, buck2) follow their parent and answer for the agent too. The reason is measured. A job started disclaimed is judged by its own code signature, and it is refused every read of the network file system (NFS) loopback mount that tierstore serves its build trees from; Apple's own tools (`ls`, `cat`, `python3`, compilers) are refused too. On a Mac (macOS 27), disclaimed, the reads fail with "Operation not permitted" and the system log shows the network-volumes privacy service denying them. Started as ordinary children of the signed, profile-granted `js-agent`, the same reads as the same pool user succeed.
 
-What keeps a job from using the rest of the grant is the slot user it runs as (Unix permissions) and the Seatbelt profile applied in the job's child before the program runs. The profile is what is relied on to keep a slot-user job out of the places only TCC protects. A proof run measures that; its result is pending.
+What keeps a job from using the rest of the grant is the slot user it runs as (Unix permissions) and the Seatbelt profile applied in the job's child before the program runs. Measured on a Mac: the prototype's profile does not keep a job out of the places only TCC protects; see "The fence, measured" below. Which way that is closed is not decided.
 
 **Every other program is disclaimed.** Host probes, `pfctl`, `launchctl`, `ioreg` and the rest answer for themselves, so a process the agent starts for its own use never carries the grant. Forgetting to choose gives the default, disclaimed: it can cost a program a read it needed, and never gives one a grant it should not have.
 
@@ -33,6 +33,42 @@ Today the root helper `js-mac-session` still starts every native job (`crates/js
 | The GUI-session path (`macos/gui.rs`: `launchctl asuser`, then `disclaim::exec`) | `js-agent` | not decided, not measured; stays disclaimed. launchd starts it in the user's session, so keeping it is not simply a flag. After an unattended restart a Mac has no logged-in user, so a start that needs a user's graphical session cannot happen until someone logs in. |
 
 Not measured: what macOS does with the responsible process when the agent that started a supervisor exits (a restart or an update while a job runs). Nothing is claimed about it.
+
+### The fence, measured
+
+With the disclaim gone, a job holds the agent's Full Disk Access, so what Unix permissions leave readable to the slot user and only TCC protects is readable to the job unless the Seatbelt profile refuses it. A proof run on a Mac (macOS 27, Apple silicon, the prototype's `confined-writes` profile, which allows reads by default and denies writes) ran the same probe as four processes: root as the agent's ordinary child; a pool user as the agent's ordinary child with no profile; a pool-user job started disclaimed under the profile; and a pool-user job started keeping the responsibility under the profile, the shape this document describes. The processes' responsible pids were read back: the disclaimed job answered for itself, the other three for the agent.
+
+| Place | Unix mode | Pool user, no profile, counted as the agent | Job started disclaimed | Job under the profile, counted as the agent |
+| --- | --- | --- | --- | --- |
+| `/Library/Application Support/com.apple.TCC` (list) | 0755 root | read | refused (`Operation not permitted`) | **read** |
+| `/Library/Application Support/com.apple.TCC/TCC.db` (first bytes) | 0644 root | read | refused | **read** |
+| `/Library/Preferences/com.apple.TimeMachine.plist` | 0644 root | read | refused | **read** |
+| another user's home folders (`Documents`, `Desktop`, `Library/Mail`, `Library/Messages`, `Library/Safari`), root's home, another user's 0600 file | 0700, 0750, 0600 | refused (`Permission denied`) | refused | refused |
+
+So the grant reaches a job for three places, and the profile as it is does not stop it. Unix permissions alone keep a job out of other users' files and root's home, as Full Disk Access never overrides them. The three places are the ones probed, not a complete list: Apple publishes no list of the places only TCC protects, and it changes between macOS releases.
+
+What a job learns from each, from public descriptions of these files (not measured past the first bytes; Apple does not document the formats):
+
+- the directory listing: the names, sizes and times of the system privacy control's files;
+- `TCC.db`: the system privacy database, believed readable whole (mode 0644): which programs, by path or bundle identifier with their code requirements, hold or were refused machine-wide privacy services such as Full Disk Access, screen capture and accessibility, and when each row last changed; the agent's own row is among them. No credential is known to be in it, and reading it changes no grant (the profile denies every write);
+- `com.apple.TimeMachine.plist`: whether backups are on, where they go (a disk, or a network server and share), the Mac's identifiers, the backup volume's name, and the paths excluded from backup. It is not known to hold a secret.
+
+Options, not decided:
+
+- **(a) The profile denies reads of the places only TCC protects.** For the three measured places, rule text for the profile (untested against a live sandbox; its owner places it after the profile's other fixed denies, since the last matching rule wins):
+
+  ```
+  ; places Unix leaves readable and only the privacy control (TCC) protects; a job holds the agent's grant
+  (deny file-read-data
+      (subpath "/Library/Application Support/com.apple.TCC")
+      (subpath "/System/Volumes/Data/Library/Application Support/com.apple.TCC")
+      (literal "/Library/Preferences/com.apple.TimeMachine.plist")
+      (literal "/System/Volumes/Data/Library/Preferences/com.apple.TimeMachine.plist"))
+  ```
+
+  It denies data and leaves metadata (names, sizes, modes, times), which Unix shows anyway and a path walk needs. `/Library` is a firmlink to the data volume, and which spelling Seatbelt matches is not measured, so both are named and the proof run probes both. The list is complete only as far as it is measured. Keeping it complete: a walk of the system volume with no profile, by a pool user counted as the agent and again started disclaimed, lists every path read in the first and refused with `EPERM` in the second; a third pass under the profile checks that each listed path is refused. Run on each macOS release a Mac runs, with the list committed beside the profile and a check that fails on a listed place the profile does not deny. Costs: the walker and its tests, a lab-Mac run per macOS release, and a place macOS adds stays readable to jobs until that release has been through the run.
+- **(b) Accept the three as readable.** A job then learns what is listed above: which programs on the Mac hold which privacy grants, and how and where the Mac is backed up. Cost: nothing to build; the residue is whatever else the grant exposes, which nobody has listed.
+- **(c) Other.** For example: reads default-denied with an allow list of what a build needs (`/usr`, `/System`, `/Library/Developer`, the developer tools, the job's own folders), which the prototype has as `deny-default` and which needs every tool's reads found and kept up; or jobs started disclaimed again with the build trees reached another way than the network file system mount (a local copy costs the copy's time and disk).
 
 ## What a start does
 
