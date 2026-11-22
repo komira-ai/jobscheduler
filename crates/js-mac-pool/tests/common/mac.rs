@@ -127,6 +127,7 @@ impl Mac {
 
     pub fn layout(&self) -> SlotLayout {
         SlotLayout {
+            trees: None,
             run: abs(&self.run),
             uid_entry: Some(abs(&self.uid_entry)),
             inputs: Vec::new(),

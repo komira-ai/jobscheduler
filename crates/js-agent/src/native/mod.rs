@@ -76,8 +76,9 @@
 //!
 //! # Privacy grants (TCC)
 //!
-//! The helper holds Full Disk Access, which a profile grants it and no job; a Mac agent
-//! without it refuses every native job, `no-full-disk-access`. See `native/grant.rs`.
+//! The agent holds Full Disk Access, which a profile grants it and no job (the helper holds
+//! none); a Mac agent without it refuses every native job, `no-full-disk-access`. See
+//! `native/grant.rs`.
 //!
 //! A start named by its image runs when it carries a `run` and the runtime holds a bundle
 //! store: the image reference is the bundle's name (the bundle pin of the legacy form), the
@@ -218,7 +219,7 @@ pub struct NativeConfig {
     /// [`Ceiling::On`]: the runtime does not open without it. A ceiling of [`Ceiling::Open`]
     /// has none: nothing filters its jobs.
     pub egress: Option<Arc<dyn Enforcer>>,
-    /// Whether the root helper holds Full Disk Access, as the agent asked it at start. Only
+    /// Whether the agent holds Full Disk Access, as its listing found at start. Only
     /// [`FullDiskAccess::Granted`] runs native jobs: every start is refused
     /// `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
     pub full_disk_access: FullDiskAccess,
@@ -696,9 +697,8 @@ impl Runtime for NativeRuntime {
             .add(&lease)
             .map_err(|why| fail(&"the lease journal", &why))?;
         // The helper records the lease, and the uid of the pool user it lends, before it
-        // finishes (an administrator's user is made for it), so a refusal may leave a live
-        // lease: it is removed again.
-        let uid = match self.helper.user_create(&lease, None) {
+        // finishes, so a refusal may leave a live lease: it is removed again.
+        let uid = match self.helper.user_create(&lease) {
             Ok(uid) => uid,
             Err(why) => {
                 self.learn(&why);

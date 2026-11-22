@@ -333,8 +333,8 @@ pub const BUNDLE_XCODE_MISMATCH: &str = "bundle-xcode-mismatch";
 /// for it. A server sends the field only to a host whose `xcode` capability lists the build,
 /// so the refusal means the host's Xcodes changed under its hello.
 pub const XCODE_NOT_HELD: &str = "xcode-not-held";
-/// A native start (a native job, or a start by image with a `run`) on a Mac agent whose root
-/// helper `js-mac-session` does not hold Full Disk Access (the agent reports the state as the
+/// A native start (a native job, or a start by image with a `run`) on a Mac agent that does
+/// not hold Full Disk Access itself (the agent reports the state as the
 /// capability `full-disk-access`: `not-granted`, or `undetermined` when it could not be
 /// found out). It is the first refusal of a native start: nothing was created, no user was
 /// made and no bundle was pinned. The host is at fault, not the request: the Mac's operator

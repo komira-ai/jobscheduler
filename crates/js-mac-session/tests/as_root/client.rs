@@ -6,7 +6,7 @@
 //! The verbs, by the copy's name (`client` below):
 //!
 //! ```text
-//! client create <socket> <lease> [grant token]   prints the uid
+//! client create <socket> <lease>         prints the uid
 //! client run <socket> <lease> <dir> <argv>...   prints "exit <code>" or "signal <n>"
 //! client run-gui <socket> <lease> <dir> <argv>...   the same, in the GUI session
 //! client run-quiet <socket> <lease> <dir> <argv>...   as run, with the action's
@@ -19,8 +19,6 @@
 //!                                                      "- <removed>" and "! <error>" lines
 //! client baseline <socket>                 prints "<class> <items>" lines
 //! client reboot-dirty <socket>             reboots the Mac if the last scan was dirty
-//! client grant <seed> <serial> <lease> <issued>   prints a grant token
-//! client pubkey <seed>                     prints the grant key file line
 //! client connect-then-exec <socket> <program> <args>...
 //! client write-then-exec <socket> <lease> <program> <args>...
 //! client replies                           prints the replies on KBF_CI_FD
@@ -62,14 +60,9 @@ mod macos {
     use std::os::unix::process::CommandExt as _;
     use std::process::Command;
 
-    use base64::Engine as _;
-    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-    use ed25519_dalek::{Signer as _, SigningKey};
     use js_mac_session::client::{self, Client, ClientError};
     use js_mac_session::proto::{self, Reply, Request, Session};
     use js_mac_session::spawn::Spawn;
-    use time::OffsetDateTime;
-    use time::macros::format_description;
 
     /// Answers as the client, and returns the exit status.
     pub fn main() -> i32 {
@@ -98,15 +91,10 @@ mod macos {
         }
     }
 
-    fn key(seed: &str) -> SigningKey {
-        let byte = u8::from_str_radix(seed, 16).expect("a seed is one hex byte");
-        SigningKey::from_bytes(&[byte; 32])
-    }
-
     fn run(words: &[&str]) -> Result<(), ClientError> {
         match words {
-            ["create", socket, lease, rest @ ..] => {
-                let uid = Client::new(socket).user_create(lease, rest.first().copied())?;
+            ["create", socket, lease] => {
+                let uid = Client::new(socket).user_create(lease)?;
                 println!("{uid}");
             }
             ["session-ready", socket, lease] => {
@@ -251,32 +239,6 @@ mod macos {
             ["delete", socket, lease] => {
                 let existed = Client::new(socket).user_delete(lease)?;
                 println!("{}", if existed { "existed" } else { "absent" });
-            }
-            ["grant", seed, serial, lease, issued] => {
-                // The `token` of the gate's `grant-admin` answer (kbf-mdm's
-                // `GrantKey::sign`): valid for an hour from `issued`.
-                let issued: i64 = issued.parse().expect("issued is unix seconds");
-                let time = |secs: i64| {
-                    let utc = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
-                    OffsetDateTime::from_unix_timestamp(secs)
-                        .expect("a time")
-                        .format(utc)
-                        .expect("a UTC time")
-                };
-                let grant = format!(
-                    "kbf-grant-v1\nserial {serial}\nlease {lease}\nissued {}\nnot-after {}\n",
-                    time(issued),
-                    time(issued + 3600)
-                );
-                let signature = key(seed).sign(grant.as_bytes());
-                println!(
-                    "{}.{}",
-                    URL_SAFE_NO_PAD.encode(&grant),
-                    URL_SAFE_NO_PAD.encode(signature.to_bytes())
-                );
-            }
-            ["pubkey", seed] => {
-                println!("{}", STANDARD.encode(key(seed).verifying_key().to_bytes()))
             }
             ["connect-then-exec", socket, program, args @ ..] => {
                 let stream = UnixStream::connect(socket).map_err(ClientError::Io)?;

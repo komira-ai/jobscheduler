@@ -14,9 +14,7 @@ name = "js-mac-session"
 path = "src/main.rs"
 
 [dependencies]
-base64.workspace = true
 clap.workspace = true
-ed25519-dalek.workspace = true
 hex.workspace = true
 js-types = { path = "../js-types" }
 libc.workspace = true

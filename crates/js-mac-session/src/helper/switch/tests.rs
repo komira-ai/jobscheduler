@@ -36,7 +36,7 @@ fn session_login_needs_a_live_lease_user() {
     let rig = switch_rig("login-nouser");
     let error = rig.helper.session_login("1.1").unwrap_err();
     assert!(error.contains("lease 1.1 has no user"), "{error}");
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.helper.user_delete("1.2").unwrap();
     let error = rig.helper.session_login("1.2").unwrap_err();
     assert!(error.contains("was deleted"), "{error}");
@@ -67,7 +67,7 @@ fn session_login_needs_a_live_lease_user() {
 #[test]
 fn session_login_writes_the_intent_before_anything_and_restarts_last() {
     let rig = switch_rig("login-order");
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     log(&rig);
     rig.helper.session_login("1.1").unwrap();
     let calls = log(&rig);
@@ -104,8 +104,8 @@ fn session_login_writes_the_intent_before_anything_and_restarts_last() {
 #[test]
 fn session_login_is_refused_for_a_second_lease_and_with_filevault_on() {
     let rig = switch_rig("login-refused");
-    rig.helper.user_create("1.1", None).unwrap();
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.host.state().answers.insert(
         "/usr/bin/fdesetup isactive".to_owned(),
         CommandOutput {
@@ -141,7 +141,7 @@ fn session_login_is_refused_for_a_second_lease_and_with_filevault_on() {
 #[test]
 fn session_idle_clears_auto_login_and_kcpassword_then_restarts() {
     let rig = switch_rig("idle");
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     rig.helper.session_login("1.1").unwrap();
     log(&rig);
     rig.helper.session_idle().unwrap();
@@ -213,8 +213,8 @@ fn rebooted(rig: &Rig, name: &str) -> Rig {
 #[test]
 fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
     let rig = switch_rig("reset-stale");
-    rig.helper.user_create("1.1", None).unwrap();
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.helper.session_login("1.1").unwrap();
     // Power is lost; at boot the lease user is logged in again by the login window.
     let booted = rebooted(&rig, "reset-stale");
@@ -260,8 +260,8 @@ fn the_boot_reset_clears_a_stale_intent_and_resets_its_user() {
 #[test]
 fn the_boot_reset_keeps_a_live_intent() {
     let rig = switch_rig("reset-live");
-    rig.helper.user_create("1.1", None).unwrap();
-    rig.helper.user_create("1.2", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
+    rig.helper.user_create("1.2").unwrap();
     rig.helper.session_login("1.1").unwrap();
     let before = std::fs::read(rig.dir.join("kcpassword")).unwrap();
     let booted = rebooted(&rig, "reset-live");
@@ -301,7 +301,7 @@ fn the_boot_reset_keeps_a_live_intent() {
 #[test]
 fn the_boot_reset_treats_a_broken_record_as_stale() {
     let rig = switch_rig("reset-broken");
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     std::fs::write(rig.dir.join("session-intent"), "garbage").unwrap();
     std::fs::write(rig.dir.join("kcpassword"), "x").unwrap();
     let booted = rebooted(&rig, "reset-broken");
@@ -450,7 +450,7 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
 #[test]
 fn a_switch_stops_at_the_first_write_that_fails() {
     let rig = switch_rig("write-fail");
-    rig.helper.user_create("1.1", None).unwrap();
+    rig.helper.user_create("1.1").unwrap();
     let blocker = |name: &str| std::fs::create_dir_all(rig.dir.join(name).join("inside")).unwrap();
     let unblock = |name: &str| std::fs::remove_dir_all(rig.dir.join(name)).unwrap();
     let no_defaults = |rig: &Rig| {
