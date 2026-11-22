@@ -77,6 +77,7 @@ impl Scene {
     fn policy(&self) -> Policy {
         let abs = |path: &Path| AbsPath::new(path).expect("absolute path");
         let layout = SlotLayout {
+            trees: None,
             run: abs(&self.run),
             uid_entry: None,
             inputs: vec![abs(&self.run.join("tree"))],
