@@ -108,8 +108,9 @@ value; the ref is not secret, since every read of the job returns it.
 On a Mac (a native job) a provider's mount must be `READ_ONLY`: every job that names the tree is given the same
 directory of the provider's mount, so a read-write one is refused `input-not-allowed` when the start is admitted. The
 job sees it as a link at its target to the directory the provider answered. Below the agent's trees root (tierstore's
-one mount of the Mac) the mount must also set `no_exec`, or the start is refused `input-not-allowed`, and the job can
-read only its own trees there. A layer from a provider is refused there as every layer is.
+one mount of the Mac) the mount must also set `no_exec` and be a tree the provider answered for the job's own run, or
+the start is refused `input-not-allowed`, and the job can read only its own trees there; a job with no tree reads
+nothing there. A layer from a provider is refused there as every layer is.
 
 The subject rule has one limit: a request whose one singular scalar field is really optional
 gets a required flag. The fix is to mark the field `optional` in the definition, which is

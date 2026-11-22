@@ -13,8 +13,12 @@
 //!   those grants would hide every tree.
 //! - **A tree is a mount strictly below the trees root** ([`tree_rules`]): it is read-only,
 //!   mounted `no_exec`, and neither the root itself nor a path that only spells its way
-//!   below the root (through `..` or a link). A mount above the root is refused, since its
-//!   grant would open every run's trees.
+//!   below the root (through `..` or a link). It is the directory the provider answered for
+//!   this run, `<root>/mount-provider/<provider>/<run>/<index>` ([`PROVIDER_DIR`],
+//!   [`is_runs_tree`]), never another run's or a folder above one. A mount above the root is
+//!   refused, since its grant would open every run's trees. With a trees root, every run's
+//!   profile carries the root's rules, with no tree when the run mounts none, so a run
+//!   without a tree reads nothing below the root.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,10 @@ use crate::lifecycle::{MountRoots, NativeRefusal};
 
 /// The flag that names the trees root.
 pub const TREES_ROOT_FLAG: &str = "--native-trees-root";
+
+/// The folder below the trees root in which the provider makes each run's trees:
+/// `<root>/mount-provider/<provider, hex>/<run, hex>/<index>`.
+pub const PROVIDER_DIR: &str = "mount-provider";
 
 /// Refuses a mount of a provider's tree whose mode is not read-only, `input-not-allowed`. A
 /// mount of a host path is not this rule's.
@@ -194,21 +202,52 @@ impl TreeRules {
     }
 }
 
-/// The trees of a run's mounts below the trees root `root` (canonical), or `None` when no
-/// mount is one. Each plan is `(dir, read_only, no_exec)`; `dir` is resolved first. A plan
-/// whose directory is below or at the root, as given or once resolved, is a tree, and must be
-/// strictly below the root once resolved, read-only and `no_exec`. Any other plan is not a
-/// tree, and is refused when it holds the root.
+/// Whether `dir` (canonical) is a tree the provider answered for the run `run_id` below the
+/// trees root `root`: `<root>/mount-provider/<provider>/<run>/<index>`, where `<provider>` is
+/// lowercase hex, `<run>` is the hex of the name the agent gives the run in its provider
+/// calls (`js.<run_id>`) and `<index>` is a number.
+#[must_use]
+pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
+    let Ok(below) = dir.strip_prefix(root) else {
+        return false;
+    };
+    let parts: Vec<&str> = below
+        .components()
+        .map(|part| part.as_os_str().to_str().unwrap_or_default())
+        .collect();
+    let run: String = crate::provider::run_name(run_id)
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let hex = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    matches!(parts.as_slice(), [dir, provider, named, index]
+        if *dir == PROVIDER_DIR && hex(provider) && *named == run && number(index))
+}
+
+/// The trees of the run `run_id`'s mounts below the trees root `root` (canonical): every
+/// tree of the run, none when it mounts none (its profile then reads nothing below the root).
+/// Each plan is `(dir, read_only, no_exec)`; `dir` is resolved first. A plan whose directory
+/// is below or at the root, as given or once resolved, is a tree, and must be strictly below
+/// the root once resolved, the run's own ([`is_runs_tree`]), read-only and `no_exec`. Any
+/// other plan is not a tree, and is refused when it holds the root.
 ///
 /// # Errors
 ///
 /// `input-unavailable` for a directory that cannot be resolved; `input-not-allowed` for a
-/// tree that is the root, one that resolves outside it, one mounted read-write or without
-/// `no_exec`, and a mount that holds the root. The text names the directory as given.
+/// tree that is the root, one that resolves outside it, one that is not a tree the provider
+/// answered for this run, one mounted read-write or without `no_exec`, and a mount that holds
+/// the root. The text names the directory as given.
 pub fn tree_rules(
     root: &Path,
+    run_id: &str,
     plans: &[(PathBuf, bool, bool)],
-) -> Result<Option<TreeRules>, NativeRefusal> {
+) -> Result<TreeRules, NativeRefusal> {
     let refused = |dir: &Path, why: String| NativeRefusal {
         code: refusal::INPUT_NOT_ALLOWED,
         why: format!("{}: {why}", dir.display()),
@@ -242,6 +281,16 @@ pub fn tree_rules(
                 TreesError::NotBelow { tree, root }.to_string(),
             ));
         }
+        if !is_runs_tree(root, run_id, &canonical) {
+            return Err(refused(
+                dir,
+                format!(
+                    "below the trees root {}, a job mounts only a tree the provider answered \
+                     for its own run ({PROVIDER_DIR}/<provider>/<run>/<index>)",
+                    root.display()
+                ),
+            ));
+        }
         if !read_only {
             return Err(refused(
                 dir,
@@ -263,10 +312,10 @@ pub fn tree_rules(
         }
         trees.push(canonical);
     }
-    Ok((!trees.is_empty()).then(|| TreeRules {
+    Ok(TreeRules {
         root: root.to_path_buf(),
         trees,
-    }))
+    })
 }
 
 #[cfg(test)]
