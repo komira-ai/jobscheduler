@@ -8,6 +8,7 @@ use tracing::Level;
 
 use super::super::{AccountError, Places, Pool, Settings};
 use super::fake::Fake;
+use super::os::FakeOs;
 use crate::test_tracing::{Capture, capture};
 
 /// What the code logged, in memory.
@@ -115,6 +116,18 @@ impl Rig {
         self.try_open().unwrap_or_else(|why| panic!("open: {why}"))
     }
 
+    /// The pool, opened over the rig with `os` for the removal of what is in the per-user
+    /// folders.
+    pub(in super::super) fn open_with(&self, os: &FakeOs) -> Pool {
+        Pool::with_os(
+            &self.dir.join("state"),
+            self.settings.clone(),
+            self.fake.clone(),
+            Box::new(os.clone()),
+        )
+        .unwrap_or_else(|why| panic!("open: {why}"))
+    }
+
     /// Opening the pool, whatever came of it.
     pub(in super::super) fn try_open(&self) -> Result<Pool, AccountError> {
         Pool::with_settings(
@@ -150,6 +163,17 @@ impl Rig {
     /// The name of account `n`.
     pub(in super::super) fn name(n: u64) -> String {
         super::super::ledger::name(n)
+    }
+
+    /// A per-user folder of the rig's uid, `folders/<shard>/<hash>`, as the system makes one:
+    /// its four top-level directories, empty. (Every file a test makes belongs to the test's
+    /// uid, which is the rig's first uid.)
+    pub(in super::super) fn folder(&self, shard: &str, hash: &str) -> std::path::PathBuf {
+        let folder = self.dir.join("folders").join(shard).join(hash);
+        for top in ["0", "C", "T", "X"] {
+            std::fs::create_dir_all(folder.join(top)).unwrap();
+        }
+        folder
     }
 
     /// The home folder of account `n`.

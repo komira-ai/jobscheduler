@@ -17,7 +17,8 @@ pub enum Gone {
     Processes,
     /// The home folder's path does not exist (`lstat` answers "no such file or directory").
     Home,
-    /// No directory two levels down in the per-user folders is owned by the uid.
+    /// Every per-user folder the uid owns is emptied: nothing but directories at its top
+    /// level, and nothing in them.
     Folders,
     /// Nothing owned by the uid, or named for the account, is left in the shared places.
     Places,
@@ -57,7 +58,7 @@ pub enum Step {
     Record,
     /// The home folder could not be made or removed.
     Home,
-    /// A directory of the uid in the per-user folders could not be found or removed.
+    /// A per-user folder of the uid could not be found, looked at or emptied.
     Folder,
     /// An item of the proof did not hold.
     Proof(Gone),

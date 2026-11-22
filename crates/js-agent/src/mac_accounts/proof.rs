@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use super::error::Failure;
 use super::pool::Pool;
 use super::teardown::{NAMED, remaining};
-use super::{Gone, Proof, Step, ipc, launchd, tree};
+use super::{Gone, Proof, Step, folder, ipc, launchd, tree};
 
 /// The failure of the proof item `item`, with `detail`.
 fn not_gone(item: Gone, detail: impl std::fmt::Display) -> Failure {
@@ -111,19 +111,20 @@ impl Pool {
         }
     }
 
-    /// No directory two levels down in the per-user folders is owned by `uid`.
+    /// Every per-user folder `uid` owns holds nothing below its top-level directories, and
+    /// nothing but directories at its top level.
     fn gone_folders(&self, uid: u32) -> Result<(), Failure> {
-        let found = tree::folder_entries(&self.settings.user_folders, uid).map_err(|why| {
+        let found = folder::left(&self.settings.user_folders, uid).map_err(|why| {
             not_gone(
                 Gone::Folders,
-                format!("searching for uid {uid}'s entries: {why}"),
+                format!("searching for uid {uid}'s per-user folders: {why}"),
             )
         })?;
         match found.is_empty() {
             true => Ok(()),
             false => Err(not_gone(
                 Gone::Folders,
-                format!("owned by uid {uid}: {}", listed(&found)),
+                format!("left in uid {uid}'s per-user folders: {}", listed(&found)),
             )),
         }
     }

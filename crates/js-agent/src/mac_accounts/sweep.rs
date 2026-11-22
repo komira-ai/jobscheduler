@@ -1,12 +1,14 @@
 //! What [`Pool::open`] does about what a crash, a restart or a lost ledger left: replays the
 //! ledger and ends every account it does not show gone, then looks for records of the pool
-//! that the ledger does not know.
+//! that the ledger does not know, then empties the per-user folders of the slots no account
+//! holds.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::ledger::{State, name, parse_name};
 use super::pool::{Pool, ledger_error};
-use super::{AccountError, PREFIX, Step};
+use super::{AccountError, PREFIX, Step, folder};
 
 /// Whether the account `name` has its record with `uid` and its home folder in `homes`: a
 /// ready account that has both is as it was made.
@@ -21,7 +23,10 @@ impl Pool {
     /// every other account that is not gone (`made` and not `ready`, `lent`, `held`) is
     /// deleted as [`Pool::retire`] does, with no refill, and recorded `gone` or `held`.
     /// Then each record named `kbf-acct-*` in the range that the ledger does not know (or
-    /// knows as gone) is deleted by name the same way.
+    /// knows as gone) is deleted by name the same way. Then the per-user folders of every uid
+    /// of the range that no live account of the ledger holds are emptied (a crash between an
+    /// account's deletion and the emptying of its folder leaves something in one); a folder
+    /// that cannot be emptied is logged, and its slot is not free until it is.
     ///
     /// # Errors
     /// The ledger could not record an outcome, the records could not be listed, or a record
@@ -64,7 +69,28 @@ impl Pool {
                 })?;
             tracing::info!(account = %name, uid, "deleted an account the ledger did not know");
         }
+        self.empty_free_folders();
         Ok(())
+    }
+
+    /// Empties the per-user folders of every uid of the range that no live account holds.
+    fn empty_free_folders(&self) {
+        let held: BTreeSet<u32> = self
+            .ledger()
+            .live()
+            .iter()
+            .map(|(_, entry)| entry.uid)
+            .collect();
+        for uid in self
+            .settings
+            .range
+            .clone()
+            .filter(|uid| !held.contains(uid))
+        {
+            if let Err(why) = folder::empty(&self.settings.user_folders, uid, &*self.os) {
+                tracing::warn!(uid, "emptying the per-user folders of a free uid: {why}");
+            }
+        }
     }
 }
 

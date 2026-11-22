@@ -158,37 +158,53 @@ fn a_home_that_exists_or_cannot_be_looked_at_fails_the_proof() {
     );
 }
 
-/// Asserts the folders item: a directory of the uid in the per-user folders names it, many
-/// are named eight and counted, and folders that cannot be searched fail the proof at
-/// `folders`.
+/// Asserts the folders item: something left below a top-level directory of a per-user folder,
+/// or a non-directory at its top level, fails the proof at `folders` and names it; many are
+/// named eight and counted; folders that cannot be searched fail it too; and a folder that is
+/// emptied and kept, as the system leaves it, does not.
 #[test]
 fn a_per_user_folder_that_is_left_or_cannot_be_searched_fails_the_proof() {
     let base = Rig::new("proof-folders", 1, 0);
     let uid = me();
     let (rig, _pool, held) = failing(&base, "one-left", "account kbf-acct-1", |rig| {
-        let hash = rig.dir.join("folders/ab/hash");
-        Box::new(move || std::fs::create_dir_all(&hash).unwrap())
+        let hash = rig.folder("ab", "hash");
+        Box::new(move || std::fs::write(hash.join("T/leftover"), "x").unwrap())
     });
     assert_eq!(
         said(&held, Gone::Folders),
         format!(
-            "owned by uid {uid}: {}",
-            rig.dir.join("folders/ab/hash").display()
+            "left in uid {uid}'s per-user folders: {}",
+            rig.dir.join("folders/ab/hash/T/leftover").display()
+        )
+    );
+
+    let (rig, _pool, held) = failing(&base, "top-level-file", "account kbf-acct-1", |rig| {
+        let hash = rig.folder("ab", "hash");
+        Box::new(move || std::fs::write(hash.join("stray"), "x").unwrap())
+    });
+    assert_eq!(
+        said(&held, Gone::Folders),
+        format!(
+            "left in uid {uid}'s per-user folders: {}",
+            rig.dir.join("folders/ab/hash/stray").display()
         )
     );
 
     let (_rig, _pool, held) = failing(&base, "ten-left", "account kbf-acct-1", |rig| {
-        let shard = rig.dir.join("folders/ab");
+        let top = rig.folder("ab", "hash").join("C");
         Box::new(move || {
             for n in 0..10 {
-                std::fs::create_dir_all(shard.join(format!("hash{n}"))).unwrap();
+                std::fs::write(top.join(format!("f{n}")), "x").unwrap();
             }
         })
     });
     let text = said(&held, Gone::Folders);
-    assert!(text.starts_with(&format!("owned by uid {uid}: ")), "{text}");
+    assert!(
+        text.starts_with(&format!("left in uid {uid}'s per-user folders: ")),
+        "{text}"
+    );
     assert!(text.ends_with(", and 2 more"), "{text}");
-    assert_eq!(text.matches("/hash").count(), 8, "{text}");
+    assert_eq!(text.matches("/C/f").count(), 8, "{text}");
 
     let (rig, _pool, held) = failing(&base, "not-searchable", "account kbf-acct-1", |rig| {
         let folders = rig.dir.join("folders");
@@ -200,7 +216,7 @@ fn a_per_user_folder_that_is_left_or_cannot_be_searched_fails_the_proof() {
     let text = said(&held, Gone::Folders);
     assert!(
         text.starts_with(&format!(
-            "searching for uid {uid}'s entries: {}: ",
+            "searching for uid {uid}'s per-user folders: {}: ",
             rig.dir.join("folders").display()
         )),
         "{text}"

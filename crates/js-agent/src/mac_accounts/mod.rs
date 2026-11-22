@@ -6,31 +6,55 @@
 //! [`Pool::retire`] ends everything of it after the job, deletes it and shows it gone,
 //! then [`Pool::refill`] makes a new one. A uid is not used again until its account is
 //! shown gone. The module is functions in `js-agent`: no helper program and no socket.
-//! Everything it asks of the operating system goes through [`AccountHost`]; `macos::MacHost`
+//! Everything it asks of the operating system goes through [`AccountHost`] (and, for the
+//! removal of what is in a per-user folder, the file calls of `tree::Os`); `macos::MacHost`
 //! is the macOS implementation (OpenDirectory for the records, `libproc` and `kill` for the
 //! processes, `launchctl` for the domains), and the tests run the same code over a fake.
 //! What the caller does itself: the job's folder, the sandbox profile, starting the job as
 //! the lent uid, its outputs.
 //!
+//! # The slot
+//!
+//! A uid of the range [`UID_RANGE`] is a *slot*: a fixed pair of the uid and a `GeneratedUID`
+//! ([`generated_uid`]: a fixed prefix and the uid, so the same slot always gets the same
+//! identifier, and a lost ledger cannot lose it). For each job the module makes a *fresh*
+//! record (a new name, never used again) and a fresh home for a free slot; after the job it
+//! kills the uid, deletes the record and the home, and *empties* the slot's per-user folder.
+//! The folder stays, one per slot, for good.
+//!
+//! Why it stays: macOS gives a user a per-user folder, `/private/var/folders/<xx>/<hash>`
+//! with directories `0`, `T`, `C` and `X`, found by the record's uid and `GeneratedUID`. With
+//! System Integrity Protection on, the folder and its four directories carry `sunlnk` and the
+//! `com.apple.rootless` attribute: `rmdir`, `chflags` and `xattr -d` are refused to root, and
+//! `sysadminctl -deleteUser` leaves the folder too. What is below the four directories can be
+//! removed. A record made with its `GeneratedUID` from the start (the directory service takes
+//! it only at creation; root may not change it afterwards) and the same uid gets the same
+//! folder again, found empty once the last account's contents were removed. So the module
+//! makes the record with the slot's `GeneratedUID` among its first attributes
+//! ([`creation_attributes`]), reads it back, and fails the making if it is not the slot's.
+//!
 //! # The account
 //!
 //! Named `kbf-acct-<n>` (the next number the ledger has not used, at most 31 bytes), with a
-//! uid of the range [`UID_RANGE`] (the first free uid after the one given last, wrapping),
-//! hidden, shell `/usr/bin/false`, no password and so no login and no secure token, the
-//! primary group `staff` and no other, never an administrator ([`account_attributes`]). Its
-//! home is `/Users/<name>`, mode 0700, made before the account's record and refused if the
-//! path exists.
+//! uid of the range (the first free slot after the one given last, wrapping), hidden, shell
+//! `/usr/bin/false`, no password and so no login and no secure token, the primary group
+//! `staff` and no other, never an administrator ([`account_attributes`]). Its home is
+//! `/Users/<name>`, mode 0700, made before the account's record and refused if the path
+//! exists.
 //!
-//! A uid is free when it is in the range; no account of the ledger that is not gone has it;
-//! no record has it; no live process runs as it; nothing is owned by it two levels down in
-//! `/private/var/folders`; and nothing is owned by it in the shared places (`/Users/Shared`,
-//! `/private/tmp`, `/private/var/tmp`, `/private/var/at/jobs`, launchd's per-uid files). An
-//! error in looking is not "free": the uid is passed over and the refusal names why.
+//! A slot is free when it is in the range; no account of the ledger that is not gone has the
+//! uid; no record has the uid and none has the slot's `GeneratedUID`; no live process runs as
+//! the uid; every per-user folder the uid owns two levels down in `/private/var/folders` holds
+//! nothing below its top-level directories (and nothing but directories at its top level);
+//! and nothing is owned by the uid in the shared places (`/Users/Shared`, `/private/tmp`,
+//! `/private/var/tmp`, `/private/var/at/jobs`, launchd's per-uid files). An error in looking
+//! is not "free": the slot is passed over and the refusal names why.
 //!
 //! # The life cycle
 //!
-//! 1. **Made.** The ledger records `made <name> <uid>` before anything exists; then the
-//!    home, the record, and `ready`. A failure after `made` deletes what was made as in
+//! 1. **Made.** The ledger records `made <name> <uid>` before anything exists; then the slot's
+//!    per-user folders are emptied again (a crash may have left something in them), and the
+//!    home, the record and `ready` follow. A failure after `made` deletes what was made as in
 //!    steps 3 to 6 below, and records `gone` when that is shown, `held` when it is not.
 //! 2. **Lent.** [`Pool::lend`] takes the oldest ready account and records `lent` before it
 //!    returns: an account is lent once, ever. With none ready it makes one on the spot,
@@ -42,12 +66,20 @@
 //!       jobs; kills once more;
 //!    2. removes its System V IPC objects;
 //!    3. removes what it owns in the shared places and launchd's per-uid files;
-//!    4. deletes the record, the home, and every directory it owns in the per-user folders,
-//!       whole;
-//!    5. proves it gone: no record by name or uid, no process and no domain, no home, no
-//!       per-user folder, nothing in the shared places, no IPC object, each looked at again
-//!       after the deletion (an item that cannot be looked at does not hold);
-//!    6. only then records `gone`; the uid is free from then on.
+//!    4. deletes the record and the home, and empties every per-user folder the uid owns
+//!       (an older account of the same uid may have left another besides the slot's): each
+//!       folder and its top-level directories stay, everything below them goes and so does
+//!       any non-directory at the top level. The removal is root's way: no link is followed
+//!       (a link is removed, its target kept), no other filesystem is entered, user flags
+//!       (`uchg`, `uappnd`) are cleared on every entry before it is removed, an entry whose
+//!       removal is refused has its ACL stripped and is removed again, a directory is made
+//!       searchable before it is entered, and a tree of any depth is moved up and removed in
+//!       passes;
+//!    5. proves it gone: no record by name or uid, no process and no domain, no home, every
+//!       per-user folder of the uid emptied (the folders being there is no fault), nothing in
+//!       the shared places, no IPC object, each looked at again after the deletion (an item
+//!       that cannot be looked at does not hold);
+//!    6. only then records `gone`; the slot is free from then on.
 //!
 //!    Then the pool is filled again; a refill that fails is logged and does not fail the
 //!    retirement of an account that was deleted.
@@ -67,8 +99,11 @@
 //! recorded `gone` or `held`; a `ready` one is kept if its record and home are still there,
 //! deleted otherwise; a record named `kbf-acct-*` in the range that the ledger does not know
 //! (a lost ledger) is deleted by name, and if that fails the open fails naming it. Then the
-//! pool is filled to `ready`. Without Full Disk Access nothing is made or deleted:
-//! [`AccountError::NoFullDiskAccess`].
+//! per-user folders of every uid of the range that no live account of the ledger holds are
+//! emptied (a crash between an account's deletion and the emptying of its folders leaves
+//! something in one); a folder that cannot be emptied is logged, and its slot is not free
+//! until it is. Then the pool is filled to `ready`. Without Full Disk Access nothing is made
+//! or deleted: [`AccountError::NoFullDiskAccess`].
 //!
 //! # Concurrency
 //!
@@ -78,6 +113,7 @@
 //! while another's is being deleted.
 
 mod error;
+mod folder;
 mod home;
 mod host;
 mod ipc;
@@ -97,7 +133,7 @@ mod tree;
 mod uid;
 
 pub use error::{AccountError, Gone, Held, Step};
-pub use home::{SHELL, account_attributes, make_home};
+pub use home::{SHELL, account_attributes, creation_attributes, generated_uid, make_home};
 pub use host::{AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord};
 #[cfg(target_os = "macos")]
 pub use macos::MacHost;
@@ -123,6 +159,8 @@ pub struct Account {
     pub uid: u32,
     /// Its primary group.
     pub gid: u32,
+    /// The `GeneratedUID` of its record ([`generated_uid`]): the slot's, fixed by the uid.
+    pub generated_uid: String,
 }
 
 /// What [`Pool::lend`] hands out.
@@ -145,7 +183,8 @@ pub struct Proof {
     pub processes: bool,
     /// The home folder's path does not exist.
     pub home: bool,
-    /// No directory two levels down in the per-user folders is owned by the uid.
+    /// Every per-user folder the uid owns is emptied: nothing but directories at its top
+    /// level, and nothing below its top-level directories. The folders themselves stay.
     pub folders: bool,
     /// Nothing owned by the uid, or named for the account, is left in the shared places.
     pub places: bool,

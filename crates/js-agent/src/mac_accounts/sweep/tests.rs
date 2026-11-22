@@ -2,8 +2,9 @@
 //! ledger can be left at, and for the records the ledger does not know.
 
 use super::*;
-use crate::mac_accounts::Account;
+use crate::mac_accounts::tests::os::FakeOs;
 use crate::mac_accounts::tests::rig::{Rig, me, my_gid};
+use crate::mac_accounts::{Account, generated_uid};
 
 /// The record and the home of account `n` with `uid`, as the making leaves them.
 fn made(rig: &Rig, n: u64, uid: u32) {
@@ -124,7 +125,8 @@ fn a_ready_account_that_cannot_be_looked_at_is_not_intact() {
         [Account {
             name: "kbf-acct-1".to_owned(),
             uid: me(),
-            gid: my_gid()
+            gid: my_gid(),
+            generated_uid: generated_uid(me()),
         }]
     );
     assert_eq!(rig.lines()[2], "held kbf-acct-1 proof-record");
@@ -308,4 +310,79 @@ fn a_ledger_that_cannot_record_the_sweep_fails_it() {
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
     assert!(why.to_string().contains("recording gone: "), "{why}");
     assert!(rig.fake.state().users.is_empty(), "the account was deleted");
+}
+
+/// Asserts that a per-user folder a crash left non-empty after its account was deleted (the
+/// ledger says `gone`, or knows nothing of the uid) is emptied at open, and kept; and that
+/// the folders of a uid a live account of the ledger holds are not touched by that pass.
+#[test]
+fn a_folder_a_crash_left_non_empty_is_emptied_at_open() {
+    let rig = Rig::new("crash-folder", 6, 0);
+    rig.write_ledger(&line(
+        "made kbf-acct-1 {me}\nready kbf-acct-1\ngone kbf-acct-1\n",
+    ));
+    let hash = rig.folder("ab", "hash");
+    std::fs::create_dir_all(hash.join("T/inner")).unwrap();
+    std::fs::write(hash.join("T/inner/f"), "x").unwrap();
+    std::fs::write(hash.join("stray"), "x").unwrap();
+    rig.open();
+    assert_eq!(std::fs::read_dir(&hash).unwrap().count(), 4);
+    for top in ["0", "C", "T", "X"] {
+        assert_eq!(
+            std::fs::read_dir(hash.join(top)).unwrap().count(),
+            0,
+            "{top}"
+        );
+    }
+
+    // A uid no ledger line names is emptied too.
+    let rig = rig.next("crash-folder-unknown", 6, 0);
+    let hash = rig.folder("ab", "hash");
+    std::fs::write(hash.join("C/f"), "x").unwrap();
+    rig.open();
+    assert_eq!(std::fs::read_dir(hash.join("C")).unwrap().count(), 0);
+
+    // A held account's uid is its own to retry: the pass leaves its folder alone (the account's
+    // deletion itself stops at the kill, before the folders).
+    let rig = rig.next("crash-folder-held", 6, 0);
+    rig.write_ledger(&line(
+        "made kbf-acct-1 {me}\nready kbf-acct-1\nlent kbf-acct-1 job-1\nheld kbf-acct-1 kill\n",
+    ));
+    made(&rig, 1, me());
+    rig.fake.add_process(me(), 40, "daemon");
+    rig.fake.state().immortal.insert(me());
+    let hash = rig.folder("ab", "hash");
+    std::fs::write(hash.join("T/f"), "x").unwrap();
+    let pool = rig.open();
+    assert_eq!(pool.held().len(), 1);
+    assert!(hash.join("T/f").is_file());
+}
+
+/// Asserts that a folder that cannot be emptied at open is logged with its uid and why, does
+/// not fail the open, and leaves its slot not free: a loan is refused naming what is left.
+#[test]
+fn a_folder_that_cannot_be_emptied_at_open_is_logged_and_its_slot_is_not_free() {
+    let rig = Rig::new("crash-folder-stuck", 1, 0);
+    let hash = rig.folder("ab", "hash");
+    std::fs::write(hash.join("T/frozen"), "x").unwrap();
+    let os = FakeOs::new();
+    os.flag_for_good("frozen");
+    let pool = rig.open_with(&os);
+    let log = rig.log.text();
+    assert!(
+        log.contains("emptying the per-user folders of a free uid")
+            && log.contains("T/frozen: the flags cannot be cleared"),
+        "{log}"
+    );
+    let Err(AccountError::NoFreeUid { reasons, .. }) = pool.lend("job-1") else {
+        panic!("the slot was free");
+    };
+    assert_eq!(
+        reasons,
+        [format!(
+            "{}: {} is left in its per-user folder",
+            me(),
+            hash.join("T/frozen").display()
+        )]
+    );
 }

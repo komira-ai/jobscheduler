@@ -25,6 +25,7 @@ fn the_record_has_the_attributes_of_a_hidden_account_that_cannot_log_in() {
         uid: 612,
         gid: 20,
         home: PathBuf::from("/Users/kbf-acct-3"),
+        generated_uid: generated_uid(612),
     };
     let attributes = account_attributes(&user);
     assert_eq!(
@@ -45,6 +46,48 @@ fn the_record_has_the_attributes_of_a_hidden_account_that_cannot_log_in() {
         assert!(
             !attribute.contains("Password") && !attribute.contains("Authentication"),
             "{attribute}"
+        );
+    }
+}
+
+/// Asserts the slot's `GeneratedUID`: the fixed prefix and the uid in twelve digits, so the same
+/// uid always has the same identifier whatever the account's name, a different uid a different
+/// one, and each is the 8-4-4-4-12 shape of a UUID; and that a record is created with its name
+/// and that identifier, which the directory takes only at creation.
+#[test]
+fn a_slots_generated_uid_is_fixed_by_its_uid_and_given_at_creation() {
+    assert_eq!(generated_uid(612), "4B424641-4343-5400-8000-000000000612");
+    assert_eq!(generated_uid(0), "4B424641-4343-5400-8000-000000000000");
+    assert_eq!(
+        generated_uid(u32::MAX),
+        "4B424641-4343-5400-8000-004294967295"
+    );
+    assert_ne!(generated_uid(612), generated_uid(613));
+    let lengths: Vec<usize> = generated_uid(612).split('-').map(str::len).collect();
+    assert_eq!(lengths, [8, 4, 4, 4, 12]);
+    let user = |name: &str| NewUser {
+        name: name.to_owned(),
+        uid: 612,
+        gid: 20,
+        home: PathBuf::from("/Users").join(name),
+        generated_uid: generated_uid(612),
+    };
+    for name in ["kbf-acct-3", "kbf-acct-9"] {
+        assert_eq!(
+            creation_attributes(&user(name)),
+            [
+                ("dsAttrTypeStandard:RecordName", name.to_owned()),
+                (
+                    "dsAttrTypeStandard:GeneratedUID",
+                    "4B424641-4343-5400-8000-000000000612".to_owned()
+                ),
+            ]
+        );
+    }
+    for (attribute, _) in account_attributes(&user("kbf-acct-3")) {
+        assert!(
+            !attribute.contains("GeneratedUID") && !attribute.contains("RecordName"),
+            "{attribute} is set after creation, where the directory refuses it"
         );
     }
 }

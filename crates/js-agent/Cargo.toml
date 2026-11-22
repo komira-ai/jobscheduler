@@ -93,7 +93,7 @@ js-contain = { path = "../js-contain" }
 # (src/mac_accounts/macos).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSDictionary", "NSError", "NSString"] }
 objc2-open-directory = { workspace = true, features = [
     "CFOpenDirectory",
     "CFOpenDirectoryConstants",

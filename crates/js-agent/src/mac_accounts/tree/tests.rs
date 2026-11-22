@@ -337,26 +337,46 @@ fn a_shard_that_cannot_be_read_fails_the_search() {
     );
 }
 
-/// Asserts that an entry of the per-user folders is removed whole, whoever owns what is in
-/// it; that a file, a link, a directory of another uid and an entry whose parent is a link
-/// are refused and stay; that a missing entry or parent holds nothing; and that a path that
-/// names no entry is refused.
+/// Asserts that a per-user folder is emptied and kept: the folder and its top-level
+/// directories stay, everything below them goes whoever owns it, and so does a non-directory
+/// at the top level; a link is removed and not followed (its target outside survives); a file,
+/// a link, a directory of another uid and an entry whose parent is a link are refused and stay;
+/// a missing entry or parent holds nothing; and a path that names no entry is refused.
 #[test]
-fn a_folder_entry_is_removed_whole_and_only_the_uids_directory() {
+fn a_folder_is_emptied_and_kept_and_only_the_uids_directory() {
     let dir = scratch("folder-entry");
     let folders = dir.join("folders");
-    fs::create_dir_all(folders.join("ab/hash/T/inner")).unwrap();
-    fs::write(folders.join("ab/hash/T/inner/f"), "x").unwrap();
-    fs::write(folders.join("ab/file"), "x").unwrap();
-    symlink(dir.join("elsewhere"), folders.join("ab/link")).unwrap();
+    let hash = folders.join("ab/hash");
+    for top in ["0", "C", "T", "X"] {
+        fs::create_dir_all(hash.join(top)).unwrap();
+    }
+    fs::create_dir_all(hash.join("T/inner")).unwrap();
+    fs::write(hash.join("T/inner/f"), "x").unwrap();
+    fs::write(hash.join("0/file"), "x").unwrap();
+    fs::write(hash.join("stray"), "x").unwrap();
     fs::create_dir_all(dir.join("elsewhere")).unwrap();
     fs::write(dir.join("elsewhere/precious"), "x").unwrap();
+    symlink(dir.join("elsewhere"), hash.join("C/link")).unwrap();
+    symlink(dir.join("elsewhere"), hash.join("stray-link")).unwrap();
+    fs::write(folders.join("ab/file"), "x").unwrap();
+    symlink(dir.join("elsewhere"), folders.join("ab/link")).unwrap();
     fs::create_dir_all(folders.join("ab/theirs")).unwrap();
 
-    remove_folder_entry(&folders.join("ab/hash"), me()).unwrap();
-    assert_eq!(names(&folders.join("ab")), ["file", "link", "theirs"]);
+    empty_folder(&hash, me(), &System).unwrap();
+    assert_eq!(names(&hash), ["0", "C", "T", "X"]);
+    for top in ["0", "C", "T", "X"] {
+        assert!(names(&hash.join(top)).is_empty(), "{top}");
+    }
+    assert_eq!(
+        names(&folders.join("ab")),
+        ["file", "hash", "link", "theirs"]
+    );
+    assert_eq!(names(&dir.join("elsewhere")), ["precious"]);
+    // Emptied already: nothing to do, nothing wrong.
+    empty_folder(&hash, me(), &System).unwrap();
+
     let refused = |path: &str, uid: u32| {
-        remove_folder_entry(&folders.join(path), uid)
+        empty_folder(&folders.join(path), uid, &System)
             .unwrap_err()
             .to_string()
     };
@@ -364,7 +384,7 @@ fn a_folder_entry_is_removed_whole_and_only_the_uids_directory() {
     assert_eq!(
         refused("ab/file", me()),
         format!(
-            "{}: not a directory on its parent's filesystem; not removed",
+            "{}: not a directory on its parent's filesystem; not emptied",
             file.display()
         )
     );
@@ -372,7 +392,7 @@ fn a_folder_entry_is_removed_whole_and_only_the_uids_directory() {
     assert_eq!(
         refused("ab/link", me()),
         format!(
-            "{}: not a directory on its parent's filesystem; not removed",
+            "{}: not a directory on its parent's filesystem; not emptied",
             link.display()
         )
     );
@@ -380,31 +400,202 @@ fn a_folder_entry_is_removed_whole_and_only_the_uids_directory() {
     assert_eq!(
         refused("ab/theirs", other()),
         format!(
-            "{}: owned by uid {}, not uid {}; not removed",
+            "{}: owned by uid {}, not uid {}; not emptied",
             theirs.display(),
             me(),
             other()
         )
     );
-    assert_eq!(names(&folders.join("ab")), ["file", "link", "theirs"]);
-    assert_eq!(names(&dir.join("elsewhere")), ["precious"]);
-    remove_folder_entry(&folders.join("ab/none"), me()).unwrap();
-    remove_folder_entry(&folders.join("none/none"), me()).unwrap();
     assert_eq!(
-        remove_folder_entry(Path::new("/"), me())
+        names(&folders.join("ab")),
+        ["file", "hash", "link", "theirs"]
+    );
+    assert_eq!(names(&dir.join("elsewhere")), ["precious"]);
+    empty_folder(&folders.join("ab/none"), me(), &System).unwrap();
+    empty_folder(&folders.join("none/none"), me(), &System).unwrap();
+    assert_eq!(
+        empty_folder(Path::new("/"), me(), &System)
             .unwrap_err()
             .to_string(),
         "not a path to an entry"
     );
-    let why = remove_folder_entry(&folders.join("ab/file/none"), me())
+    let why = empty_folder(&folders.join("ab/file/none"), me(), &System)
         .unwrap_err()
         .to_string();
     assert!(why.contains("file: "), "{why}");
 }
 
+/// Asserts that a folder or a top-level directory that cannot be opened or listed is named,
+/// and that a look at it fails the same way (an error in looking is never "empty"), as does a
+/// top-level directory on another filesystem than the folder, which is never entered.
+#[test]
+fn a_folder_that_cannot_be_read_is_named() {
+    let dir = scratch("folder-unreadable");
+    let hash = dir.join("folders/ab/hash");
+    fs::create_dir_all(hash.join("T")).unwrap();
+    fs::write(hash.join("T/f"), "x").unwrap();
+    if !root() {
+        chmod(&hash, 0o000);
+        let why = empty_folder(&hash, me(), &System).unwrap_err().to_string();
+        assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
+        let why = leftovers(&hash).unwrap_err().to_string();
+        assert!(why.starts_with(&format!("{}: ", hash.display())), "{why}");
+        chmod(&hash, 0o755);
+        chmod(&hash.join("T"), 0o000);
+        let why = leftovers(&hash).unwrap_err().to_string();
+        assert!(
+            why.starts_with(&format!("{}: ", hash.join("T").display())),
+            "{why}"
+        );
+        chmod(&hash.join("T"), 0o755);
+    }
+
+    let folder = rustix::fs::openat(CWD, &hash, DIRECTORY, Mode::empty()).unwrap();
+    let dev = rustix::fs::fstat(&folder).unwrap().st_dev;
+    let top = stat_of(&hash.join("T"));
+    let why = top_level(
+        &folder,
+        OsStr::new("T"),
+        &hash.join("T"),
+        &top,
+        (me(), dev ^ 1),
+        &System,
+    )
+    .unwrap_err();
+    assert_eq!(
+        why.to_string(),
+        "another filesystem is mounted here; not crossed"
+    );
+    assert!(hash.join("T/f").is_file());
+    let mut elsewhere = stat_of(&hash.join("T/f"));
+    elsewhere.st_dev ^= 1;
+    let inside = rustix::fs::openat(&folder, "T", DIRECTORY, Mode::empty()).unwrap();
+    let why = top_level(
+        &inside,
+        OsStr::new("f"),
+        &hash.join("T/f"),
+        &elsewhere,
+        (me(), dev),
+        &System,
+    )
+    .unwrap_err();
+    assert_eq!(
+        why.to_string(),
+        "another filesystem is mounted here; not crossed"
+    );
+    assert!(hash.join("T/f").is_file());
+    // One that vanished after it was listed is emptied already.
+    top_level(
+        &folder,
+        OsStr::new("gone"),
+        &hash.join("gone"),
+        &top,
+        (me(), dev),
+        &System,
+    )
+    .unwrap();
+}
+
+/// Asserts that a lifting removal the system still refuses after the ACL was stripped is an
+/// error naming the entry, and the rest of the folder is emptied: a file at the top level of a
+/// folder the owner cannot write in (the folder itself is not made writable: it is the
+/// system's), whose removal is refused, and whose ACL strip, which off macOS does nothing,
+/// changes nothing.
+#[test]
+fn a_removal_the_system_still_refuses_after_the_acl_is_stripped_is_named() {
+    if root() {
+        eprintln!("skipped: permission bits do not stop root");
+        return;
+    }
+    let dir = scratch("folder-refused");
+    let hash = dir.join("folders/ab/hash");
+    for top in ["0", "T"] {
+        fs::create_dir_all(hash.join(top)).unwrap();
+    }
+    fs::write(hash.join("0/file"), "x").unwrap();
+    fs::write(hash.join("stray"), "x").unwrap();
+    chmod(&hash, 0o500);
+    let why = empty_folder(&hash, me(), &System).unwrap_err().to_string();
+    chmod(&hash, 0o755);
+    assert!(
+        why.contains(&format!(
+            "{}: Permission denied",
+            hash.join("stray").display()
+        )),
+        "{why}"
+    );
+    assert!(names(&hash.join("0")).is_empty(), "the rest was emptied");
+}
+
+/// Asserts that a directory that is not the one that was examined is not changed: a directory
+/// swapped in after the examination keeps its mode, and the refusal says so (Linux changes a
+/// directory through a descriptor it opened without following a link and compares).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_directory_swapped_in_before_it_is_made_searchable_keeps_its_mode() {
+    let dir = scratch("searchable");
+    let base = dir.join("place");
+    fs::create_dir_all(base.join("a")).unwrap();
+    fs::create_dir_all(base.join("b")).unwrap();
+    chmod(&base.join("a"), 0o000);
+    chmod(&base.join("b"), 0o000);
+    let place = rustix::fs::openat(CWD, &base, DIRECTORY, Mode::empty()).unwrap();
+    let examined = stat_of(&base.join("a"));
+    let why = searchable(&place, OsStr::new("b"), &examined).unwrap_err();
+    assert_eq!(why.to_string(), "replaced while being examined");
+    assert_eq!(stat_of(&base.join("b")).st_mode & 0o777, 0);
+    // The one examined is changed, and one that is searchable already is left alone.
+    searchable(&place, OsStr::new("a"), &examined).unwrap();
+    assert_eq!(stat_of(&base.join("a")).st_mode & 0o777, 0o700);
+    let opened = stat_of(&base.join("a"));
+    searchable(&place, OsStr::new("a"), &opened).unwrap();
+    chmod(&base.join("b"), 0o755);
+}
+
+/// Asserts that a look at a folder passes over an entry that vanished after it was listed.
+#[test]
+fn a_look_passes_over_an_entry_that_vanished() {
+    let dir = scratch("look-vanished");
+    let hash = dir.join("hash");
+    fs::create_dir_all(&hash).unwrap();
+    let folder = rustix::fs::openat(CWD, &hash, DIRECTORY, Mode::empty()).unwrap();
+    let mut left = Vec::new();
+    top_leftovers(&folder, OsStr::new("gone"), &hash.join("gone"), &mut left).unwrap();
+    assert!(left.is_empty());
+}
+
+/// Asserts what a look at a folder reports: each non-directory at its top level and each entry
+/// directly below a top-level directory (the entry, not what is in it), none for the top-level
+/// directories themselves or for a folder that is not there.
+#[test]
+fn a_look_at_a_folder_reports_what_an_emptied_one_does_not_hold() {
+    let dir = scratch("folder-look");
+    let hash = dir.join("folders/ab/hash");
+    for top in ["0", "C", "T", "X"] {
+        fs::create_dir_all(hash.join(top)).unwrap();
+    }
+    assert!(leftovers(&hash).unwrap().is_empty());
+    assert!(leftovers(&dir.join("none")).unwrap().is_empty());
+    fs::create_dir_all(hash.join("T/inner/deeper")).unwrap();
+    fs::write(hash.join("C/file"), "x").unwrap();
+    fs::write(hash.join("stray"), "x").unwrap();
+    symlink(dir.join("elsewhere"), hash.join("X/link")).unwrap();
+    let mut left = leftovers(&hash).unwrap();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            hash.join("C/file"),
+            hash.join("T/inner"),
+            hash.join("X/link"),
+            hash.join("stray"),
+        ]
+    );
+}
+
 /// Asserts that a tree of any depth is removed (a job that builds a deep tree cannot stop
 /// its account's deletion) by the three removals: of a named entry, of every entry a uid owns
-/// in a place, and of an entry of the per-user folders. At this depth a walk that held a
+/// in a place, and the emptying of a per-user folder. At this depth a walk that held a
 /// descriptor per level would run out of them.
 #[test]
 fn a_tree_thousands_deep_is_removed_by_every_removal() {
@@ -421,10 +612,11 @@ fn a_tree_thousands_deep_is_removed_by_every_removal() {
     assert!(remove_named(&dir.join("Users/home"), me()).unwrap());
     assert!(names(&dir.join("Users")).is_empty());
 
-    fs::create_dir_all(dir.join("folders/ab/hash")).unwrap();
-    build_deep(&dir.join("folders/ab/hash"), levels);
-    remove_folder_entry(&dir.join("folders/ab/hash"), me()).unwrap();
-    assert!(names(&dir.join("folders/ab")).is_empty());
+    fs::create_dir_all(dir.join("folders/ab/hash/T")).unwrap();
+    build_deep(&dir.join("folders/ab/hash/T"), levels);
+    empty_folder(&dir.join("folders/ab/hash"), me(), &System).unwrap();
+    assert_eq!(names(&dir.join("folders/ab/hash")), ["T"]);
+    assert!(names(&dir.join("folders/ab/hash/T")).is_empty());
 }
 
 /// Asserts that the directories of other owners are searched to a limit and no further, so

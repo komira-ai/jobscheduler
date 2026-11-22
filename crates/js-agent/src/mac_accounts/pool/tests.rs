@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use super::*;
-use crate::mac_accounts::Proof;
 use crate::mac_accounts::tests::rig::{Rig, me, my_gid};
+use crate::mac_accounts::{Proof, generated_uid};
 
 /// The text of what an open refused for.
 fn refusal(rig: &Rig, state: &Path) -> String {
@@ -157,6 +157,7 @@ fn lend_takes_the_oldest_ready_account_and_makes_one_when_none_is_ready() {
                 name: "kbf-acct-1".to_owned(),
                 uid: me(),
                 gid: my_gid(),
+                generated_uid: generated_uid(me()),
             },
             made_now: false,
         }
@@ -488,4 +489,44 @@ fn an_account_made_for_a_lend_is_never_ready_to_another_lend() {
     assert!(lines.iter().all(|line| !line.starts_with("gone")));
     assert!(lines.iter().all(|line| !line.starts_with("ready")));
     assert_eq!(rig.fake.state().users.len(), 2);
+}
+
+/// Asserts that the next account of a slot finds the slot's per-user folder where the last one
+/// left it, emptied: after a job fills the folder and the account is retired, the folder and
+/// its top-level directories are still there, nothing is in them, and the next account is made
+/// for the same slot (the same uid and `GeneratedUID`, a new name) with its own new home.
+#[test]
+fn the_next_account_of_a_slot_finds_its_folder_empty() {
+    let rig = Rig::new("slot-again", 1, 0);
+    let pool = rig.open();
+    let first = pool.lend("job-1").unwrap().account;
+    let hash = rig.folder("ab", "hash");
+    std::fs::create_dir_all(hash.join("0/work/tree")).unwrap();
+    std::fs::write(hash.join("0/work/tree/out"), "x").unwrap();
+    std::fs::write(hash.join("T/scratch"), "x").unwrap();
+    std::fs::write(rig.home(1).join("Library"), "x").unwrap();
+    pool.retire(first.clone()).unwrap();
+    assert!(!rig.home(1).exists(), "the home is deleted");
+    assert!(hash.join("0").is_dir(), "the folder is kept");
+
+    let second = pool.lend("job-2").unwrap().account;
+    assert_eq!(
+        (second.name.as_str(), second.uid, &second.generated_uid),
+        ("kbf-acct-2", first.uid, &first.generated_uid)
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&hash)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["0", "C", "T", "X"]);
+    for top in ["0", "C", "T", "X"] {
+        assert_eq!(
+            std::fs::read_dir(hash.join(top)).unwrap().count(),
+            0,
+            "{top}"
+        );
+    }
+    assert!(rig.home(2).is_dir());
+    assert!(!rig.home(2).join("Library").exists(), "a new home, empty");
 }

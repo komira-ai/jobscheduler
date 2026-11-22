@@ -6,6 +6,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use super::super::generated_uid;
 use super::super::host::{
     AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord,
 };
@@ -54,6 +55,9 @@ pub(in super::super) struct State {
     pub(in super::super) grant: Option<io::ErrorKind>,
     /// Whether `list_accounts` ignores its prefix.
     pub(in super::super) list_ignores_prefix: bool,
+    /// The `GeneratedUID` every record is made with, instead of the one it is asked for: a
+    /// directory that did not keep what it was given.
+    pub(in super::super) made_with_guid: Option<String>,
     /// Whether `ipcs` says it failed (exit status 1).
     pub(in super::super) ipcs_exits_nonzero: bool,
     /// How much each operation advances the clock.
@@ -111,6 +115,7 @@ impl Fake {
             uid,
             gid,
             home: homes.join(name),
+            generated_uid: generated_uid(uid),
         };
         self.state().users.insert(name.to_owned(), user);
     }
@@ -207,6 +212,26 @@ impl AccountHost for Fake {
         Self::after(hooks, taken)
     }
 
+    fn guid_taken(&self, guid: &str) -> io::Result<bool> {
+        let hooks = self.enter("guid_taken", guid)?;
+        let taken = self
+            .state()
+            .users
+            .values()
+            .any(|user| user.generated_uid == guid);
+        Self::after(hooks, taken)
+    }
+
+    fn record_guid(&self, name: &str) -> io::Result<Option<String>> {
+        let hooks = self.enter("record_guid", name)?;
+        let found = self
+            .state()
+            .users
+            .get(name)
+            .map(|user| user.generated_uid.clone());
+        Self::after(hooks, found)
+    }
+
     fn list_accounts(&self, prefix: &str) -> io::Result<Vec<(String, u32)>> {
         let hooks = self.enter("list_accounts", prefix)?;
         let state = self.state();
@@ -232,7 +257,11 @@ impl AccountHost for Fake {
         if state.users.contains_key(&user.name) {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        state.users.insert(user.name.clone(), user.clone());
+        let mut user = user.clone();
+        if let Some(guid) = state.made_with_guid.clone() {
+            user.generated_uid = guid;
+        }
+        state.users.insert(user.name.clone(), user);
         drop(state);
         Self::after(hooks, ())
     }

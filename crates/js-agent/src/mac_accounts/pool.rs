@@ -9,11 +9,15 @@ use super::error::Failure;
 use super::host::AccountHost;
 use super::ledger::{self, Ledger, Record, State, name, parse_name, valid_job};
 use super::settings::Settings;
-use super::{Account, AccountError, Held, Lent, Retired, Step};
+use super::tree::{Os, System};
+use super::{Account, AccountError, Held, Lent, Retired, Step, generated_uid};
 
 /// The accounts of the pool and what became of them. See the module documentation.
 pub struct Pool {
     pub(super) host: Arc<dyn AccountHost>,
+    /// What the removal of files asks of the operating system besides the plain calls: the
+    /// user flags and ACLs of the per-user folders' contents.
+    pub(super) os: Box<dyn Os + Send + Sync>,
     pub(super) settings: Settings,
     /// The ledger file, for the errors that name it.
     pub(super) path: PathBuf,
@@ -94,6 +98,20 @@ impl Pool {
         settings: Settings,
         host: Arc<dyn AccountHost>,
     ) -> Result<Self, AccountError> {
+        Self::with_os(state, settings, host, Box::new(System))
+    }
+
+    /// [`Pool::with_settings`] with the file calls of the removal of a per-user folder's
+    /// contents given: how the tests model what macOS refuses.
+    ///
+    /// # Errors
+    /// As [`Pool::open`].
+    pub(super) fn with_os(
+        state: &Path,
+        settings: Settings,
+        host: Arc<dyn AccountHost>,
+        os: Box<dyn Os + Send + Sync>,
+    ) -> Result<Self, AccountError> {
         match host.full_disk_access() {
             Ok(()) => {}
             Err(why) if why.kind() == io::ErrorKind::PermissionDenied => {
@@ -111,6 +129,7 @@ impl Pool {
         let ledger = Ledger::open(&path).map_err(|why| ledger_error(&path, why))?;
         let pool = Self {
             host,
+            os,
             settings,
             path,
             ledger: Mutex::new(ledger),
@@ -154,6 +173,7 @@ impl Pool {
             name: name(n),
             uid,
             gid: self.settings.gid,
+            generated_uid: generated_uid(uid),
         }
     }
 

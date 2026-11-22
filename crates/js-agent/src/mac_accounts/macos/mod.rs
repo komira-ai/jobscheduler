@@ -1,7 +1,7 @@
 //! The macOS implementation of [`AccountHost`]: user records through OpenDirectory's local
 //! node, launchd through `launchctl`, processes through `libproc` and `kill`, and the few
-//! calls on files that only macOS has (the user flags that block a removal, a rename that
-//! does not replace).
+//! calls on files that only macOS has (the user flags and the ACLs that block a removal, a
+//! rename that does not replace).
 //!
 //! Nothing here is reached by the Linux test jobs; the pure decisions it serves are tested
 //! there over a fake host.
@@ -13,7 +13,7 @@ mod sys;
 use std::io;
 use std::path::Path;
 
-pub(super) use sys::{clear_user_flags, rename_excl};
+pub(super) use sys::{clear_user_flags, rename_excl, strip_acl};
 
 use super::host::{
     AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord, merge_record,
@@ -35,6 +35,14 @@ impl AccountHost for MacHost {
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {
         present_in_any(directory::uid_exists(uid), sys::uid_taken(uid))
+    }
+
+    fn guid_taken(&self, guid: &str) -> io::Result<bool> {
+        directory::guid_exists(guid)
+    }
+
+    fn record_guid(&self, name: &str) -> io::Result<Option<String>> {
+        directory::guid_of(name)
     }
 
     fn list_accounts(&self, prefix: &str) -> io::Result<Vec<(String, u32)>> {

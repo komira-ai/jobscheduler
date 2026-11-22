@@ -4,13 +4,13 @@ use std::io;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2_foundation::{NSArray, NSError, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSString};
 use objc2_open_directory::{
     ODNode, ODQuery, ODRecord, ODSession, kODMatchBeginsWith, kODMatchEqualTo,
     kODNodeTypeLocalNodes,
 };
 
-use super::super::home::account_attributes;
+use super::super::home::{account_attributes, creation_attributes};
 use super::super::host::NewUser;
 
 const USERS: &str = "dsRecTypeStandard:Users";
@@ -18,22 +18,28 @@ const USERS: &str = "dsRecTypeStandard:Users";
 const RECORD_NAME: &str = "dsAttrTypeStandard:RecordName";
 /// The attribute that holds a user's uid.
 const UNIQUE_ID: &str = "dsAttrTypeStandard:UniqueID";
+/// The attribute that holds a record's `GeneratedUID`.
+const GENERATED_UID: &str = "dsAttrTypeStandard:GeneratedUID";
 const GROUPS: &str = "dsRecTypeStandard:Groups";
 /// The group whose members are administrators.
 const ADMIN_GROUP: &str = "admin";
 
-/// Makes the record of `user`: its attributes are [`account_attributes`], and no password,
-/// so the record has no `ShadowHash` in its authentication authority.
+/// Makes the record of `user` with its name and its `GeneratedUID` ([`creation_attributes`]),
+/// given to the directory at creation because it takes that attribute then and no later; then
+/// sets the others ([`account_attributes`]), and no password, so the record has no
+/// `ShadowHash` in its authentication authority.
 pub(super) fn create(user: &NewUser) -> io::Result<()> {
     autoreleasepool(|_| {
         let node = local_node()?;
+        let attributes = dictionary(&creation_attributes(user));
         let mut error: Option<Retained<NSError>> = None;
-        // SAFETY: the record type and name are NSStrings; no attributes yet.
+        // SAFETY: the record type and name are NSStrings, and the attributes a dictionary of
+        // attribute names to arrays of strings, as the call takes them.
         let record = unsafe {
             node.createRecordWithRecordType_name_attributes_error(
                 Some(&NSString::from_str(USERS)),
                 Some(&NSString::from_str(&user.name)),
-                None,
+                Some(&attributes),
                 Some(&mut error),
             )
         }
@@ -43,6 +49,25 @@ pub(super) fn create(user: &NewUser) -> io::Result<()> {
         }
         Ok(())
     })
+}
+
+/// The dictionary of `pairs` as the directory takes attributes at creation: each attribute's
+/// name to an array of its one value.
+fn dictionary(pairs: &[(&str, String)]) -> Retained<NSDictionary> {
+    let names: Vec<Retained<NSString>> = pairs
+        .iter()
+        .map(|(attribute, _)| NSString::from_str(attribute))
+        .collect();
+    let values: Vec<Retained<NSArray<NSString>>> = pairs
+        .iter()
+        .map(|(_, value)| NSArray::from_retained_slice(&[NSString::from_str(value)]))
+        .collect();
+    let names: Vec<&NSString> = names.iter().map(|name| &**name).collect();
+    let values: Vec<&AnyObject> = values.iter().map(|value| -> &AnyObject { value }).collect();
+    let dictionary = NSDictionary::from_slices(&names, &values);
+    // SAFETY: the key and object types of an `NSDictionary` are markers of this side only:
+    // the object is the same, and it holds strings and arrays, which are objects.
+    unsafe { Retained::cast_unchecked(dictionary) }
 }
 
 /// Deletes the record `name`, and its membership of the `admin` group; whether there was
@@ -151,12 +176,36 @@ pub(super) fn exists(name: &str) -> io::Result<bool> {
 /// Whether a user record has the uid `uid`: a query of the local node for `UniqueID` equal
 /// to it. A failure of the query or of reading its results is an error, not an absence.
 pub(super) fn uid_exists(uid: u32) -> io::Result<bool> {
+    has_value(UNIQUE_ID, &uid.to_string())
+}
+
+/// Whether a user record has the `GeneratedUID` `guid`: a query of the local node for
+/// `GeneratedUID` equal to it. A failure of the query or of reading its results is an error,
+/// not an absence.
+pub(super) fn guid_exists(guid: &str) -> io::Result<bool> {
+    has_value(GENERATED_UID, guid)
+}
+
+/// The `GeneratedUID` of the user record `name`; `None` when there is none.
+pub(super) fn guid_of(name: &str) -> io::Result<Option<String>> {
+    autoreleasepool(|_| {
+        let node = local_node()?;
+        let Some(record) = find(&node, name)? else {
+            return Ok(None);
+        };
+        first_value(&record, GENERATED_UID).map(Some)
+    })
+}
+
+/// Whether a user record has `value` for `attribute`: a query of the local node for it equal
+/// to `value`.
+fn has_value(attribute: &str, value: &str) -> io::Result<bool> {
     autoreleasepool(|_| {
         let node = local_node()?;
         let kinds = NSString::from_str(USERS);
         let kinds: &AnyObject = &kinds;
-        let attribute = NSString::from_str(UNIQUE_ID);
-        let value = NSString::from_str(&uid.to_string());
+        let attribute_name = NSString::from_str(attribute);
+        let value = NSString::from_str(value);
         let value: &AnyObject = &value;
         let mut error = None;
         // SAFETY: the node, the record type, the attribute and the value are live objects of
@@ -165,7 +214,7 @@ pub(super) fn uid_exists(uid: u32) -> io::Result<bool> {
             ODQuery::queryWithNode_forRecordTypes_attribute_matchType_queryValues_returnAttributes_maximumResults_error(
                 Some(&node),
                 Some(kinds),
-                Some(&attribute),
+                Some(&attribute_name),
                 kODMatchEqualTo,
                 Some(value),
                 None,
@@ -173,11 +222,11 @@ pub(super) fn uid_exists(uid: u32) -> io::Result<bool> {
                 Some(&mut error),
             )
         }
-        .ok_or_else(|| od_error("querying the uid", error))?;
+        .ok_or_else(|| od_error(&format!("querying {attribute}"), error))?;
         let mut error = None;
         // SAFETY: a query just made; all its results, none partial.
         let results = unsafe { query.resultsAllowingPartial_error(false, Some(&mut error)) }
-            .ok_or_else(|| od_error("listing the records of a uid", error))?;
+            .ok_or_else(|| od_error(&format!("listing the records of a {attribute}"), error))?;
         Ok(results.count() > 0)
     })
 }

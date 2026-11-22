@@ -2,6 +2,7 @@
 //! that belong to no one part of the code.
 
 pub(super) mod fake;
+pub(super) mod os;
 pub(super) mod rig;
 
 use std::io;
@@ -86,6 +87,7 @@ fn the_errors_name_what_failed() {
             name: "kbf-acct-4".to_owned(),
             uid: 604,
             gid: 20,
+            generated_uid: super::generated_uid(604),
         },
         step: Step::Folder,
         why: "stuck".to_owned(),

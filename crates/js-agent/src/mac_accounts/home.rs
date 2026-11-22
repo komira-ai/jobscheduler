@@ -1,5 +1,5 @@
-//! The two pieces of making an account that are not a call to the directory service: the
-//! attributes of its record and its home folder.
+//! The pieces of making an account that are not a call to the directory service: the
+//! slot's `GeneratedUID`, the attributes of its record and its home folder.
 
 use std::io;
 use std::path::Path;
@@ -12,10 +12,35 @@ use super::host::NewUser;
 /// The login shell of every account: none can log in.
 pub const SHELL: &str = "/usr/bin/false";
 
-/// The attributes of the directory record an account gets, as OpenDirectory names them,
-/// each with its value: the uid, the primary group (the only group), the home, the login
-/// shell ([`SHELL`]), the real name (the account's name) and the hidden flag (kept off the
-/// login window's list of users). No password and no authentication authority is among
+/// The `GeneratedUID` of the slot of `uid`: a fixed prefix and the uid, so that the same slot
+/// always gets the same identifier and a lost ledger cannot lose it. macOS finds a user's
+/// per-user folder (`/private/var/folders/<xx>/<hash>`) by the record's uid and
+/// `GeneratedUID`, so the same pair is the same folder again, for the next account of the
+/// slot.
+#[must_use]
+pub fn generated_uid(uid: u32) -> String {
+    format!("4B424641-4343-5400-8000-{uid:012}")
+}
+
+/// The attributes a record is created with, as OpenDirectory names them, each with its
+/// value: its name and its `GeneratedUID`. The directory service takes the `GeneratedUID`
+/// only at creation (root may not change it afterwards), so it is given here and not with
+/// [`account_attributes`], which are set after the record exists.
+#[must_use]
+pub fn creation_attributes(user: &NewUser) -> [(&'static str, String); 2] {
+    [
+        ("dsAttrTypeStandard:RecordName", user.name.clone()),
+        (
+            "dsAttrTypeStandard:GeneratedUID",
+            user.generated_uid.clone(),
+        ),
+    ]
+}
+
+/// The attributes of the directory record an account gets after it is created, as
+/// OpenDirectory names them, each with its value: the uid, the primary group (the only
+/// group), the home, the login shell ([`SHELL`]), the real name (the account's name) and the
+/// hidden flag (kept off the login window's list of users). No password and no authentication authority is among
 /// them, so the account has no `ShadowHash`: nothing can log in as it and it has no secure
 /// token. It is in no group but its primary group, and never in `admin`.
 #[must_use]

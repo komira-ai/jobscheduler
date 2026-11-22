@@ -4,9 +4,10 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
+use crate::mac_accounts::ledger::Record;
 use crate::mac_accounts::tests::fake::Print;
 use crate::mac_accounts::tests::rig::{Rig, me, my_gid};
-use crate::mac_accounts::{MAX_NAME, PREFIX};
+use crate::mac_accounts::{MAX_NAME, PREFIX, generated_uid};
 
 fn read(path: &std::path::Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
@@ -139,21 +140,29 @@ fn a_uid_with_a_record_or_a_process_is_passed_over() {
     assert_eq!(pool.lend("job-1").unwrap().account.uid, me() + 2);
 }
 
-/// Asserts, with the test's own uid as the busy one, that a directory two levels down in the
-/// per-user folders, an entry in a shared place, and an entry of the places of schedules each
-/// make the uid busy and name what is owned by it.
+/// Asserts, with the test's own uid as the busy one, that something left in a per-user folder
+/// below its top-level directories, a non-directory at its top level, an entry in a shared
+/// place, and an entry of the places of schedules each make the uid busy and name what is
+/// owned by it; and that the folder the system made and keeps (its top-level directories,
+/// empty) makes none busy.
 #[test]
 fn a_uid_that_owns_files_is_busy() {
     let rig = Rig::new("owns-files", 1, 0);
     let pool = rig.open();
     let uid = me();
-    let folder = rig.dir.join("folders/ab/hash");
-    std::fs::create_dir_all(&folder).unwrap();
-    assert_eq!(
-        reasons(&pool),
-        [format!("{uid}: {} is owned by it", folder.display())]
-    );
-    std::fs::remove_dir_all(rig.dir.join("folders/ab")).unwrap();
+    let folder = rig.folder("ab", "hash");
+    for leftover in ["T/left", "stray"] {
+        let path = folder.join(leftover);
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(
+            reasons(&pool),
+            [format!(
+                "{uid}: {} is left in its per-user folder",
+                path.display()
+            )]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
     for (place, entry) in [("Shared", "left"), ("tmp", "left"), ("at/jobs", "job")] {
         let path = rig.dir.join(place).join(entry);
         std::fs::write(&path, "x").unwrap();
@@ -170,7 +179,9 @@ fn a_uid_that_owns_files_is_busy() {
         [format!("{uid}: {} is owned by it", plist.display())]
     );
     std::fs::remove_file(&plist).unwrap();
-    // Nothing is left: the uid is free, and an account is made.
+    // Nothing is left but the folder as the system keeps it: the uid is free, and an account
+    // is made.
+    assert!(folder.join("T").is_dir());
     assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
 }
 
@@ -422,4 +433,199 @@ fn a_domain_that_prints_does_not_make_a_uid_busy() {
         .print
         .insert(format!("user/{}", me()), Print::Stays);
     assert_eq!(pool.lend("job-1").unwrap().account.uid, me());
+}
+
+/// Asserts that the record is made with the slot's `GeneratedUID`: the account is lent with
+/// it, the record the host holds has it, and the next account of the same slot has the same
+/// one under another name, while another slot has another.
+#[test]
+fn a_record_is_made_with_its_slots_generated_uid() {
+    let rig = Rig::new("guid-made", 2, 0);
+    let pool = rig.open();
+    let first = pool.lend("job-1").unwrap().account;
+    assert_eq!(first.generated_uid, generated_uid(me()));
+    assert_eq!(
+        rig.fake.state().users["kbf-acct-1"].generated_uid,
+        "4B424641-4343-5400-8000-".to_owned() + &format!("{:012}", me())
+    );
+    let second = pool.lend("job-2").unwrap().account;
+    assert_eq!(second.generated_uid, generated_uid(me() + 1));
+    assert_ne!(first.generated_uid, second.generated_uid);
+
+    // The same slot again: the same identifier, another name.
+    pool.retire(first).unwrap();
+    let rig = rig.next("guid-same-slot", 1, 0);
+    let pool = rig.open();
+    let one = pool.lend("job-1").unwrap().account;
+    pool.retire(one.clone()).unwrap();
+    let again = pool.lend("job-2").unwrap().account;
+    assert_eq!((again.uid, again.name.as_str()), (one.uid, "kbf-acct-2"));
+    assert_eq!(again.generated_uid, one.generated_uid);
+    assert_eq!(
+        rig.fake.state().users["kbf-acct-2"].generated_uid,
+        generated_uid(me())
+    );
+}
+
+/// Asserts that a record that comes out with another `GeneratedUID` than the slot's fails the
+/// making at `record`, naming both, and what was made is deleted and shown gone; and that a
+/// record whose `GeneratedUID` cannot be read, or that is not there to be read, fails it too.
+#[test]
+fn a_record_that_does_not_have_the_slots_generated_uid_fails_the_making() {
+    let other = "00000000-0000-4000-8000-000000000001";
+    let rig = Rig::new("guid-wrong", 3, 1);
+    rig.fake.state().made_with_guid = Some(other.to_owned());
+    let AccountError::Make { account, step, why } = rig.refused() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Record));
+    assert!(
+        why.starts_with(&format!(
+            "the record's GeneratedUID is {other}, not the slot's {}; ",
+            generated_uid(me())
+        )),
+        "{why}"
+    );
+    assert!(
+        why.ends_with("what was made was deleted and shown gone"),
+        "{why}"
+    );
+    assert_eq!(
+        rig.lines(),
+        [
+            format!("made kbf-acct-1 {}", me()),
+            "gone kbf-acct-1".to_owned()
+        ]
+    );
+    assert!(rig.fake.state().users.is_empty());
+    assert!(!rig.home(1).exists());
+
+    let rig = rig.next("guid-unreadable", 3, 1);
+    rig.fake.fail("record_guid kbf-acct-1");
+    let AccountError::Make { step, why, .. } = rig.refused() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Record);
+    assert!(
+        why.starts_with("reading the GeneratedUID of the record: record_guid kbf-acct-1 failed; "),
+        "{why}"
+    );
+    assert!(rig.fake.state().users.is_empty());
+
+    let rig = rig.next("guid-vanished", 3, 1);
+    let fake = rig.fake.clone();
+    rig.fake
+        .on("create_account", move || fake.state().users.clear());
+    let AccountError::Make { step, why, .. } = rig.refused() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Record);
+    assert!(
+        why.starts_with("the record is not there after it was made; "),
+        "{why}"
+    );
+}
+
+/// Asserts that a slot whose `GeneratedUID` another record has is not free, whatever that
+/// record's name or uid, and that a failed look for it is a reason too: the slot's folder is
+/// the same one for the same pair, so an account made beside such a record would share it.
+#[test]
+fn a_slot_whose_generated_uid_another_record_has_is_not_free() {
+    let rig = Rig::new("guid-taken", 1, 0);
+    let pool = rig.open();
+    let uid = me();
+    rig.fake
+        .add_user("someone", uid + 5000, 20, &rig.settings.homes);
+    rig.fake
+        .state()
+        .users
+        .get_mut("someone")
+        .unwrap()
+        .generated_uid = generated_uid(uid);
+    assert_eq!(
+        reasons(&pool),
+        [format!("{uid}: a user record has its GeneratedUID")]
+    );
+    assert!(
+        rig.fake
+            .take_calls()
+            .contains(&format!("guid_taken {}", generated_uid(uid)))
+    );
+    rig.fake.state().users.remove("someone");
+
+    rig.fake.fail(&format!("guid_taken {}", generated_uid(uid)));
+    assert_eq!(
+        reasons(&pool),
+        [format!(
+            "{uid}: looking up its GeneratedUID: guid_taken {} failed",
+            generated_uid(uid)
+        )]
+    );
+    rig.fake.heal(&format!("guid_taken {}", generated_uid(uid)));
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
+}
+
+/// Asserts that the slot's per-user folder is emptied again once `made` is recorded, before
+/// the home and the record: something that appeared after the slot was judged free (a hook
+/// runs just before `made` is taken) is gone when the account is lent.
+#[test]
+fn the_slots_folder_is_emptied_again_before_the_account_is_made() {
+    let rig = Rig::new("folder-again", 1, 0);
+    let pool = rig.open();
+    let folder = rig.folder("ab", "hash");
+    let left = folder.join("T/left");
+    let leftover = left.clone();
+    *pool.before_record.lock().unwrap() = Some(Box::new(move |record| {
+        if matches!(record, Record::Made(..)) {
+            std::fs::write(&leftover, "x").unwrap();
+        }
+    }));
+    let lent = pool.lend("job-1").unwrap();
+    assert_eq!(lent.account.uid, me());
+    assert!(!left.exists(), "the leftover was removed");
+    assert!(folder.join("T").is_dir(), "the folder is kept");
+    let calls = rig.fake.take_calls();
+    assert!(
+        calls.contains(&"make_home kbf-acct-1".to_owned()),
+        "{calls:?}"
+    );
+}
+
+/// Asserts that a folder that cannot be emptied once `made` is recorded stops the making at
+/// `folder`, before the home and the record are made; what was made (nothing) cannot be
+/// shown gone either, so the account is held at `folder`, and the error says so.
+#[test]
+fn a_folder_that_cannot_be_emptied_before_the_making_stops_it_at_folder() {
+    let rig = Rig::new("folder-stuck", 1, 0);
+    let pool = rig.open();
+    rig.folder("ab", "hash");
+    let folders = rig.dir.join("folders");
+    *pool.before_record.lock().unwrap() = Some(Box::new(move |record| {
+        if matches!(record, Record::Made(..)) {
+            std::fs::remove_dir_all(&folders).unwrap();
+            std::fs::write(&folders, "").unwrap();
+        }
+    }));
+    let AccountError::Make { account, step, why } = pool.lend("job-1").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Folder));
+    assert!(why.starts_with("emptying its per-user folders: "), "{why}");
+    assert!(
+        why.contains("deleting what was made did not complete, at folder: "),
+        "{why}"
+    );
+    assert_eq!(
+        rig.lines(),
+        [
+            format!("made kbf-acct-1 {}", me()),
+            "held kbf-acct-1 folder".to_owned()
+        ]
+    );
+    assert!(
+        rig.fake
+            .take_calls()
+            .iter()
+            .all(|call| !call.starts_with("make_home") && !call.starts_with("create_account"))
+    );
 }

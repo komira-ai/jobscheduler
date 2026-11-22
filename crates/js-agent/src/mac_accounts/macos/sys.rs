@@ -1,11 +1,12 @@
 //! The macOS calls that are neither the directory service nor the process table: the
-//! lookups by name and uid, `launchctl` and the other programs, the privacy check, and two
+//! lookups by name and uid, `launchctl` and the other programs, the privacy check, and three
 //! calls on files.
 
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::io;
 use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -196,4 +197,63 @@ pub(crate) fn rename_excl(
             .raw_os_error()
             .unwrap_or(libc::EIO),
     ))
+}
+
+/// `ACL_TYPE_EXTENDED` of `<sys/acl.h>`: the access control list macOS keeps on a file.
+const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+
+// FFI-BOUNDARY: `acl_init` returns an ACL the caller owns and frees once with `acl_free`;
+// `acl_set_link_np` reads the NUL-terminated path and the ACL, both owned by the caller, and
+// keeps neither. These are in libSystem.
+unsafe extern "C" {
+    fn acl_init(count: c_int) -> *mut c_void;
+    fn acl_free(object: *mut c_void) -> c_int;
+    fn acl_set_link_np(path: *const c_char, kind: c_int, acl: *mut c_void) -> c_int;
+}
+
+/// The path the open directory `dir` is at (`F_GETPATH`).
+fn path_of(dir: &OwnedFd) -> io::Result<PathBuf> {
+    let mut buffer = [0 as c_char; libc::PATH_MAX as usize];
+    // SAFETY: `F_GETPATH` writes at most `PATH_MAX` bytes, NUL-terminated, into the buffer it
+    // is given, which is that long; the descriptor is open for the call.
+    let found = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+    if found == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call above wrote a NUL-terminated string into `buffer`, which is alive.
+    let bytes = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
+    Ok(Path::new(OsStr::from_bytes(bytes)).to_path_buf())
+}
+
+/// Replaces the ACL of `path` with an empty one, which removes it, without following a link
+/// at its end. An entry that is not there is done.
+fn clear_acl(path: &Path) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `acl_init` takes a count; a null answer is an error, checked below.
+    let acl = unsafe { acl_init(0) };
+    if acl.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `path` is NUL-terminated and `acl` is the one `acl_init` made; both outlive the
+    // call, which keeps neither.
+    let set = unsafe { acl_set_link_np(path.as_ptr(), ACL_TYPE_EXTENDED, acl) };
+    let failure = io::Error::last_os_error();
+    // SAFETY: `acl` was made by `acl_init` above and is freed here once.
+    unsafe { acl_free(acl) };
+    match set {
+        0 => Ok(()),
+        _ if failure.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(failure),
+    }
+}
+
+/// Strips the ACL of the entry `name` of `dir` and of `dir` itself: an ACL that denies
+/// `delete` on the entry or `delete_child` on its directory refuses the removal, root's too,
+/// until it is gone. Neither is followed if it is a link (`acl_set_link_np`). Both are
+/// tried, and the entry's failure is reported first.
+pub(crate) fn strip_acl(dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
+    let folder = path_of(dir)?;
+    let entry = clear_acl(&folder.join(name));
+    let directory = clear_acl(&folder);
+    entry.and(directory)
 }

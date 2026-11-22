@@ -1,11 +1,11 @@
 //! Tests of deleting an account: the order of the steps, what each step's failure holds the
 //! account at, and that a held account is tried again and its uid is never chosen meanwhile.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::mac_accounts::tests::fake::Print;
+use crate::mac_accounts::tests::os::FakeOs;
 use crate::mac_accounts::tests::rig::{Rig, me};
 use crate::mac_accounts::{Account, AccountError, Held, Pool};
 
@@ -303,39 +303,89 @@ fn a_home_that_cannot_be_removed_holds_the_account_at_home() {
     assert!(held.why.contains("Users: Not a directory"), "{}", held.why);
 }
 
-/// Asserts that the uid's directories in the per-user folders are removed whole, and that
-/// folders that cannot be searched, or a directory that cannot be removed, hold the account
-/// at `folder`, naming the path.
+/// Asserts that after the job every per-user folder of the uid is emptied and kept, in
+/// whichever shard it is: the folder and its top-level directories stay (the system protects
+/// them from removal), everything below them and any non-directory at the top level goes,
+/// and the proof says so; and that the other places of the folders' directory are not touched.
 #[test]
-fn the_per_user_folders_are_removed_and_a_refusal_holds_the_account_at_folder() {
+fn the_per_user_folders_are_emptied_and_kept_after_the_job() {
     let (rig, pool, account) = lent("folder");
-    let hash = rig.dir.join("folders/ab/hash");
-    std::fs::create_dir_all(hash.join("T/inner")).unwrap();
-    std::fs::write(hash.join("T/inner/f"), "x").unwrap();
+    let first = rig.folder("ab", "hash");
+    let second = rig.folder("cd", "older");
+    for hash in [&first, &second] {
+        std::fs::create_dir_all(hash.join("T/inner")).unwrap();
+        std::fs::write(hash.join("T/inner/f"), "x").unwrap();
+        std::fs::write(hash.join("0/file"), "x").unwrap();
+        std::fs::write(hash.join("stray"), "x").unwrap();
+    }
+    std::fs::write(rig.dir.join("folders/ab/file"), "x").unwrap();
+    let retired = pool.retire(account).unwrap();
+    assert!(retired.gone.folders);
+    for hash in [&first, &second] {
+        let mut names: Vec<String> = std::fs::read_dir(hash)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["0", "C", "T", "X"], "{}", hash.display());
+        for top in ["0", "C", "T", "X"] {
+            assert_eq!(std::fs::read_dir(hash.join(top)).unwrap().count(), 0);
+        }
+    }
+    assert!(rig.dir.join("folders/ab/file").is_file());
+}
+
+/// Asserts that folders that cannot be searched, and an entry in a folder that cannot be
+/// emptied, hold the account at `folder`, naming the path and why; that the record and the
+/// home are gone by then (the deletion goes record, home, folders), the uid is chosen by no
+/// one meanwhile, and a retirement tries again and shows the account gone.
+#[test]
+fn a_per_user_folder_that_cannot_be_searched_or_emptied_holds_the_account_at_folder() {
+    let (rig, pool, account) = lent_on(Rig::new("folder-held", 1, 0));
     let folders = rig.dir.join("folders");
+    let hash = rig.folder("ab", "hash");
     std::fs::rename(&folders, rig.dir.join("folders-kept")).unwrap();
     std::fs::write(&folders, "").unwrap();
-    let held1 = held(pool.retire(account.clone()));
-    assert_eq!(held1.step, Step::Folder);
+    let searching = held(pool.retire(account.clone()));
+    assert_eq!(searching.step, Step::Folder);
     assert!(
-        held1.why.contains("folders: Not a directory"),
+        searching.why.contains("folders: Not a directory"),
         "{}",
-        held1.why
+        searching.why
     );
     std::fs::remove_file(&folders).unwrap();
     std::fs::rename(rig.dir.join("folders-kept"), &folders).unwrap();
 
-    if me() != 0 {
-        let inner = hash.join("T/inner");
-        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let held2 = held(pool.retire(account.clone()));
-        assert_eq!(held2.step, Step::Folder);
-        assert!(held2.why.contains("hash/T/inner/f: "), "{}", held2.why);
-        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let os = FakeOs::new();
+    os.flag_for_good("frozen");
+    std::fs::write(hash.join("T/frozen"), "x").unwrap();
+    std::fs::write(hash.join("T/loose"), "x").unwrap();
+    let mut pool = pool;
+    pool.os = Box::new(os.clone());
+    let emptying = held(pool.retire(account.clone()));
+    assert_eq!(emptying.step, Step::Folder);
+    assert_eq!(
+        emptying.why,
+        format!(
+            "{}: the flags cannot be cleared",
+            hash.join("T/frozen").display()
+        )
+    );
+    assert_eq!(rig.lines().last().unwrap(), "held kbf-acct-1 folder");
+    assert!(!rig.home(1).exists(), "the home went before the folders");
+    assert!(rig.fake.state().users.is_empty());
+    assert!(!hash.join("T/loose").exists(), "what could go went");
+    assert!(hash.join("T/frozen").exists());
+    let Err(AccountError::NoFreeUid { reasons, .. }) = pool.lend("job-2") else {
+        panic!("the held uid was lent");
+    };
+    assert_eq!(reasons, [format!("{}: held by kbf-acct-1", me())]);
+
+    pool.os = Box::new(crate::mac_accounts::tree::System);
     pool.retire(account).unwrap();
-    assert!(!hash.exists());
-    assert!(folders.join("ab").is_dir(), "only the uid's directory goes");
+    assert!(!hash.join("T/frozen").exists());
+    assert!(hash.join("T").is_dir(), "the folder is kept");
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
 }
 
 /// Asserts that a held account's uid is chosen by no one until a retirement shows it gone:

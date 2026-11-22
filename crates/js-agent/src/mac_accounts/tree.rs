@@ -5,7 +5,8 @@
 //! checked to be the directory that was examined (device and inode), every entry is
 //! examined with `AT_SYMLINK_NOFOLLOW`, and a link is unlinked, never followed. A walk
 //! stays on the filesystem of the directory it starts in. The user flags that block removal
-//! (`uchg`, `uappnd`) are cleared on macOS, only on entries the departing uid owns.
+//! (`uchg`, `uappnd`) are cleared on macOS, only on entries the departing uid owns, except in
+//! a per-user folder ([`empty_folder`]), where every entry is the slot's and is unlocked.
 //!
 //! Two walks share one traversal ([`walk`]): a removal of every entry a uid owns in a place
 //! ([`sweep_owned`]) and a read-only look for them ([`owned_in`]). Both search the
@@ -19,6 +20,13 @@
 //! filesystem, nothing followed) and removes it from there, so a job that builds a deep tree
 //! cannot stop its account's deletion, and no removal holds more than a bounded number of
 //! descriptors.
+//!
+//! A per-user folder is emptied, not removed: the system protects it (System Integrity
+//! Protection refuses its removal), and the next account of the same slot gets the same one
+//! ([`empty_folder`]). Emptying goes further than the other removals to get past what
+//! blocks it, as root may: flags are cleared on every entry, an ACL that refuses a removal is
+//! stripped and the removal tried again, and a directory is made searchable before it is
+//! entered. What does that is [`Os`], which a test replaces.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -181,16 +189,104 @@ fn rmdir_at(dir: &OwnedFd, name: &OsStr) -> Result<(), Errno> {
     rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)
 }
 
-/// Clears the user flags that block removing the entry `name` of `dir`, examined as `stat`.
-#[cfg(target_os = "macos")]
-fn unlock(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> io::Result<()> {
-    super::macos::clear_user_flags(dir, name, stat.st_flags)
+/// The calls a removal makes that are the operating system's own, and that a test replaces:
+/// unlinking one entry, and lifting what blocks it.
+pub(super) trait Os {
+    /// `unlinkat`: removes the entry `name` of `dir`, a directory when `flags` says so.
+    fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> Result<(), Errno>;
+
+    /// Clears the user flags that block removing the entry `name` of `dir` (and, for a
+    /// directory, removing what is in it), examined as `stat`; nothing is done when none is
+    /// set.
+    ///
+    /// # Errors
+    /// The flags could not be cleared.
+    fn clear_flags(&self, dir: &OwnedFd, name: &OsStr, stat: &Stat) -> io::Result<()>;
+
+    /// Strips the ACL of the entry `name` of `dir` and of `dir` itself, whichever of them
+    /// refuses the removal (`delete` on the entry, `delete_child` on the directory). Never
+    /// through a link.
+    ///
+    /// # Errors
+    /// An ACL could not be stripped.
+    fn strip_acl(&self, dir: &OwnedFd, name: &OsStr) -> io::Result<()>;
 }
 
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::unnecessary_wraps)] // the macOS variant can fail
-fn unlock(_dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
-    Ok(())
+/// The operating system itself. Off macOS there are no user flags to clear and no ACL to
+/// strip (the calls do nothing).
+pub(super) struct System;
+
+impl Os for System {
+    fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> Result<(), Errno> {
+        rustix::fs::unlinkat(dir, name, flags)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn clear_flags(&self, dir: &OwnedFd, name: &OsStr, stat: &Stat) -> io::Result<()> {
+        super::macos::clear_user_flags(dir, name, stat.st_flags)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn clear_flags(&self, _dir: &OwnedFd, _name: &OsStr, _stat: &Stat) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn strip_acl(&self, dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
+        super::macos::strip_acl(dir, name)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn strip_acl(&self, _dir: &OwnedFd, _name: &OsStr) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Clears the user flags that block removing the entry `name` of `dir`, examined as `stat`.
+fn unlock(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> io::Result<()> {
+    System.clear_flags(dir, name, stat)
+}
+
+/// Makes the directory `name` of `dir`, examined as `stat`, searchable by its owner when it
+/// is not (`u+rwx`), so that root's removal can enter it and empty it. A link put in its
+/// place since is not followed.
+fn searchable(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> io::Result<()> {
+    #[allow(clippy::unnecessary_cast)] // `st_mode` is u32 on Linux, u16 on macOS
+    let mode = Mode::from_raw_mode(stat.st_mode as _);
+    if mode.contains(Mode::RWXU) {
+        return Ok(());
+    }
+    chmod_directory(dir, name, stat, mode | Mode::RWXU)
+}
+
+/// Sets the permission bits of the directory `name` of `dir`, examined as `stat`, to `mode`,
+/// without following a link. Linux has no `fchmodat` that does not follow one: the directory
+/// is opened without following (`O_PATH`, which needs no permission on it), checked to be the
+/// one that was examined, and changed through its entry in `/proc`, which is that inode.
+#[cfg(target_os = "linux")]
+fn chmod_directory(dir: &OwnedFd, name: &OsStr, stat: &Stat, mode: Mode) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let entry = rustix::fs::openat(dir, name, flags, Mode::empty())?;
+    let opened = rustix::fs::fstat(&entry)?;
+    if (opened.st_dev, opened.st_ino) != (stat.st_dev, stat.st_ino) {
+        return Err(io::Error::other("replaced while being examined"));
+    }
+    Ok(rustix::fs::chmod(
+        format!("/proc/self/fd/{}", entry.as_raw_fd()),
+        mode,
+    )?)
+}
+
+/// `fchmodat` with `AT_SYMLINK_NOFOLLOW`, which macOS has.
+#[cfg(target_os = "macos")]
+fn chmod_directory(dir: &OwnedFd, name: &OsStr, _stat: &Stat, mode: Mode) -> io::Result<()> {
+    Ok(rustix::fs::chmodat(
+        dir,
+        name,
+        mode,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)
 }
 
 /// `renameat` that does not replace what is at the new name (`EEXIST` instead).
@@ -210,19 +306,55 @@ fn rename_excl(from: &OwnedFd, old: &OsStr, to: &OwnedFd, new: &OsStr) -> Result
 /// shallower, so a tree of any depth is gone after as many passes as it has multiples of
 /// that. A removal that fails part-way leaves everything of the uid under `dir`, where the
 /// next removal finds it again.
+///
+/// It also says how far the removal goes to get past what blocks it: by default an entry the
+/// removed uid owns is unlocked (its user flags cleared) and a refusal is an error; a park
+/// made by [`Park::lifting`] unlocks every entry, strips the ACL of an entry whose removal is
+/// refused and tries again, and makes a directory searchable before it is entered.
 struct Park<'a> {
     dir: &'a OwnedFd,
+    os: &'a dyn Os,
+    lift: bool,
     names: std::cell::RefCell<Vec<OsString>>,
     next: std::cell::Cell<u32>,
 }
 
 impl<'a> Park<'a> {
     fn new(dir: &'a OwnedFd) -> Self {
+        Self::with(dir, &System, false)
+    }
+
+    /// A park that gets past what blocks a removal, through `os`.
+    fn lifting(dir: &'a OwnedFd, os: &'a dyn Os) -> Self {
+        Self::with(dir, os, true)
+    }
+
+    fn with(dir: &'a OwnedFd, os: &'a dyn Os, lift: bool) -> Self {
         Self {
             dir,
+            os,
+            lift,
             names: std::cell::RefCell::default(),
             next: std::cell::Cell::new(0),
         }
+    }
+
+    /// Removes the entry `name` of `dir`, a directory when `flags` says so. When this park
+    /// lifts and the system refuses (`EPERM`, `EACCES`: an ACL that denies the removal),
+    /// the ACL is stripped and the removal tried once more.
+    fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> io::Result<()> {
+        let refused = match self.os.unlink(dir, name, flags) {
+            Ok(()) => return Ok(()),
+            Err(why @ (Errno::PERM | Errno::ACCESS)) if self.lift => io::Error::from(why),
+            Err(why) => return Err(why.into()),
+        };
+        self.os.strip_acl(dir, name).map_err(|why| {
+            io::Error::new(
+                refused.kind(),
+                format!("{refused}; stripping its ACL: {why}"),
+            )
+        })?;
+        Ok(self.os.unlink(dir, name, flags)?)
     }
 
     /// Moves `name` of `from`, judged as `judged`, up to a name of its own in the park.
@@ -270,8 +402,8 @@ impl<'a> Park<'a> {
 
 /// Removes `name` in `dir`, examined as `stat`: unlinked, or a directory emptied
 /// (everything in it, whoever owns it) and removed. Only entries `uid` owns are unlocked
-/// first. An entry that is gone by the time a step reaches it, `name` or anything below it,
-/// is removed already.
+/// first (every entry, in a lifting `park`). An entry that is gone by the time a step reaches
+/// it, `name` or anything below it, is removed already.
 fn remove_entry(
     dir: &OwnedFd,
     name: &OsStr,
@@ -297,18 +429,21 @@ fn remove_present(
             "another filesystem is mounted here; not crossed",
         ));
     }
-    if stat.st_uid == uid {
-        unlock(dir, name, stat)?;
+    if park.lift || stat.st_uid == uid {
+        park.os.clear_flags(dir, name, stat)?;
     }
     if !is_dir(stat) {
-        return Ok(rustix::fs::unlinkat(dir, name, AtFlags::empty())?);
+        return park.unlink(dir, name, AtFlags::empty());
     }
     if depth > PARK_DEPTH {
         return park.take(dir, name, stat);
     }
+    if park.lift {
+        searchable(dir, name, stat)?;
+    }
     let child = open_child(dir, name, stat)?;
     empty(&child, here, (uid, dev, depth + 1), park)?;
-    Ok(rmdir_at(dir, name)?)
+    park.unlink(dir, name, AtFlags::REMOVEDIR)
 }
 
 /// Removes every entry of `dir` (at `path`), whoever owns it; the entries are at depth
@@ -622,15 +757,18 @@ fn entries_below(root: &OwnedFd, folders: &Path, uid: u32) -> io::Result<Vec<Pat
     Ok(found)
 }
 
-/// Removes the directory at `path`, an entry of the per-user folders, and everything in it,
-/// whoever owns what is inside. Nothing is removed unless `path` is a directory that `uid`
-/// owns on its parent's filesystem: one of another owner, or a file or a link, is an error
-/// and stays as it is. A `path` that does not exist holds nothing. The system placed the
-/// entry and may refuse its removal (`sunlnk`): the refusal is an error naming it.
+/// Empties the per-user folder at `path`, an entry of the per-user folders: it and its
+/// top-level directories (`0`, `C`, `T`, `X`, and whatever else is a directory there) stay,
+/// everything below the top-level directories goes, and so does any non-directory at the top
+/// level. Whoever owns what is inside; nothing is followed and no filesystem but the
+/// folder's is entered; what blocks a removal is lifted ([`Park::lifting`]). Nothing is
+/// emptied unless `path` is a directory that `uid` owns on its parent's filesystem: one of
+/// another owner, or a file or a link, is an error and stays as it is. A `path` that does
+/// not exist holds nothing. Every failure is named, and what could be removed is.
 ///
 /// # Errors
-/// The entry is not the uid's directory, or it or something in it could not be removed.
-pub(super) fn remove_folder_entry(path: &Path, uid: u32) -> io::Result<()> {
+/// The entry is not the uid's directory, or it or something in it could not be emptied.
+pub(super) fn empty_folder(path: &Path, uid: u32, os: &dyn Os) -> io::Result<()> {
     let (parent, name) = split(path)?;
     let Some(dir) = named(parent, open_dir(parent))? else {
         return Ok(());
@@ -642,18 +780,116 @@ pub(super) fn remove_folder_entry(path: &Path, uid: u32) -> io::Result<()> {
     // Without short-circuits: both are read.
     if !(is_dir(&stat) & (stat.st_dev == dev)) {
         return Err(io::Error::other(format!(
-            "{}: not a directory on its parent's filesystem; not removed",
+            "{}: not a directory on its parent's filesystem; not emptied",
             path.display()
         )));
     }
     if stat.st_uid != uid {
         return Err(io::Error::other(format!(
-            "{}: owned by uid {}, not uid {uid}; not removed",
+            "{}: owned by uid {}, not uid {uid}; not emptied",
             path.display(),
             stat.st_uid
         )));
     }
-    named(path, remove_whole(&dir, name, path, &stat, uid))
+    let folder = named(path, open_child(&dir, name, &stat))?;
+    let mut failed = Vec::new();
+    for entry in named(path, list(&folder))? {
+        let inner = path.join(&entry);
+        let result = examine(&folder, &entry).and_then(|found| {
+            found.map_or(Ok(()), |stat| {
+                top_level(&folder, &entry, &inner, &stat, (uid, dev), os)
+            })
+        });
+        note(&mut failed, &inner, result);
+    }
+    joined(&failed)
+}
+
+/// One entry at the top level of a per-user folder: a directory stays and what is in it goes,
+/// anything else goes.
+fn top_level(
+    folder: &OwnedFd,
+    name: &OsStr,
+    path: &Path,
+    stat: &Stat,
+    (uid, dev): (u32, Dev),
+    os: &dyn Os,
+) -> io::Result<()> {
+    if !is_dir(stat) {
+        let park = Park::lifting(folder, os);
+        return remove_entry(folder, name, path, stat, (uid, dev, 1), &park);
+    }
+    vanished(empty_top(folder, name, path, stat, (uid, dev), os))
+}
+
+/// Empties the directory `name` of `folder`, examined as `stat`, and keeps it. The directory
+/// itself may carry a flag that blocks removing what is in it, and may be closed to its
+/// owner: both are lifted first.
+fn empty_top(
+    folder: &OwnedFd,
+    name: &OsStr,
+    path: &Path,
+    stat: &Stat,
+    (uid, dev): (u32, Dev),
+    os: &dyn Os,
+) -> io::Result<()> {
+    if stat.st_dev != dev {
+        return Err(io::Error::other(
+            "another filesystem is mounted here; not crossed",
+        ));
+    }
+    os.clear_flags(folder, name, stat)?;
+    searchable(folder, name, stat)?;
+    let top = open_child(folder, name, stat)?;
+    let park = Park::lifting(&top, os);
+    let mut failed = Vec::new();
+    failed.extend(
+        empty(&top, path, (uid, dev, 2), &park)
+            .err()
+            .map(|why| why.to_string()),
+    );
+    note(&mut failed, path, park.drain(uid, dev));
+    joined(&failed)
+}
+
+/// What the per-user folder at `path` holds that an emptied one does not: each non-directory
+/// at its top level and each entry directly below its top-level directories (the entry
+/// itself, not what is in it); nothing for a `path` that does not exist.
+///
+/// # Errors
+/// The folder or one of its top-level directories could not be opened or listed: what was not
+/// looked at is never read as empty.
+pub(super) fn leftovers(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let Some(folder) = named(path, open_dir(path))? else {
+        return Ok(Vec::new());
+    };
+    let mut left = Vec::new();
+    for name in named(path, list(&folder))? {
+        top_leftovers(&folder, &name, &path.join(&name), &mut left)?;
+    }
+    Ok(left)
+}
+
+/// [`leftovers`] for the entry `name` (at `here`) at the top level of `folder`: itself when it
+/// is not a directory, else what is directly in it; nothing for one gone since it was listed.
+fn top_leftovers(
+    folder: &OwnedFd,
+    name: &OsStr,
+    here: &Path,
+    left: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let Some(stat) = named(here, examine(folder, name))? else {
+        return Ok(());
+    };
+    if !is_dir(&stat) {
+        left.push(here.to_path_buf());
+        return Ok(());
+    }
+    let top = named(here, open_child(folder, name, &stat))?;
+    for inner in named(here, list(&top))? {
+        left.push(here.join(inner));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

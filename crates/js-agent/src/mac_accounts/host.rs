@@ -25,6 +25,9 @@ pub struct NewUser {
     pub gid: u32,
     /// The home folder.
     pub home: PathBuf,
+    /// The record's `GeneratedUID`, which the record is made with ([`super::generated_uid`]):
+    /// the slot's, the same for the same uid whatever the account's name.
+    pub generated_uid: String,
 }
 
 /// A live process of a uid, as a refusal names it.
@@ -84,6 +87,18 @@ pub trait AccountHost: Send + Sync {
     /// The lookup failed.
     fn uid_taken(&self, uid: u32) -> io::Result<bool>;
 
+    /// Whether a record has the `GeneratedUID` `guid`.
+    ///
+    /// # Errors
+    /// The lookup failed.
+    fn guid_taken(&self, guid: &str) -> io::Result<bool>;
+
+    /// The `GeneratedUID` of the record named `name`, `None` when there is none.
+    ///
+    /// # Errors
+    /// The lookup failed, or the record has no `GeneratedUID`.
+    fn record_guid(&self, name: &str) -> io::Result<Option<String>>;
+
     /// The records whose name starts with `prefix`, each with its uid; a record whose uid
     /// cannot be read is passed over (and logged), not an error.
     ///
@@ -98,9 +113,10 @@ pub trait AccountHost: Send + Sync {
     /// The folder exists, or could not be made or given away.
     fn make_home(&self, homes: &Path, name: &str, uid: u32, gid: u32) -> io::Result<()>;
 
-    /// Makes the user record `user`: hidden, shell `/usr/bin/false`, no password, the
-    /// primary group `user.gid` and no other, never an administrator
-    /// ([`super::account_attributes`]).
+    /// Makes the user record `user`: made with its `GeneratedUID` (never set afterwards: it
+    /// cannot be changed), hidden, shell `/usr/bin/false`, no password, the primary group
+    /// `user.gid` and no other, never an administrator ([`super::creation_attributes`],
+    /// [`super::account_attributes`]).
     ///
     /// # Errors
     /// The record could not be made.
