@@ -82,6 +82,7 @@ pub(super) fn argv_of(
         .map(|(what, path)| AbsPath::new(path).map_err(|why| fail(what, &why)))
         .collect::<Result<Vec<AbsPath>, RuntimeError>>()?;
     let layout = SlotLayout {
+        trees: None,
         run,
         uid_entry: None,
         inputs,
