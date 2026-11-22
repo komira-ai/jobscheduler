@@ -143,14 +143,14 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
     }
 }
 
-/// A job's trees on the mount and its put directory, each named by a hostile path: the
+/// A job's trees on the mount and a read-write mount, each named by a hostile path: the
 /// profile text is the one of plain paths, and the hostile text is only parameter values.
 /// A NUL, which would cut a C string, is refused by [`AbsPath`] before a tree or a grant
 /// can hold it.
 ///
-/// Catches a tree, mount root or put directory spelled into the profile text.
+/// Catches a tree, mount root or mount grant spelled into the profile text.
 #[test]
-fn hostile_tree_and_put_paths_never_enter_the_profile_text() {
+fn hostile_tree_and_mount_paths_never_enter_the_profile_text() {
     let layout = |root: &str| {
         let at = |rest: &str| AbsPath::parse(&format!("{root}{rest}")).expect("path");
         let trees = MountTrees::new(at(""), vec![at("/t0"), at("/t1")]).expect("trees");
@@ -160,7 +160,7 @@ fn hostile_tree_and_put_paths_never_enter_the_profile_text() {
             inputs: vec![],
             read_denies: vec![],
             mounts: vec![MountGrant {
-                path: at("-put"),
+                path: at("-rw"),
                 write: true,
                 no_exec: false,
             }],
@@ -186,11 +186,11 @@ fn hostile_tree_and_put_paths_never_enter_the_profile_text() {
             text.to_owned(),
             format!("{text}/t0"),
             format!("{text}/t1"),
-            format!("{text}-put"),
+            format!("{text}-rw"),
         ];
         assert_eq!(values, expected, "{text:?}");
     }
-    for nul in ["/Volumes/r\0/t0", "/Volumes/r/t\0", "/Volumes/r-put\0"] {
+    for nul in ["/Volumes/r\0/t0", "/Volumes/r/t\0", "/Volumes/r-rw\0"] {
         assert_eq!(AbsPath::parse(nul), Err(PathError::Control), "{nul:?}");
     }
 }
