@@ -228,7 +228,11 @@ to the host, not to a release.
 Not made by the hook:
 
 - the pool's users, which `js-mac-session` makes in the uid range of its plist (600-699) when it starts;
-- for `--native-network on`, the pool's pf anchor (`js-mac-provision install`), which nothing installs yet.
+- for `--native-network on`, the pool's pf anchor, which the package's daemon `js-agent.pf-pool` loads at boot and
+  every 30 seconds (`js-mac-provision install --flags-file /etc/js-agent/flags`).
+
+What a restart or a macOS update of a Mac needs, and how to check a Mac after one, is
+[docs/runbooks/mac-restart-and-update.md](../runbooks/mac-restart-and-update.md).
 
 Once, for the repository of packages: the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
 write access to the prefix `pkg/jobscheduler/`.
@@ -241,8 +245,8 @@ The lease server's agent pool configuration gains a pool the Macs meet: `capabil
 "arm64", layered-rootfs = "true" }` and `exec = "sandbox-exec"`. A joined pool places a host by the capabilities it
 names, so a job with mounts (which asks for `layered-rootfs`, as kbf's macOS action jobs do) is placed on a Mac only
 when the pool names it; every native agent of a release that takes mounts reports it, and one that does not is refused
-at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
-must reach its agent listener.
+at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The
+Macs' pool names `os_version = "26"` (`docs/design/mac-runtime.md`, section 5). The Macs must reach its agent listener.
 
 ## Platform properties
 
