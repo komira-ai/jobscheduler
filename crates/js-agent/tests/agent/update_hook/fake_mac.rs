@@ -24,7 +24,8 @@ pub const GROUP: &str = "_jsagent";
 
 /// A Mac whose params name the helper's socket group and a scratch root: a first install
 /// (`previous` false) or an update from 1.3.0, with the state root and the scratch root
-/// `db/js-agent/{state,scratch}` of the rig's tree, neither there yet. The params are read
+/// `db/js-agent/state` and `db/js-agent/scratch/runs` of the rig's tree (the scratch volume's
+/// mount point is `db/js-agent/scratch`), none there yet. The params are read
 /// from the text a params file holds, with `socket_group` and `scratch_root` as its keys.
 pub fn mac_rig(name: &str, previous: bool) -> Rig {
     let mut rig = if previous {
@@ -41,21 +42,27 @@ pub fn mac_rig(name: &str, previous: bool) -> Rig {
     rig.params_text = rig.params_text.replace(
         &state_root,
         &format!(
-            "state_root = \"{db}/state\"\nscratch_root = \"{db}/scratch\"\n\
+            "state_root = \"{db}/state\"\nscratch_root = \"{db}/scratch/runs\"\n\
              socket_group = \"{GROUP}\"\n",
             db = db.display()
         ),
     );
     rig.params = Params::parse(&rig.params_text).unwrap();
     assert_eq!(rig.params.state_root, db.join("state"));
-    assert_eq!(rig.params.scratch_root, Some(db.join("scratch")));
+    assert_eq!(rig.params.scratch_root, Some(db.join("scratch/runs")));
     assert_eq!(rig.params.settings.socket_group.as_deref(), Some(GROUP));
     rig
 }
 
-/// The scratch root of a [`mac_rig`].
+/// The scratch root of a [`mac_rig`]: the directory the agent's `--scratch-root` names, on the
+/// scratch volume.
 pub fn scratch_of(rig: &Rig) -> PathBuf {
     rig.params.scratch_root.clone().unwrap()
+}
+
+/// The scratch volume's mount point of a [`mac_rig`]: the scratch root's parent.
+pub fn mount_of(rig: &Rig) -> PathBuf {
+    scratch_of(rig).parent().unwrap().to_path_buf()
 }
 
 /// A spy over `rig` whose host setup goes to `mac`.
@@ -79,6 +86,8 @@ pub const DEVICE: &str = "disk3s7";
 pub const FIRST_GID: u32 = 501;
 /// The owner a volume that ignores ownership shows.
 pub const UNKNOWN_UID: u32 = 99;
+/// The error number of a call the system refuses (`EPERM`).
+pub const EPERM: i32 = 1;
 
 /// The scratch volume.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +115,9 @@ pub struct FakeMac {
     pub look_fails: RefCell<BTreeSet<PathBuf>>,
     /// The paths a look at fails once a mount has run.
     pub look_fails_after_mount: RefCell<BTreeSet<PathBuf>>,
+    /// The paths a look at is refused by the system (`EPERM`), as macOS refuses a protected
+    /// file to a process without the grant it needs.
+    pub look_refused: RefCell<BTreeSet<PathBuf>>,
 }
 
 impl FakeMac {
@@ -123,6 +135,7 @@ impl FakeMac {
             mount_takes: Cell::new(true),
             look_fails: RefCell::new(BTreeSet::new()),
             look_fails_after_mount: RefCell::new(BTreeSet::new()),
+            look_refused: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -220,7 +233,7 @@ impl FakeMac {
                 self.alter(|volume| volume.mount = None);
                 Ok(String::new())
             }
-            (DISKUTIL, ["mount", "-mountPoint", point, DEVICE]) => {
+            (DISKUTIL, ["mount", "nobrowse", "-mountPoint", point, DEVICE]) => {
                 self.change(&line);
                 let after = std::mem::take(&mut *self.look_fails_after_mount.borrow_mut());
                 self.look_fails.borrow_mut().extend(after);
@@ -271,12 +284,16 @@ impl FakeMac {
         if self.look_fails.borrow().contains(path) {
             return Err(io::Error::other("the disk does not answer"));
         }
+        if self.look_refused.borrow().contains(path) {
+            return Err(io::Error::from_raw_os_error(EPERM));
+        }
         let meta = fs::metadata(path)?;
-        let volume = self
-            .volume
-            .borrow()
-            .clone()
-            .filter(|volume| volume.mount.as_deref() == Some(path));
+        let volume = self.volume.borrow().clone().filter(|volume| {
+            volume
+                .mount
+                .as_deref()
+                .is_some_and(|mount| path.starts_with(mount))
+        });
         Ok(match volume {
             Some(volume) => PathFacts {
                 device: 2,

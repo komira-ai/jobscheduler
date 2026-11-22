@@ -7,8 +7,14 @@
 //! <creator> <creator's group> ...`, with the kind `q`, `m` or `s`; owner and creator are
 //! a user's name, or the uid when no user record has it. An object is the uid's when it
 //! owns it or created it: a creator keeps its access after giving the object away
-//! (`IPC_SET`), so an object given to another owner is removed too. POSIX shared memory and semaphores are not listed by any interface of
-//! macOS (they have names but no directory), so they cannot be found to be removed.
+//! (`IPC_SET`), so an object given to another owner is removed too.
+//!
+//! POSIX shared memory objects and named semaphores are listed by no interface of macOS
+//! (they have names but no directory), so the reset cannot find one to remove, and one
+//! lasts until it is unlinked or the Mac restarts. A run cannot create shared memory:
+//! the job profile's floor denies it (`js_mac_pool::seatbelt`). A named semaphore a run
+//! left stays, and the next run of the same uid can open it by its name; it holds a
+//! count, not data.
 
 use super::Helper;
 use super::teardown::TeardownError;

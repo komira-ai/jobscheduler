@@ -134,6 +134,60 @@ fn good_flags_configure_the_runtime() {
     );
 }
 
+/// Asserts that every path of the agent's own is read-denied by the name the kernel resolves,
+/// whether it exists or not: a file that is not there (the token file of a Mac that joins by its
+/// host certificate) under a directory reached through a symbolic link (`/etc` is
+/// `/private/etc`) is denied by the real path of its deepest ancestor that is there, with the
+/// rest after it; and a path with no ancestor at all is refused by name.
+///
+/// Catches a missing file kept as given, which named the link: the profile refused
+/// `/etc/js-agent/token` and the agent ended at every start of a first install on a Mac.
+#[test]
+fn an_agent_path_that_is_not_there_is_denied_by_the_real_path_it_would_have() {
+    let dir = Scratch::new("native-set-planned");
+    let real = dir.path("real");
+    fs::create_dir(&real).unwrap();
+    let alias = dir.path("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let real = fs::canonicalize(&real).unwrap();
+    let homes = dir.path("homes");
+    fs::create_dir(&homes).unwrap();
+    let socket = alias.join("socket-dir/socket");
+    let (token, deeper) = (alias.join("token"), alias.join("none/token"));
+    let given = flags(Some(&socket), Some(&homes), None, &[]);
+    let settings = NativeSettings::from_flags(
+        &given,
+        &[&token, &deeper, &alias],
+        Path::new("/srv/journal"),
+    )
+    .unwrap()
+    .unwrap();
+    let denied: Vec<&str> = settings
+        .config()
+        .read_denies
+        .iter()
+        .map(|d| d.as_str())
+        .collect();
+    let spelt = |path: PathBuf| path.to_str().unwrap().to_owned();
+    assert_eq!(
+        denied,
+        [
+            spelt(real.join("token")),
+            spelt(real.join("none/token")),
+            spelt(real.clone()),
+            spelt(real.join("socket-dir")),
+            "/private/etc/kcpassword".to_owned(),
+        ]
+    );
+
+    let relative = Path::new("relative-absent/token");
+    let refused = NativeSettings::from_flags(&given, &[relative], Path::new("/srv/journal"));
+    assert_eq!(
+        refused.err(),
+        Some("relative-absent/token: path is not absolute".to_owned())
+    );
+}
+
 /// Asserts that without `--native-homes` the home directory is `/Users`: the flags are
 /// accepted exactly where that directory exists. It catches a default that is not the
 /// helper's.
@@ -159,7 +213,9 @@ fn the_default_home_directory_is_users() {
 
 /// Asserts the refusals, each naming its flag: a relative socket, home directory or tool
 /// root, a home directory that does not exist, a network level that is none of the four,
-/// and an agent path a profile cannot name. It catches a flag that is accepted and fails
+/// and an agent path a profile cannot name (a relative one: an absolute path that is not
+/// there is denied by the real path it would have, see
+/// `an_agent_path_that_is_not_there_is_denied_by_the_real_path_it_would_have`). It catches a flag that is accepted and fails
 /// when the first job starts.
 #[test]
 fn bad_flags_are_refused_by_name() {
@@ -196,10 +252,13 @@ fn bad_flags_are_refused_by_name() {
         assert!(why.starts_with(text), "{text}: {why}");
     }
     let good = flags(Some(socket), Some(&homes), None, &[]);
-    let why =
-        NativeSettings::from_flags(&good, &[Path::new("/tmp/state")], Path::new("/srv/journal"))
-            .unwrap_err();
-    assert!(why.starts_with("/tmp/state: "), "{why}");
+    let why = NativeSettings::from_flags(
+        &good,
+        &[Path::new("relative/state")],
+        Path::new("/srv/journal"),
+    )
+    .unwrap_err();
+    assert!(why.starts_with("relative/state: "), "{why}");
 }
 
 /// Asserts the read denies a start adds beyond the agent's own: `--native-deny-read` (spelled

@@ -4,14 +4,21 @@
 //! point goes on from there and makes no act twice.
 //!
 //! In this order, each before anything is changed:
-//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check, or an
-//!    `owed-*` record, halts (76), here and again before each phase below (an agent with such a
-//!    taint refuses every start, the old release included, so nothing is gained by going on; a
-//!    taint it will re-check, a residue of a post-job check the pin file does not name, does not halt the
-//!    step; if the previous release is one that predates
-//!    self-clearing, such a taint stays standing and that agent refuses starts until an operator
-//!    clears it, which is accepted because a halt would stop every release of the group). A rollback with no
-//!    record has nothing to undo: it has finished before, or `prepare` never wrote one;
+//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check
+//!    halts (76), here and again before each phase below (an agent with such a taint refuses
+//!    every start, the old release included, so nothing is gained by going on; a taint it will
+//!    re-check, a residue of a post-job check the pin file does not name, does not halt the
+//!    step; if the previous release is one that predates self-clearing, such a taint stays
+//!    standing and that agent refuses starts until an operator clears it, which is accepted
+//!    because a halt would stop every release of the group). An `owed-*` record halts too once
+//!    the agent was signalled (`stop_begun`; for a first install, `link_moved`), here and before
+//!    each phase below, except on an update that hands the runs over, whose agents run their
+//!    checks while this step waits: the stop left it, and the agent started next taints itself
+//!    for it. Before the signal it does not: the agent that runs is the one that wrote it and
+//!    settles it once the job's checks have run, and this step does not touch that agent (a
+//!    `prepare` or `cutover` that deferred for the record is rolled back here). A rollback with
+//!    no record has nothing to undo: it has finished before, or `prepare` never wrote one, and
+//!    only a taint halts it;
 //! 2. the agent was never signalled (no `stop_begun`; for a first install, no `link_moved`):
 //!    there is nothing to repair beyond the cordon. It is lifted if this update placed it, the
 //!    record is deleted, and the step ends `reversible: true`;
@@ -39,16 +46,32 @@
 //!    after `cutover` issued the start, and before this step has, is the new agent and is drained
 //!    and stopped; any other unit that is up is the previous agent and needs no act; a stopped
 //!    unit needs the start;
-//! 5. drain (new agent only; the cordon is kept up, or put back if it lapsed, within the cap):
+//! 5. drain (new agent only, and not on an update that hands the runs over, whose new agent hands
+//!    them back as the cutover's did; the cordon is kept up, or put back if it lapsed, within
+//!    the cap):
 //!    wait up to the drain bound for the host to hold no lease, then mark `rb.drained`. A lease
 //!    after the bound fails the step (`drain_bound`, class environment) with nothing stopped
 //!    and the cordon left to lapse: the SIGTERM would land on a job of unknown phase;
-//! 6. stop (`rb.stop_begun` first, then the stop and a wait for the unit to be down), the mark
+//! 6. stop (`rb.stop_begun` first, then, on a handover, the handover file as `cutover` writes
+//!    it, the stop and a wait for the unit to be down, and the file removed), the mark
 //!    that the link is on the previous release (`rb.link_restored`, first), the start
 //!    (`rb.start_issued` first, and before it, with a `helper_unit` in the params, the helper
 //!    booted out and bootstrapped from the previous release's tree and started, as `cutover`
 //!    does for the staged one) and the wait for the previous agent's hello, and then
 //!    `rb.hello_ok`, after it;
+//!    An update that hands the runs over in place (the record's `in_place`, see `prepare`)
+//!    does not stop the new agent when it runs: the record gets `rb.stop_begun` and
+//!    `rb.link_restored`, the handover file is written, the record gets `rb.start_issued`, and
+//!    the unit's main process is sent SIGHUP (see `cutover` and [`in_place`]); the previous
+//!    release's program runs in its place as the same process, and the step waits until it has
+//!    taken the request, for at most the stop's bound, before it waits for its hello. A rerun
+//!    that finds `rb.start_issued` with the unit up and the request still there signals again.
+//!    A previous agent that runs because the cutover never marked its start was never
+//!    signalled: a request the cutover wrote is removed, so that a later stop drains, and only
+//!    its hello is awaited. A unit that is not up goes the way above (it is started). A start that fails ends
+//!    `start_failed` and its detail adds that the previous release is installed again (the
+//!    release link is on it) but its agent is not running, so the update is undone on disk
+//!    and the host runs no agent until the unit starts;
 //! 7. the cordon is lifted if this update placed it and it has not lapsed or been left
 //!    unconfirmed, and the record is deleted. A lease server that does not answer the lift
 //!    does not hold the step: the cordon is ours and nothing renews it any more, so it lapses
@@ -77,8 +100,8 @@
 //! cannot tell it from the record of an update that was abandoned.
 //!
 //! Exit codes: 0; 1 (every ending after the stop says `reversible: false`); 76 on a taint
-//! the agent cannot clear, or an owed check. Never 75: the declared contract gives a rollback no
-//! deferral. A lease server that
+//! the agent cannot clear, or an owed check after the stop. Never 75: the declared contract
+//! gives a rollback no deferral. A lease server that
 //! does not answer before the first act is waited for inside the step (bounded as below), and then
 //! the step fails with `lease_unreachable` (class
 //! environment) having changed nothing.
@@ -102,11 +125,12 @@ use crate::update_hook::{
 };
 
 use super::cutover::{
-    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause, show,
+    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
+    request_handover, show, withdraw_handover,
 };
-use super::helper;
-use super::prepare::{place, refuse_host, renew};
+use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
+use super::{helper, in_place};
 use crate::cordon::CREDENTIAL_CODES;
 
 /// Runs `rollback`.
@@ -117,7 +141,7 @@ pub fn rollback(env: &Env<'_>, params: &Params) -> Done {
 fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let (held, loaded) = open_state(env, params)?;
     let Some(mut record) = loaded else {
-        refuse_host(env)?;
+        refuse_taint(env)?;
         return Ok(Done {
             report: Report {
                 detail: Some(
@@ -139,10 +163,12 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
 }
 
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
-    refuse_host(env)?;
     if !begun(record) {
+        // The agent was never signalled: an owed check is one it is still running.
+        refuse_taint(env)?;
         return finish(env, held, record);
     }
+    refuse_host_in(env, record.handover)?;
     let Some(previous) = record.update.previous_target.clone() else {
         retire(env, params, held, record)?;
         return finish(env, held, record);
@@ -259,27 +285,98 @@ fn restore(
     if !down {
         let new_agent = record.start_issued && !record.rb.start_issued;
         if !new_agent {
+            if record.in_place {
+                if record.rb.start_issued {
+                    // A rerun after the signal that handed the runs back in place: the request
+                    // may still be there, and the signal is sent again.
+                    if in_place::pending(env)? {
+                        signal_and_wait(env, params, held, record, &unit)?;
+                    }
+                } else {
+                    // The previous agent runs and was never signalled (the cutover's marks
+                    // come before its signal): a request the cutover wrote is taken back, so
+                    // that a later stop drains as it should.
+                    withdraw_handover(env, record);
+                }
+            }
             return await_hello(env, params, held, record);
         }
-        drain(env, params, held, record)?;
+        if record.in_place {
+            hand_back(env, params, held, record, &unit)?;
+            return await_hello(env, params, held, record);
+        }
+        // The new agent hands its runs over to the previous one as the cutover's did.
+        if !record.handover {
+            drain(env, params, held, record)?;
+        }
         stop(env, params, held, record, &unit)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.link_restored {
         mark_act(env, params, held, record, set_link_restored)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     // The helper of the previous release runs before its agent starts; a rerun that finds the
     // start issued has done this already.
     if !record.rb.start_issued {
         helper::replace(env, held, record, params, previous)?;
     }
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.start_issued {
         mark_act(env, params, held, record, set_start_issued)?;
     }
-    bring_up(env, held, record, params)?;
+    let note = previous_not_running(record);
+    bring_up(env, held, record, params, &note)?;
     await_hello(env, params, held, record)
+}
+
+/// What a failed start of the previous agent adds to the detail: the previous release is
+/// installed again, and no agent runs.
+fn previous_not_running(record: &Record) -> String {
+    format!(
+        "; the previous release {} is installed again (the release link is on it) but its agent is not running, so the update is undone on disk but the host runs no agent until the unit starts",
+        record.update.previous.as_deref().unwrap_or_default()
+    )
+}
+
+/// Hands the runs back to the previous release's agent in place, with the new agent running
+/// (the cutover's in-place hand-over undone): the marks of the stop and of the link, the
+/// request, the mark of the start, each before the act it names, and the signal; then the wait
+/// until the agent has taken the request.
+fn hand_back(
+    env: &Env<'_>,
+    params: &Params,
+    held: &Held,
+    record: &mut Record,
+    unit: &str,
+) -> Result<(), Done> {
+    refuse_host_in(env, record.handover)?;
+    if !record.rb.stop_begun {
+        mark_act(env, params, held, record, set_stop_begun)?;
+    }
+    if !record.rb.link_restored {
+        mark_act(env, params, held, record, set_link_restored)?;
+    }
+    // The request is on disk before the start is marked, so that a rerun that finds the start
+    // marked and the request gone knows the agent has taken it.
+    request_handover(env, record)?;
+    // Not marked yet: only an agent this step has not signalled is handed the runs back here.
+    mark_act(env, params, held, record, set_start_issued)?;
+    signal_and_wait(env, params, held, record, unit)
+}
+
+/// Signals the agent and waits until it has taken the request, for at most the stop's bound; a
+/// unit that is not active meanwhile is brought up.
+fn signal_and_wait(
+    env: &Env<'_>,
+    params: &Params,
+    held: &Held,
+    record: &mut Record,
+    unit: &str,
+) -> Result<(), Done> {
+    in_place::signal(env, unit)?;
+    let note = previous_not_running(record);
+    in_place::wait_taken(env, held, record, params, stop_bound_ms(params), &note)
 }
 
 fn set_start_issued(record: &mut Record) {
@@ -432,16 +529,22 @@ fn stop(
     record: &mut Record,
     unit: &str,
 ) -> Result<(), Done> {
-    refuse_host(env)?;
+    refuse_host_in(env, record.handover)?;
     if !record.rb.stop_begun {
         mark_act(env, params, held, record, set_stop_begun)?;
     }
+    request_handover(env, record)?;
     env.ports.point();
-    env.ports
-        .units
-        .stop_no_block(unit)
-        .map_err(|why| environment(Reason::StopFailed, format!("cannot stop {unit}: {why}")))?;
-    wait_down(env, params, held, record, unit)
+    if let Err(why) = env.ports.units.stop_no_block(unit) {
+        withdraw_handover(env, record);
+        return Err(environment(
+            Reason::StopFailed,
+            format!("cannot stop {unit}: {why}"),
+        ));
+    }
+    wait_down(env, params, held, record, unit)?;
+    withdraw_handover(env, record);
+    Ok(())
 }
 
 fn wait_down(
@@ -454,7 +557,7 @@ fn wait_down(
     let bound_ms = stop_bound_ms(params);
     let began = env.ports.clock.now_ms();
     loop {
-        refuse_host(env)?;
+        refuse_host_in(env, record.handover)?;
         let state = show(env, unit, Reason::StopFailed)?;
         if matches!(life(&state), Life::Down) {
             return Ok(());
@@ -527,7 +630,7 @@ fn await_hello(
     let began = env.ports.clock.now_ms();
     let mut last = Look::Silent;
     loop {
-        refuse_host(env)?;
+        refuse_host_in(env, record.handover)?;
         let state = show(env, &unit, Reason::StartFailed)?;
         let down = matches!(
             state.active.as_str(),

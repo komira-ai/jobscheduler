@@ -113,6 +113,22 @@ pub struct Record {
     /// `None`, so such a record reads as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_stop_session_ms: Option<u64>,
+    /// The update hands the agent's runs over to the new agent instead of draining the host:
+    /// `prepare` places no cordon and waits for nothing, and `cutover` and `rollback` ask the
+    /// agent they stop to leave its runs to the next process (the handover file, see
+    /// [`crate::lifecycle::handover`]). Decided by `prepare` when it writes the record, and
+    /// never changed. Left out of the file when `false`, so such a record reads as it did
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub handover: bool,
+    /// The hand-over is made in place: both agents list `in-place`, so `cutover` and `rollback`
+    /// signal the running agent (SIGHUP to the unit's main process) instead of stopping and
+    /// starting the unit, and wait until the agent has taken the request. Only an update that
+    /// hands over (`handover`) has it. Decided by `prepare` when it writes the record, and
+    /// never changed. Left out of the file when `false`, so such a record reads as it did before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub in_place: bool,
     /// The move of the link to the staged release is begun: written before the move, so a
     /// `cutover` killed at any later point leaves it set. The link itself says whether it
     /// happened.
@@ -134,6 +150,11 @@ pub struct Record {
     pub rb_pre_stop_session_ms: Option<u64>,
 }
 
+/// Whether `flag` is unset: a `false` field is left out of the record.
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 impl Record {
     /// The record of a `prepare` that has just begun: nothing done.
     #[must_use]
@@ -145,6 +166,8 @@ impl Record {
             unit_restart: None,
             stop_begun: false,
             pre_stop_session_ms: None,
+            handover: false,
+            in_place: false,
             link_moved: false,
             start_issued: false,
             verify_ok: false,

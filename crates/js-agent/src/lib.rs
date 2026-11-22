@@ -68,7 +68,7 @@
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | run a start with `isolation = host`: an OCI container run by `crun` as root in the host's own namespaces (pid, network, mount, IPC, UTS, cgroup; no user namespace), with the host's `/` as its root and every capability, in a cgroup of its own below its lease's, which accounts and limits it and whose kill ends it whole on a stop or a cancel. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine runs contained jobs only); the agent then reports `host-jobs`. The server taints a host for good when it places a host job, and the machine must be reimaged before it is used again (docs/runbooks/host-jobs.md). Without the flag a start with `isolation = host` is refused (`host-jobs-not-allowed`) and creates nothing |
 //! | `--allow-fuse-jobs` | give a contained job that asks for it (a start with `fuse`) the FUSE device: `/dev/fuse` and `CAP_SYS_ADMIN` of its own user namespace (never the host's), with `io_uring_setup`, `io_uring_enter` and `io_uring_register` allowed in its seccomp filter; its network, `noNewPrivileges` and masked paths are unchanged. Linux build only; taken with the crun runtime only, and refused at start with `--allow-container-engine` (the container engine does not give the device). The agent reports `fuse-jobs` when the kernel is at least 6.14 and `/dev/fuse` is the FUSE device (char 10:229), and `fuse-uring` besides when the fuse module's `enable_uring` is on and `kernel.io_uring_disabled` is 0; otherwise it warns at start, naming what is missing, and reports neither. Without the flag such a start is refused (`fuse-jobs-not-allowed`) and creates nothing (docs/runbooks/fuse-jobs.md) |
-//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean (a process of a job's user still running) or could not check is tainted: the marker survives a restart, and the agent removes it only for a taint that clears itself (see `--taint-recheck-ms`), keeping it aside as `taint.json.cleared-<unix seconds>`; any other taint ends with an operator's `js-agent clear-taint` or a reimage. A change that no contained job can cause (a package install while jobs run: a group or user added, a mount, a started service, a loaded kernel module, a changed watched directory) taints nothing: the post-job checks log it as one line. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it. It also holds the hold file `hold`, written by the step that drains the host for an update: while it is there the agent starts no work (each start is refused `host-held`) and keeps its host cordoned on the lease server, from its first hello on, across restarts (see [`lifecycle::hold`] and [`hold_cordon`]) |
+//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. A host that a post-job check found unclean (a process of a job's user still running) or could not check is tainted: the marker survives a restart, and the agent removes it only for a taint that clears itself (see `--taint-recheck-ms`), keeping it aside as `taint.json.cleared-<unix seconds>`; any other taint ends with an operator's `js-agent clear-taint` or a reimage. A change that no contained job can cause (a package install while jobs run: a group or user added, a mount, a started service, a loaded kernel module, a changed watched directory) taints nothing: the post-job checks log it as one line. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it. It also holds the hold file `hold`, written by the step that drains the host for an update: while it is there the agent starts no work (each start is refused `host-held`) and keeps its host cordoned on the lease server, from its first hello on, across restarts (see [`lifecycle::hold`] and [`hold_cordon`]); and the handover file `handover`, written by the update hook just before it stops the agent, which makes that stop leave the runs to the next process instead of draining (see [`lifecycle::handover`]); and, under an `--egress` ceiling, the egress store, the directory `egress` (mode 0700) with one record `<run>.json` per wired run (its block, level and ports), written when the run is wired and removed when its wiring is taken down, from which the next process takes the wiring over (see [`egress::store`]) |
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; Linux build only, and not with `--no-jobs`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and are noted as `watch-over-bound` and taint nothing; a change in a watched directory is logged as one `watch-dir-changed` line, never a taint (no contained job can write it, and a package install changes `/etc`). With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are looked at, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount. With the crun runtime it is a prefix of the host paths a job start's layers and mounts name (the longest wins; a link is followed only inside it), opened when the agent starts, and a run start's mount of a named root is refused (`invalid-mount`). With the native runtime (a Mac) it is the root a job start's mounts of host paths lie beneath once their links are followed (checked when the host paths are looked up, so a link inside a root that leads out is refused `input-not-allowed`), and every root is a read deny of every run: a run reads only the mounts it was given, which its profile grants back; keep nothing a job reads without mounting it (a tool) under a root, and a `--bundle-store` or a files root may not lie under one |
 //! | `--mount-root-ro <name>=<path>` | like `--mount-root`, in the same namespace of names, but a start with a read-write mount from it is refused (`invalid-mount`; a job start's, `input-not-allowed`) and nothing is created; it may be on the scratch root's file system under `--scratch-quota`; the `st_dev` comparison sees a root's own device only, not a scratch device mounted below a root (a submount a recursive bind brings along), so the operator must guarantee there is none; on a Mac it is a read deny of every run as `--mount-root` is, and a read-write mount whose canonical path lies beneath it is refused `input-not-allowed` |
@@ -83,10 +83,10 @@
 //! | `--scratch-abandon-limit <n>` | the slots the agent may give up on (see `--scratch-usage-wait-secs`) over its life under `--scratch-quota`; a run that ends well does not take one back; at the limit no run starts (each start is refused `quota-unavailable`) and the finding `quota-unhealthy` repeats every minute until the agent is restarted, so the operator must watch `quota-usage-abandoned` and look for files held open on the scratch volume; from 1, default 8; needs `--scratch-quota` |
 //! | `--job-tmp-gib <n>` | the GiB of each contained job's `/tmp` and `/var/tmp` with the crun runtime: a directory of the job's own (`.tmp-<lease>` beside the run's directory in the scratch root, its `tmp` bound at `/tmp` and its `var-tmp` at `/var/tmp`, `noexec`, `nosuid`, `nodev`, and `TMPDIR=/tmp`, which a job may not set), on the scratch disk, not in memory, bounded by an XFS project quota of its own (an id per slot, apart from the run's scratch project), so a job that writes more is refused `ENOSPC` and never fills the disk; the directory is removed with the run's. The bytes are not booked from the disk the host offers. With or without `--scratch-quota`: a crun agent whose scratch root cannot enforce a project quota (XFS mounted without `prjquota`) says so at start, reports `quota-unhealthy` every minute and refuses every start `quota-unavailable` until a probe passes. From 1 to 65535, default 1; a Linux host only |
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
-//! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required unless `--no-jobs` |
+//! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required unless `--no-jobs`. On a Mac whose scratch root is on the `--state-root`'s file system (as after a boot), the start first mounts the scratch volume the update hook made (`js-agent-scratch`, in the Data volume's container) on it, or ends saying why (see [`lifecycle::scratch_volume`]) |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. With the native runtime (a Mac, which has no tmpfs) the root is used only when the flag is given, is made `0711`, and is not checked for a tmpfs: the files are on disk unless the flag points at a RAM-backed volume; each run's directory and files are given to the run's user (`0500`, files `0400`) before its program starts, its profile denies writes there, and `JS_FILES_DIR` names it. It may not be, hold or lie in the state, scratch or a mount root, the homes of the native users, or a path native runs may not read. Not with `--no-jobs` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs, with `--allow-container-engine` (Linux build only; without `--allow-container-engine` it is refused, since the runtime is then `crun`, which takes no engine flag); never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on the crun runtime, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
-//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it the macOS build runs native jobs, each as a user the helper lends from its pool for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS build only, and required there unless `--no-jobs`; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts each run the lease journal in the state root recorded (the helper's `watch` finds it again) and ends the rest, as the rescue of an agent whose worker died does; the helper holds a deadline of each run's own, its wall limit plus `--stop-grace`, and ends it there while no agent runs (a helper from before that deadline holds none, and a run on it is bounded only while an agent runs); the silence bound (`--silence-stop`) is the agent's alone; the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
+//! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it the macOS build runs native jobs, each as a user the helper lends from its pool for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS build only, and required there unless `--no-jobs`; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts each run the lease journal in the state root recorded (the helper's `watch` finds it again) and ends the rest, as the rescue of an agent whose worker died does; the helper holds a deadline of each run's own, its wall limit plus `--stop-grace`, and ends it there while no agent runs (a helper from before that deadline holds none, and a run on it is bounded only while an agent runs); the silence bound (`--silence-stop`) is the agent's alone; the profile denies creating POSIX shared memory, but not System V shared memory, semaphores or message queues (which the helper's reset removes) nor POSIX named semaphores, and the helper reuses uids, so a named semaphore a run leaves can be opened by a later run that gets the same uid, until the Mac restarts; after each run the agent judges the helper's leak scan (see [`leak_scan`]) |
 //! | `--native-homes <path>` | (macOS build only) the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
 //! | `--native-network <level>` | (macOS build only) the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every run of the Mac); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-helper-socket` |
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | (macOS build only) the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
@@ -125,7 +125,7 @@
 //! | `--gpu-env <name>=<value>` | (Linux build only) a variable set in a `crun` GPU job's environment, over the image's of that name, such as the library path; repeatable; the name `[A-Z_][A-Z0-9_]*`, not starting with `JS_`, given once; needs `--gpu-device` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci, for a job's image and its image layers; the container engine pulls as `--container-pull` says and do not read it. `--image-allow-loopback <127.0.0.1:port/prefix>` (or `[::1]:port/prefix`) is an entry for a registry on the host's own loopback, pulled over plain http; repeatable, the crun runtime only, and a host that is not a loopback address or an entry without a port is refused at start. A Mac agent with `--bundle-store` also reads it: a start named by its image must be on an entry or it is refused `image-not-allowed`, and `--bundle-pull missing` fetches by it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; not with `--no-jobs` |
-//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; not with `--no-jobs` |
+//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; also the longest a stop asked to hand the runs over waits for the starts, stops and post-job checks under way (see [`lifecycle::handover`]); not with `--no-jobs` |
 //! | `--settle-ms <milliseconds>` | (Linux build only) how long the agent lets the host settle before it counts what it sees against a job: a process of a job's user is a job's leftover (`process-as-job-user`) only when it is still there this long after the check first saw it (the processes and mounts the host adds of its own are logged, not judged), and a running run whose control group the runtime cannot name taints the host as unchecked (`cgroup-not-found`, which clears itself) only when it is still so this long after the first step that saw it and its container's first process then runs in another group; a host's own short-lived processes and mounts at the moment a job ends, a container not made yet, and a container read as running after it exited and its group was removed, are neither. By default 1000, from 1 to 60000; not with `--no-jobs` |
 //! | `--taint-recheck-ms <milliseconds>` | (Linux build only) how long the agent waits between the re-checks of a taint it may clear itself: a taint that a check judged (`residue` of a process of a job's user, `process-as-job-user`, or `unchecked` for the process table the check could not read, or for a run whose container group was not found, `cgroup-not-found`) is re-checked while no run is held, and so is a marker an older agent wrote for a check that no longer taints (`daemonised-child`, `new-mount`, `user-changed`, `group-changed`, `kernel-module-changed`, `watch-dir-changed`: a re-check of it passes unless a job's process is left), and ends after two clean re-checks this far apart and the server's acknowledgement of the clear; the marker is then kept as `taint.json.cleared-<unix seconds>` and the clear is logged (`taint-cleared`). A process still there keeps the host tainted. A residue of a post-job check read from the marker when the agent starts is re-checked too, with one rule that needs no baseline (a process of the job users' range is a finding even if the restart baseline holds it; one whose parent is `init` in a control group a job can be in is only noted); any other taint read from the marker stays. `cleanup-failed`, `check-owed`, `host-job` and an unreadable marker are never cleared by the agent. What a re-check notes (a change of mounts, users, groups, modules or a watched directory) is logged and does not fail it. By default 60000, from 1 to 3600000; not with `--no-jobs` |
 //! | `--silence-stop <seconds>` | how long the agent runs its jobs while it hears nothing from the server (contact is a welcome or a heartbeat reply it accepted, one its worker had no room for included, counted on the agent's monotonic clock from the last of them, or from the agent's start before the first): then it stops every job it holds as a stop from the server would (SIGTERM, the stop grace, the kill; a native run through the helper's `stop`, or killed at once by a helper from before it), retires each job's fence (job id and allocation id, in the state root before the stop is reported, so a start of it never runs again here, after a restart too) and reports each `killed` with the detail `silence-stop`; once for each silence. By default 300 (twenty times the server's default grace of 15 s, and more than the 140 s a server restart costs a well agent beside the restart's own time: one heartbeat interval, the 120 s cap on `Retry-After` and the old session's grace), from 1 to 7200; no value turns the stop off. It must be above the stop grace plus the server's default grace (status 2 at start otherwise: a `--stop-grace` of 285 or more needs a longer `--silence-stop`), and a welcome whose grace plus the stop grace is not below it ends the agent (status 1, naming the flag). It runs only while the agent runs: a native run is bounded while no agent does only by the deadline the helper holds for it (`--native-helper-socket`). Not with `--no-jobs` |
@@ -246,6 +246,15 @@
 //! is not acknowledged is never dropped: its run stays listed, and a container that is
 //! still there is adopted by the next process.
 //!
+//! A stop that finds the handover file in the state root (the update hook writes it just
+//! before it stops the agent to restart it on another release) does not drain, in an agent
+//! with jobs: it takes no new job and announces `draining`, waits until no start, stop or
+//! post-job check is under way (at most `--drain-wait`), and exits 0 leaving every run as it
+//! is for the next process to adopt (see [`lifecycle::handover`] and [`drive`]). Under an
+//! egress ceiling each run keeps its network wiring and its firewall rules throughout, and
+//! the next process takes the wiring over from the run's record in the egress store (the
+//! state root's `egress` directory). An agent removes a handover file it finds at its start.
+//!
 //! # A whole-node lease
 //!
 //! A session given a [`Quiesce`] ([`Session::with_quiesce`]) follows the `exclusive` lease a
@@ -324,8 +333,10 @@ pub mod host_ports;
 mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
+pub mod in_place;
 pub mod integrity;
 mod jobs;
+pub mod leak_scan;
 pub mod lifecycle;
 mod login;
 pub mod logs;
@@ -343,7 +354,10 @@ mod registry_credentials;
 mod run;
 mod session;
 mod signals;
+#[cfg(target_os = "linux")]
+pub mod start_refused;
 mod system;
+pub mod systemd;
 #[cfg(test)]
 mod test_tracing;
 mod transport;
@@ -351,13 +365,14 @@ mod trusted_file;
 pub mod update_hook;
 pub mod usage;
 pub mod vm;
+mod warnings;
 mod worker;
 pub mod xcode;
 
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -397,9 +412,9 @@ pub use signals::SystemSleeper;
 pub use system::{Backend, Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
-    STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, WorkerHost,
-    stall_bound,
+    Delivery, Handle, LINES_CAP, LeaseAnswers, Parked, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX,
+    Rescue, STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker,
+    WorkerHost, stall_bound,
 };
 
 /// The exit statuses of `js-agent`.
@@ -462,6 +477,8 @@ pub struct Services<'a> {
     /// The user a `--registry-credentials` file must be owned by: root (0) outside a test,
     /// which cannot make a root-owned file.
     pub secret_owner: u32,
+    /// Where a Mac's Xcodes are and whose they must be: [`xcode::Site::system`] outside a test.
+    pub xcode_site: xcode::Site<'a>,
 }
 
 /// Why the program ends without a stop request.
@@ -476,13 +493,11 @@ enum Failure {
     Worker(String),
 }
 
-/// The program, with the machine's own services.
-///
-/// A helper container of the OCI runner runs this binary as `<binary> <mode> <arguments>`
-/// (descriptor-relative ownership changes, and the unpack of an image's layers). Such a
-/// start is answered before anything else, so the flags are never parsed and no signal
-/// handler is installed: the mode words are the runner's default
-/// `HelperModes`, the value the runner is configured with (`js_contain::oci::helper`). Only Linux runs containers.
+/// The program, with the machine's own services. A helper container of the OCI runner runs
+/// this binary as `<binary> <mode> <arguments>` (ownership changes, the unpack of an image's
+/// layers), answered first: no flag is parsed, no signal handler installed (the mode words are
+/// the runner's default `HelperModes`, `js_contain::oci::helper`; only Linux runs containers).
+/// Every other start writes the agent's warnings to standard error (the module `warnings`).
 pub fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if let Some(code) =
@@ -490,6 +505,7 @@ pub fn main() -> ExitCode {
     {
         return ExitCode::from(code);
     }
+    warnings::install();
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     main_with(
         &SystemSleeper::install,
@@ -537,6 +553,10 @@ pub fn main_with(
         };
         return gpu_dropin::run(&args, out, err, &host);
     }
+    #[cfg(target_os = "linux")]
+    if let Some(code) = start_refused::dispatch(&args, out, err) {
+        return code;
+    }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
     // step of another program, and installs no signal handler. hostkeeper runs an update step as
     // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
@@ -554,7 +574,7 @@ pub fn main_with(
     {
         return cordon::run_system(install, &args, out, err);
     }
-    match install() {
+    match install().and_then(|sleeper| sleeper.replace_on_hangup().map(|()| sleeper)) {
         Err(why) => fail(err, &why, exit::FAILED),
         Ok(mut sleeper) => {
             let services = &mut Services {
@@ -573,70 +593,55 @@ pub fn main_with(
                 euid: rustix::process::geteuid().as_raw(),
                 ancestors_floor: Path::new("/"),
                 secret_owner: 0,
+                xcode_site: xcode::Site::system(),
             };
             run_with(args, out, err, services)
         }
     }
 }
 
-/// How the transport first proves who it is: the host's certificate and key when
-/// `--host-cert` and `--host-key` are given (then no `--token-file` is needed, the token file
-/// and the host credential file are not read, and no bearer is sent), and otherwise
-/// [`bearer_file`].
-///
-/// # Errors
-///
-/// Whatever [`bearer_file`] refuses, when no host certificate is given.
-fn login(cli: &Cli) -> Result<Login, Failure> {
-    match Login::host_certificate(cli.host_cert.as_deref(), cli.host_key.as_deref()) {
-        Some(login) => Ok(login),
-        None => bearer_file(cli).map(Login::Token),
-    }
-}
-
-/// The file the transport first reads its bearer from: `--token-file` when given, and
-/// otherwise the host credential file of `--state-root`, which has the same form (one run
-/// of printable ASCII, owner-only). The agent adopts the credential from the same file
-/// again below, so a file that is there and not a credential stops it either way.
-///
-/// # Errors
-///
-/// [`Failure::Usage`] naming `--token-file` when there is neither, and the path of the
-/// credential file when it is there and cannot be used.
-fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
-    if let Some(token_file) = &cli.token_file {
-        return Ok(token_file.clone());
-    }
-    let kept = match &cli.state_root {
-        Some(root) => {
-            let file = CredentialFile::in_dir(root);
-            file.load().map_err(Failure::Usage)?.map(|_| file.path())
-        }
-        None => None,
-    };
-    kept.ok_or_else(|| {
-        Failure::Usage(
-            "--token-file: required unless --state-root holds a host credential".to_owned(),
-        )
-    })
-}
-
-/// Runs the agent on `args` (the program name first) until it is stopped or refused.
+/// Runs the agent on `args` (the program name first) until it is stopped or refused. After a
+/// handover in place (see `in_place`) it runs `args[0]` again over this process.
 pub fn run_with(
     args: Vec<OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> ExitCode {
-    let result = execute(args, err, services);
-    finish(result, out, err)
+    run_with_exec(args, out, err, services, &in_place::exec)
+}
+
+/// [`run_with`], with the program that runs the command line again after a handover in place
+/// given (it returns only when it failed), so a test can end the run in that way.
+pub fn run_with_exec(
+    args: Vec<OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: &mut Services<'_>,
+    exec: &dyn Fn(&[OsString]) -> std::io::Error,
+) -> ExitCode {
+    let original = args.clone();
+    match execute(args, err, services) {
+        Ok(Ended::Replaced) if services.sleeper.ready_to_run_again() => {
+            in_place::run_again(&original, exec, err)
+        }
+        result => finish(result.map(|_| ()), out, err),
+    }
+}
+
+/// How the agent ended without a failure.
+enum Ended {
+    /// A stop request: the host announced it, or drained.
+    Stopped,
+    /// A replace request handed the runs over: the command line runs again over this process.
+    Replaced,
 }
 
 fn execute(
     args: Vec<OsString>,
     err: &mut dyn Write,
     services: &mut Services<'_>,
-) -> Result<(), Failure> {
+) -> Result<Ended, Failure> {
     // `--flags-file PATH` is replaced by the file's words before anything else reads the
     // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
     let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
@@ -658,16 +663,16 @@ fn execute(
     let image_allow =
         platform::image_allow(&cli, &credentials).map_err(|why| Failure::Usage(why.to_string()))?;
     let ca_cert = cli.ca_cert.as_deref();
-    let login = login(&cli)?;
+    let login = login::login(&cli)?;
     let mut transport = services
         .connector
         .connect(&cli.server, &login, ca_cert)
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    // The bundle flags are checked before the host registers, so a store that cannot work
-    // stops the agent now and not at the first job.
+    // Checked before registering: a bad store stops the agent now. A Mac mounts its volume first.
     let host = &services.bundle;
+    platform::mount_scratch(&cli, services)?;
     let bundle = BundleSettings::from_cli(&cli, platform, &**host).map_err(Failure::Usage)?;
     let bundle = bundle.map(|settings| settings.with_credentials(credentials.clone()));
     // The runtime's checks that come before the host is described (a macOS build's bundle
@@ -678,8 +683,9 @@ fn execute(
         host: &**host,
         long_values: services.long_bundle_values,
     });
+    let site = services.xcode_site;
     let mut offer =
-        offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;
+        offer(&cli, platform, commands, files, site, version, store).map_err(Failure::Usage)?;
     // A host that authenticates by its own certificate is issued no host credential, and
     // says it keeps none.
     let by_identity = matches!(login, Login::HostCertificate(_));
@@ -855,8 +861,31 @@ fn execute(
         bundle: bundle.map(|settings| Admission::new(settings, host.clone())),
         quota: scratch_quota,
     };
+    // A stop asked to hand the runs over to the next process (see `lifecycle::handover`)
+    // leaves them as they are, their egress wiring included, for that process to adopt.
+    let handover_root = held_root.clone();
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
+    // A handover file is a request to the process running when it was written: one left
+    // there (by an update step that was killed) is removed once the runs are adopted, so this
+    // process's stop drains unless the next request is made of it.
+    let leftover = held_root.as_ref().filter(|_| jobs.is_some());
+    match leftover.map(|root| lifecycle::handover::remove(root.path())) {
+        Some(Ok(true)) => {
+            let _ = writeln!(
+                err,
+                "js-agent: removed a handover file left by an earlier stop"
+            );
+        }
+        Some(Err(why)) => {
+            let _ = writeln!(
+                err,
+                "js-agent: warning: a handover file left by an earlier stop cannot be removed \
+                 ({why}): a stop of this process may hand its runs over instead of draining"
+            );
+        }
+        Some(Ok(false)) | None => {}
+    }
     // The session asks the worker about a whole-node lease; the worker answers on its own
     // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
     let mut host = jobs
@@ -877,6 +906,7 @@ fn execute(
             .with_jobs(worker, *drain)
             .with_usage(outbox.clone())
             .with_dispatch(&cell);
+        session = session.with_handover(handover_root.as_ref().map(StateRoot::path));
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
@@ -939,7 +969,8 @@ fn execute(
         exit
     });
     match exit {
-        Exit::Stopped => Ok(()),
+        Exit::Stopped => Ok(Ended::Stopped),
+        Exit::Replaced => Ok(Ended::Replaced),
         Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         Exit::Failed(why) => Err(Failure::Worker(why)),
     }

@@ -216,7 +216,9 @@ impl Program {
         self
     }
 
-    /// Sets the user id the program runs as (`CommandExt::uid`).
+    /// Sets the user id the program runs as (`CommandExt::uid`). When the caller is root,
+    /// std then calls `setgroups(0)`, which macOS turns into group 0 (`wheel`): nothing that
+    /// starts a program as a lease user uses it; they drop with the steps of `crate::spawn`.
     pub fn uid(&mut self, id: u32) -> &mut Self {
         std::os::unix::process::CommandExt::uid(&mut self.command, id);
         self
@@ -289,6 +291,14 @@ pub fn exec(program: &OsStr, args: &[OsString]) -> io::Error {
         Ok((plan, attributes)) => darwin::exec(&plan, &attributes),
         Err(why) => why,
     }
+}
+
+/// Executes `program` with `args` in this process's place, in its environment, as `execvp`
+/// does: off macOS there is no responsibility to disclaim. Returns only when it could not.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn exec(program: &OsStr, args: &[OsString]) -> io::Error {
+    Command::new(program).args(args).exec()
 }
 
 /// The pid of the process that `pid` answers to for the privacy controls: its own pid

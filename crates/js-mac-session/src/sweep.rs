@@ -69,7 +69,7 @@ impl SweepPlan {
     /// macOS's other places besides the home folder (which the helper adds from where
     /// it made it) and the uid's own entry under `/private/var/folders` (which the
     /// helper names from the uid's `DARWIN_USER_DIR` and removes whole with
-    /// [`remove_owned`]): launchd's per-uid overrides and login items, the shared user
+    /// [`remove_owned`], or empties and keeps where the system placed it): launchd's per-uid overrides and login items, the shared user
     /// folder and the temporary folders.
     #[must_use]
     pub fn macos() -> Self {
@@ -394,7 +394,34 @@ pub fn path_is_protected(path: &Path) -> bool {
 /// root, and it cannot open the entry `name` of `dir`. Not short-circuited: the three are
 /// read together.
 fn skippable(why: &io::Error, dir: &OwnedFd, name: &OsStr) -> bool {
-    refused(why) & !rustix::process::geteuid().is_root() & cannot_open(dir, name)
+    refused(why) & !euid_is_root() & cannot_open(dir, name)
+}
+
+/// Whether this process is root.
+#[cfg(target_os = "macos")]
+fn euid_is_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// Whether this process is root, or a test on this thread said it is ([`pretend_root`]),
+/// to see off macOS what the sweep does as the root helper does.
+#[cfg(not(target_os = "macos"))]
+fn euid_is_root() -> bool {
+    PRETEND_ROOT.get() || rustix::process::geteuid().is_root()
+}
+
+#[cfg(not(target_os = "macos"))]
+thread_local! {
+    /// Whether a test on this thread says the process is root.
+    static PRETEND_ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// For tests off macOS: from now on this thread's sweeps behave as root's (or, with
+/// `false`, as they are).
+#[cfg(not(target_os = "macos"))]
+#[doc(hidden)]
+pub fn pretend_root(root: bool) {
+    PRETEND_ROOT.set(root);
 }
 
 /// `result`, with a refusal of the system taken as a success for the entry `name` of `dir`
@@ -551,8 +578,9 @@ fn remove_present(
         return Ok(());
     }
     match rmdir_at(dir, name) {
-        // The system refuses the pool user the removal of this directory (a folder it keeps
-        // in the home, such as `Library/Preferences`): kept while it is empty, which it is
+        // The system refuses the removal of this directory, to the pool user and to root
+        // alike (a folder it guards in the home, such as `Library/Preferences`, which root
+        // without Full Disk Access is refused too): kept while it is empty, which it is
         // here, unless something was made in it since.
         Err(Errno::PERM) if keepable(&child)? => {
             warn_once(here);
@@ -579,6 +607,17 @@ const KEEP_XATTR: &str = "user.kbf.rootless";
 fn scrub_kept(dir: &OwnedFd) -> io::Result<()> {
     clear_root(dir)?;
     strip_xattrs_except(dir, KEEP_XATTR)
+}
+
+/// Gives a home that stays (emptied, never removed) back as the system makes one: its user
+/// flags cleared, its ACL removed and its extended attributes but [`KEEP_XATTR`]
+/// stripped, as for any directory the sweep keeps.
+///
+/// # Errors
+/// A refusal to clear the flags or the ACL, or to list or remove an attribute.
+pub(crate) fn scrub_home(dir: &OwnedFd) -> io::Result<()> {
+    scrub_kept(dir)?;
+    crate::xattr::clear_acl(dir)
 }
 
 /// The names of `names` that [`strip_xattrs_except`] removes: all but `keep`.
@@ -613,11 +652,12 @@ fn strip_named(
     Ok(())
 }
 
-/// Whether a directory the system refused to remove is kept: the process is not root, and
-/// the directory is empty (nothing was made in it since).
+/// Whether a directory the system refused to remove is kept: it is empty (nothing was made
+/// in it since). Whoever runs the sweep, root included: macOS refuses root the removal of
+/// an account's `~/Library/Preferences`, which only a process with Full Disk Access may
+/// remove, and a directory with something in it that stays is still an error.
 fn keepable(child: &OwnedFd) -> io::Result<bool> {
-    let not_root = !rustix::process::geteuid().is_root();
-    Ok(not_root & listed(child)?.is_empty())
+    Ok(listed(child)?.is_empty())
 }
 
 /// Removes the empty directory `name` of `dir`.
@@ -856,12 +896,13 @@ pub(crate) fn placed(flags: u32, rootless: bool) -> bool {
 }
 
 /// Whether the directory `name` of `dir`, examined as `stat`, was placed by the system
-/// (see [`placed`]) below a folder it keeps: neither its flags nor its ACL are the pool
-/// user's to change, and it is never removed; what is in it is the lease's, and goes. Only
-/// for a process that is not root, like the pool user's own sweeps.
+/// (see [`placed`]): its system flags are no process's to change, root's included (with SIP
+/// on, macOS refuses root the removal of a directory that carries `sunlnk`, as it does the
+/// per-user folders' `<xx>/<hash>` entries and their `0`, `C`, `T` and `X`), and it is never
+/// removed; what is in it is the lease's, and goes. The same for root (the helper) as for the
+/// pool user's own sweeps.
 fn is_placed(dir: &OwnedFd, name: &OsStr, stat: &Stat) -> bool {
-    let not_root = !rustix::process::geteuid().is_root();
-    not_root & is_dir(stat) & system_placed(dir, name, stat)
+    is_dir(stat) & system_placed(dir, name, stat)
 }
 
 #[cfg(target_os = "macos")]

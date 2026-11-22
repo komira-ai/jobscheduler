@@ -77,6 +77,6 @@ pub use network::{JobNetwork, PortMap, UnknownJobNetwork};
 pub use queue::{JobEventKind, QueueCode, QueueNote};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
-pub use shape::{Capabilities, Shape};
+pub use shape::{Capabilities, Shape, os_major};
 pub use size_class::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL, SizeClass};
 pub use start::{RefusalCode, StartSpec};

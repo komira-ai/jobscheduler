@@ -116,8 +116,11 @@ holds the container's output and, when the container ends, writes how it ended t
 the lease's directory. The unit's `KillMode=process` lets systemd kill only the agent's main
 process, on a stop and after a crash, so the supervisors and the containers outlive the agent.
 
-- **A stop** (`systemctl stop`, an update) still drains: the agent lets its jobs run for up to
+- **A plain stop** (`systemctl stop`) drains: the agent lets its jobs run for up to
   `--drain-wait` seconds, stops them within `--stop-grace`, reports, and exits.
+- **An update** hands the jobs over instead (see "Agent updates while jobs run" below): the agent
+  hands over in place, or exits within seconds, leaving every job running, and the new agent takes
+  them over as after a crash.
 - **A crash** leaves the jobs running. When `Restart=always` starts the agent again, it reads its
   ledger and takes over (adopts) each container its record holds, then lists those jobs in its
   first heartbeat. A job that ended while no agent ran is reported with the code and output tail
@@ -128,10 +131,119 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **A job's wall limit** counts the time the job ran with no agent, but only a running agent stops
   a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
   its result says it timed out.
-- **An agent with an allow-list `--egress`** takes over no container that may still run: its
-  start removes every network wiring an earlier process made, so it removes those containers
-  instead, and their jobs are lost. A container that ended while no agent ran has no network
-  left: it is taken over and its result reported, as above.
+- **An agent with an `--egress` ceiling** (`allow-list` or `open`) takes over a container's
+  network wiring with the container. The agent keeps one record per wired run in the egress
+  store, the directory `egress` of its state root (`/var/lib/js-agent/state/egress`), written
+  when it wires the run and removed when it takes the wiring down: the run's address block, its
+  level and its declared ports. The stopping agent leaves each run's veth pair, set member and
+  port forwards in place, and the records with them, so the kernel's rules enforce with no agent
+  running. The next agent's start reads the records, loads the firewall in one transaction that
+  puts each recorded run's member and forwards back (so the job's egress holds before, during
+  and after the restart), and then takes over each run from its record after comparing the
+  level and ports in it with those the container's labels (`jobscheduler.dev/network`,
+  `jobscheduler.dev/network-ports`) give. It removes the wiring and the record of every run no
+  one took over, any record it cannot read or use, and any `jsv`/`jsp` interface no record
+  names. A container that does not fit (no network label, no record or a record that differs, a
+  level above the agent's ceiling, a port the ceiling does not list, or an agent with no ceiling
+  and a container wired at a level above none) is removed and its job lost, as any container the
+  agent cannot take over. A container that ended while no agent ran has no network left: it is
+  taken over and its result reported, as above. What is not handed over: the host-port relay
+  connections (`--host-port`) the agent process itself carries end with it, and the next agent
+  offers them again.
+
+## Agent updates while jobs run
+
+An agent update does not wait for the node to be idle, and it stops no job. hostkeeper runs the
+update hook's steps; on a crun node they go like this:
+
+1. `prepare` checks the new release and records that this update hands the jobs over. It places
+   no cordon and waits for nothing: the node keeps taking work.
+2. `cutover` writes the file `handover` in the agent's state root (`/var/lib/js-agent/state`) and
+   then either signals the agent (in place) or stops the unit.
+   - In place (the running and the new agent both list `in-place` on the `stops:` line of
+     `js-agent --version`): the hook sends SIGHUP to the unit's main process
+     (`systemctl kill --kill-whom=main --signal=SIGHUP -- js-agent-crun.service`). The agent
+     reads the file, takes no new job and says `draining` to the server, waits until no job is
+     being started (an image still being pulled counts), no job is being stopped and no finished
+     job's cleanup and post-job checks are under way, hands the jobs over, and runs the program at
+     its path (`/usr/bin/js-agent`, which the package replaced) again with its own arguments, as
+     the same process. The unit is not stopped and not started, so systemd places no process in
+     it. The new program takes the jobs over and removes the file at its start; the hook waits
+     for that. A unit that is no longer active meanwhile (the agent ended instead of running
+     again) is started as below. A request not taken in the cutover's stop bound fails the step
+     (`stop_failed`, class environment, the file left for the agent).
+   - By stop and start: the agent reads the file when the stop reaches it, does the same, and
+     exits, leaving every running job as it is; that takes seconds. The hook removes the file
+     and starts the unit on the new release.
+3. The new agent takes over (adopts) every job, as after a crash, and lists them in its first
+   heartbeat. A job that ended in the gap is reported from its `exit.json`, once. A job's result
+   that the old agent had not had acknowledged is kept in the state root and sent by the new
+   agent, once. Its first hello waits until the server stops counting the old session as live
+   (the pool's grace, 15 s by default), so the node takes no new job for that long; the jobs
+   that run are not touched by it.
+4. `verify` waits for the new agent's hello, and `cleanup` ends the update. A `rollback` hands
+   the jobs back to the previous agent the same way: no drain, the request file, and a signal
+   (or a stop and a start). If the previous agent's unit then does not start, the report says
+   that the previous release is installed again but its agent is not running, and the host runs
+   no agent until the unit starts. A cutover whose start fails says the same of the staged
+   release.
+
+The update hands over only when all of these hold; otherwise it drains as before (cordon, wait
+for no lease, stop):
+
+- the runtime is crun and the unit manager systemd;
+- the new release's unit is the same as the installed one (a changed unit must start from an
+  empty cgroup, which a running job keeps busy);
+- on a host whose flags file sets `--egress allow-list` or `open`, both the running agent (which
+  leaves the wiring in place) and the new release's agent (which adopts it) list
+  `egress-handover` on the `stops:` line of `js-agent --version`; a host whose flags file cannot be
+  read is treated as having a ceiling. An `--egress` given only on the unit's command line is not
+  seen by the hook, and such an agent does not read the file: it drains, and its jobs are
+  stopped once `--drain-wait` has passed;
+- the running agent can hand over: `js-agent --version` prints `stops: drain handover` (and
+  `egress-handover`, as above). The first update from a release without that line still drains;
+- the hand-over is made in place, or the host's systemd is older than 258: both the running and
+  the new agent list `in-place` on the `stops:` line, or `systemctl --version` prints a version
+  below 258. A systemd of 258 or newer (or one whose version cannot be read) starts a service's
+  first process in the unit's own cgroup, which the jobs a stop leaves keep from taking one (see
+  below), so an update that would stop and start the unit drains instead, and its detail says
+  why.
+
+What does not survive the restart's few seconds: a job's `--host-port` listeners, and the
+connections open through them, are the agent's and end with it; they are down until the new
+agent offers the ports again (a job that took the port itself meanwhile is stopped, its result
+`host-port-lost`). The CPU and memory use of a job taken over is no longer sampled.
+
+The maintenance `drain` step (an OS update or a reboot) is not an agent update: it still cordons
+the node and waits until no job runs.
+
+### A start refused while jobs are left (systemd 258 or newer)
+
+Since systemd 258 a service's `ExecStart=` process is cloned straight into the unit's own cgroup
+and moved into its `DelegateSubgroup=` only after; 255 to 257 cloned it into the subgroup. The
+kernel refuses a process in a cgroup that has controllers enabled for its children, and systemd
+cannot switch the controllers off while the unit's `actions` cgroup, which holds the lease
+cgroups of the jobs, uses them. So when the agent has ended and left jobs running (after a
+hand-over by stop and start, or after a crash under `KillMode=process`), every start of
+`js-agent-crun.service` on systemd 258 or newer fails until those jobs end: the journal says
+`Failed to spawn executor: Device or resource busy` and the unit's result is `resources`. With no
+job left the start works. An update avoids this by handing over in place or by draining (above).
+
+The unit's `ExecStopPost=` step, `js-agent crun-start-refused --result ${SERVICE_RESULT}`, runs
+after such a refused start. When the result is `resources`, systemd is 258 or newer and the
+unit's cgroup has controllers enabled, it ends the jobs left (the supervisors first, then the
+lease cgroups), so that systemd can trim the cgroup and the next restart (`Restart=always`)
+starts the agent. Those jobs are lost; the server finds them lost because the new agent does not
+list them.
+
+By hand, on a node in that state: do nothing, and the unit comes back by itself within
+`RestartSec` after the last job left ends. To bring it back at once, at the cost of those jobs:
+
+```
+systemctl kill --kill-whom=all --signal=SIGKILL js-agent-crun.service
+```
+
+after which the next restart starts it.
 
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:

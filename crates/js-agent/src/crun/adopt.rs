@@ -18,10 +18,23 @@
 //!   and no init named is a run that is ending, or not yet created (`crun` deletes the
 //!   container when the job exits, and the supervisor drains the streams before it writes
 //!   its record): it is adopted, and its handle gives the end once the record is there.
-//!   With no record, the runtime must also have no egress: an allow-list egress removes every
-//!   interface and table a previous process wired when it starts, so a run that may still
-//!   run would have no network, and it is removed. A run whose record is there has ended and
-//!   has no network left: its result is taken over whatever the egress.
+//!   A run whose record is there has ended and has no network left: its result is taken over
+//!   whatever the egress.
+//! - and, for one that may still run, its network is taken over as the labels the start wrote
+//!   record it ([`label::NETWORK`], [`label::NETWORK_PORTS`]): a `none` run has nothing to take
+//!   over; a wired one (`allow-list` or `open`) needs the runtime's egress to take over the
+//!   wiring the earlier process made for its container, unchanged ([`crate::crun::EgressPort::adopt`]:
+//!   the egress store's record of the run, written when the wiring was made, must name the
+//!   level and the ports the job declared; the kernel's rules stayed in place meanwhile, and
+//!   the next process's start put the run's set member and forwards back from that record).
+//!   A runtime with an egress removes a run whose sidecar records no network (an agent that
+//!   did not record it started it, so its wiring cannot be told), and a runtime without one
+//!   removes a wired run (its ceiling is none now). A run whose record the store does not hold,
+//!   or holds with another level or ports, cannot be taken over and is removed; a run whose
+//!   `crun state` fails is taken over from its record like any other.
+//!
+//! Once the runs are adopted the egress removes what an earlier process left and no run took
+//! over ([`crate::crun::EgressPort::settle`]); a failure there fails the open.
 //!
 //! An adopted run that still stands is offered its host ports again, from the label the start
 //! recorded them in (one that is not a list of host ports fails the checks); if they cannot be
@@ -45,7 +58,9 @@
 //! Every other lease of this agent is torn down and reported with its [`Reason`]: a sidecar
 //! of version 1, one whose container never started, one that failed a check, and a lease of
 //! this agent's name that has no sidecar at all. The sidecars and leases of other agents are
-//! left alone, as they always were.
+//! left alone, as they always were. A sidecar this agent cannot read (a form it does not know,
+//! or a broken file) is left alone too, with its lease, and reported in a line of its own: its
+//! job, if it still runs, is neither taken over nor stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -58,11 +73,11 @@ use js_contain::oci::{
     ExitRecord, end_supervisor, exit_record_path, read_exit_record, recorded_supervisor,
     stderr_path, stdout_path,
 };
-use js_types::JobNetwork;
+use js_types::{JobNetwork, PortMap};
 
 use super::dirs::cgroup_dir;
 use super::ledger::{
-    Booked, Entry, Failed, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
+    Booked, Entry, Failed, Left, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
 };
 use super::spec::{adopted_spec, concluded};
 use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
@@ -237,7 +252,19 @@ pub(super) fn report_lines(report: &SweepReport) -> Vec<String> {
             lease.run_id, lease.why
         )
     });
-    adopted.chain(removed).chain(failed).collect()
+    // A sidecar this process cannot read (a form it does not know, as one a later agent wrote
+    // would be, or a broken file) names a lease it neither takes over nor removes: its job, if
+    // it still runs, goes on with no agent to bound it, and the server finds it lost. That is
+    // said, never left silent. Another agent's sidecar is that agent's.
+    let left = report.left.iter().filter_map(|left| match left {
+        Left::Malformed { path, why } => Some(format!(
+            "crun: left the lease {} alone: its sidecar cannot be read ({why}), so its job, if it \
+             still runs, is neither taken over nor stopped",
+            path.file_stem().unwrap_or_default().to_string_lossy()
+        )),
+        Left::Foreign { .. } => None,
+    });
+    adopted.chain(removed).chain(failed).chain(left).collect()
 }
 
 impl CrunRuntime {
@@ -254,6 +281,9 @@ impl CrunRuntime {
         for (name, run) in swept.adopted {
             self.images.lease(&name, &run.spec.image_digest);
             self.runs.insert(name, run);
+        }
+        if let Some(egress) = &self.egress {
+            egress.settle()?;
         }
         self.remove_unrecorded(&mut report);
         self.sweep_mounts(&mut report);
@@ -321,7 +351,8 @@ impl CrunRuntime {
     /// The record cannot be read, or the run cannot stand (`standing`).
     fn adopted(&self, entry: &Entry, fields: &Fields<'_>) -> Result<Run, Reason> {
         let host_ports = net::recorded_host_ports(&entry.labels).map_err(Reason::Inconsistent)?;
-        let mut run = self.run_of(entry, fields, host_ports);
+        let network = net::recorded_network(&entry.labels).map_err(Reason::Inconsistent)?;
+        let mut run = self.run_of(entry, fields, host_ports, network.clone());
         // The supervisor is looked at before the record: one that is gone has written its
         // record already, so a record not there then is one that never will be.
         let alive = fields.supervisor.id().alive();
@@ -336,24 +367,45 @@ impl CrunRuntime {
                 run.logs = RunLogs::adopted(Some(totals));
                 self.ended_state(&run, &record)
             }
-            // One that may still run is wired, and an egress removed the wiring of every
-            // earlier process when it started.
-            None if self.egress.is_some() => {
-                return Err(Reason::Inconsistent(
-                    "its network wiring cannot be taken over".to_owned(),
-                ));
-            }
-            // One that still stands is offered its host ports again, or marked as one that
-            // lost them, which the lifecycle stops.
+            // One that still stands keeps its network: its wiring is taken over, and it is
+            // offered its host ports again, or marked as one that lost them, which the
+            // lifecycle stops.
             None => {
                 let (state, pid) = self
                     .standing(&run, fields, alive)
                     .map_err(Reason::Inconsistent)?;
+                self.take_over(&mut run, network.as_ref())
+                    .map_err(|why| Reason::Inconsistent(format!("its network: {why}")))?;
                 run.net.offer_again(&self.host_ports.1, pid);
                 state
             }
         };
         Ok(run)
+    }
+
+    /// Takes over the network of the adopted `run`, which may still run and whose labels
+    /// record `network` (see the module documentation): by the runtime's egress for a wired
+    /// run, from the run's record in the egress store.
+    ///
+    /// # Errors
+    /// The run cannot keep its network under this runtime, or its wiring cannot be taken over.
+    fn take_over(
+        &self,
+        run: &mut Run,
+        network: Option<&(JobNetwork, Vec<PortMap>)>,
+    ) -> Result<(), String> {
+        let level = network.map(|(level, _)| *level);
+        match (self.egress.as_deref(), level) {
+            (_, Some(JobNetwork::None)) | (None, None) => Ok(()),
+            (Some(_), None) => Err(format!(
+                "no {} label records it, so its wiring cannot be told",
+                label::NETWORK
+            )),
+            (None, Some(level)) => Err(format!(
+                "it was wired at {level} and this agent's ceiling is none"
+            )),
+            (Some(egress), Some(_)) => run.net.adopt(egress, &run.spec.name),
+        }
     }
 
     /// Gives each adopted run whose lease directory holds a progress record of this agent's
@@ -401,7 +453,13 @@ impl CrunRuntime {
     /// The run of the lease `entry` records, not started or ended: the container, the
     /// lease's directories and cgroup, and the labels, as a start by this process makes
     /// them. The OOM account starts at the parent's count now.
-    fn run_of(&self, entry: &Entry, fields: &Fields<'_>, host_ports: Vec<HostPort>) -> Run {
+    fn run_of(
+        &self,
+        entry: &Entry,
+        fields: &Fields<'_>,
+        host_ports: Vec<HostPort>,
+        network: Option<(JobNetwork, Vec<PortMap>)>,
+    ) -> Run {
         let lease = self.oci.lease_dirs(&entry.name);
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, &entry.name);
         Run {
@@ -412,10 +470,13 @@ impl CrunRuntime {
             backstop: cgroup.parent_ooms().ok(),
             cgroup,
             state: State::Created,
-            // A run that may still run is adopted only by a runtime with no egress, which admits
-            // no job with a network; one that ended has no network to release. Its host ports
-            // are offered again once it is known to stand (`adopted`).
-            net: net::Net::asked(JobNetwork::None, Vec::new(), host_ports),
+            // The network its labels record (none when they record none); its wiring is taken
+            // over and its host ports offered again once it is known to stand (`adopted`). One
+            // that ended has no wiring to release.
+            net: {
+                let (level, ports) = network.unwrap_or((JobNetwork::None, Vec::new()));
+                net::Net::asked(level, ports, host_ports)
+            },
             entry: entry.clone(),
             // Its uploader, if its lease holds a progress record, comes with the runtime's live
             // logs (`resume_uploads`); the sink came only in its start.

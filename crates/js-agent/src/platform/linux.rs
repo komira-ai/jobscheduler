@@ -9,22 +9,33 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::Hello;
-
 use crate::cli::Cli;
 use crate::cli_runtime::{CliRuntime, Flags as EngineFlags, Settings, system_runner, unix_ms};
-use crate::contract::{self, ToolkitHook};
+use crate::contract::ToolkitHook;
 use crate::integrity::Integrity;
 use crate::lifecycle::CheckHook;
 use crate::lifecycle::{Local, MountProviders, Runtime};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
-use crate::{Failure, Services, crun, crun_host, disk, integrity};
+use crate::{Failure, Services, crun, crun_host, disk};
+
+mod claims;
+pub(crate) use claims::{claim, report};
 
 /// What `--version` prints after the version: the runtimes this build runs jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`): `crun`, and
-/// the container engine (`docker`, Docker or Podman) behind `--allow-container-engine`.
-pub const LONG_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\nruntimes: docker crun");
+/// the container engine (`docker`, Docker or Podman) behind `--allow-container-engine`; then the
+/// ways its stop can go: `drain`, and `handover`, which the update hook looks for in the agent
+/// it is to stop before it asks that agent to leave its runs to the next process (see
+/// [`crate::lifecycle::handover`]); and `egress-handover`, which the hook looks for in both
+/// agents of an update on a host with an egress ceiling: the one it stops leaves the runs'
+/// network wiring in place, and the one it starts adopts it; and `in-place`: SIGHUP to the main
+/// process, with a handover request in the state root, hands the runs over and runs the program
+/// again in the same process, so the unit is not stopped and systemd starts nothing.
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nruntimes: docker crun\nstops: drain handover egress-handover in-place"
+);
 
 /// The one warning of an agent that runs its jobs through the container engine.
 pub const ENGINE_WARNING: &str = "--allow-container-engine: the container engine runs this \
@@ -498,6 +509,15 @@ pub(crate) fn image_allow(
     credentials.image_allow(&cli.image_allow, &cli.os.image_allow_loopback)
 }
 
+/// Nothing to mount: a Linux build's scratch root is mounted by its unit before the agent starts.
+///
+/// # Errors
+///
+/// None; the signature is the macOS build's.
+pub(crate) fn mount_scratch(_cli: &Cli, _services: &Services<'_>) -> Result<(), Failure> {
+    Ok(())
+}
+
 /// What a Linux build checks before the host is described: nothing (its checks need the
 /// GPUs the host offers, [`check`]).
 pub(crate) struct Opened;
@@ -782,101 +802,6 @@ fn egress_of(os: &Flags, crun: bool) -> Result<crate::egress::Config, String> {
 /// None; the signature is the macOS build's.
 pub(crate) fn complete(_local: &mut Local, _cli: &Cli, _start: &Start) -> Result<(), String> {
     Ok(())
-}
-
-/// The roots a crun agent holds while it runs: the claim of its host id and of its scratch
-/// root, released when dropped.
-pub(crate) type Claims = Option<(crun::HostClaim, crun::HostClaim)>;
-
-/// What a crun agent takes before its jobs start: the image store and its claim files go in
-/// the directory above the scratch root, and one crun agent may hold each scratch root and
-/// each host id (the start-up sweep and the lease names go by them); then its egress starts,
-/// once (after the claims: an allow-list's start removes every interface and table a previous
-/// agent left, which must not be another agent's that still runs; mode none starts nothing).
-/// An agent of the engine, or one that runs no job, takes nothing.
-///
-/// # Errors
-///
-/// [`Failure::Usage`] naming the flag at fault.
-pub(crate) fn claim(
-    local: &mut Local,
-    services: &Services<'_>,
-    host_id: &str,
-) -> Result<Claims, Failure> {
-    let crun = local.backend.as_ref().and_then(|b| b.settings().crun());
-    let claims = match crun {
-        Some(plan) => {
-            // The store may be on another file system: a lease's directories (its `/work` and
-            // home) are made in the scratch root, beside the run's own directory, and the store
-            // holds only the images and the helpers' state, which no job writes.
-            crun::prepare_store(&plan.claim_dir, &plan.store).map_err(Failure::Usage)?;
-            let (dir, root) = (&plan.claim_dir, &plan.scratch_root);
-            crun::require_trusted_ancestors(root, services.euid, services.ancestors_floor)
-                .map_err(|why| Failure::Usage(format!("--scratch-root: {why}")))?;
-            let host = crun::HostClaim::take(dir, host_id);
-            let host = host.map_err(|why| Failure::Usage(why.to_string()))?;
-            let scratch = crun::HostClaim::scratch_root(dir, root);
-            Some((
-                host,
-                scratch.map_err(|why| Failure::Usage(why.to_string()))?,
-            ))
-        }
-        None => None,
-    };
-    let Local {
-        backend, egress, ..
-    } = local;
-    let plan = backend
-        .as_mut()
-        .and_then(|Backend::Container(s)| s.crun_mut());
-    if let Some(plan) = plan {
-        let started = crun::start_egress(egress, crate::egress::Egress::start);
-        let mode = egress.mode();
-        plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;
-    }
-    Ok(claims)
-}
-
-/// Puts what the agent's runtime does into `hello`, and the warnings the operator should read:
-/// the agent must see what its containers do (they run where its own `/proc` and mounts show
-/// them), and the hello names the runtime only after that holds. An agent that runs no job
-/// says nothing. `default_gib` is the scratch quota's default, when one is enforced.
-///
-/// # Errors
-///
-/// [`Failure::Usage`]: the agent does not see the host.
-pub(crate) fn report(
-    hello: &mut Hello,
-    local: &Local,
-    start: &Start,
-    services: &Services<'_>,
-    default_gib: Option<u64>,
-) -> Result<Option<Vec<String>>, Failure> {
-    let Some(settings) = local.backend.as_ref().map(Backend::settings) else {
-        return Ok(None);
-    };
-    let files = services.files;
-    let (link, read) = (|path: &str| files.link(path), |path: &str| files.read(path));
-    integrity::require_host_namespaces(&link, &read)
-        .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
-    let crun = settings.crun();
-    // A crun agent given a device list gives jobs the GPUs they book, and uploads live logs.
-    let passthrough = crun.is_some_and(|plan| plan.gpus.is_some());
-    let mut found = contract::report(
-        hello,
-        start.toolkit.as_ref(),
-        services.commands,
-        local.files.is_some(),
-        default_gib,
-        (passthrough, &local.egress.ceiling(), crun.is_some()),
-    );
-    contract::report_host_jobs(hello, local.allow_host_jobs);
-    let fuse = crate::fuse_env::probe(&|path| services.files.read(path), crate::crun::read_node);
-    found.extend(contract::report_fuse(hello, local.allow_fuse_jobs, &fuse));
-    let layered = crun.is_some_and(|plan| plan.layered);
-    contract::report_layered(hello, layered);
-    contract::report_mount_providers(hello, &local.providers, layered);
-    Ok(Some(found))
 }
 
 /// The grant a crun agent's session fills from the replies, which its live logs are uploaded

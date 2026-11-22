@@ -341,6 +341,7 @@ impl Captured {
         crate::api::rig::process_sink();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || Buffer(Arc::clone(&sink)))
             .finish();
         let scope = tracing::subscriber::set_default(subscriber);

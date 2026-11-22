@@ -599,7 +599,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
 
 /// The portable home-folder maker, on the test's own uid.
 #[test]
-fn a_home_folder_is_new_private_and_the_users() {
+fn a_home_folder_is_made_private_and_the_users() {
     let dir = scratch("make-home");
     make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
     let meta = std::fs::metadata(dir.join("kbf-lease-1-1")).unwrap();
@@ -608,10 +608,60 @@ fn a_home_folder_is_new_private_and_the_users() {
         0o700
     );
     assert_eq!(std::os::unix::fs::MetadataExt::uid(&meta), me());
-    let again = make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap_err();
-    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     std::os::unix::fs::symlink(&dir, dir.join("linked")).unwrap();
     assert!(make_home(&dir.join("linked"), "x", me(), my_gid()).is_err());
+    std::fs::write(dir.join("file"), "x").unwrap();
+    assert!(make_home(&dir, "file", me(), my_gid()).is_err());
+    assert!(make_home(&dir, "no/such", me(), my_gid()).is_err());
+}
+
+/// Catches a home that is refused when it is there already, or that comes back with the
+/// mode a lease left: a home that exists is kept (the same folder, never removed and
+/// made again, which macOS refuses in `/Users`), given back mode 0700 and the user's, and
+/// what is in it stays for the caller to have emptied.
+#[test]
+fn a_home_folder_that_is_there_is_kept_and_given_back() {
+    let dir = scratch("keep-home");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let home = dir.join("kbf-lease-1-1");
+    std::fs::write(home.join("left"), "x").unwrap();
+    std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&home).unwrap());
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let meta = std::fs::metadata(&home).unwrap();
+    assert_eq!(std::os::unix::fs::MetadataExt::ino(&meta), before);
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
+        0o700
+    );
+    assert!(home.join("left").exists());
+}
+
+/// Catches an ACL a lease put on a home that stays: after the home is made again it has no
+/// access control entry (the real `ls -le` and `chmod +a` of the Mac).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_that_is_there_loses_its_acl() {
+    let dir = scratch("home-acl");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    let home = dir.join("kbf-lease-1-1");
+    let chmod = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow list"])
+        .arg(&home)
+        .status()
+        .unwrap();
+    assert!(chmod.success());
+    let listing = |path: &std::path::Path| {
+        let out = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().lines().count()
+    };
+    assert_eq!(listing(&home), 2, "the ACL is set");
+    make_home(&dir, "kbf-lease-1-1", me(), my_gid()).unwrap();
+    assert_eq!(listing(&home), 1, "the ACL is gone");
 }
 
 /// Catches the race of issue #195: a process of the uid (a cron job) that starts after
@@ -826,6 +876,7 @@ fn a_gui_run_waits_for_the_lease_user_s_gui_domain() {
 fn readiness_answer(code: Option<i32>, stderr: &str) -> io::Result<bool> {
     launchctl_print_answer(&PrintAnswer {
         code,
+        stdout: String::new(),
         stderr: stderr.to_owned(),
     })
 }

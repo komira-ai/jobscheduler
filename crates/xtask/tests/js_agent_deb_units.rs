@@ -29,9 +29,8 @@ const FLAGS: &str = "/etc/js-agent/flags";
 const TOKEN: &str = "/etc/js-agent/token";
 /// The route's address the unit gives `--health-listen`: the release manifest's `healthUrl` names it.
 const HEALTH: &str = "127.0.0.1:7311";
-/// Where the package installs the units and the tmpfiles file.
+/// Where the package installs the unit.
 const INSTALLED_UNIT: &str = "/usr/lib/systemd/system/js-agent-crun.service";
-const INSTALLED_TMPFILES: &str = "/usr/lib/tmpfiles.d/js-agent-crun.conf";
 /// The cutover bound of the hook manifest (`cargo xtask release desired`, `timeoutSecs.cutover`).
 const CUTOVER_SECS: u64 = 4320;
 /// The flags file of a host, as an operator writes it.
@@ -91,11 +90,11 @@ fn unit_value(unit: &str, section: &str, key: &str) -> String {
     found[0].clone()
 }
 
-/// The assignments of `unit` other than `ExecStart` and `ExecStartPre`.
+/// The assignments of `unit` other than `ExecStart` and `ExecStopPost`.
 fn rest(unit: &str) -> Vec<(String, String, String)> {
     assignments(unit)
         .into_iter()
-        .filter(|(_, key, _)| key != "ExecStart" && key != "ExecStartPre")
+        .filter(|(_, key, _)| key != "ExecStart" && key != "ExecStopPost")
         .collect()
 }
 
@@ -216,12 +215,12 @@ fn no_file_of_the_package_sets_the_environment_or_holds_token_text() {
 
 /// The unit is the farm unit of the setup script with the program at `/usr/bin/js-agent`, the
 /// server and pool read from the flags file, the loopback health route the release manifest's
-/// `healthUrl` names, and the tmpfiles file at the package's path.
+/// `healthUrl` names, and the `ExecStopPost` with the package's program and the farm's arguments.
 ///
 /// Catches a setting that drifted between the two (a Delegate, a KillMode or a stop bound that
 /// one has and the other lacks), which the farm unit's own tests pin for the farm unit only.
 #[test]
-fn the_unit_equals_the_farm_unit_except_program_flags_file_health_route_and_tmpfiles_path() {
+fn the_unit_equals_the_farm_unit_except_program_flags_file_health_route_and_stop_post_program() {
     let (packaged, farm) = (read(UNIT), read(FARM_UNIT));
     assert_eq!(rest(&packaged), rest(&farm));
     let words = |text: &str| -> Vec<String> {
@@ -257,12 +256,61 @@ fn the_unit_equals_the_farm_unit_except_program_flags_file_health_route_and_tmpf
             ]
         )
     );
-    let pre = |text: &str| unit_value(text, "[Service]", "ExecStartPre");
+    let stop = |text: &str| unit_value(text, "[Service]", "ExecStopPost");
+    let (stop_packaged, stop_farm) = (stop(&packaged), stop(&farm));
+    let arguments = |line: &str| line.split_once(' ').map(|(_, rest)| rest.to_owned());
+    assert_eq!(arguments(&stop_packaged), arguments(&stop_farm));
     assert_eq!(
-        pre(&packaged),
-        pre(&farm).replace("/etc/tmpfiles.d/", "/usr/lib/tmpfiles.d/")
+        stop_packaged,
+        format!("{PROGRAM} crun-start-refused --result ${{SERVICE_RESULT}}")
     );
-    assert!(pre(&packaged).ends_with(INSTALLED_TMPFILES));
+    assert!(stop_farm.starts_with(FARM_PROGRAM));
+}
+
+/// Neither unit runs a step before the agent starts: no process is spawned into the unit's cgroup
+/// ahead of the agent's own, which systemd 258 or newer refuses while runs are left in it.
+///
+/// Catches an `ExecStartPre` (or a mention of `systemd-tmpfiles`) that comes back to a unit.
+#[test]
+fn neither_unit_runs_a_step_before_the_agent() {
+    for path in [UNIT, FARM_UNIT] {
+        let text = read(path);
+        assert!(
+            !assignments(&text)
+                .iter()
+                .any(|(_, key, _)| key.starts_with("ExecStartPre")),
+            "{path}"
+        );
+        assert!(
+            !code(&text).iter().any(|line| line.contains("tmpfiles")),
+            "{path}"
+        );
+    }
+}
+
+/// The unit's `ExecStopPost` runs the program `ExecStart` runs, with a command line (the stop's
+/// result put in as systemd does) that the agent's verb accepts.
+///
+/// Catches a different program, a missing result, and a flag the verb does not take.
+#[test]
+fn the_stop_post_command_line_is_one_the_agents_verb_accepts() {
+    let unit = read(UNIT);
+    let line = unit_value(&unit, "[Service]", "ExecStopPost");
+    let exec = unit_value(&unit, "[Service]", "ExecStart");
+    assert_eq!(
+        line.split_whitespace().next(),
+        exec.split_whitespace().next()
+    );
+    let words: Vec<std::ffi::OsString> = line
+        .replace("${SERVICE_RESULT}", "resources")
+        .split_whitespace()
+        .map(Into::into)
+        .collect();
+    assert_eq!(words[1], js_agent::start_refused::VERB);
+    assert_eq!(
+        js_agent::start_refused::result_word(&words),
+        Ok("resources".to_owned())
+    );
 }
 
 /// The GPU oneshot and the tmpfiles file are the farm's, with the program at `/usr/bin/js-agent`,

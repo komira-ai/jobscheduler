@@ -71,8 +71,9 @@ impl NativeSettings {
     /// Checks `flags`; `None` without `--native-helper-socket`. `denied` are the agent's
     /// own roots and files (state and scratch roots, token, instance and CA files), which
     /// no run may read; so are the helper's socket directory, `--native-deny-read` and
-    /// the auto-login password. A path that exists is read-denied by the name the kernel
-    /// resolves.
+    /// the auto-login password. Each is read-denied by the name the kernel resolves, a path
+    /// that is not there yet by the real path of its deepest ancestor that is (see
+    /// [`real_or_planned`]).
     ///
     /// # Errors
     ///
@@ -140,12 +141,8 @@ impl NativeSettings {
                 ));
             }
         }
-        let mut denies: Vec<PathBuf> = Vec::new();
-        for path in denied {
-            denies.push(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
-        }
-        let socket_dir = socket.parent().unwrap_or(socket);
-        denies.push(fs::canonicalize(socket_dir).unwrap_or_else(|_| socket_dir.to_path_buf()));
+        let mut denies: Vec<PathBuf> = denied.iter().map(|path| real_or_planned(path)).collect();
+        denies.push(real_or_planned(socket.parent().unwrap_or(socket)));
         for path in flags.deny_read {
             let found = fs::canonicalize(path);
             denies.push(
@@ -311,4 +308,23 @@ fn absolute(flag: &str, path: &Path) -> Result<(), String> {
             path.display()
         )),
     }
+}
+
+/// The name the kernel resolves `path` to: its real path, or, for a path that is not there (the
+/// token file of a host that joins by its certificate), the real path of its deepest ancestor
+/// that is, with the rest of `path` after it. So `/etc/js-agent/token` is denied as
+/// `/private/etc/js-agent/token` whether the file exists or not: a profile cannot name `/etc`,
+/// which is a link, and a run that makes the file later is still denied it. `path` as it is when
+/// no ancestor resolves (a relative path), for the profile's check to refuse by name.
+fn real_or_planned(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|at| {
+            let real = fs::canonicalize(at).ok()?;
+            let rest = path.strip_prefix(at).ok()?;
+            Some(match rest.as_os_str().is_empty() {
+                true => real,
+                false => real.join(rest),
+            })
+        })
+        .unwrap_or_else(|| path.to_path_buf())
 }

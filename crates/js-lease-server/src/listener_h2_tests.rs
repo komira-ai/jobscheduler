@@ -149,3 +149,55 @@ async fn a_client_past_the_bound_is_told_to_calm_down() {
         Seen::GoAway(ENHANCE_YOUR_CALM)
     );
 }
+
+/// Asserts that a request whose handler calls the registry as the heartbeat route and the
+/// read calls do (a heartbeat, then the host's silence) is answered on its HTTP/2 connection
+/// while a pass over the queued jobs holds the placement engine, on a server with one async
+/// worker. Before the registry stopped waiting for the engine, the handler parked the worker
+/// for the whole pass, the connection went unread, and a client's cancels piled up until the
+/// connection ended with `ENHANCE_YOUR_CALM` ([`a_client_past_the_bound_is_told_to_calm_down`]),
+/// which a gRPC client reads as `RESOURCE_EXHAUSTED`: this is that chain, held at the pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_request_that_beats_is_answered_while_a_pass_holds_the_engine() {
+    use crate::agent_api::job_rig::{FakeAgent, placing_rig};
+
+    let mut rig = placing_rig("h2_engine_held");
+    rig.register("host-a", true);
+    let beat = rig.heartbeat(&FakeAgent::new("host-a"), None);
+    let who = rig.who.clone();
+    let agents = Arc::clone(&rig.agents);
+    let placer = agents.placer.clone().unwrap();
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let pass = std::thread::spawn(move || {
+        let _engine = placer.engine();
+        held.send(()).unwrap();
+        released.recv().unwrap();
+    });
+    holding.recv().unwrap();
+    let handler = move || {
+        let (agents, beat, who) = (Arc::clone(&agents), beat.clone(), who.clone());
+        async move {
+            let host = HostId::new("host-a").unwrap();
+            agents.registry.heartbeat(&beat, &who).unwrap();
+            assert_eq!(agents.registry.silent_since(&host), None);
+            "answer"
+        }
+    };
+    let app = Router::new().route("/answer", get(handler));
+    let (mut pipe, server) = duplex(PIPE);
+    let (sent, last) = client(0);
+    pipe.write_all(&sent).await.unwrap();
+    let (_stop, stopping) = watch::channel(());
+    let (_cut, cut) = watch::channel(());
+    let gate = Arc::new(Semaphore::new(1));
+    let permit = Arc::new(gate.try_acquire_owned().unwrap());
+    let streams = Streams { permit, cut };
+    let served = talk_both(Box::pin(server), app, Limits::default(), stopping, streams);
+    let served = tokio::spawn(served);
+    assert_eq!(seen(&mut pipe, last).await, Seen::Answered);
+    release.send(()).unwrap();
+    pass.join().unwrap();
+    drop(pipe);
+    served.await.unwrap();
+}

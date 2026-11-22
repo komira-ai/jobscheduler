@@ -17,19 +17,22 @@ use std::ops::Bound;
 use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, Version, Versioned};
 
 use super::{JobStore, allocation_at, job_at};
-use crate::codec::{DecodeError, encode_allocation, encode_job};
+use crate::codec::{encode_allocation, encode_job};
 use crate::error::JobStoreError;
-use crate::ids::{IdSource, JobId};
+use crate::ids::IdSource;
 use crate::keys;
 use crate::record::{AllocationRecord, AllocationStep, JobRecord, JobState};
 use crate::result::SWEEP_BATCH;
 
-/// What one backfill changed.
+/// What one backfill changed: what its committed transactions put and deleted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Backfill {
-    /// Entries it put: those a row called for and the spaces did not hold.
+    /// Entries it put: those a row called for and the spaces did not hold when it read them
+    /// (for a row another writer changed meanwhile, which it read again, every entry the row
+    /// calls for).
     pub added: usize,
-    /// Entries it deleted: those the spaces held and no row called for.
+    /// Entries it deleted: those the spaces held and no row called for when it read them (for
+    /// a row read again, every entry it knew of that the row no longer calls for).
     pub removed: usize,
 }
 
@@ -114,6 +117,47 @@ pub(crate) fn delete_allocation(txn: Txn, allocation: &AllocationRecord, version
     moved(txn, &allocation_entries(allocation), &BTreeSet::new())
 }
 
+/// Logs, when the backfill read `again` rows again, one line saying so with their count.
+pub(super) fn said_again(again: usize) {
+    if again > 0 {
+        tracing::info!(
+            again,
+            "the index backfill read again the rows another server changed while it ran"
+        );
+    }
+}
+
+/// The entries the row `value` at `key` (of the job table or the allocation table) calls for:
+/// one `unread` entry for a row this build cannot read.
+fn row_entries(key: &str, value: &[u8]) -> BTreeSet<String> {
+    let read = if key.starts_with(keys::JOB) {
+        job_at(key, value).map(|job| job_entries(&job))
+    } else {
+        allocation_at(key, value).map(|allocation| allocation_entries(&allocation))
+    };
+    read.unwrap_or_else(|_| keys::unread(key).into_iter().collect())
+}
+
+/// One row's fix of a backfill: the entries to move from `before` to `after`, on `cond`, the
+/// row's version as read (or absent).
+struct Fix {
+    row: String,
+    cond: Cond,
+    before: BTreeSet<String>,
+    after: BTreeSet<String>,
+}
+
+impl Fix {
+    /// The row's transaction: the check of the row on `cond`, and the entries moved.
+    fn txn(&self) -> Txn {
+        moved(
+            Txn::new().check(self.row.as_str(), self.cond),
+            &self.before,
+            &self.after,
+        )
+    }
+}
+
 /// One index space to read: its prefix, and the first key past the entries wanted when only
 /// the earlier part of the space is.
 pub(crate) struct Span<'a> {
@@ -136,17 +180,6 @@ impl<'a> Span<'a> {
 /// The row key of `entry`, whose rows a later build's entry does not name.
 fn row_of(entry: &str) -> Option<String> {
     keys::indexed_row(entry)
-}
-
-/// The id of the job a `job/<id>` or `alloc/<id>` key names, if it is a valid one. The
-/// backfill only ever checks rows of the two tables, so another key has no table prefix to
-/// strip and is judged whole, which no valid id is.
-fn id_of(key: &str) -> Option<JobId> {
-    let rest = key
-        .strip_prefix(keys::JOB)
-        .or_else(|| key.strip_prefix(keys::ALLOCATION))
-        .unwrap_or(key);
-    JobId::parse(rest).ok()
 }
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
@@ -215,63 +248,98 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// Makes the index spaces agree with the tables (the module docs): reads every job and
-    /// allocation row and every entry, then, for each row whose entries differ from those it
-    /// calls for, deletes the entries it does not call for and puts those it does, in
-    /// transactions of about [`SWEEP_BATCH`] operations, each with the version of every row
-    /// it judged as a precondition. A row this build cannot read calls for one `unread` entry,
-    /// which every indexed read of its table reads, so it is judged as a scan would judge it.
-    /// An entry of a space this build does not name is left as it is. A second backfill with
-    /// nothing written in between changes nothing and commits nothing.
+    /// allocation row, then every entry, and for each row whose entries differ from those it
+    /// calls for, deletes the entries it does not call for and puts those it does, in a
+    /// transaction of that row's own with the row's version as its precondition (absent for
+    /// entries whose row is gone), many rows to a store batch. A row this build cannot read
+    /// calls for one `unread` entry, which every indexed read of its table reads, so it is
+    /// judged as a scan would judge it. An entry of a space this build does not name is left as
+    /// it is. A second backfill with nothing written in between changes nothing and commits
+    /// nothing.
+    ///
+    /// Another writer may change rows while it runs (the serving server of a start-first
+    /// update). The rows are read before the entries, so a transaction that holds found the row
+    /// unchanged since before the entries were read: its entries were what it judged. One
+    /// whose row changed since loses alone, and that row is read again and decided again: its
+    /// transaction deletes every entry the backfill knows of that the row now does not call
+    /// for, and puts every one it does, at the version read again, until it holds or the row
+    /// does not need it. Nothing starts over: the tables and the spaces are read once, and
+    /// each row is read again only as often as another writer changed it in between. When
+    /// rows were read again it logs one line with their count.
     ///
     /// [`JobStore::new`] runs it, so every job store opened, a server's at its start included,
     /// reads indexes that agree with its tables.
     ///
     /// # Errors
-    /// [`JobStoreError::Stale`] when a row changed between the read and its batch's commit
-    /// (the batches before stay committed, and the next backfill finishes the work);
-    /// [`JobStoreError::Corrupt`] when that row's key names no valid job id;
-    /// [`JobStoreError::Store`].
+    /// [`JobStoreError::Store`]; [`JobStoreError::NodeMoved`] on a guarded view whose node
+    /// row moved.
     pub fn backfill_indexes(&self) -> Result<Backfill, JobStoreError> {
         let wanted = self.wanted_entries()?;
         let stored = self.stored_entries()?;
         let rows: BTreeSet<&String> = wanted.keys().chain(stored.keys()).collect();
         let none = BTreeSet::new();
-        let mut done = Backfill::default();
-        let mut txn = Txn::new();
+        let mut due = Vec::new();
         for row in rows {
             let (cond, want) = match wanted.get(row) {
-                Some((version, entries)) => (Cond::Version(*version), entries),
-                None => (Cond::Absent, &none),
+                Some((version, entries)) => (Cond::Version(*version), entries.clone()),
+                None => (Cond::Absent, BTreeSet::new()),
             };
             let have = stored.get(row).unwrap_or(&none);
-            if want == have {
-                continue;
-            }
-            done.added += want.difference(have).count();
-            done.removed += have.difference(want).count();
-            txn = moved(txn.check(row.as_str(), cond), have, want);
-            if txn.ops().len() >= SWEEP_BATCH.get() {
-                self.commit_backfill(std::mem::take(&mut txn))?;
+            if &want != have {
+                due.push(Fix {
+                    row: row.clone(),
+                    cond,
+                    before: have.clone(),
+                    after: want,
+                });
             }
         }
-        if !txn.ops().is_empty() {
-            self.commit_backfill(txn)?;
+        let mut done = Backfill::default();
+        let mut again: usize = 0;
+        while !due.is_empty() {
+            let held = self.write_each(due.iter().map(Fix::txn).collect())?;
+            let mut lost = Vec::new();
+            for (fix, held) in due.into_iter().zip(held) {
+                if held {
+                    done.added += fix.after.difference(&fix.before).count();
+                    done.removed += fix.before.difference(&fix.after).count();
+                } else {
+                    lost.push(fix);
+                }
+            }
+            again += lost.len();
+            due = Vec::with_capacity(lost.len());
+            for fix in lost {
+                due.push(self.fix_again(fix)?);
+            }
         }
+        said_again(again);
         Ok(done)
     }
 
-    /// Commits one batch of a backfill; a lost precondition names the row it was on.
-    fn commit_backfill(&self, txn: Txn) -> Result<(), JobStoreError> {
-        match self.write(txn)? {
-            Ok(_) => Ok(()),
-            Err(conflict) => Err(match id_of(&conflict.key) {
-                Some(id) => JobStoreError::Stale { id },
-                None => JobStoreError::Corrupt {
-                    key: conflict.key,
-                    why: DecodeError::WrongKey,
-                },
-            }),
-        }
+    /// The fix of the row of `fix`, whose transaction lost, decided again on the row as it is
+    /// now: every entry the backfill knows of that the row does not call for deleted and every
+    /// one it calls for put, at the version read now (absent for a row gone).
+    fn fix_again(&self, fix: Fix) -> Result<Fix, JobStoreError> {
+        let row = self.store.get(&fix.row)?;
+        let (cond, after) = match &row {
+            Some(row) => (
+                Cond::Version(row.version),
+                row_entries(&fix.row, &row.value),
+            ),
+            None => (Cond::Absent, BTreeSet::new()),
+        };
+        let known = fix.before.union(&fix.after);
+        let before: BTreeSet<String> = known
+            .filter(|entry| !after.contains(*entry))
+            .cloned()
+            .collect();
+        Ok(Fix {
+            row: fix.row,
+            cond,
+            before,
+            after,
+        })
     }
 
     /// Every job and allocation row with its version and the entries it calls for, read by a
@@ -280,18 +348,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         &self,
     ) -> Result<BTreeMap<String, (Version, BTreeSet<String>)>, JobStoreError> {
         let mut wanted = BTreeMap::new();
-        for (key, row) in self.store.scan_prefix(keys::JOB)? {
-            let entries = match job_at(&key, &row.value) {
-                Ok(job) => job_entries(&job),
-                Err(_) => keys::unread(&key).into_iter().collect(),
-            };
-            wanted.insert(key, (row.version, entries));
-        }
-        for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
-            let entries = match allocation_at(&key, &row.value) {
-                Ok(allocation) => allocation_entries(&allocation),
-                Err(_) => keys::unread(&key).into_iter().collect(),
-            };
+        let mut rows = self.store.scan_prefix(keys::JOB)?;
+        rows.extend(self.store.scan_prefix(keys::ALLOCATION)?);
+        for (key, row) in rows {
+            let entries = row_entries(&key, &row.value);
             wanted.insert(key, (row.version, entries));
         }
         Ok(wanted)

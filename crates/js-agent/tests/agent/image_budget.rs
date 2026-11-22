@@ -135,8 +135,16 @@ fn offered(root: &std::path::Path, extra: &[&str]) -> (String, Vec<String>) {
     host.commands = host
         .commands
         .with(&format!("/bin/df -P -k {shown}"), Ok(&row));
-    let offer = js_agent::offer(&cli, &host.platform, &host.commands, &host.files, "0", None)
-        .expect("an offer");
+    let offer = js_agent::offer(
+        &cli,
+        &host.platform,
+        &host.commands,
+        &host.files,
+        host.site(),
+        "0",
+        None,
+    )
+    .expect("an offer");
     (offer.hello.capabilities["disk-gib"].clone(), offer.warnings)
 }
 

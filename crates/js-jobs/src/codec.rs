@@ -126,7 +126,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`], [`RESULT_LOGS`] and 60 and 61 are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;

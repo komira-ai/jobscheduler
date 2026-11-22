@@ -9,7 +9,9 @@
 //!   that applied a software set or erased the Mac opened it (the window file names
 //!   the boot it was written in), a boot has followed (this boot is not that one), and
 //!   no lease holds a user or took one since (the first `user-create` closes the
-//!   window). The pool's free users are not items of either: they are the clean node's. Refused, too, when an item cannot be read: a baseline must be whole.
+//!   window). The pool's free users are not items of either: they are the clean node's;
+//!   nor are the users of the live leases, so a scan while leases run reports what they
+//!   cannot account for, not that they run. Refused, too, when an item cannot be read: a baseline must be whole.
 //! - `reboot-dirty` reboots (`launchctl reboot system`), only when the helper's own
 //!   last scan came back dirty and no `user-create` came after it: the daemon cannot
 //!   reboot a node at will, nor on a verdict older than the lease now running. The
@@ -18,7 +20,7 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
-use super::Helper;
+use super::{Helper, NO_BASELINE};
 use crate::autologin::{LAUNCHCTL, remove};
 use crate::lease::Dotted;
 use crate::ledger::Ledger;
@@ -64,14 +66,18 @@ fn capped(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The uids of the pool's free users, which the scan does not report.
-fn free_uids(ledger: &Ledger) -> BTreeSet<u32> {
-    ledger
-        .slots()
-        .into_iter()
-        .filter(|(_, entry)| entry.state == SlotState::Free)
-        .map(|(_, entry)| entry.uid)
-        .collect()
+/// The uids of the pool's free users and of the live leases, which the scan does not
+/// report.
+fn own_uids(ledger: &Ledger) -> BTreeSet<u32> {
+    let mut own = ledger.held_uids();
+    own.extend(
+        ledger
+            .slots()
+            .into_iter()
+            .filter(|(_, entry)| entry.state == SlotState::Free)
+            .map(|(_, entry)| entry.uid),
+    );
+    own
 }
 
 impl Helper {
@@ -82,9 +88,8 @@ impl Helper {
     pub fn scan(&self) -> Result<ScanReport, String> {
         let ledger = self.lock();
         self.dirty.store(false, Ordering::Release);
-        let baseline = read_baseline(&self.settings.scan.baseline)?
-            .ok_or("no baseline was recorded; baseline first")?;
-        let snapshot = scan::collect(self.host.as_ref(), &self.settings, &free_uids(&ledger));
+        let baseline = read_baseline(&self.settings.scan.baseline)?.ok_or(NO_BASELINE)?;
+        let snapshot = scan::collect(self.host.as_ref(), &self.settings, &own_uids(&ledger));
         let report = ScanReport {
             diff: scan::diff(&baseline, &snapshot.items),
             errors: snapshot.errors,
@@ -127,7 +132,7 @@ impl Helper {
                 "the baseline window was opened in this boot ({boot}); the baseline is recorded after the boot that follows"
             ));
         }
-        let snapshot = scan::collect(self.host.as_ref(), &self.settings, &free_uids(&ledger));
+        let snapshot = scan::collect(self.host.as_ref(), &self.settings, &own_uids(&ledger));
         if !snapshot.errors.is_empty() {
             return Err(format!(
                 "the baseline would be incomplete: {}",

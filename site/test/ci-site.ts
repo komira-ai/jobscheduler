@@ -39,7 +39,7 @@ export function siteRuns(yml: string): string[] {
 }
 
 /** The one command the step `id: site` runs: the decision is `cargo xtask site-changed` (crates/xtask/src/site_changed.rs), which reads site/ci-paths. */
-export const SITE_COMMAND = 'cargo xtask site-changed --event "$EVENT" --base "$BASE" --paths site/ci-paths --github-output "$GITHUB_OUTPUT"';
+export const SITE_COMMAND = 'cargo xtask site-changed --event "$EVENT" --base "$BASE" --group-base "$GROUP_BASE" --paths site/ci-paths --github-output "$GITHUB_OUTPUT"';
 
 /** The entries of a ci-paths file: its lines without comments and blanks, trimmed. */
 export function ciPathEntries(text: string): string[] {

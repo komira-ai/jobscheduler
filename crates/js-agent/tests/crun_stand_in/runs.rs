@@ -86,6 +86,7 @@ fn a_run_is_made_started_read_and_removed() {
     let labels = BTreeMap::from([
         (label::AGENT.to_owned(), "node-1".to_owned()),
         (label::CREATED_MS.to_owned(), "5000".to_owned()),
+        (label::NETWORK.to_owned(), "none".to_owned()),
         (label::RUN.to_owned(), "r1-exit".to_owned()),
     ]);
     assert_eq!(found[0].labels, labels);
@@ -571,6 +572,9 @@ fn an_ended_containers_usage_is_read_from_its_lease_cgroup() {
     let want = JobUsage {
         peak_memory_bytes: 2_147_483_648,
         cpu_usage_usec: 1_234_567,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
     };
     assert_eq!(runtime.usage(&id), Some(want));
     runtime.remove(&id).expect("removed");

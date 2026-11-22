@@ -59,6 +59,9 @@ after every later job.
 | `watch-dir-changed` | no: a `--watch-dir` may not hold or lie in a mount root, the scratch root or the state root, so no contained job can write it; a package install changes `/etc` | note |
 | `processes-unreadable` | the process check cannot run | **taint** (unchecked); clears itself |
 | `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable`, `watch-over-bound` | the input of a check that no longer taints | note; the input's value is taken as unchanged (the baseline's) |
+| `scan-residue` (Mac) | yes: a run as a pool user can make its own login item or Background Task Management entry, which the reset does not remove (mac-lease-teardown.md, "After the run: the leak scan") | **taint** (residue); stays until an operator clears it |
+| `scan-unreadable`, `scan-failed` (Mac) | the helper's leak scan could not read an item, or could not be asked | **taint** (unchecked); clears itself |
+| `scan-host-changed`, `scan-no-baseline` (Mac) | no: a root-owned item changed, or the node has no leak-scan baseline | note |
 
 A host job taints `host-job` whatever the checks say (the agent and the server both do it), so nothing is lost for it: it runs as the
 host's root and can change anything the notes look at. `cleanup-failed` and `check-owed` are the lifecycle's and are unchanged.
@@ -242,7 +245,12 @@ not read its input, `watch-over-bound`, `cgroup-not-found`) still halts the hook
 it pinned and it never clears; so does a residue the pin file names. A halt there would keep the release that carries
 the clearing from reaching the host, so one tainted host would stop every release of the group. A
 taint the restarted agent does not re-check (`cleanup-failed`, `check-owed`, `host-job`, an unchecked taint, a taint with no
-check named) still halts the hook with reason `tainted` (76), and so does an `owed-*` record. The
+check named) still halts the hook with reason `tainted` (76). An `owed-*` record halts it (`owed_check`,
+76) only where no running agent can settle it: a first install, and the steps after the update stopped
+the agent. Before the stop it is a job of the running agent whose post-job checks have not run yet, which
+a busy host almost always has: `prepare` and `cutover` count it as work and wait for it as for a lease
+(`drain_bound`, 75, when the bound passes first), a check that fails writes its taint before its record
+goes and that taint is judged as any other, and `rollback` before the stop does not look at it. The
 success line names no taint: the report has a detail on success only for a changed unit, and a
 second detail would need a format change. A rollback onto a release that predates self-clearing
 leaves such a taint standing, and that agent refuses starts until an operator clears it; that is

@@ -114,6 +114,10 @@ fn serve(fixture: &Fixture) {
         path(&fixture.state),
         "--uid-range".to_owned(),
         format!("{0}-{0}", fixture.uid),
+        // The pool is the one user of the one uid: a pool larger than the range is
+        // refused at the helper's start.
+        "--pool-size".to_owned(),
+        "1".to_owned(),
         "--homes".to_owned(),
         path(&fixture.homes),
         // The boot reset clears the auto-login of the Mac the helper serves; the files it

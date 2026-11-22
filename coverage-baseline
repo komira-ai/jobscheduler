@@ -34,6 +34,7 @@ js-jobs                     0      0
 js-lease-server             0      0
 js-logmint                  0      0
 js-logstore                 0      0
+js-mac-first-install        -      -
 js-mac-pool                 0      0
 js-mac-probe                0      0
 js-mac-provision            0      0

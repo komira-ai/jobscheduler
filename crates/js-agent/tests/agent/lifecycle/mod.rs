@@ -20,6 +20,7 @@ mod fence;
 mod files;
 #[cfg(target_os = "linux")]
 mod flags;
+mod handover;
 mod held;
 mod hold;
 mod host_ports;
@@ -39,6 +40,7 @@ mod provider_flags;
 mod providers;
 mod providers_end;
 mod providers_restart;
+mod providers_stop;
 pub mod quota;
 mod quota_health;
 mod reach;

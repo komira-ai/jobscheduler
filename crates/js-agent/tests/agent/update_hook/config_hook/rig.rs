@@ -203,6 +203,20 @@ impl Rig {
         let files = Scratch::new(name);
         let root = files.path("tree");
         fs::create_dir_all(&root).unwrap();
+        Rig::at(files, &root)
+    }
+
+    /// A rig whose every path is under `var/lib`, where `var` is a link to `private/var` as on
+    /// a Mac (`/var` is a link into `/private`).
+    pub fn behind_a_system_link(name: &str) -> Rig {
+        let files = Scratch::new(name);
+        let top = files.path("tree");
+        fs::create_dir_all(top.join("private/var")).unwrap();
+        std::os::unix::fs::symlink("private/var", top.join("var")).unwrap();
+        Rig::at(files, &top.join("var/lib"))
+    }
+
+    fn at(files: Scratch, root: &std::path::Path) -> Rig {
         let params = Params::parse(&text(&root.display().to_string(), 600, 300, 600)).unwrap();
         Rig {
             _files: files,

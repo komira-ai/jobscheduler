@@ -79,6 +79,15 @@ pub trait Machine: Send + Sync {
         crate::crun_host::CrunHost::system()
     }
 
+    /// The port that stands for the host's egress in place of the one the agent starts at its
+    /// start (with `--egress allow-list` or `open`): the runtime wires and takes over its
+    /// runs' networks through it, and the agent starts no firewall of its own. Called on
+    /// the thread that starts the agent. By default none: the agent starts the host's egress.
+    #[cfg(target_os = "linux")]
+    fn egress_port(&self) -> Option<Arc<dyn crate::crun::EgressPort>> {
+        None
+    }
+
     /// The project quota of the scratch root `root` (its canonical path): what the agent
     /// probes at start and, under `--scratch-quota`, bounds each run with. Called on the
     /// thread that starts the agent. By default the machine's own ([`quota::system`]).
@@ -208,6 +217,11 @@ impl Machine for System {
     #[cfg(target_os = "linux")]
     fn crun_host(&self) -> crate::crun_host::CrunHost {
         (self.crun.host)()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn egress_port(&self) -> Option<Arc<dyn crate::crun::EgressPort>> {
+        self.crun.egress.clone()
     }
 
     fn usage_clock(&self) -> Box<dyn UsageClock> {

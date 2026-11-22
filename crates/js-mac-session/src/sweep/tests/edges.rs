@@ -248,3 +248,72 @@ fn something_gone_from_the_entry_during_its_removal_is_no_error() {
     );
     assert!(!dir.join("ab/cdef").exists());
 }
+
+/// Runs `run` as the root helper runs a sweep (off macOS, on this thread, with the
+/// directories named `unremovable` refused removal by the system, as macOS refuses root an
+/// account's `Library/Preferences`).
+#[cfg(not(target_os = "macos"))]
+fn as_root<T>(unremovable: &[&str], run: impl FnOnce() -> T) -> T {
+    pretend_root(true);
+    pretend_unremovable(unremovable);
+    let out = run();
+    pretend_unremovable(&[]);
+    pretend_root(false);
+    out
+}
+
+/// Asserts that an empty directory the system refuses root the removal of (the
+/// `~/Library/Preferences` a job made before jobs lost the write to their home, which no
+/// process without Full Disk Access can remove) is kept and named in `kept`, and is no
+/// error, when the sweep runs as root; what was in it and around it went.
+///
+/// Catches: a root reset that fails the slot over a folder it can neither remove nor
+/// empty further, leaving the host tainted `cleanup-failed`.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_empty_directory_the_system_refuses_root_is_kept_and_named() {
+    let dir = scratch("kept-as-root");
+    let home = dir.join("home");
+    fs::create_dir_all(home.join("Library/Preferences")).unwrap();
+    fs::write(home.join("Library/Preferences/x"), "x").unwrap();
+    fs::write(home.join("Library/y"), "x").unwrap();
+    fs::create_dir_all(home.join("other")).unwrap();
+    let swept = as_root(&["Preferences"], || empty(&home, me()));
+    assert_eq!(swept.errors, Vec::<String>::new());
+    assert_eq!(swept.kept, vec![home.join("Library/Preferences")]);
+    assert_eq!(names(&home), ["Library"]);
+    assert_eq!(names(&home.join("Library")), ["Preferences"]);
+    assert!(names(&home.join("Library/Preferences")).is_empty());
+}
+
+/// Asserts that a directory the system refuses root the removal of, with something made in
+/// it after its entries were removed, still fails the sweep, naming it, and is not kept.
+///
+/// Catches: a keep rule that spares a refused folder that is not empty, which would leave
+/// a job's files for the next lease.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_directory_the_system_refuses_root_fails_the_sweep_when_it_is_not_empty() {
+    let dir = scratch("kept-as-root-full");
+    let home = dir.join("home");
+    fs::create_dir_all(home.join("Preferences")).unwrap();
+    fs::write(home.join("Preferences/x"), "x").unwrap();
+    let late = home.join("Preferences/late");
+    let swept = as_root(&["Preferences"], || {
+        vanishing(
+            move |point, _| {
+                if matches!(point, Point::Examined(seen) if *seen == "x") {
+                    fs::write(&late, "x").unwrap();
+                }
+            },
+            || empty(&home, me()),
+        )
+    });
+    assert_eq!(swept.errors.len(), 1, "{:?}", swept.errors);
+    assert!(
+        swept.errors[0].contains("Preferences"),
+        "{:?}",
+        swept.errors
+    );
+    assert!(swept.kept.is_empty(), "{:?}", swept.kept);
+}

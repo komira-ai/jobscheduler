@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::crun::{CrunRuntime, CrunSettings};
-use js_agent::lifecycle::{Exit, RunHandle, RunSpec, Runtime, Status};
+use js_agent::lifecycle::{Exit, RunHandle, RunSpec, Runtime, Status, label};
 use js_agent_wire::Isolation;
 use js_types::JobNetwork;
 use serde_json::{Value, json};
@@ -207,6 +207,33 @@ fn a_host_job_has_the_hosts_network_whatever_the_ceiling() {
     runtime.wait_ended(&id);
     assert_eq!(runtime.poll(&id), Ok(exited(3)));
     assert_eq!(runtime.remove(&id), Ok(()));
+}
+
+/// Asserts a host job that asked for the open network and declared a port is recorded with
+/// the network `none` and no ports label: it has the host's network and nothing wires it,
+/// so a restart has nothing to take over. Catches a host run recorded at the level it asked,
+/// which a restarted agent with an egress would try to adopt wiring for.
+#[test]
+fn a_host_job_is_recorded_with_no_network_whatever_it_asked() {
+    let node = Node::new("host-network-labels");
+    let mut runtime = open_allowing(&node);
+    let spec = RunSpec {
+        network: JobNetwork::Open,
+        ports: vec![js_types::PortMap {
+            host: 8080,
+            container: 80,
+        }],
+        ..host(&node, "h1-exit")
+    };
+    let id = runtime.stage(&spec).expect("staged");
+    let found = runtime.list_labelled().expect("lists");
+    let labels = &found
+        .iter()
+        .find(|one| one.id == id)
+        .expect("listed")
+        .labels;
+    assert_eq!(labels.get(label::NETWORK).map(String::as_str), Some("none"));
+    assert_eq!(labels.get(label::NETWORK_PORTS), None);
 }
 
 /// Proves a host job is stopped as a contained one is: a stop sends SIGTERM and a job that

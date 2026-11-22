@@ -22,7 +22,7 @@ fn a_tampered_open_ruleset_is_refused_by_check() {
     let fake = Fake::new();
     fake.answer("list table inet", Ok(OPEN_INET.to_owned()));
     let egress = started(&fake, open());
-    let loaded = fake.state().stdins[2].clone();
+    let loaded = loaded(&fake);
     assert_eq!(loaded, ruleset::render(&open()));
     assert!(loaded.contains("comment \"open\""), "{loaded}");
     egress.check().expect("as loaded");
@@ -203,7 +203,8 @@ fn a_member_left_in_a_set_is_never_reused_by_another_run() {
 /// failed release even though its veth was deleted, so once `nft` is back the `allow-list` run
 /// that comes next is wired as `jsv1`, never under the name `jsv0` that `openifs` still holds.
 /// The same release with `nft` running and saying the member is not there gives the block
-/// back. A sweep whose `ip` cannot be started fails too, rather than leaving the leftovers.
+/// back. A settle whose `ip` cannot be started fails too, rather than reporting the leftovers
+/// removed, and keeps their block out of use.
 #[test]
 fn a_removal_that_could_not_run_is_not_taken_for_gone() {
     let fake = Fake::new();
@@ -233,12 +234,23 @@ fn a_removal_that_could_not_run_is_not_taken_for_gone() {
     drop(again);
 
     let fake = Fake::new();
-    fake.answer("link show", Ok(r#"[{"ifname":"jsv4"}]"#.to_owned()));
+    fake.answer("link show", Ok(links(&["jsv4"])));
+    let egress = started(&fake, open());
     fake.not_run("link del");
-    let refused = Egress::start_on(open(), fake.clone()).map(drop);
-    let error = refused.expect_err("the sweep could not delete the leftover");
+    let error = egress
+        .settle()
+        .expect_err("the leftover could not be deleted");
     assert!(
         error.to_string().contains("deleting a leftover veth"),
         "{error}"
     );
+    fake.run_again();
+    let held: Vec<Attachment> = (0..5)
+        .map(|n| {
+            egress
+                .attach(&format!("r{n}"), PID, JobNetwork::Open, &[])
+                .expect("attach")
+        })
+        .collect();
+    assert_eq!(held[4].interface(), Some("jsv5"), "jsv4 stays out of use");
 }

@@ -63,9 +63,10 @@ one shared Postgres, a run spec and the action image and `kbf-tools` version it 
 
 1. **The kbf service first, in kbf's own order** (D43): storage and daemon roles, then frontends last. The embedded server is the kbf frontend.
 2. **Then `js-agent`**, ordered `after = ["kbf"]`, so no agent is updated until every kbf host runs its desired version. Never two services on
-   one host at once (kbf#1825). Per host: the updater installs on trial, the host is cordoned and drained until it holds no run (bounded by a
-   cap, because the agent's own SIGTERM stops jobs after `--drain-wait`), the helper switches, the agent says `Hello`, the ready check passes,
-   the helper confirms or reverts, and the host is uncordoned.
+   one host at once (kbf#1825). Per host: the updater installs on trial; on a `crun` host the running agent hands its jobs over (it exits
+   within seconds, leaving them running, and the new agent adopts them; docs/runbooks/crun-host-setup.md), and any other host is cordoned
+   and drained until it holds no run (bounded by a cap, because the agent's own SIGTERM stops jobs after `--drain-wait`); the helper
+   switches, the agent says `Hello`, the ready check passes, the helper confirms or reverts, and a cordon placed is lifted.
 3. **Action images and `kbf-tools`** are staged before the frontend that names them places work. Rollback of the executor path is the flag: `--executor kbf-daemon` (the default) needs no package change.
 
 A change that adds a field or feature rolls in this order and needs nothing more. A change that retires a major adds a step at the end: the

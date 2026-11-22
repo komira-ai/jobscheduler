@@ -1,6 +1,8 @@
-//! The packaged unit's kill settings, in a real systemd unit: a crash of the agent leaves what
-//! a crun job is made of (its supervisor in the agent's leaf, its container in a lease cgroup
-//! under `<unit>/actions`) alive, and `Restart=` brings the agent back to find it.
+//! The packaged unit's kill settings, in a real systemd unit: a crash of the agent, and a stop
+//! of the unit (what an update's `cutover` does once the agent has handed its runs over), leave
+//! what a crun job is made of (its supervisor in the agent's leaf, its container in a lease
+//! cgroup under `<unit>/actions`) alive, and the agent that `Restart=`, or the next start of the
+//! unit, brings back finds it.
 //!
 //! The agent here is a probe: this test binary again, run in a transient unit as
 //! `--exact unit::probe_of_the_unit` with the packaged unit's `KillMode=` and `Restart=` and its
@@ -19,13 +21,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The variable that makes the probe act; set only on the probe's unit.
-const PROBE_DIR: &str = "JS_UNIT_PROBE_DIR";
+pub(super) const PROBE_DIR: &str = "JS_UNIT_PROBE_DIR";
 
 /// The cgroup v2 mount.
 const MOUNT: &str = "/sys/fs/cgroup";
 
 /// The packaged unit's value of `key` in its `[Service]` section.
-fn packaged(key: &str) -> String {
+pub(super) fn packaged(key: &str) -> String {
     let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/js-agent/js-agent-crun.service");
     let text = fs::read_to_string(unit).expect("read the packaged unit");
@@ -38,7 +40,7 @@ fn packaged(key: &str) -> String {
 }
 
 /// Runs `program` with `args` and fails the test, with what it said, when it fails.
-fn run(program: &str, args: &[&str]) {
+pub(super) fn run(program: &str, args: &[&str]) {
     let out = Command::new(program)
         .args(args)
         .output()
@@ -52,7 +54,7 @@ fn run(program: &str, args: &[&str]) {
 }
 
 /// Makes the named pipe `path`.
-fn fifo(path: &Path) {
+pub(super) fn fifo(path: &Path) {
     rustix::fs::mknodat(
         rustix::fs::CWD,
         path,
@@ -64,7 +66,7 @@ fn fifo(path: &Path) {
 }
 
 /// The word written to the pipe `path`, waiting until the other side opens and closes it.
-fn heard(path: &Path) -> String {
+pub(super) fn heard(path: &Path) -> String {
     let mut word = String::new();
     fs::File::open(path)
         .and_then(|mut pipe| pipe.read_to_string(&mut word))
@@ -73,7 +75,7 @@ fn heard(path: &Path) -> String {
 }
 
 /// Writes `word` to the pipe `path`, waiting until the other side opens it.
-fn say(path: &Path, word: &str) {
+pub(super) fn say(path: &Path, word: &str) {
     fs::OpenOptions::new()
         .write(true)
         .open(path)
@@ -82,7 +84,7 @@ fn say(path: &Path, word: &str) {
 }
 
 /// Whether the process `pid` runs: it is there and not a zombie.
-fn alive(pid: u32) -> bool {
+pub(super) fn alive(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
         stat.rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().next())
@@ -107,7 +109,7 @@ fn own_unit() -> PathBuf {
 
 /// A process that runs until it is killed, in a process group of its own, as a supervisor and
 /// a container's init are.
-fn idle() -> u32 {
+pub(super) fn idle() -> u32 {
     let mut command = Command::new("sleep");
     command
         .arg("infinity")
@@ -158,12 +160,7 @@ fn probe_of_the_unit() {
         };
         // Nothing of the probe is left for the next case.
         let _ = fs::write(lease.join("cgroup.kill"), "1");
-        for pid in pids.iter().filter(|pid| alive(**pid)) {
-            let pid = rustix::process::Pid::from_raw(i32::try_from(*pid).expect("a pid"));
-            if let Some(pid) = pid {
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-            }
-        }
+        end_all(&pids);
         say(&dir.join("second"), word);
     }
     // The unit's main process stays until it is killed or the unit is stopped.
@@ -175,13 +172,30 @@ fn probe_of_the_unit() {
 /// What the restarted probe found of the job after its first main process was killed, in a
 /// unit with the packaged unit's delegation and `Restart=`, and `kill_mode` as its `KillMode=`.
 fn after_a_crash(kill_mode: &str) -> String {
+    after(kill_mode, End::Crash)
+}
+
+/// What the probe started again found of the job after the unit was stopped, in a unit with the
+/// packaged unit's delegation and `Restart=`, and `kill_mode` as its `KillMode=`: `gone` when
+/// the stop left nothing of it, and the probe was not started again.
+fn after_a_stop(kill_mode: &str) -> String {
+    after(kill_mode, End::Stop)
+}
+
+/// What the probe of a unit with `kill_mode` found of the job after its first main process
+/// ended as `end` says.
+fn after(kill_mode: &str, end: End) -> String {
+    let name = match end {
+        End::Crash => kill_mode.to_owned(),
+        End::Stop => format!("stop-{kill_mode}"),
+    };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("unit-probe-{kill_mode}-{}", std::process::id()));
+        .join(format!("unit-probe-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("make the probe's directory");
     fifo(&dir.join("first"));
     fifo(&dir.join("second"));
-    let unit = format!("js-unit-probe-{kill_mode}-{}", std::process::id());
+    let unit = format!("js-unit-probe-{name}-{}", std::process::id());
     let exe = std::env::current_exe().expect("this test binary");
     let set = |key: &str, value: &str| format!("--property={key}={value}");
     let restart = packaged("Restart");
@@ -208,16 +222,53 @@ fn after_a_crash(kill_mode: &str) -> String {
         ],
     );
     assert_eq!(heard(&dir.join("first")), "up");
-    run(
-        "systemctl",
-        &["kill", "--kill-whom=main", "--signal=SIGKILL", &unit],
-    );
+    match end {
+        End::Crash => run(
+            "systemctl",
+            &["kill", "--kill-whom=main", "--signal=SIGKILL", &unit],
+        ),
+        End::Stop => {
+            // The stop of the unit signals what the kill mode says and waits for it. What is
+            // left keeps the unit loaded, and its next start runs beside it; a unit that kept
+            // nothing is gone with its processes, and there is no probe to start again.
+            run("systemctl", &["stop", &unit]);
+            let text = fs::read_to_string(dir.join("pids")).expect("read the pids");
+            let pids: Vec<u32> = text
+                .split_whitespace()
+                .map(|p| p.parse().expect("a pid"))
+                .collect();
+            if !pids.iter().all(|pid| alive(*pid)) {
+                end_all(&pids);
+                return "gone".to_owned();
+            }
+            run("systemctl", &["start", &unit]);
+        }
+    }
     let found = heard(&dir.join("second"));
     run("systemctl", &["stop", &unit]);
     let _ = Command::new("systemctl")
         .args(["reset-failed", &unit])
         .status();
     found
+}
+
+/// How the probe's first main process ends.
+#[derive(Clone, Copy)]
+enum End {
+    /// It is killed (`SIGKILL`), and `Restart=` starts the next.
+    Crash,
+    /// The unit is stopped, and then started again.
+    Stop,
+}
+
+/// Kills each of `pids` that still runs.
+pub(super) fn end_all(pids: &[u32]) {
+    for pid in pids.iter().filter(|pid| alive(**pid)) {
+        let pid = rustix::process::Pid::from_raw(i32::try_from(*pid).expect("a pid"));
+        if let Some(pid) = pid {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
 }
 
 /// Proves, in a real systemd unit with the packaged unit's `KillMode=`, `Restart=` and
@@ -232,4 +283,18 @@ fn the_unit_leaves_leases_alive_when_the_agent_is_killed() {
     assert_eq!(packaged("KillMode"), "process");
     assert_eq!(after_a_crash(&packaged("KillMode")), "alive");
     assert_eq!(after_a_crash("mixed"), "gone");
+}
+
+/// Proves, in a real systemd unit with the packaged unit's `KillMode=`, `Restart=` and
+/// delegation, that a stop of the unit (an update's `cutover`, once the agent has handed its
+/// runs over and exited) leaves a crun job alive: the process standing for its container and the
+/// one standing for its supervisor still run after `systemctl stop`, and the probe that the next
+/// `systemctl start` runs, in the same unit and leaf beside them, finds both. The same stop
+/// under `KillMode=mixed` ends both: the test fails on that setting.
+#[test]
+#[ignore = "real systemd unit with DelegateSubgroup=supervisor: run by the crun-runtime workflow"]
+fn the_unit_leaves_leases_alive_when_it_is_stopped_and_started_again() {
+    assert_eq!(packaged("KillMode"), "process");
+    assert_eq!(after_a_stop(&packaged("KillMode")), "alive");
+    assert_eq!(after_a_stop("mixed"), "gone");
 }

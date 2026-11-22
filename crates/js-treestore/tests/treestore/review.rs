@@ -509,6 +509,105 @@ fn a_move_that_stays_refused_seals_the_tree_again() {
     assert_eq!(store.stats().used, 100);
 }
 
+/// A rig whose store has no `trees/` directory, so that the first move of a stage into it
+/// is refused, and one tree to ensure.
+fn refused_first_move(rig: &Rig) -> (crate::common::Store, crate::common::Layer) {
+    let store = rig.open(rig.cfg());
+    let a = sized("f", 100, 1);
+    rig.have(&a);
+    std::fs::remove_dir(rig.root().join("trees")).unwrap();
+    (store, a)
+}
+
+/// Asserts that no tree and nothing counted is in place.
+fn nothing_placed(rig: &Rig, store: &crate::common::Store) {
+    assert!(!rig.root().join("trees").exists() || rig.names("trees").is_empty());
+    assert_eq!(store.stats().trees, 0);
+    assert_eq!(store.stats().used, 0);
+}
+
+/// A stage whose first move into `trees/` is refused is unsealed, moved on the second try
+/// and sealed again in place: `ensure` succeeds, the tree and its record are present and
+/// counted, and the seal count shows the seal of the stage and the seal in place.
+///
+/// Catches a store that fails to place a tree whose sealed stage the platform will not
+/// rename (macOS refuses to move an immutable directory).
+#[test]
+fn a_stage_whose_move_is_refused_is_unsealed_moved_and_sealed_in_place() {
+    let rig = Rig::new();
+    let (store, a) = refused_first_move(&rig);
+    rig.sealer
+        .unseal_repairs_trees
+        .store(true, Ordering::SeqCst);
+    store.ensure(&wanted(&a)).unwrap();
+    assert!(rig.present(&a.diff_id));
+    assert_eq!(store.stats().trees, 1);
+    assert_eq!(store.stats().used, 100);
+    assert_eq!(rig.sealer.seal_count(), 2);
+    assert_eq!(rig.sealer.unsealing.load(Ordering::SeqCst), 1);
+}
+
+/// When the second move is refused too, `ensure` fails with the move's error, nothing is in
+/// `trees/` or counted, the stage is sealed again (a second seal), and a later `ensure`
+/// with the move allowed places the tree.
+///
+/// Catches a stage left unsealed after a refused move, a tree counted that was never placed,
+/// and a failure that sticks to the tree.
+#[test]
+fn a_move_refused_twice_seals_the_stage_again_and_a_retry_places_the_tree() {
+    let rig = Rig::new();
+    let (store, a) = refused_first_move(&rig);
+    assert!(matches!(
+        store.ensure(&wanted(&a)),
+        Err(Error::Io {
+            what: "place tree",
+            ..
+        })
+    ));
+    nothing_placed(&rig, &store);
+    // The seal of the stage and the seal put back on it.
+    assert_eq!(rig.sealer.seal_count(), 2);
+    std::fs::create_dir(rig.root().join("trees")).unwrap();
+    store.ensure(&wanted(&a)).unwrap();
+    assert!(rig.present(&a.diff_id));
+    assert_eq!(store.stats().trees, 1);
+}
+
+/// When the unsealing of the stage fails, `ensure` fails with the seal error, the stage is
+/// sealed again, and nothing is in `trees/` or counted.
+///
+/// Catches a refused move whose unsealing failure is swallowed, or that leaves the stage
+/// unsealed.
+#[test]
+fn a_stage_that_cannot_be_unsealed_fails_with_the_seal_error_and_is_sealed_again() {
+    let rig = Rig::new();
+    let (store, a) = refused_first_move(&rig);
+    rig.sealer.fail_unseals_of_stage.store(1, Ordering::SeqCst);
+    let error = store.ensure(&wanted(&a)).unwrap_err();
+    assert!(matches!(error, Error::Seal(_)), "{error:?}");
+    nothing_placed(&rig, &store);
+    assert_eq!(rig.sealer.seal_count(), 2);
+}
+
+/// When the seal in place fails after the move, `ensure` fails with the seal error, the tree
+/// is moved back out of `trees/`, and nothing is counted.
+///
+/// Catches an unsealed tree left in `trees/` or counted as placed.
+#[test]
+fn a_seal_in_place_that_fails_moves_the_tree_back_out_of_trees() {
+    let rig = Rig::new();
+    let (store, a) = refused_first_move(&rig);
+    rig.sealer
+        .unseal_repairs_trees
+        .store(true, Ordering::SeqCst);
+    rig.sealer.fail_seals_in_place.store(true, Ordering::SeqCst);
+    let error = store.ensure(&wanted(&a)).unwrap_err();
+    assert!(matches!(error, Error::Seal(_)), "{error:?}");
+    nothing_placed(&rig, &store);
+    assert!(!rig.present(&a.diff_id));
+    assert_eq!(rig.sealer.seal_count(), 2);
+}
+
 #[test]
 fn a_record_that_cannot_be_written_leaves_nothing_in_place_and_a_retry_places_the_tree() {
     let rig = Rig::new();

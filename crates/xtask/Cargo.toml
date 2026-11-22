@@ -32,6 +32,11 @@ js-agent = { path = "../js-agent" }
 # `gen-job-surface` renders the route table of docs/http-gateway.md from the gateway's routes,
 # and its served paragraph from the calls the lease server serves.
 js-api-gateway = { path = "../js-api-gateway" }
+# `release smoke-bundle`: the smoke bundle packed and pushed with `js-bundle`'s own commands,
+# pulled back with the agent's registry client and extracted with the agent's extractor.
+js-bundle = { path = "../js-bundle" }
+js-bundle-cli = { path = "../js-bundle-cli" }
+js-oci = { path = "../js-oci" }
 js-lease-server = { path = "../js-lease-server" }
 # `pkg check-macos` reads the entitlements `codesign` prints of the package's programs.
 plist.workspace = true
@@ -42,12 +47,16 @@ prost.workspace = true
 prost-types.workspace = true
 # The scratch directory and the guarded server child of `site-demo`.
 js-testkit = { path = "../js-testkit" }
+# `fetch --extract tar.xz` (and the xz archives its tests make).
+lzma-rs.workspace = true
 # The package's `md5sums` file (`release deb`).
 md-5.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 # The runner user's uid and gid, and `uname -m`, for `crun-tests`.
 rustix = { workspace = true, features = ["process", "system"] }
+# The zstd file `fetch --extract zst` installs (buck2).
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -58,12 +67,18 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["clone-impls"] }
 tar.workspace = true
 thiserror.workspace = true
+# The runtime `release smoke-bundle check` pulls on.
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The registry in this process the smoke bundle is published to and pulled from
+# (tests/smoke_bundle.rs).
+js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 # The named pipe the stand-in test copies from (tests/stand_in_busy.rs).
 rustix = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # The server addresses the client refuses (tests/js_agent_package.rs). js-agent, which the tests
 # also read, is a dependency above.
 js-client = { path = "../js-client" }
@@ -85,3 +100,13 @@ saphyr-parser.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of this package but does not build it:
+# it depends on js-contain, directly or through a dev-dependency, and its build compiles `js-init`
+# (crates/js-contain/build.rs), which must be a static executable, and buildrules' linker links it
+# dynamically and succeeds (komira-ai/buildrules#173), which `build.rs` refuses. So the farm checks
+# this package's format only; it is built, linted and tested in ci.yml.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt"]

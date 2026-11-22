@@ -7,10 +7,11 @@ use js_bundle::{EnvOp, NetworkLevel, ReadGrantKind};
 use serde::Deserialize as _;
 use serde::de::value::{Error as ValueError, StrDeserializer};
 
-/// `js-bundle`: pack a directory into a darwin bundle, print one, or verify one.
+/// `js-bundle`: pack a directory into a darwin bundle, print one, verify one, or push one
+/// to a registry.
 ///
 /// A bundle lives in an OCI image-layout directory (`oci-layout`, `index.json`,
-/// `blobs/sha256/`). Pushing to a registry is not a command of this tool.
+/// `blobs/sha256/`), and `push` puts one into a registry under a tag.
 #[derive(Debug, Parser)]
 #[command(name = "js-bundle", version)]
 pub struct Cli {
@@ -33,6 +34,10 @@ pub enum Command {
     /// the config, and every layer extracted into a scratch directory under the
     /// format's rules.
     Verify(VerifyArgs),
+    /// Puts a bundle into a registry under a tag, and prints `pushed` or `unchanged` with
+    /// the reference by digest. A tag that already names another manifest is refused and
+    /// left as it is.
+    Push(PushArgs),
 }
 
 /// A `NAME=VALUE` flag.
@@ -153,6 +158,31 @@ pub struct LayoutArgs {
     /// The manifest digest. Without it the layout must list exactly one manifest.
     #[arg(long)]
     pub digest: Option<String>,
+}
+
+/// The flags of `push`.
+#[derive(Debug, Args)]
+pub struct PushArgs {
+    /// The layout and manifest to push.
+    #[command(flatten)]
+    pub source: LayoutArgs,
+    /// Where: `REGISTRY/REPOSITORY:TAG`, such as `ghcr.io/komira-ai/js/smoke:1`. Only this
+    /// repository is reached.
+    #[arg(long)]
+    pub to: String,
+    /// The user the registry's token realm is asked for a push token as (with
+    /// `--password-file`). Without both, the token is asked for anonymously.
+    #[arg(long, requires = "password_file")]
+    pub user: Option<String>,
+    /// A file that holds the password or token of `--user`, one line (a trailing line end
+    /// is dropped); `/dev/stdin` reads it from standard input. It goes to the registry's
+    /// own token realm over https and nowhere else.
+    #[arg(long, requires = "user")]
+    pub password_file: Option<PathBuf>,
+    /// Push over plain http, with no TLS: honoured only for a registry at `127.0.0.1` or
+    /// `[::1]` with a port (one on this machine), and never with the credentials.
+    #[arg(long)]
+    pub plain_http: bool,
 }
 
 /// The flags of `verify`.

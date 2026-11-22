@@ -62,8 +62,17 @@ hand:
 | `scratch root`, `path permissions` | the scratch filesystem mounted at `/var/lib/js-agent/scratch` (the unit starts only on a mount point there), XFS with project quotas (`prjquota`): each job's `/tmp` and `/var/tmp` is a directory there bounded by a project quota (`--job-tmp-gib`), and an agent whose scratch filesystem has no `prjquota` starts no job (each start is refused `quota-unavailable`, and the finding `quota-unhealthy` says why) | the disk is the host's |
 | `cgroup v2 delegation` | cgroup v2 and systemd 254 or newer | the unit asks for it (`Delegate=yes`, `DelegateSubgroup=supervisor`) |
 
-The state root and the other directories are the package's tmpfiles file's, made at each start of
-the unit.
+The directories are the package's tmpfiles file's, applied at boot. The unit runs no tmpfiles
+step: the agent makes its state root (mode 0700) and its scratch root (mode 0711) itself at each
+start when they are missing, the leaf only (a missing parent is a miss its start check reports),
+and never changes one that exists.
+
+The unit's `ExecStopPost=` runs `js-agent crun-start-refused --result ${SERVICE_RESULT}` after
+every stop. On systemd 258 or newer a start with runs left in the unit's cgroup is refused (result
+`resources`: the first process is placed in the unit's own cgroup, which the runs' controllers
+forbid), and only then does the step end those runs, supervisors first and then the lease cgroups,
+so that the restart (`Restart=always`) places the agent. On any other result, and on systemd 257 or
+older, it does nothing.
 
 `js-agent-crun.service` is `packaging/js-agent/js-agent-crun.service`, the unit of the setup script
 (`crun_host_setup.sh`), with two differences of substance: the server and pool are not in the unit
@@ -180,7 +189,22 @@ the package: `cargo xtask release desired` writes it into the `targets` that
   615 s (the new agent runs and is registered), `rollback` 8220 s (the stop and start back to the
   previous release), `cleanup` 120 s. `verifyDeadlineSecs` is at least verify plus rollback
   (615 + 8220), so a failed verify can still be rolled back. Each bound is mirrored in `params`
-  for the hook.
+  for the hook. They cover the drain, which an update still makes on a host that cannot hand its
+  jobs over. One that can (a running agent whose `js-agent --version` prints `stops: drain
+  handover`, the unit unchanged, and with an `--egress` in the flags file `egress-handover` on the
+  `stops:` line of both the running and the staged agent) is neither cordoned nor drained:
+  `prepare` returns at once, and `cutover` writes the handover file in the state root and stops
+  the unit, which takes seconds, the agent leaving its jobs running, and under an `--egress`
+  ceiling their network wiring and their records in the state root's `egress` directory, for the
+  new agent to adopt
+  (docs/runbooks/crun-host-setup.md, "Agent updates while jobs run"). `rollback` hands them back
+  the same way. The hand-over is in place when both agents list `in-place` on the `stops:` line:
+  `cutover` writes the handover file, sends the agent SIGHUP (`systemctl kill --kill-whom=main`)
+  and waits until the new process has taken the file, and the unit is not stopped, so systemd
+  starts nothing. Otherwise, on systemd 258 or newer, or when its version cannot be read, the
+  update drains instead of handing over, because the start after a stop is refused while runs are
+  left. The first update after the unit lost its `ExecStartPre=` and gained its `ExecStopPost=` is
+  a unit change, so it drains (the hook's `Drain::UnitChanges`) whatever the agents list.
 - There is no `uninstall` bound: hostkeeper refuses an uninstall order for this package.
 - `params` is what the hook reads, as the `--params` file hostkeeper writes: the unit it
   restarts (`js-agent-crun.service`), its state directory, hostkeeper's `current` link, the flags

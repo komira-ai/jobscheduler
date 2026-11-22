@@ -1,10 +1,10 @@
 # The macOS runtime: where it lives and what macOS enforces
 
-Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this workspace. It is the pool of reused users, the `js-mac-session` root helper, the Seatbelt profile per run and pf per uid. It does not become a separate repository or a standalone OCI runtime: no one else would use it, and its only caller is the agent. This document fixes three things: the one interface both backends implement, the crate boundaries, and what macOS can and cannot enforce for each part of a job. It ends with the change that does need building, memory and CPU limits.
+Status: proposed. The macOS sandbox stays `js-agent`'s macOS backend, in this workspace. It is the pool of reused users, the `js-mac-session` root helper, the Seatbelt profile per run and pf per uid. It does not become a separate repository or a standalone OCI runtime: no one else would use it, and its only caller is the agent. This document fixes three things: the one interface both backends implement, the crate boundaries, and what macOS can and cannot enforce for each part of a job. Then it covers the change that does need building, memory and CPU limits, and the least macOS version the Macs' pool admits.
 
 ## What changes
 
-Nothing in this document changes behaviour by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
+Nothing in this document changes code by itself. Jobs, the wire, placement and the Mac package stay as they are. Section 5 sets one value of the Macs' pool file, its least `os_version`. Section 4 proposes the one behaviour change: today a Mac job is held to no memory or CPU limit, and the agent reports no usage for it. After section 4's steps, a run that goes over its memory cap is killed and reported as a memory kill, as on Linux, and the agent reports what each run uses.
 
 ## 1. One runtime interface
 
@@ -40,7 +40,7 @@ These facts were not re-checked on current macOS releases beyond those checks.
 | Job field (OCI name) | macOS primitive | Enforced today | Check |
 |---|---|---|---|
 | process isolation (`linux.namespaces`) | A separate uid per run, from the pool of reused users, reset after every run. Seatbelt's `process-info` deny does not hide other users' processes from `ps`. | yes, the uid | root test `native_isolation` (two runs on one uid) |
-| file access | Seatbelt (`sandbox-exec`). Reads are open except the read denies; writes are allowed only in the run's home. Endpoint Security could watch or authorise file events too, but it needs an entitlement Apple grants per developer, so it is not used. | yes | `sandbox/deny-write-outside`, `sandbox/deny-write-private-tmp` |
+| file access | Seatbelt (`sandbox-exec`). Reads are open except the read denies; writes are allowed only in the run directory `exec/` below the user's home (`HOME` and `TMPDIR` are inside it; the home itself is not writable). Endpoint Security could watch or authorise file events too, but it needs an entitlement Apple grants per developer, so it is not used. | yes | `sandbox/deny-write-outside`, `sandbox/deny-write-private-tmp` |
 | `root`, layers | No overlay or bind mounts. The options are `clonefile` (same APFS volume, copy-on-write) and a per-run disk image. Layers are refused (`rootfs-unsupported-here`, `docs/design/job-rootfs.md` 5.1). | refused | `fs/clonefile-*` |
 | `mounts` | Copies into the run's `exec/`, write-denied by the profile (`files.rs`). A job start's `READ_ONLY` and `READ_WRITE` mounts of host paths below `/work` are links in `exec/` with a Seatbelt grant of the canonical path, an exec deny when `no_exec`, and every mount root a read deny of every run (`job-rootfs.md` 5.2 and 5.4, built in `native/mounts.rs`); copy-on-write mounts are refused. | yes, read-only and read-write; copy-on-write refused | `sandbox/control-write-input`; the links, grants and read denies: `native::mounts` in `tests/agent/native/mounts.rs` |
 | network | pf rules matching the pool's uids (TCP and UDP only; DNS through `mDNSResponder` is outside pf), plus Seatbelt for `off` and `loopback`. Loopback is shared by every user of the host. | yes | `net/off-refuses-loopback`, `net/loopback-allows-loopback`; pf by root test `pf_as_root` |
@@ -72,3 +72,28 @@ These facts were not re-checked on current macOS releases beyond those checks.
 3. The memory cap: `memory_cap_bytes`, the kill, and the `oom_killed` report.
 
 Each step is tested on Linux against the helper's fake host (`Host` in `js-mac-session`), and on the beta stage's macOS runner.
+
+## 5. The least macOS version of the Macs' pool
+
+**The farm.** The four Macs run three macOS releases: two run 27.0.1, one 26.6 and one 26.4. An agent's hello reports the major version alone (`crates/js-agent/src/os_version.rs`), so the server sees 27, 27, 26 and 26. A job asks for a least major version in `constraints.osVersion`, compared as at least.
+
+**The policy: one pool with a floor.** The Macs stay in one pool, `mac-build`, and its `[capabilities]` name `os_version = "26"`:
+
+```toml
+[capabilities]
+os = "macos"
+arch = "arm64"
+os_version = "26"
+```
+
+- The floor only admits. Each Mac is placed by the version its own hello reports, not by the pool's value (`placement_shape` in `crates/js-registry/src/config.rs`). So a job that asks for 27 is placed only on the two Macs on 27, and a job that asks for 26, or for no version, on all four.
+- One pool per version would add nothing to placement and would cost more:
+  - Every Mac is booked at the same shape, so the version is the only thing that would differ.
+  - A version is matched as at least, and a pool has no ceiling, so a pool for 26 would still admit a Mac on 27. It could not hold its hosts to 26.
+  - Each extra pool needs its own join tokens and the same `memory_schedulable_percent`.
+  - A Mac names its pool in its flags, so each macOS update would also move the Mac to another pool.
+- 26 is the least version on the farm. The macOS runtime has been built and tested on 26.4, 26.6 and 27.0.1 only. A Mac below 26, or one whose hello reports no version (its probe failed, or its agent predates the report), is refused at its hello with `shape-not-accepted`, reason `below-floor`. That refusal shows in the agent's log, which is better than a Mac that joins and quietly serves only the jobs that ask for no version.
+- Minor versions are not placed. 26.4 and 26.6 are the same version to the scheduler, and a job cannot ask for 26.6. No job needs that today.
+- Raising the floor, once every Mac runs 27, is an edit of this value in the pool file, made after the Macs are updated. A Mac still below the new floor is refused at its next hello.
+
+**Check.** `crates/js-lease-server/tests/server/mac_os_version.rs` runs a server over this pool with four Macs (two on 27, two on 26). Jobs that ask for 27 fill only the two Macs on 27. Jobs that ask for 26 fill all four. A job that asks for 28 is refused `no-capable-host`. A Mac on 25, or one that reports no version, is refused `below-floor`.

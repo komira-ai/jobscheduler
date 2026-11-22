@@ -1,0 +1,11 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond what buildrules gives each of its units (a library src/ and
+# build.rs, a test target tests/), which a Buck2 action sees only when declared: the tests include
+# js-mdm-core's config.example.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "//crates/js-mdm-core:config.example",
+    ],
+)

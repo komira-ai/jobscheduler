@@ -212,7 +212,7 @@ pf by uid is a control on the packets a pool user's sockets send, and it has lim
 - **Not verified on a Mac yet.** The rules' text and the logic are tested against a fake.
   What pf does with them (the `user` range, whether a `block return` answers a TCP connect
   at all, the readback and its stability, the output of `pfctl -E` and `-s info`) is shown
-  by `tests/pf_as_root.rs`, which a farm Mac runs through a held script.
+  by `tests/pf_as_root.rs`, which `cargo xtask mac-root-tests` runs on a Mac.
 
 ## The root test
 

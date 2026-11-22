@@ -700,7 +700,7 @@ fn a_socket_group_that_is_not_a_group_name_or_not_text_is_refused() {
     assert_eq!(params.settings.socket_group.as_deref(), Some("_js-Agent.2"));
 }
 
-/// Asserts that a `scratch_root` a file system table line cannot name (not plain, with white
+/// Asserts that a `scratch_root` that is not a plain mount path (not plain, with white
 /// space), a relative one, and one that is not apart from `state_root` (the same, inside it,
 /// above it) are refused with the error that says so.
 #[test]

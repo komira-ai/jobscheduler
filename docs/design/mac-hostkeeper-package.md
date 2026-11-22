@@ -95,7 +95,7 @@ others none), or that has an entitlement and no hardened runtime.
   Its `postinstall` verb is gone, with its link and its tests.
 - The agent plist is fixed text, checked for drift, never edited on a host. Its program arguments are
   `/Library/Application Support/js-agent/bin/js-agent --flags-file /etc/js-agent/flags --token-file
-  /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch
+  /etc/js-agent/token --state-root /var/db/js-agent/state --scratch-root /var/db/js-agent/scratch/runs
   --native-helper-socket /var/run/js-mac-session/socket`; it runs as root, with `RunAtLoad` false, `ThrottleInterval`
   30, `ExitTimeOut` 120 and its logs in `.../js-agent/log/js-agent.log` and `js-agent.err.log`. `KeepAlive` is
   conditional on the flags file `/etc/js-agent/flags` (`PathState`), not on the token: a Mac joins by hostkeeper's
@@ -131,7 +131,7 @@ others none), or that has an entitlement and no hardened runtime.
   `/Library/Application Support/js-agent/update`,
   `release_link` `/var/lib/hostkeeper/packages/js-agent/current`, `flags_file` `/etc/js-agent/flags`, `token_file`
   `/etc/js-agent/token`, `state_root` `/var/db/js-agent/state`, `socket_group` `_jsagent`, `scratch_root`
-  `/var/db/js-agent/scratch`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
+  `/var/db/js-agent/scratch/runs`, `runtime` `native`, and the cordon, drain and step bounds of the Linux manifest.
   `socket_group` and `scratch_root` are the helper plist's `--socket-group` and the agent plist's `--scratch-root`
   (a test of xtask holds them equal); they name the host setup the hook makes (below).
 - `helper_unit` is a launchd-only parameter of the hook (`crates/js-agent`, the update hook). When it is present the
@@ -148,7 +148,12 @@ others none), or that has an entitlement and no hardened runtime.
 
 1. `release.yml`'s `beta-macos-pkg` calls `js-agent-macos-pkg.yml` with `version` the release's, `sign: true` and
    `secrets: inherit` (a called workflow reads every secret it is not passed as empty, so without it `sign` would skip).
-   A pull request runs none of it.
+   A pull request runs none of it. The release's `beta-macos-first-install` (after `beta-macos-pkg`, no secret)
+   calls `js-agent-macos-first-install.yml`, which installs the unsigned package on a runner through hostkeeper's
+   installer and runs the update hook as root, then rolls a config package over the installed agent and updates the
+   agent to a second package (the next patch version, built beside the first and never released); only
+   `promote-macos` waits for it, never the deploy. A manual run of
+   `js-agent-macos-pkg.yml` calls it too, so a branch's package can be tried before it merges.
 2. The `sign` job runs on main for that call (and for a manual run), in the environment `pkg-signing`, with the
    secrets `MACOS_INSTALLER_P12` (the "Developer ID Installer" certificate and key as a base64 PKCS#12 file) and
    `MACOS_INSTALLER_P12_PASSWORD`. It imports them into a temporary keychain for `productsign` alone, finds the
@@ -199,28 +204,57 @@ install and on every update (`crates/js-agent/src/update_hook/step/host_setup.rs
 - the helper's socket group (`socket_group`, `_jsagent`): made with `dseditgroup -o create` when the local directory
   does not list it, under the gid macOS picks; a group with staff's gid (20, the lease users' group the helper's
   plist leaves at its default) is refused, as the helper refuses it;
-- the agent's state root (`state_root`) and scratch root (`scratch_root`), mode 0700, root's, with `/var/db/js-agent`
-  0755;
+- the agent's state root (`state_root`) and scratch root (`scratch_root`, `/var/db/js-agent/scratch/runs`), mode 0700,
+  root's, with `/var/db/js-agent` 0755;
 - a file system of its own for the scratch root (the agent refuses a state root on the scratch root's device): while
-  the two share a device, the hook gives the scratch root the APFS volume `js-agent-scratch` in the Data volume's
-  container, with a quota of nine tenths of the container so that jobs that fill it leave room for the system and
-  the state root. The volume is made unmounted (`diskutil apfs addVolume <container> APFS js-agent-scratch -quota
-  <N>G -nomount`), named in `/etc/fstab` by its UUID (`UUID=<uuid> /var/db/js-agent/scratch apfs rw,nobrowse`) so
-  that every boot mounts it there, and then mounted on the scratch root (unmounted first if it is mounted elsewhere);
-  a volume root that ignores ownership is given it (`diskutil enableOwnership`). A volume rather than a disk image
-  or a second partition: it needs no space set aside, shares the container's free space up to its quota, and a boot
-  mounts it with no daemon of ours.
+  the scratch root's parent, `/var/db/js-agent/scratch`, shares a device with the state root, the hook gives that
+  directory the APFS volume `js-agent-scratch` in the Data volume's container, with a quota of nine tenths of the
+  container so that jobs that fill it leave room for the system and the state root. A volume of that name that is
+  there already is used. The volume is made unmounted (`diskutil apfs addVolume <container> APFS js-agent-scratch
+  -quota <N>G -nomount`) and mounted on the scratch root's parent (`diskutil mount nobrowse -mountPoint
+  /var/db/js-agent/scratch <device>`, unmounted first if it is mounted elsewhere; a Mac whose volume is mounted there
+  already needs no mount); a volume root that ignores ownership is given it (`diskutil enableOwnership`, which macOS
+  keeps for the volume across mounts and boots). A volume rather than a disk image or a second partition: it needs
+  no space set aside and shares the container's free space up to its quota. The volume is mounted on the parent, not
+  on the scratch root, because the bundle store, `--bundle-store /var/db/js-agent/scratch/bundles`, must lie on the
+  scratch volume and cannot lie in the scratch root: the agent's start removes every entry of the scratch root that
+  is not a run's directory. The mount point is root's, mode 0711 (search only for others): a native job runs as a
+  lease user, which must walk down through it to a bundle's programs in the store, and cannot list it; the scratch
+  root on the volume is root's, 0700. The hook makes no store directory: the agent makes it at its start (below);
+- no file system table line. Since macOS 26.6 the system's sandbox lets only a process with Full Disk Access (a TCC
+  grant, which root does not imply) write `/etc/fstab`, and answers any other process with `EPERM`; hostkeeper's
+  daemon has no such grant and a Mac without device management has no way to give it one. So the agent mounts the
+  volume itself, at each start, before it opens either root (`crates/js-agent/src/lifecycle/scratch_volume.rs`,
+  `mount_at_start`): while the scratch root's parent is on the state root's file system (as after every boot), it finds
+  `js-agent-scratch` in the Data volume's container and mounts it as above, and a start that cannot ends with the
+  reason and is started again by launchd. A boot thus needs nothing that macOS refuses, and `verify` sees the mount:
+  an agent whose roots share a file system refuses to start, so it says no hello. An earlier release's copy of the
+  table beside it (`/etc/fstab.js-agent`) is removed by the setup.
 
-Each part is looked at before it is changed and only what is not as required is made (the scratch root's owner and
-mode are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
+- the bundle store, when the host's flags give `--bundle-store`, is made by the agent at its start, after it has
+  mounted the volume: the directory, root's, 0711, when it is missing. The agent refuses to start (exit 2, naming the
+  directory) for a store inside the scratch root, and for a store with a directory above it, or itself, that a lease
+  user cannot search (not a directory, not root's, writable by group or others, or without `o+x`)
+  (`crates/js-agent/src/bundle/layout.rs`); the lab's config package may therefore keep
+  `--bundle-store=/var/db/js-agent/scratch/bundles`.
+
+Each part is looked at before it is changed and only what is not as required is made (the owner and mode of the state
+root, the mount point and the scratch root are set on every run), so a rerun makes nothing on a Mac that is set up, and a run killed at any point and run
 again ends as an uninterrupted one. A part that cannot be read or made defers the step
 (exit 75, `host_setup_missing`, the part and the cause in the detail) with no record written and no cordon placed;
-hostkeeper orders the host again later. No step undoes the setup: it belongs to the host, not to a release.
+hostkeeper orders the host again later. A system call the system refuses (`EPERM`), which no retry changes, fails the
+step instead (exit 1, `host_setup_refused`, class environment, the path and the error in the detail), with no record
+written and no cordon placed, so that the order fails where an operator sees it. No step undoes the setup: it belongs
+to the host, not to a release.
 
 Not made by the hook:
 
 - the pool's users, which `js-mac-session` makes in the uid range of its plist (600-699) when it starts;
-- for `--native-network on`, the pool's pf anchor (`js-mac-provision install`), which nothing installs yet.
+- for `--native-network on`, the pool's pf anchor, which the package's daemon `js-agent.pf-pool` loads at boot and
+  every 30 seconds (`js-mac-provision install --flags-file /etc/js-agent/flags`).
+
+What a restart or a macOS update of a Mac needs, and how to check a Mac after one, is
+[docs/runbooks/mac-restart-and-update.md](../runbooks/mac-restart-and-update.md).
 
 Once, for the repository of packages: the signers file of each Mac, the environment `pkg-signing` with its two secrets, and the publish role's
 write access to the prefix `pkg/jobscheduler/`.
@@ -233,8 +267,22 @@ The lease server's agent pool configuration gains a pool the Macs meet: `capabil
 "arm64", layered-rootfs = "true" }` and `exec = "sandbox-exec"`. A joined pool places a host by the capabilities it
 names, so a job with mounts (which asks for `layered-rootfs`, as kbf's macOS action jobs do) is placed on a Mac only
 when the pool names it; every native agent of a release that takes mounts reports it, and one that does not is refused
-at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The Macs
-must reach its agent listener.
+at its hello. The pool may also name a least `os_version`; a host is placed by the version its hello reports. The
+Macs' pool names `os_version = "26"` (`docs/design/mac-runtime.md`, section 5). The Macs must reach its agent listener.
+
+## The pool's users stay for good
+
+The helper (`js-mac-session`) makes the pool's users (`kbf-lease-pool-<n>`) once and never deletes one, nor a home, nor a
+per-user folder the system placed: measured on macOS 27.0.1 with System Integrity Protection on, root (from a launchd
+daemon and from an ssh root shell) may not delete a local user record, may not remove an existing account's home, and
+may not remove `/private/var/folders/<xx>/<hash>`, though everything can be emptied. A lease's end resets its user in
+place, and a first install on a Mac that already has the pool's users (an earlier install left them) adopts the ones
+that are the pool's own, so a package can be installed again and again. Uninstalling the package therefore leaves the
+users: a Mac that must lose them is reset by its administrator.
+
+A management profile that grants Full Disk Access to the helper (a privacy-policy payload for its signed binary, which
+needs device management) would be an option, not a need: with it the helper could delete a user's record and home, and
+the one deletion that is left, of a lease user from before the pool, would work. Nothing here asks for it.
 
 ## Platform properties
 
@@ -268,10 +316,15 @@ job's `constraints.os_version` (`26`: macOS 26 or newer) is compared with it as 
 - No flags file on the Mac, or one that names no host certificate on a Mac with no token: a first install's `prepare`
   defers `join_token_missing` (exit 75) having installed nothing, and hostkeeper runs the hook's `rollback` and retries
   later. A later order installs it once the host setup is done.
-- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume, its `/etc/fstab` line
-  or its mount): `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon
-  placed, and hostkeeper runs the hook's `rollback` (a first install) and retries later. `cutover` never starts an
-  agent whose roots share a device or a helper whose socket group is missing.
+- A part of the host setup the hook cannot make (the socket group, a root, the scratch volume or its mount):
+  `prepare` defers `host_setup_missing` (exit 75) naming it, with no record written and no cordon placed, and
+  hostkeeper runs the hook's `rollback` (a first install) and retries later. A system call of the setup that macOS
+  refuses (`EPERM`) fails `prepare` instead (`host_setup_refused`, exit 1), naming the path and the error, and is not
+  retried as if it could pass. `cutover` never starts an agent whose roots share a device or a helper whose socket
+  group is missing.
+- The agent cannot mount the scratch volume at a start (no `js-agent-scratch` in the Data volume's container, or
+  `diskutil` fails): the agent exits naming `--scratch-root` and the cause, and launchd starts it again after its
+  throttle interval; during an update `verify` sees no hello and the release is rolled back.
 - No signed package for a release (the environment `pkg-signing` is not set up, or `beta-macos-pkg` failed): `pkg-upload`
   uploads nothing, `release desired` writes `set-mac=false`, and the Linux nodes are set as before.
 - The entry does not resolve (no `macos-pkg` format in the descriptor, platform missing, no `packages` entry for

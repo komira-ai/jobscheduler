@@ -14,8 +14,8 @@
 //! deleted <term>.<seq>
 //! ```
 //!
-//! `deleted` records that the lease is over: its pool user went back to the pool (or was
-//! replaced), or, for a lease a release before the pool created, its own user was
+//! `deleted` records that the lease is over: its pool user went back to the pool (reset
+//! in place), or, for a lease a release before the pool created, its own user was
 //! deleted. This file's format is the one releases before the pool wrote and read, so
 //! they can still read it.
 //!
@@ -56,7 +56,7 @@ pub const POOL_FILE: &str = "pool";
 pub struct Entry {
     /// The uid the lease's user had.
     pub uid: u32,
-    /// Whether the lease is over (its user returned to the pool, replaced, or deleted);
+    /// Whether the lease is over (its user returned to the pool, or deleted);
     /// a lease id that is over is never used again.
     pub deleted: bool,
 }
@@ -284,7 +284,8 @@ impl Ledger {
 
     /// Records, durably, that `lease`, which holds `slot`, is over: first the lease's
     /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for an
-    /// administrator's lease).
+    /// administrator's lease: the word is kept for the format's sake, and the helper
+    /// resets that slot in place like any other).
     ///
     /// # Errors
     /// The lease is not live, `slot` is not leased to it, or a write failed (a failed
@@ -319,8 +320,8 @@ impl Ledger {
         self.pool.append(pool::Record::Resetting(slot, replace))
     }
 
-    /// Whether `slot` is leased to an administrator's lease: its user is then replaced,
-    /// never reset, and its `resetting` says so.
+    /// Whether `slot` is leased to an administrator's lease: its `resetting` says so (the
+    /// helper resets it in place all the same).
     fn leased_admin(&self, slot: Slot) -> bool {
         matches!(
             self.slot(slot),
@@ -339,7 +340,7 @@ impl Ledger {
         self.pool.append(pool::Record::Free(slot))
     }
 
-    /// Records, durably, that `slot`'s user could be neither reset nor replaced: the slot
+    /// Records, durably, that `slot`'s user could not be reset in place: the slot
     /// is broken, and leased to no one.
     ///
     /// # Errors

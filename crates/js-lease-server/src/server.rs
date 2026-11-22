@@ -839,8 +839,8 @@ impl Running {
     /// request it is serving is answered and its connection closed (within `--drain-timeout`),
     /// a held heartbeat is answered now, and the server places no more jobs. An agent opens a
     /// connection for each request, so its next heartbeat reaches another server over the same
-    /// store, which does not know its session and has it say hello there; the agent keeps its
-    /// runs. Without another server the agents retry with their backoff until one starts.
+    /// store, which serves its session from the host's row (no hello again); the agent keeps
+    /// its runs. Without another server the agents retry with their backoff until one starts.
     pub async fn hold(&self) {
         self.gate.drain();
         self.shared.agents().draining.begin();

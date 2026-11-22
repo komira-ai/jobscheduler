@@ -10,12 +10,14 @@ mod adopt;
 pub(crate) mod agent;
 mod bound;
 mod bundle;
+mod checks;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod env;
 pub(crate) mod fake_helper;
 mod files;
 mod inputs;
+mod job_home;
 mod journal;
 mod lifecycle;
 mod live_logs;
@@ -188,11 +190,15 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
 }
 
 /// The command line the runtime sent the helper, taken apart: `sandbox-exec`, the `-D`
-/// parameters, `-p` and the profile, then the program and its arguments. No shell stands
-/// between the profile and the program: the helper sets the run's limits.
+/// parameters, `-p` and the profile, then `/usr/bin/env HOME=<job home>`, the program and its
+/// arguments. No shell stands between the profile and the program: the helper sets the
+/// run's limits, and `env` sets the job's `HOME` (the helper sets its own).
 pub struct Parsed {
     pub params: Vec<(String, String)>,
     pub profile: String,
+    /// The `HOME` the job gets, as `env` sets it.
+    pub home: String,
+    /// The program and its arguments.
     pub tail: Vec<String>,
 }
 
@@ -210,9 +216,12 @@ pub fn parse(argv: &[String]) -> Parsed {
     }
     assert_eq!(argv[at], "-p");
     let profile = argv[at + 1].clone();
+    assert_eq!(argv[at + 2], "/usr/bin/env", "env sets the job's HOME");
+    let home = argv[at + 3].strip_prefix("HOME=").unwrap().to_owned();
     Parsed {
         params,
         profile,
-        tail: argv[at + 2..].to_vec(),
+        home,
+        tail: argv[at + 4..].to_vec(),
     }
 }

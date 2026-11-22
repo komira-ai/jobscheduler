@@ -3,19 +3,20 @@
 //! One record per line, as the lease ledger's (see the parent module):
 //!
 //! ```text
-//! made <slot> <uid>               the slot's user is being made: resetting, to be replaced
+//! made <slot> <uid>               the slot's user is being made (or adopted): resetting
 //! leased <slot> <term>.<seq>      the slot's user is the lease's
 //! leased <slot> <term>.<seq> admin   ... made an administrator for the lease
-//! resetting <slot>                the lease is over; the user is being reset (or replaced)
-//! resetting <slot> replace        ... an administrator's lease: the user is only replaced
+//! resetting <slot>                the lease is over; the user is being reset in place
+//! resetting <slot> replace        ... as above (the word is only read and written for the
+//!                                 format's sake: every slot is reset in place)
 //! free <slot>                     the user is clean: the next lease may take it
-//! broken <slot>                   the user could be neither reset nor replaced
+//! broken <slot>                   the user could not be reset in place
 //! ```
 //!
 //! Each record must follow from the slot's state before it: `made` once per slot, with a
 //! uid no other slot has; `leased` only from free, and only for a lease no slot is
 //! leased to; `resetting` only from leased; `free` only from resetting or broken (a
-//! broken slot whose user was replaced later); `broken` only from resetting. A line that
+//! broken slot whose user was reset again later); `broken` only from resetting. A line that
 //! does not stops the helper from starting, as in the lease ledger.
 
 use std::collections::BTreeMap;
@@ -40,16 +41,16 @@ pub enum SlotState {
         /// Whether the user was made an administrator for the lease (with a gate grant).
         admin: bool,
     },
-    /// Being made, reset after a lease, or replaced: lent to no one until it is free.
-    /// `replace` when the user must be replaced, never reset: one being made, or the
-    /// user of an administrator's lease. It survives a restart, so the recovery after a
-    /// crash replaces it too.
+    /// Being made, adopted or reset after a lease: lent to no one until it is free.
+    /// `replace` is set for a user being made and for the user of an administrator's
+    /// lease; the helper resets both in place like any other, so it only survives a
+    /// restart as the format's record of which it was.
     Resetting {
-        /// Whether the user is only replaced, never reset.
+        /// Whether the record says `replace` (a user being made, or an administrator's).
         replace: bool,
     },
-    /// Neither the reset nor the replacement of its user succeeded: lent to no one, until
-    /// a `pool-create` (or the boot reset) replaces the user.
+    /// The reset in place of its user did not come out clean: lent to no one, until a
+    /// `pool-create` (or the boot reset) resets the user again.
     Broken,
 }
 
