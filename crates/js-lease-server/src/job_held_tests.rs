@@ -14,11 +14,16 @@ use js_jobs::{
 use js_state::{Store, StoreError};
 use js_types::{HostId, JobEventKind, QueueCode};
 
-use super::{CAPACITY_BAR, HELD_BAR, MAX_CAPACITY_REQUEUES, MAX_HELD_REQUEUES, named};
+use super::{HELD_BAR, MAX_HELD_REQUEUES, named};
 use crate::agent_api::job_rig::{BOOKED, placed, result, spec, tables};
+use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 use crate::per_job::{BeatContext, JobReply, serve};
+
+/// The capacity requeue count and bar a pool that sets none has.
+const MAX_CAPACITY_REQUEUES: usize = JobLimits::DEFAULT.capacity_requeues;
+const CAPACITY_BAR: Duration = JobLimits::DEFAULT.capacity_refusal_bar;
 
 fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
@@ -79,6 +84,17 @@ fn beat(
     listed: JobResult,
     metrics: &Failures,
 ) -> Result<JobReply, JobStoreError> {
+    beat_under(JobLimits::DEFAULT, jobs, allocation, listed, metrics)
+}
+
+/// [`beat`] for a pool whose limits are `limits`.
+fn beat_under(
+    limits: JobLimits,
+    jobs: &ServerJobs,
+    allocation: &AllocationRecord,
+    listed: JobResult,
+    metrics: &Failures,
+) -> Result<JobReply, JobStoreError> {
     let ceiling = NetworkCeiling::default();
     let context = BeatContext {
         host: &allocation.host,
@@ -91,6 +107,7 @@ fn beat(
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits,
     };
     let listing = [HeldJob {
         job_id: allocation.job.to_string(),
@@ -698,4 +715,86 @@ fn each_accepted_refused_start_is_told_once_with_its_host_and_code() {
     // The capacity refusal sent its job back to the queue: its listing again is stale.
     assert_eq!(refused(&jobs, &on_a, "no-capacity", &failures), Ack::Stale);
     assert_eq!(failures.refused_told(), once, "a stale listing was counted");
+}
+
+/// A pool that sets `capacity_requeues = 1` ends the job at its second capacity refusal, the
+/// detail naming both hosts, while the first refusal still requeues it; a pool that sets 0 ends
+/// it at the first; and a pool that sets none still allows the default eight requeues (the
+/// test of the ninth refusal above). Catches a count that is still the built-in one.
+#[test]
+fn a_pool_that_sets_the_capacity_requeue_count_changes_when_the_job_ends() {
+    for (count, ends_at) in [(0, 1), (1, 2), (3, 4)] {
+        let limits = JobLimits {
+            capacity_requeues: count,
+            ..JobLimits::DEFAULT
+        };
+        let failures = Failures::default();
+        let (_store, jobs) = tables();
+        let (refused_job, mut booking) = placed(&jobs, "counted", "host-a", spec(), BOOKED);
+        for refusal_number in 1..ends_at {
+            let reply = beat_under(
+                limits,
+                &jobs,
+                &booking,
+                refusal(&booking, "no-capacity"),
+                &failures,
+            )
+            .unwrap();
+            assert_eq!(reply.job_acks[0].ack, Ack::Accepted);
+            assert_eq!(
+                job(&jobs, &refused_job.id).state,
+                JobState::Queued,
+                "count {count}: refusal {refusal_number} ended the job"
+            );
+            let next = format!(
+                "host-{}",
+                char::from(b'b' + u8::try_from(refusal_number).unwrap())
+            );
+            booking = jobs.place(&refused_job.id, host(&next), BOOKED).unwrap().1;
+        }
+        let reply = beat_under(
+            limits,
+            &jobs,
+            &booking,
+            refusal(&booking, "no-capacity"),
+            &failures,
+        )
+        .unwrap();
+        assert_eq!(reply.job_acks[0].ack, Ack::Accepted);
+        let ended = job(&jobs, &refused_job.id);
+        assert_eq!(
+            ended.state,
+            JobState::FailedToStart(StartFailure::AgentRefused),
+            "count {count}: refusal {ends_at} did not end the job"
+        );
+        assert_eq!(ended.capacity_refusals.len(), ends_at - 1);
+        assert_eq!(failures.told(), [StartFailure::AgentRefused]);
+    }
+}
+
+/// A pool that sets `capacity_refusal_bar = 5m` bars the refusing host for five minutes from
+/// the store's time, not for the default minute. Catches a bar that is still the built-in one.
+#[test]
+fn a_pool_that_sets_the_capacity_refusal_bar_bars_the_host_for_that_long() {
+    let bar = Duration::from_secs(300);
+    let limits = JobLimits {
+        capacity_refusal_bar: bar,
+        ..JobLimits::DEFAULT
+    };
+    let (_store, jobs) = tables();
+    let (barred_job, booking) = placed(&jobs, "long-bar", "host-a", spec(), BOOKED);
+    let now = jobs.now().unwrap();
+    let failures = Failures::default();
+    beat_under(
+        limits,
+        &jobs,
+        &booking,
+        refusal(&booking, "no-capacity"),
+        &failures,
+    )
+    .unwrap();
+    assert_eq!(
+        job(&jobs, &barred_job.id).prepare_bars.get(&host("host-a")),
+        Some(&Exclusion::Until(now.saturating_add(bar)))
+    );
 }

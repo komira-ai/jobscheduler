@@ -39,7 +39,7 @@ use crate::agents_support::{JOIN, POOL, hello_body, session, start_agents};
 use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
 use crate::jobs_support::{
     JobBody, beat_with, cancel, commands, exited, job_agent, job_args, job_server, job_state,
-    one_start, per_job_hello, running, submit_body,
+    left_the_queue, one_start, per_job_hello, running, submit_body,
 };
 use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request, unanswered};
 use crate::tls::{connector, test_identity, tls_request};
@@ -236,8 +236,9 @@ async fn the_listener_stops_with_the_server() {
 }
 
 /// Asserts that a job holds its host until its agent reports it ended: with one host of
-/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_PLACED` by its own submit
-/// (201, no tick) and the agent's next heartbeat reply carries its one `job_start`; the agent
+/// 8 cores registered, a job of 6 cores is answered `JOB_STATE_QUEUED` by its own submit
+/// (201), leaves the queue `JOB_STATE_PLACED` and the agent's next heartbeat reply carries its
+/// one `job_start`; the agent
 /// lists it running and the job reads `JOB_STATE_RUNNING`; a second job of 6 cores has no
 /// room and is queued (201) and, while the first runs, a heartbeat carries no command and
 /// the second still reads `JOB_STATE_QUEUED`;
@@ -262,7 +263,9 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
 
     let first = submit_body(&h, &wide("held-1").json()).await;
     assert_eq!(first.status, 201, "{}", first.body);
-    assert_eq!(first.json()["job"]["state"], "JOB_STATE_PLACED");
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
+    let placed = left_the_queue(&h, "held-1").await;
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
     let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-1");
     let held = beat_with(&h, &agent, &[running("held-1")]).await;

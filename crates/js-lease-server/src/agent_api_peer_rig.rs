@@ -18,6 +18,7 @@ use crate::job_store::ServerJobs;
 pub(crate) const NEVER: JobLimits = JobLimits {
     max_queue_wait: std::time::Duration::from_secs(365 * 24 * 3600),
     start_timeout: std::time::Duration::from_secs(365 * 24 * 3600),
+    ..JobLimits::DEFAULT
 };
 
 /// A placing server named `name` over the job tables and the clock of `first`, whose registry
