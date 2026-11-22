@@ -1378,6 +1378,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-cpu-replay"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "flate2",
+ "js-jobs",
+ "js-sched-placer",
+ "js-sizing",
+ "js-state",
+ "js-types",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-elastic"
 version = "0.1.0"
 dependencies = [
