@@ -78,7 +78,7 @@ pub(in super::super) struct State {
 impl State {
     /// Whether the cache answers for the deleted record `name` (or, with `name` `None`, for
     /// one with `uid`): one lookup is spent when it does.
-    fn from_cache(&mut self, name: Option<&str>, uid: u32) -> Option<UserRecord> {
+    fn cached_record(&mut self, name: Option<&str>, uid: u32) -> Option<UserRecord> {
         let key = self
             .cached
             .iter()
@@ -239,7 +239,7 @@ impl AccountHost for Fake {
                 uid: user.uid,
                 gid: user.gid,
             }),
-            None => state.from_cache(Some(name), 0),
+            None => state.cached_record(Some(name), 0),
         };
         drop(state);
         Self::after(hooks, found)
@@ -249,7 +249,7 @@ impl AccountHost for Fake {
         let hooks = self.enter("uid_taken", &uid.to_string())?;
         let mut state = self.state();
         let taken = state.users.values().any(|user| user.uid == uid)
-            || state.from_cache(None, uid).is_some();
+            || state.cached_record(None, uid).is_some();
         drop(state);
         Self::after(hooks, taken)
     }

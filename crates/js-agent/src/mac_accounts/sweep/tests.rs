@@ -506,13 +506,16 @@ fn the_account_of_an_adopted_job_is_kept_at_open_and_retired_after() {
     assert!(rig.fake.state().processes.is_empty());
 }
 
+/// A case of a test and what it does to the rig before the open.
+type Spoil = (&'static str, fn(&Rig));
+
 /// Asserts that the account of an adopted job whose record or home is no longer there is
 /// not repaired but logged and ended at open, `gone` recorded: the job cannot be running
 /// without them.
 #[test]
 fn the_account_of_an_adopted_job_that_lost_its_record_or_home_is_ended() {
     let base = Rig::new("adopted-lost", 2, 0);
-    let spoils: [(&str, fn(&Rig)); 2] = [
+    let spoils: [Spoil; 2] = [
         ("adopted-no-home", |rig| {
             std::fs::remove_dir(rig.home(1)).unwrap();
         }),
