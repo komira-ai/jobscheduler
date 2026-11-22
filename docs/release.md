@@ -726,7 +726,9 @@ until it is set.
   creates the package `js/smoke` of the organisation on GitHub's container registry, and GitHub
   makes a new package private, with no API to change that. In the package's settings, set its
   visibility to public (once; later pushes keep it). Until then `smoke-bundle-check` fails with the
-  registry's refusal, and the release run is red ([The smoke bundle](#the-smoke-bundle)).
+  registry's refusal (`https://ghcr.io/token: the registry answered 401`) followed by this step,
+  and the release run is red ([The smoke bundle](#the-smoke-bundle)). Re-running the failed job
+  of that run after the change turns it green.
 - **The environments `apt-publish` and `apt-signing`**, restricted to `main`, with the variables and
   secrets [The apt repository](#the-apt-repository) lists. Until they exist every apt job passes
   doing nothing, and the release ends with the GitHub release published and no package in the
@@ -768,7 +770,9 @@ it is published under and the manifest digest the tree packs to, which
    it as an agent does (the manifest against the digest, the bundle kind, every blob's length and
    digest, the config's rules), extracts its layer with the agent's extractor, and compares every
    entry with the committed tree: paths, kinds, execute bits, link targets and bytes. It fails while
-   the package is not public ([Configuration the project owner must
+   the package is not public: when the registry answers the pull 401 or 403 (ghcr.io answers 401
+   for a private package and 403 for one that is not there), the error says so after the
+   registry's answer and names the owner's step ([Configuration the project owner must
    set](#configuration-the-project-owner-must-set)).
 
 A failure of any of them makes the run red (`release-red` counts `smoke-bundle-check`, and so the

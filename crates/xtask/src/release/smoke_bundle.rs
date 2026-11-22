@@ -14,7 +14,8 @@
 //!   and left as it is.
 //! - `check --tree <dir> --scratch <dir>` pulls the bundle by the recipe's digest with the
 //!   agent's registry client (`js_oci::Client`, anonymous, the repository alone on its
-//!   allow-list), so it fails while the package is not public; checks it as a pull does (the
+//!   allow-list), so it fails while the package is not public, and a 401 or 403 says to make
+//!   it public ([`Error::NotPublic`]); checks it as a pull does (the
 //!   manifest against the digest, the bundle kind, every blob's length and digest) and the
 //!   config under the format's rules; extracts its one layer into the new directory
 //!   `--scratch` with the extractor the agent's helper runs; and compares every entry with
@@ -62,6 +63,12 @@ pub enum Error {
     /// The registry, or what it served, was refused.
     #[error("{0}")]
     Oci(#[from] js_oci::Error),
+    /// The registry answered 401 or 403 to the pull, which asks with no credentials: the
+    /// package is not public (GitHub makes a new package private), or not there.
+    #[error(
+        "{0}: the registry refuses the pull without credentials, so the package is not public or not there: set its visibility to public in the package's settings on GitHub, once (docs/release.md, \"Configuration the project owner must set\")"
+    )]
+    NotPublic(js_oci::Error),
     /// The bundle's config breaks a rule of the format.
     #[error("the bundle's config: {0}")]
     Config(#[from] js_bundle::ConfigError),
@@ -345,8 +352,15 @@ pub async fn compare(
 ) -> Result<usize, Error> {
     let committed = walk(tree)?;
     let kind = Kind::bundle();
-    let manifest = source.fetch_manifest(digest, &kind).await?;
-    let config = BundleConfig::parse(&source.fetch_config(&manifest, &kind).await?)?;
+    let manifest = source
+        .fetch_manifest(digest, &kind)
+        .await
+        .map_err(refused)?;
+    let config = source
+        .fetch_config(&manifest, &kind)
+        .await
+        .map_err(refused)?;
+    let config = BundleConfig::parse(&config)?;
     let ([blob], [layer]) = (manifest.layers(), config.layers.as_slice()) else {
         return Err(Error::Layers {
             manifest: manifest.layers().len(),
@@ -354,7 +368,7 @@ pub async fn compare(
         });
     };
     let mut bytes = Vec::new();
-    source.fetch_blob(blob, &mut bytes).await?;
+    source.fetch_blob(blob, &mut bytes).await.map_err(refused)?;
     let encoding = LayerEncoding::from_media_type(blob.media_type());
     let encoding = encoding.ok_or(Error::LayerType)?;
     let scratch = Scratch::create(scratch)?;
@@ -373,6 +387,22 @@ pub async fn compare(
     )?;
     let pulled = walk(&scratch.0)?;
     differ(&pulled, &committed).map_or(Ok(committed.len()), Err)
+}
+
+/// A failed fetch: [`Error::NotPublic`] when the registry answered 401 or 403, which to a
+/// pull without credentials means the package is not public or not there.
+fn refused(e: js_oci::Error) -> Error {
+    if matches!(
+        e,
+        js_oci::Error::Status {
+            status: 401 | 403,
+            ..
+        }
+    ) {
+        Error::NotPublic(e)
+    } else {
+        Error::Oci(e)
+    }
 }
 
 /// The first difference between `pulled` and `committed`, in path order.
