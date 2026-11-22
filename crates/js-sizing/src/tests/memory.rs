@@ -1,4 +1,4 @@
-//! The memory estimate: formula, statistic, samples, censoring, hierarchy, hosts, hints, CPU.
+//! The memory estimate: formula, statistic, samples, held samples, hierarchy, hosts, hints, CPU.
 
 use super::*;
 
@@ -248,6 +248,26 @@ fn a_success_that_reached_its_limit_books_a_step_above_it() {
         held_estimate(hits, 5),
         5 * GIB,
         "memory.events max: at least the limit, whatever the peak read"
+    );
+    let above = Run {
+        limit_hits: 3,
+        ..under(4 * GIB, 5 * GIB)
+    };
+    assert_eq!(
+        held_estimate(above, 5),
+        6 * GIB + GIB / 4,
+        "a peak above its limit: the peak (5 GiB x 1.2 + 128 MiB)"
+    );
+    let past_the_host = Run {
+        limit_hits: 1,
+        ..under(100 * GIB, 4 * GIB)
+    };
+    let mut s = Summaries::default();
+    feed(&mut s, &linux(1), &past_the_host, 5);
+    assert_eq!(
+        estimate(&s, &linux(1)),
+        Err(Fallback::OverCap),
+        "a limit past the host: held just below it, which books the whole host"
     );
     let swapped = Run {
         swap_peak_bytes: 1,
