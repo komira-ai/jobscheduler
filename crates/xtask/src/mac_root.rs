@@ -5,8 +5,8 @@
 //! - the safety check comes first: the Mac's user list (`dscl . -list /Users UniqueID`,
 //!   read as this user) must hold no lease user ([`check_users`]): no uid of the agent's
 //!   pool range [`PRODUCTION_UIDS`] or of the tests' own [`TEST_UIDS`], and no name that
-//!   starts `kbf-lease-`. The tests make and delete users named `kbf-lease-pool-<n>`, so they
-//!   run only on a Mac whose agent has not made its pool;
+//!   starts `kbf-lease-`. The tests make and delete accounts named `kbf-acct-<n>` with uids of
+//!   their own, so they run only on a Mac whose agent has not made its pool there;
 //! - every target ([`TARGETS`]) and the `js-mac-provision` program are built as this user
 //!   ([`test_build::build`], [`test_build::build_bin`]), before anything runs as root;
 //! - through `sudo -n`: the work directory `--work` (which must not exist) and a directory
@@ -17,7 +17,7 @@
 //!   target reads ([`env_for`]), `--ignored --test-threads=1`, from its package's directory,
 //!   its output in `target/mac-root-tests/<target>.log`;
 //! - after each `js-agent` target, pass or fail, the users it made are deleted
-//!   ([`to_delete`]): only those named `kbf-lease-pool-<n>` with a uid the tests use. A user
+//!   ([`to_delete`]): only those named `kbf-acct-<n>` with a uid the tests use. A user
 //!   still there afterwards is a failure;
 //! - the output of every binary is read into one row per test ([`judge`]): `pass`, `FAIL`
 //!   with the line its panic printed, or `not-run` with the reason. A binary that reports no
@@ -38,22 +38,22 @@ use crate::test_build::{self, Built, Error};
 /// The uids the agent's helper lends to jobs (its default `--uid-range`): a user with one
 /// is a lease user of a farm Mac.
 pub const PRODUCTION_UIDS: RangeInclusive<i64> = 600..=699;
-/// Every uid the tests use: the helper of `native_privileged`'s ([`NATIVE_PRIVILEGED_UIDS`]),
-/// the users of `native_isolation` and `native_inbound_pf`, and the unprivileged uid of
+/// Every uid the tests use: the account pool of `native_privileged` ([`NATIVE_PRIVILEGED_UIDS`]),
+/// the accounts of `native_isolation` and `native_inbound_pf`, and the unprivileged uid of
 /// `js-mac-pool` and `js-treestore` ([`PLAIN_UID`]).
 pub const TEST_UIDS: RangeInclusive<i64> = 4300..=4320;
-/// The uids `native_privileged`'s helper gives its pool users (the test names them).
+/// The slots of `native_privileged`'s account pool.
 pub const NATIVE_PRIVILEGED_UIDS: RangeInclusive<i64> = 4300..=4309;
-/// The uid `native_isolation`'s helper gives its one pool user.
+/// The one slot of the account pool `native_isolation` opens.
 pub const ISOLATION_UID: u32 = 4310;
-/// The uid `native_inbound_pf`'s helper gives its one pool user.
+/// The one slot of the account pool `native_inbound_pf` opens.
 pub const INBOUND_UID: u32 = 4311;
-/// The uids of the users the `js-agent` targets make, which the verb deletes after them.
+/// The uids of the accounts the `js-agent` targets make, which the verb deletes after them.
 pub const MADE_UIDS: RangeInclusive<i64> = 4300..=4311;
 /// The unprivileged uid and gid of `js-mac-pool` and `js-treestore`: no account is needed.
 pub const PLAIN_UID: u32 = 4320;
-/// The prefix of the users the `js-agent` targets' helpers make.
-pub const POOL_USER_PREFIX: &str = "kbf-lease-pool-";
+/// The prefix of the accounts the `js-agent` targets' account pools make.
+pub const POOL_USER_PREFIX: &str = "kbf-acct-";
 /// The prefix of every lease user's name, of any release.
 pub const LEASE_USER_PREFIX: &str = "kbf-lease-";
 /// The directory service tool the user list is read with.
@@ -288,7 +288,7 @@ pub fn check_users(users: &[(String, i64)]) -> Result<(), Error> {
 }
 
 /// The users a `js-agent` target left that the verb deletes: named
-/// `kbf-lease-pool-<n>`, with a uid of [`MADE_UIDS`]. No other user is ever deleted.
+/// `kbf-acct-<n>`, with a uid of [`MADE_UIDS`]. No other user is ever deleted.
 pub fn to_delete(users: &[(String, i64)]) -> Vec<String> {
     users
         .iter()

@@ -873,7 +873,7 @@ mod tests {
     /// Asserts that a run's handle is recorded before the run is finished, so that a run that
     /// fails midway (a settle error, a non-zero child) is still in the list the cleanup
     /// walks. It catches a start whose handle is recorded only on success, which leaks the
-    /// pool user of a failed run.
+    /// account of a failed run.
     #[test]
     fn a_run_is_recorded_before_it_can_fail() {
         let mut runs: Vec<&str> = Vec::new();
