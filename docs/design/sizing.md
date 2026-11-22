@@ -220,7 +220,7 @@ takes up to its slack in bookings, which are means.
 **Unknown jobs.** A class with no CPU history books its kind's learned CPU, else its client's, and only a client with no history
 at all books the cold CPU: by default 22 cores, held at a quarter of the largest host, the most any class books. Its first run is
 therefore placed with room for the most cores a class may use, and one run is enough to learn its mean. An unknown job's memory is
-its kind's or its client's peak with the margin, else the cold 4 GiB, a hard limit raised by a kill's floor.
+its kind's or its client's peak with the margin, else the cold 4 GiB, raised by a kill's floor (a booking, not a limit on the job).
 
 **The history from before.** Every run a server rebuilds at its first start after the change has a mean: its CPU time over its wall
 time, from its job record. A server re-derives each run's sample from its job record as the run's mean at the server's start; there
