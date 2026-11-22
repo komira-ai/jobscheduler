@@ -1,6 +1,6 @@
-//! The program's stop requests: SIGTERM and SIGINT (and SIGHUP for the cordon verb), read on a
-//! thread of their own and handed to the loop through a line it waits on, which also carries
-//! the job worker's bell.
+//! The program's requests: stop (SIGTERM and SIGINT, and SIGHUP for the cordon verb) and replace
+//! (SIGHUP, for the agent daemon), read on a thread of their own and handed to the loop through
+//! a line it waits on, which also carries the job worker's bell.
 
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -12,11 +12,12 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::run::{Sleeper, Wake};
 
-/// What waits on the line for the loop: the stop requests not yet taken, and whether the
-/// bell rang since a wait last took it.
+/// What waits on the line for the loop: the stop and replace requests not yet taken, and
+/// whether the bell rang since a wait last took it.
 #[derive(Debug, Default)]
 struct Calls {
     stops: u64,
+    replaces: u64,
     bell: bool,
 }
 
@@ -38,25 +39,28 @@ impl Line {
         self.changed.notify_all();
     }
 
-    /// Waits `duration`, or until a stop request is there, or the bell when `bell` (see
-    /// [`Sleeper::sleep_or_bell`]). A stop request is taken first, then the bell.
+    /// Waits `duration`, or until a stop or replace request is there, or the bell when `bell`
+    /// (see [`Sleeper::sleep_or_bell`]). A stop request is taken first, then a replace
+    /// request, then the bell.
     fn wait(&self, duration: Duration, bell: bool) -> Wake {
-        let waits = |calls: &mut Calls| calls.stops == 0 && !(bell && calls.bell);
+        let waits =
+            |calls: &mut Calls| calls.stops == 0 && calls.replaces == 0 && !(bell && calls.bell);
         let calls = self.lock();
         let (mut calls, _) = self
             .changed
             .wait_timeout_while(calls, duration, waits)
             .unwrap_or_else(PoisonError::into_inner);
-        match (calls.stops, bell && calls.bell) {
-            (0, false) => Wake::Elapsed,
-            (0, true) => {
-                calls.bell = false;
-                Wake::Bell
-            }
-            (_, _) => {
-                calls.stops -= 1;
-                Wake::Stop
-            }
+        if calls.stops > 0 {
+            calls.stops -= 1;
+            Wake::Stop
+        } else if calls.replaces > 0 {
+            calls.replaces -= 1;
+            Wake::Replace
+        } else if bell && calls.bell {
+            calls.bell = false;
+            Wake::Bell
+        } else {
+            Wake::Elapsed
         }
     }
 }
@@ -81,7 +85,7 @@ impl SystemSleeper {
             line: Arc::default(),
         };
         let kinds = [SignalKind::terminate(), SignalKind::interrupt()];
-        watch(kinds, &sleeper.line).map(|()| sleeper)
+        watch(kinds, &sleeper.line, Request::Stop).map(|()| sleeper)
     }
 
     /// Also takes SIGHUP, the end of an ssh session, as a stop request. `js-agent cordon`
@@ -92,13 +96,35 @@ impl SystemSleeper {
     ///
     /// The handler or the thread that reads it cannot be set up.
     pub fn stop_on_hangup(&self) -> io::Result<()> {
-        watch([SignalKind::hangup()], &self.line)
+        watch([SignalKind::hangup()], &self.line, Request::Stop)
+    }
+
+    /// Takes SIGHUP as a request to hand the runs over and run the program again in place
+    /// ([`Wake::Replace`]): the update hook sends it to the main process, after it wrote the
+    /// handover file, instead of stopping the unit. Only the agent daemon asks for it.
+    ///
+    /// # Errors
+    ///
+    /// The handler or the thread that reads it cannot be set up.
+    pub fn replace_on_hangup(&self) -> io::Result<()> {
+        watch([SignalKind::hangup()], &self.line, Request::Replace)
     }
 }
 
+/// What a delivery of a signal asks the loop for.
+#[derive(Debug, Clone, Copy)]
+enum Request {
+    Stop,
+    Replace,
+}
+
 /// Reads `kinds` of signal on a thread of its own, for the life of the process, and puts a
-/// stop request on `line` for each delivery.
-fn watch<const N: usize>(kinds: [SignalKind; N], line: &Arc<Line>) -> io::Result<()> {
+/// `request` on `line` for each delivery.
+fn watch<const N: usize>(
+    kinds: [SignalKind; N],
+    line: &Arc<Line>,
+    request: Request,
+) -> io::Result<()> {
     let line = Arc::clone(line);
     Builder::new_current_thread()
         .enable_all()
@@ -113,24 +139,51 @@ fn watch<const N: usize>(kinds: [SignalKind; N], line: &Arc<Line>) -> io::Result
             };
             streams.map(|streams| {
                 for stream in streams {
-                    runtime.spawn(relay(stream, Arc::clone(&line)));
+                    runtime.spawn(relay(stream, Arc::clone(&line), request));
                 }
                 thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
             })
         })
 }
 
-/// Puts a stop request on the line for every delivery on `stream`.
-async fn relay(mut stream: Signal, to: Arc<Line>) {
+/// Readies the signals for an exec of the program in this process: SIGHUP is ignored, a
+/// disposition the exec keeps, so a repeated replace request cannot end the next program before
+/// it installs its own handler; SIGTERM and SIGINT get their default action back, so one sent
+/// from now on ends the process instead of reaching a handler nobody reads any more.
+pub(crate) fn hand_signals_over() {
+    // SAFETY: `SIG_IGN` and `SIG_DFL` are dispositions, not handlers: no code of this program
+    // runs in a signal context because of them, and `signal(2)` touches no memory of ours. The
+    // handlers tokio installed are replaced; the process executes another program next.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
+}
+
+/// Puts `request` on the line for every delivery on `stream`.
+async fn relay(mut stream: Signal, to: Arc<Line>, request: Request) {
     loop {
         stream.recv().await;
-        to.call(|calls| calls.stops += 1);
+        to.call(|calls| match request {
+            Request::Stop => calls.stops += 1,
+            Request::Replace => calls.replaces += 1,
+        });
     }
 }
 
 impl Sleeper for SystemSleeper {
     fn sleep(&mut self, duration: Duration) -> Wake {
         self.line.wait(duration, false)
+    }
+
+    /// Hands the signals over to the program that runs next ([`hand_signals_over`]), then looks
+    /// at the line once more: a stop request taken by the handlers before that is there and
+    /// wins; one sent after it ends the process the default way, before or after the exec, which
+    /// is a clean stop for systemd.
+    fn ready_to_run_again(&mut self) -> bool {
+        hand_signals_over();
+        self.line.wait(Duration::ZERO, false) != Wake::Stop
     }
 
     fn sleep_or_bell(&mut self, duration: Duration) -> Wake {

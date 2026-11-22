@@ -185,9 +185,9 @@ pub struct Cli {
     /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
-    /// The CPU, in millicores from 250, a queued job that names no CPU books while the
-    /// history of its class gives no estimate; above the most cores a registered host has, that
-    /// most. Needs `--agent-pool-config`.
+    /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its
+    /// class, its fallback class nor its client has a run with a CPU sample, by default 22000 (22
+    /// cores); above a quarter of the most cores a registered host has, that quarter. Needs `--agent-pool-config`.
     #[arg(
         long,
         default_value_t = DEFAULT_COLD_CPU_MILLIS,
@@ -195,9 +195,8 @@ pub struct Cli {
     )]
     pub cold_cpu_millis: u64,
     /// The memory, in bytes from 1073741824 (1 GiB), a queued job that names no memory books
-    /// while the history of its class gives no estimate, and the least its class books before
-    /// five runs; above the most bookable memory a registered host has, that most. Needs
-    /// `--agent-pool-config`.
+    /// while neither its class, its fallback class nor its client has a fresh run; above the
+    /// most bookable memory a registered host has, that most. Needs `--agent-pool-config`.
     #[arg(
         long,
         default_value_t = DEFAULT_COLD_MEMORY_BYTES,

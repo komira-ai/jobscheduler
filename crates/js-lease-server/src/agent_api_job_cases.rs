@@ -596,10 +596,10 @@ async fn a_job_naming_an_xcode_is_started_only_on_a_host_that_lists_the_build() 
 
 /// Through the heartbeats alone, results that carry the usage their agent counted teach the
 /// job's class, and the next job of it that books nothing is placed booked from that history:
-/// after five clean runs of a class that reported 2 GiB peaks, its next job books less memory
-/// than the cold size (the first jobs booked), while a class whose five clean runs reported
-/// no usage books the cold size again. It catches a result whose usage is lost between the
-/// wire and the stored job (every class then stays cold however often it ran).
+/// after clean runs of a class that reported 2 GiB peaks, its next job books less memory
+/// than the cold size (the first jobs booked), while a class of another client whose five clean
+/// runs reported no usage books the cold size again. It catches a result whose usage is lost
+/// between the wire and the stored job (every class then stays cold however often it ran).
 #[tokio::test]
 async fn results_that_report_usage_size_the_next_job_of_the_class_from_history() {
     let mut rig = placing_rig("usage_sizes");
@@ -628,7 +628,7 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
                     ..spec()
                 },
                 priority: 0,
-                client: None,
+                client: Some(js_jobs::ClientName::parse(class).unwrap()),
             };
             let queued = rig.jobs.insert_queued(new).unwrap().record.id;
             rig.beat(&agent).await.unwrap();

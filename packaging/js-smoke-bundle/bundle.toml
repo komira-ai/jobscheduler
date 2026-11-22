@@ -1,0 +1,20 @@
+# The smoke bundle (README.md beside this file): the recipe `cargo xtask release smoke-bundle`
+# packs `tree/` with, the repository and tag the release publishes it under, and the manifest
+# digest it packs to (a function of the tree, this recipe and the workspace version, which
+# `js-bundle pack` writes into the config as the tool that built it). The release's tests (crates/xtask/tests/smoke_bundle.rs) pack the tree
+# with this recipe and fail unless it gives `digest`, so a change to the tree or to a field
+# here comes with the digest it now gives, and with a new `tag`: a published tag is never
+# moved to another manifest, and the release refuses to.
+#
+# The bundle's name is the last part of `repository`, so a job that names the image and no
+# program runs the entrypoint of that name: `bin/<name>` in the tree.
+repository = "ghcr.io/komira-ai/js/smoke"
+tag = "1"
+digest = "sha256:9e02a9ff48c04e969131abf064e01af65a167038ecc85764a8236a75cb1dc9a7"
+# The oldest macOS the agent runs on (its MACOSX_DEPLOYMENT_TARGET): the program needs only
+# what every macOS has.
+os-version = "11.0"
+license = "Apache-2.0"
+source-url = "https://github.com/komira-ai/jobscheduler/tree/main/packaging/js-smoke-bundle/tree"
+# The `org.opencontainers.image.source` annotation: the repository the package belongs to.
+source = "https://github.com/komira-ai/jobscheduler"

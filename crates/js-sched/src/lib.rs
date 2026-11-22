@@ -149,6 +149,7 @@ mod probe;
 mod provider_rank;
 mod queue;
 pub mod queue_status;
+mod refusal;
 pub use load::{
     Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
     LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
@@ -157,6 +158,7 @@ pub use load::{
 pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
 pub use provider_rank::ProviderRank;
 pub use queue::walk_in_order;
+pub use refusal::{HostRefusal, MAX_KEPT as MAX_KEPT_REFUSALS, Refusal, RefusalKind, Refusals};
 mod requeue;
 mod scheduler;
 mod servable;

@@ -111,22 +111,38 @@ impl SchedPlacer {
         }
     }
 
-    /// Which history sized each job of `decided` that the history sized, read from its record
-    /// in `queued` (what the walk that decided it sized it from) as that walk saw the history
-    /// on the day of `now`; a job that named both its CPU and its memory has none.
+    /// `decided` with each placement's [`Placement::sized_from`](js_jobs::Placement::sized_from):
+    /// which history sized the job, read from its record in `queued` (what the walk that
+    /// decided it sized it from) as that walk saw the history on the day of `now`; none for a
+    /// job that named both its CPU and its memory.
     pub(crate) fn sized_from_of(
         &self,
         queued: &[JobRecord],
-        decided: &[Decided],
+        decided: Vec<Decided>,
         now: FarmTime,
-    ) -> BTreeMap<JobId, SizedFrom> {
+    ) -> Vec<Decided> {
         let ids: BTreeSet<&JobId> = decided.iter().map(|(job, ..)| job).collect();
         let (day, mut engine) = (day_of(now), self.engine());
         let sizes = engine.sizes();
-        queued
+        let sized: BTreeMap<&JobId, SizedFrom> = queued
             .iter()
             .filter(|record| ids.contains(&record.id))
-            .filter_map(|record| Some((record.id.clone(), sizes.sized_from(record, day)?)))
+            .filter_map(|record| Some((&record.id, sizes.sized_from(record, day)?)))
+            .collect();
+        decided
+            .into_iter()
+            .map(|(job, host, booked, placement)| {
+                let sized_from = sized.get(&job).copied();
+                (
+                    job,
+                    host,
+                    booked,
+                    js_jobs::Placement {
+                        sized_from,
+                        ..placement
+                    },
+                )
+            })
             .collect()
     }
 

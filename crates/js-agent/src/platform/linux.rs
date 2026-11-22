@@ -28,10 +28,12 @@ use crate::{Failure, Services, crun, crun_host, disk, integrity};
 /// it is to stop before it asks that agent to leave its runs to the next process (see
 /// [`crate::lifecycle::handover`]); and `egress-handover`, which the hook looks for in both
 /// agents of an update on a host with an egress ceiling: the one it stops leaves the runs'
-/// network wiring in place, and the one it starts adopts it.
+/// network wiring in place, and the one it starts adopts it; and `in-place`: SIGHUP to the main
+/// process, with a handover request in the state root, hands the runs over and runs the program
+/// again in the same process, so the unit is not stopped and systemd starts nothing.
 pub const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    "\nruntimes: docker crun\nstops: drain handover egress-handover"
+    "\nruntimes: docker crun\nstops: drain handover egress-handover in-place"
 );
 
 /// The one warning of an agent that runs its jobs through the container engine.

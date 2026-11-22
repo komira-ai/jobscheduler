@@ -11,7 +11,9 @@
 //!   kept from the last read, or kept with the jobs this server's submits recorded since added
 //!   to them), and each launch the scaler ran (whatever its answer, a refusal made before the
 //!   provider is called included) and each that failed over (a `capacity` or `quota` refusal,
-//!   after which the next pass tries another offer). A start failure or a loss is counted as
+//!   after which the next pass tries another offer), and each refusal of a host to a queued
+//!   job by the placement, by host and by the predicate that refused (`cpu`,
+//!   `predicted-memory`, `booked-memory`, `cold-cap`). A start failure or a loss is counted as
 //!   its commit lands, so a pass that fails later still counts what it ended. The paths that count them call
 //!   a [`MetricsSink`], and do not know the exporter: without `--metrics-listen` the sink is
 //!   [`NoMetrics`], which counts nothing.
@@ -39,7 +41,7 @@ use std::time::Duration;
 use js_elastic::{Acquired, Refusal, RefusalCode};
 use js_jobs::StartFailure;
 use js_sched_placer::engine::TablesFrom;
-use js_types::Monotonic;
+use js_types::{HostId, Monotonic};
 
 pub(crate) use scrape::router;
 
@@ -60,6 +62,9 @@ pub(crate) trait MetricsSink: Send + Sync + std::fmt::Debug {
     fn job_tables(&self, from: TablesFrom);
     /// The scaler ran a launch of a machine for the pool `pool`, answered `answer`.
     fn acquire_answered(&self, pool: &str, answer: &Acquired);
+    /// The placement refused `host` a queued job for `reason`, one of the names of
+    /// `js_sched::RefusalKind::as_str`; by default, nothing is counted.
+    fn placement_refused(&self, _host: &HostId, _reason: &'static str) {}
 }
 
 /// Counts nothing, and reads a clock that never moves: the sink and the clock of a server
@@ -94,6 +99,10 @@ impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
 
     fn job_tables(&self, from: TablesFrom) {
         self.0.job_tables(from);
+    }
+
+    fn refused(&self, host: &HostId, reason: &'static str) {
+        self.0.placement_refused(host, reason);
     }
 }
 
@@ -334,6 +343,7 @@ pub(crate) struct Recorder {
     job_pass: Histogram,
     job_tables: [AtomicU64; 3],
     acquires: Mutex<BTreeMap<String, Acquires>>,
+    refusals: Mutex<BTreeMap<(String, &'static str), u64>>,
 }
 
 impl Default for Recorder {
@@ -347,6 +357,7 @@ impl Default for Recorder {
             job_pass: Histogram::new(JOB_PASS),
             job_tables: Default::default(),
             acquires: Mutex::default(),
+            refusals: Mutex::default(),
         }
     }
 }
@@ -383,9 +394,25 @@ impl MetricsSink for Recorder {
         seen.asked += 1;
         seen.failed_over += u64::from(fails_over(answer));
     }
+
+    fn placement_refused(&self, host: &HostId, reason: &'static str) {
+        let mut refusals = self.refusals.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = refusals
+            .entry((host.as_str().to_owned(), reason))
+            .or_default();
+        *seen += 1;
+    }
 }
 
 impl Recorder {
+    /// The refusals counted, by host and reason.
+    fn refusals(&self) -> BTreeMap<(String, &'static str), u64> {
+        self.refusals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// The pools the scaler asked a provider for, each with what it asked.
     fn acquires(&self) -> BTreeMap<String, Acquires> {
         self.acquires

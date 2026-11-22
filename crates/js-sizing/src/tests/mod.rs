@@ -2,6 +2,7 @@
 //! the doc comment of a test names the rule and the defect it catches.
 
 mod calibration;
+mod cpu;
 mod life;
 mod memory;
 mod reference;
@@ -38,6 +39,8 @@ pub(super) fn success(peak: u64) -> Run {
         swap_peak_bytes: 0,
         cpu_usage_us: 0,
         node_cpu_pressure_permille: None,
+        cpu_held: false,
+        cpu_peak_millis: None,
     }
 }
 
@@ -62,6 +65,7 @@ pub(super) fn busy(par: u64, pressure: Option<u16>) -> Run {
     Run {
         cpu_usage_us: par * 2000,
         node_cpu_pressure_permille: pressure,
+        cpu_held: false,
         ..success(GIB)
     }
 }

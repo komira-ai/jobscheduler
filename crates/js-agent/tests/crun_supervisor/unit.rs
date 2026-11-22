@@ -21,13 +21,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The variable that makes the probe act; set only on the probe's unit.
-const PROBE_DIR: &str = "JS_UNIT_PROBE_DIR";
+pub(super) const PROBE_DIR: &str = "JS_UNIT_PROBE_DIR";
 
 /// The cgroup v2 mount.
 const MOUNT: &str = "/sys/fs/cgroup";
 
 /// The packaged unit's value of `key` in its `[Service]` section.
-fn packaged(key: &str) -> String {
+pub(super) fn packaged(key: &str) -> String {
     let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/js-agent/js-agent-crun.service");
     let text = fs::read_to_string(unit).expect("read the packaged unit");
@@ -40,7 +40,7 @@ fn packaged(key: &str) -> String {
 }
 
 /// Runs `program` with `args` and fails the test, with what it said, when it fails.
-fn run(program: &str, args: &[&str]) {
+pub(super) fn run(program: &str, args: &[&str]) {
     let out = Command::new(program)
         .args(args)
         .output()
@@ -54,7 +54,7 @@ fn run(program: &str, args: &[&str]) {
 }
 
 /// Makes the named pipe `path`.
-fn fifo(path: &Path) {
+pub(super) fn fifo(path: &Path) {
     rustix::fs::mknodat(
         rustix::fs::CWD,
         path,
@@ -66,7 +66,7 @@ fn fifo(path: &Path) {
 }
 
 /// The word written to the pipe `path`, waiting until the other side opens and closes it.
-fn heard(path: &Path) -> String {
+pub(super) fn heard(path: &Path) -> String {
     let mut word = String::new();
     fs::File::open(path)
         .and_then(|mut pipe| pipe.read_to_string(&mut word))
@@ -75,7 +75,7 @@ fn heard(path: &Path) -> String {
 }
 
 /// Writes `word` to the pipe `path`, waiting until the other side opens it.
-fn say(path: &Path, word: &str) {
+pub(super) fn say(path: &Path, word: &str) {
     fs::OpenOptions::new()
         .write(true)
         .open(path)
@@ -84,7 +84,7 @@ fn say(path: &Path, word: &str) {
 }
 
 /// Whether the process `pid` runs: it is there and not a zombie.
-fn alive(pid: u32) -> bool {
+pub(super) fn alive(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
         stat.rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().next())
@@ -109,7 +109,7 @@ fn own_unit() -> PathBuf {
 
 /// A process that runs until it is killed, in a process group of its own, as a supervisor and
 /// a container's init are.
-fn idle() -> u32 {
+pub(super) fn idle() -> u32 {
     let mut command = Command::new("sleep");
     command
         .arg("infinity")
@@ -262,7 +262,7 @@ enum End {
 }
 
 /// Kills each of `pids` that still runs.
-fn end_all(pids: &[u32]) {
+pub(super) fn end_all(pids: &[u32]) {
     for pid in pids.iter().filter(|pid| alive(**pid)) {
         let pid = rustix::process::Pid::from_raw(i32::try_from(*pid).expect("a pid"));
         if let Some(pid) = pid {

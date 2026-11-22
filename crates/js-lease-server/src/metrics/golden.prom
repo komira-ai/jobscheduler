@@ -60,6 +60,11 @@ js_job_pass_duration_seconds_count 2
 js_job_tables_total{from="store"} 1
 js_job_tables_total{from="kept"} 2
 js_job_tables_total{from="submitted"} 3
+# HELP js_placement_refusals_total Refusals of a host to a queued job by the placement, by host and by the predicate that refused: cpu (CPU slack), predicted-memory (the load predicate's memory side), booked-memory (the flat memory guard) or cold-cap. A job is counted once for each host that refused it, in each pass.
+# TYPE js_placement_refusals_total counter
+js_placement_refusals_total{host="host-a",reason="cpu"} 3
+js_placement_refusals_total{host="host-a",reason="predicted-memory"} 1
+js_placement_refusals_total{host="host-b",reason="booked-memory"} 2
 # HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
 # TYPE js_acquires_total counter
 js_acquires_total{pool="gpu"} 3

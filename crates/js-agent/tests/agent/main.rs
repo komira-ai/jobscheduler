@@ -30,6 +30,8 @@ mod crun_default;
 mod crun_gpu;
 #[cfg(target_os = "linux")]
 mod crun_host;
+#[cfg(target_os = "linux")]
+mod crun_roots;
 mod disk;
 mod drive;
 mod e2e;
@@ -56,6 +58,7 @@ mod provider_wire;
 mod quota;
 mod readiness;
 mod retired;
+mod run_again;
 mod runtime_conformance;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

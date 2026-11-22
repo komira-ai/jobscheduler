@@ -10,7 +10,7 @@ use super::{holders, job, jobs, workflow};
 const PUSH: &str = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
 
 /// The `needs:` list of a job (empty when it has none).
-fn needs(lines: &[String]) -> Vec<String> {
+pub(super) fn needs(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .find_map(|l| l.strip_prefix("    needs: ["))
@@ -30,7 +30,7 @@ fn ifs(lines: &[String]) -> Vec<&str> {
 
 /// The job-level permissions as `name: level` lines in sorted order, or `None` when the job has
 /// no `permissions:` key; `permissions: {}` is the empty list.
-fn permissions(lines: &[String]) -> Option<Vec<String>> {
+pub(super) fn permissions(lines: &[String]) -> Option<Vec<String>> {
     let at = lines
         .iter()
         .position(|l| l.starts_with("    permissions:"))?;
@@ -47,7 +47,7 @@ fn permissions(lines: &[String]) -> Option<Vec<String>> {
 }
 
 /// The lines of a job that are not comments, joined.
-fn code(lines: &[String]) -> String {
+pub(super) fn code(lines: &[String]) -> String {
     lines
         .iter()
         .filter(|l| !l.trim_start().starts_with('#'))
@@ -84,7 +84,13 @@ fn alter(text: &str, name: &str, from: &str, to: &str) -> String {
 
 /// Asserts that `check` finds nothing in `text`, and something in `text` once `from` is
 /// replaced by `to` in job `name`.
-fn refused(check: fn(&str) -> Vec<String>, text: &str, name: &str, from: &str, to: &str) {
+pub(super) fn refused(
+    check: fn(&str) -> Vec<String>,
+    text: &str,
+    name: &str,
+    from: &str,
+    to: &str,
+) {
     assert_eq!(check(text), Vec::<String>::new());
     let altered = alter(text, name, from, to);
     assert!(
@@ -95,7 +101,7 @@ fn refused(check: fn(&str) -> Vec<String>, text: &str, name: &str, from: &str, t
 
 /// What is wrong with a job that holds a token and runs only the downloaded `xtask` or `gh`:
 /// a checkout, a build, or an action other than the artifact download.
-fn runs_no_repository_code(name: &str, lines: &[String]) -> Vec<String> {
+pub(super) fn runs_no_repository_code(name: &str, lines: &[String]) -> Vec<String> {
     let code = code(lines);
     let mut problems = Vec::new();
     if code.contains("actions/checkout") || code.contains("cargo ") {
