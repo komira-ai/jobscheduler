@@ -18,6 +18,7 @@ mod debs;
 mod fast_lane;
 mod images;
 mod secrets;
+mod smoke;
 
 use calls::{CALLERS, calls};
 
@@ -182,6 +183,9 @@ fn a_push_to_main_is_the_only_releasing_trigger() {
         "beta-macos-probe",
         "promote-macos",
         "pkg-upload",
+        "smoke-bundle-pack",
+        "smoke-bundle-push",
+        "smoke-bundle-check",
     ]
     .map(str::to_owned)
     .to_vec();

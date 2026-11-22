@@ -1,0 +1,10 @@
+#!/bin/sh
+# The smoke bundle's one program (packaging/js-smoke-bundle/README.md): one line that says
+# which host ran the job, as which user and uid, on which macOS, and with which arguments.
+# It uses only programs every macOS has, by absolute path, and stops at the first that fails.
+set -eu
+host=$(/bin/hostname)
+user=$(/usr/bin/id -un)
+uid=$(/usr/bin/id -u)
+macos=$(/usr/bin/sw_vers -productVersion)
+printf 'js-smoke host=%s user=%s uid=%s macos=%s args=%s\n' "$host" "$user" "$uid" "$macos" "$*"

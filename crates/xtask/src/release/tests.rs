@@ -211,6 +211,9 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/js-agent.service",
         "packaging/js-agent/tmpfiles.conf",
         "packaging/js-agent/crun_host_setup.sh",
+        // The smoke bundle's tree and recipe: the release publishes the bundle.
+        "packaging/js-smoke-bundle/bundle.toml",
+        "packaging/js-smoke-bundle/tree/bin/smoke",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -242,6 +245,10 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/deb/README.md",
         "packaging/js-agent/deb-notes/tmpfiles.conf",
         "packaging/js-agent/deb",
+        // The smoke bundle's README is in no bundle; a directory that only starts like its
+        // directory is not its.
+        "packaging/js-smoke-bundle/README.md",
+        "packaging/js-smoke-bundle-notes/bundle.toml",
         // The earlier hostkeeper archive package's directories no longer ship.
         "packaging/js-agent/hostkeeper/manifest.toml.in",
         "packaging/js-agent-macos/hostkeeper/units/js-agent.plist",
