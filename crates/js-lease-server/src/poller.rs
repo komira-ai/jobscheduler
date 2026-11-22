@@ -74,6 +74,7 @@ impl Poller {
 /// pool for blocking calls (the forced one when a submit poked, the heartbeat's otherwise) and
 /// keeps the taints of the hosts its host jobs were placed on: [`poked`], then [`run`], which
 /// the server's poller ([`crate::server`]) runs in a loop with its stop checked between them.
+#[cfg(any(test, feature = "in-process"))]
 pub(crate) async fn pass(agents: &Arc<Agents>) {
     poked(agents).await;
     run(agents).await;
