@@ -487,7 +487,7 @@ impl Summary {
     }
 
     /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample,
-    /// else the P90 of the recent parallelism, rounded up to
+    /// else the median (P50) of the recent samples, rounded up to
     /// 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
     pub(crate) fn cpu(&self, bounds: &Bounds) -> u32 {
         let node = bounds.node_cpu_millis;
@@ -499,9 +499,9 @@ impl Summary {
         let kept = self.cpu_n.min(RING as u64) as usize;
         let mut sorted = self.cpu_ring[..kept].to_vec();
         sorted.sort_unstable();
-        // Nearest rank: the ceil(0.9 * kept)-th smallest; no samples is 0.
-        let rank = (kept * 9).div_ceil(10);
-        let p90 = sorted.get(rank.saturating_sub(1)).copied().unwrap_or(0);
-        (p90.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
+        // Nearest rank: the ceil(0.5 * kept)-th smallest; no samples is 0.
+        let rank = kept.div_ceil(2);
+        let p50 = sorted.get(rank.saturating_sub(1)).copied().unwrap_or(0);
+        (p50.div_ceil(CPU_STEP).saturating_mul(CPU_STEP)).clamp(low, node)
     }
 }

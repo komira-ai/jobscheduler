@@ -61,22 +61,26 @@ fn a_held_quiet_sample_is_still_only_a_lower_bound() {
 }
 
 /// Rule: a ring full of samples at a low cap is not held there. From a ring of 32
-/// samples of 250 m, the P90 (the 29th smallest) is the real use of 1000 m once four
-/// unheld quiet runs of 1000 m have come: after three it is still 250 m, after four
-/// 1000 m, and held runs in between change nothing.
+/// samples of 250 m, the P50 (the 16th smallest) is the real use of 1000 m once
+/// seventeen unheld quiet runs of 1000 m have come: after sixteen it is still 250 m,
+/// after seventeen 1000 m, and held runs in between change nothing.
 #[test]
-fn a_ring_of_250m_samples_takes_the_real_use_within_four_unheld_runs() {
+fn a_ring_of_250m_samples_takes_the_real_use_within_seventeen_unheld_runs() {
     let mut s = Summaries::default();
     let k = linux(1);
     feed(&mut s, &k, &busy(250, Some(0)), 32);
     assert_eq!(cpu_estimate(&s, &k), 250);
-    for _ in 0..3 {
+    for _ in 0..16 {
         feed(&mut s, &k, &held(250, Some(0)), 1);
         feed(&mut s, &k, &busy(1000, Some(0)), 1);
     }
-    assert_eq!(cpu_estimate(&s, &k), 250, "three runs are not yet the P90");
+    assert_eq!(
+        cpu_estimate(&s, &k),
+        250,
+        "sixteen runs are not yet the P50"
+    );
     feed(&mut s, &k, &busy(1000, Some(0)), 1);
-    assert_eq!(cpu_estimate(&s, &k), 1000, "the fourth run is");
+    assert_eq!(cpu_estimate(&s, &k), 1000, "the seventeenth run is");
 }
 
 // ---- mixed keys' memory ---------------------------------------------------------------
@@ -208,8 +212,8 @@ fn cpu_answers_from_one_sample_and_not_without_one_or_when_stale() {
     let unseen = linux(3);
     assert_eq!(
         s.cpu(&unseen, DAY, &bounds),
-        Some(1500),
-        "then L2, which holds both"
+        Some(750),
+        "then L2, which holds both: the median of 700 m and 1300 m is the lower, 700 m"
     );
     let lone = key(Basis::Cgroup, None);
     let mut t = Summaries::default();
