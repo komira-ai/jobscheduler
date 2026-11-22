@@ -33,7 +33,7 @@ impl Backend {
     /// A user for `lease`: its uid.
     pub(super) fn user_create(&self, lease: &str) -> Result<u32, ClientError> {
         match self {
-            Self::Helper(helper) => helper.user_create(lease, None),
+            Self::Helper(helper) => helper.user_create(lease),
             Self::OneProgram(engine) => engine.user_create(lease),
         }
     }
