@@ -227,7 +227,9 @@ impl Rig {
     pub fn reopened(&self) -> NativeRuntime {
         let pool = open_pool(&self.dir, &self.settings, &self.accounts);
         let config = config(&self.dir, &self.settings);
-        NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1).unwrap()
+        NativeRuntime::over(Some(pool), self.launcher.clone(), config, TERM + 1)
+            .unwrap()
+            .with_process_table(end::GroupTable::new(self.launcher.clone()))
     }
 
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.

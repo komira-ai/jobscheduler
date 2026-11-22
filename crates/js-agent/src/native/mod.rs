@@ -78,9 +78,12 @@
 //!
 //! # Stops
 //!
-//! [`Runtime::stop`] sends `SIGTERM` to the job's process group, so a job may flush, and the
-//! first poll after the grace ends the run's processes. The lifecycle holds the wall limit and
-//! the silence bound (`--silence-stop`) and calls the stop.
+//! [`Runtime::stop`] sends `SIGTERM` to the job's process group, so a job may flush; a second
+//! stop moves nothing. The first poll after the grace that finds the job running sweeps the
+//! run's processes by the job's audit session and the account's uid (`native/end.rs`), and
+//! every later poll sweeps again until a sweep leaves none; only then is the job's end read
+//! (`native/remove.rs`). The lifecycle holds the wall limit and the silence bound
+//! (`--silence-stop`) and calls the stop.
 //!
 //! The environment of a run is the agent's (the body's own `env`, or the bundle's rules
 //! applied to it, then `TMPDIR` and `JS_FILES_DIR`) with a job start's environment

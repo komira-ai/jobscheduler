@@ -28,10 +28,11 @@ use super::{FakeLauncher, POLLS, Rig, me, native, settle};
 /// `libproc`'s filter of the processes of one process group (`sys/proc_info.h`).
 const PROC_PGRP_ONLY: u32 = 2;
 
-/// A pid no process of the test has, for the processes a [`Recording`] adds.
-const DETACHED: i32 = 99_001;
+/// A pid no process can have (macOS's highest is 99 999), for the processes a [`Recording`]
+/// adds.
+const DETACHED: i32 = 1_000_001;
 /// Another such pid, for a process that never dies.
-const STUBBORN: i32 = 99_002;
+const STUBBORN: i32 = 1_000_002;
 
 /// The pids of the process group `group`, from `libproc`.
 fn members(group: i32) -> Vec<i32> {
