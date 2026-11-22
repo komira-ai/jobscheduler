@@ -30,7 +30,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, Isolation, NativeSpec, NetworkLevel};
