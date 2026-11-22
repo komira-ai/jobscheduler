@@ -5,7 +5,8 @@
 //! ```text
 //! made <slot> <uid>               the slot's user is being made (or adopted): resetting
 //! leased <slot> <term>.<seq>      the slot's user is the lease's
-//! leased <slot> <term>.<seq> admin   ... made an administrator for the lease
+//! leased <slot> <term>.<seq> admin   ... made an administrator for the lease (only read:
+//!                                 written by releases that made administrators)
 //! resetting <slot>                the lease is over; the user is being reset in place
 //! resetting <slot> replace        ... as above (the word is only read and written for the
 //!                                 format's sake: every slot is reset in place)
@@ -38,7 +39,8 @@ pub enum SlotState {
     Leased {
         /// The lease the user is lent to.
         lease: LeaseId,
-        /// Whether the user was made an administrator for the lease (with a gate grant).
+        /// Whether the record says `admin`: a release that made administrators made the
+        /// user one for the lease. This release reads it and never writes it.
         admin: bool,
     },
     /// Being made, adopted or reset after a lease: lent to no one until it is free.
