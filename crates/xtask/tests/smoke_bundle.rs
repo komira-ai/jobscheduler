@@ -11,7 +11,7 @@ use std::process::Command;
 
 use js_oci::{Digest, Kind, Layout, Published, Tag};
 use js_testkit::dir::TestDir;
-use js_testkit::oci_registry::{Fixture, REPO};
+use js_testkit::oci_registry::{Fixture, REGISTRY, REPO};
 use xtask::release::smoke_bundle::{
     self, Error, PushFlags, Recipe, compare, pack, printed_line, push_args,
 };
@@ -207,6 +207,79 @@ async fn a_published_bundle_pulled_by_digest_is_the_committed_tree() {
             recipe().reference()
         )
     );
+}
+
+/// Proves a pull the registry refuses to a client without credentials names the owner's
+/// step: a token endpoint that answers 401 to anyone without credentials (what ghcr.io
+/// answers for a private package) and one that answers 403 (a package that is not there)
+/// both say the package is not public and how to make it so, with the registry's answer
+/// first; any other refusal (a 500) is the registry's answer alone. Catches a check that
+/// fails on a private package with only the registry's status, leaving the cause unnamed,
+/// or that blames the visibility for a refusal that is not about credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_refused_without_credentials_says_to_make_the_package_public() {
+    let dir = scratch("smoke-private");
+    let layout = packed(&dir).await;
+    let digest = Digest::parse(&recipe().digest).expect("digest");
+    let fx = Fixture::in_memory();
+    fx.behave(|b| b.token = Some("tok".to_owned()));
+    let client = fx.client();
+    let repository = client.repository(fx.location(REPO)).expect("repository");
+    let tag = Tag::parse(&recipe().tag).expect("tag");
+    repository
+        .publish(&layout, &digest, &Kind::bundle(), &tag)
+        .await
+        .expect("publish");
+    // A new client for each pull, so no token the push was given is reused.
+    let clients = [fx.client(), fx.client(), fx.client()];
+    let fresh = |i: usize| {
+        clients[i]
+            .repository(fx.location(REPO))
+            .expect("repository")
+    };
+    let host = fx.at(REGISTRY);
+    let hint = "the registry refuses the pull without credentials, so the package is not \
+                public or not there: set its visibility to public in the package's settings \
+                on GitHub, once (docs/release.md, \"Configuration the project owner must set\")";
+
+    fx.behave(|b| b.token_basic = Some("Basic b3duZXI6c2VjcmV0".to_owned()));
+    let refused = compare(&fresh(0), &digest, &tree(), &dir.join("x401"))
+        .await
+        .expect_err("private");
+    assert!(matches!(refused, Error::NotPublic(_)), "{refused:?}");
+    assert_eq!(
+        refused.to_string(),
+        format!("https://{host}/token: the registry answered 401: {hint}")
+    );
+
+    fx.behave(|b| {
+        b.token_basic = None;
+        b.token_status = Some(403);
+    });
+    let refused = compare(&fresh(1), &digest, &tree(), &dir.join("x403"))
+        .await
+        .expect_err("absent");
+    assert_eq!(
+        refused.to_string(),
+        format!("https://{host}/token: the registry answered 403: {hint}")
+    );
+
+    fx.behave(|b| {
+        b.token_status = None;
+        b.status = Some(500);
+    });
+    let refused = compare(&fresh(2), &digest, &tree(), &dir.join("x500"))
+        .await
+        .expect_err("broken");
+    assert!(matches!(refused, Error::Oci(_)), "{refused:?}");
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "https://{host}/v2/{REPO}/manifests/{}: the registry answered 500",
+            recipe().digest
+        )
+    );
+    assert!(!dir.join("x401").exists() && !dir.join("x403").exists());
 }
 
 /// Proves a pulled bundle that is not the tree is refused at the first difference in path
