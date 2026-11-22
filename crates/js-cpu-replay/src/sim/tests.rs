@@ -118,6 +118,8 @@ fn two_jobs_asking_twice_the_cores_each_take_twice_as_long() {
     assert_eq!(outcome.slowed, vec![10_000, 10_000]);
     assert_eq!(outcome.slowed_ms, 20_000);
     assert_eq!(outcome.last_end_ms, 20_000);
+    // Two jobs on the host for twenty seconds.
+    assert_eq!(outcome.held_ms, 40_000);
     assert_eq!(outcome.over_ms, 20_000);
     assert_eq!(outcome.over_excess, 80_000_000);
     assert_eq!(outcome.used, 8e7);

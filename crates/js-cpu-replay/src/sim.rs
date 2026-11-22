@@ -130,6 +130,8 @@ pub struct Outcome {
     pub over_excess: u128,
     /// The CPU the jobs got, in millicore-ms.
     pub used: f64,
+    /// The jobs on the hosts, summed over the host-time, in job-ms.
+    pub held_ms: u128,
     /// The host-time the CPU asked for was above what the rule held the host to be using.
     pub under_ms: u64,
     /// The distance between what the rule held each host to be using and what its jobs asked
@@ -545,6 +547,7 @@ impl<'a> World<'a> {
             let asked: u64 = host.runs.iter().map(Running::demand).sum();
             let planned = host.planned(self.arm.rule);
             let outcome = &mut self.outcome;
+            outcome.held_ms += host.runs.len() as u128 * u128::from(TICK_MS);
             outcome.plan_error += u128::from(planned.abs_diff(asked)) * u128::from(TICK_MS);
             if asked > planned {
                 outcome.under_ms += TICK_MS;

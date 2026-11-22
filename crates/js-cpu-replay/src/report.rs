@@ -83,8 +83,7 @@ const BURSTY_RATIO: u64 = 2;
 #[must_use]
 pub fn report(jobs: &[Job], farm: Farm) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "# CPU packing replay\n");
-    summary(&mut text, jobs, farm);
+    let _ = writeln!(text, "# CPU packing replay\n\n{}", summary(jobs, farm));
     classes(&mut text, jobs, farm);
     checks(&mut text, jobs, farm);
     options(&mut text, jobs, farm);
@@ -125,8 +124,10 @@ fn cores(milli: u64) -> String {
     format!("{:.1}", milli as f64 / 1000.0)
 }
 
-/// The trace in one paragraph.
-fn summary(text: &mut String, jobs: &[Job], farm: Farm) {
+/// The trace in one paragraph: its jobs, its span, the CPU they used, their recorded waits
+/// and the most a run of ten seconds or more averaged.
+#[must_use]
+pub fn summary(jobs: &[Job], farm: Farm) -> String {
     let span = jobs
         .iter()
         .map(|job| job.arrive_ms + job.wait_ms + job.wall_ms)
@@ -142,8 +143,7 @@ fn summary(text: &mut String, jobs: &[Job], farm: Farm) {
         .map(|job| job.cpu_ms * 1000 / job.wall_ms)
         .max()
         .unwrap_or(0);
-    let _ = writeln!(
-        text,
+    format!(
         "{} jobs over {:.1} h on {} hosts of {} cores: {:.0} core-hours of CPU, a mean of {:.1} \
          cores ({}% of the farm). Recorded wait p50 {} s, p90 {} s, p99 {} s. The most CPU a run \
          of {} s or more averaged: {} cores (a shorter run is taken to average at most {}).\n",
@@ -160,7 +160,7 @@ fn summary(text: &mut String, jobs: &[Job], farm: Farm) {
         LONG_RUN_MS / 1000,
         cores(most),
         cores(MOST_MEAN_MILLI),
-    );
+    )
 }
 
 /// What one class's good runs looked like.
@@ -421,10 +421,10 @@ fn options(text: &mut String, jobs: &[Job], farm: Farm) {
         let _ = writeln!(
             text,
             "## Options, arrivals at {speed}x\n\n\
-             | arm | shape | jobs/h | wait p50 s | p90 s | p99 s | host-time over cores % | \
-             asked past cores, mean | slowdown % | CPU used % | booked/used | used above booking % | \
-             plan error % | host-time above plan % |\n\
-             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+             | arm | shape | jobs/h | wait p50 s | p90 s | p99 s | jobs per host | host-time over \
+             cores % | asked past cores, mean | slowdown % | CPU used % | booked/used | used above \
+             booking % | plan error % | host-time above plan % |\n\
+             |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
         for arm in ARMS {
             for shape in SHAPES {
@@ -449,13 +449,14 @@ fn row(text: &mut String, arm: Arm, shape: Shape, outcome: &Outcome, (farm, cpu)
     };
     let _ = writeln!(
         text,
-        "| {} | {} | {:.0} | {} | {} | {} | {} | {} | {} | {} | {:.2} | {} | {} | {} |",
+        "| {} | {} | {:.0} | {} | {} | {} | {:.1} | {} | {} | {} | {} | {:.2} | {} | {} | {} |",
         arm.name,
         shape.name(),
         outcome.waits.len() as f64 * 3_600_000.0 / span,
         secs(percentile(&waits, 50)),
         secs(percentile(&waits, 90)),
         secs(percentile(&waits, 99)),
+        outcome.held_ms as f64 / host_time,
         percent(outcome.over_ms as f64, host_time),
         over,
         percent(outcome.slowed_ms as f64, outcome.own_ms as f64),

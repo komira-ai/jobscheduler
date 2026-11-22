@@ -119,7 +119,7 @@ fn the_report_replays_every_arm_at_every_speed_and_shape() {
             .find(|line| line.starts_with(&format!("| {name} | blip | ")))
             .unwrap()
             .split(" | ")
-            .nth(7)
+            .nth(8)
             .unwrap()
             .to_owned()
     };
@@ -142,6 +142,7 @@ fn a_row_says_each_figure_of_an_outcome() {
         over_ms: 1000,
         over_excess: 4_000_000,
         used: 2e7,
+        held_ms: 25_000,
         under_ms: 5000,
         plan_error: 4_000_000,
         booked: 30_000_000,
@@ -158,7 +159,7 @@ fn a_row_says_each_figure_of_an_outcome() {
     );
     assert_eq!(
         text,
-        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 10.0 | 4.0 | 10.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 |\n"
+        "| A median, 1.1 | blip | 720 | 0 | 2 | 2 | 2.5 | 10.0 | 4.0 | 10.0 | 50.0 | 1.50 | 25.0 | 10.0 | 50.0 |\n"
     );
     outcome.over_ms = 0;
     let mut text = String::new();
