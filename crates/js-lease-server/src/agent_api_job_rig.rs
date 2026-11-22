@@ -660,7 +660,10 @@ impl Rig {
         self.beat_reporting(agent, None).await
     }
 
-    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route.
+    /// The heartbeat of `agent`'s host reporting `taint`, answered by the route, and then the
+    /// turn of the placement poller the heartbeat poked, which the server runs on a task of its
+    /// own right after the beat ([`crate::poller::poked_pass`]): a job the beat made room for is
+    /// placed before this returns, and its start rides on the next beat.
     pub(crate) async fn beat_reporting(
         &self,
         agent: &FakeAgent,
@@ -670,7 +673,9 @@ impl Rig {
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
         let agents = State(Arc::clone(&self.agents));
         let answer = super::heartbeat(agents, Extension(self.who.clone()), (None, None), Ok(body));
-        answer.await.map(|Json(reply)| reply)
+        let reply = answer.await.map(|Json(reply)| reply);
+        crate::poller::poked_pass(&self.agents).await;
+        reply
     }
 
     /// The next heartbeat of `agent`'s host reporting `taint`, as [`Rig::beat_reporting`]

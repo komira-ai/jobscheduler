@@ -643,17 +643,14 @@ async fn serve_jobs(
             }
             served => served,
         };
-        // What the listing ended or freed, and the load the beat brought, can make room
-        // for a queued job: a pass places it, and its start rides on the host's next reply,
-        // or on this one when it is held (the placement wakes it). A beat that changed
-        // nothing the pass depends on runs none. A host job the pass placed has tainted its
-        // host: the taint is kept below.
-        let placed_taints = placing.place_jobs_after_beat();
-        (served, placed_taints)
+        served
     })
     .await;
-    let (served, placed_taints) = served;
-    agents.keep_taints(placed_taints).await;
+    // What the listing ended or freed, and the load the beat brought, can make room for a
+    // queued job: the beat pokes the placement poller, whose pass places it when something
+    // the pass depends on changed since the last one ([`crate::poller::Poller::poke_after_beat`]),
+    // and its start rides on the host's next reply, or on a held one (the placement wakes it).
+    agents.poller.poke_after_beat();
     let host = &kept.host;
     match served {
         Ok((served, taint_changed)) => {
