@@ -250,3 +250,6 @@ Known limits:
   (`diskutil mount nobrowse -mountPoint`), so a reboot needs nothing more. `/etc/js-agent/flags`
   comes from the group's config package. The setup and the agent's mount have run against
   fakes of `dscl`, `dseditgroup` and `diskutil` only.
+- No Mac with the package installed has been restarted yet. What a restart or a macOS update
+  needs, and the drill that proves a restart on one Mac, are in
+  [docs/runbooks/mac-restart-and-update.md](../../docs/runbooks/mac-restart-and-update.md).
