@@ -194,6 +194,31 @@ fn a_uid_that_owns_files_is_busy() {
     assert_eq!(pool.lend("job-1").unwrap().account.uid, uid);
 }
 
+/// Asserts that a slot whose deleted record the lookup cache (`getpw*`) still answers for, for
+/// a counted number of lookups after the retirement, is free: the refill after the
+/// retirement makes the next account on the same uid and a lend gets it, and the log says the
+/// cache answered. Catches a free check that reads a cached answer as a record, which fails
+/// the next job of a one-slot pool right after a retirement.
+#[test]
+fn a_slot_only_the_lookup_cache_still_names_is_free_again() {
+    let rig = Rig::new("free-cache", 1, 1);
+    rig.fake.state().getpw_lingers = 6;
+    let pool = rig.open();
+    let first = pool.lend("job-1").unwrap().account;
+    let uid = first.uid;
+    pool.retire(first).unwrap();
+    assert_eq!(pool.ready_count(), 1, "the refill made the next account");
+    let next = pool.lend("job-2").unwrap();
+    assert_eq!((next.account.uid, next.made_now), (uid, false));
+    let log = rig.log.text();
+    assert!(
+        log.contains(
+            "the directory has no record of the uid; a lookup still answers from its cache"
+        ),
+        "{log}"
+    );
+}
+
 /// Asserts that an error in looking at a uid is not "free": the uid is passed over and the
 /// refusal names why, for each way of looking.
 #[test]
@@ -208,6 +233,12 @@ fn an_error_in_looking_at_a_uid_is_not_free() {
         format!("{uid}: looking up its record: uid_taken {uid} failed")
     );
     rig.fake.heal(&format!("uid_taken {uid}"));
+    rig.fake.fail(&format!("uid_in_directory {uid}"));
+    assert_eq!(
+        why(&pool),
+        format!("{uid}: looking up its record: uid_in_directory {uid} failed")
+    );
+    rig.fake.heal(&format!("uid_in_directory {uid}"));
     rig.fake.fail(&format!("processes {uid}"));
     assert_eq!(
         why(&pool),
