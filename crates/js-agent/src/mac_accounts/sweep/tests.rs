@@ -506,6 +506,9 @@ fn the_account_of_an_adopted_job_is_kept_at_open_and_retired_after() {
     assert!(rig.fake.state().processes.is_empty());
 }
 
+/// A case of a test and what it does to the rig before the open.
+type Spoil = (&'static str, fn(&Rig));
+
 /// Asserts that the account of an adopted job whose record or home is no longer there is
 /// not repaired but logged and ended at open, `gone` recorded: the job cannot be running
 /// without them.

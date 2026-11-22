@@ -893,3 +893,15 @@ fn a_drain_removes_what_was_parked() {
     assert_eq!(names(&base), ["from"]);
     assert!(names(&base.join("from")).is_empty());
 }
+
+/// Asserts that an entry examined without following a link is `None` when it is not there,
+/// and an error, never an absence, when its name cannot be looked up (too long for a name).
+#[test]
+fn an_entry_not_there_is_none_and_one_that_cannot_be_examined_is_an_error() {
+    let dir = scratch("examine");
+    let place = open_dir(&dir).unwrap().unwrap();
+    assert!(examine(&place, OsStr::new("missing")).unwrap().is_none());
+    let long = "n".repeat(300);
+    let why = examine(&place, OsStr::new(&long)).unwrap_err();
+    assert_eq!(why.raw_os_error(), Some(libc::ENAMETOOLONG));
+}
