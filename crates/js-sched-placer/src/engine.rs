@@ -157,6 +157,12 @@ impl Engine {
         self.room = room;
     }
 
+    /// Adds `booked`, an allocation the pass committed on `host` outside the walk (a whole-host
+    /// job), to the ledger the walk that follows is held to.
+    pub(crate) fn room_add(&mut self, host: &HostId, booked: js_jobs::Booked) {
+        self.room.add(host, booked);
+    }
+
     /// The history the jobs that book nothing are sized from.
     pub(crate) fn sizes(&mut self) -> &mut JobSizes {
         &mut self.sizes

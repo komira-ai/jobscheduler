@@ -108,8 +108,12 @@ pub(crate) fn held_or_end(
     let until = jobs.now()?.saturating_add(bar);
     let mut prepare_bars = job.prepare_bars.clone();
     // A bar on the host the job is placed on no longer holds, or holds only as a back-off: the
-    // refusal's bar replaces it.
-    prepare_bars.insert(host.clone(), Exclusion::Until(until));
+    // refusal's bar replaces it, unless it is a bar that still ends later.
+    let later = match prepare_bars.get(host) {
+        Some(Exclusion::Until(end)) if *end > until => Exclusion::Until(*end),
+        _ => Exclusion::Until(until),
+    };
+    prepare_bars.insert(host.clone(), later);
     let outcome = match refused {
         RequeuedFor::Held => Outcome::HeldRequeued {
             host: host.clone(),

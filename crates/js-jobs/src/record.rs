@@ -418,7 +418,7 @@ pub struct JobRecord {
     pub failed_prepares: u32,
     /// The hosts the job is kept off, each with until when: those its failed prepares bar,
     /// written with the count by [`crate::JobStore::fail_prepare_with`], and those that refused
-    /// its start as held, written by [`crate::JobStore::requeue_held`]. Kept while the job is
+    /// its start as held or for capacity, written by [`crate::JobStore::requeue_held`]. Kept while the job is
     /// queued, so the bars survive the deletion of its mark. Empty on a row that never had any.
     pub prepare_bars: BTreeMap<HostId, Exclusion>,
     /// The host of each start of the job that a held host refused (the agent's code

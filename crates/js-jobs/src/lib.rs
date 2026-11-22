@@ -178,7 +178,7 @@
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
 //! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it, and delete `mark/<id>` at its version or check it absent), or nothing for an ended job or a second cancel |
-//! | [`JobStore::requeue_held`] | put `job/<id>` at its version (placed or starting to queued, with the bars, the queue note and the host appended to the held refusals), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete the allocation's start from `dispatch/<host>/` at its version |
+//! | [`JobStore::requeue_held`] | put `job/<id>` at its version (placed or starting to queued, with the bars, the queue note and the host appended to the held or the capacity refusals), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete the allocation's start from `dispatch/<host>/` at its version |
 //! | [`JobStore::fail_prepare_with`] | put `job/<id>` at its version (placed to queued with the failed-prepare count and bars, or ended failed to start), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete `mark/<id>` at its version or check it absent |
 //! | [`JobStore::restart_prepare`] | put `alloc/<id>` at its version (the new prepare deadline), check `job/<id>` at its version |
 //! | [`JobStore::mark_releasing`] | put `alloc/<id>` at its version, or nothing when it is not booked |

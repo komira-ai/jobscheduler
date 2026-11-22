@@ -863,6 +863,7 @@ impl SchedPlacer {
                 };
                 let mut engine = self.engine();
                 engine.whole_job_placed(job, host, allocation.host_ports);
+                engine.room_add(host, Booked::WholeHost);
                 drop(engine);
                 told(&record, host, (starts, metrics));
                 Ok(Some(job.clone()))

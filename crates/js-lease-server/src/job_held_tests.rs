@@ -347,27 +347,64 @@ fn a_held_refusal_of_a_cancelled_or_running_job_and_another_code_are_not_requeue
     );
 }
 
-/// A requeue whose commit fails is the heartbeat's error, and the job stays placed on its
-/// booked allocation, so the agent's next report is judged again. Catches a failed requeue
-/// answered as if it had landed, which would leave the job placed on a held host with its
-/// refusal dropped.
+/// A requeue whose commit fails, after a held or a capacity refusal, is the heartbeat's error,
+/// and the job stays placed on its booked allocation, so the agent's next report is judged
+/// again; the refusal is not counted until that report's requeue commits. Catches a failed
+/// requeue answered as if it had landed, which would leave the job placed on a refusing host
+/// with its refusal dropped, and a refusal counted twice when the agent lists it again.
 #[test]
 fn a_held_requeue_whose_commit_fails_is_the_heartbeats_error_and_moves_nothing() {
-    let (store, jobs) = tables();
-    let (placed_job, booking) = placed(&jobs, "failing", "host-a", spec(), BOOKED);
-    store.fail_next();
+    for code in ["host-held", "no-capacity"] {
+        let (store, jobs) = tables();
+        let (placed_job, booking) = placed(&jobs, "failing", "host-a", spec(), BOOKED);
+        store.fail_next();
+        let failures = Failures::default();
+        let answer = beat(&jobs, &booking, refusal(&booking, code), &failures);
+        assert!(
+            matches!(answer, Err(JobStoreError::Store(StoreError::Failed(_)))),
+            "{code}: {answer:?}"
+        );
+        assert_eq!(job(&jobs, &placed_job.id).state, JobState::Placed, "{code}");
+        assert_eq!(
+            allocation(&jobs, &placed_job.id).step,
+            AllocationStep::Booked,
+            "{code}"
+        );
+        assert_eq!(failures.told(), [], "{code}");
+        assert_eq!(
+            failures.refused_told(),
+            Vec::<(String, String)>::new(),
+            "{code}: a refusal whose requeue did not commit was counted"
+        );
+    }
+}
+
+/// A capacity refusal on a host the job is still barred from for longer (a held host's bar,
+/// which outlasts [`CAPACITY_BAR`]) keeps the longer bar. Catches the short capacity bar
+/// replacing a longer one, which would put the job back on a held host early.
+#[test]
+fn a_capacity_refusal_keeps_a_longer_bar_on_its_host() {
     let failures = Failures::default();
-    let answer = beat(&jobs, &booking, refusal(&booking, "host-held"), &failures);
-    assert!(
-        matches!(answer, Err(JobStoreError::Store(StoreError::Failed(_)))),
-        "{answer:?}"
-    );
-    assert_eq!(job(&jobs, &placed_job.id).state, JobState::Placed);
+    let (_store, jobs) = tables();
+    let (barred_job, booking) = placed(&jobs, "barred", "host-a", spec(), BOOKED);
+    let held_at = jobs.now().unwrap();
+    // Held on host-a, then placed on host-a again (as a placement past the bar would) and
+    // refused there for capacity.
+    let booking = refused_then_placed(&jobs, &booking, "host-held", "host-a", &failures);
     assert_eq!(
-        allocation(&jobs, &placed_job.id).step,
-        AllocationStep::Booked
+        refused(&jobs, &booking, "no-capacity", &failures),
+        Ack::Accepted
     );
-    assert_eq!(failures.told(), []);
+    let requeued = job(&jobs, &barred_job.id);
+    assert_eq!(requeued.capacity_refusals, [host("host-a")]);
+    let Some(Exclusion::Until(until)) = requeued.prepare_bars.get(&host("host-a")).cloned() else {
+        panic!("no bar on host-a: {:?}", requeued.prepare_bars);
+    };
+    assert!(
+        until >= held_at.saturating_add(HELD_BAR),
+        "the capacity bar replaced the held one"
+    );
+    assert!(HELD_BAR > CAPACITY_BAR);
 }
 
 /// The detail names each host once, the latest refusal's host last unless it refused before,
