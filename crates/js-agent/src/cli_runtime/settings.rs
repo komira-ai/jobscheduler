@@ -185,6 +185,9 @@ pub struct Settings {
     /// The mapping the runtime resolved when it opened; shared by the clones.
     resolved: Arc<OnceLock<Mapping>>,
     chown: Option<(u32, u32)>,
+    /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
+    /// none by default, and a job's CPU booking is then a share alone.
+    cpu_ceiling: Option<js_types::CpuCeiling>,
     /// Set for the crun runtime: what it is opened from.
     crun: Option<Box<CrunPlan>>,
 }
@@ -237,6 +240,9 @@ pub struct CrunPlan {
     /// [`Settings::with_layered`]: without them none is given and `layered-rootfs` is not
     /// reported.
     pub layered: bool,
+    /// The operator's CPU ceiling (`--cpu-ceiling`), set by [`Settings::with_cpu_ceiling`]:
+    /// none by default.
+    pub cpu_ceiling: Option<js_types::CpuCeiling>,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -321,6 +327,7 @@ impl Settings {
             subuid: None,
             resolved: Arc::new(OnceLock::new()),
             chown: None,
+            cpu_ceiling: None,
             crun: None,
         })
     }
@@ -347,6 +354,7 @@ impl Settings {
             subuid: Some(job_user.to_owned()),
             resolved: Arc::new(OnceLock::new()),
             chown: None,
+            cpu_ceiling: None,
             crun: Some(Box::new(CrunPlan {
                 crun,
                 job_ids,
@@ -365,6 +373,7 @@ impl Settings {
                 host_ports: Vec::new(),
                 mount_roots: crate::lifecycle::MountRoots::default(),
                 layered: false,
+                cpu_ceiling: None,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -411,6 +420,24 @@ impl Settings {
             .into_iter()
             .for_each(|plan| plan.logs.file_cap = file_cap);
         self
+    }
+
+    /// These settings with `ceiling` as the operator's CPU ceiling (`--cpu-ceiling`), a multiple
+    /// of each job's booked CPU, for whichever runtime they are: none (the default) leaves a
+    /// job's CPU booking a share alone.
+    #[must_use]
+    pub fn with_cpu_ceiling(mut self, ceiling: Option<js_types::CpuCeiling>) -> Self {
+        self.cpu_ceiling = ceiling;
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.cpu_ceiling = ceiling);
+        self
+    }
+
+    /// The operator's CPU ceiling (`--cpu-ceiling`), none by default.
+    #[must_use]
+    pub fn cpu_ceiling(&self) -> Option<js_types::CpuCeiling> {
+        self.cpu_ceiling
     }
 
     /// These settings with `budget` as the most bytes the crun runtime's unpacked images may

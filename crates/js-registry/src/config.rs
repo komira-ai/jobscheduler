@@ -423,7 +423,7 @@ pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: b
 /// when it does not, or when the default is absent, not a whole number, zero, or too
 /// large to count in bytes (above the wire's `MAX_DISK_BYTES`): a host that says it bounds disk and not by how much is
 /// treated as one that does not, so the server never books a guess.
-pub(crate) fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u64> {
+pub fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u64> {
     let quota = capabilities
         .get(SCRATCH_QUOTA)
         .is_some_and(|value| value == SCRATCH_QUOTA_PROJECT);

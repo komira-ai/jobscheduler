@@ -296,3 +296,35 @@ fn on_a_host_of_the_default_memory_a_cold_class_books_the_host_and_a_young_class
         assert_eq!(size(&sizes, &next), expected, "after {taught} runs");
     }
 }
+
+/// Asserts that a pass records in each allocation which history sized its job: `cold` for a
+/// job of a class with no runs that books nothing, and for one that names its CPU and leaves
+/// its memory to the history; none for a job that names both. Catches a placement that
+/// leaves `sized_from` unset (every start would then say `unknown`), and one that records a
+/// history for a job the history did not size.
+#[test]
+fn a_pass_records_which_history_sized_each_placed_job() {
+    let tables = Tables::new();
+    let placer = farm_placer(FARM);
+    for (id, class, (cpu, memory)) in [
+        ("sized", "t-sized", (0, 0)),
+        ("cpu-named", "t-cpu", (1000, 0)),
+        ("both-named", "t-both", (1000, GIB)),
+    ] {
+        let new = js_jobs::NewJob {
+            id: Some(JobId::parse(id).unwrap()),
+            spec: of_class(class, needs(cpu, memory)),
+            priority: 0,
+            client: None,
+        };
+        tables.jobs.insert_queued(new).unwrap();
+    }
+    assert_eq!(pass(&placer, &tables).len(), 3);
+    let sized_from = |id: &str| {
+        let id = JobId::parse(id).unwrap();
+        tables.jobs.get_allocation(&id).unwrap().unwrap().sized_from
+    };
+    assert_eq!(sized_from("sized"), Some(js_jobs::SizedFrom::Cold));
+    assert_eq!(sized_from("cpu-named"), Some(js_jobs::SizedFrom::Cold));
+    assert_eq!(sized_from("both-named"), None);
+}

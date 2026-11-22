@@ -525,13 +525,9 @@ pub fn main_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
-    // A native macOS job run by this program alone, start to end: answered before anything
-    // else starts a thread, because its start allocates between fork and exec.
-    if args
-        .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(mac_job::VERB))
-    {
-        return mac_job::run(&args, out, err);
+    // Before anything starts a thread: the mode's start allocates between fork and exec.
+    if let Some(code) = mac_job::dispatch(&args, out, err) {
+        return code;
     }
     // A development verb proving the account life cycle on a Mac; removed before any release.
     if args

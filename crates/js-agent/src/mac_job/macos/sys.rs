@@ -285,10 +285,8 @@ pub(super) struct ChildSteps {
     pub gid: u32,
     /// The profile text.
     pub profile: CString,
-    /// The profile's parameter name.
-    pub param_name: CString,
-    /// Its value.
-    pub param_value: CString,
+    /// The profile's parameters, by name.
+    pub params: Vec<(CString, CString)>,
 }
 
 impl ChildSteps {
@@ -297,8 +295,9 @@ impl ChildSteps {
     ///
     /// # Safety
     /// Only in the child of a `fork` of a process that had one thread (the caller checks
-    /// [`own_threads`]): `sandbox_init_with_parameters` allocates, which is safe after `fork`
-    /// only when no other thread could have held the allocator's lock.
+    /// [`own_threads`]): `sandbox_init_with_parameters` allocates, and so does the array of its
+    /// parameters made here, which is safe after `fork` only when no other thread could have held
+    /// the allocator's lock.
     pub(super) unsafe fn run(&self) -> io::Result<()> {
         if self.new_session {
             let mut info = AuditinfoAddr::default();
@@ -334,11 +333,14 @@ impl ChildSteps {
                 return Err(io::Error::from_raw_os_error(libc::EPERM));
             }
         }
-        let params = [
-            self.param_name.as_ptr(),
-            self.param_value.as_ptr(),
-            ptr::null(),
-        ];
+        // The NULL-ended array of name, value, name, value: made here, after the fork, which
+        // the single thread allows (see `# Safety`).
+        let mut params: Vec<*const c_char> = Vec::with_capacity(self.params.len() * 2 + 1);
+        for (name, value) in &self.params {
+            params.push(name.as_ptr());
+            params.push(value.as_ptr());
+        }
+        params.push(ptr::null());
         let mut error: *mut c_char = ptr::null_mut();
         // SAFETY: the text and the NULL-ended array point at strings of `self`, alive for the
         // call; `error` is ours (see the FFI-BOUNDARY comment).

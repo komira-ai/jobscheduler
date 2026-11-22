@@ -337,3 +337,25 @@ fn a_held_refusal_waits_again_with_its_host() {
         );
     }
 }
+
+/// A start a host refused for capacity sends the job back to wait for room, whatever it books,
+/// with a `REQUEUED` event naming the host and the reason in the detail; it is no attempt of its
+/// own, and it is the same note whatever code the job showed. Catches a capacity refusal noted
+/// as a held host, as a failed whole-host prepare or as an attempt.
+#[test]
+fn a_capacity_refusal_waits_again_with_its_host() {
+    let capacity = Outcome::CapacityRequeued { host: host("h-5") };
+    for current in [QueueCode::Placed, QueueCode::WaitingForCapacity] {
+        assert_eq!(
+            note(&capacity, current),
+            Some(QueueNote {
+                code: QueueCode::WaitingForCapacity,
+                detail: "host h-5 had no room for the job when its start reached it; the job is queued again".to_owned(),
+                event: Some(JobEventKind::Requeued),
+                host: Some(host("h-5")),
+                attempt: false,
+            }),
+            "showing {current:?}"
+        );
+    }
+}

@@ -2,7 +2,7 @@
 
 use js_types::{Arch, Os};
 
-use super::{ID_MAX, JobFile, Network, SpecError, WALL_LIMIT_MAX_SECS};
+use super::{ID_MAX, JobFile, Network, REF_MAX, SpecError, TREES_MAX, Tree, WALL_LIMIT_MAX_SECS};
 
 /// A job file with `extra` fields, the program and wall limit given.
 fn file(extra: &str) -> String {
@@ -26,6 +26,7 @@ fn the_smallest_job_takes_the_defaults() {
             args: Vec::new(),
             env: Default::default(),
             inputs: None,
+            trees: Vec::new(),
             outputs: Vec::new(),
             network: Network::default(),
             wall_limit_secs: 60,
@@ -256,5 +257,104 @@ fn every_refusal_reads_as_a_sentence() {
     ];
     for (error, text) in cases {
         assert_eq!(error.to_string(), text);
+    }
+}
+
+#[test]
+fn trees_name_a_reference_and_a_place_under_work() {
+    let job = parse(r#","trees":[{"ref":"cas/l/ab","at":"src"},{"ref":"cas/l/cd","at":"deps/x"}]"#)
+        .expect("decodes");
+    assert_eq!(
+        job.trees,
+        [
+            Tree {
+                reference: "cas/l/ab".to_owned(),
+                at: "src".to_owned()
+            },
+            Tree {
+                reference: "cas/l/cd".to_owned(),
+                at: "deps/x".to_owned()
+            },
+        ]
+    );
+    assert!(matches!(
+        parse(r#","trees":[{"ref":"x","at":"a","mode":"rw"}]"#),
+        Err(SpecError::Decode(_))
+    ));
+}
+
+#[test]
+fn tree_references_are_bounded_and_have_no_control_character() {
+    let longest = "r".repeat(REF_MAX);
+    assert!(parse(&format!(r#","trees":[{{"ref":"{longest}","at":"a"}}]"#)).is_ok());
+    let too_long = "r".repeat(REF_MAX + 1);
+    // (as written in the job's JSON, as decoded)
+    let cases = [
+        (String::new(), String::new()),
+        (too_long.clone(), too_long),
+        (r"cas/l/a\tb".to_owned(), "cas/l/a\tb".to_owned()),
+    ];
+    for (written, decoded) in cases {
+        let extra = format!(r#","trees":[{{"ref":"{written}","at":"a"}}]"#);
+        assert_eq!(parse(&extra), Err(SpecError::TreeRef(decoded)), "{written}");
+    }
+}
+
+#[test]
+fn a_tree_place_is_a_plain_relative_path_named_once() {
+    for bad in ["", "/abs", "../up", "a//b"] {
+        let extra = format!(r#","trees":[{{"ref":"r","at":"{bad}"}}]"#);
+        assert_eq!(
+            parse(&extra),
+            Err(SpecError::TreeAt(bad.to_owned())),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        parse(r#","trees":[{"ref":"r","at":"a"},{"ref":"s","at":"a"}]"#),
+        Err(SpecError::TreeAt("a".to_owned()))
+    );
+}
+
+#[test]
+fn at_most_sixteen_trees() {
+    let one = r#"{"ref":"r","at":"a"}"#;
+    let many: Vec<String> = (0..=TREES_MAX)
+        .map(|i| one.replace("\"a\"", &format!("\"a{i}\"")))
+        .collect();
+    let extra = format!(r#","trees":[{}]"#, many.join(","));
+    assert_eq!(parse(&extra), Err(SpecError::Trees(TREES_MAX + 1)));
+    let error_texts = [
+        (
+            SpecError::TreeRef(String::new()),
+            r#"tree ref "": 1 to 1024 bytes, no control character"#,
+        ),
+        (
+            SpecError::TreeAt("a".to_owned()),
+            r#"tree at "a": a relative path of plain parts, each named once"#,
+        ),
+        (SpecError::Trees(17), "17 trees; at most 16"),
+    ];
+    for (error, text) in error_texts {
+        assert_eq!(error.to_string(), text);
+    }
+}
+
+#[test]
+fn a_job_missing_a_required_field_or_with_a_bad_value_does_not_decode() {
+    for text in [
+        r#"{"id":"j","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh"}"#,
+        r#"{"os":"macos","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","arch":"sparc","program":"/bin/sh","wall_limit_secs":1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":-1}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":1.5}"#,
+        r#"{"id":"j","os":"macos","program":"/bin/sh","wall_limit_secs":1,"network":{"outbound_ports":[70000]}}"#,
+    ] {
+        assert!(
+            matches!(JobFile::parse(text, Arch::Arm64), Err(SpecError::Decode(_))),
+            "{text}"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The report: its status and its JSON.
 
-use super::{Ended, Leftovers, Outputs, Report, TAIL_MAX, tail};
+use super::{AccountUse, Ended, Leftovers, Outputs, Report, TAIL_MAX, TreeUse, tail};
 use crate::mac_job::status;
 use crate::mac_job::sweep::Tally;
 
@@ -20,9 +20,40 @@ fn report() -> Report {
         },
         outputs: Outputs::default(),
         leftovers: Leftovers::default(),
+        put: None,
+        trees: Vec::new(),
+        account: None,
+        spawn: "ordinary".to_owned(),
         stdout_tail: String::new(),
         stderr_tail: String::new(),
     }
+}
+
+fn lent(retired: Result<String, String>) -> Option<AccountUse> {
+    Some(AccountUse {
+        name: "kbf-acct-1".to_owned(),
+        made_now: false,
+        retired,
+    })
+}
+
+#[test]
+fn a_held_account_is_something_left_and_a_retired_one_is_not() {
+    let ok = Report {
+        account: lent(Ok("gone".to_owned())),
+        ..report()
+    };
+    assert_eq!(ok.status(), status::OK);
+    let held = Report {
+        account: lent(Err("held at delete".to_owned())),
+        ..report()
+    };
+    assert_eq!(held.status(), status::LEFT_BEHIND);
+    let json = serde_json::to_string(&held.account).expect("json");
+    assert_eq!(
+        json,
+        r#"{"name":"kbf-acct-1","made_now":false,"retired":{"Err":"held at delete"}}"#
+    );
 }
 
 #[test]
@@ -109,4 +140,41 @@ fn the_json_names_how_the_job_ended() {
         text.starts_with(r#"{"id":"j","user":"u","uid":680,"asid":7,"folder":"/r/j""#),
         "{text}"
     );
+}
+
+#[test]
+fn a_tree_reports_its_reference_place_path_and_release() {
+    let tree = TreeUse {
+        reference: "cas/l/ab".to_owned(),
+        at: "src".to_owned(),
+        path: "/fs/mount-provider/a/b/0".to_owned(),
+        mount_ms: 12,
+        released: Ok(()),
+    };
+    assert_eq!(
+        serde_json::to_string(&tree).expect("json"),
+        r#"{"ref":"cas/l/ab","at":"src","path":"/fs/mount-provider/a/b/0","mount_ms":12,"released":{"Ok":null}}"#
+    );
+}
+
+#[test]
+fn a_failed_put_is_a_job_failure_and_a_committed_one_is_not() {
+    let committed = crate::mac_job::put::Committed {
+        key: "cas/b/j/n/pack".to_owned(),
+        sha256: "ab".to_owned(),
+        bytes: 3,
+    };
+    assert_eq!(
+        Report {
+            put: Some(Ok(committed)),
+            ..report()
+        }
+        .status(),
+        status::OK
+    );
+    let failed = Report {
+        put: Some(Err("no root".to_owned())),
+        ..report()
+    };
+    assert_eq!(failed.status(), status::JOB_FAILED);
 }

@@ -10,6 +10,7 @@
 //!   "env": {"LANG": "C"},
 //!   "inputs": "/Users/adi/bringup/70-c-hello.files/src",
 //!   "outputs": ["out"],
+//!   "trees": [{"ref": "cas/l/<sha256 hex>", "at": "src"}],
 //!   "network": {"loopback": true, "outbound_ports": [8980]},
 //!   "wall_limit_secs": 600
 //! }
@@ -25,6 +26,12 @@ use std::path::Path;
 use js_types::{Arch, Os};
 use serde::Deserialize;
 use thiserror::Error;
+
+/// The longest tree reference, as the mount provider contract bounds it.
+pub const REF_MAX: usize = 1024;
+
+/// The most trees a job may name.
+pub const TREES_MAX: usize = 16;
 
 /// The most a job's wall limit may be: a day.
 pub const WALL_LIMIT_MAX_SECS: u64 = 86_400;
@@ -68,6 +75,9 @@ pub struct JobFile {
     /// A folder whose contents are copied into the job's `work` folder before the start.
     #[serde(default)]
     pub inputs: Option<String>,
+    /// Trees of the mount provider, linked read-only into `work`.
+    #[serde(default)]
+    pub trees: Vec<Tree>,
     /// Paths under `work` to copy to the output folder at the end.
     #[serde(default)]
     pub outputs: Vec<String>,
@@ -76,6 +86,18 @@ pub struct JobFile {
     pub network: Network,
     /// The wall limit, in seconds.
     pub wall_limit_secs: u64,
+}
+
+/// A tree the job reads, from the mount provider.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tree {
+    /// The tree, as the provider names it (tierstore: `cas/l/<sha256 of its tree list>`): 1 to
+    /// [`REF_MAX`] bytes, no control character.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Where it appears: a relative path of plain parts under `work`.
+    pub at: String,
 }
 
 /// The network a job may use. By default, none.
@@ -125,6 +147,15 @@ pub enum SpecError {
     /// An output is not a plain relative path.
     #[error("output {0:?} is not a relative path of plain parts")]
     Output(String),
+    /// A tree's reference is empty, too long, or holds a control character.
+    #[error("tree ref {0:?}: 1 to 1024 bytes, no control character")]
+    TreeRef(String),
+    /// A tree's place is not a plain relative path, or is named twice.
+    #[error("tree at {0:?}: a relative path of plain parts, each named once")]
+    TreeAt(String),
+    /// More trees than [`TREES_MAX`].
+    #[error("{0} trees; at most 16")]
+    Trees(usize),
     /// Port 0 cannot be connected to.
     #[error("outbound port 0")]
     Port,
@@ -179,6 +210,7 @@ impl JobFile {
         if let Some(output) = self.outputs.iter().find(|o| !relative_ok(o)) {
             return Err(SpecError::Output(output.clone()));
         }
+        self.check_trees()?;
         if self.network.outbound_ports.contains(&0) {
             return Err(SpecError::Port);
         }
@@ -187,6 +219,32 @@ impl JobFile {
         }
         Ok(())
     }
+}
+
+impl JobFile {
+    /// The checks of the trees.
+    fn check_trees(&self) -> Result<(), SpecError> {
+        if self.trees.len() > TREES_MAX {
+            return Err(SpecError::Trees(self.trees.len()));
+        }
+        if let Some(tree) = self.trees.iter().find(|t| !ref_ok(&t.reference)) {
+            return Err(SpecError::TreeRef(tree.reference.clone()));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(tree) = self
+            .trees
+            .iter()
+            .find(|t| !relative_ok(&t.at) || !seen.insert(t.at.as_str()))
+        {
+            return Err(SpecError::TreeAt(tree.at.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `reference` is 1 to [`REF_MAX`] bytes with no control character.
+fn ref_ok(reference: &str) -> bool {
+    !reference.is_empty() && reference.len() <= REF_MAX && !reference.chars().any(char::is_control)
 }
 
 /// Whether `id` is 1 to [`ID_MAX`] of `[a-z0-9-]`, the first a letter or digit.

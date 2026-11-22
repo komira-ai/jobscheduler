@@ -44,6 +44,17 @@ fn the_program_gets_its_arguments_and_the_environment_it_is_given() {
     assert_eq!(inherited.trim_end(), env!("CARGO_MANIFEST_DIR"));
 }
 
+/// A program started with its responsibility kept (not disclaimed) runs as any other: off
+/// macOS the call changes nothing, and on macOS it skips only the disclaim.
+#[test]
+fn a_program_that_keeps_its_responsibility_still_runs_with_its_arguments() {
+    let out = Program::new("/bin/echo", ["kept"])
+        .keep_responsibility()
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"kept\n");
+}
+
 /// The environment is the calls applied in order: the last value set wins, whether by
 /// `env` or `envs`; `env_clear` drops what was set before it; an empty value is a value.
 /// Catches an environment rebuilt from the calls out of order, or one that keeps a

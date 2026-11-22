@@ -44,6 +44,12 @@
 //! [`Program::spawn`] or [`Program::output`] is refused, on every platform, whether or
 //! not the first one started the program.
 //!
+//! [`Program::keep_responsibility`] leaves the disclaim out for one start: the program then
+//! answers for its starter, as a program started the usual way does. The prototype of the one
+//! Mac program uses it for the jobs it starts (`js-agent __mac-job --spawn ordinary`), because a
+//! measured job reads a network file system mount only when it holds the agent's grant, and the
+//! owner decided jobs start so. The agent's other starts keep the disclaim.
+//!
 //! This module is the only code of `js-agent` and `js-mac-session` that starts a program.
 //! `cargo test -p xtask --test spawn_sites` fails when their production code, on any
 //! platform, does it another way: a `Command::new`, a `pre_exec` or `exec` call, or a C
@@ -62,7 +68,6 @@ use std::io;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
-#[cfg(not(target_os = "macos"))]
 use std::os::unix::process::CommandExt as _;
 
 /// Steps the child runs before the program executes.
@@ -84,6 +89,9 @@ pub struct Program {
     /// Whether [`Self::env_clear`] was called.
     #[cfg(target_os = "macos")]
     cleared: bool,
+    /// Whether [`Self::keep_responsibility`] was called.
+    #[cfg(target_os = "macos")]
+    kept: bool,
 }
 
 impl fmt::Debug for Program {
@@ -140,6 +148,7 @@ impl Program {
                 program: program.to_owned(),
                 args,
                 cleared: false,
+                kept: false,
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -166,13 +175,13 @@ impl Program {
         self.started = true;
         let steps = self.steps.take();
         #[cfg(target_os = "macos")]
-        {
+        if !self.kept {
             let env = darwin::environment(self.cleared, &self.command);
             let plan = plan::Plan::new(&self.program, &self.args, &env)?;
             let attributes = darwin::Attributes::new()?;
             darwin::disclaim(&mut self.command, plan, attributes, steps);
+            return Ok(());
         }
-        #[cfg(not(target_os = "macos"))]
         if let Some(steps) = steps {
             // SAFETY: `with_steps`'s caller promises that `steps` is async-signal-safe and
             // allocates nothing; it is the only closure the command has.
@@ -181,6 +190,20 @@ impl Program {
             }
         }
         Ok(())
+    }
+
+    /// Starts the program the standard library's way, its responsibility not disclaimed: on
+    /// macOS it then answers to the privacy controls (TCC) as this process, so it holds what
+    /// this process was granted, Full Disk Access included. Off macOS nothing changes.
+    ///
+    /// For a run that must read what only the starter's grant reaches (a network file system
+    /// mount, measured): every other start keeps the disclaim.
+    pub fn keep_responsibility(&mut self) -> &mut Self {
+        #[cfg(target_os = "macos")]
+        {
+            self.kept = true;
+        }
+        self
     }
 
     /// Clears the environment the program gets ([`Command::env_clear`]).

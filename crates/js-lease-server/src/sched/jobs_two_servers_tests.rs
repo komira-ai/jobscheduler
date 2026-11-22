@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 
-use js_agent_wire::NetworkCeiling;
 use js_jobs::{Capacity, JobId, JobState};
 use js_sched_placer::engine::jobs::{NoStarts, OpenHost};
 use js_sched_placer::place::SchedPlacer;
@@ -30,15 +29,13 @@ fn tables_on(url: &str) -> ServerJobs {
 /// The hosts `names`, each offering its 8 cores and 16 GiB as the capacity a placement is held to.
 fn open_with_capacity(names: &[&str]) -> BTreeMap<HostId, OpenHost> {
     let offer = OpenHost {
-        ceiling: NetworkCeiling::default(),
-        host_jobs: false,
-        rank: None,
         capacity: Some(Capacity {
             cpu_millis: 8000,
             memory_bytes: 16 * GIB,
             disk_bytes: 0,
             accelerators: 0,
         }),
+        ..OpenHost::default()
     };
     names
         .iter()

@@ -15,4 +15,5 @@
 pub mod engine;
 pub mod map;
 pub mod place;
+pub mod room;
 pub mod sizes;

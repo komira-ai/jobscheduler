@@ -83,6 +83,9 @@ pub struct Tally {
     pub rounds: usize,
     /// Whether the last round found nothing.
     pub clean: bool,
+    /// Why the sweep stopped before a round found nothing, when the process table could not be
+    /// read.
+    pub error: Option<String>,
 }
 
 impl Tally {
@@ -100,6 +103,12 @@ impl Tally {
         }
         self.clean = found.is_empty();
         !found.is_empty()
+    }
+
+    /// Records that the process table could not be read: the sweep is not clean.
+    pub fn failed(&mut self, why: String) {
+        self.clean = false;
+        self.error = Some(why);
     }
 }
 
