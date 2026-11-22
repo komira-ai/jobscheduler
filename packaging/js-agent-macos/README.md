@@ -149,12 +149,21 @@ for a day: the first install updates the agent to it, and nothing signs it or re
 `build` made on the runner, the way hostkeeper does, runs the update hook's prepare,
 cutover, verify and cleanup as root with launchd loading the jobs, rolls a config package over
 the agent and updates the agent to the package `build-update` made (the release runs it as its own
-beta job, `beta-macos-first-install`). Three more jobs run only on main (by hand, or in the release's call), in this order.
+beta job, `beta-macos-first-install`). Three more jobs run in the release's call (on a push to
+main) and in a signing run, in this order. A signing run is a manual run with `sign` set, on a
+branch of this repository (`gh workflow run js-agent-macos-pkg.yml --ref <branch> -f version=X -f
+sign=true`): it signs and checks the programs and the package exactly as the release does and
+publishes nothing (the signed files stay artifacts of the run), so a change to the signing is
+proved before it merges. On a tag or in a fork's copy it fails by name at the first step of
+`build`. A manual run without `sign` signs nothing.
 `sign-code` runs in the environment `pkg-signing`: it takes the three programs from `build`,
 checks them against `build`'s sums, imports the application certificate into a temporary
 keychain for `/usr/bin/codesign` alone, imports Apple's Developer ID G2 intermediate (fetched
-over HTTPS and held to its SHA-256), finds the identity `Developer ID Application: Komira AI,
-Inc. (U7RTX4XD3X)` there, fails when it expires within 30 days, and signs each program with
+over HTTPS and held to its SHA-256; a hosted runner that holds it already makes `security import`
+answer `The specified item already exists in the keychain.`, and that answer alone, exactly,
+passes), finds the identity `Developer ID Application: Komira AI, Inc. (U7RTX4XD3X)` among the
+keychain's valid code-signing identities (`find-identity -v` lists it only when its chain builds
+to Apple's root), fails when it expires within 30 days, and signs each program with
 `codesign --options runtime --timestamp` under the identifier of the table in
 `crates/xtask/src/release/mac_programs.rs` (`com.komira.js-agent`, `com.komira.js-agent.session`,
 `com.komira.js-agent.provision`). It runs nothing built from the repository, and it fails,
@@ -170,8 +179,9 @@ a temporary keychain, finds the "Developer ID Installer" identity there by its S
 does not notarize. When the environment or the installer certificate's secrets are not set `sign`
 prints a notice and skips every step after the first, and the run succeeds.
 
-`pkg-signing` is created by a repository administrator, with a rule that only main may
-deploy to it and with these secrets as environment secrets (none is in the tree):
+`pkg-signing` is created by a repository administrator with these secrets as environment
+secrets (none is in the tree). It admits every branch of this repository, which the signing run
+needs; anyone who can push a branch can already run a workflow of that branch in it:
 
 - `MACOS_INSTALLER_P12`: the "Developer ID Installer" certificate and key, a PKCS#12 file, base64.
 - `MACOS_INSTALLER_P12_PASSWORD`: its password.

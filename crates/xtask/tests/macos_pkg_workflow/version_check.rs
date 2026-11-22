@@ -4,7 +4,8 @@
 use super::*;
 
 /// One line per way the jobs of the workflow `text` that run steps do not check their version
-/// first (after the presence check, in `sign`). `build` and `sign` check it in a step of their own;
+/// first (after the presence check, in `sign`, and after the refusal of a misplaced signing run, in
+/// `build`). `build` and `sign` check it in a step of their own;
 /// `build-update` builds the next version, and the one command that names it checks the version
 /// (`cargo xtask release next-version`), after the checkout and the toolchain it needs.
 /// `sign-code` signs the programs `build` made and names no version, so it checks none.
@@ -36,7 +37,9 @@ fn version_check_problems(text: &str, next_action: &str) -> Vec<String> {
             }
             continue;
         }
-        let at = usize::from(name == "sign");
+        // `sign` checks it after the presence check, `build` after the refusal of a signing
+        // run outside a branch of this repository (signing_run.rs), which uses no version.
+        let at = usize::from(name == "sign" || name == "build");
         let (step, lines) = &all[at];
         if step != "Check the version" {
             found.push(format!("{name}: the first step is {step:?}"));

@@ -9,8 +9,8 @@ package holds, what hostkeeper requires, how a release reaches the Macs, and whi
 
 - `.github/workflows/js-agent-macos-pkg.yml` builds `js-agent-<version>-macos-arm64.pkg` on a hosted Apple silicon
   runner and signs it. Its `build` job stages the payload, reads the cdhash of the `js-agent` binary, builds the
-  component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs on main,
-  by hand or in the release's call (`sign: true`), in the environment `pkg-signing`; without that environment's secrets
+  component with `pkgbuild` (no scripts) and checks it with `cargo xtask pkg check-macos`. Its `sign` job runs in the
+  release's call (`sign: true`) and in a signing run (by hand, `sign: true`, on a branch of this repository), in the environment `pkg-signing`; without that environment's secrets
   it skips with a notice.
 - `release.yml` calls it as `beta-macos-pkg` with the release's version. Its job `pkg-upload` puts the signed package
   in the package repository once `publish` passed and `beta-macos-pkg` has ended (it waits for no beta test), before
@@ -150,7 +150,7 @@ as owner), any script, and another identifier or version.
    agent to a second package (the next patch version, built beside the first and never released); only
    `promote-macos` waits for it, never the deploy. A manual run of
    `js-agent-macos-pkg.yml` calls it too, so a branch's package can be tried before it merges.
-2. The `sign` job runs on main for that call (and for a manual run), in the environment `pkg-signing`, with the
+2. The `sign` job runs for that call (and for a signing run, by hand), in the environment `pkg-signing`, with the
    secrets `MACOS_INSTALLER_P12` (the "Developer ID Installer" certificate and key as a base64 PKCS#12 file) and
    `MACOS_INSTALLER_P12_PASSWORD`. It imports them into a temporary keychain for `productsign` alone, finds the
    identity in that keychain by its SHA-1 (`security find-identity -v -p basic`; no name or team id is written in the
