@@ -96,9 +96,10 @@ jobs:
       - run: cargo test --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm
       # The put ingest's hand-over runs for real, as root (crates/js-agent/src/mac_put/root_tests.rs):
       # the key's folders given to another user, the job's directory to its group, the owners and modes read back.
-      # The run above skips it by name (#[ignore], with the reason); this step runs exactly it.
+      # The run above skips it by name (#[ignore], with the reason); this step runs exactly it, and fails unless it ran and passed
+      # (a renamed test would otherwise run nothing and pass).
       - name: Run the put ingest's root tests
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --test-threads=1 --exact mac_put::root_tests::as_root_the_put_directory_is_the_nodes_and_the_pack_its_groups
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --test-threads=1 --exact mac_put::root_tests::as_root_the_put_directory_is_the_nodes_and_the_pack_its_groups | tee "$RUNNER_TEMP/put-root-tests.log"; grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/put-root-tests.log"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

@@ -44,6 +44,7 @@ pub fn hand_over(root: &Path, target: &PutTarget, owner: u32, node: Node) -> io:
         lchown(&at, Some(node.uid), Some(node.gid)).map_err(|why| named(&at, why))?;
     }
     let dir = &target.dir;
-    lchown(dir, Some(owner), Some(node.gid)).map_err(|why| named(dir, why))?;
-    fs::set_permissions(dir, Permissions::from_mode(DIR_MODE)).map_err(|why| named(dir, why))
+    lchown(dir, Some(owner), Some(node.gid))
+        .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(DIR_MODE)))
+        .map_err(|why| named(dir, why))
 }

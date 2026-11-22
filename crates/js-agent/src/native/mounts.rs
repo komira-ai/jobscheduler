@@ -240,11 +240,13 @@ fn plan_of(
             format!("{}: not a directory", host.display()),
         ));
     }
-    if put_root.is_some_and(|root| host.starts_with(root)) {
+    // A mount that holds the put root would give the job every build's puts, and one that a
+    // link leads into it would give it another's put directory.
+    if put_root.is_some_and(|root| host.starts_with(root) || root.starts_with(&host)) {
         return Err(refuse(
             refusal::INPUT_NOT_ALLOWED,
             format!(
-                "{} lies beneath --native-put-root once its links are followed",
+                "{} holds or lies beneath --native-put-root once its links are followed",
                 wanted.display()
             ),
         ));
@@ -301,7 +303,8 @@ fn put_plan(
         return Err(refuse(
             refusal::INPUT_NOT_ALLOWED,
             format!(
-                "{} lies beneath --native-put-root, where a job is given only its put target                  (read-write)",
+                "{} lies beneath --native-put-root, where a job is given only its put target \
+                 (read-write)",
                 wanted.display()
             ),
         ));
