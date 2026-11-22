@@ -1,6 +1,6 @@
 # Input trees on a Mac: provider mounts and copy-on-write mounts
 
-Status: **for the owner's decision; nothing here is built.** It settles question Q1 of `docs/design/job-rootfs.md`
+Status: **its first step is being built (below); the later steps are for the owner's decision.** It settles question Q1 of `docs/design/job-rootfs.md`
 (section 13): how a native macOS job gets a `COPY_ON_WRITE` mount. It also settles how the macOS agent takes a mount
 provider's tree at all, because the tree a client most wants on a Mac is a provider's. The wire, the proto, the server
 and placement do not change (section 6). It is written to two rulings of the owner:
@@ -15,6 +15,27 @@ Both land before this design's agent items (section 10), so the files they name 
 **This design adds no privacy grant and no device-management profile, for any program.** The one grant native jobs
 need at all is the account-per-job design's Full Disk Access for the agent's program, which deletes accounts. This
 design neither adds to it nor needs it for the trees.
+
+## The steps
+
+**Step 1, being built: read-only whole trees.** The owner chose to run real builds on the Macs first, with the part of
+this design that needs neither ruling above.
+
+- **tierstore** writes each tree whole, as plain files, on the Mac's local disk, and answers `Mount` with that
+  directory (D2, section 5 item 2; build item 5 without its `COPY_ON_WRITE` change).
+- **The macOS agent** takes `--mount-provider` and gives a job a provider's tree as a `READ_ONLY` mount: the link of
+  job-rootfs.md 5.2 to that directory, with the local-volume rule of 2.1 (build item 3, before the one-program switch).
+- **No copy-on-write.** A `COPY_ON_WRITE` mount stays refused `rootfs-unsupported-here` on a Mac.
+- **Accounts stay as they are**: the pool of reused accounts, reset after each job. The job's pool user reads the tree,
+  whose files are the provider's, 0644 and 0755, so no account owns or deletes anything of it.
+- **The client** sends its input tree as a provider mount, and its job writes its outputs into a local directory.
+
+**Not covered by this design: outputs.** This design is about a job's input trees. What a job writes for upload (its
+put directory) was not part of it. In step 1 the provider ingests the outputs from a local directory after the job
+ends. That is designed and built apart from this document, on the provider's side.
+
+**Later steps, for the owner's decision**: copy-on-write mounts (D5, with the account-per-job and one-program designs)
+and laziness (D1). The decisions below are for them; D2 to D4 already hold in step 1.
 
 ## Decisions for the owner
 
@@ -606,9 +627,11 @@ the farm).** These are the macOS-only parts, behind `cfg(target_os = "macos")`:
 
 ## 10. Build items
 
-One subject per pull request, in this order. Items 3 and 4 come after the one-program switch (the one-program design,
-section 7). Item 4 also comes after accounts per job (the account-per-job design, step 2), whose account it makes at
-assembly.
+Step 1 is items 3 and 5 alone: item 5 without its `COPY_ON_WRITE` change, and item 3 on the agent as it is today,
+before the one-program switch. The later steps take the rest.
+
+One subject per pull request, in this order. Item 4 comes after the one-program switch (the one-program design, section
+7) and after accounts per job (the account-per-job design, step 2), whose account it makes at assembly.
 
 1. **The shared module** (`js-agent`): the admission rules of `native/mounts.rs` `check`, moved into it unchanged; the
    port; and the shared-module tests that need no later item. No behaviour change.
