@@ -1,0 +1,336 @@
+//! `__mac-job` on macOS: the set-up, the start, the sweep and the check (see [`super`]).
+
+mod files;
+mod sys;
+
+use std::ffi::CString;
+use std::fs::{self, File};
+use std::io::{Read as _, Write};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::os::unix::process::ExitStatusExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use js_mac_session::disclaim::Program;
+use js_types::Arch;
+
+use super::layout::{Layout, SUBFOLDERS};
+use super::profile::{self, JOB_PARAM};
+use super::report::{Ended, Leftovers, Report};
+use super::spec::JobFile;
+use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
+use super::{Args, AuditSession, status};
+
+/// How often the wait for the program looks.
+const POLL: Duration = Duration::from_millis(50);
+
+/// The pause between sweep rounds, for a killed process to become a zombie and be reaped.
+const SWEEP_PAUSE: Duration = Duration::from_millis(20);
+
+/// Why the mode stops before a report.
+enum Stop {
+    /// The command line or the job file is wrong.
+    Usage(String),
+    /// The job could not be set up or started.
+    Setup(String),
+}
+
+/// This host's architecture.
+fn here() -> Arch {
+    if cfg!(target_arch = "aarch64") {
+        Arch::Arm64
+    } else {
+        Arch::X86_64
+    }
+}
+
+/// Runs the mode; the status of [`super::status`].
+pub(super) fn run(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    match run_job(args) {
+        Ok(report) => {
+            let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+            let _ = writeln!(out, "{text}");
+            if let Err(why) = fs::write(args.out.join("report.json"), format!("{text}\n")) {
+                let _ = writeln!(err, "js-agent: writing the report: {why}");
+            }
+            report.status()
+        }
+        Err(Stop::Usage(why)) => {
+            let _ = writeln!(err, "js-agent: {why}");
+            status::USAGE
+        }
+        Err(Stop::Setup(why)) => {
+            let _ = writeln!(err, "js-agent: {why}");
+            status::SETUP
+        }
+    }
+}
+
+/// The run, up to its report.
+fn run_job(args: &Args) -> Result<Report, Stop> {
+    if rustix::process::geteuid().as_raw() != 0 {
+        return Err(Stop::Setup(format!("{} runs as root", super::VERB)));
+    }
+    let text = fs::read_to_string(&args.job)
+        .map_err(|why| Stop::Usage(format!("{}: {why}", args.job.display())))?;
+    let job = JobFile::parse(&text, here()).map_err(|why| Stop::Usage(why.to_string()))?;
+    let added = match &args.profile_add {
+        Some(path) => fs::read_to_string(path)
+            .map_err(|why| Stop::Usage(format!("{}: {why}", path.display())))?,
+        None => String::new(),
+    };
+    let user = sys::user(&args.user).map_err(|why| Stop::Setup(format!("{}: {why}", args.user)))?;
+    if user.uid == 0 {
+        return Err(Stop::Setup(format!("{} is root", args.user)));
+    }
+    let groups = sys::groups(&args.user, user.gid).map_err(|why| Stop::Setup(why.to_string()))?;
+    if groups.contains(&sys::ADMIN_GID) {
+        return Err(Stop::Setup(format!("{} is an administrator", args.user)));
+    }
+    let before = user_processes(user.uid)?;
+    if !before.is_empty() {
+        return Err(Stop::Setup(format!(
+            "{} runs {} process(es) already ({before:?}); one job per user at a time",
+            args.user,
+            before.len()
+        )));
+    }
+    let root = checked_root(&args.root)?;
+    let layout = Layout::new(&root, &job.id);
+    fs::create_dir_all(&args.out)
+        .map_err(|why| Stop::Setup(format!("{}: {why}", args.out.display())))?;
+
+    let scan_roots = files::scan_roots(&user.home, user.uid);
+    let snapshot = files::Snapshot::take(&scan_roots, user.uid);
+    make_folder(&layout, &job, user.uid, user.gid)?;
+
+    let profile_text = profile::render(args.profile, &job.network, &added);
+    let new_session = args.audit_session == AuditSession::New;
+    let started = Instant::now();
+    let started_job = start(
+        &job,
+        &layout,
+        &args.user,
+        &user,
+        &profile_text,
+        new_session,
+        &args.out,
+    );
+    let (mut child, asid) = match started_job {
+        Ok(started) => started,
+        Err(why) => {
+            // Nothing ran: the folder goes, and the stop says why.
+            let _ = fs::remove_dir_all(&layout.folder);
+            return Err(Stop::Setup(why));
+        }
+    };
+    let deadline = started + Duration::from_secs(job.wall_limit_secs);
+    let ended = wait(&mut child, deadline);
+    let run_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let ids = JobIds {
+        uid: user.uid,
+        asid,
+        own_pid: std::process::id().cast_signed(),
+    };
+    let sweep = sweep_job(&ids)?;
+    let outputs = files::collect(&layout.work(), &job.outputs, &args.out.join("outputs"));
+    let folder = files::remove_folder(&layout.folder)
+        .err()
+        .map(|why| format!("{}: {why}", layout.folder.display()));
+    let leftovers = Leftovers {
+        processes: user_processes(user.uid)?,
+        files: snapshot.changed(&scan_roots, user.uid),
+        folder: folder.or_else(|| {
+            layout
+                .folder
+                .exists()
+                .then(|| format!("{} is still there", layout.folder.display()))
+        }),
+    };
+    Ok(Report {
+        id: job.id,
+        user: args.user.clone(),
+        uid: user.uid,
+        asid,
+        folder: layout.folder.display().to_string(),
+        profile: profile_text,
+        ended,
+        run_ms,
+        sweep,
+        outputs,
+        leftovers,
+    })
+}
+
+/// The pids of `uid`'s live processes.
+fn user_processes(uid: u32) -> Result<Vec<i32>, Stop> {
+    Ok(sys::processes(false)
+        .map_err(|why| Stop::Setup(format!("listing the processes: {why}")))?
+        .into_iter()
+        .filter(|p| p.uid == uid)
+        .map(|p| p.pid)
+        .collect())
+}
+
+/// `root`, resolved: a folder of root's that only root may write.
+fn checked_root(root: &Path) -> Result<PathBuf, Stop> {
+    let resolved =
+        fs::canonicalize(root).map_err(|why| Stop::Setup(format!("{}: {why}", root.display())))?;
+    let meta = fs::metadata(&resolved)
+        .map_err(|why| Stop::Setup(format!("{}: {why}", resolved.display())))?;
+    if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+        return Err(Stop::Setup(format!(
+            "{}: not a folder of root's that only root may write",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Makes the job folder and its subfolders, the user's and closed to everyone else, and copies
+/// the inputs into `work`.
+fn make_folder(layout: &Layout, job: &JobFile, uid: u32, gid: u32) -> Result<(), Stop> {
+    let setup =
+        |what: &Path, why: std::io::Error| Stop::Setup(format!("{}: {why}", what.display()));
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+        .create(&layout.folder)
+        .map_err(|why| setup(&layout.folder, why))?;
+    for dir in std::iter::once(layout.folder.clone())
+        .chain(SUBFOLDERS.iter().map(|name| layout.folder.join(name)))
+    {
+        if dir != layout.folder {
+            builder.create(&dir).map_err(|why| setup(&dir, why))?;
+        }
+        std::os::unix::fs::chown(&dir, Some(uid), Some(gid)).map_err(|why| setup(&dir, why))?;
+    }
+    if let Some(inputs) = &job.inputs {
+        files::copy_tree(Path::new(inputs), &layout.work(), Some((uid, gid)))
+            .map_err(|why| Stop::Setup(format!("copying the inputs from {inputs}: {why}")))?;
+    }
+    Ok(())
+}
+
+/// Starts the program: the child opens the audit session, drops to the user and applies the
+/// profile. Returns the child and the session id it reported.
+fn start(
+    job: &JobFile,
+    layout: &Layout,
+    user_name: &str,
+    user: &sys::User,
+    profile_text: &str,
+    new_session: bool,
+    out: &Path,
+) -> Result<(std::process::Child, Option<i32>), String> {
+    let threads =
+        sys::own_threads().map_err(|why| format!("counting this process's threads: {why}"))?;
+    if threads != 1 {
+        return Err(format!(
+            "this process has {threads} threads; the start allocates after fork and needs one"
+        ));
+    }
+    let stream = |name: &str| {
+        File::create(out.join(name)).map_err(|why| format!("{}: {why}", out.join(name).display()))
+    };
+    let (stdout, stderr) = (stream("stdout")?, stream("stderr")?);
+    let (asid_read, asid_write) = sys::pipe().map_err(|why| format!("a pipe: {why}"))?;
+    let cstring =
+        |what: &str, text: &str| CString::new(text).map_err(|_| format!("the {what} holds a NUL"));
+    let steps = sys::ChildSteps {
+        new_session,
+        asid_out: asid_write.as_raw_fd(),
+        uid: user.uid,
+        gid: user.gid,
+        profile: cstring("profile", profile_text)?,
+        param_name: cstring("parameter", JOB_PARAM)?,
+        param_value: cstring("job folder", &layout.folder.to_string_lossy())?,
+    };
+    let run_steps = move || {
+        // SAFETY: `Program` runs this in the child of a fork of this process, which has one
+        // thread (checked above), so the allocation inside `sandbox_init_with_parameters` cannot
+        // meet a lock another thread held (`ChildSteps::run`).
+        unsafe { steps.run() }
+    };
+    // SAFETY: as above: the steps allocate only because no other thread exists to hold a lock.
+    let mut program = unsafe { Program::with_steps(&job.program, &job.args, run_steps) };
+    program
+        .env_clear()
+        .envs(layout.env(job, user_name))
+        .current_dir(layout.work())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    let child = program
+        .spawn()
+        .map_err(|why| format!("starting {}: {why}", job.program))?;
+    drop(asid_write);
+    let asid = if new_session {
+        let mut bytes = [0u8; 4];
+        File::from(asid_read)
+            .read_exact(&mut bytes)
+            .ok()
+            .map(|()| i32::from_ne_bytes(bytes))
+    } else {
+        None
+    };
+    Ok((child, asid))
+}
+
+/// Waits for the program until `deadline`; past it, kills the program (the sweep ends the rest).
+fn wait(child: &mut std::process::Child, deadline: Instant) -> Ended {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return ended(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ended::WallLimit;
+            }
+        }
+    }
+}
+
+/// How a program's exit status reads.
+fn ended(status: std::process::ExitStatus) -> Ended {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => Ended::Exited(code),
+        (None, Some(signal)) => Ended::Signalled(signal),
+        (None, None) => Ended::Signalled(0),
+    }
+}
+
+/// Ends every process of the job, in rounds, until a round finds none.
+fn sweep_job(ids: &JobIds) -> Result<Tally, Stop> {
+    let mut tally = Tally::default();
+    for _ in 0..ROUNDS_MAX {
+        let procs = sys::processes(ids.asid.is_some())
+            .map_err(|why| Stop::Setup(format!("listing the processes: {why}")))?;
+        let found = sweep::targets(&procs, ids);
+        if !tally.round(&found) {
+            break;
+        }
+        for (pid, _) in found {
+            sys::kill(pid);
+        }
+        thread::sleep(SWEEP_PAUSE);
+    }
+    Ok(tally)
+}
+
+/// The mode of a regular file copied for a job: the owner's bits and the others' read and
+/// execute, never set-id.
+pub(super) fn copied_mode(mode: u32) -> u32 {
+    (mode & 0o755) | 0o600
+}
+
+/// Sets `path`'s permission bits.
+pub(super) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
