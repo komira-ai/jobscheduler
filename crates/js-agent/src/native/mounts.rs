@@ -55,6 +55,7 @@ use js_mac_pool::seatbelt::{AbsPath, MAX_LISTED, MountGrant};
 
 use super::files::{HandOver, MakeDir, make_parents};
 use crate::lifecycle::{FsPrepared, JobFs, NativeRefusal};
+use crate::mac_put::{self, PutTarget};
 use crate::native_fs::{self, TreeRules};
 pub use crate::native_fs::{MountRoot, roots_of};
 
@@ -74,6 +75,9 @@ pub(super) struct MountPlan {
     pub(super) no_exec: bool,
     /// The trees root `host` is a tree below, or `None` for a mount that is no tree.
     pub(super) trees_root: Option<PathBuf>,
+    /// The run's put target, for the read-write mount below `--native-put-root`
+    /// (`native/put.rs`): never linked, never granted.
+    pub(super) put: Option<PutTarget>,
 }
 
 /// The plans of the runs whose file system was resolved and whose start has not taken them,
@@ -179,7 +183,7 @@ fn nested(mounts: &[JobMount]) -> Result<(), NativeRefusal> {
 /// refusal of the first mount that cannot be had, or of the set when its trees break the
 /// trees root's rules.
 pub(super) fn resolve(
-    roots: &[MountRoot],
+    (roots, put_root): (&[MountRoot], Option<&Path>),
     plans: &mut Plans,
     run_id: &str,
     fs: &JobFs,
@@ -187,7 +191,7 @@ pub(super) fn resolve(
     match fs
         .mounts
         .iter()
-        .map(|mount| plan_of(roots, mount))
+        .map(|mount| plan_of(roots, put_root, mount))
         .collect::<Result<Vec<_>, _>>()
         .and_then(|list| with_trees(roots, list))
     {
@@ -200,8 +204,13 @@ pub(super) fn resolve(
 }
 
 /// The plan of `mount`: its target, and its source resolved to a canonical directory that
-/// lies beneath a root of the agent that its mode allows.
-fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRefusal> {
+/// lies beneath a root of the agent that its mode allows; or, for a mount beneath the put
+/// root, its put target ([`put_plan`]).
+fn plan_of(
+    roots: &[MountRoot],
+    put_root: Option<&Path>,
+    mount: &JobMount,
+) -> Result<MountPlan, NativeRefusal> {
     let rest = plan_target(&mount.target)?;
     let MountSource::HostPath { path } = &mount.source else {
         return Err(refuse(
@@ -216,6 +225,9 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         Some(sub) if !sub.is_empty() => Path::new(path).join(sub),
         _ => PathBuf::from(path),
     };
+    if let Some(put_root) = put_root.filter(|root| wanted.starts_with(root)) {
+        return put_plan(put_root, mount, rest, &wanted);
+    }
     let host = fs::canonicalize(&wanted).map_err(|why| {
         refuse(
             refusal::INPUT_UNAVAILABLE,
@@ -226,6 +238,15 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         return Err(refuse(
             refusal::INPUT_UNAVAILABLE,
             format!("{}: not a directory", host.display()),
+        ));
+    }
+    if put_root.is_some_and(|root| host.starts_with(root)) {
+        return Err(refuse(
+            refusal::INPUT_NOT_ALLOWED,
+            format!(
+                "{} lies beneath --native-put-root once its links are followed",
+                wanted.display()
+            ),
         ));
     }
     let write = mount.mode == MountMode::ReadWrite;
@@ -263,6 +284,43 @@ fn plan_of(roots: &[MountRoot], mount: &JobMount) -> Result<MountPlan, NativeRef
         write,
         no_exec: mount.no_exec,
         trees_root: None,
+        put: None,
+    })
+}
+
+/// The plan of `mount`, whose source `wanted` lies beneath `put_root`: a read-write mount of
+/// exactly `cas/b/<build>/<nonce>` is the run's put target, made or not; anything else there
+/// is refused (`input-not-allowed`), so no job reads or writes the put root.
+fn put_plan(
+    put_root: &Path,
+    mount: &JobMount,
+    rest: PathBuf,
+    wanted: &Path,
+) -> Result<MountPlan, NativeRefusal> {
+    if mount.mode != MountMode::ReadWrite {
+        return Err(refuse(
+            refusal::INPUT_NOT_ALLOWED,
+            format!(
+                "{} lies beneath --native-put-root, where a job is given only its put target                  (read-write)",
+                wanted.display()
+            ),
+        ));
+    }
+    let target = mac_put::target_of(put_root, wanted)
+        .map_err(|why| refuse(refusal::INPUT_NOT_ALLOWED, format!("a put target: {why}")))?;
+    let host = AbsPath::new(&target.dir).map_err(|why| {
+        refuse(
+            refusal::INVALID_MOUNT,
+            format!("{}: {why}", wanted.display()),
+        )
+    })?;
+    Ok(MountPlan {
+        rest,
+        host,
+        write: true,
+        no_exec: mount.no_exec,
+        trees_root: None,
+        put: Some(target),
     })
 }
 
@@ -294,7 +352,7 @@ fn with_trees(
     Ok(list)
 }
 
-/// Makes the link of each plan below `exec`, given to `uid`: the missing directories above it
+/// Makes the link of each plan but the put target below `exec`, given to `uid`: the missing directories above it
 /// are made by `make` (as the user's), then the link, then `chown` of the link itself.
 ///
 /// # Errors
@@ -308,7 +366,7 @@ pub(super) fn link_all(
     (chown, make): (&HandOver, MakeDir<'_>),
 ) -> io::Result<()> {
     let gid = fs::symlink_metadata(exec)?.gid();
-    for plan in plans {
+    for plan in plans.iter().filter(|plan| plan.put.is_none()) {
         let named = |why: io::Error| {
             io::Error::new(why.kind(), format!("{WORK}{}: {why}", plan.rest.display()))
         };
@@ -321,12 +379,13 @@ pub(super) fn link_all(
     Ok(())
 }
 
-/// The grants of the profile for `plans`, but for the trees: the profile reads a tree
-/// through [`trees_of`], and a grant of one would reopen the trees root.
+/// The grants of the profile for `plans`, but for the trees and the put target: the profile
+/// reads a tree through [`trees_of`], and a grant of one would reopen the trees root; the job
+/// never holds its put directory.
 pub(super) fn grants(plans: &[MountPlan]) -> Vec<MountGrant> {
     plans
         .iter()
-        .filter(|plan| plan.trees_root.is_none())
+        .filter(|plan| plan.trees_root.is_none() && plan.put.is_none())
         .map(|plan| MountGrant {
             path: plan.host.clone(),
             write: plan.write,
@@ -355,7 +414,7 @@ pub(super) fn read_only_links<'a>(
 ) -> impl Iterator<Item = (&'static str, PathBuf)> + 'a {
     plans
         .iter()
-        .filter(|plan| !plan.write)
+        .filter(|plan| !plan.write && plan.put.is_none())
         .map(|plan| ("a mount", exec.join(&plan.rest)))
 }
 
@@ -388,6 +447,7 @@ mod tests {
             write: false,
             no_exec: true,
             trees_root: None,
+            put: None,
         }
     }
 

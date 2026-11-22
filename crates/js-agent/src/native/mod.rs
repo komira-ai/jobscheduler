@@ -118,6 +118,7 @@ mod outputs;
 mod pf;
 mod profile;
 pub mod proof;
+mod put;
 mod remove;
 mod run;
 mod settings;
@@ -142,7 +143,8 @@ use js_mac_session::full_disk_access::FullDiskAccess;
 use crate::bundle::Placer;
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
+    Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status,
 };
 use crate::logs::LiveLogs;
 use crate::mac_accounts::Pool;
@@ -154,6 +156,7 @@ pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
+pub use put::{MIN_FILE_MIB, PutConfig, PutFlags, put_of};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
     NativeSettings,
@@ -228,6 +231,13 @@ pub struct NativeRuntime {
     now_ms: Clock,
     /// Whether each run's supervisor opens an audit session of its own (which needs root).
     new_session: bool,
+    /// The put ingest runs' outputs are committed to, when the agent was given one
+    /// (`native/put.rs`).
+    put: Option<PutConfig>,
+    /// The put of each run that has a put target, by lease, until its removal is done.
+    puts: BTreeMap<String, put::PutRun>,
+    /// What each removed run committed, by lease, until the lifecycle asks.
+    committed: BTreeMap<String, OutputsReport>,
 }
 
 /// A wall clock: milliseconds since the Unix epoch.
@@ -310,6 +320,9 @@ impl NativeRuntime {
             logs: None,
             now_ms: system_clock(),
             new_session: true,
+            put: None,
+            puts: BTreeMap::new(),
+            committed: BTreeMap::new(),
         })
     }
 
@@ -355,6 +368,13 @@ impl NativeRuntime {
             bundles: Some(placer),
             ..self
         }
+    }
+
+    /// The same runtime, committing the output of each run with a put target to the put
+    /// ingest `put` (`native/put.rs`); `None` commits nothing.
+    #[must_use]
+    pub fn with_put(self, put: Option<PutConfig>) -> Self {
+        Self { put, ..self }
     }
 
     /// The same runtime, uploading with `logs` the output of each run whose start carries a
@@ -478,6 +498,11 @@ impl Runtime for NativeRuntime {
         self.runs.get(&id.0).and_then(|run| run.logs.report())
     }
 
+    /// What the removal of `id` committed to the put ingest (`native/put.rs`), once.
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.committed.remove(&id.0)
+    }
+
     fn supports_gpus(&self) -> bool {
         false
     }
@@ -523,7 +548,9 @@ impl Runtime for NativeRuntime {
     }
 
     fn resolve_fs(&mut self, run_id: &str, _image: &str, fs: &JobFs, _now_ms: u64) -> FsPrepared {
-        mounts::resolve(&self.config.mount_roots, &mut self.plans, run_id, fs)
+        let put_root = self.put.as_ref().map(|put| put.root.as_path());
+        let roots = (self.config.mount_roots.as_slice(), put_root);
+        mounts::resolve(roots, &mut self.plans, run_id, fs)
     }
 
     fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {

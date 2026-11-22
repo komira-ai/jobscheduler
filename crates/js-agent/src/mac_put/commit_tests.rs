@@ -5,10 +5,10 @@ use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
-use rustix::fs::{CWD, FileType, Mode, mknodat};
 use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
 
@@ -105,10 +105,10 @@ fn the_output_is_committed_as_it_is() {
 }
 
 /// Proves an output that is a link (to a host file) is refused by its path and not followed,
-/// and one that is a directory or a named pipe is refused as not a regular file: each commit
-/// fails and leaves the put directory holding nothing (its `pack.part` removed). Catches a
-/// commit that carries a host file a link names, a half-written part left behind, and a
-/// commit that waits on a pipe.
+/// one that is a directory is refused as not a regular file, and one that is a socket is
+/// refused by its path: each commit fails and leaves the put directory holding nothing (its
+/// `pack.part` removed). Catches a commit that carries a host file a link names, and a
+/// half-written part left behind.
 #[test]
 fn an_output_that_is_not_a_regular_file_is_refused() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-not-file");
@@ -119,8 +119,8 @@ fn an_output_that_is_not_a_regular_file_is_refused() {
     symlink(&host, &link).unwrap();
     let dir = scratch.path().join("a-dir");
     fs::create_dir(&dir).unwrap();
-    let pipe = scratch.path().join("pipe");
-    mknodat(CWD, &pipe, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+    let socket = scratch.path().join("socket");
+    let _listening = UnixListener::bind(&socket).unwrap();
 
     let loop_said = io::Error::from(Errno::LOOP);
     let cases = [
@@ -130,11 +130,6 @@ fn an_output_that_is_not_a_regular_file_is_refused() {
             &dir,
             format!("{}: not a regular file", dir.display()),
         ),
-        (
-            "pipe",
-            &pipe,
-            format!("{}: not a regular file", pipe.display()),
-        ),
     ];
     for (nonce, from, said) in cases {
         let to = target(&root, nonce);
@@ -142,6 +137,12 @@ fn an_output_that_is_not_a_regular_file_is_refused() {
         assert_eq!(why.to_string(), said, "{nonce}");
         assert_eq!(names(&to.dir), Vec::<String>::new(), "{nonce}");
     }
+    // A socket cannot be opened at all (the error the system gives differs by system).
+    let to = target(&root, "socket");
+    let why = commit(&socket, &to, &none).unwrap_err();
+    let named = format!("{}: ", socket.display());
+    assert!(why.to_string().starts_with(&named), "{why}");
+    assert_eq!(names(&to.dir), Vec::<String>::new());
 }
 
 /// Proves a commit that fails leaves nothing the node could take: when `ready` fails nothing

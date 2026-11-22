@@ -21,6 +21,10 @@
 //! with its path and nothing is published. `pack` is written mode `0640`, so the node's
 //! group, which the job's put directory belongs to, can read it whatever the agent's umask.
 //!
+//! [`hand_over`] gives the folders of the key to the node's user and the job's directory to
+//! its group, the one call here that needs root on a Mac (its kept test that runs it as root
+//! is `root_tests`, which the macOS beta stage runs under `sudo`).
+//!
 //! [`target_of`] says whether a directory is a job's put directory: strictly beneath the
 //! put root, exactly `cas/b/<build>/<nonce>`, with no link on the way. [`commit`] makes it,
 //! hands it to the node ([`commit`]'s `ready`) and commits; it refuses a directory that
@@ -32,12 +36,18 @@
 //! the run's collected output.
 
 mod commit;
+mod node;
 mod target;
 
 pub use commit::{Committed, PutTarget, commit};
+pub use node::{DIR_MODE, Node, hand_over};
 pub use target::{Refusal, target_of};
 
 #[cfg(test)]
 mod commit_tests;
+#[cfg(test)]
+mod node_tests;
+#[cfg(test)]
+mod root_tests;
 #[cfg(test)]
 mod target_tests;
