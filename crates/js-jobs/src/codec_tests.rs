@@ -7,6 +7,7 @@ use std::time::Duration;
 use js_state::StoreTime;
 use js_types::{ExecMode, HostId, Labels};
 
+use super::result_fields::job_result_tag;
 use super::whole_fields::job_whole_tag;
 use super::*;
 use crate::record::Exclusion;
@@ -472,8 +473,8 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_PLACED_AT,
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
-        job_tag::RESULT_CPU_THROTTLE,
-        job_tag::RESULT_CPU_PRESSURE_SOME,
+        job_result_tag::RESULT_CPU_THROTTLE,
+        job_result_tag::RESULT_CPU_PRESSURE_SOME,
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
         job_tag::RESULT_LOGS,
@@ -783,42 +784,42 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             },
         ),
         (
-            t::RESULT_CPU_THROTTLE,
+            job_result_tag::RESULT_CPU_THROTTLE,
             vec![0; 15],
             BadLength {
-                tag: t::RESULT_CPU_THROTTLE,
+                tag: job_result_tag::RESULT_CPU_THROTTLE,
             },
         ),
         (
-            t::RESULT_CPU_THROTTLE,
+            job_result_tag::RESULT_CPU_THROTTLE,
             vec![0; 17],
             BadLength {
-                tag: t::RESULT_CPU_THROTTLE,
+                tag: job_result_tag::RESULT_CPU_THROTTLE,
             },
         ),
         (
-            t::RESULT_CPU_PRESSURE_SOME,
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
             vec![0; 11],
             BadLength {
-                tag: t::RESULT_CPU_PRESSURE_SOME,
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
             },
         ),
         (
-            t::RESULT_CPU_PRESSURE_SOME,
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
             vec![0; 13],
             BadLength {
-                tag: t::RESULT_CPU_PRESSURE_SOME,
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
             },
         ),
         (
-            t::RESULT_CPU_PRESSURE_SOME,
+            job_result_tag::RESULT_CPU_PRESSURE_SOME,
             [
                 0u64.to_be_bytes().to_vec(),
                 1_000_000_000u32.to_be_bytes().to_vec(),
             ]
             .concat(),
             BadValue {
-                tag: t::RESULT_CPU_PRESSURE_SOME,
+                tag: job_result_tag::RESULT_CPU_PRESSURE_SOME,
             },
         ),
         (
