@@ -189,7 +189,7 @@ impl AgentKeys {
     /// What a job that books nothing books while neither its class, its fallback class nor its
     /// client has a run:
     /// `cold_cpu_millis` and `cold_memory_bytes` as the file gives them, each absent one its
-    /// default (4 cores and 4 GiB, [`ColdSize::default`]).
+    /// default (22 cores and 4 GiB, [`ColdSize::default`]).
     pub(crate) fn cold(&self) -> ColdSize {
         self.cold
     }
@@ -609,14 +609,14 @@ mod tests {
 
     /// Asserts that `cold_cpu_millis` and `cold_memory_bytes` are read as given, each on its
     /// own, from their least (250 and 1 GiB) up to the most CPU (4294967295); that left out
-    /// each is its default (4000 and 4 GiB, not anything of a host); and that a value under the
+    /// each is its default (22000 and 4 GiB, not anything of a host); and that a value under the
     /// least, negative or not an integer is refused at start naming the key and what it must be.
     /// Catches a key that is not read, a key read into the other dimension, and a cold size of
     /// no CPU or under the estimator's least memory.
     #[test]
     fn the_cold_size_keys_are_read_each_on_its_own_and_refused_out_of_range() {
         let none = ColdSize {
-            cpu_millis: 4000,
+            cpu_millis: 22_000,
             memory_bytes: 4 << 30,
         };
         assert_eq!(cold_of(""), Ok(none));
@@ -631,7 +631,7 @@ mod tests {
         let cpu = cold_of("cold_cpu_millis = 2000").unwrap();
         assert_eq!((cpu.cpu_millis, cpu.memory_bytes), (2000, 4 << 30));
         let memory = cold_of("cold_memory_bytes = 8589934592").unwrap();
-        assert_eq!((memory.cpu_millis, memory.memory_bytes), (4000, 8 << 30));
+        assert_eq!((memory.cpu_millis, memory.memory_bytes), (22_000, 8 << 30));
         let cpu_range = "server.cold_cpu_millis: must be from 250 to 4294967295";
         let memory_range =
             "server.cold_memory_bytes: must be from 1073741824 to 18446744073709551615";

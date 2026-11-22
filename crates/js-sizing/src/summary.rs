@@ -56,10 +56,14 @@ const CPU_STEP: u32 = 250;
 /// A success this close to its memory limit is treated as having hit it.
 const NEAR_LIMIT_PERCENT: u128 = 95;
 
-/// The run's mean parallelism in millicores, capped to `u32` so the cast cannot truncate.
+/// The run's CPU sample in millicores: its peak ([`Run::cpu_peak_millis`]) when it has one,
+/// else its mean parallelism, capped to `u32` so the cast cannot truncate.
 fn cpu_millis(run: &Run) -> u32 {
-    let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-    millis.min(u128::from(u32::MAX)) as u32
+    let mean = || {
+        let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+        millis.min(u128::from(u32::MAX)) as u32
+    };
+    run.cpu_peak_millis.unwrap_or_else(mean)
 }
 
 /// The last minute (0-indexed) a run reached: its wall time in whole minutes, saturating
@@ -263,7 +267,8 @@ impl Summary {
                 Err(Discard::NotASample)
             }
         };
-        let cpu = if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
+        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
+        let cpu = if run.outcome == Outcome::Success && trusted && used {
             self.observe_cpu(run, bounds)
         } else {
             CpuSample::Skipped

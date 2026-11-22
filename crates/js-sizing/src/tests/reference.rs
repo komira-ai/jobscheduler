@@ -85,9 +85,11 @@ impl Reference {
             }
             _ => {}
         }
-        if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
-            let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-            let millis = millis.min(u128::from(u32::MAX)) as u32;
+        let used = run.cpu_usage_us > 0 || run.cpu_peak_millis.is_some_and(|peak| peak > 0);
+        if run.outcome == Outcome::Success && trusted && used {
+            let mean = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+            let mean = mean.min(u128::from(u32::MAX)) as u32;
+            let millis = run.cpu_peak_millis.unwrap_or(mean);
             let quiet = !run.cpu_held && run.node_cpu_pressure_permille.is_some_and(|p| p < 100);
             if quiet || millis > self.cpu_estimate(b) {
                 self.cpu.push(millis);
@@ -241,6 +243,7 @@ pub(super) fn random_run(rng: &mut Rng, host: u64) -> Run {
         },
         node_cpu_pressure_permille: (rng.below(5) != 0).then(|| rng.below(300) as u16),
         cpu_held: rng.below(4) == 0,
+        cpu_peak_millis: (rng.below(3) == 0).then(|| u32::try_from(rng.below(16_000)).unwrap()),
     }
 }
 

@@ -1,7 +1,7 @@
 //! The cold size a server sets ([`ColdSize`]): what a class books when neither it, its fallback
 //! class nor its client has a run, and the history taking over from it with the first run.
 //! The hosts are the farm's: 88 cores and 251 GiB of bookable memory, where the default cold
-//! size is 4 cores and 4 GiB.
+//! size is 22 cores (held at a quarter of the host's cores) and 4 GiB.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -43,9 +43,10 @@ fn cold_taught(cold: ColdSize, jobs: &[JobRecord], booked: js_jobs::Booked) -> J
 }
 
 /// Asserts what a class with no runs books under each setting on a farm host: with none, the
-/// default of 4 cores and 4 GiB (not a quarter of the host, 22 cores and 62.75 GiB); with
-/// both, the setting (two cores and 8 GiB); with one, that one and the default for the other;
-/// with a setting above the host, the host's cores and memory. A job that names both
+/// default of 22 cores and 4 GiB (22 cores is a quarter of the host's cores, but 4 GiB is not
+/// a quarter of its memory, 62.75 GiB); with both, the setting (two cores and 8 GiB); with
+/// one, that one and the default for the other; with a setting above the host, a quarter of
+/// the host's cores (22) and the host's memory. A job that names both
 /// dimensions is booked as it names them under the setting too. Catches a default taken from
 /// the host's size, a setting that is not read, one that replaces the other dimension's
 /// default, and one that books more than any host has (which no host could place).
@@ -53,7 +54,7 @@ fn cold_taught(cold: ColdSize, jobs: &[JobRecord], booked: js_jobs::Booked) -> J
 fn a_class_with_no_runs_books_the_cold_size_the_server_sets() {
     let job = queued("cold", of_class("build", needs(0, 0)));
     let cases = [
-        (ColdSize::default(), (4000, 4 * GIB)),
+        (ColdSize::default(), (22_000, 4 * GIB)),
         (FARM, (2000, 8 * GIB)),
         (
             ColdSize {
@@ -67,14 +68,14 @@ fn a_class_with_no_runs_books_the_cold_size_the_server_sets() {
                 memory_bytes: 8 * GIB,
                 ..ColdSize::default()
             },
-            (4000, 8 * GIB),
+            (22_000, 8 * GIB),
         ),
         (
             ColdSize {
                 cpu_millis: 200_000,
                 memory_bytes: 400 * GIB,
             },
-            HOST,
+            (22_000, 251 * GIB),
         ),
     ];
     for (cold, expected) in cases {
@@ -86,28 +87,30 @@ fn a_class_with_no_runs_books_the_cold_size_the_server_sets() {
     assert_eq!(sizes.sized(&named, js_sizing::Day(0)), named);
 }
 
-/// Asserts that a cold size held at a host of less than it: on a host of one core and 4 GiB a
-/// setting of two cores and 8 GiB books the whole host, and so does the default of 4 cores and
-/// 4 GiB on a host of two cores and 2 GiB; a host of exactly the default books the default;
-/// a host under the default in one dimension only holds that one (two cores and 251 GiB books
-/// two cores and 4 GiB, 88 cores and 2 GiB books 4 cores and 2 GiB); and a quarter core is
-/// the least CPU a cold class books on a host of a tenth of a core. Catches a cold booking no
-/// host of the farm can take, one dimension held at the other's bound, and one of no CPU.
+/// Asserts that a cold size is held at a host of less than it: its CPU at a quarter of the
+/// host's cores and its memory at the host's. On a host of one core and 4 GiB a setting of two
+/// cores and 8 GiB books a quarter core and 4 GiB, and the default of 22 cores and 4 GiB on a
+/// host of two cores and 2 GiB books half a core and 2 GiB; a host of four cores and 4 GiB
+/// books one core and 4 GiB; a host under the default in one dimension only holds that one
+/// (two cores and 251 GiB books half a core and 4 GiB, 88 cores and 2 GiB books 22 cores and
+/// 2 GiB); and a quarter core is the least CPU a cold class books on a host of a tenth of a
+/// core. Catches a cold booking no host of the farm can take, one dimension held at the
+/// other's bound, and one of no CPU.
 #[test]
 fn the_cold_size_is_held_at_the_largest_host() {
     let job = queued("cold", of_class("build", needs(0, 0)));
     let mut small = JobSizes::with_cold(FARM);
     small.set_bounds(bounds_of([capacity(1000, 4 * GIB)]));
-    assert_eq!(size(&small, &job), (1000, 4 * GIB));
+    assert_eq!(size(&small, &job), (250, 4 * GIB));
     let mut under_default = JobSizes::new();
     under_default.set_bounds(bounds_of([capacity(2000, 2 * GIB)]));
-    assert_eq!(size(&under_default, &job), (2000, 2 * GIB));
+    assert_eq!(size(&under_default, &job), (500, 2 * GIB));
     let mut at_default = JobSizes::new();
     at_default.set_bounds(bounds_of([capacity(4000, 4 * GIB)]));
-    assert_eq!(size(&at_default, &job), (4000, 4 * GIB));
+    assert_eq!(size(&at_default, &job), (1000, 4 * GIB));
     for (host, expected) in [
-        ((2000, 251 * GIB), (2000, 4 * GIB)),
-        ((88_000, 2 * GIB), (4000, 2 * GIB)),
+        ((2000, 251 * GIB), (500, 4 * GIB)),
+        ((88_000, 2 * GIB), (22_000, 2 * GIB)),
     ] {
         let mut sizes = JobSizes::new();
         sizes.set_bounds(bounds_of([capacity(host.0, host.1)]));
@@ -188,14 +191,14 @@ fn farm_placer(cold: ColdSize) -> SchedPlacer {
 /// Asserts what one pass places on one farm host of 40 queued jobs of 40 classes that have
 /// no runs and book nothing: with the setting of two cores and 8 GiB, each is booked that
 /// and 31 are placed (31 x 8 GiB fits 251 GiB, 32 do not); without it, each is booked the
-/// default of 4 cores and 4 GiB and 24 are placed (24 x 4 cores fit the 88 cores at the CPU
-/// slack of 1.1, 25 do not). Catches an engine built without the setting, and a default taken
-/// from the host's size, where the farm runs four jobs a host until each target has history.
+/// default of 22 cores and 4 GiB and 4 are placed (4 x 22 cores fit the 88 cores at the CPU
+/// slack of 1.1, 5 do not). Catches an engine built without the setting, and a default taken
+/// from the host's size, and a booking that is not held at a quarter of the host.
 #[test]
 fn a_pass_books_the_cold_size_the_engine_is_built_with() {
     for (cold, placed, each) in [
         (FARM, 31, booked(2000, 8 * GIB)),
-        (ColdSize::default(), 24, booked(4000, 4 * GIB)),
+        (ColdSize::default(), 4, booked(22_000, 4 * GIB)),
     ] {
         let tables = Tables::new();
         let placer = farm_placer(cold);
@@ -214,8 +217,9 @@ fn a_pass_books_the_cold_size_the_engine_is_built_with() {
 /// 4 GiB, a class killed at an 8 GiB booking books 16 GiB next, while another class of the same
 /// client books the cold 4 GiB (a kill raises its own class's floor, not every class of its
 /// client's), as does a class of another client. And that the cold size follows the largest host the engine knows: a setting of
-/// 8 GiB held at a 4 GiB host books 8 GiB once a 251 GiB host is known. And under the default
-/// (4 GiB), a class killed at a 16 GiB booking books 32 GiB next, with the cold 4 cores (a
+/// 8 GiB held at a 4 GiB host (of one core, so a quarter core) books 8 GiB and two cores once a
+/// 251 GiB host of 88 cores is known. And under the default
+/// (4 GiB), a class killed at a 16 GiB booking books 32 GiB next, with the cold 22 cores (a
 /// class with no CPU sample books the cold CPU). Catches a setting or the default overriding
 /// the floor a kill left, a kill that raises every class of its client, and a held value kept
 /// after a larger host appears.
@@ -245,7 +249,7 @@ fn the_kill_floor_and_a_larger_host_win_over_the_cold_memory() {
 
     let mut growing = JobSizes::with_cold(FARM);
     growing.set_bounds(bounds_of([capacity(1000, 4 * GIB)]));
-    assert_eq!(size(&growing, &fresh), (1000, 4 * GIB));
+    assert_eq!(size(&growing, &fresh), (250, 4 * GIB));
     growing.set_bounds(farm_bounds());
     assert_eq!(size(&growing, &fresh), (2000, 8 * GIB));
 
@@ -253,7 +257,7 @@ fn the_kill_floor_and_a_larger_host_win_over_the_cold_memory() {
         exit_code: None,
         output: output(16 * GIB, Duration::from_secs(5)),
     };
-    let at_default = booked(4000, 16 * GIB);
+    let at_default = booked(22_000, 16 * GIB);
     let kills = runs(
         &tables,
         "killed16",
@@ -264,11 +268,11 @@ fn the_kill_floor_and_a_larger_host_win_over_the_cold_memory() {
     );
     let sizes = cold_taught(ColdSize::default(), &kills, at_default);
     let big = queued("big16", of_class("big16", needs(0, 0)));
-    assert_eq!(size(&sizes, &big), (4000, 32 * GIB));
+    assert_eq!(size(&sizes, &big), (22_000, 32 * GIB));
 }
 
 /// Asserts what the default books on a farm whose largest host has 4 GiB of bookable memory
-/// (8 cores), which the default reaches: a class with no runs books 4 cores and the whole
+/// (8 cores), which the default reaches: a class with no runs books 2 cores (a quarter of the host) and the whole
 /// 4 GiB; a class with two runs that peaked at 1 GiB, or five, books what they used (their
 /// CPU, a core, and `1.2 x 1 GiB + 128 MiB`, 1.5 GiB), not the cold memory that is the host's.
 /// Catches a default that books more than the host, and a young class held at the cold memory.
@@ -276,11 +280,11 @@ fn the_kill_floor_and_a_larger_host_win_over_the_cold_memory() {
 fn on_a_host_of_the_default_memory_a_cold_class_books_the_host_and_a_young_class_what_it_used() {
     let tables = Tables::new();
     let end = || exited(0, GIB, Duration::from_secs(10));
-    let at_default = booked(4000, 4 * GIB);
+    let at_default = booked(2000, 4 * GIB);
     let jobs = runs(&tables, "small", 5, "small", at_default, end);
     let next = queued("next", of_class("small", needs(0, 0)));
     for (taught, expected) in [
-        (0, (4000, 4 * GIB)),
+        (0, (2000, 4 * GIB)),
         (2, (1000, 6 * 256 * MIB)),
         (5, (1000, 6 * 256 * MIB)),
     ] {

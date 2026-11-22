@@ -10,7 +10,7 @@
 --allow-sqlite-store default=none required=false values=true|false
 --boot default=none required=false values=initialise|resume
 --client-token default=none required=false
---cold-cpu-millis default=4000 required=false
+--cold-cpu-millis default=22000 required=false
 --cold-memory-bytes default=4294967296 required=false
 --config default=none required=false
 --cpu-slack default=none required=false

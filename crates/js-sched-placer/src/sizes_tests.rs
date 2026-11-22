@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationStep, Booked, ClientName, CpuThrottle, EndReason, JobEnd, JobId, JobRecord, JobSpec,
-    JobState, Needs, NewJob, Output, ResourceUsage,
+    AllocationStep, Booked, ClientName, CpuPeak, CpuThrottle, EndReason, JobEnd, JobId, JobRecord,
+    JobSpec, JobState, Needs, NewJob, Output, ResourceUsage,
 };
 use js_registry::Placer;
 use js_sizing::{Bounds, Day};
@@ -32,7 +32,7 @@ fn capacity(cpu_millis: u64, memory_bytes: u64) -> Capacity {
 }
 
 /// The cold size of this module's tests: two cores and 4 GiB, a quarter of [`bounds`]'s host
-/// memory, so that a cold booking leaves the host room. The default cold size (4 cores and
+/// memory, so that a cold booking leaves the host room. The default cold size (22 cores and
 /// 4 GiB) is the subject of `sizes_cold_tests` and of
 /// [`a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs`].
 const MODULE_COLD: ColdSize = ColdSize {
@@ -40,7 +40,7 @@ const MODULE_COLD: ColdSize = ColdSize {
     memory_bytes: 4 * GIB,
 };
 
-/// The bounds of one host of 32 cores (a class books at most four of them) and 16 GiB;
+/// The bounds of one host of 32 cores (a class books at most eight of them) and 16 GiB;
 /// [`JobSizes::with_cold`] of [`MODULE_COLD`] puts its cold booking at two cores and 4 GiB.
 fn bounds() -> Bounds {
     bounds_of([capacity(32_000, 16 * GIB)]).unwrap()
@@ -69,8 +69,10 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
     spec
 }
 
-/// What the host of an uncapped agent reported: `peak` bytes at most and `cpu` of CPU time,
-/// no CPU pressure and no throttled period (so the run's CPU is a measurement).
+/// What the host of a new agent reported: `peak` bytes at most and `cpu` of CPU time, no CPU
+/// pressure and no throttled period, and a CPU peak equal to the run's mean over the ten
+/// seconds [`ran`] gives each run (so the run's CPU is a measurement, and a class books what
+/// its runs used).
 fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
@@ -81,7 +83,10 @@ fn output(peak: u64, cpu: Duration) -> Output {
                 throttled_periods: 0,
             }),
             cpu_pressure_some: Some(Duration::ZERO),
-            cpu_peak: None,
+            cpu_peak: Some(CpuPeak {
+                millicores: u64::try_from(cpu.as_millis() / 10).unwrap(),
+                window_usec: 5_000_000,
+            }),
         }),
         ..Output::default()
     }
@@ -100,10 +105,22 @@ fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
 /// allocation: the ended record.
 fn ran(
     tables: &Tables,
+    job: (&str, Option<&str>),
+    spec: JobSpec,
+    booked: Booked,
+    end: JobEnd,
+) -> JobRecord {
+    ran_for(tables, job, spec, booked, end, Duration::from_secs(10))
+}
+
+/// [`ran`] with a wall time of `wall` instead of ten seconds.
+fn ran_for(
+    tables: &Tables,
     (id, client): (&str, Option<&str>),
     spec: JobSpec,
     booked: Booked,
     end: JobEnd,
+    wall: Duration,
 ) -> JobRecord {
     let id = JobId::parse(id).unwrap();
     let new = NewJob {
@@ -123,7 +140,7 @@ fn ran(
         .transition(&id, JobState::Starting, JobState::Running)
         .unwrap();
     let start = tables.clock.now().as_duration().as_millis();
-    tables.set_ms(u64::try_from(start).unwrap() + 10_000);
+    tables.set_ms(u64::try_from(start).unwrap() + u64::try_from(wall.as_millis()).unwrap());
     let (job, _) = tables
         .jobs
         .end_and_free(&id, end, EndReason::Exited)
@@ -190,11 +207,11 @@ fn queued_by(client: Option<&str>, id: &str, spec: JobSpec) -> JobRecord {
     tables.jobs.insert_queued(new).unwrap().record
 }
 
-/// Asserts that a job that books nothing is booked the default cold size (4 cores and 4 GiB,
-/// held at the largest host's cores and bookable memory) while neither its class nor its client
+/// Asserts that a job that books nothing is booked the default cold size (22 cores and 4 GiB,
+/// held at a quarter of the largest host's cores and at its bookable memory) while neither its class nor its client
 /// has runs, that a job that names both its CPU and its memory, and one that books the whole
 /// host, are booked as they ask, and that before any host is known every job is left as it is.
-/// Catches a cold size held at the smallest host (2 cores and 2 GiB here), a sizing that
+/// Catches a cold size held at the smallest host (half a core and 2 GiB here), a sizing that
 /// overrides a declared booking, and a whole-host job made a share.
 #[test]
 fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
@@ -207,7 +224,7 @@ fn a_job_that_books_nothing_is_booked_the_cold_size_until_its_class_has_runs() {
     );
     sizes.set_bounds(bounds_of([
         capacity(2000, 2 * GIB),
-        capacity(8000, 16 * GIB),
+        capacity(16_000, 16 * GIB),
     ]));
     assert_eq!(size(&sizes, &nothing), (4000, 4 * GIB));
     let declared = queued("declared", of_class("build", needs(500, GIB)));
@@ -237,7 +254,7 @@ fn a_dimension_the_job_names_is_kept_and_only_the_other_is_sized() {
 /// Asserts that the successful runs of a class size its next job from them, from even the
 /// first: the memory is `1.2 x` their peak plus 128 MiB rounded up to 256 MiB (2 GiB peaks give
 /// 2.75 GiB, whether four runs or five) and the CPU what they used per second (30 s of CPU in
-/// 10 s is three cores, under the eighth of the host's cores a class may book). Another class
+/// 10 s is three cores, under the quarter of the host's cores a class may book). Another class
 /// of the same client books from that client's history (the same figures); a class of another
 /// client, which has none, is still cold. Catches a young class held at the cold booking, a CPU
 /// not learned, and a history shared across clients.

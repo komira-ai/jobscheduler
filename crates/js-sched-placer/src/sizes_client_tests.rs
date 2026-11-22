@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use js_jobs::{CpuThrottle, JobEnd, Output, ResourceUsage};
+use js_jobs::{CpuPeak, CpuThrottle, JobEnd, Output, ResourceUsage};
 use js_sizing::Day;
 
 use super::super::SizedFrom;
@@ -14,7 +14,8 @@ use super::{
 };
 
 /// An exit with code 0 after `cpu` of CPU time and a 1 GiB peak, with the CPU `throttle` and
-/// `pressure` its host reported.
+/// `pressure` its host reported, from a new agent: its CPU peak is the run's mean over the ten
+/// seconds [`ran`] gives each run.
 fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Duration>) -> JobEnd {
     JobEnd::Exited {
         exit_code: 0,
@@ -24,7 +25,10 @@ fn reported(cpu: Duration, throttle: Option<CpuThrottle>, pressure: Option<Durat
                 peak_memory_bytes: GIB,
                 cpu_throttle: throttle,
                 cpu_pressure_some: pressure,
-                cpu_peak: None,
+                cpu_peak: Some(CpuPeak {
+                    millicores: u64::try_from(cpu.as_millis() / 10).unwrap(),
+                    window_usec: 5_000_000,
+                }),
             }),
             ..Output::default()
         },
@@ -125,12 +129,13 @@ fn a_run_under_contention_or_held_at_a_ceiling_only_raises_the_class_cpu() {
     }
 }
 
-/// Asserts that a class books at most an eighth of the cores of the largest host (rounded down
-/// to a quarter core) and at least a quarter core: runs that used three cores book one on a
-/// host of eight cores, two on one of sixteen, three on one of 32 and a quarter core on one of
-/// two, and runs that used a tenth of a core book a quarter core. Catches a class whose history books a host's CPU alone, and one booked no CPU.
+/// Asserts that a class books at most a quarter of the cores of the largest host (rounded down
+/// to a quarter core) and at least a quarter core: runs that peaked at six cores book two on a
+/// host of eight cores, four on one of sixteen, six on one of 32 and half a core on one of
+/// two, and runs that peaked at a tenth of a core book a quarter core. Catches a class whose
+/// history books a host's CPU alone, and one booked no CPU.
 #[test]
-fn the_learned_cpu_is_at_most_an_eighth_of_the_largest_hosts_cores_and_at_least_a_quarter_core() {
+fn the_learned_cpu_is_at_most_a_quarter_of_the_largest_hosts_cores_and_at_least_a_quarter_core() {
     let tables = Tables::new();
     let end = |cpu: Duration| move || exited(0, GIB, cpu);
     let heavy = runs(
@@ -139,7 +144,7 @@ fn the_learned_cpu_is_at_most_an_eighth_of_the_largest_hosts_cores_and_at_least_
         1,
         "heavy",
         booked(2000, 4 * GIB),
-        end(Duration::from_secs(30)),
+        end(Duration::from_secs(60)),
     );
     let light = runs(
         &tables,
@@ -149,7 +154,7 @@ fn the_learned_cpu_is_at_most_an_eighth_of_the_largest_hosts_cores_and_at_least_
         booked(2000, 4 * GIB),
         end(Duration::from_secs(1)),
     );
-    for (cores, heavy_cpu) in [(8000, 1000), (16_000, 2000), (32_000, 3000), (2000, 250)] {
+    for (cores, heavy_cpu) in [(8000, 2000), (16_000, 4000), (32_000, 6000), (2000, 500)] {
         let mut sizes = JobSizes::with_cold(MODULE_COLD);
         sizes.set_bounds(bounds_of([capacity(cores, 16 * GIB)]));
         assert!(sizes.observe(&heavy[0], booked(2000, 4 * GIB)));

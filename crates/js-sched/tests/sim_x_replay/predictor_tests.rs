@@ -800,6 +800,7 @@ fn sizing_life(walls_ms: &[u64]) -> u8 {
             cpu_usage_us: 0,
             node_cpu_pressure_permille: None,
             cpu_held: false,
+            cpu_peak_millis: None,
         };
         summaries.observe(&key, &run, Day(100), &Bounds::default());
     }

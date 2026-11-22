@@ -40,6 +40,7 @@ pub(super) fn success(peak: u64) -> Run {
         cpu_usage_us: 0,
         node_cpu_pressure_permille: None,
         cpu_held: false,
+        cpu_peak_millis: None,
     }
 }
 

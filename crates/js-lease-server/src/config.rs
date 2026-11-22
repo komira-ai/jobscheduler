@@ -186,8 +186,8 @@ pub struct Cli {
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
     /// The CPU, in millicores from 250, a queued job that names no CPU books while neither its
-    /// class, its fallback class nor its client has a run with a CPU sample; above the most
-    /// cores a registered host has, that most. Needs `--agent-pool-config`.
+    /// class, its fallback class nor its client has a run with a CPU sample, by default 22000 (22
+    /// cores); above a quarter of the most cores a registered host has, that quarter. Needs `--agent-pool-config`.
     #[arg(
         long,
         default_value_t = DEFAULT_COLD_CPU_MILLIS,
