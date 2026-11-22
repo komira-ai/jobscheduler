@@ -61,6 +61,7 @@ fn a_runtime_that_gives_no_layers_prepares_nothing() {
     assert_eq!(bare.remove(&id), Ok(()));
     assert_eq!(bare.list_labelled(), Ok(Vec::new()));
     assert!(!bare.layered_rootfs());
+    assert!(!bare.owns_host_path("/srv/put/cas/b/b1/n1"));
     assert_eq!(
         bare.check_layer_image("registry.example/a@sha256:0"),
         Ok(())

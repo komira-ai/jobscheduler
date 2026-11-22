@@ -30,7 +30,20 @@ fn node() -> Node {
 /// A rig whose runtime holds the read-write root `roots/rw` (a read deny of every run, as the
 /// agent's settings make every mount root) and the put ingest `roots/rw/put` below it.
 fn rig(name: &str) -> (Rig, PathBuf) {
+    rig_with(name, false)
+}
+
+/// [`rig`], and with `trees` also the read-only trees root `trees`.
+fn rig_with(name: &str, trees: bool) -> (Rig, PathBuf) {
     let rig = Rig::in_dir(name, 1, |config, dir| {
+        if trees {
+            fs::create_dir_all(dir.path("trees")).unwrap();
+            config.mount_roots.push(MountRoot {
+                path: fs::canonicalize(dir.path("trees")).unwrap(),
+                read_only: true,
+                trees: true,
+            });
+        }
         fs::create_dir_all(dir.path("roots/rw/put")).unwrap();
         let path = fs::canonicalize(dir.path("roots/rw")).unwrap();
         config.read_denies.push(AbsPath::new(&path).unwrap());
@@ -139,6 +152,21 @@ fn a_put_mount_is_committed_once_before_the_retirement() {
     };
     assert_eq!(rig.rt.outputs_report(&handle()), Some(report));
     assert_eq!(rig.rt.outputs_report(&handle()), None, "answered once");
+}
+
+/// Asserts that an agent with a trees root admits the build service's put mount before its
+/// directory exists: the put target is no tree and is never resolved against the trees root's
+/// rules, so its missing `<nonce>` folder is not `input-unavailable`. Catches every build
+/// service job refused on a Mac that mounts trees, since the agent, not the build service,
+/// makes the put directory at the commit.
+#[test]
+fn a_put_target_not_made_yet_is_admitted_beside_a_trees_root() {
+    let (mut rig, root) = rig_with("put-trees-root", true);
+    let dir = root.join("cas/b/b1/n1");
+    assert!(fs::symlink_metadata(&dir).is_err(), "not made yet");
+    let fs = fs_of(vec![mount(&dir, "/work/.kbf-out", MountMode::ReadWrite)]);
+    assert_eq!(rig.rt.check_job_fs(&fs, &[]), Ok(()));
+    assert_eq!(rig.rt.resolve_fs("r1", "", &fs, 0), FsPrepared::Ready);
 }
 
 /// Asserts that the job never holds its put directory: the put mount is not linked into its
@@ -376,9 +404,10 @@ fn the_put_flags_are_checked() {
 /// Asserts that a put root no mount root holds takes its put mount end to end: the runtime
 /// says it takes the mount's source (so the lifecycle does not hold it to the mount roots),
 /// and not a path beside the root; the put directory, which does not exist yet, resolves as
-/// the run's put target (a tree check never looks it up); the job's pack is committed and
+/// the run's put target; the job's pack is committed and
 /// reported. Catches a put root that must be a mount root (which put it on the state root's
-/// file system), and a put target refused because its nonce folder is not made yet.
+/// file system); `a_put_target_not_made_yet_is_admitted_beside_a_trees_root` holds the nonce
+/// folder not made yet to the tree check.
 #[test]
 fn a_put_root_that_is_no_mount_root_takes_its_put_mount() {
     let rig = Rig::in_dir("put-no-root", 1, |_, dir| {
