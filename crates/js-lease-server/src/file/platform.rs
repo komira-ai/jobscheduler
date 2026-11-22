@@ -57,6 +57,8 @@ const HOST_KEYS: &[&str] = &[
     MEMORY_PERCENT_KEY,
     "max_queue_wait",
     "start_timeout",
+    "capacity_requeues",
+    "capacity_refusal_bar",
     "provider_limits",
 ];
 
@@ -77,6 +79,17 @@ const MAX_QUEUE_WAIT: Duration = JobLimits::DEFAULT.max_queue_wait;
 /// How long a placed or starting job has to start before it ends as `start-timeout`,
 /// unless the pool says.
 const START_TIMEOUT: Duration = JobLimits::DEFAULT.start_timeout;
+
+/// How many times a start a host refused for capacity sends a job back to the queue, unless
+/// the pool says.
+const CAPACITY_REQUEUES: u64 = 8;
+
+/// The most `capacity_requeues` a pool may set.
+const MAX_CAPACITY_REQUEUES: u64 = 1000;
+
+/// How long a job is kept off a host that refused its start for capacity, unless the pool
+/// says.
+const CAPACITY_REFUSAL_BAR: Duration = JobLimits::DEFAULT.capacity_refusal_bar;
 
 /// How long a queued job whose last capable path went away stays queued before it ends as
 /// `no-capable-host`, unless the pool says.
@@ -132,6 +145,12 @@ pub struct PoolSettings {
     /// How long a placed or starting job has to start before it ends as `start-timeout`
     /// (default 15m), counted from its placement.
     pub start_timeout: Duration,
+    /// How many times a start a host refused for capacity (`no-capacity`) sends a job back
+    /// to the queue (default 8, from 0 to 1000); the refusal after that ends the job, so 0
+    /// ends it at the first.
+    pub capacity_requeues: usize,
+    /// How long a job is kept off a host that refused its start for capacity (default 60s).
+    pub capacity_refusal_bar: Duration,
     /// How long a queued job whose last capable path went away stays queued before it ends
     /// as `no-capable-host` (default 15s): the registry's `regain_grace` for the pool's
     /// whole-node requests, which are the requests that wait.
@@ -207,12 +226,14 @@ impl Resolved {
             let settings = pool.settings;
             let _ = writeln!(
                 out,
-                "pool {}: platforms {}; max_machines {}; max_queue_wait {}; start_timeout {}; path_grace {}",
+                "pool {}: platforms {}; max_machines {}; max_queue_wait {}; start_timeout {}; capacity_requeues {}; capacity_refusal_bar {}; path_grace {}",
                 pool.name,
                 listed(&pool.platforms),
                 shown(pool.max_machines),
                 span(settings.max_queue_wait),
                 span(settings.start_timeout),
+                settings.capacity_requeues,
+                span(settings.capacity_refusal_bar),
                 span(settings.path_grace)
             );
             for (name, limit) in &pool.provider_limits {
@@ -565,6 +586,8 @@ pub(super) fn hostless(
         settings: PoolSettings {
             max_queue_wait: MAX_QUEUE_WAIT,
             start_timeout: START_TIMEOUT,
+            capacity_requeues: JobLimits::DEFAULT.capacity_requeues,
+            capacity_refusal_bar: CAPACITY_REFUSAL_BAR,
             path_grace,
         },
         provider_limits: BTreeMap::new(),
@@ -577,6 +600,21 @@ pub(super) fn settings(s: &mut Section) -> Result<PoolSettings, StartupError> {
     Ok(PoolSettings {
         max_queue_wait: s.duration("max_queue_wait")?.unwrap_or(MAX_QUEUE_WAIT),
         start_timeout: s.duration("start_timeout")?.unwrap_or(START_TIMEOUT),
+        capacity_requeues: requeues(s)?,
+        capacity_refusal_bar: s
+            .duration("capacity_refusal_bar")?
+            .unwrap_or(CAPACITY_REFUSAL_BAR),
         path_grace: s.duration("path_grace")?.unwrap_or(PATH_GRACE),
     })
+}
+
+/// The pool's `capacity_requeues`: from 0 to 1000, 8 when the pool gives none.
+fn requeues(s: &mut Section) -> Result<usize, StartupError> {
+    let count = s.bounded(
+        "capacity_requeues",
+        0,
+        MAX_CAPACITY_REQUEUES,
+        CAPACITY_REQUEUES,
+    )?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }

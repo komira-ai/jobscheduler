@@ -288,6 +288,8 @@
 //! max_machines   = 4          # max_instances is the same cap; give one
 //! max_queue_wait = "30m"      # default 1h
 //! start_timeout  = "15m"      # default 15m
+//! capacity_requeues    = 8     # default 8; 0 ends a job at its first refusal for capacity
+//! capacity_refusal_bar = "60s" # default 60s; how long a host that refused for capacity is kept off the job
 //! path_grace     = "15s"      # default 15s
 //! # max_spend_per_hour, max_spend_per_day and the other keys of an elastic pool as above
 //!
@@ -314,7 +316,9 @@
 //! step 5). Two machine providers of one kind (one provider id) in one pool are refused.
 //! A pool's health is its first launching provider's checks, and the scaler reads that
 //! provider's notices; a later provider's offers are its cached catalog. `max_queue_wait`, `start_timeout`
-//! and `path_grace` (each a positive duration) and the `provider_limits` tables (for a launching machine provider
+//! and `path_grace` (each a positive duration), `capacity_refusal_bar` (a positive duration, 60s by default),
+//! `capacity_requeues` (0 to 1000, 8 by default: how many times a start a host refused for capacity sends a
+//! job back to the queue before the next such refusal ends it) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
 //! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
