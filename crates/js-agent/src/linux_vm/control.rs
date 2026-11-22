@@ -3,7 +3,7 @@
 //! the guest's virtio socket. A `connect` or `start` that finds the VM stopped starts it, and
 //! one that finds it starting or stopping waits, until the guest is ready.
 //!
-//! The socket is a file in the VM's directory, mode `0600`: only root (the owner's user)
+//! The socket is a file in the VM's directory, mode `0600`: only the owner's user (root when the agent runs it)
 //! reaches it.
 
 /// The control socket's file name in the VM's directory.
@@ -23,7 +23,8 @@ pub enum Control {
     State,
     /// Start the VM, if it is not running, and answer once the guest is ready.
     Start,
-    /// Ask the guest to shut down (the power button), then stop the VM; the owner stays.
+    /// Ask the guest to shut down (the guest program's poweroff, else the power button), then
+    /// stop the VM; the owner stays.
     Stop,
     /// Stop the VM at once, as pulling its power; the owner stays.
     Kill,

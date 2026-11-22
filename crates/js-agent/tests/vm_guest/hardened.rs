@@ -24,6 +24,9 @@ const LIMIT: Duration = Duration::from_secs(300);
 
 /// A `hardened` request.
 pub fn run(shared: &Shared, id: &str, script: &str, allow: &[String]) -> Reply {
+    if !crate::plain::plain_name(id) {
+        return Reply::refused(format!("{id:?} is not a run name"));
+    }
     let Ok(_one) = shared.hardened.lock() else {
         return Reply::refused("the hardened lock is poisoned");
     };

@@ -9,7 +9,7 @@
 //!   socket in the VM's directory ([`control`]) and carries the guest's connections on the
 //!   forwarded ports to TCP addresses on the Mac. macOS only (`vm`).
 //! - `adopt` is the agent's side of a VM that outlives it: it uses the VM a live owner holds
-//!   in the directory, or boots one detached, then stays until it is stopped.
+//!   in the directory, or boots one detached, then stays until its process is ended.
 //! - `ctl`, `call` and `time` are clients ([`client`]): a control request; timed requests to
 //!   the guest program over the virtio socket ([`wire`]); a timed program (the stock channel,
 //!   `ssh`).

@@ -12,7 +12,8 @@
 //! that long, so the VM gives its memory back to the Mac, and the next connection starts it
 //! again. Each start makes a new VM object from a new configuration.
 //!
-//! Every framework call runs on the VM's serial dispatch queue. The owner prints one JSON
+//! Every call on the VM and its devices runs on the VM's serial dispatch queue (the
+//! configuration is built on the booting thread, before a VM exists). The owner prints one JSON
 //! object per line on its standard output for each event (`owner`, `starting`, `started`,
 //! `ready`, `stopping`, `stopped`, `error`, `owner-exit`), each with `ms`, the milliseconds
 //! since the owner started; `started` and `ready` also carry `since_start_ms`, the
@@ -100,7 +101,10 @@ impl<T> Queued<T> {
 struct AnyThread<T>(T);
 
 // SAFETY: `AnyThread::new` is `unsafe`; its caller promises the value may be used (or only
-// dropped) on any thread.
+// dropped) on any thread. The one use is a retained `VZVirtioSocketConnection` that the
+// holding thread only drops: retain and release of an Objective-C object are atomic and may
+// happen on any thread, and the thread sends the object no message; the descriptor it uses
+// is a duplicate of its own.
 unsafe impl<T> Send for AnyThread<T> {}
 
 impl<T> AnyThread<T> {
@@ -127,9 +131,15 @@ fn ms(began: Instant) -> u64 {
 
 /// What the owner's main loop is told.
 enum Told {
-    /// The guest stopped the VM, the framework stopped it with an error, or a force stop
-    /// completed.
-    Stopped(Option<String>),
+    /// The VM of boot `boot` stopped: the guest stopped it, the framework stopped it with an
+    /// error, or a force stop completed. A notice of an earlier boot than the current one is
+    /// stale and ignored.
+    Stopped {
+        /// The boot the notice is about.
+        boot: u32,
+        /// The framework's error, when it stopped the VM with one.
+        why: Option<String>,
+    },
     /// The guest sent its ready line.
     Ready(String),
     /// A control request to stop the VM and end the owner.
@@ -138,6 +148,7 @@ enum Told {
 
 struct ObserverIvars {
     told: Mutex<Sender<Told>>,
+    boot: u32,
     ready_port: u32,
     forwards: Vec<(u32, String)>,
 }
@@ -150,20 +161,31 @@ define_class!(
     #[ivars = ObserverIvars]
     struct Observer;
 
+    // SAFETY: NSObject's protocol, which the superclass NSObject implements.
     unsafe impl NSObjectProtocol for Observer {}
 
+    // SAFETY: each method has the selector and the argument types of the protocol's method;
+    // the framework calls them on the VM's queue, and they only send on a channel.
     unsafe impl VZVirtualMachineDelegate for Observer {
         #[unsafe(method(guestDidStopVirtualMachine:))]
         fn guest_did_stop(&self, _vm: &VZVirtualMachine) {
-            self.tell(Told::Stopped(None));
+            self.tell(Told::Stopped {
+                boot: self.ivars().boot,
+                why: None,
+            });
         }
 
         #[unsafe(method(virtualMachine:didStopWithError:))]
         fn did_stop_with_error(&self, _vm: &VZVirtualMachine, error: &NSError) {
-            self.tell(Told::Stopped(Some(describe(error))));
+            self.tell(Told::Stopped {
+                boot: self.ivars().boot,
+                why: Some(describe(error)),
+            });
         }
     }
 
+    // SAFETY: as for the VM's delegate: the selector and argument types are the protocol's,
+    // and the framework calls the method on the VM's queue.
     unsafe impl VZVirtioSocketListenerDelegate for Observer {
         #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
         fn should_accept(
@@ -452,8 +474,12 @@ impl Owner {
 
     /// Boots the VM: a new configuration and VM object, started on the queue. The caller has
     /// set the phase to `Starting`; on an error the phase goes back to `Stopped`.
-    fn boot(&self) -> Result<(), String> {
+    fn boot(self: &Arc<Self>) -> Result<(), String> {
         let started = self.boot_inner();
+        if started.is_ok() {
+            let boot = self.lock().boots;
+            self.watch_ready(boot);
+        }
         if let Err(why) = &started {
             let mut st = self.lock();
             st.phase = Phase::Stopped;
@@ -465,8 +491,15 @@ impl Owner {
 
     fn boot_inner(&self) -> Result<(), String> {
         let config = build(&self.flags, &self.paths)?;
+        let boot_no = {
+            let mut st = self.lock();
+            st.boots += 1;
+            st.start_call = Some(clock::now());
+            st.boots
+        };
         let ivars = ObserverIvars {
             told: Mutex::new(self.told.clone()),
+            boot: boot_no,
             ready_port: self.flags.ready_port,
             forwards: self
                 .flags
@@ -479,12 +512,6 @@ impl Owner {
         ports.extend(self.flags.forwards.iter().map(|f| f.port));
         let (start_tx, start_rx) = mpsc::channel::<Option<String>>();
         let (q, h, cfg) = (self.queue.clone(), self.holder.clone(), Queued(config));
-        let boot_no = {
-            let mut st = self.lock();
-            st.boots += 1;
-            st.start_call = Some(clock::now());
-            st.boots
-        };
         self.event(serde_json::json!({"event": "starting", "boot": boot_no}));
         self.queue.exec_async(move || {
             // SAFETY: this closure runs on the VM's serial queue, the only place the VM is
@@ -543,7 +570,7 @@ impl Owner {
 
     /// Waits until the VM runs, starting it when it is stopped, and counts a connection
     /// in. A start that arrives while the VM is starting or stopping waits for it.
-    fn acquire(&self) -> Result<(), String> {
+    fn acquire(self: &Arc<Self>) -> Result<(), String> {
         let deadline = clock::now() + DETACHED_READY;
         let mut st = self.lock();
         loop {
@@ -602,38 +629,48 @@ impl Owner {
         said
     }
 
-    /// Stops the VM: with `graceful`, the guest is asked to shut down (the power button) and
-    /// the VM is stopped if it has not in [`SHUTDOWN_GRACE`]; otherwise at once. Returns
-    /// whether a stop began.
-    fn stop(self: &Arc<Self>, graceful: bool, why: &str) -> bool {
-        {
+    /// Stops the VM: with `graceful`, the guest program is asked to power the guest off over
+    /// the virtio socket, then (when it does not answer) the framework's power button is
+    /// pressed, and the VM is stopped at once if it has not stopped in [`SHUTDOWN_GRACE`];
+    /// otherwise it is stopped at once. With `idle`, only a running VM with no connection open
+    /// for that long is stopped, checked under the same hold of the state as the change to
+    /// `Stopping`, so a connection that arrives in between keeps the VM. Returns whether a stop
+    /// began; the asking and waiting run on a thread of their own.
+    fn stop(self: &Arc<Self>, graceful: bool, why: &str, idle: Option<Duration>) -> bool {
+        let boot = {
             let mut st = self.lock();
-            if !matches!(st.phase, Phase::Running | Phase::Starting) {
+            let stoppable = match idle {
+                None => matches!(st.phase, Phase::Running | Phase::Starting),
+                Some(idle) => {
+                    st.phase == Phase::Running
+                        && st.active == 0
+                        && clock::now().saturating_duration_since(st.last_activity) >= idle
+                }
+            };
+            if !stoppable {
                 return false;
             }
             st.phase = Phase::Stopping;
             st.stop_call = Some(clock::now());
             self.changed.notify_all();
-        }
+            st.boots
+        };
         self.event(serde_json::json!({"event": "stopping", "why": why, "graceful": graceful}));
-        // First the guest program's `poweroff` over the virtio socket (the guest shuts down
-        // at once); when it does not answer, the framework's power button, which a guest can
-        // ignore (a freshly booted one often does).
-        let asked = graceful
-            && (self.guest_poweroff()
-                || matches!(
-                    on_queue(&self.queue, &self.holder, |vm| {
-                        // SAFETY: on the VM's queue.
-                        unsafe { vm.requestStopWithError() }.map_err(|e| describe(&e))
-                    }),
-                    Some(Ok(()))
-                ));
         let me = Arc::clone(self);
         std::thread::spawn(move || {
+            let asked = graceful
+                && (me.guest_poweroff()
+                    || matches!(
+                        on_queue(&me.queue, &me.holder, |vm| {
+                            // SAFETY: on the VM's queue.
+                            unsafe { vm.requestStopWithError() }.map_err(|e| describe(&e))
+                        }),
+                        Some(Ok(()))
+                    ));
             if asked {
                 let deadline = clock::now() + SHUTDOWN_GRACE;
                 let mut st = me.lock();
-                while st.phase == Phase::Stopping && clock::now() < deadline {
+                while st.phase == Phase::Stopping && st.boots == boot && clock::now() < deadline {
                     let left = deadline.saturating_duration_since(clock::now());
                     st = me
                         .changed
@@ -641,14 +678,41 @@ impl Owner {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .0;
                 }
-                if st.phase != Phase::Stopping {
+                if st.phase != Phase::Stopping || st.boots != boot {
                     return;
                 }
             }
             let forced = force_stop(&me.queue, &me.holder);
-            let _ = me.told.send(Told::Stopped(forced.err()));
+            let _ = me.told.send(Told::Stopped {
+                boot,
+                why: forced.err(),
+            });
         });
         true
+    }
+
+    /// Stops a boot that never says ready: a guest that boots and whose guest program never
+    /// sends its ready line would otherwise stay `Starting`, and every connection would wait.
+    fn watch_ready(self: &Arc<Self>, boot: u32) {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let deadline = clock::now() + DETACHED_READY;
+            let mut st = me.lock();
+            while st.phase == Phase::Starting && st.boots == boot && clock::now() < deadline {
+                let left = deadline.saturating_duration_since(clock::now());
+                st = me
+                    .changed
+                    .wait_timeout(st, left)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .0;
+            }
+            let stuck = st.phase == Phase::Starting && st.boots == boot;
+            drop(st);
+            if stuck {
+                me.event(serde_json::json!({"event": "error", "stage": "ready", "message": "the guest never said ready"}));
+                me.stop(false, "never ready", None);
+            }
+        });
     }
 }
 
@@ -733,18 +797,18 @@ fn serve_control(stream: UnixStream, owner: &Arc<Owner>) {
         }
         Ok(Control::State) => {
             let target = on_queue(&owner.queue, &owner.holder, |vm| balloon(vm, None)).flatten();
-            let st = owner.lock();
+            let (phase, active, boots) = {
+                let st = owner.lock();
+                (st.phase.name(), st.active, st.boots)
+            };
             answer(format!(
-                "ok {} active={} boots={} balloon_mib={} owner_pid={}",
-                st.phase.name(),
-                st.active,
-                st.boots,
+                "ok {phase} active={active} boots={boots} balloon_mib={} owner_pid={}",
                 target.map_or_else(|| "-".to_owned(), |t| t.to_string()),
                 std::process::id()
             ));
         }
         Ok(Control::Stop) => {
-            let began = owner.stop(true, "asked");
+            let began = owner.stop(true, "asked", None);
             answer(
                 if began {
                     "ok stopping"
@@ -755,7 +819,7 @@ fn serve_control(stream: UnixStream, owner: &Arc<Owner>) {
             );
         }
         Ok(Control::Kill) => {
-            let began = owner.stop(false, "asked");
+            let began = owner.stop(false, "asked", None);
             answer(
                 if began {
                     "ok stopping"
@@ -831,15 +895,7 @@ pub fn run(flags: &RunFlags, out: &mut dyn Write) -> Result<(), String> {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(250));
-                let quiet = {
-                    let st = owner.lock();
-                    st.phase == Phase::Running
-                        && st.active == 0
-                        && clock::now().saturating_duration_since(st.last_activity) >= idle
-                };
-                if quiet {
-                    owner.stop(true, "idle");
-                }
+                owner.stop(true, "idle", Some(idle));
             }
         });
     }
@@ -870,16 +926,19 @@ pub fn run(flags: &RunFlags, out: &mut dyn Write) -> Result<(), String> {
                 }));
                 if flags.exit_when_ready {
                     owner.lock().exiting = true;
-                    owner.stop(false, "exit-when-ready");
+                    owner.stop(false, "exit-when-ready", None);
                 }
             }
-            Told::Stopped(why) => {
+            Told::Stopped { boot, why } => {
+                {
+                    let st = owner.lock();
+                    if st.phase == Phase::Stopped || boot != st.boots {
+                        continue;
+                    }
+                }
                 release_on_queue(&owner.queue, &owner.holder);
                 let (took, exiting) = {
                     let mut st = owner.lock();
-                    if st.phase == Phase::Stopped {
-                        continue;
-                    }
                     st.phase = Phase::Stopped;
                     owner.changed.notify_all();
                     (st.stop_call.take().map(ms), st.exiting)
@@ -893,7 +952,7 @@ pub fn run(flags: &RunFlags, out: &mut dyn Write) -> Result<(), String> {
             }
             Told::Exit => {
                 owner.lock().exiting = true;
-                if !owner.stop(true, "exit") && owner.lock().phase == Phase::Stopped {
+                if !owner.stop(true, "exit", None) && owner.lock().phase == Phase::Stopped {
                     break;
                 }
             }
@@ -968,7 +1027,8 @@ fn detach(flags: &RunFlags, out: &mut dyn Write) -> Result<(), String> {
 }
 
 /// `adopt`: the agent's side of a VM that outlives it. Uses the owner that answers in the
-/// directory, or starts one detached; then stays until it is stopped.
+/// directory, or starts one detached; then stays (parked) until its process is ended, as a
+/// launchd job is: it does not follow the owner's own end.
 pub fn adopt(flags: &RunFlags, out: &mut dyn Write) -> Result<(), String> {
     let began = clock::now();
     match client::ctl(&flags.dir, "state") {

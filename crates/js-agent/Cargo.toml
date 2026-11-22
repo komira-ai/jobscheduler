@@ -95,7 +95,7 @@ ureq.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 js-contain = { path = "../js-contain" }
 
-# The Linux VM prototype's owner (src/linux_vm/vm.rs, `js-agent __linux-vm run`): Apple's
+# The Linux VM prototype's owner (src/linux_vm/vm/, `js-agent __linux-vm run`): Apple's
 # Virtualization framework through objc2, on the VM's dispatch queue.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true

@@ -34,14 +34,15 @@ pub struct Place {
 }
 
 /// Asks `call` until the provider answers it for good. An `Unavailable` answer (the provider
-/// is still making the tree, or is not reachable yet) is asked again until `guard` has passed.
+/// is still making the tree, or is not reachable yet) is asked again, and a call still in
+/// flight waited for, until `guard` has passed; then the last answer is returned.
 fn settle(client: &mut ProviderClient, call: &ProviderCall, guard: Duration) -> ProviderAnswer {
     let began = super::clock::now();
     loop {
         let answer = client.ask(NAME, call);
         let waited = u128::from(super::clock::micros_since(began)) > guard.as_micros();
         match answer {
-            ProviderAnswer::Pending => {
+            ProviderAnswer::Pending if !waited => {
                 let _ = client.wait_answered(NAME, call, guard);
             }
             ProviderAnswer::Unavailable(_) if !waited => {
@@ -156,8 +157,13 @@ mod tests {
         assert_eq!(out, "");
         let (_dir2, fake2, place2) = rig("linux-vm-place-down");
         fake2.fail_mount(u32::MAX);
-        let (result, _) = placed(&place2, Duration::from_millis(200));
-        assert!(result.unwrap_err().starts_with("Unavailable("));
+        // A guard of zero gives up at the first answer that is not final.
+        let (result, _) = placed(&place2, Duration::ZERO);
+        let why = result.unwrap_err();
+        assert!(
+            why.starts_with("Unavailable(") || why.starts_with("Pending"),
+            "{why}"
+        );
     }
 
     /// Asserts that `run` (the default guard) places a tree, as the verb calls it.

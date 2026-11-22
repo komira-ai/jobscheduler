@@ -58,7 +58,7 @@ fn config(rootfs: &Path, args: &[String]) -> serde_json::Value {
 }
 
 /// Whether `id` is a name `crun` and the bundle directory take: letters, digits, `-`, `_`.
-fn plain_name(id: &str) -> bool {
+pub fn plain_name(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
