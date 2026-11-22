@@ -23,6 +23,8 @@ mod journal;
 mod lifecycle;
 mod live_logs;
 #[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
 mod mac_pf;
 mod mounts;
 mod network;
