@@ -16,6 +16,13 @@ Status: proposed; steps 4 and later wait for the root probe of section 4.3. On a
 
 Some things do not change: the pool of reused users (uids 600-699, `kbf-lease-pool-<n>`) and its ledger files, the Seatbelt profile of each run, the pf rules per uid, what a job sees, the wire to the lease server, and Linux.
 
+**If accounts are made and deleted per job instead of reused.** A separate change proposes a new account for each job, deleted after it. That needs Full Disk Access for the agent's program, signed with a Developer ID Application certificate. This design holds either way, with these differences:
+
+- **The supervisor.** It takes the run's uid, gid and home in its arguments as before, and never makes or deletes an account. Its deadline kill is unchanged: it kills the uid's processes and boots out its domains, under the lease's lock.
+- **Removal.** The agent's `remove` ends the supervisor, then kills the uid, then deletes the account, where it reset the slot before. A uid is never given to a new account while a supervisor of an earlier lease that names it may still live. Removal deletes only after the supervisor is gone, and a new account skips every uid that a `supervisor` file of a live lease names.
+- **The reset at start.** It keeps the accounts of adopted leases and deletes every other account the ledger names. The ledger's `created`/`deleted` records per lease (`ledger.rs`) are the account list, and the `pool` file goes. The ledger line is written before the account is made, so a crash between the two leaves a name the next reset deletes, never an unnamed account.
+- **Privacy.** With Full Disk Access granted to the agent's program, the supervisor holds it too: it is the same program. The supervisor's disclaimed start of the job is then what keeps the grant from the job, and `spawn_sites` holds every start to it. Section 4.2's "no TCC grant is known to be held" changes accordingly.
+
 ## 2. Why there are two daemons today, and which reason holds
 
 The recorded reason is privilege separation. The table row of `js-mac-session` in `docs/design/mac-runtime.md:25` says that the agent's process "holds no right to create users or kill other uids". That reason does not hold. Both daemons run as root: the agent's plist sets `UserName` `root` (`crates/js-mac-provision/tests/golden/agent.plist`), and the agent refuses native jobs unless it is root (`crates/js-agent/src/platform/macos.rs:411-416`). The helper was moved here from another product with its socket protocol unchanged (`docs/design.md:775`). No document compares it with the agent doing the work in-process. On Linux the agent is root and starts its jobs itself, with no helper (`docs/design/agent-privilege.md`, option B, the owner's ruling).
