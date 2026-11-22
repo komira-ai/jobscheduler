@@ -862,3 +862,32 @@ fn a_job_start_is_not_refused_for_cpu_or_memory_the_job_service_placed() {
     assert_eq!(events, ["refused j4 limits-exceed-shape"]);
     assert_eq!(h.fake.created().len(), 2);
 }
+
+/// Asserts that a Linux agent runs a container start that names its job's system and
+/// architecture (`os=linux`, `arch=x86_64`, as the job service now sends every start of a job
+/// that names them) as it runs the same start without them: it is started, and the runtime is
+/// asked to create the same container (the same body, limits, labels, network and isolation),
+/// the scratch and files directories aside, which are the harness's own. Catches a container
+/// agent that refuses, or runs differently, a start because it carries the two fields.
+#[test]
+fn a_container_start_naming_its_os_and_arch_runs_as_one_naming_neither() {
+    let created = |name: &str, named: bool| {
+        let mut h = Harness::new(name);
+        let mut spec = start("j1");
+        if named {
+            spec.os = Some(js_types::Os::Linux);
+            spec.arch = Some(js_types::Arch::X86_64);
+        }
+        let events = h.apply(vec![job_start(spec)]);
+        assert_eq!(names(&events), ["started j1"], "{named}");
+        h.fake.created().remove(0)
+    };
+    let plain = created("job-platform-plain", false);
+    let named = created("job-platform-named", true);
+    let named = js_agent::lifecycle::RunSpec {
+        scratch: plain.scratch.clone(),
+        files: plain.files.clone(),
+        ..named
+    };
+    assert_eq!(named, plain);
+}

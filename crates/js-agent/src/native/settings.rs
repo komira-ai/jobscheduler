@@ -28,6 +28,11 @@ pub const DEFAULT_TOOL_ROOTS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sb
 /// The largest file a native run may write unless `--native-max-file-mib` says otherwise.
 pub const DEFAULT_MAX_FILE_MIB: u64 = 4096;
 
+/// The smallest `--native-max-file-mib`: a run's largest file is its one output (a build's
+/// pack, at most 128 MiB by default), which the run must be able to write and the removal to
+/// collect.
+pub const MIN_MAX_FILE_MIB: u64 = 128;
+
 /// The most processes a native run's user may have unless `--native-max-processes` says
 /// otherwise.
 pub const DEFAULT_MAX_PROCESSES: u32 = 512;
@@ -170,6 +175,12 @@ impl NativeSettings {
         let max_processes = flags.max_processes.unwrap_or(DEFAULT_MAX_PROCESSES);
         if mib == 0 || max_processes == 0 {
             return Err("--native-max-file-mib and --native-max-processes: above 0".to_owned());
+        }
+        if mib < MIN_MAX_FILE_MIB {
+            return Err(format!(
+                "--native-max-file-mib: {mib} is below {MIN_MAX_FILE_MIB}, the largest output \
+                 a build writes by default"
+            ));
         }
         let max_file_bytes = mib
             .checked_mul(1 << 20)
