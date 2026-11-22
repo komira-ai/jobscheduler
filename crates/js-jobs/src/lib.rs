@@ -27,9 +27,11 @@
 //! start when the placement engine says its prepares are used up.
 //!
 //! A start that a **held host** refused (the agent's code `host-held`: the host is held for
-//! maintenance and made nothing) sends its job back to the queue: [`JobStore::requeue_held`]
-//! frees the allocation, keeps the job off the host with a bar in [`JobRecord::prepare_bars`]
-//! and appends the host to [`JobRecord::held_refusals`], in one transaction, counting no
+//! maintenance and made nothing) or that a host refused for **capacity** (the agent's code
+//! `no-capacity`: the job's booking did not fit what the host holds) sends its job back to the
+//! queue: [`JobStore::requeue_held`] frees the allocation, keeps the job off the host with a
+//! bar in [`JobRecord::prepare_bars`] and appends the host to [`JobRecord::held_refusals`] or
+//! [`JobRecord::capacity_refusals`] (as [`RequeuedFor`] says), in one transaction, counting no
 //! failure.
 //!
 //! A **taint** is the mark a host-isolation job's placement puts on its host ([`HostTaint`],
@@ -250,6 +252,6 @@ pub use result::{
 };
 pub use store::{
     Backfill, Beside, CordonWrite, FailedPrepare, HeldRequeue, Inserted, JobPage, JobStore,
-    MAX_PAGE, MINT_TRIES, NewJob, Placement, Row, SCHEMA_VERSION, Step, UncordonWrite, Written,
-    queue_order,
+    MAX_PAGE, MINT_TRIES, NewJob, Placement, RequeuedFor, Row, SCHEMA_VERSION, Step, UncordonWrite,
+    Written, queue_order,
 };

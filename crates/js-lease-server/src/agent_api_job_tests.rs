@@ -3,10 +3,12 @@
 //! the reply of an agent that speaks no per-job message unchanged.
 
 use js_agent_wire::{Ack, HeldState, Outcome};
-use js_jobs::{AllocationStep, EndReason, JobId, JobState, ResultReason, StartFailure};
+use js_jobs::{AllocationStep, EndReason, JobId, JobState, NewJob, ResultReason, StartFailure};
 use js_proto::v1;
+use js_types::{HostId, JobEventKind};
 
-use super::job_rig::{FakeAgent, rig, starts, stops};
+use super::job_rig::{FakeAgent, clocked_rig, rig, spec, starts, stops};
+use crate::job_expiry::JobLimits;
 use crate::per_job::NO_EXIT_CODE;
 
 /// A running job with a cancel intent is told to stop in every reply while its host lists it
@@ -349,4 +351,68 @@ async fn a_failed_listing_commit_is_a_500_and_the_next_heartbeat_is_served() {
     );
     assert_eq!(rig.states(&id), (JobState::Placed, AllocationStep::Booked));
     assert!(rig.beat(&agent).await.is_ok());
+}
+
+/// Under `--placement js-sched`, a start a host refused with `no-capacity` is not the end of the
+/// job: through the heartbeat route the job goes back to the queue with the refusing host in its
+/// capacity refusals and a `REQUEUED` event naming it, is placed on the other host, which is
+/// sent its start, and the job never reads failed to start. It catches a capacity refusal that
+/// fails the build, and a requeued job placed again on the host that refused it.
+#[tokio::test]
+async fn a_start_refused_for_capacity_is_placed_on_another_host_and_started_there() {
+    let mut rig = clocked_rig("capacity_requeue", true, JobLimits::default());
+    rig.register("host-a", true);
+    rig.register("host-b", true);
+    let mut agents = [FakeAgent::new("host-a"), FakeAgent::new("host-b")];
+    for agent in &agents {
+        rig.beat(agent).await.unwrap();
+    }
+    let new = NewJob {
+        id: Some(JobId::parse("job-c").unwrap()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    let id = rig.jobs.insert_queued(new).unwrap().record.id;
+    let mut refusing = None;
+    for round in 0..4 {
+        for agent in &mut agents {
+            let reply = rig.beat(agent).await.unwrap();
+            agent.take(&reply);
+            let state = rig.job(&id).state;
+            assert!(
+                !matches!(state, JobState::FailedToStart(_)),
+                "round {round}: the job reads {state:?}"
+            );
+            if refusing.is_none() && agent.holds("job-c") {
+                agent.end_naming(
+                    "job-c",
+                    (Outcome::FailedToStart, None),
+                    (Some("no-capacity"), None),
+                );
+                refusing = Some(HostId::new(&agent.host).unwrap());
+            }
+        }
+    }
+    let refusing = refusing.expect("a host was sent the job's start");
+    let job = rig.job(&id);
+    assert_eq!(job.capacity_refusals, std::slice::from_ref(&refusing));
+    assert_eq!(job.held_refusals, Vec::<HostId>::new());
+    let events = job.queue.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == JobEventKind::Requeued && e.host.as_ref() == Some(&refusing)),
+        "no REQUEUED event names {refusing}: {events:?}"
+    );
+    let other = rig.allocation(&id).host;
+    assert_ne!(
+        other, refusing,
+        "the job was placed on the refusing host again"
+    );
+    let started = agents
+        .iter()
+        .find(|agent| agent.host == other.as_str())
+        .unwrap();
+    assert!(started.holds("job-c"), "{other} was not sent the start");
 }

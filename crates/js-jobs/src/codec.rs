@@ -61,8 +61,8 @@ pub(crate) use test_support::{LATER_FORMAT, field_of, rearranged, set_field};
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row (whole-host tags 45, 46 and 59 are in `whole_fields`, isolation tag 47
-/// in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
+/// The tags of a job row (whole-host tags 45, 46, 59 and 63 are in `whole_fields`, isolation tag
+/// 47 in `host_fields`, queue tags 48 to 53 in `queue_fields`, 54 to 58 in `rootfs_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -918,9 +918,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
     let start_failure_detail = rootfs_fields::take_detail(&mut fields)?;
-    let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     let client = fields.opt(t::CLIENT, client_of)?;
-    let (failed_prepares, prepare_bars, held_refusals) = whole_fields::take_job(&mut fields)?;
+    let whole = whole_fields::take_job(&mut fields)?;
     Ok(JobRecord {
         id,
         spec,
@@ -936,11 +935,12 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         result,
         start_failure_detail,
         retention_ends,
-        deadline_floor,
+        deadline_floor: fields.opt(t::DEADLINE_FLOOR, time_of)?,
         client,
-        failed_prepares,
-        prepare_bars,
-        held_refusals,
+        failed_prepares: whole.failed_prepares,
+        prepare_bars: whole.prepare_bars,
+        held_refusals: whole.held_refusals,
+        capacity_refusals: whole.capacity_refusals,
         queue: queue_fields::take_job(&mut fields)?,
         carried: fields.carried(),
     })

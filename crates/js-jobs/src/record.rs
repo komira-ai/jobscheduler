@@ -425,6 +425,10 @@ pub struct JobRecord {
     /// `host-held`) and that sent the job back to the queue, in order: appended by
     /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
     pub held_refusals: Vec<HostId>,
+    /// The host of each start of the job that a host refused for capacity (the agent's code
+    /// `no-capacity`) and that sent the job back to the queue, in order: appended by
+    /// [`crate::JobStore::requeue_held`]. Empty on a row that never had one.
+    pub capacity_refusals: Vec<HostId>,
     /// Why the job waits, its placement attempts and its newest events
     /// (`docs/design/queue-status.md`).
     pub queue: QueueTrail,
