@@ -52,6 +52,11 @@ pub enum PolicyError {
     /// proof objects only ([`Policy::allowing`]).
     #[error("trees on a mount need the open read model")]
     TreesNeedOpenModel,
+    /// A mount grant is a read-denied path or lies above one: its grant, emitted after the
+    /// read denies, would reopen the denied path. (A grant below a denied path is the
+    /// intended way to open part of it.)
+    #[error("a mount grant holds a read-denied path")]
+    MountOverReadDeny,
 }
 
 /// One host directory a run may use, granted by its canonical path (Seatbelt matches the
@@ -173,6 +178,7 @@ impl Policy {
     ///
     /// # Errors
     /// [`PolicyError::TooMany`] for a list over [`MAX_LISTED`],
+    /// [`PolicyError::MountOverReadDeny`] for a mount grant at or above a read-denied path,
     /// [`PolicyError::MountOverTrees`] for a mount grant that overlaps the trees' mount
     /// root, and [`PolicyError::TreesNeedOpenModel`] for trees under the allow read model.
     pub fn base(layout: SlotLayout, caps: Caps) -> Result<Self, PolicyError> {
@@ -241,7 +247,9 @@ impl Policy {
     /// This policy with `narrowing` applied. No narrowing widens anything.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`].
+    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`], and
+    /// [`PolicyError::MountOverReadDeny`] for a read deny added at or below a mount grant
+    /// (the grant would reopen it).
     pub fn narrowed(mut self, narrowing: Narrowing) -> Result<Self, PolicyError> {
         if let Some(net) = narrowing.net {
             self.net = self.net.narrow(net);
@@ -270,7 +278,16 @@ impl Policy {
     fn check(&self) -> Result<(), PolicyError> {
         bounded(self.inputs.len(), "inputs")?;
         bounded(self.read_denies.len(), "read denies")?;
-        bounded(self.mounts.len(), "mounts")
+        bounded(self.mounts.len(), "mounts")?;
+        let over = |mount: &MountGrant| {
+            self.read_denies
+                .iter()
+                .any(|deny| deny.starts_with(&mount.path))
+        };
+        if self.mounts.iter().any(over) {
+            return Err(PolicyError::MountOverReadDeny);
+        }
+        Ok(())
     }
 
     pub(super) fn allow(&self) -> Option<&AllowGrants> {

@@ -1,16 +1,18 @@
-//! The profile of a native job: its folder, its own trees on the store's mount, a per-run
-//! put directory, and each network level. A golden per shape, the order of the trees'
-//! rule, the floor, and the in-process apply's strings.
+//! The profile of a native job: its folder, its own trees on the store's mount, a
+//! read-write mount beside them, read denies, and each network level. A golden per shape,
+//! the order of the trees' rule, read denies after the allows, the floor, and the
+//! in-process apply's strings. (A job is never given a writable put directory; the
+//! read-write mount here is any mount grant.)
 
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, InitError, MAX_LISTED, MountGrant, MountTrees, Net, Policy, PolicyError, Ports,
-    Profile, ReadModel, SandboxInit, SlotLayout, TreesError,
+    AbsPath, Caps, InitError, MAX_LISTED, MountGrant, MountTrees, Narrowing, Net, Policy,
+    PolicyError, Ports, Profile, ReadModel, SandboxInit, SlotLayout, TreesError,
 };
 
 const ROOT: &str = "/Volumes/store/fs";
 const TREE_A: &str = "/Volumes/store/fs/mount-provider/aa/r1/0";
 const TREE_B: &str = "/Volumes/store/fs/mount-provider/aa/r1/1";
-const PUT: &str = "/Volumes/store/put/cas/b/build1/0011223344556677";
+const OUT: &str = "/Volumes/work/out";
 const JOB: &str = "/private/var/js-mac-job/jobs/j1";
 
 /// The last nine lines of every profile, written out here on its own.
@@ -33,9 +35,10 @@ fn trees(list: &[&str]) -> MountTrees {
     MountTrees::new(path(ROOT), list.iter().map(|t| path(t)).collect()).expect("trees")
 }
 
-fn put() -> MountGrant {
+/// A read-write mount grant beside the store's mount.
+fn rw_mount() -> MountGrant {
     MountGrant {
-        path: path(PUT),
+        path: path(OUT),
         write: true,
         no_exec: false,
     }
@@ -95,17 +98,6 @@ fn a_job_with_two_trees_matches_its_golden() {
     );
 }
 
-/// The whole text of a job with a per-run put directory: a read-write grant of it, and
-/// nothing else writable but the job folder and the two device paths.
-///
-/// Catches a put directory granted read-only, or not at all.
-#[test]
-fn a_job_with_a_put_directory_matches_its_golden() {
-    let profile = profile(job(None, vec![put()]), Net::Off);
-    assert_eq!(profile.text(), include_str!("goldens/job_put.sb"));
-    assert_eq!(profile.params(), params(&[("RUN", JOB), ("GR_0", PUT)]));
-}
-
 /// The whole text of a job that names outbound ports: loopback, TCP to each port on any
 /// address, and the resolver's socket.
 ///
@@ -117,13 +109,13 @@ fn a_job_that_names_outbound_ports_matches_its_golden() {
     assert_eq!(profile.params(), params(&[("RUN", JOB)]));
 }
 
-/// The whole text of a job with every input: trees, a put directory, outbound ports.
+/// The whole text of a job with trees and outbound ports.
 ///
-/// Catches a section out of its place when the others are present.
+/// Catches a section out of its place when the other is present.
 #[test]
-fn a_job_with_trees_a_put_directory_and_ports_matches_its_golden() {
+fn a_job_with_trees_and_ports_matches_its_golden() {
     let profile = profile(
-        job(Some(trees(&[TREE_A, TREE_B])), vec![put()]),
+        job(Some(trees(&[TREE_A, TREE_B])), vec![]),
         Net::Remote(ports(&[443, 8980])),
     );
     assert_eq!(profile.text(), include_str!("goldens/job_all.sb"));
@@ -134,7 +126,6 @@ fn a_job_with_trees_a_put_directory_and_ports_matches_its_golden() {
             ("MOUNT", ROOT),
             ("MT_0", TREE_A),
             ("MT_1", TREE_B),
-            ("GR_0", PUT),
         ])
     );
 }
@@ -230,7 +221,7 @@ fn a_tree_list_over_the_bound_is_refused_and_repeats_count_once() {
 /// A mount grant that is the trees' root, above it or below it would reopen what the
 /// trees' rule denies, so the layout is refused; a grant beside the root is not.
 ///
-/// Catches a put directory or another mount placed where its read grant undoes the
+/// Catches a mount placed where its read grant undoes the
 /// own-tree rule.
 #[test]
 fn a_mount_grant_over_the_trees_root_is_refused() {
@@ -239,7 +230,7 @@ fn a_mount_grant_over_the_trees_root_is_refused() {
         write: true,
         no_exec: false,
     };
-    for at in [ROOT, "/Volumes/store", TREE_B, "/Volumes/store/fs/put"] {
+    for at in [ROOT, "/Volumes/store", TREE_B, "/Volumes/store/fs/other"] {
         let layout = job(Some(trees(&[TREE_A])), vec![grant(at)]);
         assert_eq!(
             Policy::base(layout, caps(Net::Off)),
@@ -247,7 +238,7 @@ fn a_mount_grant_over_the_trees_root_is_refused() {
             "{at}"
         );
     }
-    let beside = job(Some(trees(&[TREE_A])), vec![grant(PUT)]);
+    let beside = job(Some(trees(&[TREE_A])), vec![grant(OUT)]);
     assert!(Policy::base(beside, caps(Net::Off)).is_ok());
     assert_eq!(
         PolicyError::MountOverTrees.to_string(),
@@ -277,9 +268,9 @@ fn trees_are_refused_under_the_allow_read_model() {
 }
 
 /// Every shape of a job's policy ends with the floor, in order: each network level, with
-/// and without trees (none, empty, two) and a put directory.
+/// and without trees (none, empty, two) and a read-write mount.
 ///
-/// Catches a trees, put or network rule emitted after the floor, where it would beat it.
+/// Catches a trees, mount or network rule emitted after the floor, where it would beat it.
 #[test]
 fn the_floor_is_last_in_every_job_shape() {
     let nets = [
@@ -293,7 +284,7 @@ fn the_floor_is_last_in_every_job_shape() {
     let tree_sets: [Option<&[&str]>; 3] = [None, Some(&[]), Some(&[TREE_A, TREE_B])];
     for net in nets {
         for set in tree_sets {
-            for mounts in [vec![], vec![put()]] {
+            for mounts in [vec![], vec![rw_mount()]] {
                 let profile = profile(job(set.map(trees), mounts), net.clone());
                 let text = profile.text();
                 assert!(text.ends_with(FLOOR_TEXT), "{net:?} {set:?}:\n{text}");
@@ -313,7 +304,7 @@ fn the_floor_is_last_in_every_job_shape() {
 fn a_job_writes_no_device_but_dev_null_and_its_own_descriptors() {
     let grant = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))\n";
     for net in [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On] {
-        for mounts in [vec![], vec![put()]] {
+        for mounts in [vec![], vec![rw_mount()]] {
             let profile = profile(job(Some(trees(&[TREE_A])), mounts), net.clone());
             let text = profile.text();
             assert_eq!(text.matches(grant).count(), 1, "{net:?}:\n{text}");
@@ -335,7 +326,7 @@ fn a_job_is_denied_other_processes_information_before_its_own_is_allowed() {
     let allow = "(allow process-info* (target self) (target same-sandbox))\n";
     for net in [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On] {
         for set in [None, Some(trees(&[TREE_A, TREE_B]))] {
-            let profile = profile(job(set, vec![put()]), net.clone());
+            let profile = profile(job(set, vec![rw_mount()]), net.clone());
             let text = profile.text();
             assert_eq!(text.matches(deny).count(), 1, "{net:?}:\n{text}");
             assert_eq!(text.matches(allow).count(), 1, "{net:?}:\n{text}");
@@ -346,6 +337,113 @@ fn a_job_is_denied_other_processes_information_before_its_own_is_allowed() {
             );
         }
     }
+}
+
+/// Places a runtime denies as the privacy fence: a directory, a file in it, a file
+/// elsewhere, each under both spellings.
+const FENCE: [&str; 6] = [
+    "/Library/Application Support/com.apple.TCC",
+    "/Library/Application Support/com.apple.TCC/TCC.db",
+    "/Library/Preferences/com.apple.TimeMachine.plist",
+    "/System/Volumes/Data/Library/Application Support/com.apple.TCC",
+    "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db",
+    "/System/Volumes/Data/Library/Preferences/com.apple.TimeMachine.plist",
+];
+
+/// Read denies, each place's file-read deny after every file allow of the profile but a
+/// mount grant's (which may not hold a denied place: see the next test), in every job
+/// shape; each place is a parameter, never text.
+///
+/// Catches a read deny emitted before an allow that covers it (a later rule wins, so the
+/// allow would reopen the place), and a place spelled into the text.
+#[test]
+fn read_denies_follow_every_allow_but_a_mount_grants_in_every_job_shape() {
+    let nets = [Net::Off, Net::Loopback, Net::Remote(ports(&[443])), Net::On];
+    for net in nets {
+        for set in [None, Some(trees(&[TREE_A, TREE_B]))] {
+            for mounts in [vec![], vec![rw_mount()]] {
+                let layout = SlotLayout {
+                    read_denies: FENCE.iter().map(|place| path(place)).collect(),
+                    ..job(set.clone(), mounts)
+                };
+                let profile = profile(layout, net.clone());
+                let lines: Vec<&str> = profile.text().lines().collect();
+                let last_allow = lines
+                    .iter()
+                    .rposition(|line| {
+                        line.starts_with("(allow file-") && !line.contains("(param \"GR_")
+                    })
+                    .expect("the job folder's grant");
+                for i in 0..FENCE.len() {
+                    let deny = format!("(deny file-read* (subpath (param \"RD_{i}\")))");
+                    let at = lines.iter().position(|line| *line == deny);
+                    assert!(at > Some(last_allow), "{net:?} {deny}:\n{}", profile.text());
+                }
+                let named: Vec<&str> = profile
+                    .params()
+                    .iter()
+                    .filter(|(name, _)| name.starts_with("RD_"))
+                    .map(|(_, value)| value.as_str())
+                    .collect();
+                let mut fence = FENCE.to_vec();
+                fence.sort_unstable();
+                assert_eq!(named, fence);
+                assert!(!profile.text().contains("com.apple.TCC"));
+            }
+        }
+    }
+}
+
+/// A mount grant at or above a read-denied place is refused, at the start and when a
+/// narrowing adds the deny: its grant comes after the denies and would reopen the place.
+/// A grant below a denied place, or beside it, is not.
+///
+/// Catches a mount of `/Library` (or of the place itself) that hands a job the places
+/// the runtime denies.
+#[test]
+fn a_mount_grant_at_or_above_a_read_deny_is_refused() {
+    let grant = |at: &str| MountGrant {
+        path: path(at),
+        write: false,
+        no_exec: true,
+    };
+    let with = |at: &str| SlotLayout {
+        read_denies: FENCE.iter().map(|place| path(place)).collect(),
+        ..job(None, vec![grant(at)])
+    };
+    for at in [
+        "/Library",
+        "/Library/Application Support/com.apple.TCC",
+        "/Library/Preferences/com.apple.TimeMachine.plist",
+        "/System/Volumes/Data",
+    ] {
+        assert_eq!(
+            Policy::base(with(at), caps(Net::Off)),
+            Err(PolicyError::MountOverReadDeny),
+            "{at}"
+        );
+    }
+    for at in [
+        "/Library/Application Support/com.apple.TCC/below",
+        "/Library/Application Support/com.apple.TCCx",
+        "/Library/Preferences/other.plist",
+    ] {
+        assert!(Policy::base(with(at), caps(Net::Off)).is_ok(), "{at}");
+    }
+    let mounted = Policy::base(job(None, vec![grant("/Volumes/work")]), caps(Net::Off))
+        .expect("no denies yet");
+    let narrowing = Narrowing {
+        deny_read: vec![path("/Volumes/work/state")],
+        ..Narrowing::default()
+    };
+    assert_eq!(
+        mounted.narrowed(narrowing),
+        Err(PolicyError::MountOverReadDeny)
+    );
+    assert_eq!(
+        PolicyError::MountOverReadDeny.to_string(),
+        "a mount grant holds a read-denied path"
+    );
 }
 
 /// `Remote` is above `Loopback` and below `On`; two port lists meet in the ports they
@@ -379,7 +477,7 @@ fn a_remote_level_narrows_by_rank_and_by_shared_ports() {
 /// Catches a parameter list that pairs a name with the wrong value or drops one.
 #[test]
 fn the_apply_strings_are_the_text_and_each_name_then_value() {
-    let profile = profile(job(Some(trees(&[TREE_A])), vec![put()]), Net::Off);
+    let profile = profile(job(Some(trees(&[TREE_A])), vec![rw_mount()]), Net::Off);
     let init = profile.sandbox_init().expect("no NUL");
     assert_eq!(init.text().to_bytes(), profile.text().as_bytes());
     let flat: Vec<&str> = init
@@ -389,7 +487,7 @@ fn the_apply_strings_are_the_text_and_each_name_then_value() {
         .collect();
     assert_eq!(
         flat,
-        ["RUN", JOB, "MOUNT", ROOT, "MT_0", TREE_A, "GR_0", PUT]
+        ["RUN", JOB, "MOUNT", ROOT, "MT_0", TREE_A, "GR_0", OUT]
     );
 }
 
