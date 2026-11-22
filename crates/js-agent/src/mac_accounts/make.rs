@@ -74,8 +74,9 @@ impl Pool {
     }
 
     /// Makes an account, with the maker held: chooses its uid, records `made` (durably,
-    /// before anything exists), makes its home and its record, then records `ready`, and
-    /// `lent` to `job` in the same step when there is one. A failure after `made` deletes
+    /// before anything exists), makes its home and its record, then records `ready`, or,
+    /// when it is made for the lend of `job`, `lent` to it directly (never `ready`, which a
+    /// lend beside this one could take). A failure after `made` deletes
     /// what was made and records how that ended ([`Pool::unmake`]).
     ///
     /// # Errors
@@ -103,13 +104,15 @@ impl Pool {
                     Failure::new(Step::Record, format!("creating the record: {why}"))
                 })
             })
-            .and_then(|()| {
-                self.record(&Record::Ready(n))
-                    .and_then(|()| match job {
-                        Some(job) => self.record(&Record::Lent(n, job.to_owned())),
-                        None => Ok(()),
-                    })
-                    .map_err(|why| Failure::new(Step::Ledger, format!("recording ready: {why}")))
+            .and_then(|()| match job {
+                // Made for a lend: `made` goes straight to `lent`, so the account is never
+                // visible as ready to a lend that runs beside this one.
+                Some(job) => self
+                    .record(&Record::Lent(n, job.to_owned()))
+                    .map_err(|why| Failure::new(Step::Ledger, format!("recording lent: {why}"))),
+                None => self
+                    .record(&Record::Ready(n))
+                    .map_err(|why| Failure::new(Step::Ledger, format!("recording ready: {why}"))),
             });
         match made {
             Ok(()) => {

@@ -6,7 +6,8 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_open_directory::{
-    ODNode, ODQuery, ODRecord, ODSession, kODMatchBeginsWith, kODNodeTypeLocalNodes,
+    ODNode, ODQuery, ODRecord, ODSession, kODMatchBeginsWith, kODMatchEqualTo,
+    kODNodeTypeLocalNodes,
 };
 
 use super::super::home::account_attributes;
@@ -135,6 +136,49 @@ pub(super) fn list(prefix: &str) -> io::Result<Vec<(String, u32)>> {
             accounts.push((name, uid));
         }
         Ok(accounts)
+    })
+}
+
+/// Whether the user record `name` exists. Unlike `getpwnam_r`, the directory reports a
+/// failed lookup as an error, so an error here is never read as an absence.
+pub(super) fn exists(name: &str) -> io::Result<bool> {
+    autoreleasepool(|_| {
+        let node = local_node()?;
+        find(&node, name).map(|record| record.is_some())
+    })
+}
+
+/// Whether a user record has the uid `uid`: a query of the local node for `UniqueID` equal
+/// to it. A failure of the query or of reading its results is an error, not an absence.
+pub(super) fn uid_exists(uid: u32) -> io::Result<bool> {
+    autoreleasepool(|_| {
+        let node = local_node()?;
+        let kinds = NSString::from_str(USERS);
+        let kinds: &AnyObject = &kinds;
+        let attribute = NSString::from_str(UNIQUE_ID);
+        let value = NSString::from_str(&uid.to_string());
+        let value: &AnyObject = &value;
+        let mut error = None;
+        // SAFETY: the node, the record type, the attribute and the value are live objects of
+        // the types the query takes; no attributes to return, and at most one result.
+        let query = unsafe {
+            ODQuery::queryWithNode_forRecordTypes_attribute_matchType_queryValues_returnAttributes_maximumResults_error(
+                Some(&node),
+                Some(kinds),
+                Some(&attribute),
+                kODMatchEqualTo,
+                Some(value),
+                None,
+                1,
+                Some(&mut error),
+            )
+        }
+        .ok_or_else(|| od_error("querying the uid", error))?;
+        let mut error = None;
+        // SAFETY: a query just made; all its results, none partial.
+        let results = unsafe { query.resultsAllowingPartial_error(false, Some(&mut error)) }
+            .ok_or_else(|| od_error("listing the records of a uid", error))?;
+        Ok(results.count() > 0)
     })
 }
 

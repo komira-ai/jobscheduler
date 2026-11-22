@@ -176,7 +176,6 @@ fn lend_takes_the_oldest_ready_account_and_makes_one_when_none_is_ready() {
         rig.lines()[6..],
         [
             format!("made kbf-acct-3 {}", me() + 2),
-            "ready kbf-acct-3".to_owned(),
             "lent kbf-acct-3 job-3".to_owned(),
         ]
     );
@@ -443,4 +442,50 @@ fn a_job_is_lent_an_account_while_another_is_being_deleted() {
     });
     assert!(rig.lines().contains(&"gone kbf-acct-1".to_owned()));
     assert!(!rig.fake.state().users.contains_key("kbf-acct-1"));
+}
+
+/// Asserts that an account made for a lend is never visible as ready: with none ready, the
+/// first lend is held just before its account is recorded (the channel pauses it there);
+/// at that moment the account is not ready, and a second lend that runs beside it makes an
+/// account of its own. Each job ends with a different account, recorded lent to its own
+/// job, and nothing is deleted. Catches a `ready` record that another lend takes before the
+/// first job's `lent` is written, which then deletes the account the other job holds.
+#[test]
+fn an_account_made_for_a_lend_is_never_ready_to_another_lend() {
+    let rig = Rig::new("lend-never-ready", 4, 0);
+    let pool = rig.open();
+    let (reached_tx, reached) = mpsc::channel::<()>();
+    let (go, go_rx) = mpsc::channel::<()>();
+    let mut held_once = false;
+    *pool.before_record.lock().unwrap() = Some(Box::new(move |record| {
+        if !held_once && matches!(record, Record::Lent(_, job) if job == "job-1") {
+            held_once = true;
+            reached_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        }
+    }));
+    let (pool, rig) = (&pool, &rig);
+    // `move`: should an assertion fail, `go` is dropped and the hook's wait ends.
+    let (first, second) = std::thread::scope(move |scope| {
+        let first = scope.spawn(|| pool.lend("job-1"));
+        reached.recv().unwrap();
+        assert_eq!(pool.ready_count(), 0, "the account is visible as ready");
+        assert!(rig.lines().iter().all(|line| !line.starts_with("ready")));
+        let second = scope.spawn(|| pool.lend("job-2"));
+        go.send(()).unwrap();
+        (
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        )
+    });
+    assert_ne!(first.account, second.account);
+    assert!(first.made_now && second.made_now);
+    let lines = rig.lines();
+    for (lent, job) in [(&first, "job-1"), (&second, "job-2")] {
+        let line = format!("lent {} {job}", lent.account.name);
+        assert!(lines.contains(&line), "{line} in {lines:?}");
+    }
+    assert!(lines.iter().all(|line| !line.starts_with("gone")));
+    assert!(lines.iter().all(|line| !line.starts_with("ready")));
+    assert_eq!(rig.fake.state().users.len(), 2);
 }

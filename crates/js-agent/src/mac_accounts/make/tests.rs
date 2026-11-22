@@ -382,7 +382,7 @@ fn a_ledger_that_fails_while_making_is_named() {
         panic!("not a making error");
     };
     assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Ledger));
-    assert!(why.starts_with("recording ready: "), "{why}");
+    assert!(why.starts_with("recording lent: "), "{why}");
     assert!(
         why.contains("deleting what was made did not complete, at ledger: recording gone: "),
         "{why}"
@@ -390,6 +390,24 @@ fn a_ledger_that_fails_while_making_is_named() {
     // The account was deleted all the same: only the ledger does not know.
     assert!(rig.fake.state().users.is_empty());
     assert_eq!(rig.lines(), [format!("made kbf-acct-1 {}", me())]);
+}
+
+/// Asserts that an account made for the pool (a refill) whose `ready` cannot be recorded is
+/// deleted, and the error says the failed record was `ready`.
+#[test]
+fn a_refill_whose_ready_cannot_be_recorded_is_named_and_deleted() {
+    let rig = Rig::new("refill-ledger", 3, 0);
+    let pool = Arc::new(rig.open());
+    let broken = Arc::clone(&pool);
+    let path = rig.dir.join("state/accounts");
+    rig.fake
+        .on("create_account", move || broken.ledger().fail_writes(&path));
+    let AccountError::Make { account, step, why } = pool.make(None).unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!((account.as_str(), step), ("kbf-acct-1", Step::Ledger));
+    assert!(why.starts_with("recording ready: "), "{why}");
+    assert!(rig.fake.state().users.is_empty());
 }
 
 /// Asserts that the proof's launchd judgment is used for a uid that is passed over: a domain

@@ -15,7 +15,8 @@
 //! `made` is written before anything of the account exists, so a crash after it leaves an
 //! account the next open deletes (with none of it made, there is nothing to delete and the
 //! proof holds). `ready` follows the record and the home. `lent` is written before the
-//! account is returned to a job: an account is lent once, ever. `held` says a deletion did
+//! account is returned to a job: an account is lent once, ever. An account made for a lend
+//! goes from `made` straight to `lent`, so it is never `ready` for another lend to take. `held` says a deletion did
 //! not complete, with the step it stopped at; the uid stays out of use. `gone` is written
 //! only once the account was deleted and shown gone: the uid is free from then on, not
 //! before.
@@ -95,14 +96,8 @@ pub(super) enum State {
 }
 
 impl State {
-    fn word(self) -> &'static str {
-        match self {
-            Self::Made => "made",
-            Self::Ready => "ready",
-            Self::Lent => "lent",
-            Self::Held => "held",
-            Self::Gone => "gone",
-        }
+    fn word(self) -> String {
+        format!("{self:?}").to_lowercase()
     }
 }
 
@@ -155,10 +150,31 @@ impl fmt::Display for Record {
     }
 }
 
+/// Failures a test injects into the next append, once each.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct Inject {
+    /// Writes this many bytes of the record, then fails: a fragment is left.
+    pub(super) write: Option<usize>,
+    /// Fails the sync that follows a complete write.
+    pub(super) sync: bool,
+    /// Fails the cut back to the committed length.
+    pub(super) roll_back: bool,
+}
+
 /// The ledger file and what it says.
 #[derive(Debug)]
 pub(super) struct Ledger {
     file: File,
+    /// The length of the file as far as it is committed: every byte before it is a record
+    /// that was written and synced. A failed append cuts the file back to it.
+    committed: u64,
+    /// Set when a failed append could not be cut back: the file may hold a fragment, so
+    /// every later append is refused until the ledger is opened again.
+    poisoned: bool,
+    /// Failures to inject into the next append.
+    #[cfg(test)]
+    pub(super) inject: Inject,
     entries: BTreeMap<u64, Entry>,
     /// The uid of the last `made` record: the next uid is chosen after it.
     last_uid: Option<u32>,
@@ -216,6 +232,10 @@ impl Ledger {
         let (file, text) = open_records(path)?;
         let mut ledger = Self {
             file,
+            committed: text.len() as u64,
+            poisoned: false,
+            #[cfg(test)]
+            inject: Inject::default(),
             entries: BTreeMap::new(),
             last_uid: None,
         };
@@ -242,7 +262,7 @@ impl Ledger {
             Record::Made(..) => Ok(()),
             Record::Ready(n) => need(*n, state(n), &[Made], "ready"),
             Record::Lent(_, job) if !valid_job(job) => Err(format!("bad job id {job:?}")),
-            Record::Lent(n, _) => need(*n, state(n), &[Ready], "lent"),
+            Record::Lent(n, _) => need(*n, state(n), &[Made, Ready], "lent"),
             Record::Held(_, step) if !valid_step(step) => Err(format!("bad step {step:?}")),
             Record::Held(n, _) => need(*n, state(n), &[Made, Ready, Lent, Held], "held"),
             Record::Gone(n) => need(*n, state(n), &[Made, Ready, Lent, Held], "gone"),
@@ -273,19 +293,68 @@ impl Ledger {
         }
     }
 
-    /// Writes `record` and its newline in one `write`, `fsync`s, then applies it.
+    /// Writes `record` and its newline in one `write`, `fsync`s, then applies it. A write or
+    /// sync that fails is rolled back: the file is cut to its committed length (a fragment a
+    /// later append would join into a garbage line goes, and so does a complete record the
+    /// memory does not know) and synced. When that fails too the ledger is poisoned.
     ///
     /// # Errors
-    /// The record does not follow from what the ledger holds (nothing is written), or the
-    /// write or the `fsync` failed (nothing changes in memory).
+    /// The record does not follow from what the ledger holds (nothing is written), the write
+    /// or the `fsync` failed (nothing changes in memory, and the file is as it was), or the
+    /// ledger is poisoned.
     pub(super) fn append(&mut self, record: &Record) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "the ledger is poisoned: an earlier failed write could not be rolled back, \
+                 so it takes no record until the pool is opened again",
+            ));
+        }
         self.admit(record)
             .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
-        self.file
-            .write_all(format!("{record}\n").as_bytes())
-            .and_then(|()| self.file.sync_all())?;
+        let line = format!("{record}\n");
+        if let Err(why) = self.write(line.as_bytes()).and_then(|()| self.sync()) {
+            return Err(match self.roll_back() {
+                Ok(()) => why,
+                Err(undo) => {
+                    self.poisoned = true;
+                    io::Error::other(format!(
+                        "{why}; cutting the file back also failed ({undo}), so the ledger is poisoned"
+                    ))
+                }
+            });
+        }
+        self.committed += line.len() as u64;
         self.commit(record);
         Ok(())
+    }
+
+    /// Writes `bytes` at the end of the file.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(part) = self.inject.write.take() {
+            self.file.write_all(&bytes[..part])?;
+            return Err(io::Error::other("injected: the write failed"));
+        }
+        self.file.write_all(bytes)
+    }
+
+    /// Syncs the file.
+    fn sync(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.inject.sync) {
+            return Err(io::Error::other("injected: the sync failed"));
+        }
+        self.file.sync_all()
+    }
+
+    /// Cuts the file back to its committed length and syncs it.
+    fn roll_back(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.inject.roll_back) {
+            return Err(io::Error::other("injected: the cut failed"));
+        }
+        self.file.set_len(self.committed)?;
+        self.file.sync_all()
     }
 
     /// Makes every later write fail, as a full or failing disk would.

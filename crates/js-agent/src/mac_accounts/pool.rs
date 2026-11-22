@@ -20,7 +20,14 @@ pub struct Pool {
     ledger: Mutex<Ledger>,
     /// Held while an account is made: accounts are made one at a time.
     maker: Mutex<()>,
+    /// Run by a test before each record is taken (outside the ledger's lock).
+    #[cfg(test)]
+    pub(super) before_record: Mutex<Option<RecordHook>>,
 }
+
+/// What a test runs before a record is taken.
+#[cfg(test)]
+pub(super) type RecordHook = Box<dyn FnMut(&Record) + Send>;
 
 /// The error for a ledger that could not record `why`.
 pub(super) fn ledger_error(path: &Path, why: impl std::fmt::Display) -> AccountError {
@@ -108,6 +115,8 @@ impl Pool {
             path,
             ledger: Mutex::new(ledger),
             maker: Mutex::new(()),
+            #[cfg(test)]
+            before_record: Mutex::new(None),
         };
         pool.sweep()?;
         pool.refill()?;
@@ -122,6 +131,15 @@ impl Pool {
 
     /// Records `record`, durably.
     pub(super) fn record(&self, record: &Record) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            hook(record);
+        }
         self.ledger().append(record)
     }
 

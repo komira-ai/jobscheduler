@@ -126,8 +126,8 @@ fn a_record_that_does_not_follow_is_refused_and_not_written() {
         "kbf-acct-2 was never made, so it cannot be ready"
     );
     assert_eq!(
-        refused(&mut ledger, Record::Lent(1, "job".to_owned())),
-        "kbf-acct-1 is made, so it cannot be lent"
+        refused(&mut ledger, Record::Lent(1, "Bad Job".to_owned())),
+        "bad job id \"Bad Job\""
     );
     ledger.append(&Record::Ready(1)).unwrap();
     assert_eq!(
@@ -287,4 +287,90 @@ fn the_last_uid_and_the_next_number_follow_the_made_records() {
     drop(ledger);
     let ledger = Ledger::open(&path).unwrap();
     assert_eq!((ledger.last_uid(), ledger.next()), (Some(610), 6));
+}
+
+/// Asserts that a write that fails part way leaves the file exactly as it was (the fragment
+/// is cut off, not left for the next append to join into a garbage line), that the next
+/// append is written whole, and that a reopen reads both records.
+#[test]
+fn a_failed_write_is_cut_back_and_the_next_append_reads_back() {
+    let dir = scratch("cut");
+    let path = dir.join("accounts");
+    let mut ledger = Ledger::open(&path).unwrap();
+    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.inject.write = Some(5);
+    assert!(ledger.append(&Record::Ready(1)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "made kbf-acct-1 600\n"
+    );
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
+    ledger.append(&Record::Ready(1)).unwrap();
+    drop(ledger);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "made kbf-acct-1 600\nready kbf-acct-1\n"
+    );
+    let ledger = Ledger::open(&path).unwrap();
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Ready));
+}
+
+/// Asserts that a sync that fails after a complete write is rolled back: the record is not
+/// in memory, and not in the file, on the spot or after a reopen.
+#[test]
+fn a_failed_sync_leaves_no_record_in_memory_or_on_disk() {
+    let dir = scratch("sync");
+    let path = dir.join("accounts");
+    let mut ledger = Ledger::open(&path).unwrap();
+    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.inject.sync = true;
+    assert!(ledger.append(&Record::Ready(1)).is_err());
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "made kbf-acct-1 600\n"
+    );
+    drop(ledger);
+    let ledger = Ledger::open(&path).unwrap();
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
+}
+
+/// Asserts that when the cut back fails too the ledger is poisoned: every later append is
+/// refused with an error that says so, even one that would be fine, until it is reopened;
+/// the reopen cuts the torn tail the failed write left.
+#[test]
+fn a_failed_cut_back_poisons_the_ledger_until_it_is_reopened() {
+    let dir = scratch("poison");
+    let path = dir.join("accounts");
+    let mut ledger = Ledger::open(&path).unwrap();
+    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.inject.write = Some(5);
+    ledger.inject.roll_back = true;
+    let first = ledger.append(&Record::Ready(1)).unwrap_err().to_string();
+    assert!(first.contains("poisoned"), "{first}");
+    let later = ledger.append(&Record::Ready(1)).unwrap_err().to_string();
+    assert!(later.contains("poisoned"), "{later}");
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Made));
+    drop(ledger);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "made kbf-acct-1 600\nready"
+    );
+    let mut ledger = Ledger::open(&path).unwrap();
+    ledger.append(&Record::Ready(1)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "made kbf-acct-1 600\nready kbf-acct-1\n"
+    );
+}
+
+/// Asserts that an account made for a lend may go from `made` straight to `lent`, once.
+#[test]
+fn a_made_account_may_be_lent_directly_but_only_once() {
+    let dir = scratch("made-lent");
+    let mut ledger = Ledger::open(&dir.join("accounts")).unwrap();
+    ledger.append(&Record::Made(1, 600)).unwrap();
+    ledger.append(&Record::Lent(1, "job-1".to_owned())).unwrap();
+    assert_eq!(ledger.get(1).map(|entry| entry.state), Some(State::Lent));
+    assert!(ledger.append(&Record::Lent(1, "job-2".to_owned())).is_err());
 }

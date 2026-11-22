@@ -152,3 +152,86 @@ pub trait AccountHost: Send + Sync {
     /// Milliseconds on a clock that only goes forward; only differences mean anything.
     fn now_ms(&self) -> u64;
 }
+
+/// Whether a record is present, from two sources that each answer present, absent or an
+/// error: absent only when both say absent, an error when either fails (a failed lookup is
+/// not an absence), present otherwise. The macOS host asks OpenDirectory, which reports
+/// errors, and `getpw*`, which answers absent for a failed lookup too.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn present_in_any(
+    directory: io::Result<bool>,
+    getpw: io::Result<bool>,
+) -> io::Result<bool> {
+    match (directory, getpw) {
+        (Err(why), _) | (_, Err(why)) => Err(why),
+        (Ok(directory), Ok(getpw)) => Ok(directory || getpw),
+    }
+}
+
+/// The record `getpw` found, judged with what the directory said ([`present_in_any`]):
+/// `None` only when both say absent. A record the directory has and `getpw` does not show
+/// is an error, since there is nothing to return and the record is not absent.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn merge_record<T>(
+    directory: io::Result<bool>,
+    getpw: io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    let seen = getpw
+        .as_ref()
+        .map(Option::is_some)
+        .map_err(|why| io::Error::new(why.kind(), why.to_string()));
+    let present = present_in_any(directory, seen)?;
+    match getpw? {
+        Some(record) => Ok(Some(record)),
+        None if present => Err(io::Error::other(
+            "the directory has the record and getpw does not show it",
+        )),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err() -> io::Result<bool> {
+        Err(io::Error::other("lookup failed"))
+    }
+
+    /// Asserts that a record is absent only when every source says absent, and that an error
+    /// from either source is an error, never an absence, whatever the other says.
+    #[test]
+    fn a_record_is_absent_only_when_every_source_says_so() {
+        assert!(!present_in_any(Ok(false), Ok(false)).unwrap());
+        assert!(present_in_any(Ok(true), Ok(false)).unwrap());
+        assert!(present_in_any(Ok(false), Ok(true)).unwrap());
+        assert!(present_in_any(Ok(true), Ok(true)).unwrap());
+        for (directory, getpw) in [
+            (err(), Ok(false)),
+            (Ok(false), err()),
+            (err(), Ok(true)),
+            (Ok(true), err()),
+            (err(), err()),
+        ] {
+            assert_eq!(
+                present_in_any(directory, getpw).unwrap_err().to_string(),
+                "lookup failed"
+            );
+        }
+    }
+
+    /// Asserts that a found record is returned, that none is returned only when both sources
+    /// say absent, that an error of either source is an error, and that a record only the
+    /// directory has is an error and not an absence.
+    #[test]
+    fn a_record_is_none_only_when_the_directory_and_getpw_agree() {
+        assert_eq!(merge_record(Ok(true), Ok(Some(7))).unwrap(), Some(7));
+        assert_eq!(merge_record(Ok(false), Ok(Some(7))).unwrap(), Some(7));
+        assert_eq!(merge_record::<u8>(Ok(false), Ok(None)).unwrap(), None);
+        assert!(merge_record::<u8>(Ok(true), Ok(None)).is_err());
+        assert!(merge_record::<u8>(err(), Ok(None)).is_err());
+        assert!(merge_record::<u8>(err(), Ok(Some(7))).is_err());
+        assert!(merge_record::<u8>(Ok(false), Err(io::Error::other("getpw"))).is_err());
+        assert!(merge_record::<u8>(Ok(true), Err(io::Error::other("getpw"))).is_err());
+    }
+}

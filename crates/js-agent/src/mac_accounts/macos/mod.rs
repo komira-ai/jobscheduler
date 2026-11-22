@@ -15,7 +15,10 @@ use std::path::Path;
 
 pub(super) use sys::{clear_user_flags, rename_excl};
 
-use super::host::{AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord};
+use super::host::{
+    AccountHost, CommandOutput, LiveProcess, NewUser, PrintAnswer, UserRecord, merge_record,
+    present_in_any,
+};
 
 /// The macOS host.
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,11 +30,11 @@ impl AccountHost for MacHost {
     }
 
     fn account(&self, name: &str) -> io::Result<Option<UserRecord>> {
-        sys::account(name)
+        merge_record(directory::exists(name), sys::account(name))
     }
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {
-        sys::uid_taken(uid)
+        present_in_any(directory::uid_exists(uid), sys::uid_taken(uid))
     }
 
     fn list_accounts(&self, prefix: &str) -> io::Result<Vec<(String, u32)>> {

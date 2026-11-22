@@ -33,7 +33,9 @@
 //!    home, the record, and `ready`. A failure after `made` deletes what was made as in
 //!    steps 3 to 6 below, and records `gone` when that is shown, `held` when it is not.
 //! 2. **Lent.** [`Pool::lend`] takes the oldest ready account and records `lent` before it
-//!    returns: an account is lent once, ever. With none ready it makes one on the spot.
+//!    returns: an account is lent once, ever. With none ready it makes one on the spot,
+//!    recorded `made` and then `lent`
+//!    (never `ready`, which another lend could take).
 //! 3. **Retired.** After the job, [`Pool::retire`]:
 //!    1. kills every process of the uid and boots out its launchd domains, until none is
 //!       left (judged by outcome, not by what a call answered); removes its crontab and `at`
