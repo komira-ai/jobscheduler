@@ -178,8 +178,9 @@ fn a_kbf_shaped_start_links_both_mounts_and_grants_them_in_its_profile() {
 
 /// Asserts the refusals made from the text of a start, with no I/O, by code and by exact
 /// detail: a layer, a copy-on-write mount, a remapped host port, a target that is `/work`,
-/// outside it or below another mount's (in any case), and more mounts than the profile lists;
-/// and that what a Mac gives is admitted: a host port at its own number (equal, or its job
+/// outside it or below another mount's (in any case), a provider's tree mounted read-write,
+/// and more mounts than the profile lists; and that what a Mac gives is admitted: a
+/// provider's tree mounted read-only, a host port at its own number (equal, or its job
 /// port left out) is not refused here (the lifecycle's host-port admission refuses it, as this
 /// runtime offers none), and mounts at siblings and a nested directory. Catches a mount that
 /// would be linked over the working directory or inside another mount's host directory, a
@@ -210,7 +211,24 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
         )
     };
     let many: Vec<JobMount> = (0..65).map(|i| ro(&format!("/work/m{i}"))).collect();
+    let tree = |mode| JobMount {
+        source: MountSource::Provider {
+            provider: "tierstore".to_owned(),
+            reference: "cas/l/ab".to_owned(),
+        },
+        ..mount(&dir, "/work/.kbf-tree", mode, true)
+    };
     let cases: Vec<(JobFs, Vec<HostPort>, Result<(), NativeRefusal>)> = vec![
+        (fs_of(vec![tree(MountMode::ReadOnly)]), vec![], Ok(())),
+        (
+            fs_of(vec![tree(MountMode::ReadWrite)]),
+            vec![],
+            Err(refusal_of(
+                refusal::INPUT_NOT_ALLOWED,
+                "/work/.kbf-tree: a provider's tree is shared by every native job that names \
+                 it, so a native job mounts it read-only only",
+            )),
+        ),
         (
             layered,
             vec![],
@@ -280,7 +298,9 @@ fn what_a_mac_cannot_give_is_refused_with_its_own_code() {
 /// is not there and one that is a file (`input-unavailable`), a link inside a root that leads
 /// outside every root and a read-write mount that resolves beneath the read-only root
 /// (`input-not-allowed`: the lifecycle's own check reads the text of the path only), a mount
-/// of a provider, a path the profile cannot name (`invalid-mount`) and a bad target. The first
+/// of a provider that has not answered, a read-write mount whose missing directory lies
+/// beneath the read-only root, a path the profile cannot name (`invalid-mount`) and a bad
+/// target. The first
 /// refusal wins and no plan is kept: a start after it makes no link. Catches a link that gets
 /// a job out of the roots, and a read-write grant over a read-only root.
 #[test]
@@ -350,7 +370,24 @@ fn a_host_path_that_cannot_be_had_beneath_a_root_is_refused_by_code() {
             provider,
             refusal_of(
                 refusal::INPUT_NOT_ALLOWED,
-                "/work/p: a Mac is given no mount provider",
+                "/work/p: a provider's tree is looked up once the provider has answered its \
+                 directory",
+            ),
+        ),
+        (
+            mount(
+                &ro.join("put/nonce"),
+                "/work/a",
+                MountMode::ReadWrite,
+                false,
+            ),
+            refusal_of(
+                refusal::INPUT_NOT_ALLOWED,
+                &format!(
+                    "{} lies beneath the root {}, which jobs may mount read-only only",
+                    ro.join("put/nonce").display(),
+                    ro.display()
+                ),
             ),
         ),
         (
@@ -519,6 +556,75 @@ fn the_mount_roots_are_read_denies_of_every_run() {
         "--mount-root: /tmp/root: path starts with /tmp, a symbolic link; use the canonical \
          /private spelling"
     );
+}
+
+/// Asserts a start of the kbf shape on a Mac with tierstore: the read-only tree is the
+/// directory the provider answered (a host path once the lifecycle bound it), and the put
+/// directory `cas/b/<build>/<nonce>` below the writable root is not there at the lookup. The
+/// lookup makes nothing; the start makes `cas`, `cas/b` and `cas/b/<build>` with the root's
+/// owner, group and mode, and `<nonce>` the run user's, of the root's group, mode 0770; the
+/// link `exec/.kbf-out` points at it and the profile grants it written. A second start of the
+/// same build makes only its own directory. Catches a put directory a job cannot write, one
+/// the root's owner cannot empty, and one made before the start is admitted.
+#[test]
+fn a_missing_put_directory_is_made_at_the_start_and_granted_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut rig = rig("mounts-put");
+    let tree = dir_in(&rig, "ro", "job-trees/ab");
+    let put = fs::canonicalize(rig.dir.path("roots").join("rw")).unwrap();
+    fs::set_permissions(&put, fs::Permissions::from_mode(0o755)).unwrap();
+    let of_put = fs::metadata(&put).unwrap();
+    let nonce = put.join("cas/b/build/nonce");
+    let mounts = fs_of(vec![
+        mount(&tree, "/work/.kbf-tree", MountMode::ReadOnly, true),
+        mount(&nonce, "/work/.kbf-out", MountMode::ReadWrite, true),
+    ]);
+    assert_eq!(rig.rt.check_job_fs(&mounts, &[]), Ok(()));
+    assert_eq!(rig.rt.resolve_fs("r1", "", &mounts, 0), FsPrepared::Ready);
+    assert!(!put.join("cas").exists(), "the lookup made a directory");
+    rig.rt
+        .create_and_start(&rig.spec("r1", native("/bin/true", &[])))
+        .unwrap();
+
+    let exec = rig.fake.home_of("7.0").join("exec");
+    let user = fs::metadata(&exec).unwrap().uid();
+    let of = |path: &Path| {
+        let meta = fs::metadata(path).unwrap();
+        (meta.uid(), meta.gid(), meta.mode() & 0o7777)
+    };
+    for above in ["cas", "cas/b", "cas/b/build"] {
+        assert_eq!(
+            of(&put.join(above)),
+            (of_put.uid(), of_put.gid(), 0o755),
+            "{above}"
+        );
+    }
+    assert_eq!(of(&nonce), (user, of_put.gid(), 0o770));
+    assert_eq!(fs::read_link(exec.join(".kbf-out")).unwrap(), nonce);
+    let parsed = parse(&rig.fake.run_of("7.0").argv);
+    let granted = param_for(&parsed.params, &nonce);
+    assert!(
+        parsed.profile.contains(&format!(
+            "(allow file-write* (subpath (param \"{granted}\")))"
+        )),
+        "{}",
+        parsed.profile
+    );
+
+    let other = put.join("cas/b/build/other");
+    let second = fs_of(vec![mount(
+        &other,
+        "/work/.kbf-out",
+        MountMode::ReadWrite,
+        true,
+    )]);
+    assert_eq!(rig.rt.resolve_fs("r2", "", &second, 0), FsPrepared::Ready);
+    rig.rt
+        .create_and_start(&rig.spec("r2", native("/bin/true", &[])))
+        .unwrap();
+    assert_eq!(of(&other).2, 0o770);
+    assert_eq!(of(&nonce), (user, of_put.gid(), 0o770));
 }
 
 /// How many entries of the run directory `exec` the job did not get from the runtime: all

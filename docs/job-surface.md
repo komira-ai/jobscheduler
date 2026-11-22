@@ -105,6 +105,10 @@ launch one, and the job is placed and started only on a host that reports it. A 
 name or the ref names the field (`field: spec.layers[0].provider.ref`) and never repeats its
 value; the ref is not secret, since every read of the job returns it.
 
+On a Mac (a native job) a provider's mount must be `READ_ONLY`: the provider writes the tree whole on the Mac's disk
+and every job that names it is given the same directory, so a read-write one is refused `input-not-allowed` when the
+start is admitted. A layer from a provider is refused there as every layer is.
+
 The subject rule has one limit: a request whose one singular scalar field is really optional
 gets a required flag. The fix is to mark the field `optional` in the definition, which is
 additive.

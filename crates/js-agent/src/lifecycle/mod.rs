@@ -334,7 +334,9 @@ pub use finding::{CHECK_DETAIL_MAX, CheckFinding, CheckNote};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
-pub use mount_providers::{DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders};
+pub use mount_providers::{
+    DEFAULT_PROVIDER_WAIT_SECS, MAX_PROVIDER_WAIT_SECS, MountProviders, ProviderFlags, UserNames,
+};
 pub use mounts::{Beneath, MountError, MountRoots};
 pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use provider::{ProviderAnswer, ProviderCall, Providers};
@@ -519,8 +521,8 @@ impl Config {
 pub struct Local {
     /// The `--mount-root` and `--mount-root-ro` flags, canonicalised.
     pub mounts: MountRoots,
-    /// The `--mount-provider` and `--mount-provider-wait` flags, checked: none for an agent
-    /// given none (and for a macOS build, which has no such flag).
+    /// The `--mount-provider`, `--mount-provider-user` and `--mount-provider-wait` flags,
+    /// checked: none for an agent given none.
     pub providers: MountProviders,
     /// `--scratch-quota` was given.
     pub scratch_quota: bool,
