@@ -75,7 +75,8 @@ fn the_command_line_is_the_spec_alone() {
 /// spec another user could have changed.
 #[test]
 fn a_spec_that_is_wrong_exits_2_and_writes_nothing() {
-    let changes: [(&str, fn(&mut serde_json::Value)); 7] = [
+    type Change = (&'static str, fn(&mut serde_json::Value));
+    let changes: [Change; 7] = [
         ("unknown field", |v| v["extra"] = true.into()),
         ("NUL in program", |v| v["program"] = "/bin/s\0h".into()),
         ("NUL in args", |v| {
