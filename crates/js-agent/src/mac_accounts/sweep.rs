@@ -73,7 +73,10 @@ impl Pool {
         Ok(())
     }
 
-    /// Empties the per-user folders of every uid of the range that no live account holds.
+    /// Empties the per-user folders of every uid of the range that no live account holds and
+    /// that nothing else is using: a uid any user record has (an account this pool did not
+    /// make, such as an earlier release's), or that a process runs as, is left alone, and so is
+    /// one that cannot be looked at. Those folders are someone's working files.
     fn empty_free_folders(&self) {
         let held: BTreeSet<u32> = self
             .ledger()
@@ -87,9 +90,30 @@ impl Pool {
             .clone()
             .filter(|uid| !held.contains(uid))
         {
+            if let Some(why) = self.in_use(uid) {
+                tracing::debug!(uid, "the per-user folders are left alone: {why}");
+                continue;
+            }
             if let Err(why) = folder::empty(&self.settings.user_folders, uid, &*self.os) {
                 tracing::warn!(uid, "emptying the per-user folders of a free uid: {why}");
             }
+        }
+    }
+}
+
+impl Pool {
+    /// Why `uid` is in use by something the pool does not hold, or `None` when nothing is:
+    /// a user record has it, a process runs as it, or one of the two could not be asked.
+    fn in_use(&self, uid: u32) -> Option<String> {
+        match self.host.uid_taken(uid) {
+            Ok(false) => {}
+            Ok(true) => return Some("a user record has the uid".to_owned()),
+            Err(why) => return Some(format!("asking for a record of the uid: {why}")),
+        }
+        match self.host.processes(uid) {
+            Ok(found) if found.is_empty() => None,
+            Ok(found) => Some(format!("{} process(es) run as the uid", found.len())),
+            Err(why) => Some(format!("listing the processes of the uid: {why}")),
         }
     }
 }

@@ -386,3 +386,43 @@ fn a_folder_that_cannot_be_emptied_at_open_is_logged_and_its_slot_is_not_free() 
         )]
     );
 }
+
+/// Asserts that the pass at open leaves alone the per-user folders of a uid in the range that
+/// something outside the pool uses: a record the pool did not make (an earlier release's
+/// account a job may be running as), a live process of the uid, or a uid that cannot be asked
+/// about. Catches a pass that emptied a working account's temporary files under it.
+#[test]
+fn a_folder_of_a_uid_something_else_uses_is_not_emptied_at_open() {
+    let rig = Rig::new("folder-in-use-record", 1, 0);
+    rig.fake
+        .add_user("kbf-lease-pool-0", me(), my_gid(), &rig.settings.homes);
+    let hash = rig.folder("ab", "hash");
+    std::fs::write(hash.join("T/working"), "x").unwrap();
+    let _ = rig.try_open();
+    assert!(
+        hash.join("T/working").is_file(),
+        "a record's folder was emptied"
+    );
+
+    let rig = rig.next("folder-in-use-process", 1, 0);
+    rig.fake.add_process(me(), 41, "build");
+    let hash = rig.folder("ab", "hash");
+    std::fs::write(hash.join("C/working"), "x").unwrap();
+    let _ = rig.try_open();
+    assert!(
+        hash.join("C/working").is_file(),
+        "a running uid's folder was emptied"
+    );
+
+    for key in [format!("uid_taken {}", me()), format!("processes {}", me())] {
+        let rig = rig.next("folder-in-use-unknown", 1, 0);
+        rig.fake.fail(&key);
+        let hash = rig.folder("ab", "hash");
+        std::fs::write(hash.join("0/working"), "x").unwrap();
+        let _ = rig.try_open();
+        assert!(
+            hash.join("0/working").is_file(),
+            "{key}: emptied on a failed look"
+        );
+    }
+}
