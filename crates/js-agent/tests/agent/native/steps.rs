@@ -9,7 +9,7 @@ use js_agent::native::{Journal, NativeRuntime, STEPS};
 use js_agent_wire::refusal;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
-use super::{Failing, Rig, TERM, config, native, open_pool, pool_settings, settle};
+use super::{Failing, Rig, TERM, config, native, pool_settings, settle};
 use crate::support::Scratch;
 
 /// The leases the rig's journal holds live.
