@@ -5,9 +5,20 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use js_agent::bundle::{BundleHost, Fetch, HostXcode, Needs, Placer, Settings};
+use js_agent::bundle::{
+    BundleHost, DirFacts, Fetch, HostXcode, Needs, Placer, Settings, lease_users_reach,
+};
 use js_bundle::DottedVersion;
 use js_treestore::mac::{VolumeFacts, check_securelevel, check_volumes};
+
+/// A directory of root's with the permission bits `mode`.
+pub fn root_dir(mode: u32) -> DirFacts {
+    DirFacts {
+        is_dir: true,
+        uid: 0,
+        mode,
+    }
+}
 
 /// One volume's facts, as `statfs` gives them.
 pub fn apfs(fsid: i32) -> VolumeFacts {
@@ -43,6 +54,12 @@ pub struct State {
     pub open: Result<Option<Arc<Placer>>, String>,
     /// How many times the store was opened.
     pub opens: usize,
+    /// The directories of the machine as the store's way is checked against them (a path with
+    /// no entry cannot be looked at); `None` is a machine whose every directory is root's,
+    /// 0755.
+    pub dirs: Option<BTreeMap<PathBuf, DirFacts>>,
+    /// The stores the host was asked to prepare, in order.
+    pub prepared: Vec<PathBuf>,
 }
 
 impl Default for State {
@@ -65,6 +82,8 @@ impl Default for State {
             started: Vec::new(),
             open: Ok(None),
             opens: 0,
+            dirs: None,
+            prepared: Vec::new(),
         }
     }
 }
@@ -99,6 +118,20 @@ impl FakeHost {
 }
 
 impl BundleHost for FakeHost {
+    fn prepare_store(&self, store: &Path) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        state.prepared.push(store.to_path_buf());
+        let dirs = state.dirs.clone();
+        let look = |dir: &Path| match &dirs {
+            None => Ok(root_dir(0o755)),
+            Some(dirs) => dirs
+                .get(dir)
+                .copied()
+                .ok_or_else(|| std::io::Error::other("no such directory")),
+        };
+        lease_users_reach(store, 0, &look)
+    }
+
     fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         state

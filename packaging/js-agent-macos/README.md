@@ -110,12 +110,44 @@ hostkeeper lists the three labels in the manifest's `run` and enables them, and 
 them at every boot. A rollback restores the previous release if the agent does not
 come back. Nothing in the package does any of this at install time.
 
+The helper's pool users (`kbf-lease-pool-<n>`, hidden) are made once, by the helper's boot reset,
+and stay for good: the system refuses root the deletion of a local user record, of an existing
+home and of the per-user folders it placed (all can be emptied), so the helper never deletes one
+and resets a user in place when a lease ends. A first install on a Mac that already has them (an
+earlier install left them, even with `/var/db/js-mac-session` gone) adopts each that is the pool's
+own (its name, uid, hidden flag and home `/Users/kbf-lease-pool-<n>` match), resets it and
+makes the slot free; a record on a pool uid that is not the pool's is refused and the slot is
+left unmade, which the helper's log and `pool-status` name. Removing the package leaves the users.
+
+A job writes only in its run directory, `<home>/exec`: the profile grants nothing else in the
+account's home, and the job's `HOME` and `CFFIXED_USER_HOME` are `<home>/exec/.home` and its `TMPDIR`
+is `<home>/exec/.tmp`, so a tool that keeps preferences or caches writes there and the account's
+real home stays empty (no `~/Library` is made in it). The helper sets `HOME` to the account's home
+whatever the agent asks, so the agent runs the program as `/usr/bin/env HOME=<run home> <program>`
+inside the profile. This matters because macOS guards `~/Library/Preferences` of an account's real
+home even against root without Full Disk Access (which the helper does not have and is not given):
+a folder a job made there could not be removed by the reset. A reset keeps an empty folder the
+system refuses root the removal of (reported in the sweep's `kept`) and does not fail the slot over
+it; a folder that is refused and not empty still fails the reset, naming it. Such an empty
+`~/Library/Preferences` is what a job of an agent before this change left in a slot's home. Only a
+process with Full Disk Access (a person at a Terminal that was granted it, as an act on that Mac)
+could remove it, or nothing; the pool tolerates it as it is, and a job can no longer make one.
+
 ## Signing
 
-The workflow has two jobs. `build` runs in the beta stage of the release (`release.yml` calls
+The workflow has four jobs. `build` runs in the beta stage of the release (`release.yml` calls
 the workflow on a push to main) and by hand, never on a pull request; it builds the package
-unsigned, checks it and uploads it, and names no secret: no code of a branch can see a signing
-key. `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
+unsigned (the steps are the local action `.github/actions/js-agent-macos-pkg`), checks it and
+uploads it, and names no secret: no code of a branch can see a signing key. `build-update` runs
+beside it and builds a second package with the same action, of the next patch version
+(`.github/actions/js-agent-next-version`), as the artifact `js-agent-macos-pkg-update-unsigned`
+for a day: the first install updates the agent to it, and nothing signs it or releases it.
+`first-install` runs on a manual run alone, on any branch, and calls
+`js-agent-macos-first-install.yml` with the version typed: it installs the unsigned package
+`build` made on the runner, the way hostkeeper does, runs the update hook's prepare,
+cutover, verify and cleanup as root with launchd loading the jobs, rolls a config package over
+the agent and updates the agent to the package `build-update` made (the release runs it as its own
+beta job, `beta-macos-first-install`). `sign` runs only on main, in the environment `pkg-signing`. It takes the checked package
 from `build`, imports the installer certificate into a temporary keychain, finds the
 "Developer ID Installer" identity there by its SHA-1, signs with `productsign --timestamp`,
 checks the signed package again and writes `SHA256SUMS` for it. It does not notarize. When the
@@ -227,15 +259,22 @@ Known limits:
 
 ## Not done yet
 
-- The update hook's `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`, `print`) has
-  run against a fake of `launchctl` only, never against a real launchd: what `launchctl print`
-  prints of a daemon that crashed (its `last exit code`), the time a `bootstrap` takes to start
-  the daemon, and `bootout` waiting out the agent's `ExitTimeOut` are read from the manual and
-  from what the fake says, not from a Mac. `kickstart -k` runs a daemon whatever its `KeepAlive`
+- The update hook's unit tests run its `launchctl` form (`bootout`, `bootstrap`, `kickstart -k`,
+  `print`) against a fake of `launchctl`; the real launchd is reached by the first-install
+  test (`mac_first_install`, run by `js-agent-macos-first-install.yml` on a hosted runner), which
+  covers a first install (a failed attempt and the next order), a config package rolled over the
+  running agent (its `config-hook`, with its state directory under `/var`, a link) and an update
+  of the running agent to the next version, each to `Succeeded`. It covers no rollback: what
+  `launchctl print` prints of a daemon that crashed (its `last exit code`) and `bootout` waiting
+  out the agent's `ExitTimeOut` are read from the manual and from what the fake says. In that test
+  the config package carries a launcher at `/etc/js-agent/config-hook` that runs the installed
+  `js-agent config-hook`, because hostkeeper at the pinned revision runs a hook from the
+  package's own sealed tree only; the manifest above names the installed agent instead. `kickstart -k` runs a daemon whatever its `KeepAlive`
   condition says, so the port refuses it while `/etc/js-agent/flags` is absent.
 - The package is not notarized.
 - The pf job and the cutover's `js-mac-provision install --flags-file` have run against a fake
-  `pfctl` and a fake `launchctl` only, not on a Mac.
+  `pfctl` and a fake `launchctl` in their unit tests; the first-install run is the only run of
+  them on a Mac.
 - The config hook (`js-agent config-hook`) restarts the agent without loading the anchor first:
   a config package that changes the `--native-pf-*` flags of a running Mac leaves the new anchor
   to the pf job's next run (within 30 seconds), and an agent that starts before it refuses to
@@ -244,9 +283,12 @@ Known limits:
 - The package carries no host setup. The update hook's `prepare` makes it on the Mac, as
   root, from its params (`socket_group`, `scratch_root`): the helper's socket group
   `_jsagent`, the agent's state root `/var/db/js-agent/state` and a scratch root
-  `/var/db/js-agent/scratch` on an APFS volume of its own (`js-agent-scratch`), as the agent
-  requires. Nothing names the volume in `/etc/fstab`, which macOS lets only a process with Full
-  Disk Access write: the agent mounts the volume on its scratch root at each start
+  `/var/db/js-agent/scratch/runs` on an APFS volume of its own (`js-agent-scratch`), as the agent
+  requires. The volume is mounted on `/var/db/js-agent/scratch` (root's, 0711), the scratch root's
+  parent, so that the bundle store `/var/db/js-agent/scratch/bundles` (made by the agent at its
+  start, root's, 0711) lies beside the scratch root on the same volume and a lease user can walk
+  down to it. Nothing names the volume in `/etc/fstab`, which macOS lets only a process with Full
+  Disk Access write: the agent mounts the volume on that directory at each start
   (`diskutil mount nobrowse -mountPoint`), so a reboot needs nothing more. `/etc/js-agent/flags`
   comes from the group's config package. The setup and the agent's mount have run against
   fakes of `dscl`, `dseditgroup` and `diskutil` only.

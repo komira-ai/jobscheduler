@@ -83,8 +83,10 @@
 //! A first install has no agent to drain, no host the lease server knows and no unit to stop:
 //! it skips steps 2 to 4, writes no `stop_begun`, and is irreversible from `link_moved` on.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
+
+use js_update_hook::points_at;
 
 use crate::update_hook::{
     CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Manager, Outcome, POLL_SECS,
@@ -434,33 +436,18 @@ pub(super) fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitStat
         .map_err(|why| environment(reason, format!("cannot read the state of {unit}: {why}")))
 }
 
-/// Where a link at `link` that holds `target` points: an absolute target as it is, a relative
-/// one from the link's directory, with `.` and `..` resolved by name (nothing is looked up).
-pub(super) fn resolved(link: &Path, target: &Path) -> PathBuf {
-    let mut path = link.parent().unwrap_or(link).to_path_buf();
-    for part in target.components() {
-        match part {
-            Component::RootDir => path = PathBuf::from("/"),
-            Component::ParentDir => {
-                path.pop();
-            }
-            Component::CurDir | Component::Prefix(_) => {}
-            Component::Normal(name) => path.push(name),
-        }
-    }
-    path
-}
-
-/// Whether the link points at the staged release. A target the updater wrote relative to the
-/// link's directory (`current -> 1.4.0`) is read from there.
+/// Whether the link points at the staged release: where it points (a target the updater wrote
+/// relative to the link's directory, `current -> 1.4.0`, is read from there) and the staged
+/// release are one directory by their real paths, however each is spelt. hostkeeper names the
+/// staged release by its real path, so on macOS it is `/private/var/lib/hostkeeper/...` while
+/// the link is `/var/lib/hostkeeper/.../current`.
 pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
-    let target = env.ports.link.target(link).map_err(|why| {
+    points_at(env.ports.link, link, staged).map_err(|why| {
         environment(
             Reason::LinkFailed,
             format!("cannot read {}: {why}", link.display()),
         )
-    })?;
-    Ok(target.is_some_and(|target| resolved(link, &target) == staged))
+    })
 }
 
 /// Waits one poll and renews the cordon if it is ours.

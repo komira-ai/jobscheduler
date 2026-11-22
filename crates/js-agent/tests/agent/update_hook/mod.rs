@@ -5,6 +5,7 @@
 //! steps_drain.rs and steps_resume.rs over maintain_rig.rs). The hook record, its lock, the
 //! params and the rules the record is held to are pure of the steps and tested here on their own.
 
+mod alias_rig;
 mod args;
 mod config_hook;
 mod conformance;

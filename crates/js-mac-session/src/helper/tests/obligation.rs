@@ -180,6 +180,7 @@ fn an_unreadable_name_or_a_job_named_loginwindow_is_judged_safely() {
         state.gui.insert(uid);
         state.absent_print = Some(PrintAnswer {
             code: Some(125),
+            stdout: String::new(),
             stderr: "Could not print domain: 125: Domain does not support specified action\n"
                 .to_owned(),
         });
@@ -204,6 +205,7 @@ fn processes_and_domains_that_both_remain_are_named_together() {
         state.stubborn.insert(uid, usize::MAX);
         state.absent_print = Some(PrintAnswer {
             code: None,
+            stdout: String::new(),
             stderr: "killed\n".to_owned(),
         });
     }
@@ -247,6 +249,7 @@ fn a_domain_outcome_that_holds_at_the_last_attempt_is_a_success() {
                 "no answer" => state.print_script.extend(vec![
                     PrintAnswer {
                         code: None,
+                        stdout: String::new(),
                         stderr: String::new(),
                     };
                     KILL_ROUNDS - 1

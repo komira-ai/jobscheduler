@@ -15,8 +15,35 @@ use js_mac_session::disclaim::Program;
 use super::{NativeConfig, fail};
 use crate::lifecycle::RuntimeError;
 
+/// The run directory below a pool user's home: the working directory and the only place a
+/// job may write (the profile grants writes below it and nowhere else in the home).
+pub(super) const RUN_DIR: &str = "exec";
+
+/// The job's `HOME` (and `CFFIXED_USER_HOME`), below the run directory. A tool that keeps
+/// preferences or caches under `~/Library` makes them here, so the account's real home is
+/// never written and no `~/Library` is ever made in it. It is a directory of its own, not
+/// the run directory itself, so the working directory holds only what the job puts there.
+pub(super) const JOB_HOME_DIR: &str = ".home";
+
+/// The job's `TMPDIR`, below the run directory.
+pub(super) const JOB_TMP_DIR: &str = ".tmp";
+
+/// The directory of a bundle's writable tree clones, below the run directory.
+pub(super) const JOB_TREES_DIR: &str = ".trees";
+
+/// The program that sets the job's `HOME`: it runs inside the profile, as the first thing
+/// after `sandbox-exec`, and executes the job's program.
+const ENV_PROGRAM: &str = "/usr/bin/env";
+
+/// The run directory of the pool user whose home is `home`.
+pub(super) fn run_dir(home: &Path) -> PathBuf {
+    home.join(RUN_DIR)
+}
+
 /// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
-/// whose home is `home`: `sandbox-exec`, the profile, the program and its arguments.
+/// whose home is `home`: `sandbox-exec`, the profile, then `/usr/bin/env HOME=<job home>`
+/// and the program and its arguments. The profile grants writes to the run directory
+/// (`<home>/exec`) and not to `home`.
 ///
 /// No shell is in the command line. The helper sets the run's limits in the
 /// child before it executes `sandbox-exec`, and `sandbox-exec` is the first program of the
@@ -48,7 +75,8 @@ pub(super) fn argv_of(
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
 ) -> Result<Vec<String>, RuntimeError> {
-    let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
+    let run_path = run_dir(home);
+    let run = AbsPath::new(&run_path).map_err(|why| fail(&run_path.display(), &why))?;
     let inputs = read_only
         .iter()
         .map(|(what, path)| AbsPath::new(path).map_err(|why| fail(what, &why)))
@@ -76,9 +104,20 @@ pub(super) fn argv_of(
         .and_then(|policy| policy.narrowed(narrowing))
         .map_err(|why| fail(&"the policy", &why))?;
     let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
-    let program =
-        AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
+    // The helper sets `HOME` to the account's home whatever the request says (and that
+    // is left as it is: the helper's wire does not change), so the job's `HOME` is set
+    // here, inside the profile, by `env`, which executes the program. The value is a path
+    // of the run, which every user may read on a command line; no secret goes here.
+    AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
+    let program = AbsPath::new(Path::new(ENV_PROGRAM)).map_err(|why| fail(&ENV_PROGRAM, &why))?;
+    let job_home = run_path.join(JOB_HOME_DIR);
+    let args: Vec<OsString> = [
+        OsString::from(format!("HOME={}", job_home.display())),
+        OsString::from(&native.program),
+    ]
+    .into_iter()
+    .chain(native.args.iter().map(OsString::from))
+    .collect();
     let argv = profile.argv(&program, &args);
     Ok(argv
         .iter()
@@ -131,3 +170,6 @@ fn net_of(level: NetworkLevel) -> Net {
         NetworkLevel::On | NetworkLevel::Open => Net::On,
     }
 }
+
+#[cfg(test)]
+mod tests;

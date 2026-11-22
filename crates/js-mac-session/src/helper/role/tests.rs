@@ -211,6 +211,7 @@ fn the_role_session_is_ready_when_its_gui_domain_is_up_and_no_lease_holds_it() {
         .print_script
         .push_back(crate::helper::PrintAnswer {
             code: Some(125),
+            stdout: String::new(),
             stderr: "Could not print domain: 125: Domain does not support specified action\n"
                 .to_owned(),
         });

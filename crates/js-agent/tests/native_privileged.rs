@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clap::Parser as _;
-use js_agent::bundle::{Placer, Settings, SystemHost};
+use js_agent::bundle::{BundleHost, Fetch, HostXcode, Needs, Placer, Settings, SystemHost};
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent::{Cli, Platform};
@@ -574,6 +574,55 @@ fn mac_sealer() -> Arc<dyn Sealer> {
     panic!("these tests run on macOS only");
 }
 
+/// The machine's own bundle host, except that it does not check the directories above the store:
+/// the agent's start requires each to be root's and closed to writes (`prepare_store`), and the
+/// directory the operator names for these tests may lie below one that is not (a shared one
+/// that others can write). The volume and securelevel checks, and everything else, are the
+/// machine's own.
+struct Unwalked(SystemHost<js_agent::SystemCommands>);
+
+impl BundleHost for Unwalked {
+    fn prepare_store(&self, _store: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn check_start(&self, store: &Path, scratch: &Path) -> Result<(), String> {
+        self.0.check_start(store, scratch)
+    }
+    fn read_file(&self, path: &Path) -> Result<String, String> {
+        self.0.read_file(path)
+    }
+    fn held(&self, store: &Path) -> Result<Vec<String>, String> {
+        self.0.held(store)
+    }
+    fn resolve(&self, store: &Path, digest: &str) -> String {
+        self.0.resolve(store, digest)
+    }
+    fn needs(&self, store: &Path, digest: &str) -> Result<Needs, String> {
+        self.0.needs(store, digest)
+    }
+    fn os_version(&self) -> Result<js_bundle::DottedVersion, String> {
+        self.0.os_version()
+    }
+    fn xcodes(&self) -> Vec<HostXcode> {
+        self.0.xcodes()
+    }
+    fn used_bytes(&self, store: &Path) -> Result<u64, String> {
+        self.0.used_bytes(store)
+    }
+    fn free_bytes(&self, path: &Path) -> Result<u64, String> {
+        self.0.free_bytes(path)
+    }
+    fn can_run(&self) -> bool {
+        self.0.can_run()
+    }
+    fn fetch(&self, store: &Path, name: &str, digest: &str) -> Fetch {
+        self.0.fetch(store, name, digest)
+    }
+    fn open(&self, settings: &Settings) -> Result<Option<Arc<Placer>>, String> {
+        self.0.open(settings)
+    }
+}
+
 /// The store of a Mac agent below the fixture's directory, checked by the production
 /// start checks and opened with the Mac's sealer, reaching registries through `client`.
 /// The store directory is searchable by every user (mode 0711), as the lease users read
@@ -608,7 +657,7 @@ fn mac_store(fixture: &Fixture, client: js_oci::Client) -> Arc<Placer> {
         os: "macos".to_owned(),
         arch: "arm64".to_owned(),
     };
-    let settings = Settings::from_cli(&cli, &mac, &SystemHost::system())
+    let settings = Settings::from_cli(&cli, &mac, &Unwalked(SystemHost::system()))
         .unwrap()
         .unwrap();
     Placer::open(&settings, mac_sealer(), Arc::new(|| 1 << 40), client).unwrap()

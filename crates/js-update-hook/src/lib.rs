@@ -32,7 +32,7 @@ pub use outcome::Outcome;
 pub use plain::is_plain;
 pub use ports::{
     Clock, Gate, Link, NoGate, PortError, SYSTEMCTL, SystemClock, SystemLink, SystemUnits,
-    UnitState, Units, read_link, swap_link,
+    UnitState, Units, leads_to, points_at, read_link, real_path, resolved, same_dir, swap_link,
 };
 pub use report::{Class, MAX_REASON_LEN, ReasonToken, Report, is_reason_token};
 pub use runner::{CommandRunner, Streams};

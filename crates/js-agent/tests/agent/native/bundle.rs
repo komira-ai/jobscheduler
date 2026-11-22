@@ -99,7 +99,7 @@ fn text(path: &std::path::Path) -> String {
 /// Asserts what a start that runs `@bundle/tool` gives the helper: the file of the tool
 /// tree as the program, the arguments with the bundle's placeholders resolved, the
 /// environment of the bundle's rules (a tree that is only read is the store's own, one that
-/// is written is the run's copy) with the job's own and `TMPDIR`, and a `trees` directory in
+/// is written is the run's copy) with the job's own and `TMPDIR`, and a `.trees` directory in
 /// the home that is private to the user and holds the copy of the writable tree alone. It
 /// catches a program resolved to the wrong file, a placeholder that reaches the program
 /// unresolved, a tool that could write into the store, and a copy anyone else could read.
@@ -135,21 +135,21 @@ fn a_start_runs_the_entrypoint_with_the_bundles_arguments_and_environment() {
     );
     for want in [
         ("TOOLROOT", text(&tool)),
-        ("WORKROOT", text(&home.join("trees/work"))),
-        ("TMPDIR", text(&home.join("tmp"))),
+        ("WORKROOT", text(&home.join("exec/.trees/work"))),
+        ("TMPDIR", text(&home.join("exec/.tmp"))),
         ("X", "1".to_owned()),
     ] {
         let pair = (want.0.to_owned(), want.1.clone());
         assert!(run.env.contains(&pair), "{want:?} not in {:?}", run.env);
     }
-    let mode = fs::metadata(home.join("trees"))
+    let mode = fs::metadata(home.join("exec/.trees"))
         .unwrap()
         .permissions()
         .mode();
     assert_eq!(mode & 0o7777, 0o700);
-    let copied = fs::read_to_string(home.join("trees/work/run.sh")).unwrap();
+    let copied = fs::read_to_string(home.join("exec/.trees/work/run.sh")).unwrap();
     assert_eq!(copied, "#!/bin/sh\necho work\n");
-    assert!(!home.join("trees/tool").exists());
+    assert!(!home.join("exec/.trees/tool").exists());
 }
 
 /// Asserts that an entrypoint in the tree the bundle writes to runs from the run's copy, not
@@ -162,7 +162,7 @@ fn an_entrypoint_of_a_writable_tree_runs_from_the_runs_copy() {
     s.rig.rt.create_and_start(&spec).unwrap();
     let home = fs::canonicalize(s.rig.fake.home_of("7.0")).unwrap();
     let tail = parse(&s.rig.fake.run_of("7.0").argv).tail;
-    assert_eq!(tail, [text(&home.join("trees/work/run.sh"))]);
+    assert_eq!(tail, [text(&home.join("exec/.trees/work/run.sh"))]);
 }
 
 /// Asserts that a program that is not the bundle's runs as it would without the bundle,

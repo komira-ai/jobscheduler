@@ -6,7 +6,7 @@
 //! |------------------|---------------------------------------------------------------------|
 //! | `show`           | `print system/<label>`: its `state`, `last exit code` and `last terminating signal` |
 //! | `stop_no_block`  | `bootout system/<label>`, when `print` finds the service loaded      |
-//! | `start`          | `bootstrap system <plist>` when nothing is loaded; `kickstart -k` when loaded and not running; then reads `print` until the service has begun |
+//! | `start`          | `bootstrap system <plist>` when nothing is loaded; nothing when it is `running`, `spawning` or `xpcproxy`; `kickstart -k` otherwise; then reads `print` until the service has begun |
 //! | `is_active`      | `print system/<label>`: loaded and `state = running`                |
 //!
 //! # What `show` says
@@ -24,7 +24,8 @@
 //! | `not running`, `exited`, `waiting`       | exit 0, never, or not printed    | `inactive`, `dead`        |
 //! | `spawn scheduled`                        | exit 0                           | `activating`, `start`     |
 //! | `spawn scheduled`                        | anything else                    | `activating`, `auto-restart` |
-//! | `spawning`                               | (any)                            | `activating`, `start`     |
+//! | `spawning`, `xpcproxy`                   | (any)                            | `activating`, `start`     |
+//! | `SIGTERMed`                              | (any)                            | `deactivating`, `stop-sigterm` |
 //! | not loaded (never loaded, or booted out) | -                                | `inactive`, `dead`        |
 //!
 //! So a Mac agent that crashes ends `failed` (the release's fault) as it does on Linux, and the
@@ -48,7 +49,10 @@
 //! `systemctl stop --no-block` the call blocks for as long as the agent takes to exit. A runner
 //! that bounds its helpers (js-agent's kills one after 10 s) would cut the stop short: the stop
 //! is given a runner of its own ([`LaunchUnits::with_stop_runner`]), whose limit the caller
-//! builds from the daemon's exit timeout so that it outlasts it.
+//! builds from the daemon's exit timeout so that it outlasts it. `kickstart -k` of a service
+//! launchd has scheduled (`spawn scheduled`: after a bootstrap of a job that ran within its
+//! throttle, 30 s for the package's daemons) waits for the throttle to pass, so it runs through
+//! that runner too: a Mac's update showed the 10 s bound cut a kickstart of the session helper.
 //!
 //! `bootstrap` and `kickstart` return before the program has begun: `launchctl print` can say
 //! "not running" for a moment after either, where systemd says `activating`. `start` therefore
@@ -96,7 +100,8 @@ const SETTLE_PAUSE: Duration = Duration::from_millis(500);
 /// [`Units`] over `launchctl`.
 pub struct LaunchUnits<'a> {
     runner: &'a dyn CommandRunner,
-    /// Runs `bootout`, which waits for the agent to exit; `runner` when none was given.
+    /// Runs `bootout`, which waits for the agent to exit, and `kickstart`, which waits out
+    /// launchd's throttle; `runner` when none was given.
     stopper: Option<&'a dyn CommandRunner>,
     /// Paces the reads that follow a start.
     clock: &'a dyn Clock,
@@ -116,8 +121,8 @@ impl<'a> LaunchUnits<'a> {
         }
     }
 
-    /// Runs `bootout` through `stopper` instead of the runner: it must allow the daemon's whole
-    /// `ExitTimeOut`.
+    /// Runs `bootout` and `kickstart` through `stopper` instead of the runner: it must allow the
+    /// daemon's whole `ExitTimeOut`, which is longer than launchd's throttle.
     #[must_use]
     pub fn with_stop_runner(mut self, stopper: &'a dyn CommandRunner) -> Self {
         self.stopper = Some(stopper);
@@ -232,6 +237,11 @@ enum Ended {
     Unknown,
 }
 
+/// Whether launchd runs the service or has begun to: `running`, `spawning` or `xpcproxy`.
+fn is_begun(state: &str) -> bool {
+    matches!(state, "running" | "spawning" | "xpcproxy")
+}
+
 fn ended(text: &str) -> Ended {
     let code = property(text, "last exit code")
         .and_then(|code| code.split(':').next())
@@ -251,7 +261,12 @@ fn unit_state(state: &str, ended: Ended) -> Result<UnitState, PortError> {
         ("not running" | "waiting" | "exited", Ended::Badly) => ("failed", "failed"),
         ("not running" | "waiting" | "exited", _) => ("inactive", "dead"),
         // A start that is coming after a clean exit is only a start.
-        ("spawn scheduled", Ended::Cleanly) | ("spawning", _) => ("activating", "start"),
+        // `xpcproxy`: launchd has forked the job and its exec is under way.
+        ("spawn scheduled", Ended::Cleanly) | ("spawning" | "xpcproxy", _) => {
+            ("activating", "start")
+        }
+        // launchd sent the job SIGTERM (a `bootout`, or a stop) and waits for it to exit.
+        ("SIGTERMed", _) => ("deactivating", "stop-sigterm"),
         // Between two starts of a `KeepAlive` daemon that died, the throttle running.
         ("spawn scheduled", _) => ("activating", "auto-restart"),
         (other, _) => {
@@ -335,10 +350,14 @@ impl Units for LaunchUnits<'_> {
                 let plist = format!("{LAUNCH_DAEMONS_DIR}/{unit}.plist");
                 (self.launchctl(&["bootstrap", "system", &plist]), 0)
             }
-            Some(text) if printed_state(&text)? == "running" => return Ok(()),
+            // Running, or launchd has begun its start (a bootstrap of a daemon whose launch
+            // condition holds spawns it at once): a `kickstart -k` now would kill the instance
+            // launchd just started, and launchd would then hold the next start for its throttle.
+            Some(text) if is_begun(printed_state(&text)?) => return Ok(()),
             Some(text) => {
                 self.allow_kick(unit)?;
-                let kick = self.launchctl(&["kickstart", "-k", &format!("system/{unit}")]);
+                let target = format!("system/{unit}");
+                let kick = self.stopper().run(LAUNCHCTL, &["kickstart", "-k", &target]);
                 (kick, runs_of(&text))
             }
         };

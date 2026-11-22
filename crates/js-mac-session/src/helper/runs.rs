@@ -6,8 +6,9 @@
 //! The table holds, for each lease, the last process `run` started for it: its pid (which
 //! leads a process group of its own, so it is the group's id), how it ended once it has,
 //! and its deadline, if it has one. It lives in the helper's memory: a helper that restarts
-//! starts with an empty table, and its boot reset deletes every lease user, so a run of an
-//! earlier helper is never found again. An entry is dropped when its lease's user is deleted.
+//! starts with an empty table, and its boot reset ends every lease and resets its pool user
+//! (killing what runs as it), so a run of an earlier helper is never found again. An entry is
+//! dropped when its lease ends.
 //!
 //! - `watch <lease>` answers as `run` does: `started` with the pid, then `exited` when the
 //!   process ends (at once when it has ended already). A lease with no run in the table is
@@ -178,7 +179,7 @@ impl Helper {
         let _ = parse_lease(lease).map(|lease| self.runs.started(lease, pid, Some(deadline)));
     }
 
-    /// Drops the run of `lease` from the table, once its user is deleted.
+    /// Drops the run of `lease` from the table, once its lease has ended.
     pub(super) fn forget_run(&self, lease: &str) {
         // `user-delete` parsed the lease before it deleted the user.
         let _ = parse_lease(lease).map(|lease| self.runs.forget(lease));

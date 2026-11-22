@@ -366,6 +366,21 @@ fn verify_with_the_link_not_on_the_staged_release_refuses() {
     assert_eq!(spy.log(), Vec::<String>::new());
 }
 
+/// Verify after a cutover whose release link is reached through a symlinked directory
+/// (`/var` against `/private/var`): the link and the staged release are two names of one
+/// directory, so verify finds the link on the staged release and succeeds.
+///
+/// Catches a comparison by name, which would refuse the verify with `state_invalid` on a Mac.
+#[test]
+fn verify_with_the_link_on_the_staged_release_through_a_symlinked_directory_succeeds() {
+    let rig = cut_over("hook-verify-link-aliased", true);
+    rig.link_through_an_alias("1.4.0");
+    let spy = Spy::new(&rig);
+    let done = spy.verify(&rig);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(rig.record().unwrap().verify_ok);
+}
+
 #[test]
 fn a_taint_during_verify_halts() {
     let rig = cut_over("hook-verify-taint", true);

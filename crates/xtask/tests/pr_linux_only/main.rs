@@ -5,7 +5,7 @@
 //! of those hosts; every other platform (macOS, Linux arm64) is the beta stage of the release
 //! pipeline (`release.yml` on a push to main, which calls `beta.yml` and the other workflows
 //! the stage runs). So no job a pull request starts may name another runner. On a push to main
-//! the stage holds back the macOS archives (`promote-macos` needs all three jobs) and nothing of
+//! the stage holds back the macOS archives (`promote-macos` needs all four jobs) and nothing of
 //! the deploy path: only `pkg-upload` (the package job, passed or not) and the two reports
 //! (`release-red`, `release-green`) need a beta job besides.
 //!
@@ -94,6 +94,7 @@ fn every_job_a_pull_request_starts_runs_on_linux_x86_64() {
             !job.starts_with("beta.yml/")
                 && !job.starts_with("macos-probe.yml/")
                 && !job.starts_with("js-agent-macos-pkg.yml/")
+                && !job.starts_with("js-agent-macos-first-install.yml/")
                 && !job.contains("beta-macos")
                 && !job.contains("artifacts.yml/build"),
             "{job}"
@@ -147,6 +148,41 @@ fn a_beta_job_without_its_push_condition_is_refused() {
     );
 }
 
+/// The first-install call without its push condition would start a macOS job on a pull
+/// request's dry run of release.yml, and the lint names the job in the called workflow.
+#[test]
+fn the_first_install_job_without_its_push_condition_is_refused() {
+    let gate = "  beta-macos-first-install:\n    needs: [plan, beta-macos-pkg]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}\n";
+    let ungated = "  beta-macos-first-install:\n    needs: [plan, beta-macos-pkg]\n";
+    let (jobs, problems) = lint(&changed("release.yml", gate, ungated));
+    let job =
+        "release.yml/beta-macos-first-install -> js-agent-macos-first-install.yml/first-install";
+    assert!(jobs.iter().any(|j| j == job), "{jobs:?}");
+    assert_eq!(
+        problems,
+        [format!(
+            "{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)"
+        )]
+    );
+}
+
+/// The first-install workflow with a pull request trigger is reported as a macOS job.
+#[test]
+fn the_first_install_workflow_started_by_a_pull_request_is_refused() {
+    let workflows = changed(
+        "js-agent-macos-first-install.yml",
+        "on:\n  workflow_call:\n",
+        "on:\n  pull_request:\n  workflow_call:\n",
+    );
+    let (_, problems) = lint(&workflows);
+    assert_eq!(
+        problems,
+        [
+            "js-agent-macos-first-install.yml/first-install: runs on macos-15, not Linux x86_64 (ubuntu-*)"
+        ]
+    );
+}
+
 #[test]
 fn the_release_dry_run_builds_nothing_on_arm_or_macos() {
     // artifacts.yml's build matrix names arm64 and macOS runners; only the `if:` of the
@@ -164,7 +200,12 @@ fn the_release_dry_run_builds_nothing_on_arm_or_macos() {
 
 #[test]
 fn the_beta_stage_workflows_are_called_not_started_by_a_pull_request() {
-    for file in ["beta.yml", "js-agent-macos-pkg.yml", "macos-probe.yml"] {
+    for file in [
+        "beta.yml",
+        "js-agent-macos-pkg.yml",
+        "js-agent-macos-first-install.yml",
+        "macos-probe.yml",
+    ] {
         let w = Workflow::parse(file, &read(file));
         assert!(!w.on_pull_request(), "{file}");
         assert!(
@@ -186,8 +227,9 @@ fn the_beta_stage_workflows_are_called_not_started_by_a_pull_request() {
     );
 }
 
-/// The jobs of release.yml that need a beta job but are not one of the four that may, and the
-/// jobs of the deploy path that need one; what `promote-macos` needs, what `pkg-upload` needs
+/// The jobs of release.yml that need a beta job but are not one of the five that may (the
+/// first install is a beta job that needs `beta-macos-pkg`), and the jobs of the deploy path that
+/// need one; what `promote-macos` needs, what `pkg-upload` needs
 /// and that `pkg-upload` runs even when its package job failed.
 fn beta_need_problems(text: &str) -> Vec<String> {
     let w = Workflow::parse("release.yml", text);
@@ -218,6 +260,7 @@ fn beta_need_problems(text: &str) -> Vec<String> {
     }
     if waiting
         != [
+            "beta-macos-first-install",
             "promote-macos",
             "pkg-upload",
             "release-red",
@@ -248,14 +291,20 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
     for (name, file) in [
         ("beta-macos", "beta.yml"),
         ("beta-macos-pkg", "js-agent-macos-pkg.yml"),
+        (
+            "beta-macos-first-install",
+            "js-agent-macos-first-install.yml",
+        ),
         ("beta-macos-probe", "macos-probe.yml"),
     ] {
         let lines = job(name);
-        assert_eq!(
-            block(lines, 4, "needs").expect("needs"),
-            ["[plan, artifacts]"],
-            "{name}"
-        );
+        // The first install installs the package `beta-macos-pkg` built, so it waits for it.
+        let needs = if name == "beta-macos-first-install" {
+            "[plan, beta-macos-pkg]"
+        } else {
+            "[plan, artifacts]"
+        };
+        assert_eq!(block(lines, 4, "needs").expect("needs"), [needs], "{name}");
         assert_eq!(
             block(lines, 4, "uses").expect("uses"),
             [format!("./.github/workflows/{file}")],
@@ -278,7 +327,7 @@ fn the_beta_stage_runs_after_the_build_and_holds_back_only_the_macos_archives() 
     let promote = job("promote-macos");
     assert_eq!(
         block(promote, 4, "needs").expect("needs"),
-        ["[plan, publish, beta-macos, beta-macos-pkg, beta-macos-probe]"]
+        ["[plan, publish, beta-macos, beta-macos-pkg, beta-macos-first-install, beta-macos-probe]"]
     );
     // `publish` leaves the macOS archives to it.
     assert!(text.contains(
@@ -365,7 +414,7 @@ fn the_package_workflow_started_by_a_pull_request_is_refused() {
         "on:\n  pull_request:\n  workflow_call:\n",
     );
     let (_, problems) = lint(&workflows);
-    for job in ["build", "sign"] {
+    for job in ["build", "build-update", "sign"] {
         let want =
             format!("js-agent-macos-pkg.yml/{job}: runs on macos-15, not Linux x86_64 (ubuntu-*)");
         assert!(problems.contains(&want), "{problems:?}");
