@@ -110,7 +110,7 @@ q  65537 0x0000002a --rw-r--r--     root    wheel
 
 Shared Memory:
 T     ID     KEY        MODE       OWNER    GROUP
-m  131072 0x89abcdef --rw-------  kbf-lease-3-4      700
+m  131072 0x89abcdef --rw-------  kbf-acct-3      700
 m  131073 0x00000000 --rw-rw-rw-    alice    staff
 
 Semaphores:
@@ -158,7 +158,7 @@ s  196609 0x0000beef --ra-ra-ra-     root    wheel
     #[test]
     fn objects_are_owned_by_uid_number_or_name() {
         let objects = parse_ipcs(IPCS);
-        let mine = ipc_owned_by(&objects, 700, &["kbf-lease-3-4"]);
+        let mine = ipc_owned_by(&objects, 700, &["kbf-acct-3"]);
         let ids: Vec<u64> = mine.iter().map(|object| object.id).collect();
         assert_eq!(ids, [65536, 131_072, 196_608]);
         let by_number = ipc_owned_by(&objects, 700, &[]);

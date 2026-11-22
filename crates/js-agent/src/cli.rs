@@ -332,8 +332,8 @@ pub struct Cli {
     /// offers (`disk-gib`) is reduced by the part of the budget the store has not used yet.
     /// The hello reports `bundle-root` (this path) and `bundle` (the manifest digests the
     /// store holds, that the deny and allow lists let through) only when the agent can run a
-    /// bundle: it runs native jobs (`--native-helper-socket`) and the store opened; without
-    /// the helper it reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
+    /// bundle: it runs native jobs (`--native-accounts`) and the store opened; without
+    /// it the agent reports neither. A job that pins a bundle runs `@bundle/<entrypoint>`
     /// from the store's trees, under the same profile as any native job. Until a server says it
     /// takes a longer value, `bundle` holds one digest. Roll out servers first, then agents,
     /// then this flag, then placement by `bundle`.
@@ -429,7 +429,7 @@ static REMOVED: [(&str, &str); 4] = [
         "runtime",
         "--runtime: removed. The runtime is the build's: a Linux build runs crun (or, with \
          --allow-container-engine and --container-bin, the container engine), a macOS build the \
-         native runtime of --native-helper-socket; --no-jobs starts an agent that runs no job",
+         native runtime of --native-accounts; --no-jobs starts an agent that runs no job",
     ),
 ];
 

@@ -1,15 +1,15 @@
 # Builds the js-agent two-run isolation test binary (`--test native_isolation`) for
 # aarch64-apple-darwin and uploads it, WITHOUT running it. The test
-# (crates/js-agent/tests/native_isolation/, the Mac part `#[ignore]`) serves the real
-# `js-mac-session` helper from the test process with a range of one uid, has run A leave
-# things behind as that user (files, a process, a keychain item, a defaults key, a launchd
+# (crates/js-agent/tests/native_isolation/, the Mac part `#[ignore]`) opens the agent's account
+# pool with one slot and runs through the agent's supervisor (the js-agent binary shipped beside
+# the test binary), has run A leave things behind as its account (files, a process, a keychain item, a defaults key, a launchd
 # agent, System V and POSIX shared memory (which the profile refuses), semaphores, a message queue), ends the run as the
-# agent does, and has run B on the same uid look for them. It needs root, makes a user and
+# agent does (its account retired), and has run B, a fresh account on the same uid, look for them. It needs root, makes a user and
 # changes the machine: an operator runs it once on a provisioned Mac that has no other use.
-# Download the artifact, check SHA256SUMS, copy the binary over, chmod +x it (the artifact zip
-# drops the mode) and, as root, run
+# Download the artifact, check SHA256SUMS, copy both binaries into one directory, chmod +x them
+# (the artifact zip drops the mode) and, as root, run
 #   JS_NATIVE_ISO_ROOT=<a new root-owned 0755 directory every user can search down to> \
-#     JS_NATIVE_ISO_UID=<a uid from 500 to 60000 nothing uses> \
+#     JS_NATIVE_ISO_UID=<a uid from 501 to 60000, outside 600-799, nothing uses> \
 #     ./native_isolation --ignored --test-threads=1 --nocapture
 # (libtest flags come first.)
 #
@@ -67,8 +67,11 @@ jobs:
               exit 1
               ;;
           esac
-          (cd dist && shasum -a 256 native_isolation > SHA256SUMS)
-          sha="$(cut -d ' ' -f 1 dist/SHA256SUMS)"
+          # The supervisor the test starts: the js-agent binary cargo built for the test, shipped
+          # beside it (the test takes the js-agent next to itself).
+          cp "target/$TARGET/debug/js-agent" dist/js-agent
+          (cd dist && shasum -a 256 native_isolation js-agent > SHA256SUMS)
+          sha="$(head -n 1 dist/SHA256SUMS | cut -d ' ' -f 1)"
           {
             echo "### js-agent native isolation test binary"
             echo
@@ -83,6 +86,7 @@ jobs:
           name: js-agent-native-isolation-test-${{ env.SHORT }}
           path: |
             dist/native_isolation
+            dist/js-agent
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7

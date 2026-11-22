@@ -16,7 +16,7 @@ What keeps a job from using the rest of the grant is the slot user it runs as (U
 
 The table below says which start is which.
 
-Today the root helper `js-mac-session` still starts every native job (`crates/js-mac-session/src/spawn.rs`), disclaimed, and the helper holds no grant (the agent holds it), so a job it starts holds none. The supervisor (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`) is the code that keeps the responsibility: the agent's launcher (`launch.rs`) starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job` (`run.rs`). Nothing calls the launcher yet: until the native runtime does, no job is started that way.
+The native runtime (`crates/js-agent/src/native`) starts every native job through the supervisor (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), which is the code that keeps the responsibility: the agent's launcher (`launch.rs`) starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job` (`run.rs`). The root helper `js-mac-session` starts no native job of the agent's any more.
 
 ### Which program keeps its responsibility
 

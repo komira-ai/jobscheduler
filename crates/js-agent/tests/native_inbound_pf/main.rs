@@ -9,14 +9,16 @@
 //! test measures it. A pass would allow a later change to accept declared ports on a Mac; this
 //! change does not, and the refusal stands until the test passes.
 //!
-//! What it does, with the real `js-mac-session` helper served from this process on a range of
-//! ONE uid (as `native_isolation` does):
+//! What it does, with the agent's real account pool over `MacHost` (slots of ONE uid, its
+//! state and homes under the test's root directory) and the real supervisor (the `js-agent`
+//! binary cargo builds beside this test answers `__supervise-native`):
 //!
 //! 1. A native run through the agent's own `NativeRuntime` (network cap `On`, the run's level
 //!    `On`) executes this binary in the role `listen`: it prints its `getuid()`, binds a TCP
 //!    listener on 0.0.0.0 port 0, prints the port, and answers every connection with one byte.
 //!    The test reads those lines from the run's stdout log with a bounded count of polls and
-//!    checks that the uid is the configured one.
+//!    checks that the uid is the one slot's: the run's account, `kbf-acct-<n>`, is made fresh
+//!    for the run and deleted at its removal.
 //! 2. The test installs the real anchor for that one uid with no endpoints, under its own
 //!    test anchor and its own state directory, through `Provisioner` and `SystemPfctl`. The
 //!    runtime is opened ungated: the test installs and removes the anchor itself, so the
@@ -39,13 +41,13 @@
 //!
 //! Nothing asserts on elapsed time: the counter decides a block.
 //!
-//! No pull request job runs it (rule B9). It needs root, a Mac and a free uid, makes a user,
+//! No pull request job runs it (rule B9). It needs root, a Mac and a free uid, makes an account,
 //! loads pf rules under its own test anchor and removes them: never run it on a production
 //! host. The manual workflow `js-agent-native-inbound-pf-test` builds the binary for Apple
 //! silicon and uploads it without running it. Run it as root on a provisioned Mac with no
 //! other use, with `JS_NATIVE_INBOUND_ROOT` naming a new directory, owned by root and mode 0755,
-//! that every user can search down to, and `JS_NATIVE_INBOUND_UID` naming a uid in 500 to
-//! 60000 that nothing uses (test-binary parameters for the operator), with `--ignored
+//! that every user can search down to, and `JS_NATIVE_INBOUND_UID` naming the one slot's uid, in 500 to
+//! 60000, that nothing uses (test-binary parameters for the operator), with `--ignored
 //! --test-threads=1 --nocapture`.
 //!
 //! One difference from production: the runtime here has the directory of this test binary as
@@ -99,7 +101,7 @@ fn listen() {
 /// connect. It fails when the connection gets through (the anchor does not filter inbound
 /// traffic) and when the cases cannot tell (a control failed or the block is unproven).
 #[test]
-#[ignore = "needs root and a Mac; creates a user and loads pf rules under its own anchor"]
+#[ignore = "needs root and a Mac; creates an account and loads pf rules under its own anchor"]
 fn inbound_by_uid() {
     let verdict = run_on_a_mac();
     assert_eq!(verdict, Verdict::Filtered, "{}", final_line(&verdict));

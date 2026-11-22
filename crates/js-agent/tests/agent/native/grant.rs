@@ -1,20 +1,106 @@
 //! Full Disk Access on the native path: the question the agent answers for itself at start,
 //! the capability that reports the answer, and the refusal of every native job unless the
-//! agent holds the grant. The helper is the fake that speaks the real protocol; the agent
-//! never asks it about the grant.
+//! agent holds the grant. The agent asks the operating system for it itself; without it the
+//! runtime has no account pool, and the lifecycle over a runtime of the test's pool refuses
+//! every native start before an account, a journal line or a scratch directory is made.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::{fs, io};
 
-use js_agent::lifecycle::Runtime as _;
+use js_agent::bundle::{Admission, Placer};
+use js_agent::lifecycle::{Event, Lifecycle, NoChecks, Runtime as _};
 use js_agent::native::grant;
-use js_agent_wire::{Hello, Outcome, Phase, ProtocolRange, WireShape, refusal};
+use js_agent_wire::{Command, Hello, JobSpec, Outcome, Phase, ProtocolRange, WireShape, refusal};
 use js_caps::FULL_DISK_ACCESS;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
-use super::lifecycle::{Native, job};
-use super::{Rig, native};
+use super::{FakeAccounts, FakeLauncher, Rig, native};
+use crate::lifecycle::fake::ManualClock;
+use crate::lifecycle::{config_in, names, reply};
 use crate::support::Scratch;
+
+/// A lifecycle over the native runtime of a [`Rig`]: its pool is on the rig's fake host and
+/// its supervisor is the rig's fake launcher.
+pub(super) struct Over {
+    pub(super) life: Lifecycle,
+    pub(super) launcher: Arc<FakeLauncher>,
+    pub(super) accounts: Arc<FakeAccounts>,
+    pub(super) dir: Scratch,
+}
+
+/// The most steps a test takes for a run to end.
+const STEPS: u32 = 50_000_000;
+
+impl Over {
+    /// A lifecycle over `rig`'s runtime, which holds the bundle store `bundles` names and
+    /// judges starts that pin a bundle by the admission it names.
+    pub(super) fn of(rig: Rig, bundles: Option<(Arc<Placer>, Admission)>) -> Self {
+        let Rig {
+            accounts,
+            launcher,
+            mut rt,
+            dir,
+            ..
+        } = rig;
+        let mut config = config_in(&dir, false);
+        if let Some((store, admission)) = bundles {
+            config.bundle = Some(admission);
+            rt = rt.with_bundles(store);
+        }
+        let (life, _) = Lifecycle::adopt(
+            config,
+            Box::new(rt),
+            Box::new(NoChecks),
+            Box::new(ManualClock::default()),
+        )
+        .unwrap();
+        Self {
+            life,
+            launcher,
+            accounts,
+            dir,
+        }
+    }
+
+    /// Applies a start of `spec` and returns the names of the events.
+    pub(super) fn start(&mut self, spec: JobSpec) -> Vec<String> {
+        names(
+            &self
+                .life
+                .apply(&reply(vec![Command::Start(Box::new(spec))])),
+        )
+    }
+
+    /// Steps the lifecycle until `done`, and returns the events of the steps.
+    pub(super) fn until(&mut self, done: impl Fn(&Lifecycle) -> bool) -> Vec<Event> {
+        let mut events = Vec::new();
+        for _ in 0..STEPS {
+            events.extend(self.life.step());
+            if done(&self.life) {
+                return events;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the lifecycle never got there: the run never ended");
+    }
+
+    /// The scratch directory of the run `run_id`.
+    pub(super) fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
+        fs::canonicalize(self.dir.path("scratch"))
+            .unwrap()
+            .join(run_id)
+    }
+}
+
+/// A native start of `program`: no image, one CPU, a minute.
+pub(super) fn job(run_id: &str, program: &str) -> JobSpec {
+    let mut spec = crate::lifecycle::job(run_id);
+    spec.image = String::new();
+    spec.args = Vec::new();
+    spec.native = Some(native(program, &[]));
+    spec
+}
 
 /// A hello of a Mac host with no capabilities but its os.
 fn hello() -> Hello {
@@ -158,22 +244,25 @@ fn a_runtime_without_the_grant_refuses_every_native_body_first() {
 
 /// Asserts, through the lifecycle over the real runtime, that a native job start on a host
 /// whose state is `not-granted` or `undetermined` is refused `no-full-disk-access`, answered
-/// `failed_to_start` with the code as its detail, and makes nothing: the helper hears only
-/// its boot reset (no `user-create`), no lease journal is written, no scratch directory is
-/// made and the booking is intact; and that the same start on a granted host runs and does
-/// write the journal. Catches a refused job that still costs a user, and a Mac that runs jobs
-/// without the grant.
+/// `failed_to_start` with the code as its detail, and makes nothing: no account is lent (the
+/// pool's records are as they were), the supervisor is asked for nothing, no lease journal is
+/// written, no scratch directory is made and the booking is intact; and that the same start
+/// on a granted host runs and does write the journal. Catches a refused job that still costs
+/// an account, and a Mac that runs jobs without the grant.
 #[test]
 fn a_native_job_without_the_grant_is_refused_and_makes_nothing() {
     for state in [FullDiskAccess::NotGranted, FullDiskAccess::Undetermined] {
-        let mut h = Native::built("grant-refused", None, |config| {
+        let rig = Rig::with("grant-refused", |config| {
             config.full_disk_access = state;
         });
+        let before = rig.accounts.records();
+        let mut h = Over::of(rig, None);
         assert_eq!(
             h.start(job("r1", "/bin/echo")),
             [format!("refused r1 {}", refusal::NO_FULL_DISK_ACCESS)]
         );
-        assert_eq!(h.fake.verbs(), ["boot-reset"]);
+        assert!(h.launcher.launched().is_empty());
+        assert_eq!(h.accounts.records(), before);
         assert!(!h.dir.path("native-leases").exists());
         assert!(!h.scratch_of("r1").exists());
         assert_eq!(h.life.free().cpu_millis, 4000);
@@ -181,8 +270,9 @@ fn a_native_job_without_the_grant_is_refused_and_makes_nothing() {
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some(refusal::NO_FULL_DISK_ACCESS));
     }
-    let mut granted = Native::new("grant-granted");
+    let mut granted = Over::of(Rig::new("grant-granted"), None);
     assert_eq!(granted.start(job("r1", "/bin/echo")), ["started r1"]);
     assert!(granted.dir.path("native-leases").exists());
-    assert!(granted.fake.verbs().contains(&"user-create 7.0".to_owned()));
+    assert_eq!(granted.launcher.launched().len(), 1);
+    assert_eq!(granted.launcher.last().program, "/bin/echo");
 }

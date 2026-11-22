@@ -3,8 +3,8 @@
 //! The runtime makes the job's three standard streams as files in the run's scratch
 //! directory, which only the agent can enter: an empty one for standard input and one each for
 //! standard output and error. The job writes the two log files itself, through the
-//! descriptors the helper gives it, so they hold the whole of each stream (up to the run's
-//! file-size limit, `--native-max-file-mib`) whether or not an agent runs.
+//! descriptors the agent hands its supervisor, so they hold the whole of each stream (up to
+//! the run's file-size limit, `--native-max-file-mib`).
 //!
 //! **The tail** a result carries is the end of each file ([`tail`]): the last
 //! [`MAX_LOG_STREAM_LEN`] bytes, the same text a capture's ring of the stream's last bytes
@@ -18,16 +18,16 @@
 //! for a longer stream, a gap marker for the rest and no final. The end ([`end`]) is told at
 //! the first poll that reads the run's exit, before its result is reported, with each file's
 //! length as the stream's total; the result never waits for the upload. A run whose exit was
-//! never read (the helper's connection ended without one, or it was removed before) is told
+//! never read (its supervisor ended with no word of it, or it was removed before) is told
 //! its end at its removal, after the kill ([`close`]), when its files are final. The progress record
 //! is kept in the scratch directory, and the runtime stops it before the directory is removed.
 //!
-//! **After a restart** the run is adopted (`native/adopt.rs`) with its scratch directory, and
-//! the helper kept its process and the job kept writing its files. A run whose directory holds
-//! a progress record has its upload go on from it ([`adopted`]): a chunk in flight is put again
-//! at the same key, and what the job wrote while no agent ran goes out as ordinary chunks, so
-//! nothing is skipped or put twice. Its end is told as any run's. A directory without a record,
-//! or with one that is not taken, uploads nothing more.
+//! **After a restart** a run of the earlier process is listed ended (`native/adopt.rs`) with
+//! its scratch directory; its account was retired, so its files are final. A run whose
+//! directory holds a progress record has its upload go on from it ([`adopted`]): a chunk in
+//! flight is put again at the same key, and what the job wrote after it goes out as ordinary
+//! chunks, so nothing is skipped or put twice; its end is told at its removal. A directory
+//! without a record, or with one that is not taken, uploads nothing more.
 
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
@@ -125,7 +125,8 @@ pub(super) fn end(run: &mut RunLogs, dir: &Path) {
 }
 
 /// At the removal of a run, after its processes were killed, so its files in `dir` hold all it
-/// wrote: a run whose end no poll told (one the helper lost track of, or one removed before
+/// wrote: a run whose end no poll told (one whose supervisor said nothing of it, one an earlier
+/// process left, or one removed before
 /// its exit was read) is told it now, and the progress record stops and is removed before the
 /// directory is. The upload goes on.
 pub(super) fn close(run: &mut RunLogs, dir: &Path) {

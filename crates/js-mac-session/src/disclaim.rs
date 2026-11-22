@@ -25,8 +25,8 @@
 //! With both kept, every process between the agent and the job is started without the
 //! disclaim, so the job answers for the agent and holds what the agent holds, Full Disk
 //! Access included. Its callers are the two starts of `js-agent`'s native job supervisor
-//! (`mac_supervisor`), which nothing starts yet: the one job start in use, the helper's
-//! (`crate::spawn`), disclaims, and the helper holds no grant to pass on. A
+//! (`mac_supervisor`), which the agent's native runtime starts for every native job; the
+//! helper's job start (`crate::spawn`) disclaims, and the helper holds no grant to pass on. A
 //! job started disclaimed is judged by its own signature and is refused every read of the
 //! network file system mount its build trees are served from, and so are Apple's own tools
 //! it runs. What keeps a job from using the rest of the grant is the user it runs as (Unix
