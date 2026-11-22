@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use js_mac_pool::seatbelt::{AbsPath, ReadModel, SANDBOX_EXEC};
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
@@ -178,6 +179,7 @@ impl NativeSettings {
                 max_file_bytes,
                 max_processes,
                 egress: egress.map(|policy| Arc::new(policy) as Arc<dyn Enforcer>),
+                full_disk_access: FullDiskAccess::Undetermined,
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
@@ -245,6 +247,15 @@ impl NativeSettings {
     #[must_use]
     pub fn logs(&self) -> &LogPlan {
         &self.logs
+    }
+
+    /// The same settings with `state` as whether the root helper holds Full Disk Access, as
+    /// the agent asked it at start ([`super::grant::ask`]). The flags alone say nothing of it, so
+    /// settings are made `Undetermined`, which refuses every native job.
+    #[must_use]
+    pub fn with_full_disk_access(mut self, state: FullDiskAccess) -> Self {
+        self.config.full_disk_access = state;
+        self
     }
 
     /// The same settings with `xcodes` as the Xcodes the runtime runs a job with, by build.
