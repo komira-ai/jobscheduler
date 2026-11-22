@@ -138,6 +138,7 @@ pub(super) fn allocation(booked: Booked) -> AllocationRecord {
         end_reason: Some(EndReason::Exited),
         prepare_deadline: None,
         wall_limit_secs: None,
+        sized_from: None,
         carried: Carried::default(),
     }
 }

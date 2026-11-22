@@ -10,7 +10,9 @@
 //! allocation row gains the instant the agent must
 //! have reported the host ready ([`alloc_whole_tag::PREPARE_DEADLINE`], a time) and the
 //! placement's own wall limit ([`alloc_whole_tag::WALL_LIMIT_SECS`], a `u64`), each written when
-//! set.
+//! set. An allocation row also gains which history sized the job
+//! ([`alloc_whole_tag::SIZED_FROM`], one byte per [`SizedFrom`]), written when set; a byte this
+//! build does not know reads as none, so a later build's value never fails an older reader.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +21,7 @@ use js_types::HostId;
 
 use super::mark_fields::{exclusions_of, exclusions_value};
 use super::{DecodeError, Fields, Writer, host_of, texts, time, time_of, u64_of};
-use crate::record::{AllocationRecord, Exclusion, JobRecord};
+use crate::record::{AllocationRecord, Exclusion, JobRecord, SizedFrom};
 
 /// The tags a whole-host job adds to a job row, after the ones of `job_tag`.
 pub(crate) mod job_whole_tag {
@@ -39,6 +41,8 @@ pub(crate) mod alloc_whole_tag {
     pub const PREPARE_DEADLINE: u16 = 14;
     /// The placement's wall limit in seconds (u64).
     pub const WALL_LIMIT_SECS: u16 = 15;
+    /// Which history sized the job (u8: 1 class, 2 fallback, 3 cold, 4 over-cap).
+    pub const SIZED_FROM: u16 = 16;
 }
 
 /// A `u32`.
@@ -101,16 +105,46 @@ pub(super) fn put_allocation(row: &mut Writer, allocation: &AllocationRecord) {
             .wall_limit_secs
             .map(|secs| secs.to_be_bytes().to_vec()),
     );
+    row.put_opt(
+        t::SIZED_FROM,
+        allocation.sized_from.map(|from| vec![sized_code(from)]),
+    );
 }
 
-/// The prepare deadline and the wall limit of an allocation row: none when it has neither.
-pub(super) fn take_allocation(
-    fields: &mut Fields,
-) -> Result<(Option<StoreTime>, Option<u64>), DecodeError> {
+/// The byte of `from`.
+fn sized_code(from: SizedFrom) -> u8 {
+    match from {
+        SizedFrom::Class => 1,
+        SizedFrom::Fallback => 2,
+        SizedFrom::Cold => 3,
+        SizedFrom::OverCap => 4,
+    }
+}
+
+/// The history a sized-from value names; a value of another length or a byte this build does
+/// not know is none, never an error.
+fn sized_of(_tag: u16, value: Vec<u8>) -> Result<Option<SizedFrom>, DecodeError> {
+    Ok(match value.as_slice() {
+        [1] => Some(SizedFrom::Class),
+        [2] => Some(SizedFrom::Fallback),
+        [3] => Some(SizedFrom::Cold),
+        [4] => Some(SizedFrom::OverCap),
+        _ => None,
+    })
+}
+
+/// What [`take_alloc`] reads of an allocation row: its prepare deadline, its wall limit and
+/// the history that sized it.
+pub(super) type WholeOfAllocation = (Option<StoreTime>, Option<u64>, Option<SizedFrom>);
+
+/// The prepare deadline, the wall limit and the sizing history of an allocation row: none when
+/// it has none of them.
+pub(super) fn take_alloc(fields: &mut Fields) -> Result<WholeOfAllocation, DecodeError> {
     use alloc_whole_tag as t;
     Ok((
         fields.opt(t::PREPARE_DEADLINE, time_of)?,
         fields.opt(t::WALL_LIMIT_SECS, u64_of)?,
+        fields.opt(t::SIZED_FROM, sized_of)?.flatten(),
     ))
 }
 
@@ -121,3 +155,7 @@ mod tests;
 #[cfg(test)]
 #[path = "held_fields_tests.rs"]
 mod held_tests;
+
+#[cfg(test)]
+#[path = "sizing_fields_tests.rs"]
+mod sizing_tests;

@@ -41,6 +41,7 @@ pub(super) fn engine_placement() -> Placement {
     Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: None,
+        sized_from: None,
         queue: Vec::new(),
         start: None,
     }
@@ -100,6 +101,7 @@ pub fn place_with_writes_the_prepare_deadline_and_drops_the_mark<B: Backend>(bac
     let placement = Placement {
         prepare_timeout: Some(PREPARE),
         wall_limit_secs: Some(1200),
+        sized_from: None,
         queue: Vec::new(),
         start: None,
     };

@@ -134,6 +134,7 @@ fn start(job_id: &str, prefix: Option<String>) -> JobStartSpec {
         host_ports: Vec::new(),
         placed_at_ms: None,
         xcode: None,
+        sizing: None,
     }
 }
 

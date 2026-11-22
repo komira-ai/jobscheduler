@@ -58,6 +58,11 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   and is never part of a result's acceptance. A server from before the field ignores it, and a result from an agent from before it
   reads with no usage; the lease server stores it as the job's resource usage, which is what the placement history is taught from
   (`docs/design/sizing.md`, section 7.7).
+- `JobStartSpec.sizing` (`StartSizing`: the optional `class`, and `cpu` and `memory`, each `named`, `class`, `fallback`, `cold` or
+  `over-cap`), what the job's booking came from: its size class, and for each of its CPU and memory whether the job named it or
+  which history sized it. The lease server fills it from the job and its allocation's `sized_from`; the agent writes it in its
+  journal at the job's start and its result, and decides nothing by it. A name the agent does not know reads as `unknown`, a class
+  outside the grammar of an id is left out, and the field is decoded as `logs` is; an agent from before it ignores it.
 
 The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that

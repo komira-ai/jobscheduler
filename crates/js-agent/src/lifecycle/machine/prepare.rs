@@ -193,9 +193,71 @@ impl Lifecycle {
         self.hold_waiting((spec, keyed), waiting);
     }
 
-    /// Holds a start that waits as `starting`, booking its slot.
+    /// Records how a start went: a running job (its wall-time limit begins now, after any
+    /// wait for the image, and ends no later than `cap`, the end of its lease), or a
+    /// `failed_to_start` result whose cleanup is owed. It takes the place of the job at
+    /// `replace` (a start that waited), or is added.
+    pub(super) fn settle(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        started: Result<RunHandle, Failure>,
+        (slot, booked): (u32, u64),
+        (replace, cap): (Option<usize>, u64),
+        events: &mut Vec<Event>,
+    ) {
+        let run_id = &spec.run_id;
+        let mut job = match started {
+            Ok(id) => {
+                self.mark(run_id, "created");
+                let timeline = self.take_timeline(run_id, &id);
+                let now = self.clock.now_ms();
+                let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
+                let cgroup = self.runtime.cgroup(&id);
+                let mut job =
+                    super::Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
+                job.started_at(now);
+                job.cgroup = cgroup;
+                job.sizing = self.sizing.remove(run_id);
+                events.push(Event::Started {
+                    run_id: run_id.clone(),
+                    timeline,
+                    booked: job.booked(),
+                });
+                job
+            }
+            Err((why, finding, message, blind)) => {
+                let sizing = self.sizing.remove(run_id);
+                self.drop_timeline(run_id);
+                let mut job = super::Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
+                job.sizing = sizing;
+                // A host the agent cannot see is not known to be checkable: tainted as
+                // unchecked, before the finding that follows from it.
+                if blind {
+                    job.taint(&mut self.taint, super::blind_taint(run_id), events);
+                }
+                job.result =
+                    Some(job.report(js_agent_wire::Outcome::FailedToStart, None, Some(why)));
+                job.note(finding, message, events);
+                events.push(Event::ResultReady {
+                    run_id: run_id.clone(),
+                    booked: job.booked(),
+                    usage: None,
+                });
+                job
+            }
+        };
+        job.keyed = keyed;
+        match replace {
+            Some(index) => self.jobs[index] = job,
+            None => self.jobs.push(job),
+        }
+    }
+
+    /// Holds a start that waits as `starting`, booking its slot, with what its booking came
+    /// from, so that a start stopped while it waits is logged with it.
     fn hold_waiting(&mut self, (spec, keyed): (&JobSpec, Keyed), waiting: Waiting) {
         let (slot, booked) = (waiting.slot, waiting.booked);
+        let sizing = waiting.given.sizing.clone();
         let mut job = super::Job::of(
             spec,
             Stage::Preparing(Box::new(waiting)),
@@ -204,6 +266,7 @@ impl Lifecycle {
             booked,
         );
         job.keyed = keyed;
+        job.sizing = sizing;
         self.jobs.push(job);
     }
 
