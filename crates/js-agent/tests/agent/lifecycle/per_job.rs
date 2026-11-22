@@ -829,3 +829,32 @@ fn a_job_stopped_while_its_image_is_pulled_is_logged_with_its_sizing() {
     assert_eq!(booked.len(), 1, "{ended:?}");
     assert_eq!(booked[0].1.sizing, Some(sizing));
 }
+
+/// Proves the agent does not refuse a job start for CPU or memory the job service's placement
+/// already judged: on the 4-core, 8 GiB harness, two job starts that each book 3 cores and
+/// 6 GiB both start (their bookings sum past the machine: the job service packs by measured
+/// load within its slack and books peaks), while a job start larger than the machine is still
+/// refused `limits-exceed-shape`, and a run start that does not fit what is free is still
+/// refused `no-capacity` (`rules::overcommit_refused`). Catches the agent refusing
+/// `no-capacity` what the job service placed, which fails the build that sent it.
+#[test]
+fn a_job_start_is_not_refused_for_cpu_or_memory_the_job_service_placed() {
+    let mut h = Harness::new("job-placed");
+    let booked = |job_id: &str, cpu_millis: u64, memory_bytes: u64| {
+        let mut spec = start(job_id);
+        spec.booked.cpu_millis = cpu_millis;
+        spec.booked.memory_bytes = memory_bytes;
+        job_start(spec)
+    };
+    let events = names(&h.apply(vec![
+        booked("j1", 3000, 6 << 30),
+        booked("j2", 3000, 6 << 30),
+    ]));
+    assert_eq!(events, ["started j1", "started j2"]);
+    assert_eq!(h.fake.created().len(), 2);
+    let events = names(&h.apply(vec![booked("j3", 4001, 1 << 30)]));
+    assert_eq!(events, ["refused j3 limits-exceed-shape"]);
+    let events = names(&h.apply(vec![booked("j4", 1000, (8 << 30) + 1)]));
+    assert_eq!(events, ["refused j4 limits-exceed-shape"]);
+    assert_eq!(h.fake.created().len(), 2);
+}

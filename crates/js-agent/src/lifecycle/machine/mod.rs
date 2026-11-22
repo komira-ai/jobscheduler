@@ -491,7 +491,19 @@ impl Lifecycle {
 
     /// Whether a start may run now, and its mounts resolved when it may. `env` is the
     /// environment of a job start, empty for a run start.
-    fn admit(&self, spec: &JobSpec, given: &Given) -> Result<Vec<ResolvedMount>, Refusal> {
+    ///
+    /// A start must fit the machine (`limits-exceed-shape`) and what is free of it
+    /// (`no-capacity`). What is free is the offer less the bookings of the jobs held, in disk,
+    /// GPUs and slots for every start, and in CPU and memory for a run start only. A job start
+    /// (keyed by job id) was placed by the job service, which packs a host by measured load
+    /// within its CPU slack and books each job its peak: its CPU and memory are the job
+    /// service's to judge, one rule for both, and the agent sums neither. Its CPU is not
+    /// limited, and its memory is held to its booking by its lease's `memory.max`.
+    fn admit(
+        &self,
+        (spec, keyed): (&JobSpec, Keyed),
+        given: &Given,
+    ) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -567,9 +579,11 @@ impl Lifecycle {
             ));
         }
         let used = self.booked();
+        // The job service's placement judged a job start's CPU and memory.
+        let placed = keyed == Keyed::Job;
         let room = [
-            want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
-            want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            placed || want.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
+            placed || want.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
             disk <= offered.disk_bytes.saturating_sub(used.disk_bytes),
             spec.gpu_indices.iter().all(|gpu| !used.gpus.contains(gpu)),
             self.slots.has_room(),
@@ -911,7 +925,7 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec, given)
+            .admit((spec, keyed), given)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
