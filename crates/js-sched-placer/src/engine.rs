@@ -35,6 +35,7 @@ use js_types::sched::{
 use js_types::{HostId, Shape};
 
 use crate::map;
+use crate::room::Room;
 use crate::sizes::{ColdSize, JobSizes};
 
 #[path = "jobs.rs"]
@@ -116,6 +117,9 @@ pub struct Engine {
     refused: refusals::Book,
     /// The sequence the next grant of a whole-host job gets, in [`whole::WHOLE_TERM`].
     whole_seq: u64,
+    /// What each open host has room for in the walk under way, which a placement is held to
+    /// ([`crate::room`]); empty (every host has room) until a pass sets it.
+    room: Room,
     /// How many placement rounds the walks over the queued jobs ran, for the tests that
     /// count them ([`jobs`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -142,9 +146,15 @@ impl Engine {
             sizes: JobSizes::with_cold(settings.cold),
             refused: refusals::Book::default(),
             whole_seq: 0,
+            room: Room::default(),
             #[cfg(any(test, feature = "test-support"))]
             job_rounds: 0,
         }
+    }
+
+    /// Holds the walks that follow to `room`, the ledger a pass builds ([`Room::of`]).
+    pub(crate) fn set_room(&mut self, room: Room) {
+        self.room = room;
     }
 
     /// The history the jobs that book nothing are sized from.
