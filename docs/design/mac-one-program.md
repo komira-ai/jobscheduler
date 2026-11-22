@@ -1,6 +1,6 @@
 # One agent program on a Mac
 
-Status: proposed; steps 4 and later wait for the root probe of section 4.3. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
+Status: accepted, 2026-11-22 (the owner's answers are in section 10); steps 4 and later wait for the root probe of section 4.3. On a Mac, `js-agent` does the work of the root helper `js-mac-session` itself, behind the agent's platform layer. Each native run gets a supervisor process of its own, built on the mechanism Linux already uses for a crun container. That supervisor keeps the run alive while the agent stops, restarts or updates. The package ships one program and one launchd job. Nothing here is built yet. The way there is in section 7, the questions for the owner are in section 8, and the case for keeping the helper is answered in section 9.
 
 ## 1. What changes for an operator
 
@@ -326,6 +326,16 @@ The arguments for keeping the helper, strongest first, with the answers:
 7. **Blocking pool calls inside an async agent.** Medium. Pool calls run on blocking threads, and the ledger lock is not held across a supervisor's ready wait (section 3, section 4.2).
 8. **Privacy grants.** Weak to medium. Neither daemon is known to hold a grant. The supervisor and the job are each started disclaimed, and `spawn_sites` fails any other start (section 4.2).
 9. **Crash isolation.** Weak. Today a helper crash ends every job (its table is in memory and its reset ends every lease, `runs.rs:6-10`). After the change, an agent crash ends none. A crash mid-teardown leaves a `resetting` slot that the next start finishes.
+
+## 10. The owner's answers
+
+The owner answered yes to all five questions of section 8:
+
+- **Q1.** Yes: one program on a Mac.
+- **Q2.** Yes: delete the uncalled helper verbs.
+- **Q3.** Yes: delete `node-admin`.
+- **Q4.** Yes: keep the Mac rule that the supervisor holds a run's deadline while no agent runs, and leave Linux as it is.
+- **Q5.** Yes: accept one drain per Mac at the switch and across a rollback.
 
 ## Decisions
 
