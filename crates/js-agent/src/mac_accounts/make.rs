@@ -80,7 +80,7 @@ impl Pool {
             }
             Ok(_) => {}
         }
-        match folder::left(&self.settings.user_folders, uid) {
+        match folder::left(&self.settings.user_folders, uid, &*self.os) {
             Err(why) => return Some(format!("searching the per-user folders: {why}")),
             Ok(found) if !found.is_empty() => {
                 return Some(format!(

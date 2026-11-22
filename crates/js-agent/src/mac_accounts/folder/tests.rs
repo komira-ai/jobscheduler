@@ -87,7 +87,7 @@ fn a_folder_is_emptied_and_kept_whatever_a_job_left_in_it() {
     empty(&folders, me(), &System).unwrap();
     assert_emptied(&hash);
     assert_eq!(names(&dir.join("outside")), ["precious"]);
-    assert!(left(&folders, me()).unwrap().is_empty());
+    assert!(left(&folders, me(), &System).unwrap().is_empty());
     // Nothing is left to do the second time.
     empty(&folders, me(), &System).unwrap();
 }
@@ -113,9 +113,12 @@ fn every_folder_of_the_uid_is_emptied_and_no_other() {
     // Another uid owns none of them.
     empty(&folders, me() + 1, &System).unwrap();
     assert_eq!(names(&first.join("T")), ["f"]);
-    assert_eq!(left(&folders, me() + 1).unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(
+        left(&folders, me() + 1, &System).unwrap(),
+        Vec::<PathBuf>::new()
+    );
 
-    let mut found = left(&folders, me()).unwrap();
+    let mut found = left(&folders, me(), &System).unwrap();
     found.sort();
     assert_eq!(
         found,
@@ -131,7 +134,7 @@ fn every_folder_of_the_uid_is_emptied_and_no_other() {
     assert_emptied(&second);
     assert_eq!(names(&folders.join("ab")), ["file", "one"]);
     assert_eq!(names(&dir.join("elsewhere/hash3/T")), ["f"]);
-    assert!(left(&folders, me()).unwrap().is_empty());
+    assert!(left(&folders, me(), &System).unwrap().is_empty());
 }
 
 /// Asserts that a user flag is cleared before the entry is removed, on every entry whoever
@@ -237,7 +240,7 @@ fn an_entry_that_cannot_be_unlocked_is_named_and_the_rest_goes() {
     assert_eq!(names(&hash.join("C")), ["denied", "frozen"]);
     assert!(names(&hash.join("0")).is_empty());
     assert_eq!(names(&hash), TOPS);
-    let mut found = left(&folders, me()).unwrap();
+    let mut found = left(&folders, me(), &System).unwrap();
     found.sort();
     assert_eq!(found, [hash.join("C/denied"), hash.join("C/frozen")]);
 }
@@ -276,7 +279,7 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
     fs::write(&folders, "").unwrap();
     for why in [
         empty(&folders, me(), &System).unwrap_err().to_string(),
-        left(&folders, me()).unwrap_err().to_string(),
+        left(&folders, me(), &System).unwrap_err().to_string(),
     ] {
         assert!(
             why.starts_with(&format!("{}: ", folders.display())),
@@ -286,7 +289,7 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
     fs::remove_file(&folders).unwrap();
     // No folders at all holds nothing.
     empty(&folders, me(), &System).unwrap();
-    assert!(left(&folders, me()).unwrap().is_empty());
+    assert!(left(&folders, me(), &System).unwrap().is_empty());
 
     let first = folder(&folders, "ab", "one");
     let second = folder(&folders, "cd", "two");
@@ -300,4 +303,49 @@ fn folders_that_cannot_be_searched_fail_naming_them() {
         "{why}"
     );
     assert_emptied(&second);
+}
+
+/// Asserts what is kept of the items macOS's own daemons seal in a per-user folder: Launch
+/// Services' data vault in `0`, sealed, stays with what is in it, and a look does not count
+/// it; the trust daemon's folder in `T`, not sealed, is removed like anything else; a sealed
+/// item that is not one of the system's (a name of the list in another top-level directory,
+/// another name) is refused and named, and a look counts it. Without the seal (`System` off
+/// macOS) the vault is an ordinary leftover.
+#[test]
+fn only_a_sealed_system_item_is_kept_in_a_folder() {
+    let dir = scratch("sealed");
+    let folders = dir.join("folders");
+    let hash = folder(&folders, "ab", "hash");
+    fs::create_dir_all(hash.join("0/com.apple.LaunchServices.dv")).unwrap();
+    fs::write(hash.join("0/com.apple.LaunchServices.dv/db"), "x").unwrap();
+    fs::create_dir_all(hash.join("T/com.apple.trustd")).unwrap();
+    fs::write(hash.join("T/com.apple.trustd/cache"), "x").unwrap();
+    fs::write(hash.join("X/com.apple.LaunchServices.dv"), "x").unwrap();
+    fs::write(hash.join("C/vault"), "x").unwrap();
+    let os = FakeOs::new();
+    os.seal("com.apple.LaunchServices.dv");
+    os.seal("vault");
+
+    let why = empty(&folders, me(), &os).unwrap_err().to_string();
+    for refused in ["X/com.apple.LaunchServices.dv", "C/vault"] {
+        assert!(
+            why.contains(&hash.join(refused).display().to_string()),
+            "{why}"
+        );
+    }
+    assert!(!why.contains("0/com.apple"), "{why}");
+    assert_eq!(names(&hash.join("0/com.apple.LaunchServices.dv")), ["db"]);
+    assert!(names(&hash.join("T")).is_empty());
+    let mut found = left(&folders, me(), &os).unwrap();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            hash.join("C/vault"),
+            hash.join("X/com.apple.LaunchServices.dv")
+        ]
+    );
+    assert!(os.calls().contains(&"sealed com.apple.trustd".to_owned()));
+    let unsealed = left(&folders, me(), &System).unwrap();
+    assert!(unsealed.contains(&hash.join("0/com.apple.LaunchServices.dv")));
 }

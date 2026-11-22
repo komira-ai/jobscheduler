@@ -210,6 +210,34 @@ pub(super) trait Os {
     /// # Errors
     /// An ACL could not be stripped.
     fn strip_acl(&self, dir: &OwnedFd, name: &OsStr) -> io::Result<()>;
+
+    /// Whether root is refused the entry `name` of `dir` itself: examining or opening it
+    /// answers `EPERM`. macOS answers so for a data vault, which only the system daemon
+    /// entitled to it may open, root with Full Disk Access included.
+    fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool;
+}
+
+/// What macOS's own per-user daemons make in a slot's per-user folder, as (top-level
+/// directory, name), that root may not remove or even look into when it is sealed
+/// ([`Os::sealed`]): Launch Services' data vault (`lsd`) and the trust daemon's folder
+/// (`trustd`, made when a job checks a TLS certificate). Such an item is kept with the folder,
+/// as the folder itself is: no job can open it, only the daemon. One of these that is not
+/// sealed is removed like anything else, and any other item root is refused holds the
+/// account.
+pub(super) const SYSTEM_KEPT: [(&str, &str); 2] = [
+    ("0", "com.apple.LaunchServices.dv"),
+    ("T", "com.apple.trustd"),
+];
+
+/// The entries of the top-level directory `top` (named `top_name`) of a per-user folder that
+/// are kept: those of [`SYSTEM_KEPT`] for it that are there and sealed.
+fn kept_in(top: &OwnedFd, top_name: &OsStr, os: &dyn Os) -> Vec<OsString> {
+    SYSTEM_KEPT
+        .iter()
+        .filter(|(dir, _)| OsStr::new(dir) == top_name)
+        .map(|(_, name)| OsString::from(name))
+        .filter(|name| os.sealed(top, name))
+        .collect()
 }
 
 /// The operating system itself. Off macOS there are no user flags to clear and no ACL to
@@ -239,6 +267,12 @@ impl Os for System {
     #[cfg(not(target_os = "macos"))]
     fn strip_acl(&self, _dir: &OwnedFd, _name: &OsStr) -> io::Result<()> {
         Ok(())
+    }
+
+    fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool {
+        let refused = |result: Result<(), Errno>| result == Err(Errno::PERM);
+        refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop))
+            || refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop))
     }
 }
 
@@ -458,8 +492,19 @@ fn empty(
     (uid, dev, depth): (u32, Dev, usize),
     park: &Park,
 ) -> io::Result<()> {
+    empty_but(dir, path, (uid, dev, depth), park, &[])
+}
+
+/// [`empty`], except the entries named in `keep`, which stay.
+fn empty_but(
+    dir: &OwnedFd,
+    path: &Path,
+    (uid, dev, depth): (u32, Dev, usize),
+    park: &Park,
+    keep: &[OsString],
+) -> io::Result<()> {
     let mut failed = Vec::new();
-    for entry in list(dir)? {
+    for entry in list(dir)?.into_iter().filter(|entry| !keep.contains(entry)) {
         let inner = path.join(&entry);
         let result = examine(dir, &entry).and_then(|found| {
             found.map_or(Ok(()), |stat| {
@@ -841,10 +886,14 @@ fn empty_top(
     os.clear_flags(folder, name, stat)?;
     searchable(folder, name, stat)?;
     let top = open_child(folder, name, stat)?;
+    let keep = kept_in(&top, name, os);
+    for kept in &keep {
+        tracing::info!(item = %path.join(kept).display(), "kept: a system item root may not open");
+    }
     let park = Park::lifting(&top, os);
     let mut failed = Vec::new();
     failed.extend(
-        empty(&top, path, (uid, dev, 2), &park)
+        empty_but(&top, path, (uid, dev, 2), &park, &keep)
             .err()
             .map(|why| why.to_string()),
     );
@@ -854,18 +903,19 @@ fn empty_top(
 
 /// What the per-user folder at `path` holds that an emptied one does not: each non-directory
 /// at its top level and each entry directly below its top-level directories (the entry
-/// itself, not what is in it); nothing for a `path` that does not exist.
+/// itself, not what is in it), except a sealed item of [`SYSTEM_KEPT`]; nothing for a `path`
+/// that does not exist.
 ///
 /// # Errors
 /// The folder or one of its top-level directories could not be opened or listed: what was not
 /// looked at is never read as empty.
-pub(super) fn leftovers(path: &Path) -> io::Result<Vec<PathBuf>> {
+pub(super) fn leftovers(path: &Path, os: &dyn Os) -> io::Result<Vec<PathBuf>> {
     let Some(folder) = named(path, open_dir(path))? else {
         return Ok(Vec::new());
     };
     let mut left = Vec::new();
     for name in named(path, list(&folder))? {
-        top_leftovers(&folder, &name, &path.join(&name), &mut left)?;
+        top_leftovers(&folder, &name, &path.join(&name), &mut left, os)?;
     }
     Ok(left)
 }
@@ -877,6 +927,7 @@ fn top_leftovers(
     name: &OsStr,
     here: &Path,
     left: &mut Vec<PathBuf>,
+    os: &dyn Os,
 ) -> io::Result<()> {
     let Some(stat) = named(here, examine(folder, name))? else {
         return Ok(());
@@ -886,7 +937,11 @@ fn top_leftovers(
         return Ok(());
     }
     let top = named(here, open_child(folder, name, &stat))?;
+    let keep = kept_in(&top, name, os);
     for inner in named(here, list(&top))? {
+        if keep.contains(&inner) {
+            continue;
+        }
         left.push(here.join(inner));
     }
     Ok(())

@@ -117,7 +117,7 @@ impl Pool {
     /// Every per-user folder `uid` owns holds nothing below its top-level directories, and
     /// nothing but directories at its top level.
     fn gone_folders(&self, uid: u32) -> Result<(), Failure> {
-        let found = folder::left(&self.settings.user_folders, uid).map_err(|why| {
+        let found = folder::left(&self.settings.user_folders, uid, &*self.os).map_err(|why| {
             not_gone(
                 Gone::Folders,
                 format!("searching for uid {uid}'s per-user folders: {why}"),

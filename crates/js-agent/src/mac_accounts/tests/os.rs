@@ -1,6 +1,6 @@
 //! An [`Os`] that models what macOS does to a removal and a test cannot make: entries whose
 //! removal is refused until their user flags are cleared (`uchg`, `uappnd`) or their ACL is
-//! stripped, and flags or ACLs that cannot be lifted. Everything else is the real call.
+//! stripped, flags or ACLs that cannot be lifted, and sealed entries (a data vault). Everything else is the real call.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -25,6 +25,8 @@ struct State {
     unclearable: BTreeSet<OsString>,
     /// Their ACL cannot be stripped.
     unstrippable: BTreeSet<OsString>,
+    /// Sealed: root is refused them (`EPERM`), and their removal too.
+    sealed: BTreeSet<OsString>,
     /// The calls, `<call> <name>`, in order.
     calls: Vec<String>,
 }
@@ -68,6 +70,11 @@ impl FakeOs {
         self.state().unstrippable.insert(name.into());
     }
 
+    /// The entry `name` is sealed, as a data vault is: root is refused it.
+    pub(in super::super) fn seal(&self, name: &str) {
+        self.state().sealed.insert(name.into());
+    }
+
     /// The calls made, `<call> <name>`, in order.
     pub(in super::super) fn calls(&self) -> Vec<String> {
         self.state().calls.clone()
@@ -84,7 +91,7 @@ impl Os for FakeOs {
     fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> Result<(), Errno> {
         self.log("unlink", name);
         let state = self.state();
-        if state.flagged.contains(name) {
+        if state.flagged.contains(name) | state.sealed.contains(name) {
             return Err(Errno::PERM);
         }
         if state.denied.contains(name) {
@@ -112,5 +119,10 @@ impl Os for FakeOs {
         }
         state.denied.remove(name);
         Ok(())
+    }
+
+    fn sealed(&self, _dir: &OwnedFd, name: &OsStr) -> bool {
+        self.log("sealed", name);
+        self.state().sealed.contains(name)
     }
 }
