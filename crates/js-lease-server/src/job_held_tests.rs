@@ -24,9 +24,10 @@ fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
-/// A sink that records the start failures it is told of, and counts nothing else.
+/// A sink that records the start failures and the refused starts it is told of, and counts
+/// nothing else.
 #[derive(Debug, Default)]
-struct Failures(Mutex<Vec<StartFailure>>);
+struct Failures(Mutex<Vec<StartFailure>>, Mutex<Vec<(String, String)>>);
 
 impl MetricsSink for Failures {
     fn job_placed(&self, _: Duration) {}
@@ -38,11 +39,22 @@ impl MetricsSink for Failures {
     fn job_pass_took(&self, _: Duration) {}
     fn job_tables(&self, _: js_sched_placer::engine::TablesFrom) {}
     fn acquire_answered(&self, _: &str, _: &js_elastic::Acquired) {}
+    fn start_refused(&self, host: &HostId, code: &str) {
+        self.1
+            .lock()
+            .unwrap()
+            .push((host.to_string(), code.to_owned()));
+    }
 }
 
 impl Failures {
     fn told(&self) -> Vec<StartFailure> {
         self.0.lock().unwrap().clone()
+    }
+
+    /// The refused starts told of, each as its host and code.
+    fn refused_told(&self) -> Vec<(String, String)> {
+        self.1.lock().unwrap().clone()
     }
 }
 
@@ -604,4 +616,45 @@ fn held_and_capacity_refusals_are_counted_apart() {
         Some("no-capacity: host-a, host-b, host-c")
     );
     assert_eq!(failures.told(), [StartFailure::AgentRefused; 2]);
+}
+
+/// A listed refused start is told to the metrics once with its host and code: `no-capacity`
+/// on host-a and `input-not-allowed` on host-b, a held host's `host-held` that sends its job
+/// back to the queue, and a refusal that lists no code as `none`; a relisting of a result the
+/// server already took is answered a duplicate and not told again. Catches a refusal not
+/// counted, counted twice, counted only when the job fails, or counted again when the agent
+/// lists it again.
+#[test]
+fn each_accepted_refused_start_is_told_once_with_its_host_and_code() {
+    let (_store, jobs) = tables();
+    let failures = Failures::default();
+    let (_, on_a) = placed(&jobs, "on-a", "host-a", spec(), BOOKED);
+    let (_, on_b) = placed(&jobs, "on-b", "host-b", spec(), BOOKED);
+    let (_, held) = placed(&jobs, "held", "host-c", spec(), BOOKED);
+    let (_, bare) = placed(&jobs, "bare", "host-d", spec(), BOOKED);
+    assert_eq!(
+        refused(&jobs, &on_a, "no-capacity", &failures),
+        Ack::Accepted
+    );
+    assert_eq!(
+        refused(&jobs, &on_b, "input-not-allowed", &failures),
+        Ack::Accepted
+    );
+    assert_eq!(refused(&jobs, &held, "host-held", &failures), Ack::Accepted);
+    let mut none = refusal(&bare, "x");
+    none.detail = None;
+    beat(&jobs, &bare, none, &failures).unwrap();
+    let told = |host: &str, code: &str| (host.to_owned(), code.to_owned());
+    let once = [
+        told("host-a", "no-capacity"),
+        told("host-b", "input-not-allowed"),
+        told("host-c", "host-held"),
+        told("host-d", "none"),
+    ];
+    assert_eq!(failures.refused_told(), once);
+    assert_eq!(
+        refused(&jobs, &on_a, "no-capacity", &failures),
+        Ack::Duplicate
+    );
+    assert_eq!(failures.refused_told(), once, "a duplicate was counted");
 }

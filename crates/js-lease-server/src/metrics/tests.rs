@@ -146,6 +146,8 @@ async fn fixture(name: &str) -> Fixture {
     ] {
         (0..times).for_each(|_| recorder.placement_refused(host, reason));
     }
+    (0..2).for_each(|_| recorder.start_refused(&host_a, "no-capacity"));
+    recorder.start_refused(&host_b, "input-not-allowed");
     let capacity = Acquired::Refused(Refusal {
         code: RefusalCode::Capacity,
         reason: Reason::Api("no capacity in the zone".to_owned()),
@@ -328,6 +330,45 @@ fn a_refusal_is_written_with_its_host_and_reason_labels() {
     };
     let text = render(&seen, &recorder);
     let line = "\njs_placement_refusals_total{host=\"h\",reason=\"cpu\"} 1\n";
+    assert!(text.contains(line), "{line} is not in:\n{text}");
+}
+
+/// Asserts that an agent's refusal code is a label of its own only when it is 1 to 64 characters
+/// of `a-z`, `0-9` and `-`, and is counted as `other` otherwise (a capital, a space, a quote,
+/// no characters, 65 characters), and that with no refusal counted the family is only its HELP
+/// and TYPE lines. Catches a label value the agent's text chooses without bound.
+#[test]
+fn a_refusal_code_outside_the_label_rule_is_counted_as_other() {
+    let seen = super::render::Snapshot {
+        jobs: None,
+        hosts: Vec::new(),
+    };
+    let recorder = Recorder::default();
+    let empty = render(&seen, &recorder);
+    assert!(empty.contains("# TYPE js_agent_start_refusals_total counter\n"));
+    assert!(!empty.contains("js_agent_start_refusals_total{"), "{empty}");
+    let host = HostId::new("h").unwrap();
+    let longest = "a".repeat(64);
+    let too_long = "a".repeat(65);
+    for code in [
+        "no-capacity",
+        "No-capacity",
+        "no capacity",
+        "x\"y",
+        "",
+        &longest,
+        &too_long,
+    ] {
+        recorder.start_refused(&host, code);
+    }
+    let expected = BTreeMap::from([
+        (("h".to_owned(), "no-capacity".to_owned()), 1),
+        (("h".to_owned(), "other".to_owned()), 5),
+        (("h".to_owned(), longest), 1),
+    ]);
+    assert_eq!(recorder.start_refusals(), expected);
+    let text = render(&seen, &recorder);
+    let line = "\njs_agent_start_refusals_total{host=\"h\",code=\"other\"} 5\n";
     assert!(text.contains(line), "{line} is not in:\n{text}");
 }
 

@@ -341,7 +341,9 @@ fn report(
 /// it skipped when it ran and ended between two heartbeats ([`Ack::Accepted`]); a job that has
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
-/// unanswered.
+/// unanswered. A start the host refused is told to the metrics with its code (`none` when it
+/// lists none) once, whether it is sent back to the queue or ends the job, and a duplicate is
+/// not told.
 fn commit_result(
     jobs: &ServerJobs,
     context: &BeatContext<'_>,
@@ -353,6 +355,10 @@ fn commit_result(
     };
     if job.state.is_ended() {
         return Ok(Some(Ack::Duplicate));
+    }
+    if matches!(result.outcome, Outcome::FailedToStart) {
+        let code = result.detail.as_deref().unwrap_or("none");
+        context.metrics.start_refused(context.host, code);
     }
     let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
         return Ok(Some(Ack::Accepted));
