@@ -63,9 +63,8 @@ impl PeakWindow {
         {
             self.kept.pop_front();
         }
-        let Some(&(from, used)) = self.kept.front() else {
-            return;
-        };
+        // Never empty: this sample was just kept.
+        let (from, used) = self.kept.front().copied().unwrap_or((at, usage));
         let span = at.saturating_sub(from);
         if span < WINDOW_USEC {
             return;

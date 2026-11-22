@@ -70,7 +70,12 @@ impl FromStr for CpuCeiling {
         let whole: u32 = whole
             .parse()
             .map_err(|_| CpuCeilingError::OutOfRange(text.to_owned()))?;
-        let thousandths: u32 = format!("{fraction:0<3}").parse().map_err(|_| not())?;
+        // At most three digits, each checked above, padded with zeros to three.
+        let thousandths = fraction
+            .bytes()
+            .chain(std::iter::repeat(b'0'))
+            .take(3)
+            .fold(0_u32, |n, digit| n * 10 + u32::from(digit - b'0'));
         whole
             .checked_mul(1000)
             .and_then(|whole| whole.checked_add(thousandths))
@@ -111,7 +116,7 @@ mod tests {
                 "{text}"
             );
         }
-        for text in ["0.999", "0", "1000.001", "4294968"] {
+        for text in ["0.999", "0", "1000.001", "4294968", "4294967296"] {
             assert_eq!(
                 text.parse::<CpuCeiling>(),
                 Err(CpuCeilingError::OutOfRange(text.to_owned())),
