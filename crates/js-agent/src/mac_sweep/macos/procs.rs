@@ -30,7 +30,15 @@ fn all_pids() -> io::Result<Vec<libc::pid_t>> {
     if got < 0 {
         return Err(io::Error::last_os_error());
     }
-    pids.truncate(got.unsigned_abs() as usize);
+    let got = got.unsigned_abs() as usize;
+    if got >= pids.len() {
+        // A full buffer may have left processes out: the listing is not trusted.
+        return Err(io::Error::other(format!(
+            "more than {} processes started while the pids were read",
+            pids.len() - count.unsigned_abs() as usize
+        )));
+    }
+    pids.truncate(got);
     Ok(pids)
 }
 

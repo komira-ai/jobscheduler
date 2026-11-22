@@ -28,7 +28,7 @@ fn sleeper() -> Child {
 
 /// Waits until `child` has exited, leaving it a zombie (not reaped).
 fn exited_not_reaped(child: &Child) {
-    let id = libc::id_t::from(child.id());
+    let id: libc::id_t = child.id();
     // SAFETY: an all-zero `siginfo_t` is a valid value of the plain C struct.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     // SAFETY: `info` is ours and writable for the call; `WNOWAIT` leaves the child to be
