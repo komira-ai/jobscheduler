@@ -135,7 +135,7 @@ launchd ─ js-agent __supervise-native ... (root)  own process group; parent la
 
 - After the switch, the agent starts the supervisor disclaimed, and the supervisor starts the job disclaimed.
 - Each is its own responsible process from its start, so none depends on a live ancestor.
-- No TCC grant is known to be held by either daemon today. The Macs run hostkeeper without Full Disk Access, and nothing grants one to `js-agent`. A grant given to `js-agent` later would cover the supervisor, which is the same program, but never a job.
+- The privacy profile `packaging/js-agent-macos/mdm/js-agent-full-disk-access.mobileconfig` grants Full Disk Access to `js-agent` alone, where device management installs it; the helper holds none. The grant covers the supervisor, which is the same program, but never a job.
 - Measured on macOS 27: the privacy control refuses Apple's own programs (the compilers, `xcodebuild` and the other tools a build job runs) any read of an NFS mount. Disclaiming does not change that, and neither does who starts the job. A native job reads its inputs from local copies, as the native runtime makes them today (`native/files.rs`), never from an NFS mount.
 - `spawn_sites` already holds every start in `js-agent` and `js-mac-session` to `disclaim::Program`, so a supervisor started any other way fails the check.
 

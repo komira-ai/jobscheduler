@@ -497,9 +497,12 @@ pub(crate) fn complete(local: &mut Local, cli: &Cli, start: &Start) -> Result<()
                 Some(store) => native.with_bundles(Arc::clone(store))?,
                 None => native,
             };
-            // The helper is asked once, here: the state it answers is the one the hello
-            // reports and the runtime refuses jobs by.
-            let held = native::grant::ask(&js_mac_session::client::Client::new(native.socket()))?;
+            // The agent asks itself once, here: the state its listing of the privacy
+            // database's directory shows is the one the hello reports and the runtime
+            // refuses jobs by.
+            let held = native::grant::ask(native::grant::list(std::path::Path::new(
+                native::grant::PRIVACY_DIR,
+            )));
             let native = native
                 .with_full_disk_access(held)
                 .with_xcodes(start.xcodes.clone());
@@ -637,7 +640,7 @@ const NO_NATIVE_USAGE: &str = "usage: native runs report no load yet: the heartb
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
 /// `open`), with no `egress-ports`, since a Mac forwards no port, `full-disk-access` (the state
-/// the helper answered at start: [`native::grant::report`]), and `log-upload`, since the
+/// the agent found at start: [`native::grant::report`]), and `log-upload`, since the
 /// native runtime uploads live logs (`native/logs.rs`), and the job half (`per-job`,
 /// `start-fence`, `held-beat`, `dispatch-poll`, `layered-rootfs`: [`contract::report_native_jobs`]). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
