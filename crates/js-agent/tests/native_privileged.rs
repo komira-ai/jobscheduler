@@ -160,7 +160,6 @@ fn serve(fixture: &Fixture) {
     let ready = start::prepare(
         &args,
         Box::new(MacHost),
-        "js-native-privileged".to_owned(),
         SweepPlan::macos_schedules(),
         SweepPlan::macos(),
         ScanFolder::macos(),

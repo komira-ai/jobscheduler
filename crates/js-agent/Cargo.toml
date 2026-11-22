@@ -66,9 +66,6 @@ rustix = { workspace = true, features = ["fs", "net", "process", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# The tar of a native Mac job's outputs that `__mac-job` commits to the put ingest
-# (src/mac_job/put.rs).
-tar.workspace = true
 thiserror.workspace = true
 # `fs`: the layer files of the image source (src/image). `net` and `time`: the runtime of
 # the `image-pull` verb (src/image/pull.rs). `rt-multi-thread`: the runtime the image

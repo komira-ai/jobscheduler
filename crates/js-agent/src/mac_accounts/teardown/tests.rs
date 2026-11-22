@@ -29,10 +29,13 @@ fn held(result: Result<crate::mac_accounts::Retired, Held>) -> Held {
     }
 }
 
-/// Asserts the order of a deletion of an account with nothing running: the processes are
-/// ended and the domains booted out and looked at, the crontab and at jobs are removed,
-/// that is done once more, the IPC objects go, the record is deleted, and only then is the
-/// account shown gone, each item looked at again after the deletion.
+/// Asserts the order of a deletion of an account with nothing running: the record is looked
+/// up by name and by uid, the processes are ended and the domains booted out and the login domain looked at,
+/// the crontab and at jobs are removed, that is done once more, the IPC objects go, the
+/// record is deleted, and only then is the account shown gone, each item looked at again
+/// after the deletion. launchd is never asked to print a user domain, and is asked nothing
+/// once the record is deleted. Catches a deletion that prints `user/<uid>` (which makes the
+/// domain again) or asks launchd about a uid whose record is gone.
 #[test]
 fn a_deletion_makes_these_calls_in_this_order() {
     let (rig, pool, account) = lent("order");
@@ -45,9 +48,12 @@ fn a_deletion_makes_these_calls_in_this_order() {
         format!("bootout user/{u}"),
         format!("processes {u}"),
         format!("launchctl_print gui/{u}"),
-        format!("launchctl_print user/{u}"),
     ];
     let want = [
+        &[
+            "in_directory kbf-acct-1".to_owned(),
+            format!("uid_in_directory {u}"),
+        ][..],
         round.as_slice(),
         round.as_slice(),
         &[
@@ -58,14 +64,92 @@ fn a_deletion_makes_these_calls_in_this_order() {
             "account kbf-acct-1".to_owned(),
             format!("uid_taken {u}"),
             format!("processes {u}"),
-            format!("launchctl_print gui/{u}"),
-            format!("launchctl_print user/{u}"),
             "command /usr/bin/ipcs -a".to_owned(),
         ],
     ]
     .concat();
     assert_eq!(rig.fake.take_calls(), want);
     assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+}
+
+/// Asserts that an account whose record is no longer there (a crash after the deletion, or a
+/// making that never got to the record) is ended without a question to launchd: its process
+/// is killed, it is shown gone, and no `bootout` or `launchctl print` names its uid. Catches
+/// kill rounds that make a user domain for a uid with no account.
+#[test]
+fn a_uid_whose_record_is_gone_is_ended_without_asking_launchd() {
+    let (rig, pool, account) = lent("no-record");
+    rig.fake.state().users.remove("kbf-acct-1");
+    rig.fake.add_process(me(), 40, "distnoted");
+    let retired = pool.retire(account).unwrap();
+    assert_eq!(retired.killed, [40]);
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    let calls = rig.fake.take_calls();
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.starts_with("bootout") && !call.starts_with("launchctl_print")),
+        "{calls:?}"
+    );
+}
+
+/// Asserts that a record that cannot be looked up before the kill rounds holds the account at
+/// `kill`, naming the lookup, with nothing killed and launchd not asked: neither answer can be
+/// taken for granted.
+#[test]
+fn a_record_that_cannot_be_looked_up_before_the_kill_holds_the_account() {
+    let (rig, pool, account) = lent("no-lookup");
+    rig.fake.fail("in_directory kbf-acct-1");
+    let held = self::held(pool.retire(account));
+    assert_eq!(held.step, Step::Kill);
+    assert_eq!(
+        held.why,
+        format!(
+            "looking up the record kbf-acct-1 before ending uid {}'s processes: \
+             in_directory kbf-acct-1 failed",
+            me()
+        )
+    );
+    assert_eq!(rig.fake.take_calls(), ["in_directory kbf-acct-1"]);
+    assert_eq!(rig.lines().last().unwrap(), "held kbf-acct-1 kill");
+
+    let (rig, pool, account) = lent_on(rig.next("no-uid-lookup", 4, 0));
+    let u = me();
+    rig.fake.fail(&format!("uid_in_directory {u}"));
+    let held = self::held(pool.retire(account));
+    assert_eq!(
+        held.why,
+        format!(
+            "looking up the record kbf-acct-1 before ending uid {u}'s processes: \
+             uid_in_directory {u} failed"
+        )
+    );
+    assert_eq!(
+        rig.fake.take_calls(),
+        [
+            "in_directory kbf-acct-1".to_owned(),
+            format!("uid_in_directory {u}")
+        ]
+    );
+}
+
+/// Asserts that a record of the account's name that has another uid does not let launchd
+/// be asked about the account's uid: the account is ended and shown gone, and no `bootout`
+/// or `launchctl print` names either uid. Catches a check of the name alone.
+#[test]
+fn a_record_of_the_name_with_another_uid_does_not_let_launchd_be_asked() {
+    let (rig, pool, account) = lent("other-uid");
+    let other = me() + 3;
+    rig.fake.state().users.get_mut("kbf-acct-1").unwrap().uid = other;
+    pool.retire(account).unwrap();
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    let calls = rig.fake.take_calls();
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.starts_with("bootout") && !call.starts_with("launchctl_print")),
+        "{calls:?}"
+    );
 }
 
 /// Asserts that the crontab and the at jobs of the account are removed after the first kill
@@ -93,7 +177,7 @@ fn schedules_that_cannot_be_removed_hold_the_account_after_the_second_kill() {
     let (rig, pool, account) = lent("schedules-fail");
     std::fs::remove_dir(rig.dir.join("at/tabs")).unwrap();
     std::fs::write(rig.dir.join("at/tabs"), "").unwrap();
-    let held = held(pool.retire(account.clone()));
+    let held = self::held(pool.retire(account.clone()));
     assert_eq!(held.step, Step::Schedules);
     assert!(
         held.why.contains("at/tabs: Not a directory"),
@@ -118,7 +202,7 @@ fn a_process_that_survives_holds_the_account_and_a_retry_deletes_it() {
     let (rig, pool, account) = lent("immortal");
     rig.fake.add_process(me(), 40, "daemon");
     rig.fake.state().immortal.insert(me());
-    let held = held(pool.retire(account.clone()));
+    let held = self::held(pool.retire(account.clone()));
     assert_eq!(held.account, account);
     assert_eq!(held.step, Step::Kill);
     assert_eq!(
@@ -165,7 +249,7 @@ fn the_processes_a_refusal_names_are_at_most_eight() {
         rig.fake.add_process(me(), pid, "p");
     }
     rig.fake.state().immortal.insert(me());
-    let held = held(pool.retire(account.clone()));
+    let held = self::held(pool.retire(account.clone()));
     assert_eq!(
         held.why,
         format!(
@@ -185,7 +269,7 @@ fn the_processes_a_refusal_names_are_at_most_eight() {
 #[test]
 fn a_domain_that_stays_holds_the_account_at_domains() {
     let (rig, pool, account) = lent("domain");
-    let user = format!("user/{}", me());
+    let user = format!("gui/{}", me());
     rig.fake.state().print.insert(user.clone(), Print::Stays);
     rig.fake.state().stubborn.insert(user.clone());
     let at_domains = held(pool.retire(account.clone()));
@@ -246,7 +330,7 @@ fn an_ipc_object_that_stays_holds_the_account_at_ipc() {
     let (rig, pool, account) = lent("ipc");
     rig.fake.add_ipc('m', 100, "kbf-acct-1", "kbf-acct-1");
     rig.fake.state().ipcrm_fails = true;
-    let held = held(pool.retire(account.clone()));
+    let held = self::held(pool.retire(account.clone()));
     assert_eq!(held.step, Step::Ipc);
     assert_eq!(
         held.why,
@@ -266,7 +350,7 @@ fn a_shared_place_that_cannot_be_swept_holds_the_account_at_sweep() {
     let (rig, pool, account) = lent("sweep");
     std::fs::remove_dir(rig.dir.join("Shared")).unwrap();
     std::fs::write(rig.dir.join("Shared"), "").unwrap();
-    let held = held(pool.retire(account));
+    let held = self::held(pool.retire(account));
     assert_eq!(held.step, Step::Sweep);
     assert!(held.why.contains("Shared: Not a directory"), "{}", held.why);
 }
@@ -278,7 +362,7 @@ fn a_shared_place_that_cannot_be_swept_holds_the_account_at_sweep() {
 fn a_record_that_cannot_be_deleted_holds_the_account_at_record() {
     let (rig, pool, account) = lent("record");
     rig.fake.fail("delete_account kbf-acct-1");
-    let held = held(pool.retire(account.clone()));
+    let held = self::held(pool.retire(account.clone()));
     assert_eq!(held.step, Step::Record);
     assert_eq!(
         held.why,
@@ -300,7 +384,7 @@ fn a_home_that_cannot_be_removed_holds_the_account_at_home() {
     let (rig, pool, account) = lent("home");
     std::fs::remove_dir_all(rig.dir.join("Users")).unwrap();
     std::fs::write(rig.dir.join("Users"), "").unwrap();
-    let held = held(pool.retire(account));
+    let held = self::held(pool.retire(account));
     assert_eq!(held.step, Step::Home);
     assert!(held.why.contains("Users: Not a directory"), "{}", held.why);
 }

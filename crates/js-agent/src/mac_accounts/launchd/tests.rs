@@ -14,10 +14,13 @@ fn answer(code: Option<i32>, stdout: &str) -> PrintAnswer {
     }
 }
 
-/// Asserts that a uid's domains are its login session's and its user domain, in that order.
+/// Asserts that a uid's domains booted out are its login session's and its user domain, in
+/// that order, and that only its login session's is ever printed: a print of the user domain
+/// would make it again.
 #[test]
 fn the_domains_of_a_uid_are_its_session_and_its_user_domain() {
     assert_eq!(domains(701), ["gui/701".to_owned(), "user/701".to_owned()]);
+    assert_eq!(printed_domains(701), ["gui/701".to_owned()]);
 }
 
 /// Asserts that a domain that holds nothing is told from one that holds a service or an

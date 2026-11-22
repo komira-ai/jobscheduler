@@ -20,7 +20,7 @@ fn broken(why: &str) -> String {
 #[test]
 fn a_reset_whose_account_cannot_be_looked_up_breaks_the_slot() {
     let rig = rig("pool-reset-account", 1);
-    rig.helper.user_create("91.1", None).unwrap();
+    rig.helper.user_create("91.1").unwrap();
     rig.host
         .state()
         .fail_script
@@ -50,7 +50,7 @@ fn a_reset_whose_account_cannot_be_looked_up_breaks_the_slot() {
 #[test]
 fn a_reset_whose_record_cannot_be_read_or_is_not_there_breaks_the_slot() {
     let rig = rig("pool-reset-record", 1);
-    rig.helper.user_create("92.1", None).unwrap();
+    rig.helper.user_create("92.1").unwrap();
     rig.host
         .state()
         .fail_script
@@ -92,7 +92,7 @@ fn a_reset_whose_record_cannot_be_read_or_is_not_there_breaks_the_slot() {
 #[test]
 fn a_record_whose_uid_is_not_the_slot_s_leaves_the_slot_broken() {
     let rig = rig("pool-reset-uid", 1);
-    let uid = rig.helper.user_create("93.1", None).unwrap();
+    let uid = rig.helper.user_create("93.1").unwrap();
     let mut record = rig.host.user_record("kbf-lease-pool-0").unwrap().unwrap();
     record.uid = uid + 7;
     rig.host

@@ -135,10 +135,10 @@ fn a_record_only_the_lookup_cache_still_answers_for_is_gone() {
     );
 }
 
-/// Asserts the process item: a process that is there after the deletion, a process table
-/// that cannot be read, and a launchd domain that prints each fail the proof at `processes`.
+/// Asserts the process item: a process that is there after the deletion, and a process
+/// table that cannot be read, each fail the proof at `processes`.
 #[test]
-fn a_process_or_a_domain_after_the_deletion_fails_the_proof() {
+fn a_process_after_the_deletion_fails_the_proof() {
     let base = Rig::new("proof-processes", 1, 0);
     let uid = me();
     let (_rig, _pool, held) = failing(&base, "late-process", "delete_account", |rig| {
@@ -158,18 +158,36 @@ fn a_process_or_a_domain_after_the_deletion_fails_the_proof() {
         said(&held, Gone::Processes),
         format!("listing the processes of uid {uid}: processes {uid} failed")
     );
+}
 
-    let (_rig, _pool, held) = failing(&base, "late-domain", "delete_account", |rig| {
-        let fake = rig.fake.clone();
-        Box::new(move || {
-            fake.state()
-                .print
-                .insert(format!("user/{uid}"), Print::Stays);
-        })
+/// Asserts that once the record is deleted the proof asks launchd nothing, so a user domain
+/// that would print does not hold the account and is never made again by a print: the
+/// retirement is `gone`, and no `launchctl print` or `bootout` follows the deletion.
+#[test]
+fn the_proof_asks_launchd_nothing_after_the_deletion() {
+    let rig = Rig::new("proof-no-launchd", 1, 0);
+    let pool = rig.open();
+    let account = pool.lend("job-1").unwrap().account;
+    let uid = account.uid;
+    let fake = rig.fake.clone();
+    rig.fake.on("delete_account", move || {
+        fake.state()
+            .print
+            .insert(format!("user/{uid}"), Print::Stays);
     });
-    assert_eq!(
-        said(&held, Gone::Processes),
-        format!("launchd domains of uid {uid} remain after the account was deleted: user/{uid}")
+    rig.fake.take_calls();
+    pool.retire(account).unwrap();
+    assert_eq!(rig.lines().last().unwrap(), "gone kbf-acct-1");
+    let calls = rig.fake.take_calls();
+    let deleted = calls
+        .iter()
+        .position(|call| call == "delete_account kbf-acct-1")
+        .unwrap();
+    assert!(
+        calls[deleted..]
+            .iter()
+            .all(|call| !call.starts_with("launchctl_print") && !call.starts_with("bootout")),
+        "{calls:?}"
     );
 }
 

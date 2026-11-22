@@ -5,6 +5,7 @@ use super::error::Failure;
 use super::host::NewUser;
 use super::ledger::{Record, name};
 use super::pool::Pool;
+use super::teardown::Launchd;
 use super::{Account, AccountError, Step, folder, generated_uid, tree, uid};
 
 /// How many uids a refusal for want of a free one names; it counts the rest.
@@ -48,9 +49,10 @@ impl Pool {
     /// A process of a slot that no account of the ledger holds and that no record has is
     /// nobody's work: macOS starts per-user daemons (`distnoted`) by itself for a uid whose
     /// domain was touched. Such a process is ended with the rounds a retirement uses
-    /// ([`Pool::kill_rounds`]), and the slot is busy only when one survives them or they
-    /// cannot look. A slot an account of the ledger holds is never killed here: that is
-    /// [`Pool::retire`]'s.
+    /// ([`Pool::kill_rounds`]), without asking launchd anything (no account has the uid, and
+    /// a question about its user domain would make one), and the slot is busy only when one
+    /// survives them or they cannot look. A slot an account of the ledger holds is never
+    /// killed here: that is [`Pool::retire`]'s.
     fn why_busy(&self, uid: u32) -> Option<String> {
         if let Some(n) = self.ledger().holding(uid) {
             return Some(format!("held by {}", name(n)));
@@ -69,7 +71,7 @@ impl Pool {
             Err(why) => return Some(format!("listing its processes: {why}")),
             Ok(stray) if !stray.is_empty() => {
                 let mut killed = Vec::new();
-                if let Err(failed) = self.kill_rounds(uid, &mut killed) {
+                if let Err(failed) = self.kill_rounds(uid, &mut killed, Launchd::Never) {
                     return Some(failed.why);
                 }
                 killed.sort_unstable();
@@ -199,7 +201,8 @@ impl Pool {
     fn unmake(&self, n: u64, uid: u32, failed: &Failure) -> AccountError {
         let name = name(n);
         let done = self
-            .kill_rounds(uid, &mut Vec::new())
+            .launchd_for(&name, uid)
+            .and_then(|ask| self.kill_rounds(uid, &mut Vec::new(), ask))
             .and_then(|()| self.cleanup(&name, uid));
         let ended = match self.settle(n, done) {
             Ok(_) => "what was made was deleted and shown gone".to_owned(),

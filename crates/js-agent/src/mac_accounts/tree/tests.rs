@@ -801,7 +801,8 @@ fn an_entry_that_vanishes_is_not_an_error_and_other_errors_are() {
     assert!(vanished(Ok(())).is_ok());
     assert!(present::<()>(Err(Errno::NOENT)).unwrap().is_none());
     assert!(present::<()>(Err(Errno::ACCESS)).is_err());
-    assert_eq!(present(Ok(5)).unwrap(), Some(5));
+    // One instantiation for every arm: arms split across types count as missed.
+    assert_eq!(present::<()>(Ok(())).unwrap(), Some(()));
 }
 
 /// Asserts that a directory swapped in after it was examined is not entered: the walk opens

@@ -56,7 +56,6 @@ fn img(name: &str) -> Img {
             uid: me(),
             gid: my_gid(),
             home: rig.dir.join("Users").join(VM),
-            admin: false,
         },
     );
     let settings = rig.helper.settings.image.clone();
