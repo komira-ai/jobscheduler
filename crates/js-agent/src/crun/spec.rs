@@ -115,11 +115,11 @@ pub(super) fn container_spec(
         working_directory: String::new(),
         env: Vec::new(),
         argv: Vec::new(),
-        // The booking again on the container's own cgroup, which the job reads as its
-        // `/sys/fs/cgroup`: the lease's (`LeasePolicy::Hard`) is what bounds it.
+        // The memory booking again on the container's own cgroup, which the job reads as its
+        // `/sys/fs/cgroup`: the lease's (`LeasePolicy::HardMemory`) is what bounds it. The CPU
+        // booking is the lease's `cpu.weight`, a share: no cgroup of the job has a `cpu.max`.
         limits: ContainerLimits {
             pids: run.pids.unwrap_or(DEFAULT_PIDS),
-            cpu_millis: Some(run.cpu_millis),
             memory_bytes: Some(run.memory_bytes),
             ..ContainerLimits::DEFAULT
         },

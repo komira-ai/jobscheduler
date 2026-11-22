@@ -370,42 +370,69 @@ fn made(
     }
 }
 
-/// Catches a Hard lease whose memory cap is not the booking (the booking times 1.5 plus
-/// 512 MiB lets a job use what it did not book, which podman's `--memory` never did), or
-/// whose swap is not 0 (a job pressed at its cap would be moved to swap, which podman's
-/// `--memory-swap` equal to `--memory` forbids), or that lost the OOM group.
+/// Catches a lease of the agent's policy whose memory cap is not the booking (the booking
+/// times 1.5 plus 512 MiB lets a job use what it did not book), or whose swap is not 0 (a job
+/// pressed at its cap would be moved to swap), or that lost the OOM group.
 #[test]
-fn a_hard_lease_caps_memory_at_the_booking_and_forbids_swap() {
-    let read = made("hard-memory", &booking(2000, 3 << 30), LeasePolicy::Hard);
+fn a_hard_memory_lease_caps_memory_at_the_booking_and_forbids_swap() {
+    let read = made(
+        "hard-memory",
+        &booking(2000, 3 << 30),
+        LeasePolicy::HardMemory,
+    );
     assert_eq!(read("memory.max"), Some((3u64 << 30).to_string()));
     assert_eq!(read("memory.swap.max").as_deref(), Some("0"));
     assert_eq!(read("memory.oom.group").as_deref(), Some("1"));
     assert_eq!(read("memory.high"), None);
-}
-
-/// Catches a Hard lease without a hard CPU cap (a `cpu.weight` alone lets a job use idle
-/// cores, which `--cpus` never did) and a cap that is not `cpu_millis` thousandths of a
-/// core per 100 ms period: 2500 booked is `250000 100000`, as `--cpus 2.500` makes.
-#[test]
-fn a_hard_lease_caps_cpu_at_the_booked_cores() {
-    let read = made("hard-cpu", &booking(2500, 1 << 30), LeasePolicy::Hard);
-    assert_eq!(read("cpu.max").as_deref(), Some("250000 100000"));
-    assert_eq!(cpu_max(1500).as_deref(), Some("150000 100000"));
-    assert_eq!(
-        cpu_max(1).as_deref(),
-        Some("1000 100000"),
-        "the kernel's least quota"
-    );
-    assert_eq!(cpu_max(0), None);
     assert_eq!(hard_memory_max(1 << 30), Some(1 << 30));
     assert_eq!(hard_memory_max(0), None);
 }
 
-/// Catches a Hard lease that booked nothing getting a limit of 0 (a `memory.max` of 0
-/// kills every process at once) and a swap limit with no memory limit beside it.
+/// Catches a lease held to its CPU booking: a `cpu.max` makes the kernel throttle a job that
+/// booked half a core to half a core in every period while the node's other cores are idle.
+/// With no `cpu.max` the kernel's `max` stands (no quota, so no period is ever throttled)
+/// and the booking is the lease's `cpu.weight`, 100 a core: half a core is 50.
 #[test]
-fn a_hard_lease_that_booked_nothing_has_no_limits() {
-    let read = made("hard-none", &Resources::default(), LeasePolicy::Hard);
+fn a_lease_that_booked_half_a_core_has_no_cpu_ceiling_and_a_weight_of_half_a_core() {
+    let read = made("half-core", &booking(500, 1 << 30), LeasePolicy::HardMemory);
+    assert_eq!(read("cpu.max"), None);
+    assert_eq!(read("cpu.weight").as_deref(), Some("50"));
+}
+
+/// Catches two leases that want every core not sharing the cores as they booked them: the
+/// kernel gives siblings that all want CPU each its weight's part of the cores, so leases
+/// that booked 1 and 3 cores get a quarter and three quarters. A `cpu.max` on either would
+/// hold it to its booking whatever the other leaves idle; neither has one.
+#[test]
+fn two_leases_that_booked_one_and_three_cores_share_the_cores_one_to_three() {
+    let one = made(
+        "share-one",
+        &booking(1000, 1 << 30),
+        LeasePolicy::HardMemory,
+    );
+    let three = made(
+        "share-three",
+        &booking(3000, 1 << 30),
+        LeasePolicy::HardMemory,
+    );
+    let weight = |read: &dyn Fn(&str) -> Option<String>| -> u64 {
+        read("cpu.weight")
+            .expect("cpu.weight")
+            .parse()
+            .expect("a number")
+    };
+    let (one_weight, three_weight) = (weight(&one), weight(&three));
+    assert_eq!((one_weight, three_weight), (100, 300));
+    assert_eq!(three_weight, 3 * one_weight, "shares one to three");
+    assert_eq!((one("cpu.max"), three("cpu.max")), (None, None));
+}
+
+/// Catches a lease that booked nothing getting a limit of 0 (a `memory.max` of 0 kills
+/// every process at once, a `cpu.weight` of 0 is refused by the kernel) and a swap limit
+/// with no memory limit beside it.
+#[test]
+fn a_hard_memory_lease_that_booked_nothing_has_no_limits() {
+    let read = made("hard-none", &Resources::default(), LeasePolicy::HardMemory);
     for file in ["memory.max", "memory.swap.max", "cpu.max", "cpu.weight"] {
         assert_eq!(read(file), None, "{file}");
     }

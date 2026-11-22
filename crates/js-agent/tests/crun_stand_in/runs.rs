@@ -49,13 +49,14 @@ fn a_start_gives_its_steps_once_in_the_order_they_were_done() {
 /// plus 1000) in the order the layout says, then the job's temporary directory to the job
 /// user with its `tmp` and `var-tmp` to the job's id, then the run's scratch directory to the
 /// job's id, then the lease's cgroup and its four files to the job user; a cgroup limited by
-/// the booking (`memory.max` the booking, no swap, `cpu.max` the booked cores,
-/// `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
+/// the booking (`memory.max` the booking, no swap, `cpu.weight` from the booked cores and no
+/// `cpu.max`: the CPU booking is a share, never a ceiling, `memory.oom.group`); a bundle that runs the image's entrypoint with the run's arguments
 /// in the image's environment with the scratch directory bound, and the temporary
 /// directory's `tmp` and `var-tmp` bound at `/tmp` and `/var/tmp` (`noexec`). It lists with
 /// the run's label, the agent's and the time it was made. The program's exit 3 polls as 3,
 /// again as the same, and removing it leaves no directory (the temporary one included), no
-/// cgroup and no listing, repeated without error. Catches a limit that is not the booking,
+/// cgroup and no listing, repeated without error. Catches a memory limit that is not the
+/// booking, a CPU ceiling (a job held to 1.5 cores while the node's others are idle),
 /// files the job cannot write or `crun` cannot use, a `/tmp` in memory or not bound, and a
 /// removal that leaves a lease or a job's `/tmp` behind.
 #[test]
@@ -94,7 +95,8 @@ fn a_run_is_made_started_read_and_removed() {
     let (lease, cgroup) = (node.lease_of(&name), node.cgroup_of(&name));
     assert_eq!(read(&cgroup.join("memory.max")), (1_u64 << 30).to_string());
     assert_eq!(read(&cgroup.join("memory.swap.max")), "0");
-    assert_eq!(read(&cgroup.join("cpu.max")), "150000 100000");
+    assert_eq!(read(&cgroup.join("cpu.weight")), "150");
+    assert!(!cgroup.join("cpu.max").exists(), "no CPU ceiling");
     assert_eq!(read(&cgroup.join("memory.oom.group")), "1");
 
     let bundle: Value =

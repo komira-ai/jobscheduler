@@ -16,7 +16,7 @@
 //! ```text
 //! <bin> create --name js-<agent tag>-<run id> --label jobscheduler.dev/run-id=r1 ...
 //!   --label jobscheduler.dev/agent=<host> [--env <name>=<value> ...]
-//!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 32768
+//!   --cpu-shares 1536 --memory 1073741824 --memory-swap 1073741824 --pids-limit 32768
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
 //!   --mount type=bind,src=<scratch>,dst=/scratch,nosuid,nodev            (Podman)
 //!   --mount type=volume,dst=/scratch,volume-driver=local,volume-nocopy,

@@ -20,10 +20,10 @@ fn strings(args: &[&str]) -> Vec<String> {
 }
 
 /// The limits of a spec without a GPU or a mount, plus the scratch mount every job has.
-fn base(cpus: &str, memory: &str, pids: &str) -> Vec<String> {
+fn base(shares: &str, memory: &str, pids: &str) -> Vec<String> {
     strings(&[
-        "--cpus",
-        cpus,
+        "--cpu-shares",
+        shares,
         "--memory",
         memory,
         "--memory-swap",
@@ -35,11 +35,13 @@ fn base(cpus: &str, memory: &str, pids: &str) -> Vec<String> {
     ])
 }
 
-/// Asserts one row for each limit: CPUs as exact decimals from thousandths, memory with
-/// swap pinned to the same number (so the job cannot spill into swap), and the process
-/// limit as given, or the default when the job names none. It catches a limit that is
-/// missing from the flags, which lets the container exceed it, a swap allowance that
-/// lets memory grow past its limit, and a CPU count rounded or scaled wrongly.
+/// Asserts one row for each limit: the CPU booking as a share, 1024 a core and within the
+/// engines' range of 2 to 262144, never `--cpus` (a ceiling that holds a job to its booking
+/// while the node's cores are idle); memory with swap pinned to the same number (so the job
+/// cannot spill into swap), and the process limit as given, or the default when the job
+/// names none. It catches a ceiling on the CPU, a memory or process limit that is missing
+/// from the flags, which lets the container exceed it, a swap allowance that lets memory
+/// grow past its limit, and a share scaled wrongly or outside what the engines take.
 #[test]
 fn limits_to_args_table() {
     let row = |cpu_millis, memory_bytes, pids| {
@@ -52,32 +54,37 @@ fn limits_to_args_table() {
         (
             "whole cpu",
             row(1000, 1 << 30, Some(100)),
-            base("1.000", "1073741824", "100"),
+            base("1024", "1073741824", "100"),
         ),
         (
             "fraction",
             row(250, 1 << 30, Some(100)),
-            base("0.250", "1073741824", "100"),
+            base("256", "1073741824", "100"),
         ),
         (
             "many cpus",
             row(64_000, 1 << 30, Some(100)),
-            base("64.000", "1073741824", "100"),
+            base("65536", "1073741824", "100"),
         ),
         (
             "smallest cpu",
             row(1, 1 << 30, Some(100)),
-            base("0.001", "1073741824", "100"),
+            base("2", "1073741824", "100"),
+        ),
+        (
+            "most cpus",
+            row(1_000_000, 1 << 30, Some(100)),
+            base("262144", "1073741824", "100"),
         ),
         (
             "small memory",
             row(1500, 6 << 20, Some(1)),
-            base("1.500", "6291456", "1"),
+            base("1536", "6291456", "1"),
         ),
         (
             "no pid bound still bounded",
             row(1500, 1 << 30, None),
-            base("1.500", "1073741824", &default_pids),
+            base("1536", "1073741824", &default_pids),
         ),
     ];
     for (name, job, expected) in rows {

@@ -57,7 +57,7 @@ pub mod walk;
 #[cfg(test)]
 mod test_dir;
 
-pub use cgroup::{LeasePolicy, SwapKill, cpu_max, cpu_weight, hard_memory_max, memory_max};
+pub use cgroup::{LeasePolicy, SwapKill, cpu_weight, hard_memory_max, memory_max};
 pub use cgroup_usage::{CgroupUsage, NumaNodeBytes};
 pub use container::{
     ContainerLimits, ContainerSpec, Dirs, Ended, HostMount, Isolation, SharedMount,

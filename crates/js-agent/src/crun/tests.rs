@@ -154,8 +154,9 @@ fn a_job_env_goes_over_the_image_env_once_applied() {
 /// binds, read-write, `noexec`: no tmpfs in memory), then its mounts with the access they
 /// asked, then its files read-only; the job starting at the
 /// exec root; no shared trees; the process limit the run named, or the default for one that
-/// named none; the run's booked CPU and memory as its container cgroup's own limits (without
-/// them the job reads `max` in `/sys/fs/cgroup/cpu.max`); no program or environment (the
+/// named none; the run's booked memory as its container cgroup's own limit (without it the job
+/// reads `max` in `/sys/fs/cgroup/memory.max`) and no CPU limit on it (the CPU booking is the
+/// lease's `cpu.weight`, a share: the job reads `max` in its `cpu.max`); no program or environment (the
 /// image config gives them); and the job ports of its host ports, in order, as the ports its
 /// init waits to be listening (none without).
 #[test]
@@ -186,7 +187,6 @@ fn a_run_becomes_the_container_it_asked_for() {
         spec.limits,
         ContainerLimits {
             pids: 77,
-            cpu_millis: Some(1500),
             memory_bytes: Some(1 << 30),
             ..ContainerLimits::DEFAULT
         }
@@ -224,10 +224,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         "/c",
     );
     assert_eq!(plain.limits.pids, DEFAULT_PIDS);
-    assert_eq!(
-        (plain.limits.cpu_millis, plain.limits.memory_bytes),
-        (Some(1500), Some(1 << 30))
-    );
+    assert_eq!(plain.limits.memory_bytes, Some(1 << 30));
     // `/scratch`, `/tmp`, `/var/tmp` and the run's two mounts.
     assert_eq!(plain.mounts.len(), 5);
     assert!(

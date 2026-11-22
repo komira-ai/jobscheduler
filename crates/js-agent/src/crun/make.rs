@@ -206,7 +206,7 @@ impl Maker {
         self.mark(marks, "dirs");
         let booking = Resources::new(spec.cpu_millis, spec.memory_bytes, 0, None)?;
         cgroup
-            .create_with(&booking, None, LeasePolicy::Hard)
+            .create_with(&booking, None, LeasePolicy::HardMemory)
             .map_err(|why| Fault::step("make the lease's cgroup", &why))?;
         for file in JOB_OWNED_FILES {
             chown(&owned(cgroup.dir(), file), job.0, job.1)
