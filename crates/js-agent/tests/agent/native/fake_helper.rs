@@ -27,6 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use js_mac_session::client::Client;
+use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::lease::{Slot, parse_lease, pool_user_name, user_name};
 use js_mac_session::proto::{self, Call, Limits, PoolState, RUN_FDS, Reply, Request};
 
@@ -120,6 +121,8 @@ struct State {
     held: BTreeSet<u32>,
     /// Whether `pool-status` leaves out which lease holds which slot.
     status_names_none: bool,
+    /// What `full-disk-access` answers: the grant held unless a test says otherwise.
+    full_disk_access: Option<FullDiskAccess>,
 }
 
 struct Shared {
@@ -218,6 +221,8 @@ impl FakeHelper {
     /// The native backend over this helper, with its lease journal in `dir`: what an agent
     /// given this helper's socket and homes (`--native-helper-socket`, `--native-homes`) runs
     /// its jobs with.
+    /// The helper holds Full Disk Access unless [`FakeHelper::full_disk_access`] says
+    /// otherwise, and the backend carries the state the agent would have asked for.
     pub fn backend(&self, dir: &Scratch) -> js_agent::Backend {
         let flags = js_agent::native::NativeFlags {
             socket: Some(self.socket()),
@@ -231,7 +236,18 @@ impl FakeHelper {
         };
         let journal = dir.path("native-leases");
         let settings = js_agent::native::NativeSettings::from_flags(&flags, &[], &journal);
-        js_agent::Backend::Native(settings.unwrap().unwrap())
+        let state = self.shared.lock().full_disk_access;
+        let settings = settings.unwrap().unwrap();
+        js_agent::Backend::Native(
+            settings.with_full_disk_access(state.unwrap_or(FullDiskAccess::Granted)),
+        )
+    }
+
+    /// From now on `full-disk-access` answers `state`. To make the helper refuse the verb
+    /// as an old helper does, [`FakeHelper::be_old`]; to make it fail, refuse the verb
+    /// with [`FakeHelper::refuse`].
+    pub fn full_disk_access(&self, state: FullDiskAccess) {
+        self.shared.lock().full_disk_access = Some(state);
     }
 
     /// The home of the pool user lent to `lease` (also once the lease is over).
@@ -505,6 +521,14 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 let existed =
                     held && fs::remove_dir_all(shared.homes.join(shared.user_of(&lease))).is_ok();
                 reply(stream, &Reply::Deleted { existed });
+            }
+        },
+        Request::FullDiskAccess => match shared.take(seen("full-disk-access", "")) {
+            Some(reason) => refused(stream, reason),
+            None => {
+                let state = shared.lock().full_disk_access;
+                let state = state.unwrap_or(FullDiskAccess::Granted);
+                reply(stream, &Reply::FullDiskAccess { state });
             }
         },
         Request::Scan => {
