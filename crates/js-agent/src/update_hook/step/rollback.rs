@@ -4,7 +4,8 @@
 //! point goes on from there and makes no act twice.
 //!
 //! In this order, each before anything is changed:
-//! 1. the lock, the record and the params agree; a taint the restarted agent will not re-check
+//! 1. the lock, the record and the params agree, or the record is of another target and is
+//!    rolled back with the params it was written under (below); a taint the restarted agent will not re-check
 //!    halts (76), here and again before each phase below (an agent with such a taint refuses
 //!    every start, the old release included, so nothing is gained by going on; a taint it will
 //!    re-check, a residue of a post-job check the pin file does not name, does not halt the
@@ -94,6 +95,16 @@
 //! left unconfirmed, and not past its expiry; an operator's, and one that may be anyone's, are
 //! never touched, renewed or placed again.
 //!
+//! The update rolled back is the one on record. A record of another target that this hook wrote
+//! (it keeps every rule under its own target, previous version, digest and releases) and that
+//! returns the host to the previous release the params name is rolled back with those params
+//! of its own, and the last line of every ending says so: an update that failed half way
+//! through its rollback is finished by the updater's rollback of the next order, whose
+//! `prepare` refused it (see [`supersede`](super::supersede)). A record of another target that
+//! returns the host elsewhere is refused (`state_invalid`) and kept, and the detail says that
+//! its rollback needs the params it was written under; so is every other record that does not
+//! agree with the params.
+//!
 //! The ending: the record is deleted (no `cleanup` follows a rollback), so a rerun finds none
 //! and says so (`reversible: true`: it knows nothing, and the updater does not decide with the
 //! flag on a success). A tombstone would have to be cleared by the next `prepare`, which
@@ -129,7 +140,8 @@ use super::cutover::{
     request_handover, show, withdraw_handover,
 };
 use super::prepare::{place, refuse_host, refuse_host_in, refuse_taint, renew};
-use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
+use super::supersede::{for_rollback, noted};
+use super::{Env, failure, lease_failure, open_unchecked, save, state_failure, success};
 use super::{helper, in_place};
 use crate::cordon::CREDENTIAL_CODES;
 
@@ -139,7 +151,7 @@ pub fn rollback(env: &Env<'_>, params: &Params) -> Done {
 }
 
 fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
-    let (held, loaded) = open_state(env, params)?;
+    let (held, loaded) = open_unchecked(env, params)?;
     let Some(mut record) = loaded else {
         refuse_taint(env)?;
         return Ok(Done {
@@ -153,7 +165,9 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             ..success()
         });
     };
-    let done = go(env, params, &held, &mut record).unwrap_or_else(|done| done);
+    let (params, note) = for_rollback(params, &record)?;
+    let done = go(env, &params, &held, &mut record).unwrap_or_else(|done| done);
+    let done = noted(done, note, None);
     // Once the agent was stopped (or a first install moved its link) nothing is reversible.
     Ok(if begun(&record) {
         irreversible(done)
@@ -577,7 +591,7 @@ fn wait_down(
 }
 
 /// What the last look of the lease server showed.
-enum Look {
+pub(super) enum Look {
     /// No other session said hello (not yet, or the server shows the one of before).
     Silent,
     /// Another session said hello, and it is not the previous agent.
@@ -590,7 +604,12 @@ enum Look {
 /// step the session must differ from the one recorded before it, by equality (both are the
 /// server's stamps, never compared with the host's clock); with no act made the agent that
 /// runs is the one that always did, and no other session is asked for.
-fn judge(host: &HostReading, record: &Record, previous: &str, runtime: &str) -> Result<(), Look> {
+pub(super) fn hello(
+    host: &HostReading,
+    record: &Record,
+    previous: &str,
+    runtime: &str,
+) -> Result<(), Look> {
     let rb = &record.rb;
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
     let other_session = match host.session_started_ms {
@@ -648,7 +667,7 @@ fn await_hello(
         if state.active == "active" {
             last = match env.ports.lease.host() {
                 Ok(host) => {
-                    match judge(&host, record, &previous, params.settings.hello_runtime()) {
+                    match hello(&host, record, &previous, params.settings.hello_runtime()) {
                         Ok(()) => break,
                         Err(look) => look,
                     }

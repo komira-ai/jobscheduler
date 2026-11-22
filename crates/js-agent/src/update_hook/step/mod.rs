@@ -5,9 +5,11 @@
 //!
 //! A step is a function of an [`Env`] and the params table, and ends as a [`Done`]: the status
 //! and the last line. It takes the state directory's lock first (making the directory when it
-//! is not there), loads and validates the record, and only then looks at the machine. The one
-//! exception is `prepare`'s judgement of a record of another target: it may read the unit's
-//! state to decide whether the record is superseded or refused (see [`supersede`]). Every
+//! is not there), loads and validates the record, and only then looks at the machine. The
+//! exceptions are the record of another target: `prepare` may read the unit's state, the release
+//! link, the handover file and the lease server to decide whether that record is superseded,
+//! finished or refused, and `rollback` rolls it back with the params it was written under (see
+//! [`supersede`]). Every
 //! change to the record or through a port passes a kill point first
 //! ([`Ports::point`](super::Ports::point)), so that a test, and later the conformance harness,
 //! can end the step at any of them and run it again.

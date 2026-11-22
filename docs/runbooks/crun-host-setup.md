@@ -245,6 +245,36 @@ systemctl kill --kill-whom=all --signal=SIGKILL js-agent-crun.service
 
 after which the next restart starts it.
 
+### An update record a rollback did not finish
+
+The update hook keeps its record of an update in `/var/lib/js-agent-update/record.json` (root's;
+on a Mac `/Library/Application Support/js-agent/update/record.json`) and deletes it when the
+update ends, by `cleanup` or by a `rollback` that saw the previous agent's hello. A rollback whose
+start was refused (above) ends before that hello and leaves the record, although the previous
+agent comes back by itself once the last job ends. The next update names another target, and
+its steps treat the record so:
+
+- `prepare` finishes the record itself when the rollback is complete in effect: the record
+  returns the host to the previous release this update names, the release link is on that
+  release, the unit is active, the record does not say the agent that runs is the one the
+  failed update started, and the lease server shows the previous agent's live session. It moves
+  the record aside as `record.rolled-back-<target>-<ms>.json` in the same directory, says so in
+  its detail, and goes on. Otherwise it fails `state_invalid` with the record kept, and the
+  detail names the first thing left (`... its rollback is not complete: <what>; the rollback step
+  finishes it`).
+- the updater's `rollback` that follows rolls back the update on record, with the record's own
+  target, previous version, digest and releases, and its detail begins `the record is of the
+  update to <target>, not <ordered>`. It is refused, record kept, when the record returns the
+  host to another previous release than the order's.
+
+A hook from before this behaviour refuses such a record at both steps. To finish it by hand with
+jobs running, run that hook's `rollback` with a params file that is the package's `[params]`
+table plus the record's own `updater.target_version`, `updater.previous_version`,
+`updater.staged_release`, `updater.previous_release` and `updater.artifact_digest` (the values
+of its `update` object, byte for byte). With the unit active on the previous release it makes no
+act on the unit: it waits for the previous agent's session, deletes the record and prints
+`{"class":"release","promotion_pending":false,"reversible":false}`.
+
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:
 
