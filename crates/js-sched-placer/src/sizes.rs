@@ -80,9 +80,9 @@
 //! - its peak memory and CPU time are what its host reported in the job's result (`usage`, read
 //!   from the job's control group); a job with none has no peak, and a success with no peak teaches
 //!   the memory nothing; its wall time is from its start to its end;
-//! - a success whose peak came within 5% of its booking counts as having hit its limit, so it
-//!   can hold an estimate at the booking but never lower it (the estimator's own censoring
-//!   rule assumes the build-host limit, half as much again above the booking);
+//! - its memory limit is its booking (what the agent writes as a contained job's `memory.max`;
+//!   a booking of 0 has none): a success whose peak came within 5% of it needed at least the
+//!   limit, and its class books a step above it next ([`js_sizing::Run::memory_limit_bytes`]);
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
 //!   of wall time (`cpu.pressure`, as its host reported it). Below a tenth, the sample is a
 //!   measurement; at or above it the run's CPU may only raise its class's CPU, since a run that
@@ -136,8 +136,7 @@ const CPU_STEP: u64 = 250;
 /// The milliseconds of a day.
 const DAY_MILLIS: u64 = 86_400_000;
 
-/// A peak within this many hundredths of its booking hit the booking, and so did a mean CPU
-/// within this many hundredths of the CPU a run was held to.
+/// A mean CPU within this many hundredths of the CPU a run was held to was held there.
 const AT_LIMIT_PERCENT: u64 = 95;
 
 /// A run throttled in at least one period in this many was held at its CPU ceiling (5%).
@@ -446,18 +445,16 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
     let peak = result.usage.map(|usage| usage.peak_memory_bytes);
     let cpu = result.usage.map_or(0, |usage| micros(usage.cpu_time));
     let wall = micros(ended.since(started));
-    // At the limit: a peak within 5% of a booking (a booking of 0 has no limit).
-    let at_limit = peak.is_some_and(|peak| {
-        let peak = u128::from(peak) * 100;
-        (memory_bytes > 0) & (peak >= u128::from(memory_bytes) * u128::from(AT_LIMIT_PERCENT))
-    });
     let run = Run {
         outcome,
         wall_us: wall,
         peak_memory_bytes: peak,
         booked_memory_bytes: memory_bytes,
         raised_memory_bytes: killed.then(|| memory_bytes.saturating_mul(2)),
-        limit_hits: u64::from(at_limit),
+        // The agent holds a contained job to its booking (its `memory.max`); a booking of 0
+        // has no limit. The estimator judges whether the run reached it.
+        memory_limit_bytes: (memory_bytes > 0).then_some(memory_bytes),
+        limit_hits: 0,
         swap_peak_bytes: 0,
         cpu_usage_us: cpu,
         node_cpu_pressure_permille: result.usage.map(|usage| contention(usage, wall)),

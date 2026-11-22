@@ -61,12 +61,13 @@ impl Reference {
                 let usable = |p: &u64| trusted && *p > 0 && *p < b.host_memory;
                 if let Some(peak) = run.peak_memory_bytes.filter(usable) {
                     {
-                        let limit = memory_max(run.booked_memory_bytes);
-                        let near =
-                            limit.is_some_and(|l| u128::from(peak) * 100 >= u128::from(l) * 95);
-                        if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near {
-                            self.samples
-                                .push((peak.min(run.booked_memory_bytes), true, now));
+                        let limit = run.memory_limit_bytes.unwrap_or(0);
+                        let near = limit > 0 && u128::from(peak) * 100 >= u128::from(limit) * 95;
+                        if run.limit_hits > 0 || near {
+                            let need = peak.max(limit).min(b.host_memory - 1);
+                            self.samples.push((need, true, now));
+                        } else if run.swap_peak_bytes > 0 {
+                            self.samples.push((peak, true, now));
                         } else {
                             self.samples.push((peak, false, now));
                         }
@@ -75,7 +76,10 @@ impl Reference {
                 }
             }
             Outcome::OwnLimitKill => {
-                let limit = memory_max(run.booked_memory_bytes).unwrap_or(0);
+                let limit = match run.memory_limit_bytes {
+                    Some(limit) if limit > 0 => limit,
+                    _ => run.booked_memory_bytes,
+                };
                 let used = run.peak_memory_bytes.unwrap_or(0);
                 let sample = used.max(limit).min(b.host_memory.saturating_sub(1));
                 if sample > 0 {
@@ -168,13 +172,14 @@ impl Reference {
         let raise_only = day.max(self.last_seen).min(MAX_DAY) < self.until;
         let max = self.window(false).into_iter().max().unwrap_or(0);
         let held = self.window(true).into_iter().max().unwrap_or(0);
-        let sized = max
-            .saturating_add(max.div_ceil(5))
+        let top = max.max(held);
+        let sized = top
+            .saturating_add(top.div_ceil(5))
             .saturating_add(128 * MIB);
         let mut memory = if self.mixed() {
-            b.default_memory.max(floor).max(up(sized.max(held)))
+            b.default_memory.max(floor).max(up(sized))
         } else {
-            let memory = up(sized.max(held).max(floor));
+            let memory = up(sized.max(floor));
             if n < 5 || raise_only {
                 memory.max(b.default_memory)
             } else {
@@ -244,6 +249,11 @@ pub(super) fn random_run(rng: &mut Rng, host: u64) -> Run {
         node_cpu_pressure_permille: (rng.below(5) != 0).then(|| rng.below(300) as u16),
         cpu_held: rng.below(4) == 0,
         cpu_peak_millis: (rng.below(3) == 0).then(|| u32::try_from(rng.below(16_000)).unwrap()),
+        memory_limit_bytes: match rng.below(3) {
+            0 => None,
+            1 => Some(booked),
+            _ => Some(rng.size(host)),
+        },
     }
 }
 

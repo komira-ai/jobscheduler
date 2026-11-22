@@ -512,19 +512,20 @@ fn a_job_that_never_ran_had_the_whole_host_or_no_result_teaches_nothing() {
     assert!(!sizes.observe(&unstarted, booked(1, GIB)), "never started");
 }
 
-/// Asserts that a success whose peak came within 5% of its booking holds its class at the
-/// booking (a contained job's booking is its limit, so it may have been held there), while one
-/// at 90% of it raises the class past the booking. Catches a run at its limit taken as an
-/// honest peak, which would size the class at the limit that held it.
+/// Asserts that a success whose peak came within 5% of its booking (a contained job's booking
+/// is its limit, so the agent held it there) books its class a step above that booking: 4 GiB
+/// x 1.2 + 128 MiB, 5 GiB; one at 90% of it is an honest peak, with the same margin; and a run
+/// booked 0 has no limit and is a run. Catches a run held at its limit taken as the class's
+/// need, which books the class at the limit that held it again, run after run.
 #[test]
-fn a_success_at_its_booking_holds_the_class_at_the_booking() {
+fn a_success_at_its_booking_books_the_class_a_step_above_it() {
     let tables = Tables::new();
     let near = || exited(0, 4 * GIB - 100 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "near", 5, "build", booked(2000, 4 * GIB), near);
     let next = queued("next", of_class("build", needs(0, 0)));
     assert_eq!(
         size(&taught(&jobs, booked(2000, 4 * GIB)), &next).1,
-        4 * GIB
+        5 * GIB
     );
     let below = || exited(0, 4 * GIB - 400 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "below", 5, "build", booked(2000, 4 * GIB), below);
@@ -539,6 +540,47 @@ fn a_success_at_its_booking_holds_the_class_at_the_booking() {
         sizes.observe(&unbooked[0], booked(2000, 0)),
         "a run with no booking is a run"
     );
+}
+
+/// Asserts the case of a compile whose runs outgrew the class's booking: five runs of
+/// 6450 MiB (booked 12 GiB) book the class 7.75 GiB; a run held at that booking (peak
+/// 7894 MiB) books the next 9.5 GiB, and runs of the same peak under 9.5 GiB keep it there.
+/// Catches a class whose runs sit at the booking it learned, booked there again for every
+/// later run.
+#[test]
+fn a_class_held_at_its_booking_leaves_it_and_then_stays() {
+    let tables = Tables::new();
+    let next = queued("next", of_class("compile", needs(0, 0)));
+    let learned = || exited(0, 6450 * MIB, Duration::from_secs(30));
+    let mut history: Vec<(JobRecord, Booked)> = runs(
+        &tables,
+        "learn",
+        5,
+        "compile",
+        booked(2000, 12 * GIB),
+        learned,
+    )
+    .into_iter()
+    .map(|job| (job, booked(2000, 12 * GIB)))
+    .collect();
+    let teach = |history: &[(JobRecord, Booked)]| {
+        let mut sizes = JobSizes::with_cold(MODULE_COLD);
+        sizes.set_bounds(Some(bounds()));
+        for (job, booked) in history {
+            assert!(sizes.observe(job, *booked), "{} teaches a run", job.id);
+        }
+        sizes
+    };
+    assert_eq!(size(&teach(&history), &next).1, 7936 * MIB);
+    let pinned = || exited(0, 7894 * MIB, Duration::from_secs(30));
+    let at_cap = booked(2000, 7936 * MIB);
+    let held = runs(&tables, "held", 1, "compile", at_cap, pinned);
+    history.extend(held.into_iter().map(|job| (job, at_cap)));
+    assert_eq!(size(&teach(&history), &next).1, 9728 * MIB, "a step above");
+    let roomy = booked(2000, 9728 * MIB);
+    let fits = runs(&tables, "fits", 5, "compile", roomy, pinned);
+    history.extend(fits.into_iter().map(|job| (job, roomy)));
+    assert_eq!(size(&teach(&history), &next).1, 9728 * MIB, "and stays");
 }
 
 /// Asserts that runs taught before any host is known are kept and taught when the first

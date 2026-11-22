@@ -35,6 +35,7 @@ pub(super) fn success(peak: u64) -> Run {
         peak_memory_bytes: Some(peak),
         booked_memory_bytes: peak.max(4 * GIB),
         raised_memory_bytes: None,
+        memory_limit_bytes: None,
         limit_hits: 0,
         swap_peak_bytes: 0,
         cpu_usage_us: 0,

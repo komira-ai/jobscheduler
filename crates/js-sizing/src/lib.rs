@@ -20,26 +20,27 @@
 //!   [`MIN_SAMPLES`], else there is no estimate.
 //! * **Samples.** A success with a non-zero measured peak (zero is not a measurement)
 //!   and a wall time of at least one second, or an own-limit memory kill. A kill is a
-//!   sample of at least the limit derived from its booking (`1.5 x booked + 512 MiB`,
-//!   [`memory_max`]), not of a recorded limit field. Failed non-OOM runs, lost or
+//!   sample of at least the limit it died at ([`Run::memory_limit_bytes`], else its
+//!   booking). Failed non-OOM runs, lost or
 //!   cancelled runs and node-pressure kills are not samples. A success that hit its
-//!   limit (`memory.events` `max` above zero, any swap, or a peak within 5% of the
-//!   limit) is censored: it contributes `min(peak, booked)` with no headroom, so it can
-//!   hold an estimate at the booking but never raise it; only a kill raises past the
-//!   booking. CPU samples are successful runs with CPU time that started below
+//!   limit (`memory.events` `max` above zero, or a peak within 5% of the
+//!   [`Run::memory_limit_bytes`] it ran under) needed at least that limit: it is a held
+//!   sample of `max(peak, limit)`, so its key books a step above the limit next. A
+//!   success that swapped is a held sample of its peak. A run with no limit of its own
+//!   reaches none. CPU samples are successful runs with CPU time that started below
 //!   [`CPU_PRESSURE_MAX_PERMILLE`] node CPU pressure and were not held at a CPU
 //!   ceiling ([`Run::cpu_held`]).
-//! * **Memory.** `round_up_256MiB(max(1.2 * M + 128 MiB, held, oom_floor))` in integer
+//! * **Memory.** `round_up_256MiB(max(1.2 * max(M, held) + 128 MiB, oom_floor))` in integer
 //!   arithmetic (`M + ceil(M / 5)`, so results match on every architecture), where `M`
-//!   is the maximum uncensored sample over the last 256 or more runs (nine chunk
+//!   is the maximum measured (not held) sample over the last 256 or more runs (nine chunk
 //!   maxima of 32 runs: the eight latest full chunks plus the current one, a span of
-//!   257 to 288 runs) and `held` the largest censored one; at least 1 GiB. The
+//!   257 to 288 runs) and `held` the largest held one; at least 1 GiB. The
 //!   statistic is the maximum, not a percentile. With fewer than [`N_MIN`] samples, or
 //!   while raise-only, the estimate may only raise (it is at least the default
 //!   booking). A *mixed* key (the largest of its last 32 samples over four times their
 //!   median) is never lowered by samples and raised by kills: its estimate is the larger
 //!   of the default booking, its floor and its own sized estimate
-//!   `round_up_256MiB(max(1.2 * M + 128 MiB, held))`, so it is never booked below
+//!   `round_up_256MiB(1.2 * max(M, held) + 128 MiB)`, so it is never booked below
 //!   its own largest recent peak with the margin. [`Summaries::peak_memory`] answers
 //!   what a key's largest recent samples ask for whatever their number or dispersion.
 //! * **Never a whole host.** A booking at or above the memory of the largest matching
@@ -93,7 +94,7 @@
 //! * **Calibration.** The test `the_kill_rate_stays_within_the_declared_bound` draws
 //!   peaks from a lognormal around 1 GiB (sigma in rows) and from the same with a 3%
 //!   tail four times larger, gives the crate `n` samples, and counts how often the next
-//!   run needs more than the limit (1.5 x booking + 512 MiB) of the booking it gets, in
+//!   run needs more than the build-host limit (1.5 x booking + 512 MiB) of the booking it gets, in
 //!   10,000 trials per cell. Declared bound, per mille:
 //!
 //!   | sigma, tail | n=3 | n=4 | n=5 | n=10 | n=32 |
@@ -125,7 +126,7 @@ mod summary;
 mod tests;
 
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
-pub use run::{Bounds, CpuSample, Discard, Hint, Observed, Outcome, Run, memory_max};
+pub use run::{Bounds, CpuSample, Discard, Hint, Observed, Outcome, Run};
 pub use store::{
     CpuCounts, Estimate, Fallback, MAX_KEYS, MAX_KEYS_PER_INSTANCE, MAX_PINNED, STALE_DAYS,
     Summaries,

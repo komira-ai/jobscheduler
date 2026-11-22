@@ -635,8 +635,8 @@ leasing it is level 2 (9.1). In short:
 - **7.2 Sizing policy.** The constants scattered in kbf become one `SizingPolicy` value; `SizingPolicy::kbf()` returns today's values and a
   property test asserts every estimator output is unchanged (step 14). `Declared` mode (ucdk) makes the declared size the booking and
   the ceiling.
-- **7.3 One limit rule.** The scheduler computes the limit (today 1.5 x the booking + 512 MiB), sends it in `Start.limits`, and the
-  estimator's censoring decision uses the same function.
+- **7.3 One limit rule.** The scheduler computes the limit (today the booking, which js-agent writes as the job's `memory.max`), sends
+  it in `Start.limits`, and the estimator is given each run's limit to judge whether the run reached it.
 - **7.4 Ladder per class.** An unseen request climbs its class's ladder; an out-of-memory kill moves to the next rung above the killed
   run's booking and below `cap_of(request)`. `cap_of(request)` is the largest machine the consumer holds a lease on or can lease from a pool matching the request's class and
   selectors, not the size of one lease. When the next rung exceeds the leases held, the consumer requests a whole-node lease (queued as

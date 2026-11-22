@@ -1,8 +1,14 @@
-//! S12: how often the next run exceeds the limit of the estimate, by distribution and
-//! by number of samples seen. `EPSILON` is the declared bound, in tenths of a percent;
-//! the same table is in the crate docs.
+//! S12: how often the next run exceeds the build-host limit of the estimate (1.5 x the
+//! booking + 512 MiB, js-contain's `LeasePolicy::BuildHost`), by distribution and by number
+//! of samples seen. `EPSILON` is the declared bound, in tenths of a percent; the same table
+//! is in the crate docs.
 
 use super::*;
+
+/// The build-host limit of a booking: half as much again plus 512 MiB.
+fn build_host_limit(booked: u64) -> u64 {
+    booked + booked / 2 + 512 * MIB
+}
 
 const TRIALS: usize = 10_000;
 const COUNTS: [usize; 5] = [3, 4, 5, 10, 32];
@@ -91,7 +97,7 @@ fn kill_rate(dist: Dist, seen: usize, seed: u64) -> u64 {
         let booked = s
             .estimate(&k, DAY, &b, &Hint::default())
             .map_or(b.default_memory, |est| est.memory_bytes);
-        if draw(&mut rng, dist) > memory_max(booked).unwrap() {
+        if draw(&mut rng, dist) > build_host_limit(booked) {
             kills += 1;
         }
     }

@@ -795,6 +795,7 @@ fn sizing_life(walls_ms: &[u64]) -> u8 {
             peak_memory_bytes: Some(1 << 30),
             booked_memory_bytes: 4 << 30,
             raised_memory_bytes: None,
+            memory_limit_bytes: None,
             limit_hits: 0,
             swap_peak_bytes: 0,
             cpu_usage_us: 0,

@@ -13,7 +13,7 @@ Constants that are scattered today become one value:
 
 ```rust
 struct SizingPolicy {
-    limit_of: fn(booking) -> limit,   // today memory_max: 1.5 x + 512 MiB
+    limit_of: fn(booking) -> limit,   // today the booking: js-agent writes it as the job's memory.max
     round: u64, min: u64,             // 256 MiB steps
     slack_frac: Ratio, headroom: u64, // 20% + 128 MiB
     n_min: usize,                     // 5; gates lowering below the default booking
@@ -34,9 +34,11 @@ struct SizingPolicy {
 (11.3).
 
 ## 7.3 One limit rule
-The 1.5x + 512 MiB rule lives in `cgroup.rs`, in `memory_max()` in the estimator, and in the native driver. The Start `limits` field plus
-`SizingPolicy::limit_of` make the scheduler the one source: the scheduler computes the limit, sends it, and the estimator's censoring
-decision ("did this run hit its limit") uses the same function. A provider may still enforce a stricter limit and say so in usage.
+The build-host 1.5x + 512 MiB rule lives in `cgroup.rs` (`LeasePolicy::BuildHost`) and in the native driver; js-agent's jobs run under
+`LeasePolicy::HardMemory`, whose limit is the booking. The estimator derives no limit: each run names the one it ran under
+(`Run::memory_limit_bytes`, which the job service sets to the booking). The Start `limits` field plus
+`SizingPolicy::limit_of` make the scheduler the one source: the scheduler computes the limit, sends it, and the estimator's decision
+("did this run reach its limit") uses the same limit. A provider may still enforce a stricter limit and say so in usage.
 
 ## 7.4 Ladder per class
 `--memory-ladder-gib` is server-wide. The generic form is per resource class: an unseen request climbs its class's ladder; an
@@ -45,7 +47,7 @@ The cap is an explicit core query, `cap_of(request)`, which keeps `Scheduler::me
 cordoned or not, that serves the request's kind, platform, CPU and GPU needs, and always the pool the killed run used. It is not
 Fit's candidate set, which leaves cordoned pools out; a `cap_of` built on Fit's view would change the rung a killed run climbs to
 during a cordon or drain. For a pool that scales, the cap is the largest shape the pool can acquire (the memory of
-its biggest configured shape, 5.7), not the live fleet. Because the limit is 1.5x + 512 MiB, a 12 GiB booking has an 18.5 GiB limit
+its biggest configured shape, 5.7), not the live fleet. Because the build-host limit is 1.5x + 512 MiB, a 12 GiB booking has an 18.5 GiB limit
 and the next rung (16 GiB) is below the limit that just failed; whether to move to "above the limit" is D4, not part of the extraction.
 The scheduler interface stays `set_size_key`, `key_floor_bound`, `lower_key_floor`, `restore_floors`
 (`crates/kbf-sched/src/scheduler/memory.rs`). The ladder becomes a plugin behind `RetryPolicy`, because `memory.rs` today mixes retry
@@ -119,8 +121,11 @@ its start (`taught`) counts the runs that gave a class a sample, not the jobs it
 **What a run teaches.** When a pass sees a job's allocation freed, it reads the job once and gives the estimator one run: an exit 0 is
 a success; any other exit, a wall limit or a failed input a failure, which teaches the memory nothing; a stop for memory is a kill at
 the job's own limit, which raises the class's floor to twice the booking it died at. A success whose peak came within 5% of its
-booking counts as having hit its limit (the estimator's own censoring rule assumes the build-host limit of 7.3), so it can hold the
-class at its booking but not lower it. A run's CPU sample is its peak: the most cores its group used over any five seconds of
+limit (the booking: the agent writes it as the job's `memory.max`, and the server passes it to the estimator as the run's limit)
+needed at least that limit: the agent held it there, reclaiming its pages, rather than killing it. It is a held sample of the limit,
+so its class books a step above it next (`1.2 x` the limit plus 128 MiB, rounded up to 256 MiB) and keeps stepping up while its runs
+reach their limit. Its peak counts page cache, so a job whose cache alone fills its limit climbs the same way.
+A run's CPU sample is its peak: the most cores its group used over any five seconds of
 the run, which the agent measures from the group's `cpu.stat` every second and reports beside the CPU time (`cpu_peak`). A run
 with no peak reported (an agent from before the field, and every run recorded before it) has only its mean CPU, which is a lower
 bound of its peak: it counts as held (below). A run's sample is a measurement only when its own contention is low and nothing held it: its

@@ -33,6 +33,10 @@ pub struct Run {
     pub booked_memory_bytes: u64,
     /// For an own-limit kill: the booking the caller's ladder retries with.
     pub raised_memory_bytes: Option<u64>,
+    /// The memory limit the run was held to (its `memory.max`), as the caller's host wrote
+    /// it; `None` when the run had no limit of its own. A run that reached it needed at least
+    /// it, and an own-limit kill died at it. A limit of 0 is none.
+    pub memory_limit_bytes: Option<u64>,
     /// How many times the run reached its memory limit (`memory.events` `max`); 0 when
     /// none or not measured.
     pub limit_hits: u64,
@@ -54,17 +58,6 @@ pub struct Run {
     /// would have used. Such a sample is kept only when it exceeds the key's current
     /// estimate, whatever the pressure.
     pub cpu_held: bool,
-}
-
-/// The hard memory limit (`memory.max`) of a lease that booked `booked` bytes: the
-/// booking plus half of it plus 512 MiB, as the container driver sets it. `None` when
-/// nothing was booked (no limit).
-pub fn memory_max(booked: u64) -> Option<u64> {
-    (booked > 0).then(|| {
-        booked
-            .saturating_add(booked / 2)
-            .saturating_add(512 * crate::MIB)
-    })
 }
 
 /// What the caller books by default and the bound it must stay under.
