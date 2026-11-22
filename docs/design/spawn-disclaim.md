@@ -1,6 +1,6 @@
 # Starting programs with the privacy responsibility disclaimed
 
-How `js-agent` and `js-mac-session` start every program on macOS so that no job holds a privacy (TCC) grant of theirs, why the start is built the way it is, and how the rule is kept. The code is `crates/js-mac-session/src/disclaim.rs` and its modules (`plan.rs`, `darwin.rs`); the check is `crates/xtask/src/spawn_sites.rs`.
+How `js-agent` and `js-mac-session` start every program on macOS so that no program of theirs holds a privacy (TCC) grant of the helper's, and a job holds the agent's by one start only: the job path keeps the responsibility, nothing between the agent and the job disclaims it. Why the start is built the way it is, and how the rule is kept. The code is `crates/js-mac-session/src/disclaim.rs` and its modules (`plan.rs`, `darwin.rs`); the check is `crates/xtask/src/spawn_sites.rs`.
 
 ## The problem
 
@@ -30,6 +30,16 @@ The helper's `as-user` mode (the last step of a run in a GUI session, executed b
 
 What the disclaim gives: the program is its own responsible process, and what it starts answers for it. What it does not do: it does not take away a grant that the job's own program already has (a grant given to that app by someone); it only stops the daemon's grants from reaching it.
 
+## The job path keeps the responsibility
+
+The owner decided that a job is an ordinary child of the agent: a job reads the store's network file system mount only when it holds the agent's Full Disk Access (measured), and the job's Seatbelt profile, not the disclaim, keeps it on its own trees there. So nothing between the agent and the job disclaims the responsibility.
+
+- The helper starts the run's start process (`js-agent __job-start`, the agent's own program) through `spawn`, disclaimed as every helper start is: the start process answers for itself, which is the agent's program, and the helper's own grants (it holds none) never reach it.
+- That process applies the profile and executes the job's program in its own place with `disclaim::exec_kept`, the responsibility kept: the job answers for the start process, so it holds the agent's grant.
+- A run the agent starts itself (`mac_job`, the one-program prototype) starts the same mode with `Program::keep_responsibility` and the start process again executes with `exec_kept`: the job answers for the agent. There is no flag that disclaims it.
+
+The agent's other programs (its probes, the self-test, `pfctl`) and the helper's `launchctl` keep the disclaim.
+
 ## How the rule is kept
 
 `cargo test -p xtask --test spawn_sites` parses, with `syn`, the production source of `js-agent`, `js-mac-session` and every workspace crate built into them for macOS (their path dependencies, not the Linux-only target tables), from every crate root the manifests and the source layout give. Outside `disclaim.rs` it reports an import that renames `libc` or a `process` module (under another name, `Command` and the shells would not be named), and any naming of the standard library's or tokio's `process::Command`, `CommandExt`, a `pre_exec` or `exec` call, the C library's `exec*`, `posix_spawn*`, `vfork`, `system` and `popen`, and glob imports of those modules, in code, imports and macro tokens. What only a test build compiles is left out. A module it cannot find, a module whose file a `cfg_attr` chooses by target, an `include!`, or a crate with no root stops it with an error, never a skip.
@@ -52,5 +62,5 @@ No CLI, flag, configuration key, wire message or file format changes.
 ## What is tested where
 
 - The rules that need no system call (the vectors byte for byte, the search, the order and cleanup of the attribute calls, the pid conversions) and `Program` as the standard library's command run on Linux, in `js-mac-session`'s own tests.
-- On the macOS CI runner, `crates/js-agent/tests/agent/native/disclaim.rs` starts real jobs through the helper's `spawn` and through `Program` and reads each process's responsible process back (`responsibility_get_pid_responsible_for_pid`): jobs, a job under `sandbox-exec`, a job's child and grandchild, the agent's `pfctl`, jobs started at the same moment, and a control started the usual way. It also checks the search and the environment on a real system: relative and empty `PATH` directories in the job's own directory, a non-executable and an unreadable candidate passed over, a script without `#!`, a `PATH` only the job has, and the environment byte for byte.
+- On the macOS CI runner, `crates/js-agent/tests/agent/native/disclaim.rs` starts real jobs through the helper's `spawn` and through `Program` and reads each process's responsible process back (`responsibility_get_pid_responsible_for_pid`): jobs, a job under the agent's own `__job-start` mode (which applies the job's profile in the job's own process with `sandbox_init_with_parameters` and executes the program with the responsibility kept), a job the agent starts itself, which answers for the agent's responsible process, a job's child and grandchild, the agent's `pfctl`, jobs started at the same moment, and a control started the usual way. It also checks the search and the environment on a real system: relative and empty `PATH` directories in the job's own directory, a non-executable and an unreadable candidate passed over, a script without `#!`, a `PATH` only the job has, and the environment byte for byte.
 - Not proven on the hosted runner, which has no grant to give: a protected read refused while the helper holds a grant; nor the GUI-session path (`launchctl asuser`, the drop to the lease user and the in-process `disclaim::exec`), which needs root and a logged-in user. Its `exec` shares the plan, the search and the attributes with the `Program` start the runner does test; what only it does is build the plan from its own environment and call the search without a fork. The check by hand is in `packaging/js-agent-macos/README.md`.

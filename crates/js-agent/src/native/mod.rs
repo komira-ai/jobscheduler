@@ -13,25 +13,24 @@
 //!    `.tmp/` and a bundle's `.trees/` inside it) and gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
-//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
-//!    the run's file-size and process limits as fields of the request: the helper sets
-//!    them with `setrlimit` in the child, before it executes `sandbox-exec`, so no shell
-//!    stands between the profile and the program. The helper starts it with
-//!    the empty file as standard input, the log files as standard output and error, and
-//!    `exec/` as the working directory. The profile is built by
-//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the run directory
-//!    `exec/` and nothing else: the account's home itself is not writable to the job (macOS
-//!    guards what a job would make in `~/Library` even against root, so the sweep could
-//!    not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
-//!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper
-//!    sets `HOME` to the account's home whatever the agent passes, so the command is
-//!    `sandbox-exec ... /usr/bin/env HOME=<exec/.home> <program> <args>`: `env` runs
-//!    inside the profile and executes the program, and the helper's wire is unchanged.
-//!    The helper builds the process's environment around the one the agent passes. The connection stays open until the process exits: a thread of the runtime
-//!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
-//!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
-//!    `--run-files-root`) has their directory given to the user before this, `0500` with
-//!    its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it. Its
+//! 3. `run` starts `<agent> __job-start --profile <profile> --param ... -- <program> <args>` as
+//!    the user, with the run's file-size and process limits as fields of the request: the helper
+//!    sets them with `setrlimit` in the child, before it executes the agent (no shell). The
+//!    helper starts it with the empty file as standard input, the log files as standard output
+//!    and error, and `exec/` as the working directory. The profile is built by
+//!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the run directory `exec/`
+//!    and nothing else: the account's home itself is not writable to the
+//!    job (macOS guards what a job would make in `~/Library` even against root, so the sweep
+//!    could not remove it). `HOME` and `CFFIXED_USER_HOME` name `exec/.home` and `TMPDIR` names
+//!    `exec/.tmp`, so a tool that keeps preferences or caches writes there. The helper sets
+//!    `HOME` to the account's home whatever the agent passes, so the command is
+//!    `<agent> __job-start ... -- /usr/bin/env HOME=<exec/.home> <program> <args>`: the agent
+//!    applies the profile to its own process and executes `env`, which runs inside the profile
+//!    and executes the program, and the helper's wire is unchanged. The connection stays open
+//!    until the process exits: a thread of the runtime waits on it, and [`Runtime::poll`] reads
+//!    what it found, so it never blocks. A start with run files (`RunSpec::files`, written by
+//!    the lifecycle into the agent's `--run-files-root`) has their directory given to the user
+//!    before this, `0500` with its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it. Its
 //!    mount inputs, which the lifecycle resolved below the agent's mount roots
 //!    (`RunSpec::mounts`), are copied to their `dest` below `exec/` and given to the user
 //!    the same way, and the profile denies writes there too (`native/files.rs`). The
@@ -227,6 +226,8 @@ pub struct NativeConfig {
     /// [`FullDiskAccess::Granted`] runs native jobs: every start is refused
     /// `no-full-disk-access` before anything is made otherwise (`native/grant.rs`).
     pub full_disk_access: FullDiskAccess,
+    /// The program the helper starts for each run: this agent's `__job-start` mode.
+    pub start: PathBuf,
 }
 
 /// A run that started: its scratch directory (where its log files are) and what the thread
@@ -520,7 +521,7 @@ impl NativeRuntime {
         // The job start's environment last, over the agent's: its values win.
         let env = env::with_job(env, &spec.env);
         let grants = mounts::grants(plans);
-        let (profile, command) =
+        let (profile, command, start) =
             profile::confinement_of(&self.config, &native, &home, (&read_only, &grants))?;
         let logs = logs::open(&spec.scratch).map_err(RuntimeError::new)?;
         let fds = [
@@ -533,6 +534,7 @@ impl NativeRuntime {
             .start(
                 (spec, lease, &exec.join(&native.cwd)),
                 (&profile, &command, &env),
+                &start,
                 fds,
             )
             .map_err(|why| fail(&"run", &why))?;

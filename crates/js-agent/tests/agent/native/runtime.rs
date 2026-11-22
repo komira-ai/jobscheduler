@@ -35,7 +35,7 @@ fn exited(code: i32) -> Status {
 /// Asserts that a start asks the helper for a user named for the run's lease, makes the run
 /// directory (`exec`, the working directory, with `.home` and `.tmp` inside it) private to
 /// that user before the program starts, hands the helper a working directory and an empty
-/// standard input, and runs the program under `sandbox-exec` with a profile that grants
+/// standard input, and runs the program through the agent's start mode with a profile that grants
 /// writes to the run directory (not to the home, nor to the user's folder entry), with
 /// `TMPDIR` and `CFFIXED_USER_HOME` inside the run directory. It catches a program
 /// started without its profile, a working directory that is not a directory, a run
@@ -595,34 +595,36 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     }
 }
 
-/// Asserts that the first program of the command is `sandbox-exec`, that the program of the
-/// run follows the profile directly and that no shell is anywhere in the command line: the
-/// helper sets the limits, so nothing the job's environment steers runs before the profile
-/// applies. The command line does not depend on the environment. It catches a command that
-/// starts any other program first, or puts a shell back between the profile and the program.
+/// Asserts that the first program of the command is the agent's own start mode, that the
+/// program of the run follows the profile directly and that no shell is anywhere in the
+/// command line: the helper sets the limits, so nothing the job's environment steers runs
+/// before the profile applies. The command line does not depend on the environment. It
+/// catches a command that starts any other program first, or puts a shell back between the
+/// profile and the program.
 #[test]
-fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
+fn nothing_but_the_agents_start_runs_before_the_profile_applies() {
     let mut rig = Rig::new("first-program");
     let mut body = native("/usr/bin/id", &["-u"]);
     body.env = BTreeMap::from([("A".to_owned(), "b".to_owned())]);
     let spec = rig.spec("r1", body);
     rig.rt.create_and_start(&spec).unwrap();
     let argv = rig.fake.run_of("7.0").argv;
-    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+    assert_eq!(argv[0], config(&rig.fake).start.to_str().unwrap());
+    assert_eq!(argv[1], "__job-start");
     for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "sh", "-c"] {
         assert!(
             !argv.iter().any(|word| word == shell),
             "{shell} is in the command line: {argv:?}"
         );
     }
-    let profile_at = argv.iter().position(|word| word == "-p").unwrap();
+    let separator = argv.iter().position(|word| word == "--").unwrap();
     assert_eq!(
-        argv[profile_at + 2],
+        argv[separator + 1],
         "/usr/bin/env",
         "env, which sets the job's HOME, follows the profile"
     );
     assert_eq!(
-        &argv[profile_at + 4..],
+        &argv[separator + 3..],
         ["/usr/bin/id", "-u"],
         "the program follows"
     );

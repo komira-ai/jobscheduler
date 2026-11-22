@@ -1,13 +1,15 @@
-//! The profile text and the `sandbox-exec` argument vector.
+//! The profile text and the argument vector of js-agent's start mode.
 
 use std::ffi::OsString;
 
 use super::allow;
+use super::apply::{InitError, SandboxInit};
 use super::net::Net;
+use super::path::AbsPath;
 use super::policy::{Policy, ReadModel};
 
-/// The program that applies a profile.
-pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// The word of js-agent's start mode.
+pub const START_VERB: &str = "__job-start";
 
 /// Lines before every grant: allow everything, then take away what a run gets back only
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
@@ -41,6 +43,16 @@ const OFF_RULES: [&str; 2] = [
     "(deny network*)",
     "(allow network-outbound (literal \"/private/var/run/syslog\"))",
 ];
+
+/// Any loopback connect, and listeners on loopback only.
+const LOOPBACK_RULES: [&str; 2] = [
+    "(allow network-inbound (local ip \"localhost:*\"))",
+    "(allow network* (remote ip \"localhost:*\"))",
+];
+
+/// Name lookups: the resolver's socket by path. `mach-lookup` is not denied, so the
+/// resolver's Mach service needs no rule.
+const RESOLVER: &str = "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))";
 
 /// The floor, emitted last and not removable: nothing in a policy reaches this constant.
 /// Denied services: registering a mach name, mounting, creating a POSIX shared memory
@@ -91,7 +103,9 @@ pub struct Profile {
 impl Profile {
     /// The profile of `policy`, in a fixed order: version and `(allow default)`; the
     /// write denies; the write grants (the run directory, the user's folder entry,
-    /// `/dev/null` and `/dev/fd`); the read denies, each with a write deny of the same
+    /// `/dev/null` and `/dev/fd`); the trees on a mount (a read deny of the mount's root,
+    /// then for each tree a read grant and a metadata grant on the tree and its ancestors,
+    /// so a path walk reaches it); the read denies, each with a write deny of the same
     /// path (a read-denied path inside a granted directory is not writable either); the
     /// write protection of inputs; the mount grants (for each mount a read grant of its
     /// path, a metadata grant on the path and its ancestors, and for a read-write mount
@@ -136,6 +150,7 @@ impl Profile {
         if let Some(allow) = policy.allow() {
             allow::reads(allow, policy.uid_entry(), &mut lines, &mut params);
         }
+        tree_rules(policy, &mut lines, &mut params);
 
         for (i, path) in policy.read_denies().iter().enumerate() {
             lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
@@ -178,18 +193,39 @@ impl Profile {
         &self.params
     }
 
-    /// The full command: `sandbox-exec`, a `-D NAME=value` pair per parameter, `-p` and
-    /// the profile, then `program` and its `args`. `program` is absolute (an [`AbsPath`](super::AbsPath)
-    /// or a [`ToolPath`](super::ToolPath)'s path), so `sandbox-exec` does not search `PATH`.
+    /// The text and the parameters as the C strings an in-process apply takes.
+    ///
+    /// # Errors
+    /// An [`InitError`] for a NUL byte; a profile of this builder holds none (its text is
+    /// constants and parameter names, and an [`AbsPath`](super::AbsPath) refuses NUL), so
+    /// the error is the check, not an expected outcome.
+    pub fn sandbox_init(&self) -> Result<SandboxInit, InitError> {
+        SandboxInit::new(&self.text, &self.params)
+    }
+
+    /// The full command: the `start` program (js-agent), the start verb, `--profile` and the
+    /// profile text, a `--param NAME=value` pair per parameter in [`Profile::params`]
+    /// order, `--`, then `program` and its `args`. The start mode applies the profile in
+    /// its own process and executes `program`, which is absolute (an
+    /// [`AbsPath`](super::AbsPath) or a [`ToolPath`](super::ToolPath)'s path).
     #[must_use]
-    pub fn argv(&self, program: impl AsRef<str>, args: &[OsString]) -> Vec<OsString> {
-        let mut argv = vec![OsString::from(SANDBOX_EXEC)];
+    pub fn start_argv(
+        &self,
+        start: &AbsPath,
+        program: impl AsRef<str>,
+        args: &[OsString],
+    ) -> Vec<OsString> {
+        let mut argv = vec![
+            OsString::from(start.as_str()),
+            OsString::from(START_VERB),
+            OsString::from("--profile"),
+            OsString::from(self.text.as_str()),
+        ];
         for (name, value) in &self.params {
-            argv.push(OsString::from("-D"));
+            argv.push(OsString::from("--param"));
             argv.push(OsString::from(format!("{name}={value}")));
         }
-        argv.push(OsString::from("-p"));
-        argv.push(OsString::from(self.text.as_str()));
+        argv.push(OsString::from("--"));
         argv.push(OsString::from(program.as_ref()));
         argv.extend(args.iter().cloned());
         argv
@@ -199,6 +235,24 @@ impl Profile {
 fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     for rule in rules {
         lines.push((*rule).to_owned());
+    }
+}
+
+/// The trees on the shared mount: no read below the root, then each tree's reads and the
+/// metadata of the tree and its ancestors (the root's included, so a walk can pass it but
+/// not list it).
+fn tree_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
+    let Some(trees) = policy.trees() else {
+        return;
+    };
+    params.push(("MOUNT".to_owned(), trees.root().as_str().to_owned()));
+    lines.push("(deny file-read* (subpath (param \"MOUNT\")))".to_owned());
+    for (i, tree) in trees.trees().iter().enumerate() {
+        params.push((format!("MT_{i}"), tree.as_str().to_owned()));
+        lines.push(format!("(allow file-read* (subpath (param \"MT_{i}\")))"));
+        lines.push(format!(
+            "(allow file-read-metadata (path-ancestors (param \"MT_{i}\")))"
+        ));
     }
 }
 
@@ -238,8 +292,17 @@ fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
         }
         Net::Loopback => {
             push_all(lines, &OFF_RULES);
-            lines.push("(allow network-inbound (local ip \"localhost:*\"))".to_owned());
-            lines.push("(allow network* (remote ip \"localhost:*\"))".to_owned());
+            push_all(lines, &LOOPBACK_RULES);
+        }
+        Net::Remote(ports) => {
+            push_all(lines, &OFF_RULES);
+            push_all(lines, &LOOPBACK_RULES);
+            for port in ports.iter() {
+                lines.push(format!(
+                    "(allow network-outbound (remote tcp \"*:{port}\"))"
+                ));
+            }
+            lines.push(RESOLVER.to_owned());
         }
     }
 }

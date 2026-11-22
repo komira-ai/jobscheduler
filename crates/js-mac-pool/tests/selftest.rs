@@ -9,11 +9,15 @@ use std::ffi::OsString;
 use common::{Scratch, canaries, fixture, path, tree, xcode_host};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
-    AbsPath, Class, Failure, MacosMajor, Outcome, PolicyError, ReadGrant, Role, SANDBOX_EXEC,
+    AbsPath, Class, Failure, MacosMajor, Outcome, PolicyError, ReadGrant, Role, START_VERB,
     SelfTest, SelfTestError, Step, Why, scan_privileged,
 };
 
 const STORE: &str = "/Volumes/work/store";
+
+fn start() -> AbsPath {
+    path("/opt/js-agent")
+}
 
 fn grants_with_xcode(scratch: &Scratch) -> Vec<ReadGrant> {
     vec![
@@ -95,14 +99,16 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
     let test = selftest(grants_with_xcode(&scratch));
     for step in test.steps() {
         assert_eq!(step.cwd(), "/Volumes/work/slot1/run", "{}", step.class());
-        let argv = step.argv();
+        let argv = step.argv(&start());
         match step.role() {
             Role::Control => {
                 let programs = ["/bin/cat", "/bin/ls", "/usr/bin/stat", "/usr/bin/xattr"];
                 assert!(programs.iter().any(|p| argv[0] == *p), "{}", step.class());
             }
             Role::Denied | Role::Allowed => {
-                assert_eq!(argv[0], OsString::from(SANDBOX_EXEC), "{}", step.class());
+                assert_eq!(argv[0], OsString::from("/opt/js-agent"), "{}", step.class());
+                assert_eq!(argv[1], OsString::from(START_VERB), "{}", step.class());
+                assert_eq!(argv[2], OsString::from("--profile"), "{}", step.class());
                 let text = argv
                     .iter()
                     .map(|arg| arg.to_string_lossy().into_owned())
@@ -114,7 +120,7 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
     }
     let first = &test.steps()[0];
     assert_eq!(
-        first.argv(),
+        first.argv(&start()),
         [
             OsString::from("/bin/cat"),
             OsString::from("/Users/other/secret")
@@ -233,7 +239,7 @@ fn a_blocked_toolchain_step_refuses_the_assurance() {
     }
 }
 
-/// A profile `sandbox-exec` cannot compile fails every sandboxed step: a denied step
+/// A profile the Seatbelt compiler refuses fails every sandboxed step: a denied step
 /// that failed without the kernel's refusal shows nothing, and the allowed ones are
 /// blocked.
 #[test]
@@ -308,12 +314,22 @@ fn an_outcome_is_read_from_the_exit_code_and_the_kernels_words() {
         ),
         (
             Some(65),
-            "sandbox-exec: /tmp/x: Operation not permitted",
+            "js-agent: /tmp/x: Operation not permitted",
             Outcome::Failed,
         ),
         (
             Some(1),
-            "sandbox-exec: apply: Operation not permitted\nls: /x: Operation not permitted",
+            "js-agent: apply: Operation not permitted\nls: /x: Operation not permitted",
+            Outcome::Refused,
+        ),
+        (
+            Some(126),
+            "js-agent: executing /bin/cat: Operation not permitted",
+            Outcome::Failed,
+        ),
+        (
+            Some(1),
+            "js-agent: executing /bin/cat: Operation not permitted\nls: /x: Operation not permitted",
             Outcome::Refused,
         ),
         (Some(1), "Operation not permitted", Outcome::Failed),

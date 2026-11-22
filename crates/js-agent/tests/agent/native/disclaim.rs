@@ -129,16 +129,22 @@ fn spawned_job_has_responsibility_disclaimed() {
     job.finish();
 }
 
-/// A native job runs as `sandbox-exec ... <program>`: once the program itself has printed
-/// (so `sandbox-exec` has executed it), it is still its own responsible process. It
-/// catches a disclaim lost on the way from `sandbox-exec` to the job's program.
+/// A native job the helper starts runs as `js-agent __job-start ... -- <program>`, and the
+/// helper disclaims the start process, so the process answers for itself (the agent's own
+/// program, which holds the agent's grant). The job path keeps that responsibility: once the
+/// program itself has printed (so the start mode has applied the profile and executed it in
+/// the same process), it is still the start process's own responsible process, which is its
+/// own pid. It catches a disclaim or a change of responsible process on the way from the
+/// start mode to the job's program.
 #[test]
-fn a_job_under_sandbox_exec_answers_for_itself() {
+fn a_job_under_the_agents_start_answers_for_itself() {
     let dir = Scratch::new("disclaim-sandbox");
     let argv = [
-        "/usr/bin/sandbox-exec",
-        "-p",
-        "(version 1) (allow default)",
+        env!("CARGO_BIN_EXE_js-agent"),
+        "__job-start",
+        "--profile",
+        "(version 1)\n(allow default)\n",
+        "--",
         READY[0],
         READY[1],
         READY[2],
@@ -152,6 +158,53 @@ fn a_job_under_sandbox_exec_answers_for_itself() {
     );
     assert_eq!(responsible_pid(pid).unwrap(), pid);
     job.finish();
+}
+
+/// A job the agent starts itself (`js-agent __mac-job-start`, the start mode of the one-program
+/// run) keeps the agent's responsibility: its start is not disclaimed, and neither is the
+/// program the start mode executes in its place, so the job answers for whoever answers for the
+/// agent (here this test's own responsible process), not for itself. It catches a disclaim
+/// between the agent and the job.
+#[test]
+fn a_job_the_agent_starts_itself_answers_for_the_agent() {
+    let dir = Scratch::new("disclaim-kept");
+    let start = dir.path("start.json");
+    let file = js_agent::mac_job::start::StartFile {
+        uid: rustix::process::getuid().as_raw(),
+        gid: rustix::process::getgid().as_raw(),
+        new_session: false,
+        asid_file: dir.path("asid").display().to_string(),
+        profile: "(version 1)\n(allow default)\n".to_owned(),
+        params: Vec::new(),
+        program: READY[0].to_owned(),
+        args: READY[1..].iter().map(|arg| (*arg).to_owned()).collect(),
+    };
+    std::fs::write(&start, serde_json::to_string(&file).unwrap()).unwrap();
+    let (stdin, mut feed) = std::io::pipe().unwrap();
+    let (out, out_end) = std::io::pipe().unwrap();
+    let mut child = Program::new(
+        env!("CARGO_BIN_EXE_js-agent"),
+        [
+            std::ffi::OsStr::new(js_agent::mac_job::start::VERB),
+            std::ffi::OsStr::new("--start"),
+            start.as_os_str(),
+        ],
+    )
+    .keep_responsibility()
+    .stdin(stdin)
+    .stdout(out_end)
+    .spawn()
+    .unwrap();
+    let pid = child.id();
+    let mut line = String::new();
+    BufReader::new(out).read_line(&mut line).unwrap();
+    assert_eq!(line, format!("ready {pid}\n"));
+    let mine = responsible_pid(std::process::id()).unwrap();
+    assert_eq!(responsible_pid(pid).unwrap(), mine);
+    assert_ne!(mine, pid);
+    feed.write_all(b"done\n").unwrap();
+    drop(feed);
+    assert!(child.wait().unwrap().success());
 }
 
 /// What a job starts the usual way, a child and a grandchild, answers for the job, not
@@ -180,7 +233,7 @@ fn a_jobs_children_answer_for_the_job() {
     job.finish();
 }
 
-/// A program the agent starts itself (a probe, the `sandbox-exec` self-test) is its own
+/// A program the agent starts itself (a probe, the start-mode self-test) is its own
 /// responsible process too. It catches a [`Program`] that disclaims only when it is given
 /// steps, as the helper's runs are.
 #[test]

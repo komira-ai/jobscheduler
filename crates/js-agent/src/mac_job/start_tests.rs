@@ -9,10 +9,9 @@ fn file() -> StartFile {
         new_session: true,
         asid_file: "/out/asid".to_owned(),
         profile: "(version 1)".to_owned(),
-        params: vec![("JOB".to_owned(), "/r/j".to_owned())],
+        params: vec![("RUN".to_owned(), "/r/j".to_owned())],
         program: "/bin/sh".to_owned(),
         args: vec!["build.sh".to_owned()],
-        disclaim: false,
     }
 }
 

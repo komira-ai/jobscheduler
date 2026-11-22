@@ -9,10 +9,11 @@ use super::grant::{PinnedTree, ReadGrant};
 use super::net::Net;
 use super::path::AbsPath;
 use super::selftest::Assurance;
+use super::trees::MountTrees;
 use crate::xcode::HostXcode;
 
 /// The most entries any one list of a policy holds. Each is a rule and a `-D` parameter
-/// on the `sandbox-exec` command line.
+/// on the start mode's command line.
 pub const MAX_LISTED: usize = 64;
 
 /// Which reads the profile permits.
@@ -43,6 +44,14 @@ pub enum PolicyError {
     /// More than one Xcode was granted.
     #[error("more than one Xcode granted")]
     TwoXcodes,
+    /// A mount grant is the trees' mount root, above it or below it: its read grant would
+    /// reopen what the trees' rule denies.
+    #[error("a mount grant overlaps the trees' mount root")]
+    MountOverTrees,
+    /// Trees were given to a policy of the allow read model, whose read grants are made of
+    /// proof objects only ([`Policy::allowing`]).
+    #[error("trees on a mount need the open read model")]
+    TreesNeedOpenModel,
 }
 
 /// One host directory a run may use, granted by its canonical path (Seatbelt matches the
@@ -73,6 +82,10 @@ pub struct SlotLayout {
     /// Host directories granted to this run, after the read denies (so a mount under a
     /// denied mount root is readable again) and before the network rules.
     pub mounts: Vec<MountGrant>,
+    /// The run's own trees on the store's shared mount, if the host has one: nothing else
+    /// below the mount's root is readable. Rendered before the read denies, so a read deny
+    /// also holds inside a tree.
+    pub trees: Option<MountTrees>,
 }
 
 /// What the agent allows at most, from its flags.
@@ -93,6 +106,7 @@ pub struct Policy {
     inputs: BTreeSet<AbsPath>,
     read_denies: BTreeSet<AbsPath>,
     mounts: BTreeSet<MountGrant>,
+    trees: Option<MountTrees>,
     net: Net,
     read_model: ReadModel,
     allow: Option<AllowGrants>,
@@ -158,7 +172,9 @@ impl Policy {
     /// The widest policy for `layout` that `caps` allow.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list over [`MAX_LISTED`].
+    /// [`PolicyError::TooMany`] for a list over [`MAX_LISTED`],
+    /// [`PolicyError::MountOverTrees`] for a mount grant that overlaps the trees' mount
+    /// root, and [`PolicyError::TreesNeedOpenModel`] for trees under the allow read model.
     pub fn base(layout: SlotLayout, caps: Caps) -> Result<Self, PolicyError> {
         let policy = Self {
             run: layout.run,
@@ -166,11 +182,25 @@ impl Policy {
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
             mounts: layout.mounts.into_iter().collect(),
+            trees: layout.trees,
             net: caps.net,
             read_model: caps.read_model,
             allow: None,
         };
         policy.check()?;
+        if let Some(trees) = &policy.trees {
+            if policy.read_model != ReadModel::Open {
+                return Err(PolicyError::TreesNeedOpenModel);
+            }
+            let root = trees.root();
+            if policy
+                .mounts
+                .iter()
+                .any(|mount| mount.path.starts_with(root) || root.starts_with(&mount.path))
+            {
+                return Err(PolicyError::MountOverTrees);
+            }
+        }
         Ok(policy)
     }
 
@@ -265,6 +295,10 @@ impl Policy {
 
     pub(super) fn mounts(&self) -> &BTreeSet<MountGrant> {
         &self.mounts
+    }
+
+    pub(super) fn trees(&self) -> Option<&MountTrees> {
+        self.trees.as_ref()
     }
 }
 

@@ -73,8 +73,6 @@ pub struct Report {
     pub trees: Vec<TreeUse>,
     /// The lent account and what its retirement did, when the pool lent one.
     pub account: Option<AccountUse>,
-    /// How the program was started: `ordinary` or `disclaimed`.
-    pub spawn: String,
     /// The last [`TAIL_MAX`] bytes of the program's standard output.
     pub stdout_tail: String,
     /// The last [`TAIL_MAX`] bytes of its standard error.

@@ -50,7 +50,7 @@ pub struct Flags {
     /// a Seatbelt profile, and reports `exec = sandbox-exec`. This flag is in the macOS build
     /// only, and the build requires it unless `--no-jobs` is given. Needs `--scratch-root`
     /// and `--state-root`, and the agent must run as root. The agent checks at start that
-    /// `sandbox-exec` applies a profile.
+    /// its own start mode (`__job-start`) applies a profile.
     /// The helper must be dedicated to this agent, on a Mac used for native jobs only, and
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
@@ -624,7 +624,7 @@ pub(crate) fn runtime(
     // refuses the second time: the start fails, loudly, and never runs as a used user.
     let _ = getrandom::getrandom(&mut bytes);
     let term = u64::from_le_bytes(bytes) >> (u64::BITS - TERM_BITS);
-    native::self_test(native.config(), native.sandbox_exec())
+    native::self_test(native.config())
         .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
     let backend = match native.accounts() {
         Some(pool) => native::Backend::OneProgram(Arc::new(

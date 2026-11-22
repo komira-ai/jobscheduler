@@ -1,4 +1,4 @@
-//! The allow-list read model under the real `sandbox-exec` on a macOS runner, as the
+//! The allow-list read model applied by js-agent's `__job-start` on a macOS runner, as the
 //! runner's own user: the start-up self-test against a fixture store and the host's
 //! Xcode, a toolchain run of a bundle entrypoint, the open model as the control that the
 //! canaries are readable, and the setuid golden list against the host's image. The
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use common::mac::{DATA, Mac, describe, host_major, outcomes, run_steps};
-use common::{Scratch, run};
+use common::{Scratch, run, start_program};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
     Caps, Class, MacosMajor, Net, Outcome, Policy, Profile, ReadGrant, ReadModel, Role, SelfTest,
@@ -74,12 +74,16 @@ fn the_open_model_leaves_every_canary_readable_and_the_self_test_refuses_it() {
         .map(|step| match step.role() {
             Role::Denied => {
                 let (program, args) = step.command();
-                let argv = open.argv(program, args);
+                let argv = open.start_argv(&start_program(), program, args);
                 run(&argv, step.env(), Some(step.cwd()), None).outcome()
             }
-            Role::Control | Role::Allowed => {
-                run(&step.argv(), step.env(), Some(step.cwd()), None).outcome()
-            }
+            Role::Control | Role::Allowed => run(
+                &step.argv(&start_program()),
+                step.env(),
+                Some(step.cwd()),
+                None,
+            )
+            .outcome(),
         })
         .collect();
     let failures = test
@@ -140,7 +144,12 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
 
     let data = vec![fixture.pinned_file("data.txt").into_os_string()];
     let cwd = fixture.run.to_str().expect("text");
-    let under = run(&profile.argv(tool.path(), &data), &[], Some(cwd), None);
+    let under = run(
+        &profile.start_argv(&start_program(), tool.path(), &data),
+        &[],
+        Some(cwd),
+        None,
+    );
     assert!(under.ok, "{}", under.stderr);
     assert_eq!(under.stdout, DATA);
     let control = run(
@@ -163,7 +172,12 @@ fn a_bundle_entrypoint_runs_under_the_allow_profile_and_reads_only_its_pinned_tr
         "the control reads the unpinned file: {}",
         control.stderr
     );
-    let refused = run(&profile.argv(tool.path(), &secret), &[], Some(cwd), None);
+    let refused = run(
+        &profile.start_argv(&start_program(), tool.path(), &secret),
+        &[],
+        Some(cwd),
+        None,
+    );
     assert!(
         !refused.ok,
         "the allow profile let a run read an unpinned tree"

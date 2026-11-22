@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use crate::mac_job::Args;
 use crate::mac_job::layout::Layout;
-use crate::mac_job::profile::Kind;
 use crate::mac_job::report::TreeUse;
 use crate::mac_job::spec::JobFile;
 use crate::provider::CallBounds;
@@ -67,9 +66,6 @@ pub(super) fn link(
     if job.trees.is_empty() {
         return Ok(Vec::new());
     }
-    if args.profile != Kind::ConfinedWrites {
-        return Err("a job with trees runs under --profile confined-writes only".to_owned());
-    }
     let Some((provider, root)) = provider(args)? else {
         return Err("the job names trees and no --mount-provider is given".to_owned());
     };
@@ -125,20 +121,20 @@ fn link_one(
     Ok((entry, resolved))
 }
 
-/// The profile's rules for the mounted trees, and their parameters: none without trees.
-pub(super) fn rules(
+/// The mount root and the resolved paths of the mounted trees, for the profile: none without
+/// trees.
+pub(super) fn mount(
     args: &Args,
     mounted: &[Mounted],
-) -> Result<(String, Vec<(String, String)>), String> {
+) -> Result<Option<(PathBuf, Vec<PathBuf>)>, String> {
     if mounted.is_empty() {
-        return Ok((String::new(), Vec::new()));
+        return Ok(None);
     }
     let Some((_, root)) = provider(args)? else {
         return Err("trees are mounted and no --mount-root is given".to_owned());
     };
     let trees: Vec<PathBuf> = mounted.iter().map(|m| m.resolved.clone()).collect();
-    crate::mac_job::profile::mount_rules(&root, &trees)
-        .map_err(|tree| format!("{} is not beneath {}", tree.display(), root.display()))
+    Ok(Some((root, trees)))
 }
 
 /// Releases every mounted tree: the report's entries, each with its release.

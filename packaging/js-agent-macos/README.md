@@ -236,31 +236,31 @@ updates replace it in place) and the program's designated requirement, which nam
 `com.komira.js-agent`, Apple's Developer ID chain and the team and no hash, so every release of
 the program meets it. That is why the release signs the programs (see Signing), and `cargo test -p
 xtask` holds the profile to the table the signing uses. The root helper `js-mac-session` and
-`js-mac-provision` need no grant. A grant given to the helper or the agent, by hand or by a
-profile, never reaches a job. macOS lets a
+`js-mac-provision` need no grant. A grant given to the helper never reaches a job; the agent's grant does, on purpose. macOS lets a
 process use the grants of its *responsible* process, which is whoever started it, unless
-the starter disclaims that responsibility as it starts it. Every process the helper
-starts for a job (the job's program, and `launchctl` with the helper's `as-user` mode for
-a GUI session), and every program the agent starts itself (its probes, the `sandbox-exec`
-self-test, `pfctl`), is started with that responsibility disclaimed
+the starter disclaims that responsibility as it starts it. The helper starts each job's start
+process (`js-agent __job-start`, the agent's own program, which applies the job's profile in its
+own process) with that responsibility disclaimed, so the start process answers for itself, which
+is the agent's program and holds the agent's grant; the start process executes the job's program
+in its own place with the responsibility kept, so nothing between the agent and the job
+disclaims it: the job, and the processes it starts, answer for the agent's program and hold its
+Full Disk Access. What keeps a job off what it may not read is its Seatbelt profile (the job's own
+trees on the mount, and the rest of the profile). The helper's `launchctl` (the `as-user` mode for
+a GUI session) and every program the agent starts for itself (its probes, the self-test of its
+own `__job-start` mode, `pfctl`) are started with the responsibility disclaimed
 (`crates/js-mac-session/src/disclaim.rs`; the design is in
-`docs/design/spawn-disclaim.md`). A job's process therefore answers for itself, and the
-processes it starts answer for it: none of them holds the agent's or the helper's grants.
-What a job may do is then what its own program was granted. A grant that someone gave a
-job's program itself (an app the job runs, say) is that program's, and the disclaim does
-not take it away.
+`docs/design/spawn-disclaim.md`): none of those holds the helper's or the agent's grants.
 
-The hosted CI runner has no grant to give, so CI checks the disclaim and not a refused
-read: on the macOS runner the agent's tests read back the responsible process of the
-processes the helper's `run` and the agent start, and see that each is the process itself.
-To check a host by hand that a grant does not reach a job: give `js-mac-session` Full
-Disk Access in Privacy & Security, run a native job whose program is `/bin/ls` with the
-argument `/Library/Application Support/com.apple.TCC`, and see it fail with `Operation not
-permitted`. A refusal is also what a grant that did not take effect gives, so check the
-grant the same way with a release from before the disclaim (one whose
-`crates/js-mac-session/src/disclaim.rs` does not exist): there the same job answers for
-the helper and lists the directory. Remove the grant afterwards. `sudo launchctl procinfo <pid>` of a running job's
-process shows its `responsible pid` equal to its own pid.
+The hosted CI runner has no grant to give, so CI checks the responsibility and not a read a
+grant would allow: on the macOS runner the agent's tests read back the responsible process of the
+processes the helper's `run` and the agent start, and see that a job under the agent's start
+mode is its own responsible process (the agent's program) and that a job the agent starts itself
+answers for the agent's own responsible process. To check a host by hand that the grant reaches
+a job: give `js-agent` Full Disk Access in Privacy & Security (the privacy profile does), run a
+native job whose program is `/bin/ls` with the argument `/Library/Application
+Support/com.apple.TCC`, and see it list the directory; a grant given to `js-mac-session` alone
+gives a job nothing. `sudo launchctl procinfo <pid>` of a running job's process shows its
+`responsible pid` equal to its own pid (the start process executed the program in its place).
 
 ## Network
 

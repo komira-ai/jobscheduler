@@ -2,7 +2,7 @@
 //! threads: the agent with an account pool, a tree client or a session always has some, so the
 //! start must not depend on its starter having one. The test process starts threads that stay
 //! alive, then starts the mode with a start file of its own user (no drop, no new audit session:
-//! both need root) and the confined-writes profile on a scratch job folder. Catches a start that
+//! both need root) and the job's profile (the builder's, `mac_job::confine`) on a scratch job folder. Catches a start that
 //! allocates between fork and exec in its starter, a profile that is not applied, and a start
 //! that does not remove its file.
 
@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 use std::sync::mpsc;
 use std::thread;
 
-use js_agent::mac_job::profile::{self, Kind};
+use js_agent::mac_job::confine::{Confinement, confine};
 use js_agent::mac_job::spec::Network;
 use js_agent::mac_job::start::{START_FAILED, StartFile, VERB};
 use js_testkit::dir::TestDir;
@@ -54,24 +54,37 @@ fn folders(name: &str) -> (TestDir, std::path::PathBuf, std::path::PathBuf) {
     (scratch, job, beside)
 }
 
-fn start_file(job: &Path, profile: String, args: Vec<String>) -> StartFile {
+fn start_file(
+    job: &Path,
+    (profile, params): (String, Vec<(String, String)>),
+    args: Vec<String>,
+) -> StartFile {
     StartFile {
         uid: rustix::process::getuid().as_raw(),
         gid: rustix::process::getgid().as_raw(),
         new_session: false,
         asid_file: job.join("asid").display().to_string(),
         profile,
-        params: vec![("JOB".to_owned(), job.display().to_string())],
+        params,
         program: "/bin/sh".to_owned(),
         args,
-        disclaim: false,
     }
 }
 
 #[test]
 fn a_job_started_from_a_process_with_other_threads_runs_under_its_profile() {
     let (_scratch, job, beside) = folders("mac-job-start");
-    let text = profile::render(Kind::ConfinedWrites, &Network::default(), "", "");
+    let confined = confine(&Confinement {
+        folder: &job,
+        mount: None,
+        put_dirs: &[],
+        network: &Network::default(),
+    })
+    .unwrap();
+    let text = (
+        confined.profile.text().to_owned(),
+        confined.profile.params().to_vec(),
+    );
     let script = r#"echo in > "$1/in" && echo in-written; echo out > "$2/out" 2>/dev/null || echo out-refused"#;
     let start = start_file(
         &job,
@@ -100,7 +113,7 @@ fn a_refused_profile_ends_the_start_before_the_program_runs() {
     let (_scratch, job, _beside) = folders("mac-job-start-refused");
     let start = start_file(
         &job,
-        "(version 1)\n(no-such-operation)\n".to_owned(),
+        ("(version 1)\n(no-such-operation)\n".to_owned(), Vec::new()),
         vec!["-c".to_owned(), format!("echo ran > {}/ran", job.display())],
     );
     let (output, removed) = start_with_threads(&job.join(".."), &start);

@@ -91,7 +91,7 @@ A native run starts the same way, with a macOS arm where Linux has `crun`. Two t
 ```text
 launchd ─ js-agent (root)                         js-agent's launchd job, its process group
 launchd ─ js-agent __supervise-native ... (root)  own process group; parent launchd once the agent is gone
-            └─ sandbox-exec -p <profile> prog     the pool user (uid 600-699); own process group
+            └─ js-agent __job-start prog  the pool user (uid 600-699); own process group
 ```
 
 **Shared code: the crate `js-supervise`.** It is moved out of `oci/supervise.rs` with its tests, so that a target without crun builds it.

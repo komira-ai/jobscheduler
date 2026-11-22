@@ -8,7 +8,9 @@
 //! process with Full Disk Access may list. The listing opens no file and reads no
 //! database. The profile grants it to `js-agent` alone, not to the helper, and everything
 //! either starts is started with its privacy responsibility disclaimed
-//! ([`crate::disclaim`]), so the grant never reaches a job.
+//! ([`crate::disclaim`]), so the helper's grants never reach anything; a job's start process
+//! (the agent's own program) is disclaimed too and executes the job with the responsibility
+//! kept, so the agent's grant reaches the job, on purpose.
 
 use std::io;
 

@@ -16,6 +16,11 @@
 //!   [`Caps`], and cannot change it except with a [`Narrowing`], which only lowers the
 //!   network, drops a grant or adds a deny.
 //! - The floor is a private constant emitted after every other rule.
+//! - A run's trees on the store's shared mount ([`MountTrees`]) are its only readable
+//!   places below the mount's root: the root is read-denied, each tree is read-granted
+//!   after the deny, and a mount grant that would reopen the root is refused.
+//! - The profile is applied inside the run's own process from a [`SandboxInit`] (the text
+//!   and the parameters as C strings, checked for NUL before the caller forks).
 //!
 //! The allow-list read model ([`ReadModel::Allow`]) differs in the read section only:
 //!
@@ -38,20 +43,23 @@
 //! - Loopback is shared by every user of the Mac; see [`Net`].
 //! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).
-//! - Under [`Net::On`] no address can be denied: the profile compiler takes only `*` and
-//!   `localhost` as the host of a `remote ip` filter (a runner test pins this). Blocking
-//!   the scheduler or the cloud metadata address needs a packet filter keyed on the
-//!   pool's user range (tracked in komira-ai/jobscheduler#407).
+//! - Under [`Net::Remote`] and [`Net::On`] no address can be denied: the profile
+//!   compiler takes only `*` and `localhost` as the host of a `remote ip` filter (a
+//!   runner test pins this). Blocking the scheduler or the cloud metadata address needs
+//!   a packet filter keyed on the pool's user range (tracked in
+//!   komira-ai/jobscheduler#407).
 //! - Every read-denied path is also write-denied and its unix sockets are neither
 //!   connectable nor bindable, under every network level. The builder keeps such paths
 //!   and denies them, rather than refusing a read-denied path inside the run directory,
 //!   because a layout may keep a read-denied state directory under a granted one.
 //! - A path is only spelled correctly by [`AbsPath`]; its canonical form (symbolic
 //!   links, Unicode normalisation) is the caller's duty, and the host step pins it.
-//! - It starts nothing; applying the profile is the caller's `exec` of
-//!   [`Profile::argv`].
+//! - It starts nothing. The profile is applied in the run's own process by js-agent's
+//!   start mode ([`Profile::start_argv`], read back by [`StartArgs`]); nothing here
+//!   starts anything.
 
 mod allow;
+mod apply;
 mod grant;
 mod net;
 mod path;
@@ -59,19 +67,24 @@ mod policy;
 mod profile;
 mod scan;
 mod selftest;
+mod start;
 mod tool;
+mod trees;
 
 pub use allow::{BaseSet, MacosMajor};
+pub use apply::{InitError, SandboxInit};
 pub use grant::{Match, PinnedTree, ReadGrant, is_directory_wide, kind_rules};
 pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
 pub use policy::{
     Caps, MAX_LISTED, MountGrant, Narrowing, Policy, PolicyError, ReadModel, SlotLayout,
 };
-pub use profile::{BuildError, Profile, SANDBOX_EXEC};
+pub use profile::{BuildError, Profile, START_VERB};
 pub use scan::{PrivilegedScan, scan_privileged};
 pub use selftest::{
     Assurance, Canaries, Class, Failure, Fixture, KEYCHAIN_CANARY, Outcome, Role, SETUID_CANARY,
     STUB_OUTPUT, STUB_SOURCE, SelfTest, SelfTestError, Step, Why,
 };
+pub use start::{StartArgs, StartError};
 pub use tool::{BUNDLE_PREFIX, ToolError, ToolPath, check_path_dirs};
+pub use trees::{MountTrees, TreesError};

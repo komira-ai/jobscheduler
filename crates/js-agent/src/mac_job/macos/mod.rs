@@ -16,30 +16,25 @@ use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use js_mac_pool::seatbelt::SandboxInit;
 use js_mac_session::disclaim::Program;
 use js_types::Arch;
 
 use crate::mac_accounts::Pool;
 
+use super::confine::{self, Confined, Confinement};
 use super::layout::{Layout, SUBFOLDERS};
-use super::profile::{self, JOB_PARAM};
 use super::report::{self, AccountUse, Ended, Leftovers, Report};
 use super::spec::JobFile;
 use super::start::StartFile;
 use super::sweep::{self, JobIds, ROUNDS_MAX, Tally};
-use super::{Args, AuditSession, Spawn, status};
+use super::{Args, AuditSession, status};
 
 /// How often the wait for the program looks.
 const POLL: Duration = Duration::from_millis(50);
 
 /// The pause between sweep rounds, for a killed process to become a zombie and be reaped.
 const SWEEP_PAUSE: Duration = Duration::from_millis(20);
-
-/// The profile text and the parameters it names beside `JOB`.
-struct Profile<'a> {
-    text: &'a str,
-    params: &'a [(String, String)],
-}
 
 /// Why the mode stops before a report.
 enum Stop {
@@ -92,11 +87,6 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         (None, None) => return Err(Stop::Usage("no job named".to_owned())),
     };
     let job = JobFile::parse(&text, here()).map_err(|why| Stop::Usage(why.to_string()))?;
-    let added = match &args.profile_add {
-        Some(path) => fs::read_to_string(path)
-            .map_err(|why| Stop::Usage(format!("{}: {why}", path.display())))?,
-        None => String::new(),
-    };
     let pool = match (&args.accounts, args.account_range) {
         (Some(state), Some(slots)) => Some(make_private(state).and_then(|()| {
             Pool::open(state, slots, args.ready, &std::collections::BTreeSet::new())
@@ -109,14 +99,14 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
         let Some(name) = &args.user else {
             return Err(Stop::Usage("neither --accounts nor --user".to_owned()));
         };
-        return run_as(args, job, &added, name);
+        return run_as(args, job, name);
     };
     let lent = pool
         .lend(&job.id)
         .map_err(|why| Stop::Setup(format!("lending an account: {why}")))?;
     let name = lent.account.name.clone();
     // The account is retired whatever the run did: it ran, or was meant to run, a job.
-    let run = run_as(args, job, &added, &name);
+    let run = run_as(args, job, &name);
     let retired = pool
         .retire(lent.account)
         .map(|done| format!("{done:?}"))
@@ -137,7 +127,7 @@ fn run_job(args: &Args) -> Result<Report, Stop> {
 }
 
 /// The run as the user `name`, up to its report.
-fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, Stop> {
+fn run_as(args: &Args, job: JobFile, name: &str) -> Result<Report, Stop> {
     let user = sys::user(name).map_err(|why| Stop::Setup(format!("{name}: {why}")))?;
     if user.uid == 0 {
         return Err(Stop::Setup(format!("{name} is root")));
@@ -169,33 +159,40 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         }
     };
 
-    let rules = trees::rules(args, &mounted).and_then(|(text, params)| {
-        let made = puts::make(args, &job, &layout, user.uid)?;
-        Ok((text, params, made))
+    let prepared = trees::mount(args, &mounted).and_then(|mount| {
+        let put_dirs = puts::make(args, &job, &layout, user.uid)?;
+        Ok((mount, put_dirs))
     });
-    let (mount_text, mount_params, put_dirs) = match rules {
-        Ok(rules) => rules,
+    let (mount, put_dirs) = match prepared {
+        Ok(prepared) => prepared,
         Err(why) => {
             let _ = trees::release(args, &job, mounted);
             let _ = files::remove_folder(&layout.folder);
             return Err(Stop::Setup(why));
         }
     };
-    let (put_text, put_params) = profile::put_rules(&put_dirs);
-    let mount_params: Vec<(String, String)> = mount_params.into_iter().chain(put_params).collect();
-    let profile_text = profile::render(
-        args.profile,
-        &job.network,
-        &format!("{mount_text}{put_text}"),
-        added,
-    );
+    // The profile and its C strings, before anything is started: a path the builder refuses, a
+    // tree outside the mount root and a NUL end the job here, with nothing to end.
+    let confined = confine::confine(&Confinement {
+        folder: &layout.folder,
+        mount: mount
+            .as_ref()
+            .map(|(root, trees)| (root.as_path(), trees.as_slice())),
+        put_dirs: &put_dirs,
+        network: &job.network,
+    });
+    let confined = match confined {
+        Ok(confined) => confined,
+        Err(why) => {
+            let _ = trees::release(args, &job, mounted);
+            let _ = files::remove_folder(&layout.folder);
+            return Err(Stop::Setup(why.to_string()));
+        }
+    };
+    let profile_text = confined.profile.text().to_owned();
     let new_session = args.audit_session == AuditSession::New;
     let started = Instant::now();
-    let profile_of = Profile {
-        text: &profile_text,
-        params: &mount_params,
-    };
-    let started_job = start(&job, &layout, name, &user, &profile_of, new_session, args);
+    let started_job = start(&job, &layout, name, &user, &confined, new_session, args);
     let mut child = match started_job {
         Ok(started) => started,
         Err(why) => {
@@ -256,7 +253,6 @@ fn run_as(args: &Args, job: JobFile, added: &str, name: &str) -> Result<Report, 
         put_dirs,
         trees,
         account: None,
-        spawn: format!("{:?}", args.spawn).to_lowercase(),
         stdout_tail: report::tail(&fs::read(args.out.join("stdout")).unwrap_or_default()),
         stderr_tail: report::tail(&fs::read(args.out.join("stderr")).unwrap_or_default()),
     })
@@ -358,7 +354,7 @@ fn start(
     layout: &Layout,
     user_name: &str,
     user: &sys::User,
-    profile: &Profile<'_>,
+    confined: &Confined,
     new_session: bool,
     args: &Args,
 ) -> Result<std::process::Child, String> {
@@ -374,16 +370,10 @@ fn start(
         gid: user.gid,
         new_session,
         asid_file: asid_file.to_string_lossy().into_owned(),
-        profile: profile.text.to_owned(),
-        params: std::iter::once((
-            JOB_PARAM.to_owned(),
-            layout.folder.to_string_lossy().into_owned(),
-        ))
-        .chain(profile.params.iter().cloned())
-        .collect(),
+        profile: confined.profile.text().to_owned(),
+        params: confined.profile.params().to_vec(),
         program: job.program.clone(),
         args: job.args.clone(),
-        disclaim: args.spawn == Spawn::Disclaimed,
     };
     let start_path = out.join("start.json");
     let text = serde_json::to_string(&start).map_err(|why| format!("the start file: {why}"))?;
@@ -403,9 +393,9 @@ fn start(
             start_path.as_os_str(),
         ],
     );
-    // The start process answers for the agent; the job's program, executed in its place, does
-    // too unless the start file says to disclaim it (the owner's decision: a job is an ordinary
-    // child of the agent, and its profile keeps it on the mount to its own trees).
+    // The start process answers for the agent, and so does the job's program, executed in its
+    // place: nothing between the agent and the job disclaims it (the owner's decision: a job is an
+    // ordinary child of the agent, and its profile keeps it on the mount to its own trees).
     program.keep_responsibility();
     program
         .env_clear()
@@ -455,15 +445,13 @@ fn start_steps(file: &Path) -> Result<std::convert::Infallible, String> {
         sys::drop_to(start.uid, start.gid)
             .map_err(|why| format!("the drop to uid {}: {why}", start.uid))?;
     }
-    sys::apply_profile(&start.profile, &start.params)
+    let init = SandboxInit::new(&start.profile, &start.params)
+        .map_err(|why| format!("the Seatbelt profile: {why}"))?;
+    crate::job_start::macos::apply(&init)
         .map_err(|why| format!("the Seatbelt profile was refused: {why}"))?;
     let program = std::ffi::OsStr::new(&start.program);
     let program_args: Vec<std::ffi::OsString> = start.args.iter().map(Into::into).collect();
-    let why = if start.disclaim {
-        js_mac_session::disclaim::exec(program, &program_args)
-    } else {
-        js_mac_session::disclaim::exec_kept(program, &program_args)
-    };
+    let why = js_mac_session::disclaim::exec_kept(program, &program_args);
     Err(format!("executing {}: {why}", start.program))
 }
 

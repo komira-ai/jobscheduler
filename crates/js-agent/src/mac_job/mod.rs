@@ -3,9 +3,7 @@
 //! ```text
 //! js-agent __mac-job (--job <file> | --job-inline <json>)
 //!     (--accounts <dir> --account-range <first>-<last> | --user <name>)
-//!     --root <dir> --out <dir> [--ready <n>] [--spawn ordinary|disclaimed]
-//!     [--profile confined-writes|deny-default] [--audit-session new|inherit]
-//!     [--profile-add <file>]
+//!     --root <dir> --out <dir> [--ready <n>] [--audit-session new|inherit]
 //!     [--mount-provider <socket> --mount-root <dir> [--mount-provider-user <user>] [--agent-id <id>]]
 //!     [--put-ingest <dir> [--put-user <user>]]
 //! ```
@@ -25,9 +23,10 @@
 //!    inputs into its `work` folder, and points `HOME`, `TMPDIR` and the caches inside it.
 //! 4. starts the job through [`js_mac_session::disclaim::Program`]: this program again, in the
 //!    start mode ([`start`]), a new process of one thread, which opens a new audit session, drops
-//!    to the user, applies the Seatbelt profile ([`profile::render`], of the kind `--profile`
-//!    names) itself with `sandbox_init_with_parameters`, and executes the job's program in its
-//!    place. Nothing runs between `fork` and `exec` in the agent, so the agent may have threads.
+//!    to the user, applies the Seatbelt profile with `sandbox_init_with_parameters` (the agent's
+//!    one call, in `crate::job_start`) and executes the job's program in its place. The profile
+//!    is the builder's, the one every native run has ([`confine`]); its C strings are made
+//!    before the start, so a NUL in a path refuses the job before anything is started. Nothing runs between `fork` and `exec` in the agent, so the agent may have threads.
 //! 5. waits for the program or its wall limit, then ends every process the job started
 //!    ([`sweep`]): every process of the job's audit session, and every process of the user,
 //!    which may be killed because no other job runs as that user.
@@ -36,20 +35,19 @@
 //!    changed, no job folder. A lent account is then retired: the pool ends its uid, deletes it,
 //!    shows it gone, and refills.
 //!
-//! `--spawn ordinary` (the default) starts the job the usual way, so it answers to the privacy
-//! controls as the agent and holds the agent's Full Disk Access: the one way measured to let a
-//! job read tierstore's network file system mount. `--spawn disclaimed` disclaims it, as the
-//! agent's other starts do. The owner decided the default: a job is an ordinary child of the
-//! agent, and the profile keeps it on the mount to its own trees (see [`profile::mount_rules`]).
+//! The job keeps the agent's responsibility: nothing between the agent and the job disclaims it,
+//! so it answers to the privacy controls as the agent and holds the agent's Full Disk Access, the
+//! one way measured to let a job read tierstore's network file system mount. The owner decided
+//! it: a job is an ordinary child of the agent, and the profile keeps it on the mount to its own
+//! trees ([`confine`]).
 //!
 //! It writes a JSON report ([`report::Report`]) to `<out>/report.json` and to standard output,
 //! and the program's standard output and error to `<out>/stdout` and `<out>/stderr`.
 //!
 //! A job's `trees` come from the mount provider at `--mount-provider`: each is prepared read-only
 //! and mounted (run id the job's id, source index its place in the list), the path it is mounted
-//! at must lie beneath `--mount-root`, and `work/<at>` is a link to it. The confined-writes
-//! profile lets the job read it and write nothing there; the deny-default one has no rule for it,
-//! so a job with trees is refused under it. Each tree is released after the sweep.
+//! at must lie beneath `--mount-root`, and `work/<at>` is a link to it. The profile lets the job
+//! read it and write nothing there. Each tree is released after the sweep.
 //!
 //! A job's `put_dirs` are tierstore's put directories, the way the build service sends a Mac job
 //! its output directory (a read-write mount `<put root>/cas/b/<run>/<nonce>`): each must lie
@@ -69,8 +67,8 @@
 //!
 //! Only macOS runs it; elsewhere it parses its command line and refuses.
 
+pub mod confine;
 pub mod layout;
-pub mod profile;
 pub mod report;
 pub mod spec;
 pub mod start;
@@ -103,15 +101,6 @@ pub mod status {
     pub const LEFT_BEHIND: u8 = 3;
     /// The job could not be set up or started.
     pub const SETUP: u8 = 4;
-}
-
-/// How the job's program is started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Spawn {
-    /// The usual way: it holds the agent's privacy grants (the owner's decided default).
-    Ordinary,
-    /// With its privacy responsibility disclaimed.
-    Disclaimed,
 }
 
 /// Whether the job gets an audit session of its own.
@@ -155,24 +144,15 @@ pub struct Args {
     /// How many ready accounts the pool keeps.
     #[arg(long, default_value_t = 1)]
     pub ready: usize,
-    /// How the job is started.
-    #[arg(long, value_enum, default_value = "ordinary")]
-    pub spawn: Spawn,
     /// The folder the job folder is made in: absolute, owned by root.
     #[arg(long)]
     pub root: PathBuf,
     /// The folder the outputs, the program's streams and the report go to.
     #[arg(long)]
     pub out: PathBuf,
-    /// The kind of Seatbelt profile.
-    #[arg(long, value_enum, default_value = "confined-writes")]
-    pub profile: profile::Kind,
     /// Whether the job gets an audit session of its own.
     #[arg(long, value_enum, default_value = "new")]
     pub audit_session: AuditSession,
-    /// Seatbelt rules appended to the profile, for measuring what a build needs.
-    #[arg(long)]
-    pub profile_add: Option<PathBuf>,
     /// The mount provider's socket, for the job's trees.
     #[arg(long, requires = "mount_root")]
     pub mount_provider: Option<PathBuf>,

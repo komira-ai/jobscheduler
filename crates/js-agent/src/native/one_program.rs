@@ -7,9 +7,9 @@
 //!   `crate::mac_job::start`), with the run's environment, working directory and streams and a
 //!   start file only root reads. That process, with one thread, opens a new audit session, drops
 //!   to the account, applies the run's Seatbelt profile (the profile the helper's run would have
-//!   had, `native/profile.rs`, applied with `sandbox_init_with_parameters` in place of
-//!   `sandbox-exec`) and executes the command in its place, undisclaimed: the job answers to the
-//!   privacy controls as the agent (the owner's decision).
+//!   had, `native/profile.rs`, applied with `sandbox_init_with_parameters`) and executes the
+//!   command in its place, undisclaimed: the job answers to the privacy controls as the agent
+//!   (the owner's decision).
 //! - **The end.** A stop is `SIGTERM` to the run's process group; a kill is the sweep of the
 //!   job's audit session and of its account (`crate::mac_job::macos::sweep_job`); the deletion
 //!   of the user is the pool's retire, which ends the uid, deletes the account and shows it gone.
@@ -143,7 +143,6 @@ impl OneProgram {
             params: profile.params().to_vec(),
             program: program.clone(),
             args: args.to_vec(),
-            disclaim: false,
         };
         let path = dir.join("start.json");
         let text = serde_json::to_string(&start).map_err(refused)?;

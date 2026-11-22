@@ -199,6 +199,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
         max_processes: 512,
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
+        start: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     };
     adjust(&mut config);
     let term = TERMS.fetch_add(1, Ordering::SeqCst);

@@ -12,17 +12,21 @@
 //! which root without it may not do. The root helper `js-mac-session` is granted nothing: the
 //! pool's reset in place, which it does, neither needs nor uses the grant.
 //!
-//! The grant never reaches a job. Every process of a run is started through
-//! `js_mac_session::disclaim`, which disclaims the responsibility, so the run's processes,
-//! and the processes they start, answer for the run's program and hold no grant of the
-//! helper's or the agent's; what the run may do is what its own program was granted, which
-//! this runtime neither gives nor takes away. The same holds for the programs the agent
-//! starts itself (its probes, the `sandbox-exec` self-test, and `pfctl` through
-//! `js_mac_provision`) and for the helper's own (`launchctl`, `getconf`). `cargo test -p xtask
-//! --test spawn_sites` fails when the agent, the helper or a crate built into them starts a
-//! program another way. On a Mac, the tests read the responsible process of what the helper's
-//! `run` and the agent start (`tests/agent/native/disclaim.rs`). The check by hand is in
-//! `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the design.
+//! The job path keeps the responsibility: nothing between the agent and the job disclaims it.
+//! The helper starts each run's start mode (`js-agent __job-start`) disclaimed, so the helper's
+//! own grants (it holds none) never reach a run; that process is the agent's own program, and it
+//! executes the run's program in its place with the responsibility kept
+//! (`js_mac_session::disclaim::exec_kept`), so the run's processes, and the processes they
+//! start, answer for the agent's program and hold its Full Disk Access. The one-program run
+//! (`mac_job`) starts the same mode with the agent as the starter and keeps the responsibility
+//! too. What keeps a run off what it may not read is its Seatbelt profile, not the disclaim.
+//! The programs the agent starts for itself (its probes, the start-mode self-test, and `pfctl`
+//! through `js_mac_provision`) and the helper's own (`launchctl`, `getconf`) are still
+//! disclaimed. `cargo test -p xtask --test spawn_sites` fails when the agent, the helper or a
+//! crate built into them starts a program another way. On a Mac, the tests read the responsible
+//! process of what the helper's `run` and the agent start (`tests/agent/native/disclaim.rs`).
+//! The check by hand is in `packaging/js-agent-macos/README.md`;
+//! `docs/design/spawn-disclaim.md` has the design.
 //!
 //! The agent finds out at start whether it holds the grant the way every program does
 //! ([`list`], then [`ask`]): it lists the directory of the privacy database

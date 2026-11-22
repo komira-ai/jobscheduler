@@ -3,6 +3,8 @@
 //! no agent.
 //!
 //! - `image-pull` (Linux): pulls an image into the image store ([`crate::image::pull`]).
+//! - `__job-start`: a native run's start under the helper, which applies the run's Seatbelt
+//!   profile in its own process and executes the program ([`crate::job_start`]).
 //! - `__mac-job` and `__mac-job-start`: one native Mac job run by this program alone, and its
 //!   start in a process of its own ([`crate::mac_job`]); a prototype of the one Mac program.
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
@@ -25,6 +27,9 @@ pub(crate) fn dispatch(
     if verb == crate::image::pull::VERB {
         let host = crate::image::pull::Host::system();
         return Some(crate::image::pull::run(args, out, err, &host));
+    }
+    if let Some(code) = crate::job_start::dispatch(args, err) {
+        return Some(code);
     }
     if let Some(code) = crate::mac_job::dispatch(args, out, err) {
         return Some(code);
@@ -72,8 +77,8 @@ mod tests {
         }
     }
 
-    /// Asserts that the native Mac job's mode and its start are answered here, each with its own
-    /// usage error for a command line it cannot run.
+    /// Asserts that the native Mac job's mode, its start and the helper's start mode are
+    /// answered here, each with its own usage error for a command line it cannot run.
     #[test]
     fn the_mac_job_and_its_start_are_answered() {
         for (verb, said) in [
@@ -81,6 +86,10 @@ mod tests {
             (
                 crate::mac_job::start::VERB,
                 "usage: js-agent __mac-job-start --start <file>",
+            ),
+            (
+                crate::job_start::VERB,
+                "usage: js-agent __job-start --profile TEXT",
             ),
         ] {
             let (mut out, mut err) = (Vec::new(), Vec::new());

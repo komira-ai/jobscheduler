@@ -46,7 +46,7 @@
 //!
 //! [`Program::keep_responsibility`] leaves the disclaim out for one start: the program then
 //! answers for its starter, as a program started the usual way does. The prototype of the one
-//! Mac program uses it for the jobs it starts (`js-agent __mac-job --spawn ordinary`), because a
+//! Mac program uses it for the jobs it starts (`js-agent __mac-job`, always), because a
 //! measured job reads a network file system mount only when it holds the agent's grant, and the
 //! owner decided jobs start so. The agent's other starts keep the disclaim.
 //!
@@ -304,8 +304,8 @@ impl Program {
 /// Executes `program` with `args` in this process's place, in its environment, its
 /// responsibility NOT disclaimed: the program answers to the privacy controls as this process
 /// does. Returns only when it could not. For the start of a native job (`js-agent
-/// __mac-job-start`), which the owner decided is an ordinary child of the agent; every other
-/// program is executed by [`exec`].
+/// __mac-job-start` and `__job-start`), which the owner decided is an ordinary child of the
+/// agent; every other program is executed by [`exec`].
 pub fn exec_kept(program: &OsStr, args: &[OsString]) -> io::Error {
     Command::new(program).args(args).exec()
 }

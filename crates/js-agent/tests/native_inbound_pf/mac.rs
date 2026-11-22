@@ -166,6 +166,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         max_processes: 512,
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
+        start: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     };
     NativeRuntime::open_ungated(
         js_agent::native::Backend::Helper(Client::new(&fixture.socket)),

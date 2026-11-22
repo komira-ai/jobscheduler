@@ -23,7 +23,6 @@ fn report() -> Report {
         put_dirs: Vec::new(),
         trees: Vec::new(),
         account: None,
-        spawn: "ordinary".to_owned(),
         stdout_tail: String::new(),
         stderr_tail: String::new(),
     }

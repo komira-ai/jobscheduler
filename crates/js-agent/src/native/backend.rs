@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_mac_pool::seatbelt::Profile;
+use js_mac_pool::seatbelt::{AbsPath, Profile};
 use js_mac_session::client::{Client, ClientError};
 use js_mac_session::proto::{Limits, Session};
 
@@ -47,12 +47,13 @@ impl Backend {
         }
     }
 
-    /// Starts the run of `lease`. The helper is given the `sandbox-exec` command line of
-    /// `profile` and `command`; the agent itself applies `profile` in the start process.
+    /// Starts the run of `lease`. The helper is given the command line of the start mode
+    /// `start` (this agent's `__job-start`) with `profile` and `command`; the agent itself
+    /// applies `profile` in its own start process.
     pub(super) fn run(
         &self,
         lease: &str,
-        (profile, command): (&Profile, &[String]),
+        (profile, command, start): (&Profile, &[String], &AbsPath),
         env: &[(String, String)],
         fds: [BorrowedFd<'_>; 4],
         (limits, deadline): (Option<Limits>, Option<Duration>),
@@ -64,7 +65,7 @@ impl Backend {
                 let (program, args) = command.split_first().unwrap_or((&none, &[]));
                 let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
                 let argv: Vec<String> = profile
-                    .argv(program, &args)
+                    .start_argv(start, program, &args)
                     .iter()
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect();

@@ -11,9 +11,11 @@
 //! 2. with `new_session`, it opens a new audit session and writes its id to `asid_file`;
 //! 3. it drops to the job's user (its primary group as its only group) for good, when it runs as
 //!    root (a test runs it as itself);
-//! 4. it applies the profile with `sandbox_init_with_parameters`;
-//! 5. it executes the job's program in its own place: undisclaimed, so the program answers to the
-//!    privacy controls as the agent that started this process, or, with `disclaim`, disclaimed.
+//! 4. it applies the profile with `sandbox_init_with_parameters`, through the agent's one call
+//!    of it (`crate::job_start`), on the C strings made of the file's text and parameters;
+//! 5. it executes the job's program in its own place, with the agent's responsibility kept (never
+//!    disclaimed), so the program answers to the privacy controls as the agent that started this
+//!    process.
 //!
 //! The pid the agent started is the job's program's from then on. A step that fails writes why to
 //! standard error (the job's) and exits [`START_FAILED`] without executing anything.
@@ -46,8 +48,6 @@ pub struct StartFile {
     pub program: String,
     /// Its arguments.
     pub args: Vec<String>,
-    /// Whether the program is executed with its privacy responsibility disclaimed.
-    pub disclaim: bool,
 }
 
 impl StartFile {

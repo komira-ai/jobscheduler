@@ -3,8 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::profile::Kind;
-use super::{Args, AuditSession, Spawn, VERB, parse, run, status};
+use super::{Args, AuditSession, VERB, parse, run, status};
 use crate::mac_accounts::Slots;
 
 fn words(list: &[&str]) -> Vec<OsString> {
@@ -16,7 +15,7 @@ const MINIMAL: [&str; 8] = [
 ];
 
 #[test]
-fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
+fn the_minimal_command_line_takes_a_new_audit_session() {
     let args = parse(&words(&MINIMAL)).expect("parses");
     assert_eq!(
         args,
@@ -27,12 +26,9 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
             account_range: None,
             user: Some("u".to_owned()),
             ready: 1,
-            spawn: Spawn::Ordinary,
             root: PathBuf::from("/r"),
             out: PathBuf::from("/o"),
-            profile: Kind::ConfinedWrites,
             audit_session: AuditSession::New,
-            profile_add: None,
             mount_provider: None,
             mount_provider_user: "0".to_owned(),
             mount_root: None,
@@ -44,20 +40,32 @@ fn the_minimal_command_line_takes_a_new_audit_session_and_adds_no_rules() {
 }
 
 #[test]
-fn the_audit_session_may_be_inherited_the_profile_chosen_and_rules_added() {
+fn the_audit_session_may_be_inherited() {
     let mut list = MINIMAL.to_vec();
-    list.extend([
-        "--audit-session",
-        "inherit",
-        "--profile-add",
-        "more.sb",
-        "--profile",
-        "deny-default",
-    ]);
+    list.extend(["--audit-session", "inherit"]);
     let args = parse(&words(&list)).expect("parses");
-    assert_eq!(args.profile, Kind::DenyDefault);
     assert_eq!(args.audit_session, AuditSession::Inherit);
-    assert_eq!(args.profile_add, Some(PathBuf::from("more.sb")));
+}
+
+/// Asserts that the flags that chose a kind of profile, added rules to it or disclaimed the
+/// job are gone: the job has the one profile and keeps the agent's responsibility, so a command
+/// line that names one is a usage error naming the flag.
+#[test]
+fn the_flags_of_the_other_profiles_and_of_the_disclaim_are_refused() {
+    for flag in [
+        ["--profile", "confined-writes"],
+        ["--profile", "deny-default"],
+        ["--profile-add", "more.sb"],
+        ["--spawn", "disclaimed"],
+        ["--spawn", "ordinary"],
+    ] {
+        let mut list = MINIMAL.to_vec();
+        list.extend(flag);
+        let why = parse(&words(&list))
+            .expect_err("an unknown flag")
+            .to_string();
+        assert!(why.contains(flag[0]), "{why}");
+    }
 }
 
 #[test]
@@ -140,15 +148,12 @@ fn the_user_is_lent_by_the_pool_or_named_and_exactly_one_is_given() {
         "700-799",
         "--ready",
         "3",
-        "--spawn",
-        "disclaimed",
     ];
     pooled.extend(rest);
     let args = parse(&words(&pooled)).expect("parses");
     assert_eq!(args.accounts, Some(PathBuf::from("/s")));
     assert_eq!(args.user, None);
     assert_eq!(args.ready, 3);
-    assert_eq!(args.spawn, Spawn::Disclaimed);
     let mut both = vec![
         "--accounts",
         "/s",

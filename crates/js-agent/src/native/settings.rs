@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_mac_pool::seatbelt::{AbsPath, ReadModel, SANDBOX_EXEC};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 use js_mac_session::proto::Limits;
 
@@ -60,7 +60,6 @@ pub struct NativeFlags<'a> {
 pub struct NativeSettings {
     socket: PathBuf,
     config: NativeConfig,
-    sandbox_exec: PathBuf,
     bundles: Option<Arc<Placer>>,
     /// The Xcodes the host holds, which a job start may name by build.
     xcodes: Vec<Xcode>,
@@ -180,6 +179,8 @@ impl NativeSettings {
             .iter()
             .map(|path| AbsPath::new(path).map_err(|why| format!("{}: {why}", path.display())))
             .collect::<Result<Vec<_>, _>>()?;
+        let start = std::env::current_exe()
+            .map_err(|why| format!("the agent's own path, which starts every job: {why}"))?;
         Ok(Some(Self {
             socket: socket.to_path_buf(),
             config: NativeConfig {
@@ -194,8 +195,8 @@ impl NativeSettings {
                 max_processes,
                 egress: egress.map(|policy| Arc::new(policy) as Arc<dyn Enforcer>),
                 full_disk_access: FullDiskAccess::Undetermined,
+                start,
             },
-            sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
             xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
@@ -311,18 +312,12 @@ impl NativeSettings {
         self
     }
 
-    /// The same settings with `program` as the `sandbox-exec` the start-up self-test runs:
-    /// a seam for tests.
+    /// The same settings with `program` as the program the helper starts for each run, which
+    /// the start-up self-test runs too: a seam for tests. It is this agent unless set.
     #[must_use]
-    pub fn with_sandbox_exec(mut self, program: &Path) -> Self {
-        self.sandbox_exec = program.to_path_buf();
+    pub fn with_start(mut self, program: &Path) -> Self {
+        self.config.start = program.to_path_buf();
         self
-    }
-
-    /// The `sandbox-exec` the start-up self-test runs.
-    #[must_use]
-    pub fn sandbox_exec(&self) -> &Path {
-        &self.sandbox_exec
     }
 
     /// The helper's socket.

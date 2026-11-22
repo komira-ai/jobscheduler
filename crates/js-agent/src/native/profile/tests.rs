@@ -23,6 +23,7 @@ fn config() -> NativeConfig {
         max_processes: 512,
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
+        start: PathBuf::from("/usr/local/bin/js-agent"),
     }
 }
 
@@ -51,16 +52,21 @@ fn a_run_may_write_below_its_run_directory_alone_and_gets_a_home_there() {
     let home = Path::new("/srv/homes/kbf-lease-pool-4");
     let argv = profile_argv(&config(), &body("/bin/echo", &["HOME=/x", "-n"]), home).unwrap();
     let rule = "(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))";
-    let at = argv.iter().position(|word| word == "-p").unwrap();
-    let profile = &argv[at + 1];
+    assert_eq!(
+        argv[..3],
+        ["/usr/local/bin/js-agent", "__job-start", "--profile"]
+    );
+    let profile = &argv[3];
     let writes: Vec<&str> = profile
         .lines()
         .filter(|line| line.starts_with("(allow file-write") || line.starts_with("(allow file*"))
         .collect();
     assert_eq!(writes, [rule]);
-    let params: Vec<&String> = argv[..at]
-        .iter()
-        .filter(|word| word.contains('='))
+    let separator = argv.iter().position(|word| word == "--").unwrap();
+    let params: Vec<&String> = argv[4..separator]
+        .chunks(2)
+        .inspect(|pair| assert_eq!(pair[0], "--param", "{pair:?}"))
+        .map(|pair| &pair[1])
         .collect();
     assert!(params.contains(&&"RUN=/srv/homes/kbf-lease-pool-4/exec".to_owned()));
     assert!(
@@ -70,7 +76,7 @@ fn a_run_may_write_below_its_run_directory_alone_and_gets_a_home_there() {
         "{params:?}"
     );
     assert_eq!(
-        argv[at + 2..],
+        argv[separator + 1..],
         [
             "/usr/bin/env",
             "HOME=/srv/homes/kbf-lease-pool-4/exec/.home",

@@ -14,7 +14,6 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::mac_job::Args;
 use crate::mac_job::layout::Layout;
-use crate::mac_job::profile::Kind;
 use crate::mac_job::report::PutUse;
 use crate::mac_job::spec::JobFile;
 
@@ -43,9 +42,6 @@ pub(super) fn make(
 ) -> Result<Vec<PathBuf>, String> {
     if job.put_dirs.is_empty() {
         return Ok(Vec::new());
-    }
-    if args.profile != Kind::ConfinedWrites {
-        return Err("a job with put dirs runs under --profile confined-writes only".to_owned());
     }
     let Some(root) = &args.put_ingest else {
         return Err("the job names put dirs and no --put-ingest is given".to_owned());

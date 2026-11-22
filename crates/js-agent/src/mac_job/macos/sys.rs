@@ -1,5 +1,5 @@
-//! The system calls of `__mac-job`: the user database, the process table, audit sessions and
-//! Seatbelt. All of the mode's `unsafe` code is here.
+//! The system calls of `__mac-job`: the user database, the process table and audit sessions. All
+//! of the mode's `unsafe` code is here; the Seatbelt call is the agent's one (`crate::job_start`).
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io;
@@ -73,23 +73,11 @@ const AU_ASSIGN_ASID: i32 = -1;
 pub(super) const ADMIN_GID: u32 = 80;
 
 // FFI-BOUNDARY: the audit calls read or write the one struct they are given, owned by the
-// caller, of the length given; they keep no pointer. `sandbox_init_with_parameters` reads the
-// profile text and the NULL-ended array of parameter strings, all owned by the caller and kept
-// by nobody after it returns; on a failure it stores in `errorbuf` a string the library
-// allocated, which the caller frees with `sandbox_free_error` and nothing else.
-// `sandbox_init_with_parameters` is exported by libsystem_sandbox (part of libSystem) but is not
-// in the public `<sandbox.h>`; its signature is the one Seatbelt's own tools use.
+// caller, of the length given; they keep no pointer.
 unsafe extern "C" {
     fn getaudit_addr(info: *mut AuditinfoAddr, length: c_int) -> c_int;
     fn setaudit_addr(info: *const AuditinfoAddr, length: c_int) -> c_int;
     fn auditon(cmd: c_int, data: *mut c_void, length: c_int) -> c_int;
-    fn sandbox_init_with_parameters(
-        profile: *const c_char,
-        flags: u64,
-        parameters: *const *const c_char,
-        errorbuf: *mut *mut c_char,
-    ) -> c_int;
-    fn sandbox_free_error(errorbuf: *mut c_char);
 }
 
 /// The size of `T` as the C calls take it.
@@ -287,37 +275,4 @@ pub(super) fn drop_to(uid: u32, gid: u32) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Applies the profile `text`, with its parameters `params`, to this process and every process
-/// it starts: the library's own message when it refuses the profile.
-pub(super) fn apply_profile(text: &str, params: &[(String, String)]) -> Result<(), String> {
-    let cstring = |s: &str| CString::new(s).map_err(|_| "a string with a NUL".to_owned());
-    let text = cstring(text)?;
-    let owned: Vec<CString> = params
-        .iter()
-        .flat_map(|(name, value)| [name, value])
-        .map(|s| cstring(s))
-        .collect::<Result<_, _>>()?;
-    let mut pointers: Vec<*const c_char> = owned.iter().map(|s| s.as_ptr()).collect();
-    pointers.push(ptr::null());
-    let mut error: *mut c_char = ptr::null_mut();
-    // SAFETY: the text and the NULL-ended array point at strings of `text` and `owned`, alive
-    // for the call; `error` is ours (see the FFI-BOUNDARY comment).
-    let rc =
-        unsafe { sandbox_init_with_parameters(text.as_ptr(), 0, pointers.as_ptr(), &mut error) };
-    if rc == 0 {
-        return Ok(());
-    }
-    if error.is_null() {
-        return Err(format!("sandbox_init_with_parameters returned {rc}"));
-    }
-    // SAFETY: `error` is the NUL-ended string the library made; it is read once, then freed
-    // once, the way the library says.
-    let why = unsafe { CStr::from_ptr(error) }
-        .to_string_lossy()
-        .into_owned();
-    // SAFETY: as above.
-    unsafe { sandbox_free_error(error) };
-    Err(why)
 }

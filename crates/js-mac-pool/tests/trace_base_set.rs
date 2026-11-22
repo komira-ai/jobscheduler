@@ -30,11 +30,11 @@ use std::process::{Command, Stdio};
 
 use common::mac::Mac;
 use common::priv_root::{fixture, ids, work_root};
-use common::run;
 use common::trace::{
     Row, Touch, Workload, ablate, begin_marker, end_marker, mark_touched, parse_fs_usage, render,
     retarget, setuid_rows, windows,
 };
+use common::{run, start_program};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{Class, MacosMajor, ReadGrant, Role, SelfTest, scan_privileged};
 
@@ -80,7 +80,7 @@ fn workloads(test: &SelfTest, mac: &Mac) -> Vec<Workload> {
         all.push(Workload {
             name,
             allowed,
-            argv: step.argv(),
+            argv: step.argv(&start_program()),
             env: step.env().to_vec(),
             cwd: step.cwd().to_owned(),
         });
@@ -90,7 +90,7 @@ fn workloads(test: &SelfTest, mac: &Mac) -> Vec<Workload> {
         .iter()
         .find(|step| step.class() == Class::RunTrue)
         .expect("the self-test runs true")
-        .argv();
+        .argv(&start_program());
     let cwd = mac.run.to_str().expect("text").to_owned();
     let entrypoint = mac.pinned_file("bin/read");
     let data = mac.pinned_file("data.txt").into_os_string();
@@ -187,7 +187,12 @@ fn trace_the_base_set_of_this_host_under_the_macos_15_set() {
 
     let mut rows: Vec<Row> = Vec::new();
     for step in test.steps().iter().filter(|s| s.role() == Role::Control) {
-        let ran = run(&step.argv(), step.env(), Some(step.cwd()), Some(ids));
+        let ran = run(
+            &step.argv(&start_program()),
+            step.env(),
+            Some(step.cwd()),
+            Some(ids),
+        );
         rows.push(Row::baseline(
             &format!("control:{}", step.class()),
             ran.outcome(),

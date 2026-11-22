@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use js_mac_pool::seatbelt::Profile;
+use js_mac_pool::seatbelt::{AbsPath, Profile};
 use js_mac_session::client::ClientError;
 
 use super::NativeRuntime;
@@ -43,6 +43,7 @@ impl NativeRuntime {
         &self,
         (spec, lease, cwd): (&RunSpec, &str, &Path),
         (profile, command, env): (&Profile, &[String], &[(String, String)]),
+        start: &AbsPath,
         fds: [BorrowedFd<'_>; 4],
     ) -> Result<(Started, Option<u64>), ClientError> {
         let limits = Some(self.limits);
@@ -51,7 +52,7 @@ impl NativeRuntime {
             .filter(|_| !self.old_helper.load(Ordering::Relaxed));
         let places = (cwd, spec.scratch.as_path());
         if let Some(deadline) = deadline {
-            let run = (profile, command);
+            let run = (profile, command, start);
             match self
                 .backend
                 .run(lease, run, env, fds, (limits, Some(deadline)), places)
@@ -66,9 +67,14 @@ impl NativeRuntime {
                 }
             }
         }
-        let running =
-            self.backend
-                .run(lease, (profile, command), env, fds, (limits, None), places)?;
+        let running = self.backend.run(
+            lease,
+            (profile, command, start),
+            env,
+            fds,
+            (limits, None),
+            places,
+        )?;
         Ok((running, None))
     }
 
