@@ -190,6 +190,99 @@ mod tests {
         assert!(out.ends_with("summary n=0 failed=1\n"), "{out}");
     }
 
+    /// A writer that refuses every write.
+    struct Refusing;
+
+    impl Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("refused"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Asserts that an argument that is not UTF-8 is refused with status 2, and that a client
+    /// whose output cannot be written fails and says so. Catches a verb that runs with a
+    /// mangled argument or hides a lost report.
+    #[test]
+    fn a_bad_argument_and_a_lost_output_fail() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut args = line(&["ctl"]);
+        args.push(OsString::from_vec(vec![0xff]));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(run(&args, &mut out, &mut err), ExitCode::from(USAGE));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "js-agent __linux-vm: an argument is not UTF-8\n"
+        );
+        let me = std::env::current_exe().unwrap();
+        let args = line(&[
+            "time",
+            "--",
+            me.to_str().unwrap(),
+            "--exact",
+            "no-such-test",
+        ]);
+        let mut err = Vec::new();
+        assert_eq!(run(&args, &mut Refusing, &mut err), ExitCode::FAILURE);
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "js-agent __linux-vm: write the output: refused\n"
+        );
+    }
+
+    /// Asserts that `place` prints the directory a provider answers and exits 0, and that a
+    /// refused ref exits 1 saying why. Catches a place whose failure reads as success.
+    #[test]
+    fn place_prints_the_directory_or_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TestDir::under(std::env::temp_dir(), "linux-vm-verb-place");
+        let fake = js_testkit::mount_provider::FakeProvider::start(dir.path()).unwrap();
+        std::fs::set_permissions(fake.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let socket = fake.socket().to_str().unwrap().to_owned();
+        let uid = rustix::process::geteuid().as_raw().to_string();
+        let words = [
+            "place", "--socket", &socket, "--uid", &uid, "--ref", "cas/l/ab", "--run", "v1",
+        ];
+        let (code, out, _) = verb(&words);
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(out, "/trees/linux-vm-poc/js.v1/0\n");
+        fake.refuse("cas/l/no");
+        let words = [
+            "place", "--socket", &socket, "--uid", &uid, "--ref", "cas/l/no", "--run", "v2",
+        ];
+        let (code, _, err) = verb(&words);
+        assert_eq!(code, ExitCode::FAILURE);
+        assert!(
+            err.starts_with("js-agent __linux-vm place: refused: "),
+            "{err}"
+        );
+    }
+
+    /// Asserts that `ctl` prints the owner's answer after `ok` and exits 0.
+    #[test]
+    fn ctl_prints_the_answer() {
+        use std::io::{BufRead as _, BufReader};
+        let dir = TestDir::under(std::env::temp_dir(), "linux-vm-verb-ctl");
+        let listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join(control::SOCKET)).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            stream.write_all(b"ok running active=0\n").unwrap();
+        });
+        let (code, out, _) = verb(&["ctl", "--dir", dir.path().to_str().unwrap(), "state"]);
+        assert_eq!(
+            (code, out.as_str()),
+            (ExitCode::SUCCESS, "ok running active=0\n")
+        );
+    }
+
     /// Asserts that `time` of a program that exits 0 succeeds and prints its summary.
     #[test]
     fn a_timed_program_that_succeeds_exits_zero() {
