@@ -259,12 +259,12 @@ mod tests {
     /// directory has is an error and not an absence.
     #[test]
     fn a_record_is_none_only_when_the_directory_and_getpw_agree() {
-        assert_eq!(merge_record(Ok(true), Ok(Some(7))).unwrap(), Some(7));
-        assert_eq!(merge_record(Ok(false), Ok(Some(7))).unwrap(), Some(7));
+        assert_eq!(merge_record(Ok(true), Ok(Some(7_u8))).unwrap(), Some(7));
+        assert_eq!(merge_record(Ok(false), Ok(Some(7_u8))).unwrap(), Some(7));
         assert_eq!(merge_record::<u8>(Ok(false), Ok(None)).unwrap(), None);
         assert!(merge_record::<u8>(Ok(true), Ok(None)).is_err());
         assert!(merge_record::<u8>(err(), Ok(None)).is_err());
-        assert!(merge_record::<u8>(err(), Ok(Some(7))).is_err());
+        assert!(merge_record(err(), Ok(Some(7_u8))).is_err());
         assert!(merge_record::<u8>(Ok(false), Err(io::Error::other("getpw"))).is_err());
         assert!(merge_record::<u8>(Ok(true), Err(io::Error::other("getpw"))).is_err());
     }

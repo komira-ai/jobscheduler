@@ -63,7 +63,7 @@ mod tests {
         ] {
             let (mut out, mut err) = (Vec::new(), Vec::new());
             assert_eq!(dispatch(&words(args), &mut out, &mut err), None, "{args:?}");
-            assert!(out.is_empty() && err.is_empty(), "{args:?}");
+            assert_eq!((out, err), (Vec::new(), Vec::new()), "{args:?}");
         }
     }
 }

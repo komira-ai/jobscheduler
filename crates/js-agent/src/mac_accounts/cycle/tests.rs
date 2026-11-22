@@ -689,6 +689,10 @@ fn the_lookups_after_the_retirement_are_printed_round_by_round() {
         assert!(out.lines().any(|said| said == line), "{line}\n{out}");
     }
     assert_eq!(rig.fake.state().pauses, 1);
+    assert_eq!(
+        said::<bool>(Err(io::Error::other("the directory did not answer"))),
+        "error: the directory did not answer"
+    );
 }
 
 /// Asserts that `--range <first>-<last>` is required and gives the slots' uids, both
