@@ -386,7 +386,10 @@ fn a_ledger_that_fails_while_making_is_named() {
         panic!("{error:?}");
     };
     assert_eq!((account.as_str(), *step), ("kbf-acct-1", Step::Ledger));
-    assert!(why.starts_with("recording made: "), "{why}");
+    assert!(
+        why.starts_with("recording made: "),
+        "the error does not say what the test expects"
+    );
     assert!(
         rig.fake
             .take_calls()
@@ -778,4 +781,90 @@ fn a_failed_making_ends_a_stray_process_and_is_shown_gone() {
     );
     assert!(rig.fake.state().processes.is_empty());
     assert!(rig.fake.state().users.is_empty());
+}
+
+/// Asserts that a failed making never deletes what another ledger on the host made under the
+/// same name: with a record `kbf-acct-1` of a uid outside the range (the other ledger's) and
+/// its home there, the making fails at the home, the record and the home stay, and the account
+/// is held at the record.
+#[test]
+fn a_failed_making_keeps_a_record_and_a_home_of_the_name_that_are_anothers() {
+    let rig = Rig::new("make-theirs", 3, 0);
+    let theirs = me() + 10;
+    rig.fake
+        .add_user("kbf-acct-1", theirs, my_gid(), &rig.settings.homes);
+    std::fs::create_dir(rig.home(1)).unwrap();
+    std::fs::write(rig.home(1).join("theirs"), "x").unwrap();
+    let pool = rig.open();
+    let AccountError::Make { step, why, .. } = pool.lend("job").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Home);
+    assert!(
+        why.contains(&format!(
+            "the record kbf-acct-1 has uid {theirs}, not {}: another's, not deleted",
+            me()
+        )),
+        "the refusal names the other's record"
+    );
+    assert!(
+        rig.fake.state().users.contains_key("kbf-acct-1"),
+        "the other's record stays"
+    );
+    assert!(
+        rig.home(1).join("theirs").exists(),
+        "the other's home stays"
+    );
+    assert!(rig.lines().contains(&"held kbf-acct-1 record".to_owned()));
+}
+
+/// Asserts the other two ways a failed making leaves a name alone. A home of the name that
+/// another uid owns (here the test's own uid, while the account has the next one) stays, and
+/// the account is held at the home, naming the owner. A record that cannot be looked up holds
+/// the account at the record, and nothing is deleted on a failed look.
+#[test]
+fn a_failed_making_holds_on_another_uids_home_or_on_a_record_it_cannot_look_up() {
+    let rig = Rig::new("make-theirs-home", 2, 0);
+    let pool = rig.open();
+    assert_eq!(pool.lend("job-1").unwrap().account.uid, me());
+    std::fs::create_dir(rig.home(2)).unwrap();
+    std::fs::write(rig.home(2).join("theirs"), "x").unwrap();
+    let AccountError::Make { step, why, .. } = pool.lend("job-2").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Home);
+    let owned = format!(
+        "deleting what was made did not complete, at home: {} is owned by uid {}, not {}: \
+         another's, not removed",
+        rig.home(2).display(),
+        me(),
+        me() + 1
+    );
+    assert!(why.ends_with(&owned), "the refusal names the other's home");
+    assert!(rig.home(2).join("theirs").exists());
+    assert!(rig.lines().contains(&"held kbf-acct-2 home".to_owned()));
+
+    let rig = rig.next("make-unlookable", 1, 0);
+    let pool = rig.open();
+    rig.fake.fail("create_account kbf-acct-1");
+    rig.fake.fail("account kbf-acct-1");
+    let AccountError::Make { step, why, .. } = pool.lend("job-1").unwrap_err() else {
+        panic!("not a making error");
+    };
+    assert_eq!(step, Step::Record);
+    assert!(
+        why.ends_with(
+            "deleting what was made did not complete, at record: looking up the record \
+             kbf-acct-1: account kbf-acct-1 failed"
+        ),
+        "the refusal names the failed look"
+    );
+    assert!(rig.lines().contains(&"held kbf-acct-1 record".to_owned()));
+    assert!(
+        rig.fake
+            .take_calls()
+            .iter()
+            .all(|call| !call.starts_with("delete_account")),
+        "nothing is deleted on a failed look"
+    );
 }

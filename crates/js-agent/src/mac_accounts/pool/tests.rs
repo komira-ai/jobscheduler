@@ -64,7 +64,7 @@ fn an_open_without_full_disk_access_makes_nothing() {
             && why
                 .to_string()
                 .contains("js-agent-full-disk-access.mobileconfig"),
-        "{why}"
+        "the error does not say what the test expects"
     );
     assert_eq!(rig.fake.take_calls(), ["full_disk_access"]);
     assert!(
@@ -256,7 +256,10 @@ fn a_loan_the_ledger_cannot_record_is_not_made() {
     pool.ledger().fail_writes(&rig.dir.join("state/accounts"));
     let why = pool.lend("job-1").unwrap_err();
     assert!(matches!(why, AccountError::Ledger { .. }), "{why:?}");
-    assert!(why.to_string().contains("state/accounts: "), "{why}");
+    assert!(
+        why.to_string().contains("state/accounts: "),
+        "the error does not say what the test expects"
+    );
     assert_eq!(pool.ready_count(), 1);
 }
 
