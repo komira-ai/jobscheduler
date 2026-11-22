@@ -1,7 +1,6 @@
 use clap::Parser as _;
 
 use super::*;
-use crate::grant::testing::key_line;
 use crate::testing::{FakeHost, scratch, trace};
 
 /// A group the test process may give files to, other than `staff` (20): the first of
@@ -61,7 +60,6 @@ fn prepared(args: &Args) -> Result<Ready, String> {
     prepare(
         args,
         Box::new(FakeHost::default()),
-        "S".to_owned(),
         crate::sweep::SweepPlan::macos_schedules(),
         crate::sweep::SweepPlan::macos(),
         crate::scan::ScanFolder::macos(),
@@ -80,7 +78,6 @@ fn the_flags_default_to_the_design() {
     assert_eq!(args.pool_size, crate::lease::PoolSize::new(100).unwrap());
     assert_eq!(args.lease_gid, STAFF_GID);
     assert_eq!(args.homes, PathBuf::from("/Users"));
-    assert_eq!(args.grant_keys, None);
     assert_eq!(args.images_dir, PathBuf::from("/var/db/kbf-vm/images"));
     assert_eq!(args.staging_dir, PathBuf::from("/var/db/kbf-vm/staging"));
     assert_eq!(args.vmm, PathBuf::from("/usr/local/kbf/current/kbf-vmm"));
@@ -105,6 +102,18 @@ fn the_flags_default_to_the_design() {
         ])
         .is_err()
     );
+    // No key file can make administrators: the flag that named one is gone, so a start
+    // that still passes it fails before anything is served.
+    let error = Args::try_parse_from([
+        "kbf-mac-session",
+        "--daemon-requirement",
+        "r",
+        "--grant-keys",
+        "/etc/kbf/grant-keys",
+    ])
+    .err()
+    .unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 /// Catches: image flags that do not reach the helper's settings (the verbs would act in
@@ -152,16 +161,12 @@ fn the_vm_user_flag_takes_a_name_no_lease_user_can_have() {
 }
 
 /// Catches: a start-up that skips the state directory's privacy or the socket's
-/// group, or one that ignores the grant key file.
+/// group.
 #[test]
 fn prepare_makes_private_state_and_binds_the_socket() {
     let dir = scratch("start-ok");
     let (group, gid) = my_group();
-    let mut args = args(&dir, &group);
-    let keys = dir.join("grant-keys");
-    std::fs::write(&keys, key_line(3)).unwrap();
-    private(&keys);
-    args.grant_keys = Some(keys);
+    let args = args(&dir, &group);
     let ready = prepared(&args).unwrap();
     drop(ready.listener);
     let state = std::fs::metadata(dir.join("state")).unwrap();
@@ -196,25 +201,14 @@ fn the_socket_group_must_be_dedicated() {
     assert!(error.contains("nul"), "{error}");
 }
 
+/// Catches: a start over a state directory that is missing, linked or holds a ledger
+/// that does not parse, or a socket that cannot be bound, taken as a start.
 #[test]
-fn bad_state_keys_or_socket_stop_the_start() {
+fn bad_state_or_socket_stop_the_start() {
     let dir = scratch("start-bad");
     let (group, _) = my_group();
     let good = args(&dir, &group);
-
-    let mut missing_keys = good.clone();
-    missing_keys.grant_keys = Some(dir.join("no-such-keys"));
-    assert!(
-        prepared(&missing_keys)
-            .err()
-            .unwrap()
-            .contains("no-such-keys")
-    );
-    let mut bad_keys = good.clone();
-    std::fs::write(dir.join("bad-keys"), "zz\n").unwrap();
-    private(&dir.join("bad-keys"));
-    bad_keys.grant_keys = Some(dir.join("bad-keys"));
-    assert!(prepared(&bad_keys).err().unwrap().contains("line 1"));
+    std::fs::write(dir.join("a-file"), "").unwrap();
 
     let mut orphan = good.clone();
     orphan.state_dir = dir.join("no/such/state");
@@ -234,19 +228,20 @@ fn bad_state_keys_or_socket_stop_the_start() {
     assert!(prepared(&corrupt).err().unwrap().contains("unknown record"));
 
     let mut unbindable = good;
-    unbindable.socket = dir.join("bad-keys/socket");
+    unbindable.socket = dir.join("a-file/socket");
     assert!(
         prepared(&unbindable)
             .err()
             .unwrap()
-            .contains("bad-keys/socket")
+            .contains("a-file/socket")
     );
 }
 
-/// Catches: trusted files read with no check of who may write them (S4.3, item 6 of
-/// the review): a grant key file, state directory or ledger that another user owns,
-/// or that its group or others may write, or a key file reached through a link. Any
-/// of them would let someone else make administrators or replay a grant.
+/// Catches: trusted files read with no check of who may write them (S4.3): a state
+/// directory, ledger or file the helper reads as its own that another user owns, or that
+/// its group or others may write, or such a file read through a link or that is not a
+/// regular file. Any would let someone else reuse a lease id, hand out a user twice or
+/// write the leak scan's baseline.
 #[test]
 fn trusted_files_must_be_the_helpers_own_and_private() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -257,36 +252,30 @@ fn trusted_files_must_be_the_helpers_own_and_private() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     };
 
-    let keys = dir.join("grant-keys");
-    std::fs::write(&keys, key_line(3)).unwrap();
-    let mut with_keys = good.clone();
-    with_keys.grant_keys = Some(keys.clone());
-    mode(&keys, 0o644);
-    prepared(&with_keys).unwrap();
-    mode(&keys, 0o664);
-    let error = prepared(&with_keys).err().unwrap();
+    // A file the helper reads as its own (the leak scan's baseline and window): never
+    // through a link, a regular file, writable by no one else.
+    let file = dir.join("trusted");
+    std::fs::write(&file, "x\n").unwrap();
+    mode(&file, 0o644);
+    assert_eq!(read_trusted(&file).unwrap(), "x\n");
+    mode(&file, 0o664);
+    let error = read_trusted(&file).unwrap_err().to_string();
+    assert_eq!(error, "writable by its group or others (mode 664)");
+    mode(&file, 0o646);
     assert!(
-        error.contains("writable by its group or others (mode 664)"),
-        "{error}"
+        read_trusted(&file)
+            .unwrap_err()
+            .to_string()
+            .contains("writable by")
     );
-    mode(&keys, 0o646);
-    assert!(prepared(&with_keys).err().unwrap().contains("writable by"));
-    mode(&keys, 0o600);
-
-    std::os::unix::fs::symlink(&keys, dir.join("linked-keys")).unwrap();
-    let mut linked = good.clone();
-    linked.grant_keys = Some(dir.join("linked-keys"));
-    assert!(prepared(&linked).err().unwrap().contains("linked-keys"));
-    let mut a_dir = good.clone();
-    a_dir.grant_keys = Some(dir.to_path_buf());
-    assert!(
-        prepared(&a_dir)
-            .err()
-            .unwrap()
-            .contains("not a regular file")
-    );
+    mode(&file, 0o600);
+    std::os::unix::fs::symlink(&file, dir.join("linked")).unwrap();
+    assert!(read_trusted(&dir.join("linked")).is_err());
+    let error = read_trusted(&dir).unwrap_err().to_string();
+    assert_eq!(error, "not a regular file");
 
     // State: the directory and the ledger in it.
+    prepared(&good).unwrap();
     let state = dir.join("state");
     mode(&state, 0o770);
     let error = prepared(&good).err().unwrap();
@@ -301,30 +290,14 @@ fn trusted_files_must_be_the_helpers_own_and_private() {
 
     // Another user's: root's own files, seen by a test that is not root.
     if rustix::process::geteuid().as_raw() != 0 {
-        let mut foreign_keys = good.clone();
-        foreign_keys.grant_keys = Some(PathBuf::from("/etc/passwd"));
-        let error = prepared(&foreign_keys).err().unwrap();
+        let error = read_trusted(Path::new("/etc/passwd"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("owned by uid 0"), "{error}");
         let mut foreign_state = good;
         foreign_state.state_dir = PathBuf::from("/");
         let error = prepared(&foreign_state).err().unwrap();
         assert!(error.contains("owned by uid 0"), "{error}");
-    }
-}
-
-/// Catches: a serial taken from the wrong line, or a value with quotes or spaces.
-#[test]
-fn the_serial_comes_from_its_ioreg_line() {
-    let ioreg = "+-o J316sAP  <class IOPlatformExpertDevice>\n    {\n      \"IOPlatformUUID\" = \"0000-1111\"\n      \"IOPlatformSerialNumber\" = \"C02ABC123\"\n    }\n";
-    assert_eq!(parse_serial(ioreg), Some("C02ABC123".to_owned()));
-    for bad in [
-        "",
-        "\"IOPlatformSerialNumber\" = \"\"",
-        "\"IOPlatformSerialNumber\" = \"A B\"",
-        "\"IOPlatformSerialNumber\" = \"ABC",
-        "\"IOPlatformSerialNumbe\" = \"ABC\"",
-    ] {
-        assert_eq!(parse_serial(bad), None, "{bad:?}");
     }
 }
 
