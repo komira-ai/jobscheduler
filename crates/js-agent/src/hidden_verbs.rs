@@ -2,10 +2,18 @@
 //! installed and before any thread starts: each is a short-lived program of its own that runs
 //! no agent.
 //!
+//! - `__supervise-native`: the start of one native Mac job in a process of its own, with one
+//!   thread, which opens the job's audit session, drops to its slot user, sets its limits and
+//!   applies its profile, then starts it and records how it went
+//!   ([`crate::mac_supervisor`]). The native runtime starts it for every native job and for
+//!   its self-test ([`crate::native`]).
 //! - `image-pull` (Linux): pulls an image into the image store ([`crate::image::pull`]).
 //! - `__account-cycle`: a development verb that runs the life cycle of one account of the
 //!   Mac account pool once, to prove it on a Mac ([`crate::mac_accounts::cycle`]). It runs no
 //!   job, and is removed once the native runtime proves an account's life cycle itself.
+//! - `__native-proof` (macOS): a development verb that runs one native job through the
+//!   production runtime and the real supervisor ([`crate::native::proof`]); it is removed once
+//!   the end-to-end proof through the job service runs a native job.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -19,6 +27,9 @@ pub(crate) fn dispatch(
     err: &mut dyn Write,
 ) -> Option<ExitCode> {
     let verb = args.get(1).and_then(|verb| verb.to_str())?;
+    if verb == crate::mac_supervisor::VERB {
+        return Some(crate::mac_supervisor::run(args, out, err));
+    }
     #[cfg(target_os = "linux")]
     if verb == crate::image::pull::VERB {
         let host = crate::image::pull::Host::system();
@@ -26,6 +37,10 @@ pub(crate) fn dispatch(
     }
     if verb == crate::mac_accounts::cycle::VERB {
         return Some(crate::mac_accounts::cycle::run(args, out, err));
+    }
+    #[cfg(target_os = "macos")]
+    if verb == crate::native::proof::VERB {
+        return Some(crate::native::proof::run(args, out, err));
     }
     None
 }
@@ -64,6 +79,34 @@ mod tests {
             let (mut out, mut err) = (Vec::new(), Vec::new());
             assert_eq!(dispatch(&words(args), &mut out, &mut err), None, "{args:?}");
             assert_eq!((out, err), (Vec::new(), Vec::new()), "{args:?}");
+        }
+    }
+
+    /// Asserts that `__supervise-native` is answered here, with status 2 and a usage line,
+    /// for a command line with no `--spec` and for a spec file that does not exist, and that
+    /// nothing is written to its output (the job's). Catches a supervisor left to the agent's
+    /// own start, which would install signal handlers and start threads before the job.
+    #[test]
+    fn the_supervisor_is_answered_here_before_anything_else() {
+        use crate::mac_supervisor::{VERB, status};
+
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "hidden-supervise");
+        let absent = dir.join("spec.json");
+        let absent = absent.to_str().unwrap();
+        for args in [
+            &["js-agent", VERB][..],
+            &["js-agent", VERB, "--spec", absent][..],
+        ] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = dispatch(&words(args), &mut out, &mut err);
+            assert_eq!(code, Some(ExitCode::from(status::USAGE)), "{args:?}");
+            let err = String::from_utf8(err).unwrap();
+            assert!(err.starts_with(&format!("js-agent: {VERB}: ")), "{err}");
+            assert!(
+                err.ends_with("usage: js-agent __supervise-native --spec <file>\n"),
+                "{err}"
+            );
+            assert!(out.is_empty());
         }
     }
 

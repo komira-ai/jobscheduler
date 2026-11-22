@@ -89,9 +89,12 @@ pub const START_CRATES: [&str; 2] = ["js-agent", "js-mac-session"];
 pub const SPAWNER: &str = "crates/js-mac-session/src/disclaim.rs";
 
 /// The files, from the repository root, that may keep a program's responsibility
-/// (`Program::keep_responsibility`, `disclaim::Kept`): each starts a native job or the
-/// supervisor that starts one. None does yet: no production code keeps it.
-pub const KEEPERS: [&str; 0] = [];
+/// (`Program::keep_responsibility`, `disclaim::Kept`): the agent's start of a native job's
+/// supervisor (`Kept::Supervisor`), and the supervisor's start of the job (`Kept::Job`).
+pub const KEEPERS: [&str; 2] = [
+    "crates/js-agent/src/mac_supervisor/launch.rs",
+    "crates/js-agent/src/mac_supervisor/run.rs",
+];
 
 /// The word sequences that keep a program's responsibility, with the name a [`Site`] gives
 /// each, looked for outside the keepers.

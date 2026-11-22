@@ -37,8 +37,9 @@ shipped: nothing in them is a placeholder. The third daemon, `js-agent.pf-pool`
 (`js-mac-provision pf-pool-plist`), is described below.
 
 - The agent's plist names `--flags-file /etc/js-agent/flags` and `--token-file
-  /etc/js-agent/token`, and the fixed state root, scratch root and helper socket. The host's
-  own values (`--server`, `--pool`, `--native-network` and the `--native-pf-*` flags) are in
+  /etc/js-agent/token`, and the fixed state root and scratch root. The host's
+  own values (`--server`, `--pool`, `--native-network`, `--native-accounts`,
+  `--native-account-range`, `--native-account-ready` and the `--native-pf-*` flags) are in
   `/etc/js-agent/flags`, which a per-group configuration package installs. The plist carries
   no server and no pool.
 - The helper's plist holds its caller to `cdhash H"<40 hex>"`, the code directory hash of
@@ -267,10 +268,12 @@ which is not measured and stays disclaimed. After an unattended restart a Mac ha
 user, so a start that needs a user's graphical session cannot happen until someone logs in.
 
 Today the root helper starts every native job, disclaimed, and the helper holds no grant, so a
-job it starts holds none. The supervisor, whose starts keep the responsibility, is not in this
-tree yet. A call that keeps the responsibility (`Program::keep_responsibility`) is allowed only
-in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists, which no
-production file is yet.
+job it starts holds none. The supervisor, whose starts keep the responsibility
+(`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`), is in the tree, and
+nothing starts it yet. A call that keeps the responsibility (`Program::keep_responsibility`) is
+allowed only in the files the `KEEPERS` constant of `crates/xtask/src/spawn_sites.rs` lists: the
+supervisor's `launch.rs` (the agent's start of the supervisor) and `run.rs` (its start of the
+job).
 
 The hosted CI runner has no grant to give, so CI checks the starts and not a refused read: on
 the macOS runner the agent's tests read back the responsible process of the processes the

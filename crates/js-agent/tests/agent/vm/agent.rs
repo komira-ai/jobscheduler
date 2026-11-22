@@ -8,7 +8,6 @@ use js_vm_lease::fake::FakeDriver;
 use serde_json::Value;
 
 use super::super::native::agent::{native_flags, private};
-use super::super::native::fake_helper::FakeHelper;
 use crate::jobs::fake::FakeMachine;
 use crate::support::{
     CountingSleeper, Host, Jobs, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
@@ -53,8 +52,7 @@ pub(super) fn vm_flags(dir: &Scratch) -> Vec<String> {
 #[test]
 fn the_hello_reports_two_vm_slots_with_the_flags_and_none_without() {
     let dir = Scratch::new("vm-agent-on");
-    let fake = FakeHelper::start(&dir);
-    let mut extra = native_flags(&dir, &fake);
+    let mut extra = native_flags(&dir);
     extra.extend(vm_flags(&dir));
     let driver = Arc::new(FakeDriver::new());
     let (ran, hello) = hello_with(&mac_host(), &extra, FakeMachine::new().with_vms(&driver));
@@ -69,8 +67,7 @@ fn the_hello_reports_two_vm_slots_with_the_flags_and_none_without() {
     assert_eq!(driver.calls(), [js_vm_lease::fake::Call::Leftovers]);
 
     let off = Scratch::new("vm-agent-off");
-    let fake = FakeHelper::start(&off);
-    let extra = native_flags(&off, &fake);
+    let extra = native_flags(&off);
     let (ran, hello) = hello_with(&mac_host(), &extra, FakeMachine::new());
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     let caps = hello["capabilities"].as_object().unwrap();
@@ -87,8 +84,7 @@ fn the_hello_reports_two_vm_slots_with_the_flags_and_none_without() {
 #[test]
 fn a_wrong_vm_flag_exits_2_naming_it() {
     let dir = Scratch::new("vm-agent-flags");
-    let fake = FakeHelper::start(&dir);
-    let native = native_flags(&dir, &fake);
+    let native = native_flags(&dir);
     let vm = vm_flags(&dir);
     let (driver, store) = (vm[1].clone(), vm[3].clone());
     let with = |more: &[&str]| -> Vec<String> {

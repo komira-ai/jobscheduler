@@ -218,7 +218,8 @@ impl Place {
 #[test]
 fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
     let place = Place::new("clean");
-    let made = "adi 501\nkbf-lease-pool-0 4300\nkbf-lease-pool-1 4309\nkbf-lease-pool-7 650\nkbf-lease-pool-x 4312\nother 4305\n";
+    let made =
+        "adi 501\nkbf-acct-0 4300\nkbf-acct-1 4309\nkbf-acct-7 650\nkbf-acct-x 4312\nother 4305\n";
     let fake = Fake::new().listing(&[CLEAN, made]);
     let ok = place.run(&fake).expect("every test passed");
     let table_path = place.root().join("target/mac-root-tests/table.tsv");
@@ -262,8 +263,8 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
     chmod.push_str(&format!(" {w}/bin/js-mac-provision"));
     expected.push(chmod);
     // Only the users the native_privileged run made: in range and named as the pool's.
-    expected.push("/usr/bin/dscl . -delete /Users/kbf-lease-pool-0".to_owned());
-    expected.push("/usr/bin/dscl . -delete /Users/kbf-lease-pool-1".to_owned());
+    expected.push("/usr/bin/dscl . -delete /Users/kbf-acct-0".to_owned());
+    expected.push("/usr/bin/dscl . -delete /Users/kbf-acct-1".to_owned());
     assert_eq!(fake.roots(), expected);
 
     let logged = fake.logged.borrow();
@@ -295,7 +296,7 @@ fn a_clean_mac_runs_every_target_from_the_work_directory_and_passes() {
 #[test]
 fn failures_are_rows_every_target_still_runs_and_the_verb_fails() {
     let place = Place::new("failures");
-    let left = "kbf-lease-pool-0 4310\n";
+    let left = "kbf-acct-0 4310\n";
     let mut fake = Fake::new().listing(&[CLEAN, CLEAN, CLEAN, left, left, CLEAN, "!"]);
     let failed = "running 2 tests\ntest a ... ok\ntest b ... FAILED\n\nfailures:\n\n---- b stdout ----\n\nthread 'b' panicked at tests/x.rs:1:2:\nthe pf rule did not load\n\nfailures:\n    b\n";
     fake.ran
@@ -316,14 +317,14 @@ fn failures_are_rows_every_target_still_runs_and_the_verb_fails() {
                 logs.join("treestore.log").display()
             ),
             "mac_pool (binary): mac_pool could not start".to_owned(),
-            "cleanup kbf-lease-pool-0: the user is left after native_isolation".to_owned(),
+            "cleanup kbf-acct-0: the user is left after native_isolation".to_owned(),
             "cleanup (listing): after native_inbound_pf: dscl failed".to_owned(),
         ]
     );
     assert_eq!(fake.logged.borrow().len(), TARGETS.len());
     assert!(
         fake.roots()
-            .contains(&"/usr/bin/dscl . -delete /Users/kbf-lease-pool-0".to_owned())
+            .contains(&"/usr/bin/dscl . -delete /Users/kbf-acct-0".to_owned())
     );
 }
 
@@ -488,7 +489,7 @@ fn a_lease_user_is_refused_at_every_edge() {
             e,
             format!(
                 "refused: the root tests run only on a Mac with no lease users, because they \
-                 make and delete users named kbf-lease-pool-<n> (uids 4300-4320); this Mac has \
+                 make and delete users named kbf-acct-<n> (uids 4300-4320); this Mac has \
                  {name} ({uid})"
             )
         );
@@ -507,22 +508,24 @@ fn a_lease_user_is_refused_at_every_edge() {
     assert!(e.ends_with("this Mac has x (650), y (4310)"), "{e}");
 }
 
-/// Catches a cleanup that deletes a user the tests did not make: only pool-named users with a
-/// uid of the tests' made range, at both edges, are named.
+/// Catches a cleanup that deletes a user the tests did not make: only account-named users with
+/// a uid of the tests' made range, at both edges, are named (an earlier release's pool user
+/// is not).
 #[test]
 fn only_the_tests_pool_users_are_deleted() {
     let users: Vec<(String, i64)> = [
-        ("kbf-lease-pool-0", 4300),
-        ("kbf-lease-pool-1", 4311),
-        ("kbf-lease-pool-2", 4299),
-        ("kbf-lease-pool-3", 4312),
-        ("kbf-lease-pool-4", 650),
+        ("kbf-acct-0", 4300),
+        ("kbf-acct-1", 4311),
+        ("kbf-acct-2", 4299),
+        ("kbf-acct-3", 4312),
+        ("kbf-acct-4", 650),
         ("other", 4305),
+        ("kbf-lease-pool-5", 4306),
     ]
     .iter()
     .map(|(n, u)| ((*n).to_owned(), *u))
     .collect();
-    assert_eq!(to_delete(&users), ["kbf-lease-pool-0", "kbf-lease-pool-1"]);
+    assert_eq!(to_delete(&users), ["kbf-acct-0", "kbf-acct-1"]);
 }
 
 /// Catches a target given another target's variables or directories, a missing filter or
