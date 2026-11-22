@@ -13,15 +13,17 @@
 //!   out of `exec/` into its scratch directory (once: a removal that is tried again does not
 //!   copy them again), its account retired (every process of the uid killed, the record and
 //!   the home deleted, the per-user folder emptied, all shown gone) and its lease marked done.
+//!   Between the copy and the retirement, a run with a put target commits its output to the
+//!   put ingest, once (`native/put.rs`).
 //!   An account the pool holds fails the removal (the run is kept, so a later removal tries
-//!   the retirement again); outputs that could not be copied fail it only as
-//!   [`RuntimeError::outputs`], after everything else is done.
+//!   the retirement again); outputs that could not be copied, or a commit that failed, fail
+//!   it only as [`RuntimeError::outputs`], after everything else is done.
 
 use std::time::Duration;
 
 use rustix::process::Signal;
 
-use super::{NativeRuntime, accounts, end, logs, outputs, run::exit_of};
+use super::{NativeRuntime, accounts, end, logs, outputs, put, run::exit_of};
 use crate::lifecycle::{RunHandle, RuntimeError, Status};
 
 impl NativeRuntime {
@@ -84,6 +86,7 @@ impl NativeRuntime {
         }
         run.collect(&id.0, max_file_bytes);
         logs::close(&mut run.logs, &run.scratch);
+        put::commit_run(&mut self.puts, self.put.as_ref(), &id.0, run);
         if let Some(job) = run.job.take() {
             // A job exists only on a runtime whose pool is open.
             if let Some(pool) = &self.pool {
@@ -98,9 +101,10 @@ impl NativeRuntime {
         }
         let run = self.runs.remove(&id.0);
         let _ = self.journal.done(&id.0);
+        let put = put::end_run(&mut self.puts, &mut self.committed, &id.0);
         let failed = run.and_then(|run| run.collected).map(|done| done.failed);
         match failed.unwrap_or_default() {
-            failed if failed.is_empty() => Ok(()),
+            failed if failed.is_empty() => put,
             failed => Err(RuntimeError::outputs(format!(
                 "outputs not copied: {}",
                 outputs::told(&failed)

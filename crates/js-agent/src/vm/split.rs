@@ -9,8 +9,8 @@ use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, Po
 
 use super::VmRuntime;
 use crate::lifecycle::{
-    Created, Found, FsPrepared, JobFs, NativeRefusal, Prepared, Removal, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Created, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, Removal, RunHandle,
+    RunSpec, Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 
 /// The agent's runtime and its VM runtime; see the [module](self).
@@ -102,6 +102,10 @@ impl Runtime for WithVms {
 
     fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
         self.owner(id).logs_report(id)
+    }
+
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.owner(id).outputs_report(id)
     }
 
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {

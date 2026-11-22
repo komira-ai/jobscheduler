@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Created, FsPrepared, JobFs, Prepared, Removal, RunHandle, Runtime, Status, Wake, Whereabouts,
-    label,
+    Created, FsPrepared, JobFs, OutputsReport, Prepared, Removal, RunHandle, Runtime, Status, Wake,
+    Whereabouts, label,
 };
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{JobUsage, LogReport, LogTail, NativeSpec, NetworkLevel, PortRange, refusal};
@@ -30,7 +30,8 @@ fn split(driver: &Arc<FakeDriver>) -> (WithVms, FakeRuntime) {
 
 /// Asserts that a run with the VM kind is made by the VM runtime and one without it by the
 /// other runtime, and that each later call about a run (poll, tail, log report, control
-/// group, where its container is, stop, removal) goes to the runtime that made it: a running
+/// group, where its container is, stop, removal, what the removal committed) goes to the
+/// runtime that made it: a running
 /// VM run of a router whose other runtime places its containers in groups has no container
 /// process to be blind to, and a container's first process outside its group is the other
 /// runtime's answer. Catches a VM start run as a native job on the host, a container's calls
@@ -66,6 +67,7 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     let tail = with.log_tail(&in_vm).unwrap().unwrap();
     assert_eq!(tail.stdout, "vm out");
     assert_eq!(with.logs_report(&in_vm), None);
+    assert_eq!(with.outputs_report(&in_vm), None);
     assert_eq!(with.cgroup(&in_vm), None);
     with.stop(&in_vm, GRACE).unwrap();
     with.remove(&in_vm).unwrap();
@@ -103,8 +105,16 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
     assert!(with.cgroup(&on_host).is_some());
     with.stop(&on_host, GRACE).unwrap();
     assert_eq!(fake.stops().len(), 1);
+    let committed = OutputsReport {
+        key: "cas/b/b1/n1/pack".to_owned(),
+        sha256: "0".repeat(64),
+        bytes: 3,
+    };
+    fake.commit_outputs("run-plain", committed.clone());
     with.remove(&on_host).unwrap();
     assert!(fake.gone("run-plain"));
+    assert_eq!(with.outputs_report(&on_host), Some(committed));
+    assert_eq!(with.outputs_report(&on_host), None, "answered once");
 }
 
 /// Asserts that a removal is asked of the runtime that holds the run: a container's of the
