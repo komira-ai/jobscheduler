@@ -81,6 +81,10 @@ pub(super) fn full_job() -> JobRecord {
             HostId::new("host-a").expect("a host"),
             HostId::new("host-d").expect("a host"),
         ],
+        capacity_refusals: vec![
+            HostId::new("host-e").expect("a host"),
+            HostId::new("host-a").expect("a host"),
+        ],
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -120,6 +124,7 @@ pub(super) fn bare_job() -> JobRecord {
         failed_prepares: 0,
         prepare_bars: BTreeMap::new(),
         held_refusals: Vec::new(),
+        capacity_refusals: Vec::new(),
         queue: crate::QueueTrail::default(),
         carried: Carried::default(),
     }
@@ -138,6 +143,7 @@ pub(super) fn allocation(booked: Booked) -> AllocationRecord {
         end_reason: Some(EndReason::Exited),
         prepare_deadline: None,
         wall_limit_secs: None,
+        sized_from: None,
         carried: Carried::default(),
     }
 }
@@ -482,6 +488,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_whole_tag::FAILED_PREPARES,
         job_whole_tag::PREPARE_BARS,
         job_whole_tag::HELD_REFUSALS,
+        job_whole_tag::CAPACITY_REFUSALS,
     ] {
         row = without(&row, tag);
     }
@@ -494,6 +501,11 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job.held_refusals,
         Vec::new(),
         "and before held refusals were kept"
+    );
+    assert_eq!(
+        job.capacity_refusals,
+        Vec::new(),
+        "and before capacity refusals were kept"
     );
     assert_eq!(
         job.result,
