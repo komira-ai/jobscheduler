@@ -14,7 +14,9 @@
 //! js-agent __native-proof --accounts <dir> --range <first>-<last> --state <dir>
 //!     [--ready <n>] [--network off|loopback|on|open] [--deny-read <path>]...
 //!     [--input <host dir>=<dest>]... [--output <path>]... [--cwd <dir>]
-//!     [--stop-after <s>] [--grace <s>] -- <program> [<arg>...]
+//!     [--stop-after <s>] [--grace <s>]
+//!     [--mount-root <dir> --put-root <dir> --put-user <user> --put-mount <dir>=<target>]
+//!     -- <program> [<arg>...]
 //! ```
 
 use std::ffi::OsString;
@@ -26,10 +28,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, NativeSpec, NetworkLevel, OutputKind, OutputSpec};
+use js_agent_wire::{
+    Isolation, JobMount, MountMode, MountSource, NativeSpec, NetworkLevel, OutputKind, OutputSpec,
+    Propagation,
+};
 
-use super::{NativeFlags, NativeRuntime, NativeSettings, PfFlags, grant};
-use crate::lifecycle::{Body, ResolvedMount, RunSpec, Runtime, Status};
+use super::{MountRoot, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags, grant};
+use crate::lifecycle::{Body, FsPrepared, JobFs, ResolvedMount, RunSpec, Runtime, Status};
 use crate::mac_supervisor::SystemLauncher;
 
 /// The verb.
@@ -65,6 +70,11 @@ struct Args {
     stop_after: Option<u64>,
     grace: u64,
     command: Vec<String>,
+    /// The put ingest (`--put-root`, `--put-user`), the read-write mount root that holds it
+    /// (`--mount-root`) and the run's put mount (`--put-mount <host dir>=<target>`).
+    put: PutFlags,
+    mount_root: Option<PathBuf>,
+    put_mount: Option<(String, String)>,
 }
 
 /// Parses the words after the verb.
@@ -95,6 +105,16 @@ fn parse(words: &[OsString]) -> Result<Args, String> {
             "--cwd" => args.cwd = value()?,
             "--stop-after" => args.stop_after = Some(number(&word, &value()?)?),
             "--grace" => args.grace = number(&word, &value()?)?,
+            "--put-root" => args.put.native_put_root = Some(PathBuf::from(value()?)),
+            "--put-user" => args.put.native_put_user = Some(value()?),
+            "--mount-root" => args.mount_root = Some(PathBuf::from(value()?)),
+            "--put-mount" => {
+                let given = value()?;
+                let (host, target) = given
+                    .split_once('=')
+                    .ok_or(format!("--put-mount {given}: not <host dir>=<target>"))?;
+                args.put_mount = Some((host.to_owned(), target.to_owned()));
+            }
             other => return Err(format!("{other}: not a flag of {VERB}")),
         }
     }
@@ -166,6 +186,31 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
             return status::USAGE;
         }
     };
+    let roots: Vec<MountRoot> = args
+        .mount_root
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .map(|path| MountRoot {
+            path,
+            read_only: false,
+            trees: false,
+        })
+        .collect();
+    let settings = match settings.with_mount_roots(roots.clone()) {
+        Ok(settings) => settings,
+        Err(why) => {
+            let _ = writeln!(err, "js-agent: {VERB}: {why}");
+            return status::USAGE;
+        }
+    };
+    let put = match super::put_of(&args.put, &roots, &node_of_name) {
+        Ok(put) => put,
+        Err(why) => {
+            let _ = writeln!(err, "js-agent: {VERB}: {why}");
+            return status::USAGE;
+        }
+    };
+    let _ = writeln!(out, "put: {put:?}");
     let held = grant::ask(grant::list(Path::new(grant::PRIVACY_DIR)));
     let _ = writeln!(out, "full disk access: {}", held.as_str());
     let config = settings.with_full_disk_access(held).config().clone();
@@ -177,12 +222,31 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         }
     };
     let mut runtime = match NativeRuntime::open(launcher, config, 1) {
-        Ok(runtime) => runtime,
+        Ok(runtime) => runtime.with_put(put),
         Err(why) => {
             let _ = writeln!(out, "open: {}", why.0);
             return status::REFUSED;
         }
     };
+    if let Some((host, target)) = &args.put_mount {
+        let fs = JobFs {
+            layers: Vec::new(),
+            mounts: vec![JobMount {
+                source: MountSource::HostPath { path: host.clone() },
+                target: target.clone(),
+                mode: MountMode::ReadWrite,
+                sub_path: None,
+                no_exec: true,
+                propagation: Propagation::Private,
+            }],
+        };
+        let checked = runtime.check_job_fs(&fs, &[]);
+        let resolved = runtime.resolve_fs("native-proof", "", &fs, 0);
+        let _ = writeln!(out, "put mount: checked {checked:?}, resolved {resolved:?}");
+        if !matches!(resolved, FsPrepared::Ready) {
+            return status::REFUSED;
+        }
+    }
     let scratch = state.join("proof-run");
     if let Err(why) = fresh(&scratch) {
         let _ = writeln!(out, "scratch {}: {why}", scratch.display());
@@ -228,6 +292,35 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         let _ = writeln!(out, "stderr:\n{}", tail.stderr);
     }
     let removed = runtime.remove(&id);
+    // What the lifecycle would keep as the finding `outputs-committed`, and the pack as the
+    // node finds it, read at once (the node may take it any moment after).
+    match runtime.outputs_report(&id) {
+        Some(report) => {
+            let _ = writeln!(out, "finding outputs-committed {}", report.note());
+            if let Some(put) = &args.put_mount {
+                let pack = Path::new(&put.0).join("pack");
+                match fs::symlink_metadata(&pack) {
+                    Ok(meta) => {
+                        use std::os::unix::fs::MetadataExt as _;
+                        let _ = writeln!(
+                            out,
+                            "pack at once: uid {} gid {} mode {:o} bytes {}",
+                            meta.uid(),
+                            meta.gid(),
+                            meta.mode() & 0o7777,
+                            meta.len()
+                        );
+                    }
+                    Err(why) => {
+                        let _ = writeln!(out, "pack at once: {why} (the node took it)");
+                    }
+                }
+            }
+        }
+        None => {
+            let _ = writeln!(out, "finding outputs-committed: none");
+        }
+    }
     match &removed {
         Ok(()) => {
             let _ = writeln!(out, "remove: ok");
@@ -296,6 +389,16 @@ fn spec_of(args: &Args, (program, rest): (&String, &[String]), scratch: PathBuf)
         log_sink: None,
         xcode: None,
     }
+}
+
+/// The uid and group of the user `name` in the directory service.
+fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
+    use js_mac_session::helper::Host as _;
+    let account = js_mac_session::macos::MacHost.account(name)?;
+    Ok(account.map(|account| crate::mac_put::Node {
+        uid: account.uid,
+        gid: account.gid,
+    }))
 }
 
 /// Makes `dir` empty and the agent's alone.
