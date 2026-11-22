@@ -505,6 +505,24 @@ fn the_new_shapes_are_refused_by_an_old_decoder_in_a_way_the_client_reads() {
     }
 }
 
+/// Asserts that the `full-disk-access` verb, which a helper from before it does not
+/// know, is refused by the old decoder in the words the client reads as an unknown verb
+/// (`unknown_to_helper`), and that the reply is a new variant that decodes only in the new
+/// type. Catches: a verb added in a way an old helper would not refuse cleanly (the agent
+/// would then fail to start on a Mac whose helper was not updated yet).
+#[test]
+fn the_full_disk_access_verb_is_unknown_to_an_old_helper() {
+    let text = serde_json::to_string(&Request::FullDiskAccess).unwrap();
+    assert_eq!(text, r#"{"verb":"full-disk-access"}"#);
+    let why = serde_json::from_str::<old::Request>(&text).unwrap_err();
+    assert!(refusal_of(&why).unknown_to_helper(), "{text}: {why}");
+    let reply = Reply::FullDiskAccess {
+        state: crate::full_disk_access::FullDiskAccess::NotGranted,
+    };
+    let text = serde_json::to_string(&reply).unwrap();
+    assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), reply);
+}
+
 /// Catches: a client that falls back from a refusal that is not about an unknown verb or
 /// field (it would then kill where it should have stopped, or drop a deadline for nothing).
 #[test]

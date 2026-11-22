@@ -130,6 +130,9 @@ pub(crate) struct State {
     /// The uids with one more live process whose name cannot be read (`?`, pid 901),
     /// which a kill ends.
     pub(crate) unreadable: BTreeSet<u32>,
+    /// What `list_privacy_dir` answers when it fails: the kind of its error. `None`
+    /// lists the directory (a helper that holds Full Disk Access).
+    pub(crate) privacy_dir: Option<io::ErrorKind>,
     /// The System V IPC objects, by id: their kind's letter (`q`, `m` or `s`) and their
     /// owner as `ipcs` prints it (a user's name, or a uid). `ipcs -a` lists them and
     /// `ipcrm -<kind> <id>` removes one, unless a command answer is set for either.
@@ -648,6 +651,14 @@ impl Host for FakeHost {
 
     fn term_group(&self, pgid: i32) -> io::Result<()> {
         self.call("term_group", format!("term_group {pgid}"))
+    }
+
+    fn list_privacy_dir(&self) -> io::Result<()> {
+        let mut state = self.state();
+        state.log.push("list_privacy_dir".to_owned());
+        state
+            .privacy_dir
+            .map_or(Ok(()), |kind| Err(io::Error::new(kind, "privacy dir")))
     }
 
     fn pause(&self) {

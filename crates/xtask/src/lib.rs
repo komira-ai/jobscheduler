@@ -29,6 +29,10 @@
 //!   <dir>` ([`release::macos_leg`]): on a Mac, the release's macOS leg from a checkout:
 //!   the release build of each binary, its archive directory, its minimum macOS and its
 //!   `--version`; nothing is uploaded.
+//! - `release check-code-signature <binary> --program <name> [--codesign <program>]`
+//!   ([`release::code_signature`]): on a Mac, refuses a js-agent program unless it is signed as the
+//!   release signs it (Developer ID Application, the team, its identifier, hardened runtime,
+//!   timestamp, its designated requirement), against the table of [`release::mac_programs`].
 //! - `release deb --binary <path> --version <X.Y.Z> --platform linux-x86_64|linux-arm64 --out <dir>`
 //!   ([`release::deb`]): the js-agent Debian package of one Linux platform, byte for byte the same
 //!   for the same inputs.
@@ -164,6 +168,9 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
+    /// `release check-code-signature` refused a program.
+    #[error(transparent)]
+    CodeSignature(#[from] release::code_signature::Error),
     /// `release desired` set nothing, or could not tell.
     #[error(transparent)]
     Desired(release::desired::Error),
@@ -452,6 +459,8 @@ enum ReleaseVerb {
     Stage(release::stage::StageArgs),
     /// Build, stage, check and package the darwin leg of a release.
     MacosLeg(release::macos_leg::LegArgs),
+    /// Refuse a macOS program that is not signed as the release signs it (a Mac only).
+    CheckCodeSignature(release::code_signature::CheckArgs),
     /// Build the Debian package of js-agent for one Linux platform.
     Deb(release::deb::DebArgs),
     /// Build the OCI image tar of js-lease-server for one Linux target.
@@ -610,6 +619,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::NextVersion(args) => release::next_version::run(&args)?,
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
+            ReleaseVerb::CheckCodeSignature(args) => release::code_signature::run(&args)?,
             ReleaseVerb::Deb(args) => release::deb::run(&args)?,
             ReleaseVerb::Image(args) => release::server_image::run(&args)?,
             ReleaseVerb::Desired(args) => release::desired::run(&args).map_err(|e| match e {
