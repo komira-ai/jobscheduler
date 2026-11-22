@@ -142,9 +142,10 @@ fn a_put_mount_is_committed_once_before_the_retirement() {
 }
 
 /// Asserts that the job never holds its put directory: the put mount is not linked into its
-/// folder, no profile parameter names the put directory or anything below the put root, and
-/// the read-write root that holds the put root is a read deny of the run's profile. Catches a
-/// job given a writable put directory, and one that can read other builds' puts.
+/// folder, no profile parameter but a read deny names the put directory or anything below the
+/// put root, and the put root itself is a read deny of the run's profile (the runtime makes it
+/// one; it is no mount root). Catches a job given a writable put directory, and one that can
+/// read other builds' puts.
 #[test]
 fn the_put_directory_is_never_the_jobs() {
     let (mut rig, root) = rig("put-never");
@@ -155,15 +156,14 @@ fn the_put_directory_is_never_the_jobs() {
     let named: Vec<&(String, String)> = launched
         .params
         .iter()
-        .filter(|(_, value)| value.starts_with(&below))
+        .filter(|(key, value)| value.starts_with(&below) && !key.starts_with("RD_"))
         .collect();
     assert!(named.is_empty(), "{named:?}");
-    let holder = root.parent().unwrap().display().to_string();
     assert!(
         launched
             .params
             .iter()
-            .any(|(key, value)| key.starts_with("RD_") && *value == holder),
+            .any(|(key, value)| key.starts_with("RD_") && *value == below),
         "{:?}",
         launched.params
     );
@@ -306,23 +306,16 @@ fn any_other_mount_beneath_the_put_root_is_refused() {
 }
 
 /// Asserts the checks of the put flags: neither flag is no put; one without the other, a root
-/// that is not a directory, a root no read-write mount root holds (one only a read-only root
-/// holds) and a user the directory service does not know are refused naming the flag; a
+/// that is not a directory (or not absolute) and a user the directory service does not know
+/// are refused naming the flag; a
 /// number is the node's uid and group, a name is looked up; the root is kept canonical.
-/// Catches a put root a run could read, and an agent that starts with a node it cannot hand
-/// a directory to. A lookup that fails is refused with its error.
+/// Catches an agent that starts with a put root it cannot use or a node it cannot hand a
+/// directory to. A lookup that fails is refused with its error.
 #[test]
 fn the_put_flags_are_checked() {
     let dir = crate::support::Scratch::new("native-put-flags");
     fs::create_dir_all(dir.path("rw/put")).unwrap();
-    fs::create_dir_all(dir.path("ro/put")).unwrap();
     fs::write(dir.path("rw/file"), "").unwrap();
-    let root_of = |name: &str, read_only: bool| MountRoot {
-        path: fs::canonicalize(dir.path(name)).unwrap(),
-        read_only,
-        trees: false,
-    };
-    let roots = [root_of("rw", false), root_of("ro", true)];
     let users = |name: &str| -> io::Result<Option<Node>> {
         match name {
             "_broken" => Err(io::Error::other("the directory service did not answer")),
@@ -333,7 +326,7 @@ fn the_put_flags_are_checked() {
         native_put_root: root,
         native_put_user: user.map(str::to_owned),
     };
-    assert_eq!(put_of(&flags(None, None), &roots, &users), Ok(None));
+    assert_eq!(put_of(&flags(None, None), &users), Ok(None));
     let put = dir.path("rw/put");
     let canonical = fs::canonicalize(&put).unwrap();
     let refused = [
@@ -357,13 +350,6 @@ fn the_put_flags_are_checked() {
             "--native-put-root: rw/put is not a directory".to_owned(),
         ),
         (
-            flags(Some(dir.path("ro/put")), Some("_tierstore")),
-            format!(
-                "--native-put-root: {} lies beneath no read-write --mount-root",
-                fs::canonicalize(dir.path("ro/put")).unwrap().display()
-            ),
-        ),
-        (
             flags(Some(put.clone()), Some("_nobody_here")),
             "--native-put-user: no user \"_nobody_here\"".to_owned(),
         ),
@@ -373,7 +359,7 @@ fn the_put_flags_are_checked() {
         ),
     ];
     for (given, why) in refused {
-        assert_eq!(put_of(&given, &roots, &users), Err(why));
+        assert_eq!(put_of(&given, &users), Err(why));
     }
     let named = put_of(
         &flags(Some(put.clone()), Some("_tierstore")),
@@ -387,6 +373,37 @@ fn the_put_flags_are_checked() {
         }))
     };
     assert_eq!(named, want(Node { uid: 7, gid: 8 }));
-    let numbered = put_of(&flags(Some(put), Some("281")), &roots, &users);
+    let numbered = put_of(&flags(Some(put), Some("281")), &users);
     assert_eq!(numbered, want(Node { uid: 281, gid: 281 }));
+}
+
+/// Asserts that a put root no mount root holds takes its put mount end to end: the runtime
+/// says it takes the mount's source (so the lifecycle does not hold it to the mount roots),
+/// and not a path beside the root; the put directory, which does not exist yet, resolves as
+/// the run's put target (a tree check never looks it up); the job's pack is committed and
+/// reported. Catches a put root that must be a mount root (which put it on the state root's
+/// file system), and a put target refused because its nonce folder is not made yet.
+#[test]
+fn a_put_root_that_is_no_mount_root_takes_its_put_mount() {
+    let rig = Rig::in_dir("put-no-root", 1, |_, dir| {
+        fs::create_dir_all(dir.path("put")).unwrap();
+    });
+    let root = fs::canonicalize(rig.dir.path("put")).unwrap();
+    let put = PutConfig {
+        root: root.clone(),
+        node: node(),
+    };
+    let rt = rig.rt.with_put(Some(put));
+    let mut rig = Rig { rt, ..rig };
+    let dir = root.join("cas/b/b1/n1");
+    assert!(rig.rt.owns_host_path(&dir.display().to_string()));
+    let beside = root.with_file_name("put-other");
+    assert!(!rig.rt.owns_host_path(&beside.display().to_string()));
+    assert!(!dir.exists(), "the build service makes no nonce folder");
+    let exec = started(&mut rig, &root, Vec::new());
+    write_pack(&exec, b"pack");
+    rig.settle(&handle());
+    rig.rt.remove(&handle()).unwrap();
+    assert_eq!(fs::read(dir.join("pack")).unwrap(), b"pack");
+    assert!(rig.rt.outputs_report(&handle()).is_some());
 }

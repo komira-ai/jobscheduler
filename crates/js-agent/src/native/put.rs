@@ -3,10 +3,10 @@
 //!
 //! - **Flags.** `--native-put-root` (the put ingest's directory, the node's `put_root`) and
 //!   `--native-put-user` (the user the node runs as, by name or number) are given together or
-//!   not at all. The root must be a directory that a read-write `--mount-root` holds (the
-//!   lifecycle admits a mount's source only beneath a mount root, and every mount root is a
-//!   read deny of every run, so no run reads the root). The largest file a run may write is
-//!   at least the build service's largest pack whatever the flags say
+//!   not at all. The root is no mount root: the lifecycle leaves a mount source beneath it to
+//!   this runtime ([`crate::lifecycle::Runtime::owns_host_path`]), and the root is a read deny
+//!   of every run ([`super::NativeRuntime::with_put`]), so no run reads it. The largest file a
+//!   run may write is at least the build service's largest pack whatever the flags say
 //!   ([`super::MIN_MAX_FILE_MIB`]).
 //! - **Target.** A read-write host-path mount whose source lies beneath the put root is the
 //!   run's put target when it is exactly `cas/b/<build>/<nonce>` below it, whether or not it
@@ -32,8 +32,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use js_agent_wire::{OutputKind, OutputSpec};
+use js_mac_pool::seatbelt::AbsPath;
 
-use super::mounts::{MountPlan, MountRoot};
+use super::mounts::MountPlan;
 use super::outputs;
 use super::run::Run;
 use crate::lifecycle::{OutputsReport, RuntimeError};
@@ -47,8 +48,8 @@ const PACK: &str = "pack";
 pub struct PutFlags {
     /// The put ingest's directory (tierstore's `local_cache.put_ingest` put root): a run's
     /// read-write mount of `<this>/cas/b/<build>/<nonce>` is where its output is committed
-    /// after it, and is never given to the job. It must be a directory a read-write
-    /// `--mount-root` holds. Needs `--native-put-user` and `--native-accounts`.
+    /// after it, and is never given to the job; no run may read below it. Needs
+    /// `--native-put-user` and `--native-accounts`.
     #[arg(long, value_name = "PATH")]
     pub native_put_root: Option<PathBuf>,
     /// The user the tierstore node runs as, by name or by number (a number is its uid and
@@ -67,16 +68,15 @@ pub struct PutConfig {
     pub node: Node,
 }
 
-/// Checks `flags` against the agent's mount `roots`; a user named by name is looked up with
-/// `user_of` (its uid and group, or `None`).
+/// Checks `flags`; a user named by name is looked up with `user_of` (its uid and group, or
+/// `None`).
 ///
 /// # Errors
 ///
 /// The text names the flag at fault: one flag without the other, a root that is not an
-/// absolute directory or that no read-write mount root holds, or a user that is not known.
+/// absolute directory or that a profile cannot name, or a user that is not known.
 pub fn put_of(
     flags: &PutFlags,
-    roots: &[MountRoot],
     user_of: &dyn Fn(&str) -> io::Result<Option<Node>>,
 ) -> Result<Option<PutConfig>, String> {
     let (root, user) = match (&flags.native_put_root, &flags.native_put_user) {
@@ -89,15 +89,7 @@ pub fn put_of(
     let root = found
         .filter(|found| found.is_dir())
         .ok_or_else(|| format!("--native-put-root: {} is not a directory", root.display()))?;
-    if !roots
-        .iter()
-        .any(|held| !held.read_only && root.starts_with(&held.path))
-    {
-        return Err(format!(
-            "--native-put-root: {} lies beneath no read-write --mount-root",
-            root.display()
-        ));
-    }
+    AbsPath::new(&root).map_err(|why| format!("--native-put-root: {}: {why}", root.display()))?;
     let node = match user.parse::<u32>() {
         Ok(id) => Node { uid: id, gid: id },
         Err(_) => user_of(user)

@@ -383,9 +383,14 @@ impl NativeRuntime {
     }
 
     /// The same runtime, committing the output of each run with a put target to the put
-    /// ingest `put` (`native/put.rs`); `None` commits nothing.
+    /// ingest `put` (`native/put.rs`), whose root becomes a read deny of every run; `None`
+    /// commits nothing.
     #[must_use]
-    pub fn with_put(self, put: Option<PutConfig>) -> Self {
+    pub fn with_put(mut self, put: Option<PutConfig>) -> Self {
+        let denied = put.as_ref().and_then(|put| AbsPath::new(&put.root).ok());
+        if let Some(denied) = denied.filter(|root| !self.config.read_denies.contains(root)) {
+            self.config.read_denies.push(denied);
+        }
         Self { put, ..self }
     }
 
@@ -553,6 +558,14 @@ impl Runtime for NativeRuntime {
     /// Mounts of host paths, as links in `exec/` (`native/mounts.rs`); layers are refused.
     fn layered_rootfs(&self) -> bool {
         true
+    }
+
+    /// A mount source beneath `--native-put-root`: the run's put target, or a mount the
+    /// lookup refuses (`native/mounts.rs`), never one held to the mount roots.
+    fn owns_host_path(&self, path: &str) -> bool {
+        self.put
+            .as_ref()
+            .is_some_and(|put| Path::new(path).starts_with(&put.root))
     }
 
     fn check_job_fs(&self, fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {

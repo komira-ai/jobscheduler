@@ -108,6 +108,11 @@ impl Runtime for WithVms {
         self.owner(id).outputs_report(id)
     }
 
+    /// The other runtime's: a VM start has no mount of a host path.
+    fn owns_host_path(&self, path: &str) -> bool {
+        self.other.owns_host_path(path)
+    }
+
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         self.owner(id).usage(id)
     }

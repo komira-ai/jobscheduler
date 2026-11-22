@@ -337,8 +337,10 @@ fn with_trees(
     let Some(root) = roots.iter().find(|root| root.trees) else {
         return Ok(list);
     };
+    // A put target is no tree and may not exist yet: the commit makes it after the run.
     let dirs: Vec<(PathBuf, bool, bool)> = list
         .iter()
+        .filter(|plan| plan.put.is_none())
         .map(|plan| (PathBuf::from(plan.host.as_str()), !plan.write, plan.no_exec))
         .collect();
     if let Some(rules) = native_fs::tree_rules(&root.path, &dirs)? {
