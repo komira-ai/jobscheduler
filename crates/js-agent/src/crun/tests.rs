@@ -834,3 +834,35 @@ fn a_leases_usage_is_both_counters_or_none() {
     fs::remove_dir_all(&dir).expect("remove the group");
     assert_eq!(usage_of(&fixture.lease()), None);
 }
+
+/// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both:
+/// `nr_periods` and `nr_throttled` as they are (a group with no `cpu.max` counts 0 of each,
+/// a capped one counts its periods), and none when either is missing. Catches the counts
+/// left out, read from each other's line, or a missing count sent as a zero (which would
+/// read as a run its host never throttled).
+#[test]
+fn a_leases_usage_carries_its_throttle_counts_when_both_are_there() {
+    let fixture = Fixture::new("usage-throttle");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    fs::write(dir.join("memory.peak"), "1024\n").expect("peak");
+    let throttle = |stat: &str| {
+        fs::write(dir.join("cpu.stat"), stat).expect("stat");
+        usage_of(&fixture.lease()).expect("a usage").cpu_throttle
+    };
+    let counted = |periods, throttled_periods| {
+        Some(js_agent_wire::CpuThrottle {
+            periods,
+            throttled_periods,
+        })
+    };
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n"),
+        counted(0, 0)
+    );
+    assert_eq!(
+        throttle("usage_usec 9\nnr_periods 5597\nnr_throttled 5585\nthrottled_usec 5730985614\n"),
+        counted(5597, 5585)
+    );
+    assert_eq!(throttle("usage_usec 9\nnr_periods 5597\n"), None);
+    assert_eq!(throttle("usage_usec 9\nnr_throttled 5585\n"), None);
+}

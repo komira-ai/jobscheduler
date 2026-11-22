@@ -35,6 +35,22 @@ pub enum BookedFrom {
     Unknown,
 }
 
+impl BookedFrom {
+    /// The name it has on the wire and in the agent's journal: `named`, `class`, `fallback`,
+    /// `cold`, `over-cap` or `unknown`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Class => "class",
+            Self::Fallback => "fallback",
+            Self::Cold => "cold",
+            Self::OverCap => "over-cap",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// What a job's booking came from: its size class, and which history gave its CPU and its
 /// memory ([`BookedFrom`]). The agent writes it in its journal at the job's start and its
 /// result, beside the booking; it decides nothing by it.
@@ -108,7 +124,11 @@ mod tests {
             ("\"learned-twice\"", BookedFrom::Unknown),
         ] {
             assert_eq!(read(text), from, "{text}");
+            if from != BookedFrom::Unknown {
+                assert_eq!(format!("\"{}\"", from.as_str()), text, "the logged name");
+            }
         }
+        assert_eq!(BookedFrom::Unknown.as_str(), "unknown");
         assert_eq!(
             serde_json::to_string(&BookedFrom::OverCap).expect("encodes"),
             "\"over-cap\""

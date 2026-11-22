@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
-    RunResult, Taint, limits, refusal,
+    RunResult, StartSizing, Taint, limits, refusal,
 };
 use js_types::JobNetwork;
 
@@ -155,6 +155,10 @@ pub struct Lifecycle {
     wake: Wake,
     /// The timelines of the starts admitted and not yet started or ended (`timeline`).
     starting: BTreeMap<String, StartTimeline>,
+    /// What the booking of each of those starts came from, when its start said
+    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)): kept with its
+    /// timeline and given to its job when it starts or ends (`timeline`).
+    sizing: BTreeMap<String, StartSizing>,
     /// The removals of finished runs' directories, on the lifecycle's pool when it has one
     /// ([`Lifecycle::with_cleanup_threads`]).
     run_dirs: run_dirs::RunDirs,
@@ -941,6 +945,9 @@ impl Lifecycle {
         // prepared, waits as `starting`, holding its booking, and costs the worker nothing
         // until it is ready (see `Runtime::prepare` and `prepare`).
         self.begin_timeline(run_id, (received, taken), given.placed_at_ms);
+        if let Some(sizing) = &given.sizing {
+            self.sizing.insert(run_id.clone(), sizing.clone());
+        }
         let made = (mounts, slot, booked);
         self.prepare_or_begin((spec, keyed), given, made, received, events);
     }
@@ -968,15 +975,19 @@ impl Lifecycle {
                 let mut job = Job::of(spec, Stage::Running(id), deadline, Some(slot), booked);
                 job.started_at(now);
                 job.cgroup = cgroup;
+                job.sizing = self.sizing.remove(run_id);
                 events.push(Event::Started {
                     run_id: run_id.clone(),
                     timeline,
+                    booked: job.booked(),
                 });
                 job
             }
             Err((why, finding, message, blind)) => {
+                let sizing = self.sizing.remove(run_id);
                 self.drop_timeline(run_id);
                 let mut job = Job::of(spec, Stage::Scratch, 0, Some(slot), booked);
+                job.sizing = sizing;
                 // A host the agent cannot see is not known to be checkable: tainted as
                 // unchecked, before the finding that follows from it.
                 if blind {
@@ -986,6 +997,8 @@ impl Lifecycle {
                 job.note(finding, message, events);
                 events.push(Event::ResultReady {
                     run_id: run_id.clone(),
+                    booked: job.booked(),
+                    usage: None,
                 });
                 job
             }

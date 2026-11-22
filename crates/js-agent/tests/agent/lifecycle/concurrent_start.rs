@@ -155,7 +155,12 @@ fn the_timeline_of_a_start_with_a_provider_shows_provided_between_dirs_and_resol
         h.life.step(),
         vec![Event::Started {
             run_id: "j1".to_owned(),
-            timeline
+            timeline,
+            booked: js_agent::lifecycle::JobBooking {
+                cpu_millis: 1000,
+                memory_bytes: 1 << 30,
+                sizing: None,
+            },
         }]
     );
 }

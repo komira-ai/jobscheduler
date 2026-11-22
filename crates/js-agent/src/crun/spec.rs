@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use js_agent_wire::{HostPort, JobUsage, LogTail};
+use js_agent_wire::{CpuThrottle, HostPort, JobUsage, LogTail};
 use js_contain::Isolation;
 use js_contain::cgroup::{LeaseCgroup, OomOutcome};
 use js_contain::cgroup_usage::NumaSample;
@@ -274,13 +274,20 @@ pub(super) fn end_of(
 /// What the lease's `cgroup` counted, read once its processes have exited and before the group
 /// is removed: `memory.peak` and `usage_usec` of `cpu.stat`, read by js-contain. `None` when
 /// either is not readable (cgroup version 1, a kernel without `memory.peak`, a group that is
-/// gone): an unknown is never a zero.
+/// gone): an unknown is never a zero. With them, the throttle counts of `cpu.stat`
+/// (`nr_periods`, `nr_throttled`) when both are there, and `None` for them otherwise.
 pub(super) fn usage_of(cgroup: &LeaseCgroup) -> Option<JobUsage> {
     let counted = NumaSample::default().finish(cgroup.dir());
+    let cpu_throttle = counted.cpu_periods.zip(counted.cpu_throttled_periods).map(
+        |(periods, throttled_periods)| CpuThrottle {
+            periods,
+            throttled_periods,
+        },
+    );
     Some(JobUsage {
         peak_memory_bytes: counted.memory_peak_bytes?,
         cpu_usage_usec: counted.cpu_usage_micros?,
-        cpu_throttle: None,
+        cpu_throttle,
     })
 }
 

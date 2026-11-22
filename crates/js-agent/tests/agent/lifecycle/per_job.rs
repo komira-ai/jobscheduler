@@ -674,3 +674,127 @@ fn a_jobs_usage_reaches_its_result_and_an_unread_one_is_absent() {
     assert_eq!(result("j1").usage, Some(counted));
     assert_eq!(result("j2").usage, None);
 }
+
+/// Each job's booking as its `Started` (or else `ResultReady`) events carry it, by job id.
+fn booked_in(
+    events: &[js_agent::lifecycle::Event],
+) -> Vec<(String, js_agent::lifecycle::JobBooking)> {
+    use js_agent::lifecycle::Event;
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Started { run_id, booked, .. } | Event::ResultReady { run_id, booked, .. } => {
+                Some((run_id.clone(), booked.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Proves a job's booking and where it came from reach the journal at its start and at its
+/// result, with its usage and throttle counts at the result: a start that says its sizing
+/// is logged with it (its class and both sources), one whose class is outside the grammar
+/// of an id is logged without the class and with its sources, and one that says none is
+/// logged with its booking alone. Catches a sizing lost between the start and the job, a
+/// class that would break the line kept, the sizing of one job on another's line, and a
+/// result line without the usage the runtime read.
+#[test]
+fn a_jobs_sizing_and_its_throttle_counts_reach_its_start_and_result_lines() {
+    use js_agent::lifecycle::{Event, JobBooking};
+    use js_agent_wire::{BookedFrom, CpuThrottle, StartSizing};
+    let sized = |job_id: &str, class: &str| JobStartSpec {
+        sizing: Some(StartSizing {
+            class: Some(class.to_owned()),
+            cpu: BookedFrom::Class,
+            memory: BookedFrom::Cold,
+        }),
+        ..start(job_id)
+    };
+    let mut h = Harness::new("job-sizing-lines");
+    let events = h.apply(vec![
+        job_start(sized("j1", "root.crates.js-sched.js-sched")),
+        job_start(sized("j2", "two words")),
+        job_start(start("j3")),
+    ]);
+    let booking = |class: Option<&str>, sized: bool| JobBooking {
+        cpu_millis: 1000,
+        memory_bytes: 1 << 30,
+        sizing: sized.then(|| StartSizing {
+            class: class.map(str::to_owned),
+            cpu: BookedFrom::Class,
+            memory: BookedFrom::Cold,
+        }),
+    };
+    let lines = [
+        (
+            "j1".to_owned(),
+            booking(Some("root.crates.js-sched.js-sched"), true),
+        ),
+        ("j2".to_owned(), booking(None, true)),
+        ("j3".to_owned(), booking(None, false)),
+    ];
+    assert_eq!(booked_in(&events), lines);
+    let counted = JobUsage {
+        peak_memory_bytes: 3 << 30,
+        cpu_usage_usec: 4_500_000,
+        cpu_throttle: Some(CpuThrottle {
+            periods: 0,
+            throttled_periods: 0,
+        }),
+    };
+    h.fake.report_usage("j1", counted);
+    for job in ["j1", "j2", "j3"] {
+        h.fake.exit(job, 0);
+    }
+    let ended = h.life.step();
+    assert_eq!(booked_in(&ended), lines);
+    let usage: Vec<(String, Option<JobUsage>)> = ended
+        .iter()
+        .filter_map(|event| match event {
+            Event::ResultReady { run_id, usage, .. } => Some((run_id.clone(), *usage)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        usage,
+        [
+            ("j1".to_owned(), Some(counted)),
+            ("j2".to_owned(), None),
+            ("j3".to_owned(), None),
+        ]
+    );
+}
+
+/// Proves a start refused before its container is made leaves nothing of its sizing behind:
+/// its `ResultReady` carries it, and a later start of another job under the same id that
+/// says no sizing is logged without the first one's. Catches a sizing kept for a run id after
+/// its start ended, which a later start of that id would be logged with.
+#[test]
+fn a_refused_starts_sizing_is_not_kept_for_a_later_start() {
+    use js_agent_wire::{BookedFrom, StartSizing};
+    let mut h = Harness::new("job-sizing-refused");
+    let sizing = StartSizing {
+        class: Some("a.class".to_owned()),
+        cpu: BookedFrom::Named,
+        memory: BookedFrom::Fallback,
+    };
+    h.fake.fail("create", 1);
+    let refused = h.apply(vec![job_start(JobStartSpec {
+        sizing: Some(sizing.clone()),
+        ..start("j1")
+    })]);
+    let booked = booked_in(&refused);
+    assert_eq!(booked.len(), 1, "{refused:?}");
+    assert_eq!(booked[0].1.sizing, Some(sizing));
+    ack_job(&mut h, "j1", "recorded");
+    while !h.life.held_jobs().is_empty() {
+        h.life.step();
+    }
+    let again = h.apply(vec![job_start(JobStartSpec {
+        allocation_id: "alloc-j1-again".to_owned(),
+        ..start("j1")
+    })]);
+    let booked = booked_in(&again);
+    assert_eq!(booked.len(), 1, "{again:?}");
+    assert_eq!(booked[0].1.sizing, None);
+}

@@ -3,7 +3,7 @@
 //! the runtime gives them. The clock moves only when a test moves it (and while the fake's
 //! create takes its scripted time), so every number here is the test's.
 
-use js_agent::lifecycle::{Clock, Event, StartTimeline};
+use js_agent::lifecycle::{Clock, Event, JobBooking, StartTimeline};
 use js_agent::{Machine, System};
 use js_agent_wire::Command;
 
@@ -14,11 +14,17 @@ use super::{Harness, job, names, reply};
 
 const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
-/// The one `Started` event of `run_id` with `timeline`.
+/// The one `Started` event of `run_id` with `timeline`, booked the one CPU and the GiB every
+/// start here books, with no sizing (none of these starts says one).
 fn started(run_id: &str, timeline: StartTimeline) -> Vec<Event> {
     vec![Event::Started {
         run_id: run_id.to_owned(),
         timeline,
+        booked: JobBooking {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            sizing: None,
+        },
     }]
 }
 

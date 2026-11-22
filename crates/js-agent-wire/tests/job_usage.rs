@@ -110,6 +110,30 @@ fn usage_at_its_widest_adds_89_bytes_to_a_result() {
     assert_eq!(len(&result(Some(widest))) - len(&result(None)), 89);
 }
 
+/// Asserts the bytes `cpu_throttle` adds to a usage at its widest, both counts at 20 digits:
+/// 89 more, 178 for the whole usage, the figure of `docs/design/agent-wire.md`; and that a
+/// usage with no throttle counts writes none of it. Catches a field whose size the heartbeat
+/// budget no longer allows for, and an absent count written as a zero.
+#[test]
+fn throttle_counts_at_their_widest_add_89_bytes_to_a_usage() {
+    let widest = JobUsage {
+        peak_memory_bytes: u64::MAX,
+        cpu_usage_usec: u64::MAX,
+        cpu_throttle: Some(js_agent_wire::CpuThrottle {
+            periods: u64::MAX,
+            throttled_periods: u64::MAX,
+        }),
+    };
+    let len = |result: &JobResult| serde_json::to_string(result).unwrap().len();
+    assert_eq!(len(&result(Some(widest))) - len(&result(None)), 178);
+    let none = JobUsage {
+        cpu_throttle: None,
+        ..widest
+    };
+    let text = serde_json::to_string(&none).unwrap();
+    assert!(!text.contains("cpu_throttle"), "{text}");
+}
+
 /// Asserts a server from before `usage` reads a result that carries it as it reads one without
 /// (same ids, outcome and exit code), inside a heartbeat that this release validates, and that
 /// this release reads a result from before the field with no usage. Catches a field an older

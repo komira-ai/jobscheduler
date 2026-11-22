@@ -78,8 +78,10 @@ impl Lifecycle {
         timeline
     }
 
-    /// Drops the timeline of the start `run_id`, which ended without a container.
+    /// Drops the timeline of the start `run_id`, which ended without a container, and what
+    /// its booking came from.
     pub(super) fn drop_timeline(&mut self, run_id: &str) {
         self.starting.remove(run_id);
+        self.sizing.remove(run_id);
     }
 }
