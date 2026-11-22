@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use js_agent_wire::{
     HeldRun, HeldState, HostPort, Isolation, JobSpec, JobUsage, LogReport, NativeSpec, Outcome,
-    RunResult, Taint, refusal,
+    RunResult, StartSizing, Taint, refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ use crate::lifecycle::runtime::{
 };
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{
-    Capacity, CheckFinding, CleanupTimeline, Event, Finding, code, detail, label,
+    Capacity, CheckFinding, CleanupTimeline, Event, Finding, JobBooking, code, detail, label,
 };
 use crate::logs::Sink;
 
@@ -74,6 +74,10 @@ pub(super) struct Given {
     /// holds to the runtime's [`Runtime::check_xcode`](crate::lifecycle::Runtime::check_xcode)
     /// ([`RunSpec::xcode`]).
     pub(super) xcode: Option<String>,
+    /// What the start's booking came from
+    /// ([`JobStartSpec::sizing`](js_agent_wire::JobStartSpec::sizing)), checked
+    /// ([`StartSizing::checked`]), for the journal alone; `None` for a run start.
+    pub(super) sizing: Option<StartSizing>,
 }
 
 /// What a start that waits is waiting for besides its images.
@@ -377,6 +381,9 @@ pub(super) struct Job {
     /// a result read back from the state root, which never reports a zero for what it does
     /// not know.
     pub(super) usage: Option<JobUsage>,
+    /// What the job's booking came from, as its start said ([`Given::sizing`]): `None` for a
+    /// run start and for a job taken over from an earlier agent.
+    pub(super) sizing: Option<StartSizing>,
     pub(super) findings: Vec<Finding>,
     /// When the container started, on the agent's monotonic clock, in microseconds (the
     /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
@@ -471,9 +478,21 @@ impl Job {
             self.result = Some(self.report(Outcome::Killed, None, detail));
             events.push(Event::ResultReady {
                 run_id: self.run_id.clone(),
+                booked: self.booked(),
+                usage: None,
             });
         }
         self.stage = Stage::Scratch;
+    }
+
+    /// What the job booked and where the booking came from, for its journal lines
+    /// ([`Event::Started`], [`Event::ResultReady`]).
+    pub(super) fn booked(&self) -> JobBooking {
+        JobBooking {
+            cpu_millis: self.booking.cpu_millis,
+            memory_bytes: self.booking.memory_bytes,
+            sizing: self.sizing.clone(),
+        }
     }
 
     /// Where the job is, as a heartbeat lists it: starting while it waits to start,
@@ -628,6 +647,7 @@ impl Job {
             result: None,
             input_failure: None,
             usage: None,
+            sizing: None,
             logs: None,
             findings: Vec::new(),
             started_usec: None,
@@ -670,6 +690,7 @@ impl Job {
             findings: Vec::new(),
             started_usec: None,
             usage: None,
+            sizing: None,
             cgroup: None,
             cgroup_missing_told: false,
             blind_told: false,
@@ -706,6 +727,7 @@ impl Job {
             result: None,
             input_failure: None,
             usage: None,
+            sizing: None,
             logs: None,
             findings: Vec::new(),
             started_usec: now

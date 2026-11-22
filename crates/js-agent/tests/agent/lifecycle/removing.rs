@@ -60,7 +60,10 @@ fn a_start_received_while_a_removal_runs_is_taken_and_admitted_at_once() {
 
     let start = reply(vec![Command::Start(Box::new(job("r2")))]);
     let events = h.life.apply_at(&start, received);
-    let Some(Event::Started { run_id, timeline }) = events.first() else {
+    let Some(Event::Started {
+        run_id, timeline, ..
+    }) = events.first()
+    else {
         panic!("r2 did not start: {events:?}");
     };
     assert_eq!(run_id, "r2");

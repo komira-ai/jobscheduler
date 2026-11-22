@@ -13,7 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use js_agent_wire::{DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY};
+use js_agent_wire::{
+    DISPATCH_CAPABILITY, HELD_BEAT_CAPABILITY, HOST_JOBS_CAPABILITY, LOAD_ADMISSION_CAPABILITY,
+};
 use js_caps::{FLAG_SET, LAYERED_ROOTFS, XCODE, is_mount_provider_key};
 use js_elastic::CapacityProvider;
 use js_jobs::{Isolation, ScaleMark};
@@ -157,6 +159,16 @@ pub(crate) fn reports_held_beat(capabilities: &BTreeMap<String, String>) -> bool
     capabilities.get(HELD_BEAT_CAPABILITY).map(String::as_str) == Some(FLAG_SET)
 }
 
+/// Whether `capabilities`, those a host's hello reported, say its agent admits a job start by
+/// the job service's load placement for CPU and memory ([`LOAD_ADMISSION_CAPABILITY`] is
+/// exactly [`FLAG_SET`]), so the host is packed by measured load, not by summed bookings.
+pub(crate) fn reports_load_admission(capabilities: &BTreeMap<String, String>) -> bool {
+    capabilities
+        .get(LOAD_ADMISSION_CAPABILITY)
+        .map(String::as_str)
+        == Some(FLAG_SET)
+}
+
 /// Whether `capabilities`, those a host's hello reported, say its agent polls for its starts
 /// and stops ([`DISPATCH_CAPABILITY`] is exactly [`FLAG_SET`]), so a server that serves the
 /// poll leaves out of its heartbeat replies what the dispatch queue carries.
@@ -278,6 +290,24 @@ mod tests {
         assert_eq!(state_of(false, true, true), HostState::Cordoned);
         assert_eq!(state_of(false, false, true), HostState::Busy);
         assert_eq!(state_of(false, false, false), HostState::Serving);
+    }
+
+    /// Asserts that a hello reports load admission only with the capability `load-admission`
+    /// set to exactly `true`. Catches a host that reports nothing, or something else, packed
+    /// by measured load though its agent refuses by the summed bookings.
+    #[test]
+    fn load_admission_is_reported_only_by_the_value_true() {
+        let said = |value: Option<&str>| {
+            let caps: BTreeMap<String, String> = value
+                .map(|value| (LOAD_ADMISSION_CAPABILITY.to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            reports_load_admission(&caps)
+        };
+        assert!(said(Some("true")));
+        for other in [None, Some("false"), Some("True"), Some("true ")] {
+            assert!(!said(other), "{other:?}");
+        }
     }
 
     /// Asserts that a hello reports host jobs only with the capability `host-jobs` set to

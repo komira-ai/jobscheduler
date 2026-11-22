@@ -17,7 +17,7 @@
 //! | `process.args`          | the init at its bind in `/dev`, then the argv   | the init at its host path with `--end-descendants`, then the argv |
 //! | `cgroupsPath`           | `<lease cgroup>/ctr`                            | the same                                              |
 //! | pids limit, OOM group   | `resources.pids`, `memory.oom.group=1`          | the same                                              |
-//! | `cpu.max`, `memory.max` | the lease's, when the limits name a booking     | the same                                              |
+//! | `memory.max`            | the lease's, when the limits name a booking     | the same                                              |
 //! | rlimits, OOM score      | `nofile`, `nproc`, no core dump; the default     | the same                                              |
 //!
 //! The memory and CPU limits that bound the job are the lease cgroup's, as for a contained
