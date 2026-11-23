@@ -194,8 +194,9 @@ pub struct Settings {
 
 /// What the crun runtime is opened from, besides the settings every runtime has: the
 /// `crun` program, the job user's ids and the registries images may be pulled from. The
-/// agent's delegated actions cgroup is recorded when the runtime opens (the cgroup is set
-/// up then), and shared by the clones of the settings.
+/// directory of the agent's delegated actions cgroup (below the cgroup mount, as
+/// `--actions-cgroup` names one) is recorded when the runtime opens (the cgroup is set up
+/// then), and shared by the clones of the settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrunPlan {
     /// The `crun` program (`--crun-bin`).
@@ -252,7 +253,8 @@ pub struct CrunPlan {
 }
 
 impl CrunPlan {
-    /// Records the actions cgroup the runtime made; the first one recorded stays.
+    /// Records the directory of the actions cgroup the runtime made, the path the usage is
+    /// read from; the first one recorded stays.
     pub fn delegated(&self, actions: &str) {
         let _ = self.actions.set(actions.to_owned());
     }

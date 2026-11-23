@@ -17,7 +17,8 @@ pub struct LoadIn {
     pub seq: u64,
     /// The agent's monotonic clock in microseconds when the reading was taken.
     pub mono_usec: u64,
-    /// Cumulative CPU time of the actions cgroup, in microseconds.
+    /// Cumulative CPU busy time of the whole host, in microseconds (the actions cgroup's
+    /// CPU time from an agent of an earlier release, which sends no host counter).
     pub cpu_usage_usec: u64,
     /// The working set of the actions cgroup, in bytes.
     pub working_set_bytes: u64,
