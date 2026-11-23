@@ -139,7 +139,7 @@ use std::io;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, CpuSeries, HostPort, InputRef, JobUsage, LogReport, LogTail,
@@ -160,6 +160,7 @@ use crate::mac_supervisor::Launcher;
 use crate::mac_sweep::{MacTable, ProcessTable};
 use crate::mac_usage::macos::MacProcesses;
 use crate::mac_usage::{ProcessUsage, Series};
+use crate::usage::{MonotonicClock, UsageClock as _};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
@@ -277,8 +278,8 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// The system's monotonic clock, in microseconds since the runtime was made.
 fn system_mono_clock() -> Clock {
-    let origin = Instant::now();
-    Arc::new(move || u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX))
+    let clock = MonotonicClock::new();
+    Arc::new(move || clock.now_usec())
 }
 
 /// The system's wall clock.
