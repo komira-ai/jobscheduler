@@ -9,9 +9,10 @@
 //!    store, one transaction per step, each step carrying the allocation change that goes with
 //!    it: `starting` moves placed to starting; `running` moves to running and stamps the start
 //!    (the wall clock runs from there); a result moves the job to its end and its allocation
-//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`) or for
-//!    capacity (`no-capacity`) sends the job back to the queue and frees its allocation instead
-//!    ([`crate::job_held`]), and is acknowledged too. A job the agent ran and ended between two heartbeats is walked
+//!    to releasing, and is acknowledged; a start the host refused as held (`host-held`), for
+//!    capacity (`no-capacity`) or while it fetches the job's bundle (`bundle-pending`) sends the
+//!    job back to the queue and frees its allocation instead ([`crate::job_held`]), and is
+//!    acknowledged too. A job the agent ran and ended between two heartbeats is walked
 //!    through the steps it skipped first. The same listing twice commits nothing, and a
 //!    report that would move a job backwards or out of an end is ignored.
 //! 2. **Retired ids are answered** ([`job_alloc::answer_retired`]): a job the agent never held
@@ -338,7 +339,8 @@ fn report(
 
 /// Commits the result the host of `context` lists for `job`, which it holds, and returns the
 /// verdict on it: the one place a listed result is recorded. A start the host refused as held
-/// (`host-held`) or for capacity (`no-capacity`) sends the job back to the queue instead,
+/// (`host-held`), for capacity (`no-capacity`) or while it fetches the job's bundle
+/// (`bundle-pending`) sends the job back to the queue instead,
 /// freeing its allocation, and is answered [`Ack::Accepted`] ([`job_held::held_or_end`]).
 /// Otherwise the job ends as [`end_of`] reads the result (or, for the refusal of a job such
 /// refusals sent back too often, with a detail naming the hosts), in one transaction with its allocation's move to releasing, after the steps

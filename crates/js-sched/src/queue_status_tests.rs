@@ -359,3 +359,35 @@ fn a_capacity_refusal_waits_again_with_its_host() {
         );
     }
 }
+
+/// A start a host refused while it fetches the job's bundle sends the job back to wait as it
+/// waited before (for a whole host when it books one, else for room), with a `REQUEUED` event
+/// naming the host and the fetch in the detail; it is no attempt of its own, and it is the same
+/// note whatever code the job showed. Catches a bundle-pending refusal noted as a held host, as
+/// no room, or as an attempt, and a whole-host job told to wait for room.
+#[test]
+fn a_bundle_pending_refusal_waits_again_with_its_host() {
+    let detail = "host h-6 is still fetching the job's bundle and refused the start; the job is queued again";
+    for (whole_host, code) in [
+        (false, QueueCode::WaitingForCapacity),
+        (true, QueueCode::WaitingForWholeHost),
+    ] {
+        let pending = Outcome::BundlePendingRequeued {
+            host: host("h-6"),
+            whole_host,
+        };
+        for current in [QueueCode::Placed, code] {
+            assert_eq!(
+                note(&pending, current),
+                Some(QueueNote {
+                    code,
+                    detail: detail.to_owned(),
+                    event: Some(JobEventKind::Requeued),
+                    host: Some(host("h-6")),
+                    attempt: false,
+                }),
+                "whole host: {whole_host}, showing {current:?}"
+            );
+        }
+    }
+}
