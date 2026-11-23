@@ -56,7 +56,10 @@ impl Lifecycle {
     /// taken over and the leftovers swept: one check of the host
     /// ([`CheckHook::run_restored`](crate::lifecycle::CheckHook::run_restored), the rules that
     /// need no baseline), with every container taken over or that could not be removed live.
-    /// What it notes is logged as findings of no run. A check that passes removes every record
+    /// What it notes is logged as findings of no run. Before the check, a scratch or run-files
+    /// directory of an owed run that no job taken over holds (one the sweep could not remove)
+    /// taints the host (`check-owed`, the check `scratch-failed`, naming that run) and no check
+    /// runs. A check that passes removes every record
     /// and logs `owed-checked`. The host is tainted (`check-owed`, naming the first run), with
     /// the records kept, when the check finds something (the check is the finding's code, the
     /// detail what it found) or could not run, or when a record cannot be removed
@@ -65,6 +68,18 @@ impl Lifecycle {
         let Some(first) = owed.first() else {
             return;
         };
+        // The sweep at the start says nothing of an entry it could not remove, and the check
+        // judges only processes: a directory of a run that no container holds any more is
+        // what the job left, as a removal that fails in its cleanup is (`scratch-failed`).
+        if let Some((run, dir)) = self.left_behind(owed) {
+            let detail = format!(
+                "the directory {} of run {run} is still on the host after the sweep",
+                dir.display()
+            );
+            let taint = owed_taint(Some(run), Some(code::SCRATCH_FAILED));
+            self.seal(taint, Some(detail), events);
+            return;
+        }
         // Every job taken over is running: its container is on the host.
         let live: Vec<RunHandle> = self
             .jobs
@@ -121,5 +136,23 @@ impl Lifecycle {
         };
         let taint = owed_taint(Some(first.clone()), Some(&check));
         self.seal(taint, Some(detail), events);
+    }
+
+    /// The first of the runs `owed` that no job taken over holds whose scratch or run-files
+    /// directory is still there, with that directory (looked at without following a link).
+    fn left_behind(&self, owed: &[String]) -> Option<(String, std::path::PathBuf)> {
+        let held = |run: &String| self.jobs.iter().any(|job| job.run_id == *run);
+        let files = self.config.files.as_ref();
+        owed.iter().filter(|run| !held(run)).find_map(|run| {
+            let dirs = [
+                Some(self.config.scratch.of(run)),
+                files.map(|root| root.of(run)),
+            ];
+            let left = dirs
+                .into_iter()
+                .flatten()
+                .find(|dir| dir.symlink_metadata().is_ok());
+            left.map(|dir| (run.clone(), dir))
+        })
     }
 }

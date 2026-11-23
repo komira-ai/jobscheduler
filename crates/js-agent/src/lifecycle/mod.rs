@@ -187,7 +187,8 @@
 //!   containers over, by the rules that need no baseline ([`CheckHook::run_restored`]):
 //!   what the job left behind may be part of the baseline the new process took. A clean
 //!   host removes the records and is not tainted. The host is tainted (`check-owed`)
-//!   instead when the check finds a process or cannot run, when a record is not complete
+//!   instead when the check finds a process or cannot run, when a directory of the run is
+//!   still there after the start's sweep, when a record is not complete
 //!   (it does not hold its run id), when the records cannot be listed or removed, or when
 //!   the hook cannot judge without a baseline ([`CheckHook::checks_owed_at_start`]). A
 //!   record that cannot be written holds the cleanup where it is, the container included;

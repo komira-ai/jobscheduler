@@ -272,6 +272,9 @@ check is host-wide, and the run id only names the finding. So the next process r
 - Once the containers are taken over and the leftovers swept, it runs one check for all the records:
   `CheckHook::run_restored`, the rules that need no baseline, with every container taken over or that could not be removed
   counted as live. Its notes are logged as findings of no run.
+- Before the check, a scratch or run-files directory of an owed run that no adopted job holds taints the host `check-owed`
+  with the check `scratch-failed`, naming that run, and no check runs. Such a directory is one the start's sweep could
+  not remove, and the check judges only processes.
 - A pass removes every record and logs `owed-checked`. The host is not tainted.
 - A finding taints the host `check-owed`, naming the first run, with the finding's code as the check and what it found as
   the detail, and keeps every record. The finding is a process of the job users' range outside a live container, or a

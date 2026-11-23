@@ -80,6 +80,8 @@
 //!   check is the code of what it could not read);
 //! - a record is not complete (the check is `owed-record-incomplete`), or the records cannot
 //!   be listed (`owed-records-unreadable`);
+//! - a scratch or run-files directory of an owed run that no adopted job holds is still there
+//!   after the start's sweep (`scratch-failed`): the check judges only processes;
 //! - a record cannot be removed after a clean check (`owed-record-failed`);
 //! - the hook cannot judge without a baseline
 //!   ([`CheckHook::checks_owed_at_start`](super::CheckHook::checks_owed_at_start), false

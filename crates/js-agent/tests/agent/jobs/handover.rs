@@ -362,13 +362,14 @@ fn a_check_under_way_is_waited_for_and_the_next_process_starts_untainted() {
     assert_eq!(snapshot.results[0].run_id, "r1");
 }
 
-/// Asserts that the next process runs the post-job check a hand-over left owed (the record of
-/// a job whose cleanup was under way when the hand-over's bound passed, see the test below)
-/// with the agent's own Linux checks, by the rules that need no baseline: on a quiet host it
-/// removes the record, starts untainted and keeps the job it adopted running. Catches a
-/// start that taints the host `check-owed` for a check it can run.
+/// Asserts that the next process after a hand-over runs a post-job check the earlier process
+/// left owed with the agent's own Linux checks, by the rules that need no baseline: on a quiet
+/// host it removes the record, starts untainted and keeps the job it adopted running. The
+/// record is written as `owe` writes it before a cleanup's first step, standing for a job
+/// whose cleanup was under way when the earlier process ended (a hand-over whose bound passed,
+/// a second stop). Catches a start that taints the host `check-owed` for a check it can run.
 #[test]
-fn the_next_process_runs_the_check_a_handover_left_owed_and_starts_untainted() {
+fn the_next_process_runs_a_check_left_owed_and_starts_untainted() {
     let dir = Scratch::new("jobs-handover-owed-left");
     let machine = FakeMachine::new();
     let worker = running(&dir, &machine, &["r1"]);

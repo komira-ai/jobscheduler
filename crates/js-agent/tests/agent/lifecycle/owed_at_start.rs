@@ -2,8 +2,13 @@
 //! window (an update's hand-over or drain that ends with a cleanup under way, a second stop, a
 //! crash) leaves the `owed-*` record of the job, and the next process runs the check itself,
 //! by the rules that need no baseline, instead of tainting the host. It still taints when the
-//! check cannot run or finds something, when a record is not complete, and when its hook cannot
-//! judge without a baseline (`owed.rs`).
+//! check cannot run or finds something, when a directory of the run is left, when a record is
+//! not complete or cannot be removed. A hook that cannot judge without a baseline taints as
+//! before: that case is `owed.rs`'s `a_check_that_was_owed_when_the_agent_stopped_taints_the_next_start`.
+//!
+//! An update is modelled here by what it does to the lifecycle: the process ends (the lifecycle
+//! is dropped) while a cleanup is under way, and the next process adopts. The hand-over and
+//! drain that end that way are `jobs::handover`'s.
 
 use std::cell::RefCell;
 use std::fs;
@@ -204,6 +209,7 @@ fn the_owed_check_sees_every_container_on_the_host_live_and_logs_its_notes() {
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
+        (label::SLOT, "3"),
     ];
     let stuck = h.fake.leak(&odd, 0);
     h.fake.fail("remove", 1);
@@ -226,15 +232,17 @@ fn the_owed_check_sees_every_container_on_the_host_live_and_logs_its_notes() {
     );
     assert_eq!(
         *said.borrow(),
-        [format!("restored r1 live [c1,{stuck}] slots [0] slot None")]
+        [format!(
+            "restored r1 live [c1,{stuck}] slots [0, 3] slot None"
+        )]
     );
     assert!(records(&h).is_empty());
 }
 
 /// Asserts that an owed check that cannot run, or that finds a process, still taints the host
 /// `check-owed`, naming the first run and the check's code, with what it found as the detail
-/// ("the check could not run" before it for a check that could not), and keeps every record,
-/// so that a restart taints the host again; a new job is refused. Catches a start that clears
+/// ("the check could not run" before it for a check that could not), and keeps every record;
+/// a new job is refused, and a restart reads the taint again from the marker. Catches a start that clears
 /// records it could not check, or a residue it found, and a taint that says nothing of why.
 #[test]
 fn an_owed_check_that_cannot_run_or_finds_a_process_still_taints() {
@@ -273,8 +281,7 @@ fn an_owed_check_that_cannot_run_or_finds_a_process_still_taints() {
         assert_eq!(records(&h), ["owed-r1", "owed-r2"], "{name}: kept");
         assert_eq!(names(&h.start(job("r3"))), ["refused r3 host-tainted"]);
 
-        let again = Judging::new(&said);
-        h.restart_with(again.boxed()).unwrap();
+        h.restart_with(Judging::new(&said).boxed()).unwrap();
         assert!(h.life.is_tainted(), "{name}: the marker holds it");
     }
 }
@@ -333,6 +340,40 @@ fn an_owed_record_that_cannot_be_removed_after_a_clean_check_taints() {
         "{detail}"
     );
     assert_eq!(records(&h), ["owed-r1"]);
+}
+
+/// Asserts that a directory of an owed run still on the host after the start's sweep keeps
+/// the check from passing: here the run's container could not be removed, so the sweep keeps
+/// its scratch and run-files directories. No check runs, no record is removed and no
+/// `owed-checked` is logged; the host is tainted (`cleanup-failed` first, for the container,
+/// and pinned by the owed run's `check-owed`, so a re-check never clears it). Catches a start
+/// that removes the records of a run whose tree is still on the host, which a check of
+/// processes cannot see.
+#[test]
+fn a_directory_of_an_owed_run_left_on_the_host_keeps_the_records_and_runs_no_check() {
+    let mut h = Harness::new("owed-start-left");
+    let odd = [
+        (label::RUN, "r9"),
+        (label::LEASE, "lease-old"),
+        (label::CPU_MILLIS, "lots"),
+        (label::ISOLATION, "contained"),
+    ];
+    h.fake.leak(&odd, 0);
+    h.fake.fail("remove", 1);
+    state(&h).owe("r9").unwrap();
+    fs::create_dir(h.dir.path("scratch").join("r9")).unwrap();
+    let said = Said::default();
+    let events = names(&h.restart_with(Judging::new(&said).boxed()).unwrap());
+    assert_eq!(
+        events,
+        [
+            "tainted - cleanup-failed",
+            "finding - unadoptable-container-kept"
+        ]
+    );
+    assert!(said.borrow().is_empty(), "no check ran");
+    assert_eq!(records(&h), ["owed-r9"]);
+    assert!(h.dir.path("state").join("taint.pinned").exists(), "pinned");
 }
 
 /// Asserts the state root's test of a complete record on its own: a record [`StateRoot::owe`]
