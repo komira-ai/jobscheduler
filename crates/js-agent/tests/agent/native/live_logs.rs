@@ -5,7 +5,8 @@
 //! ended and finishes its upload from its progress record, and a run without a sink uploads
 //! nothing. The test writes the job's output into the files the runtime gave the job, as the
 //! job would; the job itself is a shell that waits for a gate file the test makes, so that
-//! it ends when the test says (and with exit code 0).
+//! it ends when the test says (and with exit code 0), and the test goes on from a start only
+//! once that shell has said it is up.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -24,7 +25,7 @@ use js_logstore::{Endpoint, JobPrefix, ManualClock, Stream};
 use serde_json::{Value, json};
 
 use super::agent::{hello_on, native_flags};
-use super::{Rig, TERM, config, native, open_pool};
+use super::{POLLS, Rig, TERM, config, native, open_pool};
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Scratch, Script, ScriptConnector, code, flags, mac_host, reply,
     run_on, welcome,
@@ -167,15 +168,38 @@ fn gate_of(rig: &Rig, run_id: &str) -> PathBuf {
     rig.dir.path(&format!("gate-{run_id}"))
 }
 
-/// A job that prints nothing and ends with exit code 0 once the file `gate` is there.
+/// The file the job that waits at `gate` makes once it is up.
+fn up_of(gate: &Path) -> PathBuf {
+    gate.with_extension("up")
+}
+
+/// A job that prints nothing, makes the file [`up_of`] `gate` once its shell has started and
+/// gone to `/`, and ends with exit code 0 once the file `gate` is there.
 fn waiting(gate: &Path) -> js_agent_wire::NativeSpec {
     // From `/`: the run directory goes with the account when a later runtime's pool retires
     // it, and a shell whose working directory is gone writes errors into the log under test.
     let script = format!(
-        "cd / && until [ -e '{}' ]; do /bin/sleep 0.01; done",
+        "cd / && : > '{}' && until [ -e '{}' ]; do /bin/sleep 0.01; done",
+        up_of(gate).display(),
         gate.display()
     );
     native("/bin/sh", &["-c", &script])
+}
+
+/// Waits (by looks at the file, not by time) until the job that waits at `gate` is up: its
+/// shell has read its working directory, the run directory, and left it for `/`. A shell reads
+/// its working directory as it starts; one that starts only after the run directory is gone
+/// (a later runtime's pool retired the account) writes `shell-init` errors to its standard
+/// error, at its own offset, over what the test wrote there.
+fn wait_up(gate: &Path) {
+    let up = up_of(gate);
+    for _ in 0..POLLS {
+        if up.exists() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("the job never made {}", up.display());
 }
 
 /// Lets the job that waits at `gate` end.
@@ -183,14 +207,15 @@ fn open(gate: &Path) {
     std::fs::write(gate, b"").unwrap();
 }
 
-/// A rig whose runtime uploads with `live`, and a run of it whose start carries a sink, started:
-/// the rig, the run, its scratch directory (where its log files are) and its gate.
+/// A rig whose runtime uploads with `live`, and a run of it whose start carries a sink, started
+/// and up: the rig, the run, its scratch directory (where its log files are) and its gate.
 fn started(name: &str, live: &Live, run_id: &str) -> (Rig, RunHandle, PathBuf, PathBuf) {
     let mut rig = Rig::new(name).living(live.logs.clone());
     let gate = gate_of(&rig, run_id);
     let mut spec = rig.spec(run_id, waiting(&gate));
     spec.log_sink = Some(sink(run_id));
     let id = rig.rt.create_and_start(&spec).unwrap();
+    wait_up(&gate);
     (rig, id, spec.scratch, gate)
 }
 
@@ -345,6 +370,8 @@ fn an_earlier_run_listed_ended_goes_on_from_the_record_without_a_gap_or_a_repeat
     spec.log_sink = Some(sink("j3"));
     spec.labels = BTreeMap::from([(label::RUN.to_owned(), "j3".to_owned())]);
     rig.rt.create_and_start(&spec).unwrap();
+    // Up before the next runtime's pool retires the account and its run directory with it.
+    wait_up(&gate);
     let dir = spec.scratch;
     let first = live.wake(0);
     assert_eq!(first.settled(), Settled::Asleep);
