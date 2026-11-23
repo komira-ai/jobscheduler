@@ -17,7 +17,7 @@ use js_agent::lifecycle::{
     Whereabouts,
 };
 use js_agent_wire::{
-    HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
 };
 
 use super::fake::{FakeRuntime, ManualClock};
@@ -233,6 +233,9 @@ impl Runtime for Deferring {
     }
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         self.inner.usage(id)
+    }
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        self.inner.cpu_series(id)
     }
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
         self.inner.check_native(native)

@@ -12,7 +12,7 @@ use js_agent::lifecycle::{
     Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
-    HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
 };
 
 #[path = "fake_checks.rs"]
@@ -73,6 +73,8 @@ struct State {
     /// a removed container, by its id (see [`FakeRuntime::commit_outputs`]).
     committed: BTreeMap<String, OutputsReport>,
     answers: BTreeMap<String, OutputsReport>,
+    /// What `cpu_series` answers for a run, by run id.
+    series: BTreeMap<String, CpuSeries>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// The control group the first process of the container of a run runs in, outside the
@@ -310,6 +312,12 @@ impl FakeRuntime {
             .borrow_mut()
             .usages
             .insert(run_id.to_owned(), usage);
+    }
+
+    /// The runtime recorded `series` for `run_id`: `cpu_series` answers it.
+    pub fn report_cpu_series(&self, run_id: &str, series: CpuSeries) {
+        let mut state = self.state.borrow_mut();
+        state.series.insert(run_id.to_owned(), series);
     }
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
@@ -851,6 +859,14 @@ impl Runtime for FakeRuntime {
         let state = self.state.borrow();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
         run.and_then(|run| state.usages.get(&run).copied())
+    }
+
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        let state = self.state.borrow();
+        state
+            .series
+            .get(&state.containers.get(&id.0)?.run_id)
+            .cloned()
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
