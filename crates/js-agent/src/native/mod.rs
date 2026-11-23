@@ -128,7 +128,7 @@ mod settings;
 mod start;
 mod xcode;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io;
@@ -151,7 +151,7 @@ use crate::lifecycle::{
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
 use crate::mac_supervisor::Launcher;
-use crate::mac_sweep::{MacTable, ProcessTable, Tally};
+use crate::mac_sweep::{MacTable, ProcessTable};
 
 pub use accounts::Accounts;
 pub use files::HandOver;
@@ -237,16 +237,10 @@ pub struct NativeRuntime {
     table: Arc<dyn ProcessTable + Send + Sync>,
     /// The account the last removal retired, and what its retirement showed.
     last_retired: Option<(String, Retired)>,
-    /// The last sweeps of runs' processes, each with its run's lease, oldest first, at most
-    /// [`SWEEPS_KEPT`].
-    sweeps: VecDeque<(String, Tally)>,
     /// What finds the lent account's own per-user temporary and cache folders, which its
     /// run may write; none grants nothing there.
     own_folders: Option<OwnFolders>,
 }
-
-/// How many of the last sweeps the runtime keeps for [`NativeRuntime::sweeps`].
-const SWEEPS_KEPT: usize = 16;
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
 /// `/private/var/folders`), given the account and its home.
@@ -336,7 +330,6 @@ impl NativeRuntime {
             new_session: true,
             table: Arc::new(MacTable),
             last_retired: None,
-            sweeps: VecDeque::new(),
             own_folders: None,
         })
     }
@@ -347,14 +340,6 @@ impl NativeRuntime {
     #[must_use]
     pub fn last_retired(&self) -> Option<&(String, Retired)> {
         self.last_retired.as_ref()
-    }
-
-    /// The last sweeps of runs' processes (at most 16), each with its run's lease, oldest
-    /// first: what each rule found, in how many rounds, and whether it was clean. What the
-    /// development verb prints.
-    #[doc(hidden)]
-    pub fn sweeps(&self) -> impl Iterator<Item = &(String, Tally)> {
-        self.sweeps.iter()
     }
 
     /// Whether the runtime has an account pool: the agent holds Full Disk Access.

@@ -337,7 +337,6 @@ fn killed() -> Status {
 /// passed on the injected clock; the poll at the grace's end sweeps the job (the fake
 /// supervisor, the agent's child) and a detached process of the account, and answers the
 /// killed supervisor's status, 137, so the lifecycle reads the run's log tail as for any exit.
-/// The runtime keeps the sweep's tally, by rule.
 ///
 /// Catches: a sweep at the stop (no grace), no sweep at all, a sweep by a thread that sleeps
 /// out the grace, and an escalated run answered `Gone`.
@@ -362,17 +361,6 @@ fn stop_then_the_grace_then_the_sweep() {
         BTreeSet::from([pid, DETACHED])
     );
     assert_eq!(kills.len(), 2, "each process killed once: {kills:?}");
-    // The runtime keeps the sweep's tally: the fake supervisor gives no audit session, so
-    // both were found by the uid alone, in two rounds (the second found none).
-    let swept: Vec<_> = rt.sweeps().collect();
-    assert_eq!(swept.len(), 1, "{swept:?}");
-    let (lease, tally) = swept[0];
-    assert_eq!(lease, &id.0);
-    assert!(tally.clean && tally.error.is_none(), "{tally:?}");
-    assert_eq!(tally.rounds, 2);
-    assert!(tally.by_session.is_empty());
-    let found: BTreeSet<i32> = tally.by_user_only.iter().map(|swept| swept.pid).collect();
-    assert_eq!(found, BTreeSet::from([pid, DETACHED]));
     assert_eq!(rt.poll(&id).unwrap(), killed(), "told the same again");
     rt.remove(&id).unwrap();
 }
