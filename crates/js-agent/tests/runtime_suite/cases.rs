@@ -58,20 +58,6 @@ pub fn an_exit_code_is_reported(s: &mut dyn Subject) {
     }
 }
 
-/// Proves that a program the kernel kills at the run's own memory booking exits 137 with
-/// the memory flag set, the answer the server retries with more memory on. Catches a
-/// runtime that reports the kill as an ordinary exit.
-pub fn a_kill_at_the_runs_own_memory_limit_is_flagged(s: &mut dyn Subject) {
-    let id = begin(s, "r1", Program::Hog { own_limit: true });
-    s.settled(&id);
-    let want = Status::Exited(Exit {
-        code: 137,
-        oom_killed: true,
-    });
-    assert_eq!(poll(s, &id), want);
-    clean_up(s);
-}
-
 /// Proves the flag is distinct: a program killed by a limit above the lease (the node ran
 /// short of memory) exits 137 with the flag clear, because the booking was not the cause
 /// and the server retries with the same booking. Catches a runtime that flags every kill.

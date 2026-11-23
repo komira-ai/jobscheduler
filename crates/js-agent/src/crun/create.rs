@@ -398,7 +398,6 @@ impl Maker {
             labels,
             lease,
             cgroup,
-            cap: js_contain::hard_memory_max(spec.memory_bytes),
             backstop: None,
             state: State::Created,
             net,

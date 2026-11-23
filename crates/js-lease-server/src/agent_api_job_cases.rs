@@ -615,6 +615,7 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
         }),
         cpu_pressure_some_usec: Some(0),
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let mut memory_of = Vec::new();
     for (class, usage) in [("measured", Some(counted)), ("bare", None)] {
@@ -638,7 +639,10 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
             rig.beat(&agent).await.unwrap();
             rig.advance(std::time::Duration::from_secs(10));
             match usage {
-                Some(usage) => agent.end_with_usage(&id, usage),
+                Some(usage) => {
+                    agent.end(&id, Outcome::Succeeded, Some(0));
+                    agent.report(&id, usage);
+                }
                 None => agent.end(&id, Outcome::Succeeded, Some(0)),
             }
             agent.take(&rig.beat(&agent).await.unwrap());
@@ -661,5 +665,70 @@ async fn results_that_report_usage_size_the_next_job_of_the_class_from_history()
     assert!(
         learned < cold,
         "five runs with usage size the sixth from history below the cold size: {learned} < {cold}"
+    );
+}
+
+/// One job service and two agents during a roll of the agents: one of the release now deployed,
+/// which holds a job at its memory booking (1 GiB, [`BOOKED`]) and reports it killed there, out
+/// of memory with its peak at the booking; and one of this release, which holds a job of the same
+/// booking to nothing, so that it uses 1.5 GiB and part of the host's swap, and reports it
+/// succeeded with that peak and a swap peak. The server takes both results from the same
+/// heartbeats, as each agent sent it: the deployed agent's job fails for memory with its 1 GiB
+/// peak, this release's succeeds with its whole 1.5 GiB peak, above its booking. It catches a
+/// result of either release that the server refuses or leaves unanswered, a swap peak the server
+/// cannot take, and a peak above the booking the server does not record as sent.
+#[tokio::test]
+async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_measured() {
+    let mut rig = rig("deployed_and_new_agents", true);
+    rig.register("host-deployed", true);
+    rig.register("host-new", true);
+    let mut deployed = FakeAgent::new("host-deployed");
+    let mut new = FakeAgent::new("host-new");
+    let held = rig.place("held", "host-deployed");
+    let over = rig.place("over", "host-new");
+    let usage = |peak_memory_bytes, peak_swap_bytes| js_agent_wire::JobUsage {
+        peak_memory_bytes,
+        cpu_usage_usec: 30_000_000,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes,
+    };
+    for (agent, name, id) in [(&mut deployed, "held", &held), (&mut new, "over", &over)] {
+        let allocation = rig.allocation(id).allocation_id.to_string();
+        agent.hold(name, &allocation, HeldState::Running);
+        rig.beat(agent).await.unwrap();
+        assert_eq!(rig.job(id).state, JobState::Running, "{name}");
+    }
+    deployed.end("held", Outcome::OutOfMemory, None);
+    deployed.report("held", usage(1 << 30, None));
+    new.end("over", Outcome::Succeeded, Some(0));
+    new.report("over", usage(3 << 29, Some(256 << 20)));
+    for (agent, name) in [(&deployed, "held"), (&new, "over")] {
+        let reply = rig.beat(agent).await.unwrap();
+        let acks: Vec<Ack> = reply.job_acks.iter().map(|ack| ack.ack).collect();
+        assert_eq!(acks, [Ack::Accepted], "{name}");
+    }
+    let ended = |id: &JobId| {
+        let job = rig.job(id);
+        let result = job.result.expect("a result");
+        let peak = result.usage.map(|usage| usage.peak_memory_bytes);
+        (job.state, result.reason, peak)
+    };
+    assert_eq!(
+        ended(&held),
+        (
+            JobState::Failed,
+            js_jobs::ResultReason::Memory,
+            Some(1 << 30)
+        )
+    );
+    assert_eq!(
+        ended(&over),
+        (
+            JobState::Succeeded,
+            js_jobs::ResultReason::Exit,
+            Some(3 << 29)
+        )
     );
 }

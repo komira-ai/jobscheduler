@@ -120,11 +120,12 @@ fn a_host_job_shares_the_hosts_namespaces_and_network() {
     assert_eq!(runtime.remove(&id), Ok(()));
 }
 
-/// Proves a host job is accounted and limited in its lease's cgroup: its process is in the
+/// Proves a host job is accounted in its lease's cgroup: its process is in the
 /// container's cgroup `ctr` directly below the lease's (as its `/proc/<pid>/cgroup` says and
-/// the cgroup's `cgroup.procs` lists), and the lease's `memory.max` is the run's booking.
-/// Catches a host job that runs in the agent's cgroup or the host's, where the booking does
-/// not limit it and the lease's kill does not reach it.
+/// the cgroup's `cgroup.procs` lists), and the lease's `memory.max` reads `max`: a host job's
+/// memory booking is no limit either.
+/// Catches a host job that runs in the agent's cgroup or the host's, where its use is not
+/// counted with its lease's and the lease's kill does not reach it.
 #[test]
 #[ignore = "real crun: run through cargo xtask crun-tests"]
 fn a_host_job_is_accounted_in_its_leases_cgroup() {
@@ -150,7 +151,7 @@ fn a_host_job_is_accounted_in_its_leases_cgroup() {
     let own = fs::read_to_string(format!("/proc/{pid}/cgroup")).expect("the job's cgroup");
     assert!(own.trim().ends_with(&format!("/{}/ctr", id.0)), "{own}");
     let memory = fs::read_to_string(lease.join("memory.max")).expect("memory.max");
-    assert_eq!(memory.trim(), spec.memory_bytes.to_string());
+    assert_eq!(memory.trim(), "max");
     assert_eq!(runtime.stop(&id, Duration::ZERO), Ok(()));
     assert_eq!(runtime.remove(&id), Ok(()));
 }
