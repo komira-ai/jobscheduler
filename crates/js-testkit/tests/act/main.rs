@@ -482,6 +482,22 @@ fn directories_are_made_files_printed_and_times_set() {
     assert_eq!(text(&out.stdout), format!("two\nlines\n{pid}\n"));
 }
 
+/// Catches: `groups` printing other than the list the kernel holds for it, which it
+/// inherits from this test unchanged: an id missing, added (the effective group put in
+/// when the kernel's list does not hold it) or misprinted, or the ids out of the kernel's
+/// order.
+#[test]
+fn groups_prints_the_kernel_s_group_list() {
+    let held: Vec<String> = rustix::process::getgroups()
+        .expect("getgroups")
+        .iter()
+        .map(|g| g.as_raw().to_string())
+        .collect();
+    let out = output(&["groups", ";", "echo", "end"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(text(&out.stdout), format!("{}\nend\n", held.join(" ")));
+}
+
 /// Catches: `run` not waiting for its program (the next step would run first), not
 /// passing its arguments, or giving it other output streams.
 #[test]
