@@ -16,7 +16,7 @@ What keeps a job from using the rest of the grant is the slot user it runs as (U
 
 The table below says which start is which.
 
-Today the root helper `js-mac-session` still starts every native job (`crates/js-mac-session/src/spawn.rs`), disclaimed, and the helper holds no grant (the agent holds it), so a job it starts holds none. No production code keeps the responsibility yet. The supervisor (`js-agent __supervise-native`) is the first caller: the agent starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job`.
+Today the root helper `js-mac-session` still starts every native job (`crates/js-mac-session/src/spawn.rs`), disclaimed, and the helper holds no grant (the agent holds it), so a job it starts holds none. The supervisor (`js-agent __supervise-native`, `crates/js-agent/src/mac_supervisor`) is the code that keeps the responsibility: the agent's launcher (`launch.rs`) starts it with `Kept::Supervisor`, and it starts the job with `Kept::Job` (`run.rs`). Nothing calls the launcher yet: until the native runtime does, no job is started that way.
 
 ### Which program keeps its responsibility
 
@@ -96,7 +96,7 @@ What the disclaim gives: the program is its own responsible process, and what it
 
 `cargo test -p xtask --test spawn_sites` parses, with `syn`, the production source of `js-agent`, `js-mac-session` and every workspace crate built into them for macOS (their path dependencies, not the Linux-only target tables), from every crate root the manifests and the source layout give. Outside `disclaim.rs` it reports an import that renames `libc` or a `process` module (under another name, `Command` and the shells would not be named), and any naming of the standard library's or tokio's `process::Command`, `CommandExt`, a `pre_exec` or `exec` call, the C library's `exec*`, `posix_spawn*`, `vfork`, `system` and `popen`, and glob imports of those modules, in code, imports and macro tokens. What only a test build compiles is left out. A module it cannot find, a module whose file a `cfg_attr` chooses by target, an `include!`, or a crate with no root stops it with an error, never a skip.
 
-`cargo test -p xtask --test spawn_sites_keepers` holds the second rule: a call of `keep_responsibility` or a use of `disclaim::Kept` outside the files listed in the constant `KEEPERS` in `crates/xtask/src/spawn_sites.rs` is a site, and the test fails. `KEEPERS` is empty until the supervisor lands, because no production code keeps the responsibility yet. A listed file that the walk does not reach is an error, as a missing module is, so a stale entry cannot stand.
+`cargo test -p xtask --test spawn_sites_keepers` holds the second rule: a call of `keep_responsibility` or a use of `disclaim::Kept` outside the files listed in the constant `KEEPERS` in `crates/xtask/src/spawn_sites.rs` is a site, and the test fails. `KEEPERS` lists the supervisor's two starts and nothing else: `crates/js-agent/src/mac_supervisor/launch.rs` (the agent's start of the supervisor) and `crates/js-agent/src/mac_supervisor/run.rs` (the supervisor's start of the job). A listed file that the walk does not reach is an error, as a missing module is, so a stale entry cannot stand.
 
 `js-mac-provision`'s `pfctl` and `launchctl` runners go through `Program` too: the agent starts `pfctl` through them, disclaimed.
 
