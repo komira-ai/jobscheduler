@@ -59,3 +59,32 @@ fn as_root_the_put_directory_is_the_nodes_and_the_pack_its_groups() {
         assert_eq!(pack.gid(), NODE.gid, "pack takes the directory's group");
     }
 }
+
+/// Proves, as root, that a link in the job directory's place gives the node nothing outside
+/// the put root: the directory the link names keeps its owner, group and mode (root's, 0755),
+/// and the hand-over fails. Catches a hand-over by `chown` or `chmod` of a path, which follows
+/// the link and hands the node's user a directory the agent never made.
+#[test]
+#[ignore = "needs root: the macOS beta stage's root step runs it (beta.yml)"]
+fn as_root_a_link_in_the_job_directorys_place_is_not_followed() {
+    assert_eq!(geteuid().as_raw(), 0, "this test needs root");
+    let scratch = TestDir::under(std::env::temp_dir(), "put-root-link");
+    let root = scratch.path().join("put");
+    fs::create_dir_all(root.join("cas/b/r1")).unwrap();
+    let outside = scratch.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+    let to = PutTarget {
+        dir: root.join("cas/b/r1/n1"),
+        key_prefix: "cas/b/r1/n1".to_owned(),
+    };
+    std::os::unix::fs::symlink(&outside, &to.dir).unwrap();
+    assert!(hand_over(&root, &to, 0, NODE).is_err());
+    let meta = fs::metadata(&outside).unwrap();
+    assert_eq!(
+        (meta.uid(), meta.gid()),
+        (0, 0),
+        "the outside directory's owners"
+    );
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+}

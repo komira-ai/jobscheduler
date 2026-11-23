@@ -231,3 +231,24 @@ fn a_missing_output_is_named_and_nothing_is_left() {
     assert_eq!(why.to_string(), said);
     assert_eq!(names(&to.dir), Vec::<String>::new());
 }
+
+/// Proves a named pipe at the collected path, with no writer, is refused as not a regular
+/// file at once, and leaves nothing in the put directory: it is opened `O_NONBLOCK`, so the
+/// open does not wait for a writer. Catches a commit that blocks for ever on a pipe a job left
+/// where its output should be (Linux only: the test makes the pipe with `mknodat`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_pipe_at_the_collected_path_is_refused_at_once() {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+
+    let scratch = TestDir::under(std::env::temp_dir(), "put-pipe");
+    let pipe = scratch.path().join("pipe");
+    mknodat(CWD, &pipe, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+    let to = target(&scratch.path().join("put"), "n1");
+    let why = commit(&pipe, &to, &none).unwrap_err();
+    assert_eq!(
+        why.to_string(),
+        format!("{}: not a regular file", pipe.display())
+    );
+    assert_eq!(names(&to.dir), Vec::<String>::new());
+}
