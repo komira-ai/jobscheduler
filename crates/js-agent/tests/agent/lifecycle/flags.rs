@@ -843,3 +843,24 @@ fn the_taint_recheck_flag_is_read_bounded_and_refused_with_no_jobs() {
     );
     assert_eq!(sent, 0);
 }
+
+/// Asserts `--host-second-samples` end to end: the job flags of an agent that runs containers
+/// say it is off when the flag is not given and on when it is, and the flag on an agent that
+/// runs no job (`--no-jobs`) ends it with status 2 before anything is sent. It catches a flag
+/// that is read and dropped, one that is on by default, and one taken where no worker would
+/// sample.
+#[test]
+fn the_host_second_samples_flag_is_read_and_refused_with_no_jobs() {
+    let default = container_local("seconds-default", &[]).unwrap();
+    assert!(!default.host_second_samples);
+    let given = container_local("seconds-given", &["--host-second-samples"]).unwrap();
+    assert!(given.host_second_samples);
+
+    let (status, err, sent) = start(&["--host-second-samples"]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--host-second-samples: not with --no-jobs (an agent that runs no job)"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+}

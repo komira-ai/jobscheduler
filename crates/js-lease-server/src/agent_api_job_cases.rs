@@ -732,3 +732,56 @@ async fn a_deployed_agent_and_this_one_report_their_jobs_to_one_server_as_each_m
         )
     );
 }
+
+/// Through the heartbeats alone, a result that carries a CPU series (and no usage) is accepted,
+/// the series is stored in the job's result exactly as the agent sent it, and when the job's
+/// allocation is freed the usage history row of the job holds the same series; a second job
+/// whose result carries none is recorded with none. It catches a series lost between the wire
+/// result and the stored job, one lost between the stored job and the history row that
+/// `GetUsage` lists, one altered on the way (a point, the granularity, the run length or the
+/// partial flag), and one tied to the result's usage.
+#[tokio::test]
+async fn a_results_cpu_series_reaches_the_job_row_and_the_usage_history() {
+    let mut rig = rig("series_reaches_history", true);
+    rig.register("host-a", true);
+    let mut agent = FakeAgent::new("host-a");
+    let sent = js_agent_wire::CpuSeries {
+        granularity_secs: 2,
+        points: vec![0, 16, 40, 65535],
+        run_usec: 7_500_000,
+        partial: true,
+    };
+    let stored = js_types::CpuSeries::new(2, vec![0, 16, 40, 65535], 7_500_000, true);
+    let with = rig.place("with-series", "host-a");
+    let without = rig.place("no-series", "host-a");
+    for (name, id) in [("with-series", &with), ("no-series", &without)] {
+        let allocation = rig.allocation(id).allocation_id.to_string();
+        agent.hold(name, &allocation, HeldState::Running);
+    }
+    rig.beat(&agent).await.unwrap();
+    agent.end("with-series", Outcome::Succeeded, Some(0));
+    agent.report_series("with-series", sent);
+    agent.end("no-series", Outcome::Succeeded, Some(0));
+    let reply = rig.beat(&agent).await.unwrap();
+    let acks: Vec<Ack> = reply.job_acks.iter().map(|ack| ack.ack).collect();
+    assert_eq!(acks, [Ack::Accepted, Ack::Accepted]);
+    agent.take(&reply);
+    rig.beat(&agent).await.unwrap();
+    for id in [&with, &without] {
+        assert_eq!(rig.allocation(id).step, AllocationStep::Freed, "{id}");
+    }
+
+    let series_of = |id: &JobId| rig.job(id).result.expect("a result").cpu_series;
+    assert_eq!(series_of(&with), stored);
+    assert_eq!(rig.job(&with).result.expect("a result").usage, None);
+    assert_eq!(series_of(&without), None);
+
+    let limit = std::num::NonZeroUsize::new(100).unwrap();
+    let rows = js_usage::EndedHistory::new(&*rig.store)
+        .range(0, u64::MAX, limit)
+        .unwrap()
+        .rows;
+    let row_of = |id: &JobId| rows.iter().find(|row| row.id.as_str() == id.as_str());
+    assert_eq!(row_of(&with).expect("a row").cpu_series, stored);
+    assert_eq!(row_of(&without).expect("a row").cpu_series, None);
+}

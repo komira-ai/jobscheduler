@@ -541,7 +541,12 @@ generated paragraph above.
 - `GetUsage` reads the ended bookings of leases in the usage store and of jobs in the job
   store (see `usage-store.md`) as one listing, oldest end first (then by id, a lease's record
   before a job's with the same end and id), from `from_ms` included to `to_ms` excluded, of one
-  host or one job when asked; a job's record carries the job id in `job_id`. A page holds
+  host or one job when asked; a job's record carries the job id in `job_id`. A job's record
+  carries `cpu_series` (`cpuSeries` over the gateway) when its host's agent reported the job's CPU
+  second by second with its result: `granularity_secs` (the seconds each point covers: 1, 2, 4,
+  and so on), `points` (the mean CPU of each span in sixteenths of a core, at most 128), `run_usec`
+  (the run as the agent measured it) and `partial` (the series misses the start of the run), kept
+  as reported; it is absent for a job whose agent reported none, and for a lease's record. A page holds
   `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
   `next_page_token` names the page's last record, its key and which store it came from: the
   next page starts right after it, so no record is read twice or skipped while records are

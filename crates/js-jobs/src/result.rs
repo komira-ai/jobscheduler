@@ -2,7 +2,8 @@
 //! sections 3.2, 6.7 and 8, rows 3, 30 and 36).
 //!
 //! An ended job's record keeps its [`JobResult`] (exit code, reason, log tails, timing,
-//! resource usage, and the lengths of its live-log streams when the agent reported them) and
+//! resource usage, the lengths of its live-log streams and its CPU series when the agent
+//! reported them) and
 //! its retention end, both written by [`crate::JobStore::end_job`] in
 //! the transaction that ends the job. The retention end is a stored instant: the store's
 //! clock at the end plus the [`Retention`] window the store was opened with, so a window
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_state::StoreTime;
+use js_types::CpuSeries;
 
 use crate::ids::JobId;
 use crate::record::{JobRecord, JobState, StartFailure};
@@ -139,6 +141,9 @@ pub struct JobResult {
     /// The lengths of its output streams; `None` when the agent reported none (a runtime that
     /// does not upload live logs, or a build from before them).
     pub logs: Option<LogLengths>,
+    /// Its CPU second by second over its run, when the agent reported it; kept as reported
+    /// beside `usage` and never part of it.
+    pub cpu_series: Option<CpuSeries>,
     /// With [`ResultReason::InputFailed`], the agent's code of the input that failed
     /// (`input-unreadable`, `host-port-lost`); `None` otherwise.
     pub input_failure: Option<String>,
@@ -159,6 +164,8 @@ pub struct Output {
     pub usage: Option<ResourceUsage>,
     /// The lengths of its output streams, when the agent reported them.
     pub logs: Option<LogLengths>,
+    /// Its CPU over its run, when the agent reported a well-formed series.
+    pub cpu_series: Option<CpuSeries>,
 }
 
 /// How a job ended: what [`crate::JobStore::end_job`] records.
@@ -374,6 +381,7 @@ pub(crate) fn ended(
                 timing,
                 usage: output.usage,
                 logs: output.logs,
+                cpu_series: output.cpu_series,
                 input_failure,
             }
         });
@@ -505,13 +513,18 @@ mod tests {
                 cpu_peak: None,
             }),
             logs: Some(LENGTHS),
+            cpu_series: Some(series()),
         }
+    }
+
+    fn series() -> CpuSeries {
+        CpuSeries::new(4, vec![8, 16], 6_000_000, false).expect("a series")
     }
 
     // Catches an end mapped to the wrong state or reason (a clean exit read as failed, a wall
     // limit read as an exit, a cancel without its reason), an exit code dropped or invented,
-    // the stream lengths the host reported dropped from the result, and a result made for a
-    // job that was lost or failed to start.
+    // the stream lengths or the CPU series the host reported dropped from the result, and a
+    // result made for a job that was lost or failed to start.
     #[test]
     fn every_end_has_its_state_and_its_result() {
         let cases = [
@@ -602,6 +615,7 @@ mod tests {
                             cpu_peak: None,
                         }),
                         logs: Some(LENGTHS),
+                        cpu_series: Some(series()),
                         input_failure: None,
                     },
                     "{end:?}"

@@ -26,12 +26,14 @@
 //! (lease, minute). Only a 2xx answer settles a minute for good.
 //!
 //! The scalar part of a load (the counters and gauges) is never resent: the next sample
-//! has newer ones.
+//! has newer ones. The per-second lists are scalars in this sense: a beat that fails loses
+//! the seconds it carried.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use js_agent_usage::SecondRates;
 use js_agent_wire::NodeLoad;
 
 use super::binner::{ClosedMinute, MAX_UNSENT_AGE_USEC};
@@ -51,6 +53,10 @@ pub struct Reading {
     pub clocks: Vec<(String, u64)>,
     /// The minutes closed since the last reading, oldest first.
     pub minutes: Vec<ClosedMinute>,
+    /// The node's busy CPU and CPU pressure of each second since the last reading, newest
+    /// last; empty without `--host-second-samples`. Sent once, like the scalars: a beat
+    /// that fails loses them.
+    pub seconds: SecondRates,
 }
 
 /// Minutes that left the worker, and the clock reading of the sample they rode with.
@@ -72,6 +78,7 @@ struct Slot {
 #[derive(Debug, Default)]
 pub struct Outbox {
     window_usec: AtomicU64,
+    host_seconds: bool,
     slot: Mutex<Slot>,
 }
 
@@ -80,6 +87,19 @@ impl Outbox {
     /// heartbeat interval to give it.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Says whether the worker takes the node's CPU per second as well
+    /// (`--host-second-samples`): every reading then carries the rates since the last one.
+    #[must_use]
+    pub fn with_host_seconds(mut self, on: bool) -> Self {
+        self.host_seconds = on;
+        self
+    }
+
+    /// Whether the worker takes the node's CPU per second ([`Outbox::with_host_seconds`]).
+    pub fn host_seconds(&self) -> bool {
+        self.host_seconds
     }
 
     /// The time between samples: the session's heartbeat interval. Called when a session

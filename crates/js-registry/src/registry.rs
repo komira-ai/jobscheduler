@@ -121,6 +121,9 @@ pub struct HostView {
     /// host has not reported one in this session, when its latest heartbeat carried none
     /// (the agent could not measure), and while the host is lost. A new hello clears it.
     pub load: Option<NodeLoad>,
+    /// The per-second lists of the same load, for the hosts listing only: empty exactly when
+    /// `load` is `None` or the agent sent none.
+    pub load_seconds: crate::load::LoadSeconds,
 }
 
 /// How a host is set aside: for whole-node use, or to be scaled away. The registry sets
