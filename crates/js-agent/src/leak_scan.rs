@@ -2,6 +2,12 @@
 //! leak scan (`scan`, [`js_mac_session::helper`]), judged against what the same scan
 //! answered when the host was last idle.
 //!
+//! A Mac agent does not run it now: its native runs no longer go through the helper, whose
+//! recorded baseline the scan needs, and the account pool's retirement proves everything of a
+//! run's uid gone (`crate::mac_accounts`); the agent's post-job check is
+//! [`crate::lifecycle::NoChecks`]. The check, its codes and its judgment stay for the scan's
+//! return, over a baseline of a fresh account, built with [`NativeChecks::new`].
+//!
 //! The helper's scan reports what changed against the node's recorded baseline: what was
 //! added, what was removed, and what it could not read (each list cut to
 //! [`js_mac_session::proto::SCAN_LINES`] lines and a last `and <n> more`). The baseline is
@@ -80,12 +86,6 @@ impl NativeChecks {
             notes: Vec::new(),
             told_no_baseline: false,
         }
-    }
-
-    /// The check over the helper's `scan` at `helper`.
-    #[must_use]
-    pub fn over(helper: js_mac_session::client::Client) -> Self {
-        Self::new(Box::new(move || helper.scan()))
     }
 
     /// Judges the scan after a run.

@@ -1,7 +1,8 @@
 //! The pf check of a native agent whose cap is `on`: it refuses to start, and refuses each
 //! job that asks for the network, unless the anchor of `js-mac-provision` is enforced right
 //! then. The check is a fake that answers as the real one does and counts its calls; the
-//! runtime, the lifecycle and the worker are the real ones over the fake helper.
+//! runtime and the lifecycle are the real ones over the real pool on a fake host and the fake
+//! launcher.
 
 use std::fs;
 use std::io;
@@ -13,14 +14,10 @@ use js_agent::lifecycle::{Event, Runtime};
 use js_agent::native::{
     Ceiling, Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
 };
-use js_agent::{Backend, Worker};
 use js_agent_wire::{Command, JobSpec, NetworkLevel};
 
-use super::fake_helper::FakeHelper;
 use super::lifecycle::{Native, job};
-use super::{TERM, config};
-use crate::jobs::fake::FakeMachine;
-use crate::jobs::{STEP_NEVER, plan};
+use super::{FakeAccounts, FakeLauncher, Rig, TERM, config, open_pool, pool_settings};
 use crate::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use crate::lifecycle::reply;
 use crate::support::Scratch;
@@ -110,8 +107,8 @@ fn start(h: &mut Native, spec: JobSpec) -> Vec<Event> {
 /// Asserts that a start that asks for the network is refused as `egress-unchecked`, with the
 /// reason on the first line of the text, for each way the anchor can fail to be enforced
 /// (pf off, the main ruleset not reaching the anchor, the loaded rules drifted, `pfctl`
-/// exiting non-zero, `pfctl` not starting), and that nothing is made: the helper hears only
-/// of its boot reset, the scratch directory is not made, the booking is intact and the result
+/// exiting non-zero, `pfctl` not starting), and that nothing is made: no account is lent and
+/// no supervisor started, the scratch directory is not made, the booking is intact and the result
 /// is a start that failed. It catches a Mac job that reaches the network with no limit in
 /// force, and a refusal that still costs a lease user.
 #[test]
@@ -139,7 +136,7 @@ fn a_network_job_is_refused_for_each_way_the_anchor_is_not_enforced() {
         assert!(refused[0].1.contains(said), "{verdict:?}: {}", refused[0].1);
         assert!(!refused[0].1.contains('\n'), "{verdict:?}: one line");
         assert_eq!(check.calls(), 1, "{verdict:?}");
-        assert_eq!(h.fake.verbs(), ["boot-reset"], "{verdict:?}");
+        h.made_no_run();
         let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
         assert!(!scratch.join("r1").exists(), "{verdict:?}");
         assert_eq!(h.life.free().cpu_millis, 4000, "{verdict:?}");
@@ -200,30 +197,41 @@ fn an_agent_whose_cap_is_not_on_never_asks() {
     assert_eq!(check.calls(), 0);
 }
 
-/// Asserts that a runtime whose cap is `on` and that was given no check does not open, naming
-/// the flag, and sends the helper nothing. It catches a configuration that reaches the
+/// Asserts that a runtime whose cap is `on` and that was given no check does not open (as an
+/// agent opens it, and over a pool it is given), naming the flag, and starts no supervisor;
+/// and that it opens once it has the check. It catches a configuration that reaches the
 /// network with nothing to limit it.
 #[test]
 fn a_runtime_whose_cap_is_on_does_not_open_without_a_check() {
     let dir = Scratch::new("native-pf-open");
-    let fake = FakeHelper::start(&dir);
-    let mut cfg = config(&fake);
+    let settings = pool_settings(&dir, 1);
+    let accounts = FakeAccounts::new();
+    let pool = open_pool(&dir, &settings, &accounts);
+    let launcher = FakeLauncher::new();
+    let mut cfg = config(&dir, &settings);
     cfg.network = Ceiling::On;
-    let Err(why) = NativeRuntime::open(fake.client(), cfg.clone(), TERM) else {
+    let opened = NativeRuntime::open(launcher.clone(), cfg.clone(), TERM);
+    let Err(why) = opened else {
         panic!("no check, no runtime");
     };
     let why = why.to_string();
     assert!(why.contains("--native-network"), "{why}");
-    assert!(fake.verbs().is_empty(), "the helper was not asked");
+    let over = NativeRuntime::over(Some(pool.clone()), launcher.clone(), cfg.clone(), TERM);
+    assert!(over.is_err());
+    assert!(launcher.launched().is_empty(), "no supervisor was started");
     cfg.egress = Some(Fake::new(Verdict::Enforced));
-    assert!(NativeRuntime::open(fake.client(), cfg, TERM).is_ok());
+    let over = NativeRuntime::over(Some(pool), launcher, cfg, TERM);
+    assert!(over.is_ok());
 }
 
-/// The settings of a native agent over `fake` with the cap `network`, checked by `check`.
-fn settings(fake: &FakeHelper, network: &str, check: &Arc<Fake>) -> NativeSettings {
+/// The settings of a native agent with the cap `network`, from the flags the command line
+/// gives.
+fn settings(network: &str) -> NativeSettings {
     let flags = NativeFlags {
-        socket: Some(fake.socket()),
-        homes: Some(fake.homes()),
+        accounts: Some(Path::new("/srv/js-accounts")),
+        account_range: Some("600-609"),
+        account_ready: None,
+        homes: None,
         network: Some(network),
         tool_roots: &[],
         deny_read: &[],
@@ -235,42 +243,48 @@ fn settings(fake: &FakeHelper, network: &str, check: &Arc<Fake>) -> NativeSettin
             ..PfFlags::default()
         },
     };
-    let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+    NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
         .unwrap()
-        .unwrap();
-    settings.with_enforcer(check.clone())
+        .unwrap()
 }
 
-/// Asserts that a worker over a native backend whose cap is `on` asks the check once at start
-/// and does not start when it fails, naming `--native-network` and the reason; that it starts
-/// when the check passes; and that a cap below `on` asks nothing. It catches an agent that
-/// registers for network jobs with no limit in force.
+/// Asserts that a native runtime whose cap is `on` asks the check once at the agent's start
+/// (`Runtime::check_egress`, which the worker calls before it serves) and fails when it
+/// fails, naming `--native-network` and the reason; that it passes when the check passes;
+/// that a cap below `on` asks nothing; and that the flags of a cap of `on` make a
+/// configuration that has the check and those of the lower caps one that has none. It
+/// catches an agent that registers for network jobs with no limit in force.
 #[test]
-fn the_worker_does_not_start_while_the_anchor_is_not_enforced() {
-    let dir = Scratch::new("native-pf-start");
-    let fake = FakeHelper::start(&dir);
-    let machine = FakeMachine::new();
+fn the_start_check_fails_while_the_anchor_is_not_enforced() {
     let cases = [
         ("on", Verdict::PfDisabled, 1, false),
         ("on", Verdict::Enforced, 1, true),
         ("loopback", Verdict::PfDisabled, 0, true),
         ("off", Verdict::PfDisabled, 0, true),
     ];
-    for (n, (network, verdict, calls, starts)) in cases.into_iter().enumerate() {
+    for (n, (network, verdict, calls, passes)) in cases.into_iter().enumerate() {
         let check = Fake::new(verdict);
-        let roots = Scratch::new(&format!("native-pf-start{n}"));
-        let mut plan = plan(&roots, &machine, STEP_NEVER);
-        let settings = settings(&fake, network, &check);
-        plan.backend = Backend::Native(settings);
-        let started = Worker::start(plan);
+        let from_flags = settings(network);
+        assert_eq!(
+            from_flags.config().egress.is_some(),
+            network == "on",
+            "case {n}"
+        );
+        let ceiling = from_flags.config().network;
+        let rig = Rig::with(&format!("native-pf-start{n}"), |config| {
+            config.network = ceiling;
+            config.egress = Some(check.clone());
+        });
+        let started = rig.rt.check_egress();
         assert_eq!(check.calls(), calls, "case {n}");
-        match (started, starts) {
-            (Ok(_), true) => {}
+        match (started, passes) {
+            (Ok(()), true) => {}
             (Err(why), false) => {
-                assert!(why.starts_with("--native-network: "), "{why}");
+                let why = why.to_string();
+                assert!(why.contains("--native-network"), "{why}");
                 assert!(why.contains("pf is not enabled"), "{why}");
             }
-            (other, _) => panic!("case {n}: {:?}", other.err()),
+            (other, _) => panic!("case {n}: {other:?}"),
         }
     }
 }
@@ -282,17 +296,21 @@ fn the_worker_does_not_start_while_the_anchor_is_not_enforced() {
 #[test]
 fn the_runtime_asks_only_when_its_cap_is_on() {
     let dir = Scratch::new("native-pf-cap");
-    let fake = FakeHelper::start(&dir);
+    let settings = pool_settings(&dir, 1);
+    let accounts = FakeAccounts::new();
+    let pool = open_pool(&dir, &settings, &accounts);
+    let launcher = FakeLauncher::new();
     let check = Fake::new(Verdict::PfDisabled);
     let asks = job_at("r1", NetworkLevel::On).native.unwrap();
-    let mut cfg = config(&fake);
+    let mut cfg = config(&dir, &settings);
     cfg.egress = Some(check.clone());
-    let below = NativeRuntime::open(fake.client(), cfg.clone(), TERM).unwrap();
+    let below =
+        NativeRuntime::over(Some(pool.clone()), launcher.clone(), cfg.clone(), TERM).unwrap();
     assert!(below.check_egress().is_ok());
     assert!(below.check_native_egress(&asks).is_ok());
     assert_eq!(check.calls(), 0);
     cfg.network = Ceiling::On;
-    let on = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
+    let on = NativeRuntime::over(Some(pool), launcher, cfg, TERM).unwrap();
     assert!(on.check_egress().is_err());
     assert!(on.check_native_egress(&asks).is_err());
     assert_eq!(check.calls(), 2);
@@ -322,16 +340,18 @@ fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
         h.start(job_at("r1", NetworkLevel::On)),
         ["refused r1 egress-unchecked"]
     );
-    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    h.made_no_run();
     let scratch = fs::canonicalize(h.dir.path("scratch")).unwrap();
     assert!(!scratch.join("r1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
     assert_eq!(h.start(job_at("r2", NetworkLevel::Off)), ["started r2"]);
 
     let dir = Scratch::new("native-pf-nocheck-rt");
-    let fake = FakeHelper::start(&dir);
-    let mut cfg = config(&fake);
+    let settings = pool_settings(&dir, 1);
+    let accounts = FakeAccounts::new();
+    let pool = open_pool(&dir, &settings, &accounts);
+    let mut cfg = config(&dir, &settings);
     cfg.network = Ceiling::On;
-    let runtime = NativeRuntime::open_ungated(fake.client(), cfg, TERM).unwrap();
-    assert!(runtime.check_egress().is_err());
+    let runtime = NativeRuntime::open_ungated(Some(pool), FakeLauncher::new(), cfg, TERM);
+    assert!(runtime.unwrap().check_egress().is_err());
 }

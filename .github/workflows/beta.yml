@@ -117,3 +117,12 @@ jobs:
       - name: Run the supervisor's root tests as root
         if: ${{ !cancelled() }}
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test mac_supervisor_root --locked -- --ignored --nocapture --test-threads=1
+      # The native runtime's root tests (crates/js-agent/tests/native_privileged.rs, each
+      # `#[ignore]` by name in the run above): a real account pool over the Mac's directory and
+      # processes, the real supervisor, the run directories given to the slot account, a stop
+      # signalling the job's group, the account retired. They run after the cache is saved, as
+      # they leave root-owned files in target. They make their own directory below /private/var.
+      # The VM test needs a signed js-vmm and a base image.
+      - name: Run the native runtime's root tests as root
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm

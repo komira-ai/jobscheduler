@@ -32,11 +32,10 @@ pub const AUTHORITIES: [&str; 3] = [
 pub const INSTALL_DIR: &str = "/Library/Application Support/js-agent/bin";
 
 /// The program that holds the Full Disk Access grant: the agent, which is its own launchd
-/// job. Every program the agent starts today is started with the responsibility disclaimed
-/// (`js_mac_session::disclaim`), and the helper, which starts every native job today, holds no
-/// grant. A native job's supervisor and the job's program are to be started keeping the
+/// job. A native job's supervisor and the job's program are started keeping the
 /// responsibility, so that a job answers for the agent and holds the grant, within its slot
-/// user's Unix permissions and its Seatbelt profile.
+/// account's Unix permissions and its Seatbelt profile; every other program the agent starts
+/// is started with the responsibility disclaimed (`js_mac_session::disclaim`).
 pub const FULL_DISK_ACCESS_PROGRAM: &str = "js-agent";
 
 /// One program of the package and the identifier it is signed under.

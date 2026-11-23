@@ -11,8 +11,6 @@ use js_vm_lease::{Step, VmDriver};
 use super::vm;
 use crate::jobs::fake::FakeMachine;
 use crate::jobs::{STEP_NEVER, plan};
-#[cfg(target_os = "macos")]
-use crate::native::fake_helper::FakeHelper;
 use crate::support::Scratch;
 
 /// The VM settings over a driver binary and a store with a base image, both in `dir`.
@@ -25,32 +23,24 @@ fn settings(dir: &Scratch) -> VmSettings {
         .unwrap()
 }
 
-/// A worker and what its jobs backend needs while it runs.
+/// A running worker.
 struct Running {
     worker: Worker,
-    /// The fake helper the native backend talks to, kept until the test ends.
-    #[cfg(target_os = "macos")]
-    _helper: FakeHelper,
 }
 
 /// A worker over `machine` under `dir`, with `vm` as its VM backend. Its jobs backend is the
-/// build's: the container runtime of `plan` on Linux, the native runtime on macOS, over a fake
-/// helper, since a worker asks the helper for its boot reset when it starts.
+/// build's: the container runtime of `plan` on Linux, the native runtime on macOS, over
+/// settings that have not found Full Disk Access, so it opens no account pool and nothing of
+/// the Mac's accounts is touched.
 fn start(dir: &Scratch, machine: &FakeMachine, vm: Option<VmSettings>) -> Running {
-    #[cfg(target_os = "macos")]
-    let helper = FakeHelper::start(dir);
     let mut plan = plan(dir, machine, STEP_NEVER);
     plan.vm = vm;
     #[cfg(target_os = "macos")]
     {
-        plan.backend = helper.backend(dir);
+        plan.backend = crate::native::agent::backend(dir);
     }
     match Worker::start(plan) {
-        Ok(worker) => Running {
-            worker,
-            #[cfg(target_os = "macos")]
-            _helper: helper,
-        },
+        Ok(worker) => Running { worker },
         Err(why) => panic!("the worker did not start: {why}"),
     }
 }

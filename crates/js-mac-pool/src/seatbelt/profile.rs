@@ -102,9 +102,10 @@ pub struct Profile {
 impl Profile {
     /// The profile of `policy`, in a fixed order: version and `(allow default)`; the
     /// write denies; the write grants (the run directory, the user's folder entry,
-    /// `/dev/null` and `/dev/fd`); the trees on a mount (a read deny of the mount's root,
-    /// then for each tree a read grant and a metadata grant on the tree and its ancestors,
-    /// so a path walk reaches it); the read denies, each with a write deny of the same
+    /// `/dev/null` and `/dev/fd`); the trees on a mount (an exec deny, an executable-mapping
+    /// deny and a read deny of the mount's root, then for each tree a read grant and a
+    /// metadata grant on the tree and its ancestors, so a path walk reaches it); the read
+    /// denies, each with a write deny of the same
     /// path (a read-denied path inside a granted directory is not writable either); the
     /// write protection of inputs; the mount grants (for each mount a read grant of its
     /// path, a metadata grant on the path and its ancestors, and for a read-write mount
@@ -226,14 +227,18 @@ fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     }
 }
 
-/// The trees on the shared mount: no read below the root, then each tree's reads and the
-/// metadata of the tree and its ancestors (the root's included, so a walk can pass it but
-/// not list it).
+/// The trees on the shared mount: nothing below the root is run or mapped executable (a
+/// tree is read, never executed: the read grants below would otherwise let a run execute
+/// what it reads, since the profile allows by default), no read below the root, then each
+/// tree's reads and the metadata of the tree and its ancestors (the root's included, so a
+/// walk can pass it but not list it).
 fn tree_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
     let Some(trees) = policy.trees() else {
         return;
     };
     params.push(("MOUNT".to_owned(), trees.root().as_str().to_owned()));
+    lines.push("(deny process-exec* (subpath (param \"MOUNT\")))".to_owned());
+    lines.push("(deny file-map-executable (subpath (param \"MOUNT\")))".to_owned());
     lines.push("(deny file-read* (subpath (param \"MOUNT\")))".to_owned());
     for (i, tree) in trees.trees().iter().enumerate() {
         params.push((format!("MT_{i}"), tree.as_str().to_owned()));
