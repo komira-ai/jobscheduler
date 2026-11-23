@@ -93,6 +93,7 @@ fn each_run_goes_to_the_runtime_of_its_kind() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     fake.report_usage("run-plain", counted);
     fake.set_cgroup("run-plain", "/sys/fs/cgroup/run-plain");

@@ -1,9 +1,9 @@
 //! The CPU booking is a share, never a ceiling: the kernel's own counters and settings of a
-//! lease made as the agent makes it ([`LeasePolicy::HardMemory`]), read after its job ran.
+//! lease made as the agent makes it ([`LeasePolicy::TrackedMemory`]), read after its job ran.
 //! Nothing here measures a time: a lease with a `cpu.max` counts its periods and the ones it
 //! was throttled in (`cpu.stat` `nr_periods`, `nr_throttled`), and one without counts none.
 //!
-//! [`LeasePolicy::HardMemory`]: js_contain::cgroup::LeasePolicy::HardMemory
+//! [`LeasePolicy::TrackedMemory`]: js_contain::cgroup::LeasePolicy::TrackedMemory
 
 use std::fs;
 
@@ -28,8 +28,8 @@ fn stat_of(stat: &str, key: &str) -> u64 {
 /// throttle it in nearly every period of its run (`nr_throttled` close to `nr_periods`); as
 /// a share it has no quota, so the kernel counts no period and throttles none, and the job
 /// may use every core no other job wants. Its `cpu.weight` is half a core's, 50. The job
-/// reads `max` in its own `cpu.max` and counts the CPUs this process may run on. Its memory
-/// is still held at the booking: the lease's `memory.max` is the booking, with no swap.
+/// reads `max` in its own `cpu.max` and counts the CPUs this process may run on. Nor is its
+/// memory booking a limit: the lease's `memory.max` and `memory.swap.max` read `max`.
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn a_job_booked_half_a_core_is_never_throttled_and_reads_no_cpu_ceiling() {
@@ -38,7 +38,6 @@ async fn a_job_booked_half_a_core_is_never_throttled_and_reads_no_cpu_ceiling() 
         cpu_millis: 500,
         ..Shape::default()
     };
-    let memory = shape.memory;
     let lease = cell.lease("half-core", &["/bin/sh", "-c", BUSY], shape);
     let running = cell.start(&lease).await;
     let run = cell.finish(&lease, running).await;
@@ -65,8 +64,8 @@ async fn a_job_booked_half_a_core_is_never_throttled_and_reads_no_cpu_ceiling() 
     );
     assert_eq!(read("cpu.max").trim(), "max 100000");
     assert_eq!(read("cpu.weight").trim(), "50");
-    assert_eq!(read("memory.max").trim(), memory.to_string());
-    assert_eq!(read("memory.swap.max").trim(), "0");
+    assert_eq!(read("memory.max").trim(), "max");
+    assert_eq!(read("memory.swap.max").trim(), "max");
 }
 
 /// Catches leases that want every core not sharing them as they booked them: the kernel
