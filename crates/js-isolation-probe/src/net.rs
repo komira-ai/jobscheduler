@@ -64,13 +64,13 @@ fn short(err: &io::Error) -> String {
 /// `lookup:<name>`: one lookup of the host name with the system resolver.
 #[must_use]
 pub fn lookup(named: &Named) -> Line {
-    lookup_with(named, |host| {
+    lookup_with(named, &|host| {
         (host, 0).to_socket_addrs().map(Iterator::count)
     })
 }
 
 /// [`lookup`] with the resolver given: it answers how many addresses the name has.
-pub fn lookup_with(named: &Named, resolver: impl Fn(&str) -> io::Result<usize>) -> Line {
+pub fn lookup_with(named: &Named, resolver: &dyn Fn(&str) -> io::Result<usize>) -> Line {
     let name = format!("lookup:{}", named.name);
     match resolver(&named.value) {
         Ok(n) => {
@@ -166,7 +166,7 @@ mod tests {
             line.to_string(),
             "lookup:literal: allowed; 127.0.0.1: 1 addresses"
         );
-        let line = lookup_with(&named("public-name", "example.org"), |_| {
+        let line = lookup_with(&named("public-name", "example.org"), &|_| {
             Err(io::Error::other("failed to lookup address information"))
         });
         assert_eq!(

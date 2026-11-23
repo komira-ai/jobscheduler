@@ -2,8 +2,10 @@
 # by name (src/expect.rs). The run fails when an answer differs or a pinned probe did not run;
 # a probe with no line here is printed as UNPINNED and fails nothing.
 #
-# They are what a job gets with the job's network `none` and the arguments of
-# docs/runbooks/mac-isolation-probe.md, on macOS 27 with the agent's Seatbelt profile.
+# They are what a job must get with the job's network `none` and the arguments of
+# docs/runbooks/mac-isolation-probe.md, on macOS 27 with the agent's Seatbelt profile. Where
+# a Mac answered otherwise and the answer is a hole, the pin keeps the answer a job must get,
+# so the run fails by that name until the hole is closed; the comment says what the Mac did.
 # A change of an answer is a change of what a job can do: it comes with the code that
 # changes it, in the same pull request, and the runbook's table says why each one is so.
 #
@@ -12,14 +14,18 @@
 [probe]
 # The run directory is the job's own; the whole home is writable (the profile's write grant).
 "write:run-dir" = "allowed"
-"write:home-launchagents" = "allowed"
-"write:home-preferences" = "allowed"
+# A slot's home is emptied by its reset, so it has no Library folders and the probe makes
+# none: a job can make them, but neither it nor the reset can remove them again (on macOS 27
+# the reset of a slot whose home had Library/Preferences failed and replaced the slot).
+"write:home-launchagents" = "n/a"
+"write:home-preferences" = "n/a"
 # Every place outside the home: the profile denies the write.
 "write:private-tmp" = "denied"
 "write:private-var-tmp" = "denied"
 "write:users-shared" = "denied"
 "write:library-caches" = "denied"
-"write:opt-homebrew" = "denied"
+# The pool hosts have no Homebrew; a host that has it answers denied and fails here by name.
+"write:opt-homebrew" = "n/a"
 "write:usr-local" = "denied"
 "write:etc" = "denied"
 "write:library-launchdaemons" = "denied"
@@ -27,31 +33,45 @@
 "write:other-home" = "denied"
 "write:bundle-store" = "denied"
 # Reads: the other pool user's home is 0700, the agent's and helper's state are root's.
+# sudoers is root:wheel 0440. A macOS 27 job read it (allowed, though the same uid outside
+# the job could not): see priv:group-wheel.
 "read:sudoers" = "denied"
 "read:other-home" = "denied"
-"read:agent-flags" = "denied"
-"read:agent-token" = "denied"
+# The flags file is 0644 and holds no secret (the token is a file of its own).
+"read:agent-flags" = "allowed"
+# The agent's token file: an agent enrolled without one has none, and the probe says n/a.
+"read:agent-token" = "n/a"
 "read:agent-state" = "denied"
 "read:helper-state" = "denied"
+# Another service's key (0640, its own group).
+"read:host-key" = "denied"
 # A job whose network is `none` runs under the profile's `(deny network*)`.
 "connect:job-service" = "denied"
 "connect:lan-host" = "denied"
 "connect:metadata" = "denied"
 "connect:public" = "denied"
 "connect:loopback" = "denied"
+# An address the host's packet filter lets jobs with an allow-list reach: not a `none` job.
+"connect:pf-endpoint" = "denied"
 "lookup:public-name" = "denied"
-# A pool user is no administrator and has no password.
+# A pool user is no administrator and has no password; the profile refuses to start a setuid
+# tool at all (EPERM), so sudo, su, crontab and at never run.
 "priv:sudo" = "denied"
 "priv:su" = "denied"
 "priv:admin-group" = "denied"
+# The job's process holds its user's groups only. A macOS 27 job could read root:wheel 0440
+# files, which only a process holding wheel can: these two say which groups it holds.
+"priv:group-wheel" = "denied"
+"priv:group-admin" = "denied"
 "priv:record-same-value" = "denied"
 "priv:account-attribute" = "denied"
-# The profile denies job creation; the setuid tools still write under the profile.
+# The profile denies job creation (launchctl's bootstrap is refused).
 "priv:launchd-user" = "denied"
 "priv:launchd-gui" = "denied"
 "priv:crontab" = "denied"
 "priv:at-job" = "denied"
-# The native runtime sets the file size and process limits only.
+# The native runtime sets the file size (4 GiB) and process (512) limits; descriptors keep
+# the system's soft 256.
 "limit:file-size" = "limited"
 "limit:processes" = "limited"
 "limit:descriptors" = "limited"
@@ -67,11 +87,12 @@
 # System V objects are not denied by the profile; the reset removes the uid's.
 "leave:sysv-semaphore" = "allowed"
 "leave:sysv-shared-memory" = "allowed"
-# The profile denies user preference writes.
-"leave:preferences" = "denied"
+# The profile denies user preference writes. An emptied home has no Library/Preferences
+# or Library/Keychains, and the probe makes neither (n/a); with them it must be denied.
+"leave:preferences" = "n/a"
 "leave:launch-services" = "denied"
 "leave:pasteboard" = "denied"
-"leave:keychain" = "denied"
+"leave:keychain" = "n/a"
 # Nothing stops a process from starting its own session; the reset kills by uid.
 "leave:background-process" = "allowed"
 "leave:crontab" = "denied"
@@ -80,13 +101,13 @@
 "leave:launchd-gui" = "denied"
 "leave:account-attribute" = "denied"
 "leave:file:run-dir" = "allowed"
-"leave:file:home-launchagents" = "allowed"
-"leave:file:home-preferences" = "allowed"
+"leave:file:home-launchagents" = "n/a"
+"leave:file:home-preferences" = "n/a"
 "leave:file:private-tmp" = "denied"
 "leave:file:private-var-tmp" = "denied"
 "leave:file:users-shared" = "denied"
 "leave:file:library-caches" = "denied"
-"leave:file:opt-homebrew" = "denied"
+"leave:file:opt-homebrew" = "n/a"
 "leave:file:usr-local" = "denied"
 "leave:file:etc" = "denied"
 "leave:file:library-launchdaemons" = "denied"

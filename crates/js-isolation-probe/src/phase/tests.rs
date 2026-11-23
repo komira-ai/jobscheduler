@@ -27,12 +27,10 @@ fn places(who: &Who) -> Vec<Target> {
         Target {
             name: "run-dir".to_owned(),
             dir: who.cwd.clone(),
-            make_dir: false,
         },
         Target {
             name: "shared".to_owned(),
             dir: who.home.parent().unwrap().join("shared"),
-            make_dir: false,
         },
     ]
 }
@@ -41,6 +39,7 @@ fn host<'a>(tools: &'a Fake, who: Who, writes: &'a dyn Fn(&Who) -> Vec<Target>) 
     Host {
         tools,
         who,
+        groups: vec![20],
         writes,
         reads: vec![],
         connect_limit: Duration::from_secs(30),
@@ -119,7 +118,7 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
         .filter_map(|l| l.split_once(": ").map(|(name, _)| name))
         .collect();
     assert_eq!(
-        &names[..13],
+        &names[..15],
         [
             "write:run-dir",
             "write:shared",
@@ -130,6 +129,8 @@ fn probe_prints_every_probe_in_order_and_judges_by_the_pins() {
             "priv:sudo",
             "priv:su",
             "priv:admin-group",
+            "priv:group-wheel",
+            "priv:group-admin",
             "priv:record-same-value",
             "priv:launchd-user",
             "priv:launchd-gui",

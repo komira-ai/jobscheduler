@@ -77,19 +77,15 @@ impl Who {
 pub struct Target {
     /// The probe's name after `write:`.
     pub name: String,
-    /// The directory.
+    /// The directory. The probe never makes it: when it is absent the probe is `n/a`.
     pub dir: PathBuf,
-    /// Whether the probe makes the directory (and removes it again) when it is absent: the
-    /// per-user places under the home, which an emptied home does not have.
-    pub make_dir: bool,
 }
 
 impl Target {
-    fn fixed(name: &str, dir: &str) -> Self {
+    fn new(name: &str, dir: impl Into<PathBuf>) -> Self {
         Self {
             name: name.to_owned(),
-            dir: PathBuf::from(dir),
-            make_dir: false,
+            dir: dir.into(),
         }
     }
 }
@@ -97,40 +93,26 @@ impl Target {
 /// The places every write probe tries, for the account `who`: the run directory, which must
 /// be writable, and the places a job must not write: the shared temporary and cache folders,
 /// the package managers' prefixes, `/etc`, the system's launch daemons, and the user's own
-/// launch agents and preferences.
+/// launch agents and preferences. Those two are tried only when the home has them: a folder
+/// a job makes under `~/Library` is one a job's sandbox cannot remove again, and so neither can
+/// the probe.
 #[must_use]
 pub fn writes(who: &Who) -> Vec<Target> {
     let mut targets = vec![
-        Target {
-            name: "run-dir".to_owned(),
-            dir: who.cwd.clone(),
-            make_dir: false,
-        },
-        Target::fixed("private-tmp", "/private/tmp"),
-        Target::fixed("private-var-tmp", "/private/var/tmp"),
-        Target::fixed("users-shared", "/Users/Shared"),
-        Target::fixed("library-caches", "/Library/Caches"),
-        Target::fixed("opt-homebrew", "/opt/homebrew"),
-        Target::fixed("usr-local", "/usr/local"),
-        Target::fixed("etc", "/private/etc"),
-        Target::fixed("library-launchdaemons", "/Library/LaunchDaemons"),
-        Target {
-            name: "home-launchagents".to_owned(),
-            dir: who.home.join("Library/LaunchAgents"),
-            make_dir: true,
-        },
-        Target {
-            name: "home-preferences".to_owned(),
-            dir: who.home.join("Library/Preferences"),
-            make_dir: true,
-        },
+        Target::new("run-dir", who.cwd.clone()),
+        Target::new("private-tmp", "/private/tmp"),
+        Target::new("private-var-tmp", "/private/var/tmp"),
+        Target::new("users-shared", "/Users/Shared"),
+        Target::new("library-caches", "/Library/Caches"),
+        Target::new("opt-homebrew", "/opt/homebrew"),
+        Target::new("usr-local", "/usr/local"),
+        Target::new("etc", "/private/etc"),
+        Target::new("library-launchdaemons", "/Library/LaunchDaemons"),
+        Target::new("home-launchagents", who.home.join("Library/LaunchAgents")),
+        Target::new("home-preferences", who.home.join("Library/Preferences")),
     ];
     if let Some(dir) = &who.user_temp {
-        targets.push(Target {
-            name: "user-temp-dir".to_owned(),
-            dir: dir.clone(),
-            make_dir: false,
-        });
+        targets.push(Target::new("user-temp-dir", dir.clone()));
     }
     targets
 }
@@ -182,11 +164,7 @@ pub fn named(arg: &str) -> Result<Named, String> {
 /// The targets `--write NAME=DIR` names, after the built-in ones.
 #[must_use]
 pub fn with_extra(mut targets: Vec<Target>, extra: &[Named]) -> Vec<Target> {
-    targets.extend(extra.iter().map(|n| Target {
-        name: n.name.clone(),
-        dir: PathBuf::from(&n.value),
-        make_dir: false,
-    }));
+    targets.extend(extra.iter().map(|n| Target::new(&n.name, &n.value)));
     targets
 }
 
@@ -316,6 +294,5 @@ mod tests {
         assert_eq!(named("lan-host2=192.0.2.7:22").unwrap().name, "lan-host2");
         let all = with_extra(vec![], &[named("bundle-store=/s").unwrap()]);
         assert_eq!(all[0].dir, Path::new("/s"));
-        assert!(!all[0].make_dir);
     }
 }

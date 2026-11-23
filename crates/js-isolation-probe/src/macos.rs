@@ -29,6 +29,7 @@ pub(crate) fn run(phase: &Phase) -> ExitCode {
         let host = Host {
             tools: &tools,
             who,
+            groups: groups()?,
             writes: &host::writes,
             reads: host::reads(),
             connect_limit: CONNECT_LIMIT,
@@ -62,6 +63,19 @@ fn prepare() -> Result<(Who, System, Pins), String> {
         },
         pins,
     ))
+}
+
+/// The process's effective and supplementary group ids, in order, each once.
+fn groups() -> Result<Vec<u32>, String> {
+    let mut gids: Vec<u32> = rustix::process::getgroups()
+        .map_err(|e| format!("the process's groups: {e}"))?
+        .into_iter()
+        .map(rustix::process::Gid::as_raw)
+        .collect();
+    gids.push(rustix::process::getegid().as_raw());
+    gids.sort_unstable();
+    gids.dedup();
+    Ok(gids)
 }
 
 /// The user's `DARWIN_USER_TEMP_DIR`, when the system names one.

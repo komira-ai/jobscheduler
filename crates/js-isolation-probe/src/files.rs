@@ -21,36 +21,16 @@ struct Made {
     line: Line,
     /// The file, when it was made.
     file: Option<PathBuf>,
-    /// The directory the probe made, and the directory above it that was there before.
-    made_dir: Option<(PathBuf, PathBuf)>,
 }
 
 fn make(prefix: &str, target: &Target, tag: &str) -> Made {
     let name = format!("{prefix}:{}", target.name);
     let shown = target.dir.display().to_string();
-    let mut made_dir = None;
     if !target.dir.is_dir() {
-        if !target.make_dir {
-            return Made {
-                line: Line::new(name, Outcome::NotApplicable).detail(format!("{shown} is absent")),
-                file: None,
-                made_dir: None,
-            };
-        }
-        let before = target
-            .dir
-            .ancestors()
-            .find(|p| p.is_dir())
-            .unwrap_or(Path::new("/"))
-            .to_path_buf();
-        if let Err(err) = fs::create_dir_all(&target.dir) {
-            return Made {
-                line: Line::refused(name, &err, format!("making {shown}")),
-                file: None,
-                made_dir: None,
-            };
-        }
-        made_dir = Some((target.dir.clone(), before));
+        return Made {
+            line: Line::new(name, Outcome::NotApplicable).detail(format!("{shown} is absent")),
+            file: None,
+        };
     }
     let file = target.dir.join(marker_name(tag));
     // The file is empty: its name carries the tag, so nothing is written that could fail
@@ -60,47 +40,31 @@ fn make(prefix: &str, target: &Target, tag: &str) -> Made {
         .create_new(true)
         .mode(0o600)
         .open(&file);
-    if let Err(err) = opened {
-        return Made {
+    match opened {
+        Ok(_) => Made {
+            line: Line::new(name, Outcome::Allowed).detail(shown),
+            file: Some(file),
+        },
+        Err(err) => Made {
             line: Line::refused(name, &err, shown),
             file: None,
-            made_dir,
-        };
-    }
-    let line = Line::new(name, Outcome::Allowed).detail(shown);
-    Made {
-        line,
-        file: Some(file),
-        made_dir,
+        },
     }
 }
 
-/// Removes what [`make`] made; a failure is added to the line's detail.
-fn undo(mut made: Made) -> Line {
-    let mut failed = Vec::new();
+/// Removes the file [`make`] made; a failure is added to the line's detail.
+fn undo(made: Made) -> Line {
+    let mut line = made.line;
     if let Some(file) = &made.file
         && let Err(err) = fs::remove_file(file)
     {
-        failed.push(format!("could not remove {}: {err}", file.display()));
+        line.detail = format!(
+            "{}; could not remove {}: {err}",
+            line.detail,
+            file.display()
+        );
     }
-    if let Some((dir, before)) = &made.made_dir
-        && let Err(err) = remove_made_dirs(dir, before)
-    {
-        failed.push(format!("could not remove {}: {err}", dir.display()));
-    }
-    if !failed.is_empty() {
-        made.line.detail = format!("{}; {}", made.line.detail, failed.join("; "));
-    }
-    made.line
-}
-
-/// Removes `dir` and its parents below `before`, the directory that was there before the
-/// probe made them.
-fn remove_made_dirs(dir: &Path, before: &Path) -> io::Result<()> {
-    for made in dir.ancestors().take_while(|p| *p != before) {
-        fs::remove_dir(made)?;
-    }
-    Ok(())
+    line
 }
 
 /// `write:<target>`: makes a file in the target and removes it again.
@@ -238,57 +202,53 @@ mod tests {
 
     use super::*;
 
-    fn target(name: &str, dir: &Path, make_dir: bool) -> Target {
+    fn target(name: &str, dir: &Path) -> Target {
         Target {
             name: name.to_owned(),
             dir: dir.to_path_buf(),
-            make_dir,
         }
     }
 
     #[test]
     fn a_write_in_a_writable_dir_is_allowed_and_leaves_nothing() {
         let dir = TestDir::under(std::env::temp_dir(), "files-write");
-        let line = write(&target("run-dir", &dir, false), "t1");
+        let line = write(&target("run-dir", &dir), "t1");
         assert_eq!(line.outcome, Outcome::Allowed, "{line}");
         assert_eq!(line.name, "write:run-dir");
         assert_eq!(fs::read_dir(&*dir).unwrap().count(), 0);
     }
 
     #[test]
-    fn an_absent_dir_is_not_applicable_unless_the_probe_makes_it() {
+    fn an_absent_dir_is_not_applicable_and_is_never_made() {
         let dir = TestDir::under(std::env::temp_dir(), "files-absent");
-        let absent = dir.join("absent");
-        let line = write(&target("opt-homebrew", &absent, false), "t1");
-        assert_eq!(line.outcome, Outcome::NotApplicable);
-        assert!(line.detail.ends_with("is absent"), "{line}");
-        let made = write(
-            &target(
-                "home-launchagents",
-                &absent.join("Library/LaunchAgents"),
-                true,
-            ),
-            "t1",
+        let absent = dir.join("Library/LaunchAgents");
+        let line = write(&target("home-launchagents", &absent), "t1");
+        assert_eq!(
+            line.to_string(),
+            format!(
+                "write:home-launchagents: n/a; {} is absent",
+                absent.display()
+            )
         );
-        assert_eq!(made.outcome, Outcome::Allowed, "{made}");
-        assert!(!absent.exists(), "the made directories are removed again");
-        assert!(dir.exists(), "a directory the probe did not make is kept");
+        assert!(!dir.join("Library").exists(), "nothing is made");
+        let left = leave(&target("home-launchagents", &absent), "t1");
+        assert_eq!(left.outcome, Outcome::NotApplicable);
+        assert!(!dir.join("Library").exists(), "nothing is made");
     }
 
     #[test]
-    fn a_dir_that_cannot_be_made_or_written_is_reported_with_its_errno() {
+    fn a_dir_that_cannot_be_written_is_reported_with_its_errno() {
         let dir = TestDir::under(std::env::temp_dir(), "files-refused");
-        let file = dir.join("a-file");
-        fs::write(&file, b"").unwrap();
-        let line = write(&target("home-preferences", &file.join("sub"), true), "t1");
-        assert_eq!(line.outcome, Outcome::Error);
-        assert_eq!(line.errno, Some(libc::ENOTDIR));
-        assert!(line.detail.starts_with("making "), "{line}");
         // An existing marker of the same tag: the probe never overwrites.
         fs::write(dir.join(marker_name("t2")), b"").unwrap();
-        let line = write(&target("run-dir", &dir, false), "t2");
+        let line = write(&target("run-dir", &dir), "t2");
         assert_eq!(line.errno, Some(libc::EEXIST));
         assert_eq!(line.outcome, Outcome::Error);
+        assert_eq!(
+            fs::read_dir(&*dir).unwrap().count(),
+            1,
+            "the old one is kept"
+        );
     }
 
     #[test]
@@ -297,18 +257,16 @@ mod tests {
         let made = Made {
             line: Line::new("write:x", Outcome::Allowed).detail("d"),
             file: Some(dir.join("never-made")),
-            made_dir: Some((dir.join("never-made-dir"), dir.to_path_buf())),
         };
         let line = undo(made);
         assert!(line.detail.starts_with("d; could not remove "), "{line}");
-        assert!(dir.exists());
-        assert_eq!(line.detail.matches("could not remove").count(), 2, "{line}");
+        assert_eq!(line.detail.matches("could not remove").count(), 1, "{line}");
     }
 
     #[test]
     fn a_left_marker_is_found_and_removed_on_its_own_slot_only() {
         let dir = TestDir::under(std::env::temp_dir(), "files-find");
-        let t = target("run-dir", &dir, false);
+        let t = target("run-dir", &dir);
         assert_eq!(leave(&t, "t3").outcome, Outcome::Allowed);
         assert_eq!(leave(&t, "t3").name, "leave:file:run-dir");
         let kept = find(&t, "t3", false);
@@ -324,13 +282,13 @@ mod tests {
         let dir = TestDir::under(std::env::temp_dir(), "files-find-odd");
         // A path under a regular file cannot be looked at (ENOTDIR).
         fs::write(dir.join("plain"), b"").unwrap();
-        let t = target("x", &dir.join("plain"), false);
+        let t = target("x", &dir.join("plain"));
         let line = find(&t, "t4", false);
         assert_eq!(line.outcome, Outcome::NotApplicable);
         assert_eq!(line.errno, Some(libc::ENOTDIR));
         // A marker that is a directory is found but cannot be removed as a file.
         fs::create_dir(dir.join(marker_name("t5"))).unwrap();
-        let line = find(&target("y", &dir, false), "t5", true);
+        let line = find(&target("y", &dir), "t5", true);
         assert_eq!(line.outcome, Outcome::Found);
         assert!(line.detail.ends_with("could not remove it"), "{line}");
         assert!(line.errno.is_some());

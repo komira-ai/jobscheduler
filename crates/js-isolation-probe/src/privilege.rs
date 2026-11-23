@@ -27,6 +27,34 @@ pub fn su(tools: &dyn Tools) -> Line {
         .line("priv:su")
 }
 
+/// The groups whose ids a job's process must not hold: `wheel` (0) and `admin` (80).
+const SYSTEM_GROUPS: [(&str, u32); 2] = [("wheel", 0), ("admin", 80)];
+
+/// `priv:group-wheel` and `priv:group-admin`: whether the job's process holds the group's id
+/// (allowed means it does), from `gids`, its effective and supplementary groups. A pool user
+/// is a member of neither, so a process that holds one was started with groups that are not
+/// its user's, and can read what the group may (root's `0440` files are `wheel`'s). Each line
+/// names all of `gids`.
+#[must_use]
+pub fn groups(gids: &[u32]) -> Vec<Line> {
+    let all = gids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    SYSTEM_GROUPS
+        .iter()
+        .map(|(group, gid)| {
+            let name = format!("priv:group-{group}");
+            if gids.contains(gid) {
+                Line::new(name, Outcome::Allowed).detail(format!("holds {gid}; groups {all}"))
+            } else {
+                Line::new(name, Outcome::Denied).detail(format!("groups {all}"))
+            }
+        })
+        .collect()
+}
+
 /// `priv:admin-group`: whether the account is a member of `admin` (allowed means it is).
 #[must_use]
 pub fn admin(tools: &dyn Tools, who: &Who) -> Line {
@@ -193,5 +221,28 @@ mod tests {
             assert!(line.detail.starts_with("cannot read the shell: "), "{line}");
             assert_eq!(tools.lines().len(), 1, "only the read was asked");
         }
+    }
+
+    #[test]
+    fn a_process_holding_wheel_or_admin_is_allowed_by_name() {
+        let lines: Vec<String> = groups(&[20, 0, 12])
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "priv:group-wheel: allowed; holds 0; groups 20 0 12",
+                "priv:group-admin: denied; groups 20 0 12"
+            ]
+        );
+        let lines: Vec<String> = groups(&[20, 80]).iter().map(ToString::to_string).collect();
+        assert_eq!(
+            lines,
+            [
+                "priv:group-wheel: denied; groups 20 80",
+                "priv:group-admin: allowed; holds 80; groups 20 80"
+            ]
+        );
     }
 }

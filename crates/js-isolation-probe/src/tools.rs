@@ -96,17 +96,17 @@ impl Ran {
 
     /// The usual reading of a tool run as a probe: exit 0 is [`Outcome::Allowed`], another
     /// exit [`Outcome::Denied`] (with [`Ran::why`]), a tool that is not installed
-    /// [`Outcome::NotApplicable`], and one that could not start otherwise or timed out
-    /// [`Outcome::Error`].
+    /// [`Outcome::NotApplicable`], one the system refused to start (`EPERM`, `EACCES`)
+    /// [`Outcome::Denied`] with the error number, and one that could not start otherwise or
+    /// timed out [`Outcome::Error`].
     #[must_use]
     pub fn line(&self, name: &str) -> Line {
         if let Some(err) = &self.start {
-            let outcome = if err.kind() == io::ErrorKind::NotFound {
-                Outcome::NotApplicable
-            } else {
-                Outcome::Error
-            };
-            return Line::new(name, outcome).detail(self.why());
+            if err.kind() == io::ErrorKind::NotFound {
+                return Line::new(name, Outcome::NotApplicable).detail(self.why());
+            }
+            // The sandbox refuses to start a setuid tool (sudo, su, crontab, at) with EPERM.
+            return Line::refused(name, err, self.why());
         }
         if self.ok() {
             return Line::new(name, Outcome::Allowed);
@@ -367,12 +367,18 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_tool_is_not_applicable_and_other_start_failures_are_errors() {
+    fn a_missing_tool_is_not_applicable_a_refused_start_denied_and_others_errors() {
         let missing = Ran::unstarted(io::Error::from(io::ErrorKind::NotFound));
         assert_eq!(missing.line("priv:at").outcome, Outcome::NotApplicable);
         assert!(missing.why().starts_with("cannot start: "));
-        let refused = Ran::unstarted(io::Error::from_raw_os_error(libc::EACCES));
-        assert_eq!(refused.line("priv:at").outcome, Outcome::Error);
+        // What a Mac's sandbox answers when a job starts a setuid tool.
+        let refused = Ran::unstarted(io::Error::from_raw_os_error(libc::EPERM));
+        let line = refused.line("priv:sudo");
+        assert_eq!(line.outcome, Outcome::Denied);
+        assert_eq!(line.errno, Some(libc::EPERM));
+        assert!(line.detail.starts_with("cannot start: "), "{line}");
+        let odd = Ran::unstarted(io::Error::from_raw_os_error(libc::ENOEXEC));
+        assert_eq!(odd.line("priv:at").outcome, Outcome::Error);
     }
 
     #[test]

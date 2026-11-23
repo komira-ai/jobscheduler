@@ -11,13 +11,15 @@ succeed where a job's must not):
 
 - it writes only files it names (`.js-isolation-probe-<tag>`, empty) and removes them; `probe` removes at once
   whatever else it managed to make (a launchd job, a crontab, an `at` job, an attribute on its own record);
+- it makes no folder: a place that is absent is `n/a` (a folder a job makes under `~/Library` is one neither the
+  job nor the slot's reset can remove);
 - it touches the job account's own state only: its pasteboard (overwritten, then emptied by `find`), its preferences
-  domain `com.komira.js-isolation-probe`, its keychain, and its crontab, which it uses only when the account has none;
+  domain `com.komira.js-isolation-probe` and its keychain (each only when the home already has the folder it is kept
+  in), and its crontab, which it uses only when the account has none;
 - it only connects to and looks up the addresses it is given (no scan), and sends nothing;
 - it never prints the contents of a file it opened, only whether it opened and its size;
 - the markers `leave` keeps are removed by `find` on the same slot when the reset did not remove them. The
-  application and plists `leave` writes into the run directory, and any `Library/` folders it made in the home, go
-  with the slot's reset (the home is emptied).
+  application and plists `leave` writes into the run directory go with the slot's reset (the home is emptied).
 
 ## Output
 
@@ -41,7 +43,7 @@ pass, 1 for a failure, 2 when the probe could not run.
 
 | phase | what it does | judged by |
 |---|---|---|
-| `probe` | a file in the run directory and in every place a job must not write (`/private/tmp`, `/private/var/tmp`, `/Users/Shared`, `/Library/Caches`, `/opt/homebrew`, `/usr/local`, `/private/etc`, `/Library/LaunchDaemons`, the user's `Library/LaunchAgents` and `Library/Preferences`, its `/private/var/folders` temporary directory, and each `--write`); opening `/private/etc/sudoers` and each `--read`; one TCP connect per `--connect` and one lookup per `--lookup`; `sudo -n`, `su` with no password, membership of `admin`, a write of its own record's shell with the same value and of an attribute of its own, a launchd job in `user/<uid>` and `gui/<uid>`, a crontab and an `at` job (each removed at once when allowed); the file size, process, descriptor and memory limits; free space; and 10,000 small files made and removed | `[probe]` |
+| `probe` | a file in the run directory and in every place a job must not write (`/private/tmp`, `/private/var/tmp`, `/Users/Shared`, `/Library/Caches`, `/opt/homebrew`, `/usr/local`, `/private/etc`, `/Library/LaunchDaemons`, the user's `Library/LaunchAgents` and `Library/Preferences`, its `/private/var/folders` temporary directory, and each `--write`); opening `/private/etc/sudoers` and each `--read`; one TCP connect per `--connect` and one lookup per `--lookup`; `sudo -n`, `su` with no password, membership of `admin`, whether the process holds the `wheel` or `admin` group id, a write of its own record's shell with the same value and of an attribute of its own, a launchd job in `user/<uid>` and `gui/<uid>`, a crontab and an `at` job (each removed at once when allowed); the file size, process, descriptor and memory limits; free space; and 10,000 small files made and removed | `[probe]` |
 | `leave --token T` | one marker of every kind it is allowed to make, kept: a named semaphore, a System V semaphore and shared memory segment, a preferences key, a Launch Services registration, a pasteboard entry, a keychain item, a background process in its own session, a crontab, an `at` job, launchd jobs, an attribute on its own record, and a file in every place `probe` writes; prints the `find` arguments | `[leave]` |
 | `find --token T --left-by-uid ... --left-by-user ... --left-by-home ...` | looks for each marker; on the slot that left them (the same uid) removes each one it finds, on another slot removes nothing | `[find-same-slot]` or `[find-other-slot]` |
 
@@ -68,8 +70,9 @@ the host's bundle store, and add the digest to the host's `--bundle-allow-file` 
 ## The jobs
 
 The arguments name what differs per host: another pool user's home (a slot that is not the job's), the bundle store,
-the agent's and the helper's files, the job service, a host on the same network, the cloud metadata address, a public
-address, a port that listens on loopback, and a public host name. Every name here is pinned, so each must be given.
+the agent's and the helper's files, another service's key, the job service, a host on the same network, the cloud
+metadata address, a public address, a port that listens on loopback, an address the host's packet filter lets jobs with
+an allow-list reach, and a public host name. Every name here is pinned, so each must be given.
 
 ```
 js job run --server <job service> --token-file <client token> --id <id>-probe \
@@ -84,11 +87,13 @@ js job run --server <job service> --token-file <client token> --id <id>-probe \
   --spec.args --read --spec.args agent-token=/etc/js-agent/token \
   --spec.args --read --spec.args agent-state=/var/db/js-agent/state \
   --spec.args --read --spec.args helper-state=/var/db/js-mac-session \
+  --spec.args --read --spec.args host-key=<another service's key file> \
   --spec.args --connect --spec.args job-service=<host:port> \
   --spec.args --connect --spec.args lan-host=<host:port> \
   --spec.args --connect --spec.args metadata=<metadata address>:80 \
   --spec.args --connect --spec.args public=<public address>:443 \
   --spec.args --connect --spec.args loopback=127.0.0.1:<listening port> \
+  --spec.args --connect --spec.args pf-endpoint=<an allow-listed host:port> \
   --spec.args --lookup --spec.args public-name=<public host name>
 ```
 
@@ -97,8 +102,9 @@ as the one before it):
 
 1. `leave`: the same job with `--spec.args leave --spec.args --token --spec.args <token>` and the two `--write`
    arguments. Its output's `# next:` line gives the `find` arguments.
-2. `find` on another slot: start a job that holds the slot (`--spec.command /bin/sleep --spec.args 120`), and while it
-   runs, the `find` job with the `# next:` arguments and the two `--write` arguments.
+2. `find` on another slot: start a job that holds the slot (the same image and command with
+   `--spec.args linger --spec.args --token --spec.args hold --spec.args --secs --spec.args 120`; a job needs an
+   image), and while it runs, the `find` job with the `# next:` arguments and the two `--write` arguments.
 3. `find` on the same slot, alone: it removes whatever the reset left.
 
 A marker that only the same slot can remove and no `find` on that slot removed (the slot was broken by its reset, or

@@ -240,10 +240,20 @@ fn linger_row(row: &str, tag: &str) -> Option<(i32, i32, u32)> {
 
 /// Makes the marker of `kind`. A made marker is [`Outcome::Allowed`], with the handle its
 /// removal needs; a refusal is [`Outcome::Denied`] (or an error), with why.
+///
+/// A preferences key and a keychain item are made only when the home already has the folder
+/// they are kept in (`Library/Preferences`, `Library/Keychains`): the system would make it,
+/// and a folder made under `~/Library` is one neither a job nor the slot's reset can remove.
 pub fn make(ctx: &Ctx<'_>, kind: Kind, prefix: &str, tag: &str) -> (Line, Option<String>) {
     let name = format!("{prefix}:{}", kind.name());
     let tools = ctx.tools;
     let who = ctx.who;
+    if let Some(dir) = kept_in(kind, who)
+        && !dir.is_dir()
+    {
+        let why = format!("{} is absent; not made", dir.display());
+        return (Line::new(name, Outcome::NotApplicable).detail(why), None);
+    }
     match kind {
         Kind::NamedSemaphore => {
             let sem = ipc::semaphore_name(tag);
@@ -333,6 +343,15 @@ pub fn make(ctx: &Ctx<'_>, kind: Kind, prefix: &str, tag: &str) -> (Line, Option
                 .line(&name),
             None,
         ),
+    }
+}
+
+/// The folder under the home a kind's marker is kept in, when the system would make it.
+fn kept_in(kind: Kind, who: &Who) -> Option<PathBuf> {
+    match kind {
+        Kind::Preferences => Some(who.home.join("Library/Preferences")),
+        Kind::Keychain => Some(who.home.join("Library/Keychains")),
+        _ => None,
     }
 }
 

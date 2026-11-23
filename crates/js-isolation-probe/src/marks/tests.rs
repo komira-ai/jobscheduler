@@ -22,11 +22,40 @@ fn token(test: &str) -> String {
     format!("{test}{}", std::process::id())
 }
 
+/// A home as a used one: its run directory and the `Library` folders a pool user's home has
+/// once the system made them.
 fn home(name: &str) -> (TestDir, Who) {
     let dir = TestDir::under(std::env::temp_dir(), name);
     fs::create_dir(dir.join("exec")).unwrap();
+    fs::create_dir_all(dir.join("Library/Preferences")).unwrap();
+    fs::create_dir_all(dir.join("Library/Keychains")).unwrap();
     let who = test_who(&dir);
     (dir, who)
+}
+
+#[test]
+fn preferences_and_keychain_are_not_made_in_an_emptied_home() {
+    let dir = TestDir::under(std::env::temp_dir(), "marks-emptied");
+    fs::create_dir(dir.join("exec")).unwrap();
+    let who = test_who(&dir);
+    let tools = Fake::default();
+    let ctx = ctx(&tools, &who);
+    assert_eq!(
+        leave(&ctx, Kind::Preferences, "t1").to_string(),
+        format!(
+            "leave:preferences: n/a; {}/Library/Preferences is absent; not made",
+            dir.display()
+        )
+    );
+    assert_eq!(
+        leave(&ctx, Kind::Keychain, "t1").to_string(),
+        format!(
+            "leave:keychain: n/a; {}/Library/Keychains is absent; not made",
+            dir.display()
+        )
+    );
+    assert!(tools.lines().is_empty(), "no tool is run");
+    assert!(!dir.join("Library").exists());
 }
 
 fn missing() -> Ran {
@@ -326,6 +355,29 @@ fn the_pasteboard_holds_the_text_or_cannot_be_read() {
     );
     assert_eq!(remove(&ctx, Kind::Pasteboard, "t1", &who, None), Ok(()));
     assert_eq!(tools.asked.borrow().last().unwrap().1, "");
+}
+
+#[test]
+fn a_keychain_item_is_left_in_a_home_that_has_a_keychain_folder() {
+    let (_dir, who) = home("marks-keychain-leave");
+    let tools = Fake::default()
+        .exit(
+            "/usr/bin/security add-generic-password -s com.komira.js-isolation-probe -a t1 -w t1",
+            0,
+            "",
+            "",
+        )
+        .exit(
+            "/usr/bin/security find-generic-password -s com.komira.js-isolation-probe -a t1",
+            0,
+            "keychain: ...",
+            "",
+        );
+    let ctx = ctx(&tools, &who);
+    assert_eq!(
+        leave(&ctx, Kind::Keychain, "t1").to_string(),
+        "leave:keychain: allowed"
+    );
 }
 
 #[test]

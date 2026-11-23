@@ -28,6 +28,8 @@ pub struct Host<'a> {
     pub tools: &'a dyn Tools,
     /// Who the job runs as.
     pub who: Who,
+    /// The process's effective and supplementary group ids.
+    pub groups: Vec<u32>,
     /// The built-in write targets for an account ([`crate::host::writes`] on a Mac).
     pub writes: &'a dyn Fn(&Who) -> Vec<Target>,
     /// The built-in reads ([`crate::host::reads`] on a Mac).
@@ -193,6 +195,7 @@ impl Probe<'_> {
         lines.push(privilege::sudo(host.tools));
         lines.push(privilege::su(host.tools));
         lines.push(privilege::admin(host.tools, who));
+        lines.extend(privilege::groups(&host.groups));
         lines.push(privilege::record_same_value(host.tools, who));
         lines.extend(
             Kind::PRIVILEGED
