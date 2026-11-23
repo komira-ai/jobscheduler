@@ -432,3 +432,100 @@ fn a_put_root_that_is_no_mount_root_takes_its_put_mount() {
     assert_eq!(fs::read(dir.join("pack")).unwrap(), b"pack");
     assert!(rig.rt.outputs_report(&handle()).is_some());
 }
+
+/// Asserts the put flags through the whole macOS agent, as its command line and its start read
+/// them: beside a native agent's flags, `--native-put-root` and `--native-put-user` given as a
+/// number or as a user of the directory service (`nobody`, on every Mac) start the agent,
+/// which says hello. One without the other, a root that is not a directory and a user the
+/// directory service does not know end it with status 2 before the hello, naming the flag by
+/// exact text; and `--no-jobs` refuses each flag by name. Catches a Mac agent that drops the
+/// flags, checks them only in a struct no command line reaches, or starts with a put ingest it
+/// cannot hand to the node.
+#[test]
+fn the_put_flags_go_through_the_mac_agents_start() {
+    use serde_json::Value;
+
+    use super::agent::{hello_on, native_flags};
+    use crate::jobs::fake::FakeMachine;
+    use crate::support::{
+        CountingSleeper, Jobs, Lowest, Scratch, Script, ScriptConnector, code, flags, mac_host,
+        run_on_defaulted, welcome,
+    };
+
+    let dir = Scratch::new("native-put-agent");
+    fs::create_dir_all(dir.path("put")).unwrap();
+    fs::write(dir.path("not-a-dir"), "").unwrap();
+    let put = dir.path("put").display().to_string();
+    // The native flags make their directories once; each run of the agent reuses them.
+    let base = native_flags(&dir);
+    let with = |extra: &[&str]| {
+        let mut given = base.clone();
+        given.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        hello_on(&mac_host(), &given, welcome(1))
+    };
+    for user in ["281", "nobody"] {
+        let (ran, hello) = with(&["--native-put-root", &put, "--native-put-user", user]);
+        assert_eq!(ran.status(), code(0), "{user}: {}", ran.err);
+        assert_ne!(hello, Value::Null, "{user}: no hello");
+    }
+    let file = dir.path("not-a-dir").display().to_string();
+    let refused = [
+        (
+            vec!["--native-put-root", put.as_str()],
+            "--native-put-root: needs --native-put-user".to_owned(),
+        ),
+        (
+            vec!["--native-put-user", "nobody"],
+            "--native-put-user: needs --native-put-root".to_owned(),
+        ),
+        (
+            vec!["--native-put-root", &file, "--native-put-user", "nobody"],
+            format!("--native-put-root: {file} is not a directory"),
+        ),
+        (
+            vec![
+                "--native-put-root",
+                &put,
+                "--native-put-user",
+                "_js-no-such-user",
+            ],
+            "--native-put-user: no user \"_js-no-such-user\"".to_owned(),
+        ),
+    ];
+    for (extra, why) in refused {
+        let (ran, hello) = with(&extra);
+        assert_eq!(ran.status(), code(2), "{why}: {}", ran.err);
+        assert_eq!(
+            ran.err.lines().last(),
+            Some(format!("js-agent: {why}").as_str()),
+            "{}",
+            ran.err
+        );
+        assert_eq!(hello, Value::Null, "{why}");
+    }
+    for (flag, value) in [
+        ("--native-put-root", put.as_str()),
+        ("--native-put-user", "nobody"),
+    ] {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (std::sync::Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
+}
