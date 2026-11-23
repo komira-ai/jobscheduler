@@ -645,9 +645,7 @@ fn a_running_jobs_cpu_peak_is_its_busiest_five_seconds() {
         ..Node::hooks(LONG, LONG)
     };
     let mut runtime = node.open_with(hooks, std::sync::Arc::new(crate::node::NoImages));
-    let id = runtime
-        .create_and_start(&node.spec("r9-hold"))
-        .expect("started");
+    let id = crate::adopt::started(&node, &mut runtime, &node.spec("r9-hold"));
     let cgroup = node.cgroup_of(&id.0);
     for used in 1..=6_u64 {
         let stat = format!("usage_usec {}\n", used * 20_000_000);
