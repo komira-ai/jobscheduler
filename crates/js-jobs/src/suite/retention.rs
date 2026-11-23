@@ -80,6 +80,7 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
         }),
         logs: None,
         cpu_series: Some(series()),
+        memory_series: None,
         input_failure: None,
     };
     assert_eq!(
@@ -515,6 +516,7 @@ pub fn an_overlong_tail_is_cut_on_a_character_boundary<B: Backend>(backend: &B) 
             usage: None,
             logs: None,
             cpu_series: None,
+            memory_series: None,
         },
     };
     let ended = rig.jobs.end_job(&id, end).expect("ends");

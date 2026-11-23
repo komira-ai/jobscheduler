@@ -525,6 +525,7 @@ fn job_result_with_input_failure_wire_form() {
         input_failure: Some(refusal::TREE_READ_FAILED.into()),
         usage: None,
         cpu_series: None,
+        memory_series: None,
     };
     let wire = json!({
         "job_id": "job-1",

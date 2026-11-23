@@ -79,6 +79,16 @@ fn the_layout_is_pinned_byte_for_byte() {
             ]
             .concat(),
         ),
+        (
+            65,
+            [
+                &[0, 4][..],
+                &9_500_000u64.to_be_bytes(),
+                &[1],
+                &[0, 0, 1, 0, 0, 0, 0, 7],
+            ]
+            .concat(),
+        ),
     ]);
     // The rootfs fields (tags 54 to 58) are pinned by `rootfs_fields`' own tests.
     let full = super::rootfs_fields::tests::plain_job();

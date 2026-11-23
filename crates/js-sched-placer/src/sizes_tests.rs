@@ -939,3 +939,6 @@ mod farm;
 
 #[path = "sizes_follows_use_tests.rs"]
 mod follows_use;
+
+#[path = "sizes_memory_series_tests.rs"]
+mod memory_series;

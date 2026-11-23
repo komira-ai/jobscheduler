@@ -6,9 +6,12 @@
 //! by its host certificate. On the host that install leaves, the host group's config package is
 //! rolled over the running agent (the config hook restarts it onto the new flags) and then the
 //! agent itself is updated to the next version. The host the lease server lists carries the
-//! capability `full-disk-access` as `not-granted`: the agent the hosted runner installs is not
-//! signed by the release's identity and the runner has no privacy profile, so it holds no Full
-//! Disk Access, and the agent reports what its own listing shows. (That such an agent refuses every native job with
+//! capability `full-disk-access` as the agent found it at its start, which this test reads back
+//! from what the agent did with it: the agent opens its account pool, and so makes the directory
+//! of `--native-accounts`, only when it holds Full Disk Access (`granted`; the release's hosted
+//! runner gives it to a launchd daemon although the agent is not signed by the release's
+//! identity and no privacy profile is installed), and refuses every native job otherwise
+//! (`not-granted`). (That such an agent refuses every native job with
 //! `no-full-disk-access` is the agent's own tests; submitting a job here would need a lease
 //! request, a native job body and its outcome read back, which is more machinery than this
 //! install test carries.) What of hostkeeper's daemon is reproduced, and
@@ -49,7 +52,7 @@ use hostkeeper_hook::Verdict;
 use hostkeeper_steps::Staged;
 use js_testkit::dir::TestDir;
 
-use host::{FLAGS_FILE, HOST_ID, LeaseServer, studio};
+use host::{FLAGS_FILE, HOST_ID, LeaseServer, NATIVE_ACCOUNTS, studio};
 use hostkeeper::{
     AGENT, CONFIG, CONFIG_SERVICE, Daemon, PACKAGES, RUN, SERVICE, STATE_DIR, current_link,
     service_dir,
@@ -117,6 +120,12 @@ fn inputs() -> Inputs {
         !service_dir().exists(),
         "{} exists: this is not a host js-agent was never installed on",
         service_dir().display()
+    );
+    // Only the agent's open of its account pool may make it: the Full Disk Access the host
+    // list shows is judged by it.
+    assert!(
+        !Path::new(NATIVE_ACCOUNTS).exists(),
+        "{NATIVE_ACCOUNTS} exists: this is not a host js-agent was never installed on"
     );
     found
 }
@@ -275,13 +284,22 @@ fn config_update(daemon: &Arc<Daemon>, server: &LeaseServer, scratch: &Path) {
     );
 }
 
-/// The host entry carries the agent's own answer as the capability `full-disk-access`:
-/// `not-granted`, as the agent of this runner is unsigned and holds no grant.
-fn assert_full_disk_access_not_granted(server: &LeaseServer) {
+/// The host entry carries the agent's own answer as the capability `full-disk-access`, and the
+/// answer is the one the agent acted on: `granted` when it opened its account pool (the
+/// directory of `--native-accounts` is there, which only an open makes), `not-granted` when it
+/// did not. `undetermined`, a missing key or a state the agent did not act on fails.
+fn assert_full_disk_access_as_found(server: &LeaseServer) {
+    let found = if Path::new(NATIVE_ACCOUNTS).is_dir() {
+        "granted"
+    } else {
+        "not-granted"
+    };
     let seen = server.host(HOST_ID);
     assert_eq!(
-        seen["capabilities"]["full-disk-access"], "not-granted",
-        "the host list shows the agent without Full Disk Access: {seen}"
+        seen["capabilities"]["full-disk-access"],
+        found,
+        "the host list shows the Full Disk Access the agent found ({NATIVE_ACCOUNTS} is there: {}): {seen}",
+        found == "granted"
     );
 }
 
@@ -325,7 +343,7 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
         versions.update_version.as_str(),
         "{seen}"
     );
-    assert_full_disk_access_not_granted(server);
+    assert_full_disk_access_as_found(server);
 }
 
 /// js-agent on a Mac from its first install to an update: a first install whose cutover failed
@@ -357,7 +375,8 @@ fn agent_update(daemon: &Arc<Daemon>, server: &LeaseServer, installed: &Staged, 
 /// directory (`/var` is one) or leaves the agent on the old flags, and an update of a running
 /// agent that does not switch `current` and `previous`, or does not bring the agent of the next
 /// version up and joined, and an agent that does not report whether it holds Full Disk
-/// Access (the host list then lacks the capability or shows another state).
+/// Access (the host list then lacks the capability) or reports another state than the one it
+/// opened its account pool by.
 #[test]
 #[ignore = "needs root on a disposable Mac: installs the js-agent package, updates it and loads launchd jobs"]
 fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_package_and_updates_to_the_next_version()
@@ -383,7 +402,7 @@ fn js_agent_installs_on_a_mac_after_a_failed_first_install_takes_a_config_packag
     // The runtime the agent's hello named, which the host list does not show.
     let itself = server.host_as_itself(HOST_ID);
     assert_eq!(itself["runtime"], "sandbox-exec", "{itself}");
-    assert_full_disk_access_not_granted(&server);
+    assert_full_disk_access_as_found(&server);
 
     config_update(&daemon, &server, &dir.path().join("config-pkg"));
     agent_update(&daemon, &server, &installed, &versions);

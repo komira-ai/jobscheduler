@@ -901,5 +901,6 @@ pub(crate) fn result(
         input_failure: None,
         usage: None,
         cpu_series: None,
+        memory_series: None,
     }
 }
