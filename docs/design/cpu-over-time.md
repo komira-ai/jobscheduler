@@ -27,9 +27,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
      figure above is of booking-only placement; load-based placement runs once #1036's agent is on the six hosts.
 2. A booking is one number. A class can average a few cores and burst to 20 for a few seconds. The sum of bookings
    can then sit at 1.1x of a host's cores while the real demand in some seconds is several times that.
-3. Even read, a host cannot measure above its cores (READ: `NodeLoad::busy_millicores_since`), so it reads 88 and
-   admits until the bookings alone reach 96.8 (READ: `WorkerLoad::left`). Only pressure would show overload, and the
-   agent does not send it.
+3. Even read, a host cannot measure above its cores (READ: `NodeLoad::busy_millicores_since`, `WorkerLoad::left`):
+   it reads 88 and admits until bookings reach 96.8. Only pressure shows overload, and no agent sends it.
 4. The agent reads every job's CPU counter once a second, keeps the highest five-second rate, and throws the rest
    away (READ: `crates/js-agent/src/crun/peak.rs`, `PeakWindow`). The server therefore cannot tell a steady 2 cores
    from 1 core for 60 s followed by 20 cores for 3 s.
@@ -64,8 +63,8 @@ with no CPU limit). **MEASURED**, counted from the export or the farm's metrics,
    - 11.3% of jobs show 10 ms or less (MEASURED);
    - a run of a few seconds can show more CPU than 88 cores give in its recorded time (REPLAY: the replay holds
      such runs to 24 cores, the most any run of 10 s or more averaged, 23.3).
-2. The agent also records, per host, busy cores and CPU pressure (the kernel's "share of time some task waited for
-   a core") for every second. They travel as small arrays inside the existing 5-second heartbeat.
+2. The heartbeat reports the WHOLE HOST, per second: busy cores and CPU pressure from host-wide counters, so the
+   agent and everything else count (the owner's ruling). A job's series comes from its own cgroup.
 3. For each class the server keeps a decayed distribution of per-second CPU (section 4): a level, a start shape
    for ages 0 to 128 s in 2-second slots, and a tail. Memory is learned per class the same way (section 4).
 4. Today's median booking stays the flat ceiling beside it (decision 3).
@@ -192,9 +191,10 @@ new recorder beside `PeakWindow` receives the same `(monotonic time, usage_usec)
   restart, never learned from).
 - **Guard:** the server ignores a series whose total CPU differs from the exact `cpu_usage_usec` by more than 5%.
 
-**Per host, on the agent.** The heartbeat carries the cumulative CPU time of the actions control group every 5 s
-(READ). New: five per-second values of busy cores and five of `cpu.pressure` "some" in each heartbeat. Whether the
-actions group exposes pressure is **UNKNOWN**; one read-only check on one host answers it.
+**Per host, on the agent: the whole host** (the owner's ruling). Today the heartbeat carries the jobs' group's CPU
+time every 5 s (READ: `NodeLoad.cpu_usage_usec`, the actions cgroup). It becomes the whole host's: five per-second
+values of busy cores (`/proc/stat`) and of `cpu.pressure` "some" (`/proc/pressure/cpu`) in each heartbeat. The
+agent, the tree store and anything else on the host then count. Each job's series stays its own cgroup's.
 
 **How it travels.** One optional field on the job result, beside `JobUsage` (which is `Copy`, READ). A receiver
 ignores unknown fields; precedent `cpu_peak`, with a test that the previous release reads a result that carries it.
@@ -248,8 +248,8 @@ teaches the class: a run slowed by contention may only raise it, as today.
   larger of the 60th percentile and half the peak; then a 10 to 15% margin and the maximum over the last hour.
 - **What is taken here:** #1035's rule as it is. The maximum over recent runs is Autopilot's choice for minimal
   tolerance, which is ours because a job here may not be killed.
-- **The host's measured memory.** The working set in the heartbeat (READ: `NodeLoad.working_set_bytes`) enters as
-  for CPU: the larger of it and the bookings it covers, plus what it does not cover yet.
+- **The host's measured memory:** the whole host's memory in use (today the jobs' group's working set, READ:
+  `NodeLoad.working_set_bytes`), used as for CPU.
 - **Nothing is ever killed for memory.** A host whose bookings leave no room is refused as `booked-memory`.
 
 ## 5. The placement rule
@@ -270,8 +270,8 @@ L_h(k) = sum_j E_j(k) + B_h * max(0, 1 - k/5)
 B_h    = max(0, measured_busy_h - sum over covered jobs of E_j(0))          // 0 when the reading is stale
 fits(n, h)  <=>  for every slot k in 0..64:  L_h(k) + E_n(k) <= cap
 ```
-`measured_busy_h` is the existing reading (READ: `WorkerLoad::measured`, the larger of the last two windows, stale
-after 15 s). "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
+`measured_busy_h` is the whole host's busy CPU (section 3), the larger of the last two windows, stale after 15 s
+(READ: `WorkerLoad::measured`); work that is no job's shows in `B_h` at every reading. "Covered" means running at the previous reading. At slot 0 this is today's load rule; with all profiles
 flat every slot holds the same number. That equality is the first test. Among hosts where the job fits, the existing
 scorer ranks them. The two flat checks that exist (`Room::fits`, and `Capacity::has_room` in `place_claimed`) stay,
 so the curve rule can only hold a job that today would be placed. After the 30 s hold bound the job skips the curve
@@ -288,8 +288,8 @@ second, each 1 core for ages 0 to 20 s, 20 cores for 20 to 24 s, then 1 core, so
 ## 7. When the prediction is wrong
 Nothing running is ever killed, throttled or moved: the host runs overcommitted until its jobs end, which the owner
 accepts. What corrects is the next placement:
-- **A job runs longer than every recorded run, or bursts at another time:** it is charged flat; the measured busy
-  above the expectations enters `B_h` for 10 s; the profile learns it when the run ends.
+- **A job runs longer than every recorded run, or bursts at another time:** it is charged flat; the whole host's
+  measured busy above the expectations enters `B_h` for 10 s; the profile learns it when the run ends.
 - **A class whose curve misfits:** the self-check turns it flat within about 16 runs.
 - **No oscillation, no starvation** (argued, not shown): only the next job is held; an empty host fits any job;
   queue order binds; after 30 s the curve test is skipped. In the replay every arm finishes every job.
