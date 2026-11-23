@@ -62,7 +62,7 @@ pub fn checked(printed: &str, folders: &Path, uid: u32) -> io::Result<PathBuf> {
 pub(super) fn folders_via(
     account: &Account,
     root: &Path,
-    mut run: impl FnMut(&[String]) -> io::Result<Ran>,
+    run: &mut dyn FnMut(&[String]) -> io::Result<Ran>,
 ) -> io::Result<Vec<PathBuf>> {
     NAMES
         .iter()

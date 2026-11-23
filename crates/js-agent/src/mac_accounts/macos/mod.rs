@@ -37,7 +37,7 @@ use super::host::{
 /// folder.
 pub fn own_folders(account: &Account, home: &Path) -> io::Result<Vec<PathBuf>> {
     let root = Path::new("/private/var/folders");
-    super::user_dirs::folders_via(account, root, |command| {
+    super::user_dirs::folders_via(account, root, &mut |command| {
         AsAccount.run(account, home, command)
     })
 }
