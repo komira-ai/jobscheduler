@@ -15,11 +15,11 @@ use sha2::{Digest as _, Sha256};
 use super::commit::commit_with;
 use super::{Committed, PutTarget, commit};
 
-/// The put directory `cas/b/r1/<nonce>` under `root`, not made yet.
-fn target(root: &Path, nonce: &str) -> PutTarget {
+/// The put directory `cas/b/r1/<leaf>` under `root`, not made yet.
+fn target(root: &Path, leaf: &str) -> PutTarget {
     PutTarget {
-        dir: root.join("cas/b/r1").join(nonce),
-        key_prefix: format!("cas/b/r1/{nonce}"),
+        dir: root.join("cas/b/r1").join(leaf),
+        key_prefix: format!("cas/b/r1/{leaf}"),
     }
 }
 
@@ -94,13 +94,13 @@ fn the_output_is_committed_as_it_is() {
     let scratch = TestDir::under(std::env::temp_dir(), "put-as-is");
     let root = scratch.path().join("put");
     let big: Vec<u8> = (0..(1 << 20) + 7).map(|n: u32| (n % 251) as u8).collect();
-    for (nonce, bytes) in [("empty", Vec::new()), ("big", big)] {
-        let from = collected(&scratch.path().join(nonce), &bytes);
-        let to = target(&root, nonce);
+    for (leaf, bytes) in [("empty", Vec::new()), ("big", big)] {
+        let from = collected(&scratch.path().join(leaf), &bytes);
+        let to = target(&root, leaf);
         let done = commit(&from, &to, &none).unwrap();
-        assert_eq!(fs::read(to.dir.join("pack")).unwrap(), bytes, "{nonce}");
-        assert_eq!(done.sha256, hex::encode(Sha256::digest(&bytes)), "{nonce}");
-        assert_eq!(done.bytes, bytes.len() as u64, "{nonce}");
+        assert_eq!(fs::read(to.dir.join("pack")).unwrap(), bytes, "{leaf}");
+        assert_eq!(done.sha256, hex::encode(Sha256::digest(&bytes)), "{leaf}");
+        assert_eq!(done.bytes, bytes.len() as u64, "{leaf}");
     }
 }
 
@@ -131,11 +131,11 @@ fn an_output_that_is_not_a_regular_file_is_refused() {
             format!("{}: not a regular file", dir.display()),
         ),
     ];
-    for (nonce, from, said) in cases {
-        let to = target(&root, nonce);
+    for (leaf, from, said) in cases {
+        let to = target(&root, leaf);
         let why = commit(from, &to, &none).unwrap_err();
-        assert_eq!(why.to_string(), said, "{nonce}");
-        assert_eq!(names(&to.dir), Vec::<String>::new(), "{nonce}");
+        assert_eq!(why.to_string(), said, "{leaf}");
+        assert_eq!(names(&to.dir), Vec::<String>::new(), "{leaf}");
     }
     // A socket cannot be opened at all (the error the system gives differs by system).
     let to = target(&root, "socket");
