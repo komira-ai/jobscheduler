@@ -49,7 +49,7 @@ fn start_sleeper(rig: &mut Rig, run_id: &str) -> (RunHandle, i32) {
 fn an_ended_run_is_answered_from_its_stored_status() {
     let mut rig = Rig::new("ended-stored");
     rig.launcher.fail(Failing::ExitOnce);
-    let id = rig.start("r0", "/bin/true", &[]);
+    let id = rig.start("r0", "/usr/bin/true", &[]);
     let before = rig.launcher.looks();
     assert_eq!(rig.rt.poll(&id).unwrap(), exited(7));
     for _ in 0..3 {
@@ -68,7 +68,7 @@ fn an_ended_run_is_answered_from_its_stored_status() {
 #[test]
 fn a_supervisor_that_cannot_be_asked_leaves_the_run_gone() {
     let mut rig = Rig::new("ended-ask-fails");
-    let id = rig.start("r0", "/bin/true", &[]);
+    let id = rig.start("r0", "/usr/bin/true", &[]);
     rig.launcher.fail_looks(true);
     let before = rig.launcher.looks();
     assert_eq!(rig.rt.poll(&id).unwrap(), Status::Gone);
@@ -88,7 +88,7 @@ fn a_supervisor_that_cannot_be_asked_leaves_the_run_gone() {
 fn a_setup_failure_found_at_the_end_leaves_the_run_gone() {
     let mut rig = Rig::new("ended-setup");
     rig.launcher.fail(Failing::SetupAtExit);
-    let id = rig.start("r0", "/bin/true", &[]);
+    let id = rig.start("r0", "/usr/bin/true", &[]);
     let status = rig.rt.poll(&id).unwrap();
     assert_eq!(status, Status::Gone);
     rig.rt.remove(&id).unwrap();
