@@ -15,6 +15,24 @@ fn tools(limit: Duration) -> System {
     System { limit, exe: exe() }
 }
 
+/// The most looks [`reaped`] takes at a killed process.
+const LOOKS: u32 = 50_000_000;
+
+/// Whether the process `pid`, killed, is reaped within [`LOOKS`] looks (not a time): `linger`'s
+/// thread takes its status, after which the pid names no process and a signal to it fails with
+/// `ESRCH` (a killed process not yet reaped still takes one).
+fn reaped(tools: &System, pid: i32) -> bool {
+    (0..LOOKS).any(|_| {
+        let gone = tools
+            .kill(pid)
+            .is_err_and(|err| err.raw_os_error() == Some(libc::ESRCH));
+        if !gone {
+            std::thread::yield_now();
+        }
+        gone
+    })
+}
+
 #[test]
 fn linger_with_no_time_ends_at_once() {
     let out = Command::new(exe())
@@ -117,6 +135,8 @@ fn a_tool_that_is_not_installed_cannot_start() {
     assert!(ran.why().starts_with("cannot start: "), "{}", ran.why());
 }
 
+/// A linger starts in the background and is killed, and the thread that waits on it reaps it
+/// before the test goes on, so the reaping is done (and measured) by the time the test ends.
 #[test]
 fn a_lingering_process_is_started_in_the_background_and_killed() {
     let dir = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "binary-linger");
@@ -124,6 +144,10 @@ fn a_lingering_process_is_started_in_the_background_and_killed() {
     let pid = tools.linger("t1", 86_400).unwrap();
     assert!(pid > 0);
     tools.kill(pid).unwrap();
+    assert!(
+        reaped(&tools, pid),
+        "the killed linger {pid} was never reaped"
+    );
     assert_eq!(
         tools.kill(0).unwrap_err().raw_os_error(),
         Some(libc::ESRCH),
