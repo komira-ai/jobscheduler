@@ -6,7 +6,8 @@
 //! nothing. The test writes the job's output into the files the runtime gave the job, as the
 //! job would; the job itself is a shell that waits for a gate file the test makes, so that
 //! it ends when the test says (and with exit code 0), and the test goes on from a start only
-//! once that shell has said it is up.
+//! once that shell has said it is up. The job also ends when the test's directory goes, so
+//! none outlives its test.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -170,18 +171,22 @@ fn gate_of(rig: &Rig, run_id: &str) -> PathBuf {
 
 /// The file the job that waits at `gate` makes once it is up.
 fn up_of(gate: &Path) -> PathBuf {
-    gate.with_extension("up")
+    PathBuf::from(format!("{}.up", gate.display()))
 }
 
 /// A job that prints nothing, makes the file [`up_of`] `gate` once its shell has started and
-/// gone to `/`, and ends with exit code 0 once the file `gate` is there.
+/// gone to `/`, and ends with exit code 0 once the file `gate` is there, or once that file of
+/// its own is gone: the test's directory, which holds both, is removed when the test ends, so
+/// a job the test never let end, or whose gate went with the directory before the job looked,
+/// does not outlive the test.
 fn waiting(gate: &Path) -> js_agent_wire::NativeSpec {
     // From `/`: the run directory goes with the account when a later runtime's pool retires
     // it, and a shell whose working directory is gone writes errors into the log under test.
+    let up = up_of(gate);
     let script = format!(
-        "cd / && : > '{}' && until [ -e '{}' ]; do /bin/sleep 0.01; done",
-        up_of(gate).display(),
-        gate.display()
+        "cd / && : > '{up}' && until [ -e '{gate}' ] || [ ! -e '{up}' ]; do /bin/sleep 0.01; done",
+        up = up.display(),
+        gate = gate.display()
     );
     native("/bin/sh", &["-c", &script])
 }
