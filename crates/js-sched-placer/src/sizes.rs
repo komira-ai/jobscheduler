@@ -67,9 +67,10 @@
 //! The estimator learns from a job when its allocation is freed: [`JobSizes::freed`] names
 //! the jobs whose live allocations are gone since the last pass, and
 //! [`JobSizes::observe`] feeds each one that ended with a result, with what its allocation
-//! booked. At a server's start, [`JobSizes::observe`] is fed every ended job the job store
-//! still holds, in the order they ended ([`crate::place::SchedPlacer::learn_ended`]): the job
-//! records are the history, and nothing else is stored. A run is taught to the job's class
+//! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
+//! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
+//! were held for it ([`Teaching`]): the job records are the history, and nothing else is
+//! stored. A run is taught to the job's class
 //! and, when the job names one, to its fallback class (once, when the two are one class), and,
 //! unless it is a memory kill, to its client's whole history on its platform
 //! ([`JobSizes::client_key_of`]).
@@ -108,12 +109,12 @@
 //!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
 //!   left most of it idle.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationRecord, AllocationStep, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError,
-    MAX_PAGE, Needs, ResourceUsage, ResultReason,
+    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, Needs, ResourceUsage,
+    ResultReason,
 };
 use js_sizing::{
     Basis, Bounds, Day, Instance, Key, MIN_WALL_US, Outcome, PlatformClass, Run, Shape, Summaries,
@@ -127,6 +128,10 @@ use tracing::{info, warn};
 use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
+pub use teach::Teaching;
+
+#[path = "sizes_teach.rs"]
+mod teach;
 
 /// The CPU a class books unless the server sets another when neither it, its fallback class nor
 /// its client has a CPU sample: 22 cores, a quarter of the farm's 88-core hosts, and held at a
@@ -213,6 +218,20 @@ pub struct JobSizes {
     /// The runs observed before any bounds were known, in the order they came: taught when
     /// the first bounds come.
     pending: Vec<(Key, Run, Day)>,
+    /// What a teaching of the ended jobs begun and not taught ([`Teaching`]) holds; `None`
+    /// otherwise, when a freed job is taught at once.
+    held: Option<Held>,
+}
+
+/// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
+#[derive(Debug, Default)]
+struct Held {
+    /// Each job a pass freed, with what it booked, in the order the passes freed them: taught
+    /// after the ended jobs.
+    runs: Vec<(JobRecord, Booked)>,
+    /// Every job [`JobSizes::freed`] named since the teaching began, its run held or not yet:
+    /// the passes teach them, so the teaching leaves them out of the ended jobs it read.
+    named: BTreeSet<JobId>,
 }
 
 impl JobSizes {
@@ -369,10 +388,14 @@ impl JobSizes {
             .map(|allocation| (allocation.job.clone(), allocation.booked))
             .collect();
         let before = std::mem::replace(&mut self.live, now);
-        before
+        let freed: Vec<(JobId, Booked)> = before
             .into_iter()
             .filter(|(job, _)| !self.live.contains_key(job))
-            .collect()
+            .collect();
+        if let Some(held) = &mut self.held {
+            held.named.extend(freed.iter().map(|(job, _)| job.clone()));
+        }
+        freed
     }
 
     /// Counts the allocation of `job`, booking `booked`, live from the pass that placed it, so
@@ -406,6 +429,17 @@ impl JobSizes {
         self.pending.push((Self::key_of(job), run, day));
         self.set_bounds(self.bounds);
         taught
+    }
+
+    /// Teaches the run of `job`, freed booked as `booked` ([`JobSizes::observe`]), or holds it
+    /// while a teaching of the ended jobs is begun and not taught ([`Teaching`]).
+    fn freed_run(&mut self, job: JobRecord, booked: Booked) {
+        match &mut self.held {
+            Some(held) => held.runs.push((job, booked)),
+            None => {
+                let _ = self.observe(&job, booked);
+            }
+        }
     }
 
     /// Whether the estimator would take `run` of `job` as a memory sample, judged on a summary
@@ -647,7 +681,8 @@ impl SchedPlacer {
 
     /// Teaches the history the jobs whose allocations `live` (the live allocations a pass read)
     /// no longer holds since the last pass: each is read from `jobs` once, and taught what it
-    /// ran ([`JobSizes::observe`]). A job the store no longer holds teaches nothing; a read that
+    /// ran ([`JobSizes::observe`]), or held until the teaching of the ended jobs begun is taught
+    /// ([`Teaching`]). A job the store no longer holds teaches nothing; a read that
     /// fails is logged and the job's run is let go (the history is a guide, not a record).
     pub(crate) fn learn_freed<S: js_state::Store, I: IdSource>(
         &self,
@@ -659,55 +694,14 @@ impl SchedPlacer {
             match jobs.get_job(&id) {
                 Ok(job) => {
                     let mut engine = self.engine();
-                    job.iter().for_each(|job| {
-                        let _ = engine.sizes().observe(job, booked);
-                    });
+                    job.into_iter()
+                        .for_each(|job| engine.sizes().freed_run(job, booked));
                 }
                 Err(error) => {
                     warn!(job = %id, %error, "a freed job was not read; its run teaches no size")
                 }
             }
         }
-    }
-
-    /// Teaches the history every ended job `jobs` holds whose allocation is freed, with what it
-    /// booked, in the order the jobs ended, and takes the live allocations as those of the last pass: what a
-    /// server does once at its start, before its first pass, so that the history outlives a
-    /// restart for as long as the store keeps the jobs. Answers how many runs taught a class a
-    /// memory sample ([`JobSizes::observe`]): a job that ended with no measured usage is read
-    /// and not counted.
-    ///
-    /// # Errors
-    /// The first [`JobStoreError`] of a read: nothing is taught.
-    pub fn learn_ended<S: js_state::Store, I: IdSource>(
-        &self,
-        jobs: &JobStore<S, I>,
-    ) -> Result<usize, JobStoreError> {
-        let mut ended = Vec::new();
-        let mut resume = None;
-        loop {
-            let page = jobs.list_jobs(None, resume.as_ref(), MAX_PAGE)?;
-            for job in page.jobs.into_iter().filter(|job| job.result.is_some()) {
-                let allocation = jobs.get_allocation(&job.id)?;
-                let freed =
-                    allocation.filter(|allocation| allocation.step == AllocationStep::Freed);
-                ended.extend(freed.map(|allocation| (job, allocation.booked)));
-            }
-            resume = page.resume;
-            if resume.is_none() {
-                break;
-            }
-        }
-        ended.sort_by_key(|(job, _)| job.ended_at);
-        let live = jobs.live_allocations()?;
-        let mut engine = self.engine();
-        let sizes = engine.sizes();
-        let taught = ended
-            .iter()
-            .filter(|(job, booked)| sizes.observe(job, *booked))
-            .count();
-        let _ = sizes.freed(&live);
-        Ok(taught)
     }
 }
 

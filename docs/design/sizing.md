@@ -155,9 +155,13 @@ CPU it was booked (every run recorded while the agent wrote the booking as `cpu.
 was given or at what a run that waited used: what it is booked rises with the runs that used more, and falls only on quiet, measured
 runs that used less.
 
-**Where the history lives.** Nowhere new: at its start the server teaches the estimator every ended job its job store still holds
+**Where the history lives.** Nowhere new: after its start the server teaches the estimator every ended job its job store still holds
 (seven days by default), in the order they ended, with what each allocation booked; then each pass teaches the jobs it sees freed.
-A failed read at the start is logged and every class starts cold. Each job's usage history row now carries what its host reported
+The start does not wait for it: it reads the live allocations alone, so what it reads does not grow with the history, and the server
+answers ready; the ended jobs are read a page at a time while it serves. Until they are taught, a job that books nothing is sized from
+what is taught so far (at a start, its fallback's or the cold size), and the runs the passes free are held and taught after the ended
+jobs, so the history once taught is the one a server that read everything before its first pass holds. A failed read is logged and
+every class starts cold, the held runs still taught. Each job's usage history row now carries what its host reported
 (`used`: the peak memory, and the CPU per second of its run as both the highest and the mean), so `GetUsage` can set what a host
 used beside what it booked, and is kept under the name of the job's class as its `profile`: the `size-class` label as it is, else
 `run-` and the 16 hex digits of the class's shape. The name is what the job builds (for example `kbf.cargo-test.kbf-server`), the
@@ -241,7 +245,7 @@ therefore placed with room for the most cores a class may use, and one run is en
 its kind's or its client's peak with the margin, else the cold 4 GiB, until its first run; then its own peaks with the margin. Both are raised by a kill's floor (a booking, not a limit on the job).
 
 **The history from before.** Every run a server rebuilds at its first start after the change has a mean: its CPU time over its wall
-time, from its job record. A server re-derives each run's sample from its job record as the run's mean at the server's start; there
+time, from its job record. A server re-derives each run's sample from its job record as the run's mean when it reads the ended jobs after its start; there
 is no conversion, and the `cpu_peak` an agent reported with a run, if any, is not read for it. The runs taken under a `cpu.max` stay
 what they were: a run whose mean came within 5% of its booked CPU (or throttled in at least one period in 20) was held at its ceiling
 and can only raise its class, so a class whose runs were all held at a quarter core has no CPU sample: its jobs book its fallback's or
