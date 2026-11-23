@@ -9,9 +9,11 @@
 //! on. Build the binary on a Mac as an ordinary user (`cargo test -p js-agent --test
 //! native_privileged --no-run`) and run it as root, from the machine that built it (the
 //! supervisor is the `js-agent` binary cargo built beside it, named at build time), with
-//! `JS_NATIVE_PRIV_ROOT` naming a new directory, owned by root and mode 0755, that every
-//! user can search down to (a home directory is 0700 and does not qualify), and `--ignored
-//! --test-threads=1 --nocapture`. The pool's slots are the uids 4300 to 4309, which must be
+//! `--ignored --test-threads=1 --nocapture`. The tests work in a new directory they make,
+//! `/private/var/js-native-priv-<pid>`, owned by root and mode 0755, or in the one
+//! `JS_NATIVE_PRIV_ROOT` names (new, owned by root, mode 0755, and one every user can search
+//! down to: a home directory is 0700 and does not qualify), as `cargo xtask mac-root-tests`
+//! sets it. The pool's slots are the uids 4300 to 4309, which must be
 //! free (outside the farm's 600 to 799), and no account of the pool may exist: the names are
 //! `kbf-acct-<n>`, made fresh for each run and deleted at its removal (`cargo xtask
 //! mac-root-tests` deletes what is left). The pool's state (its ledger) and the accounts'
@@ -82,7 +84,7 @@ static TERMS: AtomicU64 = AtomicU64::new(1);
 fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
         assert!(rustix::process::geteuid().is_root(), "{NEEDS_ROOT}");
-        let root = std::env::var_os(ROOT).unwrap_or_else(|| panic!("{ROOT} is not set"));
+        let root = std::env::var_os(ROOT).map_or_else(own_root, PathBuf::from);
         let root = fs::canonicalize(root).unwrap();
         let fixture = Fixture {
             homes: root.join("homes"),
@@ -101,6 +103,19 @@ fn fixture() -> &'static Fixture {
         }
         fixture
     })
+}
+
+/// The directory the tests work in when [`ROOT`] names none: a new one made here, as root,
+/// at `/private/var/js-native-priv-<pid>` (0755, so every account can search down to its
+/// homes), so the run needs no setting of its own.
+fn own_root() -> PathBuf {
+    let root = PathBuf::from(format!(
+        "/private/var/js-native-priv-{}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap_or_else(|why| panic!("{}: {why}", root.display()));
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    root
 }
 
 fn runtime(fixture: &Fixture) -> NativeRuntime {
