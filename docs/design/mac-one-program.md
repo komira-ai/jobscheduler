@@ -374,7 +374,7 @@ The owner answered yes to all five questions of section 8:
 - **Checks.** A Mac agent runs no post-job leak scan (`NoChecks`): the helper's scan needs the helper's recorded baseline, which nothing records now; the retirement's proof covers everything of the run's uid.
 - **The self-test.** With the pool open, the agent runs `/usr/bin/true` through every step, its end and its removal before it says hello, and does not start when that fails.
 
-Not built yet: trees from a provider on a shared mount, the sweep by audit session, adoption across an agent update, the retirement of `js-mac-session`'s pool and the helper program.
+Not built yet: the sweep by audit session, adoption across an agent update, the retirement of `js-mac-session`'s pool and the helper program.
 
 ## 14. Built: a run's output committed to the put ingest
 
