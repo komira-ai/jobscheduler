@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{CpuSeries, ExecMode, HostId, Labels};
+use js_types::{CpuSeries, ExecMode, HostId, Labels, MemorySeries};
 
 use super::result_fields::job_result_tag;
 use super::whole_fields::job_whole_tag;
@@ -46,6 +46,7 @@ pub(super) fn full_result() -> JobResult {
             stderr_dropped: 2,
         }),
         cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
+        memory_series: MemorySeries::new(4, vec![256, 7], 9_500_000, true),
         input_failure: Some("input-unreadable".to_owned()),
     }
 }
@@ -205,6 +206,7 @@ fn a_record_reads_back_as_written() {
             usage: None,
             logs: None,
             cpu_series: None,
+            memory_series: None,
             input_failure: None,
         }),
         ..bare_job()
@@ -530,7 +532,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58, 60, 61, 62, 64]) {
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS, 58, 60, 61, 62, 64, 65]) {
         before_results = without(&before_results, tag);
     }
     assert_eq!(

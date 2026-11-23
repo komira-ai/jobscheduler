@@ -26,6 +26,7 @@ fn job(id: &str, result: bool) -> HeldJob {
             input_failure: None,
             usage: None,
             cpu_series: None,
+            memory_series: None,
         }),
     }
 }

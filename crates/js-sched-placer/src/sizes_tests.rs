@@ -1,5 +1,5 @@
 //! The sizes of the jobs that book nothing ([`JobSizes`]) and the history the placer teaches
-//! them ([`SchedPlacer::learn_freed`] at each pass, [`SchedPlacer::learn_ended`] at a start):
+//! them ([`SchedPlacer::learn_freed`] at each pass, [`SchedPlacer::learn_ended`] at once):
 //! the job tables on the in-memory fake, every clock the test's.
 
 use std::collections::BTreeMap;
@@ -23,8 +23,8 @@ use crate::engine::jobs::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, host, spec_of};
 use crate::place::SchedPlacer;
 
-const GIB: u64 = 1 << 30;
-const MIB: u64 = 1 << 20;
+pub(super) const GIB: u64 = 1 << 30;
+pub(super) const MIB: u64 = 1 << 20;
 
 /// A host's bookable capacity: `cpu_millis` and `memory_bytes`.
 fn capacity(cpu_millis: u64, memory_bytes: u64) -> Capacity {
@@ -47,12 +47,12 @@ fn bounds() -> Bounds {
 }
 
 /// Needs of `cpu_millis` and `memory_bytes`.
-fn needs(cpu_millis: u64, memory_bytes: u64) -> Needs {
+pub(super) fn needs(cpu_millis: u64, memory_bytes: u64) -> Needs {
     Needs::Shape(Resources::new(cpu_millis, memory_bytes, 0, None).unwrap())
 }
 
 /// A share booked at `cpu_millis` and `memory_bytes`.
-fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
+pub(super) fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
     Booked::Shape {
         cpu_millis,
         memory_bytes,
@@ -62,7 +62,7 @@ fn booked(cpu_millis: u64, memory_bytes: u64) -> Booked {
 }
 
 /// The spec of a job of the class `class` (by its label) that asks for `needs`.
-fn of_class(class: &str, needs: Needs) -> JobSpec {
+pub(super) fn of_class(class: &str, needs: Needs) -> JobSpec {
     let mut spec = spec_of(needs, 600);
     let labels = BTreeMap::from([(SIZE_CLASS_LABEL.to_owned(), class.to_owned())]);
     spec.labels = Labels::from_caller(&labels).unwrap();
@@ -73,7 +73,7 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
 /// pressure and no throttled period, and a CPU peak equal to the run's mean over the ten
 /// seconds [`ran`] gives each run (the run's CPU is a measurement, and a class books the mean
 /// its runs used, their CPU time over their wall time; the peak is reported, not booked).
-fn output(peak: u64, cpu: Duration) -> Output {
+pub(super) fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
             cpu_time: cpu,
@@ -93,7 +93,7 @@ fn output(peak: u64, cpu: Duration) -> Output {
 }
 
 /// An exit with `code` after using `peak` bytes and `cpu` of CPU time.
-fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
+pub(super) fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
     JobEnd::Exited {
         exit_code: code,
         output: output(peak, cpu),
@@ -103,7 +103,7 @@ fn exited(code: i32, peak: u64, cpu: Duration) -> JobEnd {
 /// Records the job `id` of `spec` (for `client`, when one is given), places it booked as
 /// `booked`, starts it at `start_ms` and ends it as `end` ten seconds later, freeing its
 /// allocation: the ended record.
-fn ran(
+pub(super) fn ran(
     tables: &Tables,
     job: (&str, Option<&str>),
     spec: JobSpec,
@@ -150,7 +150,7 @@ fn ran_for(
 
 /// `n` runs of `class` booked as `booked`, each ending as `end` gives: the ended records, for
 /// the ids `<prefix>-<n>`.
-fn runs(
+pub(super) fn runs(
     tables: &Tables,
     prefix: &str,
     n: usize,
@@ -673,7 +673,7 @@ impl JobStarts for Quiet {
 }
 
 /// A placer over the host `a` of eight cores and 16 GiB, on a clock at zero.
-fn placer() -> SchedPlacer {
+pub(super) fn placer() -> SchedPlacer {
     let clock = ManualClock::new(Timestamp::from_millis(0));
     let settings = Settings {
         cold: MODULE_COLD,
@@ -687,7 +687,7 @@ fn placer() -> SchedPlacer {
 }
 
 /// One pass of `placer` over `tables` with `a` open: the jobs it placed.
-fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
+pub(super) fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
     placer.heard(&host("a"), None);
     let open = BTreeMap::from([(host("a"), OpenHost::default())]);
     let hello = std::collections::BTreeSet::new();
@@ -702,13 +702,13 @@ fn pass(placer: &SchedPlacer, tables: &Tables) -> Vec<JobId> {
 }
 
 /// What the allocation of `id` books.
-fn allocation(tables: &Tables, id: &str) -> Booked {
+pub(super) fn allocation(tables: &Tables, id: &str) -> Booked {
     let id = JobId::parse(id).unwrap();
     tables.jobs.get_allocation(&id).unwrap().unwrap().booked
 }
 
 /// Records the queued job `id` of `class` that books nothing.
-fn submit(tables: &Tables, id: &str, class: &str) {
+pub(super) fn submit(tables: &Tables, id: &str, class: &str) {
     submit_by(tables, id, class, None);
 }
 
@@ -730,7 +730,7 @@ fn finish(tables: &Tables, id: &str) {
 
 /// Starts the placed job `id` and ends it with a peak of `peak` bytes and three cores, freeing
 /// it.
-fn finish_at(tables: &Tables, id: &str, peak: u64) {
+pub(super) fn finish_at(tables: &Tables, id: &str, peak: u64) {
     let id = JobId::parse(id).unwrap();
     tables
         .jobs
@@ -939,3 +939,6 @@ mod farm;
 
 #[path = "sizes_follows_use_tests.rs"]
 mod follows_use;
+
+#[path = "sizes_memory_series_tests.rs"]
+mod memory_series;

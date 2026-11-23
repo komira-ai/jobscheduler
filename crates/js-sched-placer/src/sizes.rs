@@ -67,9 +67,10 @@
 //! The estimator learns from a job when its allocation is freed: [`JobSizes::freed`] names
 //! the jobs whose live allocations are gone since the last pass, and
 //! [`JobSizes::observe`] feeds each one that ended with a result, with what its allocation
-//! booked. At a server's start, [`JobSizes::observe`] is fed every ended job the job store
-//! still holds, in the order they ended ([`crate::place::SchedPlacer::learn_ended`]): the job
-//! records are the history, and nothing else is stored. A run is taught to the job's class
+//! booked. After a server's start, [`JobSizes::observe`] is fed every ended job the job store
+//! still holds, in the order they ended, and then the runs the passes freed meanwhile, which
+//! were held for it ([`Teaching`]): the job records are the history, and nothing else is
+//! stored. A run is taught to the job's class
 //! and, when the job names one, to its fallback class (once, when the two are one class), and,
 //! unless it is a memory kill, to its client's whole history on its platform
 //! ([`JobSizes::client_key_of`]).
@@ -81,13 +82,17 @@
 //!   and a stop for memory (an agent from before the booking stopped being a limit, which held
 //!   a job at its booking) a kill at its booking, which raises the class's floor to twice the
 //!   booking it died at;
-//! - its peak memory and CPU time are what its host reported in the job's result (`usage`, read
-//!   from the job's control group); a job with none has no peak, and a success with no peak teaches
-//!   the memory nothing; its wall time is from its start to its end;
+//! - its peak memory is the peak of the non-file memory series its host reported in the job's
+//!   result (`memory_series`: what the job held that the kernel cannot drop, sampled about once
+//!   a second, so no page cache of the files it read), and, for a run with no whole series, the
+//!   group's `memory.peak` of its `usage`; its CPU time is its `usage`'s; a job with neither has
+//!   no peak, and a success with no peak teaches the memory nothing; its wall time is from its
+//!   start to its end;
 //! - a success's peak is a measurement whatever its booking: the booking is no limit, so a peak
 //!   at or above it is what the run used, and a peak above it raises the class's next booking
 //!   at once (with the margin);
-//! - a run under a second gives its peak (the group's `memory.peak` is exact) and no CPU sample;
+//! - a run under a second gives its peak (its series' when a poll sampled it, else the group's
+//!   `memory.peak`, which is exact) and no CPU sample;
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
 //!   of wall time (`cpu.pressure`, as its host reported it). Below a tenth, the sample is a
 //!   measurement; at or above it the run's CPU may only raise its class's CPU, since a run that
@@ -104,12 +109,12 @@
 //!   booked: a peak booking held a host to a few jobs whose peaks fill it while their use
 //!   left most of it idle.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_jobs::{
-    AllocationRecord, AllocationStep, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError,
-    MAX_PAGE, Needs, ResourceUsage, ResultReason,
+    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, Needs, ResourceUsage,
+    ResultReason,
 };
 use js_sizing::{
     Basis, Bounds, Day, Instance, Key, MIN_WALL_US, Outcome, PlatformClass, Run, Shape, Summaries,
@@ -123,6 +128,10 @@ use tracing::{info, warn};
 use crate::place::SchedPlacer;
 
 pub use js_types::{SIZE_CLASS_LABEL, SIZE_FALLBACK_LABEL};
+pub use teach::Teaching;
+
+#[path = "sizes_teach.rs"]
+mod teach;
 
 /// The CPU a class books unless the server sets another when neither it, its fallback class nor
 /// its client has a CPU sample: 22 cores, a quarter of the farm's 88-core hosts, and held at a
@@ -209,6 +218,20 @@ pub struct JobSizes {
     /// The runs observed before any bounds were known, in the order they came: taught when
     /// the first bounds come.
     pending: Vec<(Key, Run, Day)>,
+    /// What a teaching of the ended jobs begun and not taught ([`Teaching`]) holds; `None`
+    /// otherwise, when a freed job is taught at once.
+    held: Option<Held>,
+}
+
+/// The freed jobs a teaching of the ended jobs holds until it is taught ([`Teaching`]).
+#[derive(Debug, Default)]
+struct Held {
+    /// Each job a pass freed, with what it booked, in the order the passes freed them: taught
+    /// after the ended jobs.
+    runs: Vec<(JobRecord, Booked)>,
+    /// Every job [`JobSizes::freed`] named since the teaching began, its run held or not yet:
+    /// the passes teach them, so the teaching leaves them out of the ended jobs it read.
+    named: BTreeSet<JobId>,
 }
 
 impl JobSizes {
@@ -365,10 +388,14 @@ impl JobSizes {
             .map(|allocation| (allocation.job.clone(), allocation.booked))
             .collect();
         let before = std::mem::replace(&mut self.live, now);
-        before
+        let freed: Vec<(JobId, Booked)> = before
             .into_iter()
             .filter(|(job, _)| !self.live.contains_key(job))
-            .collect()
+            .collect();
+        if let Some(held) = &mut self.held {
+            held.named.extend(freed.iter().map(|(job, _)| job.clone()));
+        }
+        freed
     }
 
     /// Counts the allocation of `job`, booking `booked`, live from the pass that placed it, so
@@ -404,6 +431,17 @@ impl JobSizes {
         taught
     }
 
+    /// Teaches the run of `job`, freed booked as `booked` ([`JobSizes::observe`]), or holds it
+    /// while a teaching of the ended jobs is begun and not taught ([`Teaching`]).
+    fn freed_run(&mut self, job: JobRecord, booked: Booked) {
+        match &mut self.held {
+            Some(held) => held.runs.push((job, booked)),
+            None => {
+                let _ = self.observe(&job, booked);
+            }
+        }
+    }
+
     /// Whether the estimator would take `run` of `job` as a memory sample, judged on a summary
     /// of its own that is then dropped, against the known bounds (a host of unlimited memory
     /// before any are known).
@@ -416,6 +454,22 @@ impl JobSizes {
         let mut trial = Summary::new(Self::key_of(job).basis(), day);
         trial.observe(run, day, &bounds).memory.is_ok()
     }
+}
+
+/// The memory a run of `result` teaches its class: the peak of its non-file memory series (the
+/// most the job held that the kernel cannot drop, sampled about once a second) when its host
+/// reported a whole one with a point; else the group's `memory.peak`, which counts the page
+/// cache of the files the job read too (an agent without `--memory-series`, a runtime that
+/// records no series, a run adopted after a restart of its agent, whose series misses its
+/// start, and a run so short no poll sampled it).
+fn peak_of(result: &js_jobs::JobResult) -> Option<u64> {
+    let whole = result
+        .memory_series
+        .as_ref()
+        .filter(|series| !series.partial);
+    whole
+        .and_then(js_types::MemorySeries::peak_bytes)
+        .or_else(|| result.usage.map(|usage| usage.peak_memory_bytes))
 }
 
 /// The run of `job`, booked as `booked`, as the estimator takes it (the module docs), with the
@@ -438,13 +492,14 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         ResultReason::Cancelled => Outcome::Cancelled,
     };
     let killed = outcome == Outcome::OwnLimitKill;
-    let peak = result.usage.map(|usage| usage.peak_memory_bytes);
+    let peak = peak_of(result);
     let cpu = result.usage.map_or(0, |usage| micros(usage.cpu_time));
     let wall = micros(ended.since(started));
-    // A successful run under a second gives its peak (the group's `memory.peak` is exact
-    // whatever the run's length) and no CPU sample (its mean over so short a wall is no
-    // measure): the estimator takes a memory sample from a run of at least a second, and a CPU
-    // sample only from a run that used CPU time. No other outcome is a sample of either.
+    // A successful run under a second gives its peak (its series' if a poll sampled it, else
+    // the group's `memory.peak`, exact whatever the run's length) and no CPU sample (its mean
+    // over so short a wall is no measure): the estimator takes a memory sample from a run of
+    // at least a second, and a CPU sample only from a run that used CPU time. No other outcome
+    // is a sample of either.
     let (wall_us, cpu_us) = if wall < MIN_WALL_US {
         (MIN_WALL_US, 0)
     } else {
@@ -626,7 +681,8 @@ impl SchedPlacer {
 
     /// Teaches the history the jobs whose allocations `live` (the live allocations a pass read)
     /// no longer holds since the last pass: each is read from `jobs` once, and taught what it
-    /// ran ([`JobSizes::observe`]). A job the store no longer holds teaches nothing; a read that
+    /// ran ([`JobSizes::observe`]), or held until the teaching of the ended jobs begun is taught
+    /// ([`Teaching`]). A job the store no longer holds teaches nothing; a read that
     /// fails is logged and the job's run is let go (the history is a guide, not a record).
     pub(crate) fn learn_freed<S: js_state::Store, I: IdSource>(
         &self,
@@ -638,55 +694,14 @@ impl SchedPlacer {
             match jobs.get_job(&id) {
                 Ok(job) => {
                     let mut engine = self.engine();
-                    job.iter().for_each(|job| {
-                        let _ = engine.sizes().observe(job, booked);
-                    });
+                    job.into_iter()
+                        .for_each(|job| engine.sizes().freed_run(job, booked));
                 }
                 Err(error) => {
                     warn!(job = %id, %error, "a freed job was not read; its run teaches no size")
                 }
             }
         }
-    }
-
-    /// Teaches the history every ended job `jobs` holds whose allocation is freed, with what it
-    /// booked, in the order the jobs ended, and takes the live allocations as those of the last pass: what a
-    /// server does once at its start, before its first pass, so that the history outlives a
-    /// restart for as long as the store keeps the jobs. Answers how many runs taught a class a
-    /// memory sample ([`JobSizes::observe`]): a job that ended with no measured usage is read
-    /// and not counted.
-    ///
-    /// # Errors
-    /// The first [`JobStoreError`] of a read: nothing is taught.
-    pub fn learn_ended<S: js_state::Store, I: IdSource>(
-        &self,
-        jobs: &JobStore<S, I>,
-    ) -> Result<usize, JobStoreError> {
-        let mut ended = Vec::new();
-        let mut resume = None;
-        loop {
-            let page = jobs.list_jobs(None, resume.as_ref(), MAX_PAGE)?;
-            for job in page.jobs.into_iter().filter(|job| job.result.is_some()) {
-                let allocation = jobs.get_allocation(&job.id)?;
-                let freed =
-                    allocation.filter(|allocation| allocation.step == AllocationStep::Freed);
-                ended.extend(freed.map(|allocation| (job, allocation.booked)));
-            }
-            resume = page.resume;
-            if resume.is_none() {
-                break;
-            }
-        }
-        ended.sort_by_key(|(job, _)| job.ended_at);
-        let live = jobs.live_allocations()?;
-        let mut engine = self.engine();
-        let sizes = engine.sizes();
-        let taught = ended
-            .iter()
-            .filter(|(job, booked)| sizes.observe(job, *booked))
-            .count();
-        let _ = sizes.freed(&live);
-        Ok(taught)
     }
 }
 

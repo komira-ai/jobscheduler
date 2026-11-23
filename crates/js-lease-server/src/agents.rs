@@ -43,6 +43,7 @@ use crate::error::StartupError;
 use crate::held_beat::{self, Wakes};
 use crate::host_keys::Writes;
 use crate::job_expiry::JobLimits;
+use crate::job_sizes::Sizes;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::logs::{self, LogGrants};
@@ -107,6 +108,8 @@ pub(crate) struct Agents {
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
+    /// The teaching of the job sizes the start began, which the server reads after it listens.
+    pub(crate) sizes: Sizes,
     /// The store's rows the last pass offered hosts by, which the next read takes each row from
     /// while it stands at the version it had ([`crate::sched`]). Its lock is a leaf.
     pub(crate) rows_read: Mutex<Option<Arc<crate::sched::jobs_rows::RowsRead>>>,
@@ -212,7 +215,7 @@ pub(crate) fn assemble_in(
     placed.map(|(assembled, _)| assembled)
 }
 
-/// [`assemble`], with the placer the registry was given.
+/// [`assemble`], with the placer the registry was given and the sizes taught.
 #[cfg(test)]
 pub(crate) fn assemble_placed(
     agents: Box<AgentSetup>,
@@ -221,7 +224,9 @@ pub(crate) fn assemble_placed(
     state_file: &Path,
     logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Arc<SchedPlacer>), StartupError> {
-    placed_in(agents, usage, clock, (state_file, None), logs)
+    let placed = placed_in(agents, usage, clock, (state_file, None), logs)?;
+    let _ = placed.0.sizes.teach();
+    Ok(placed)
 }
 
 /// The join tokens, the bindings read at start and their store: from the files beside the
@@ -304,7 +309,9 @@ fn placed_in(
     // the job store's row first. Its commit failing refuses the start, as a store
     // that cannot be read does.
     let restore_flag = jobs.as_ref().map(|setup| setup.flag);
-    let (jobs, job_feed, job_state) = match jobs {
+    // The sizes' teaching is begun, not read: the server listens before its read of the ended
+    // jobs (`crate::job_sizes`).
+    let (jobs, job_feed, job_state, sizes) = match jobs {
         Some(setup) => {
             let opened = job_store::open(
                 (state_file, kept.map(ServerStore::store)),
@@ -312,10 +319,11 @@ fn placed_in(
                 &job_sources,
             )?;
             restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
-            let _ = crate::job_sizes::learn(&placer, &opened.jobs);
-            (Some(opened.jobs), Some(opened.feed), Some(opened.store))
+            let sizes = crate::job_sizes::begin(&placer, &opened.jobs);
+            let (jobs, feed, state) = (opened.jobs, opened.feed, opened.store);
+            (Some(jobs), Some(feed), Some(state), sizes)
         }
-        None => (None, None, None),
+        None => (None, None, None, Sizes::default()),
     };
     for (host, binding) in &bindings {
         taints::put_back(&registry, host, binding, "start");
@@ -342,6 +350,7 @@ fn placed_in(
         job_state,
         usage_in_job_store,
         placer: Some(placer.clone()),
+        sizes,
         rows_read: Mutex::default(),
         logs,
         job_limits,
@@ -418,6 +427,7 @@ impl Agents {
             job_state: None,
             usage_in_job_store: false,
             placer: None,
+            sizes: Sizes::default(),
             rows_read: Mutex::default(),
             logs: None,
             job_limits: JobLimits::default(),

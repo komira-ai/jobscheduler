@@ -157,6 +157,13 @@ pub struct Flags {
     /// runtime only: a job of the container engine records none.
     #[arg(long)]
     pub cpu_series: bool,
+    /// Record each job's non-file memory (`memory.current - (file - shmem)` of its cgroup:
+    /// no page cache, shared memory and tmpfs kept) about once a second and send it with the
+    /// job's result (`memory_series`): at most 128 points in MiB, each the most of its span,
+    /// combined in pairs by their maximum when a run outlasts them. The job service books a
+    /// class's memory from the peak of it. Off by default; taken by the crun runtime only.
+    #[arg(long)]
+    pub memory_series: bool,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -415,6 +422,7 @@ impl Flags {
             ("--allow-fuse-jobs", self.allow_fuse_jobs),
             ("--cpu-ceiling", self.cpu_ceiling.is_some()),
             ("--cpu-series", self.cpu_series),
+            ("--memory-series", self.memory_series),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
@@ -749,6 +757,7 @@ pub(crate) fn jobs(
             settings
                 .with_cpu_ceiling(os.cpu_ceiling)
                 .with_cpu_series(os.cpu_series)
+                .with_memory_series(os.memory_series)
         }),
         layout,
         egress,
