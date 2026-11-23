@@ -75,7 +75,7 @@ impl Trial {
 
     /// A launch agent run A could not load (a user cannot load into its own domain on
     /// every macOS) is loaded by root into the user's domain: the item is still the run's
-    /// to leave, and the domain is the one the helper's delete does not end. A pool uid has
+    /// to leave, and the domain is the one the account's deletion does not end. A slot uid has
     /// no login session, so launchd may have no domain for it: root then tries the documented
     /// ways to reach one (`launchctl asuser`) and prints every attempt with its exact command,
     /// status and text. An agent root cannot load either has NO PATH when the evidence

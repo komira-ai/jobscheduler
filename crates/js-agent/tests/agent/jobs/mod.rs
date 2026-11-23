@@ -154,15 +154,16 @@ pub fn backend(dir: &Scratch) -> Backend {
     Backend::Container(settings(dir))
 }
 
-/// What the jobs run with, under `dir`: the native settings of a helper socket nobody
-/// listens on.
+/// What the jobs run with, under `dir`: the native settings of an account pool in `dir`
+/// (which no test opens: the settings hold no Full Disk Access, so the runtime opens no pool).
 #[cfg(target_os = "macos")]
 pub fn backend(dir: &Scratch) -> Backend {
-    let socket = dir.path("helper.sock");
-    let homes = private(dir, "homes");
+    let accounts = private(dir, "accounts");
     let flags = js_agent::native::NativeFlags {
-        socket: Some(socket.as_path()),
-        homes: Some(homes.as_path()),
+        accounts: Some(accounts.as_path()),
+        account_range: Some("600-609"),
+        account_ready: None,
+        homes: None,
         network: None,
         tool_roots: &[],
         deny_read: &[],

@@ -62,6 +62,9 @@
 //! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
 //!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
 //!   no service container (the macOS job), and its URL for the later steps.
+//! - `mac-test-artifact --test <name> --target <triple> --build-json <file> --out <dir> --commit
+//!   <sha> --summary <file> --github-env <file>` ([`mac_test_artifact`]): a Mac root test binary
+//!   and the `js-agent` it starts, staged for an operator with their SHA-256 sums.
 //!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
@@ -153,6 +156,7 @@ pub mod image;
 pub mod job_surface;
 pub mod layering;
 pub mod mac_root;
+pub mod mac_test_artifact;
 pub mod macpkg;
 pub mod merge_profiles;
 pub mod postgres_for_tests;
@@ -218,6 +222,9 @@ pub enum Error {
     /// The Postgres server for the tests could not be started.
     #[error(transparent)]
     PostgresForTests(#[from] postgres_for_tests::Error),
+    /// A Mac root test binary could not be staged.
+    #[error("mac-test-artifact: {0}")]
+    MacTestArtifact(#[from] mac_test_artifact::Error),
     /// A coverage shard's raw profiles could not be merged.
     #[error("merge-profiles: {0}")]
     MergeProfiles(#[from] merge_profiles::Error),
@@ -406,6 +413,9 @@ enum Verb {
     /// Start a Postgres server for the tests that need one, from an installed Postgres's
     /// programs, and append its URL (`KBF_TEST_POSTGRES_URL`) to the workflow's environment file.
     PostgresForTests(postgres_for_tests::Args),
+    /// Stage a Mac root test binary and the `js-agent` it starts, checked to be arm64 Mach-O
+    /// executables, with their SHA-256 sums, for the manual Mac root-test workflows.
+    MacTestArtifact(mac_test_artifact::Args),
     /// Merge the raw coverage profiles at the top of a directory into one indexed profile,
     /// with the toolchain's llvm-profdata.
     MergeProfiles(merge_profiles::Args),
@@ -605,6 +615,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
+        Verb::MacTestArtifact(args) => Ok(mac_test_artifact::run(&args)?),
         Verb::MergeProfiles(args) => Ok(merge_profiles::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::GenReport(args) => Ok(report::run(&args)?),

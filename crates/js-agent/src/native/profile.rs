@@ -1,21 +1,18 @@
-//! The `sandbox-exec` command line of a native run: the Seatbelt profile built from the
-//! agent's policy, then the program and its arguments, and the self-test that runs it once
-//! at the agent's start.
+//! The Seatbelt profile of a native run: the policy the agent's flags and the run's start
+//! give, as the text and the parameters the supervisor applies in the job's own process
+//! (`sandbox_init_with_parameters`, before it starts the program).
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use js_agent_wire::{NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{
-    AbsPath, Caps, MountGrant, Narrowing, Net, Policy, Profile, SlotLayout,
+    AbsPath, Caps, MountGrant, MountTrees, Narrowing, Net, Policy, Profile, SlotLayout,
 };
-use js_mac_session::disclaim::Program;
 
-use super::{NativeConfig, fail};
+use super::{NativeConfig, fail, fence};
 use crate::lifecycle::RuntimeError;
 
-/// The run directory below a pool user's home: the working directory and the only place a
+/// The run directory below an account's home: the working directory and the only place a
 /// job may write (the profile grants writes below it and nowhere else in the home).
 pub(super) const RUN_DIR: &str = "exec";
 
@@ -31,58 +28,54 @@ pub(super) const JOB_TMP_DIR: &str = ".tmp";
 /// The directory of a bundle's writable tree clones, below the run directory.
 pub(super) const JOB_TREES_DIR: &str = ".trees";
 
-/// The program that sets the job's `HOME`: it runs inside the profile, as the first thing
-/// after `sandbox-exec`, and executes the job's program.
-const ENV_PROGRAM: &str = "/usr/bin/env";
-
-/// The run directory of the pool user whose home is `home`.
+/// The run directory of the account whose home is `home`.
 pub(super) fn run_dir(home: &Path) -> PathBuf {
     home.join(RUN_DIR)
 }
 
-/// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
-/// whose home is `home`: `sandbox-exec`, the profile, then `/usr/bin/env HOME=<job home>`
-/// and the program and its arguments. The profile grants writes to the run directory
-/// (`<home>/exec`) and not to `home`.
+/// The profile of `native` under the policy of `config`, run as an account whose home is
+/// `home`: writes are granted to the run directory (`<home>/exec`) and to the grants in
+/// `mounts` (the run's job mounts and its account's own per-user temporary and cache folders),
+/// and nowhere else, `read_only` (the run's files directory, the `dest`
+/// of each input below `exec/` and the link of each read-only mount, each named for an error)
+/// is denied writes, `mounts` are granted after the read denies (every mount root is one),
+/// and `trees` are the shared trees of the run, if any.
 ///
-/// No shell is in the command line. The helper sets the run's limits in the
-/// child before it executes `sandbox-exec`, and `sandbox-exec` is the first program of the
-/// command, so nothing the job's environment steers runs outside the profile and the
-/// environment does not enter the command line at all.
+/// The read denies are the agent's (`config.read_denies`), the places only the privacy
+/// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of
+/// those is refused, since its grant would follow the deny and reopen it.
 ///
 /// # Errors
 ///
-/// The policy or the profile cannot be built, or `native.program` is not an absolute path.
-/// The environment is not read here: [`NativeRuntime`] checks it before it makes a user.
-pub fn profile_argv(
-    config: &NativeConfig,
-    native: &NativeSpec,
-    home: &Path,
-) -> Result<Vec<String>, RuntimeError> {
-    argv_of(config, native, home, (&[], &[]))
-}
-
-/// [`profile_argv`] for a run whose files and inputs are at `read_only` (its files directory,
-/// the `dest` of each input below `exec/` and the link of each read-only mount): the profile
-/// denies writes there. Reads are open under the only read model that has a profile
-/// ([`ReadModel::Open`]), and the agent refuses at start a files root that a read deny
-/// covers, so the run reads them. `mounts` are the run's job mounts, granted after the read
-/// denies (every mount root is one), so the run reads and, for a read-write one, writes
-/// only the host directories it was given (`native/mounts.rs`).
-pub(super) fn argv_of(
+/// A path the profile cannot name, a mount in a fenced place, or a policy or profile that
+/// cannot be built.
+pub(super) fn build(
     config: &NativeConfig,
     native: &NativeSpec,
     home: &Path,
     (read_only, mounts): (&[(&str, PathBuf)], &[MountGrant]),
-) -> Result<Vec<String>, RuntimeError> {
+    trees: Option<MountTrees>,
+) -> Result<Profile, RuntimeError> {
     let run_path = run_dir(home);
     let run = AbsPath::new(&run_path).map_err(|why| fail(&run_path.display(), &why))?;
     let inputs = read_only
         .iter()
         .map(|(what, path)| AbsPath::new(path).map_err(|why| fail(what, &why)))
         .collect::<Result<Vec<AbsPath>, RuntimeError>>()?;
+    if let Some(fenced) = mounts
+        .iter()
+        .find(|grant| fence::is_fenced(grant.path.as_str()))
+    {
+        return Err(fail(
+            &"a mount",
+            &format!(
+                "{} lies in a place only the privacy controls guard",
+                fenced.path.as_str()
+            ),
+        ));
+    }
     let layout = SlotLayout {
-        trees: None,
+        trees,
         run,
         uid_entry: None,
         inputs,
@@ -90,8 +83,8 @@ pub(super) fn argv_of(
         mounts: mounts.to_vec(),
     };
     // The policy never grants more than the ceiling. That is a defence in depth only: a
-    // start above the ceiling was refused by `check_native` before its user existed, so this
-    // narrowing lowers nothing the agent admitted. What can still lower the level is the
+    // start above the ceiling was refused by `check_native` before its account was lent, so
+    // this narrowing lowers nothing the agent admitted. What can still lower the level is the
     // bundle's `network_max` (`bundle::lower`), applied to `native` before this.
     let caps = Caps {
         net: config.network.net(),
@@ -104,62 +97,7 @@ pub(super) fn argv_of(
     let policy = Policy::base(layout, caps)
         .and_then(|policy| policy.narrowed(narrowing))
         .map_err(|why| fail(&"the policy", &why))?;
-    let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
-    // The helper sets `HOME` to the account's home whatever the request says (and that
-    // is left as it is: the helper's wire does not change), so the job's `HOME` is set
-    // here, inside the profile, by `env`, which executes the program. The value is a path
-    // of the run, which every user may read on a command line; no secret goes here.
-    AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let program = AbsPath::new(Path::new(ENV_PROGRAM)).map_err(|why| fail(&ENV_PROGRAM, &why))?;
-    let job_home = run_path.join(JOB_HOME_DIR);
-    let args: Vec<OsString> = [
-        OsString::from(format!("HOME={}", job_home.display())),
-        OsString::from(&native.program),
-    ]
-    .into_iter()
-    .chain(native.args.iter().map(OsString::from))
-    .collect();
-    let argv = profile.argv(&program, &args);
-    Ok(argv
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect())
-}
-
-/// Runs `/usr/bin/true` under the profile of `config` with `sandbox_exec`, as the agent:
-/// whether the Mac has a `sandbox-exec` that accepts the profile this runtime builds. An
-/// agent that fails it must not say `exec = sandbox-exec`, or every job it takes would
-/// fail.
-///
-/// # Errors
-///
-/// What failed, for the operator: the profile cannot be built, the program cannot be run,
-/// or it refused the profile.
-pub fn self_test(config: &NativeConfig, sandbox_exec: &Path) -> Result<(), String> {
-    let probe = NativeSpec {
-        program: "/usr/bin/true".to_owned(),
-        args: Vec::new(),
-        env: BTreeMap::new(),
-        cwd: String::new(),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        network: NetworkLevel::Off,
-        ports: Vec::new(),
-    };
-    let argv = profile_argv(config, &probe, &config.homes).map_err(|why| why.0)?;
-    let name = sandbox_exec.display();
-    let out = Program::new(sandbox_exec, &argv[1..])
-        .env_clear()
-        .output()
-        .map_err(|why| format!("{name}: {why}"))?;
-    match out.status.success() {
-        true => Ok(()),
-        false => Err(format!(
-            "{name} refused the profile ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-    }
+    Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))
 }
 
 /// The network level of a start as the profile's. `on` and `open` are one profile, with no

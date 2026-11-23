@@ -1,39 +1,21 @@
-//! Adoption: a native run outlives the agent object that started it, and the runtime of the
-//! next process finds it again through the journal and the helper's `watch`, lists it with
-//! its labels and its age, and reports how it ends; a run the helper no longer has is listed
-//! ended, never leaked.
+//! A restart of the agent at the runtime level. No run outlives the process that started it:
+//! the next process's pool retires every account an earlier run held, so the runtime lists
+//! each run the journal has a record of as ended (`Gone`, with its labels, its age and the
+//! output it wrote), the lifecycle reports the job failed and removes it, which ends its
+//! lease; a lease with no run record (a start that died before its job started) is dropped by
+//! `reclaim`; a run whose record could not be written still runs; and a journal that cannot be
+//! read fails the listing.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_agent::lifecycle::{Exit, Found, RunHandle, Runtime, Status, label};
-use js_agent::native::{Journal, NativeRuntime};
-use js_mac_session::helper::RESET_ALREADY;
+use js_agent::native::Journal;
 
-use super::fake_helper::FakeHelper;
-use super::{Rig, TERM, config, native};
-
-/// A wall clock a test sets, in milliseconds since the Unix epoch.
-#[derive(Clone, Default)]
-struct Wall(Arc<AtomicU64>);
-
-impl Wall {
-    fn at(ms: u64) -> Self {
-        let wall = Self::default();
-        wall.0.store(ms, Ordering::SeqCst);
-        wall
-    }
-
-    fn set(&self, ms: u64) {
-        self.0.store(ms, Ordering::SeqCst);
-    }
-
-    fn clock(&self) -> js_agent::native::Clock {
-        let wall = Arc::clone(&self.0);
-        Arc::new(move || wall.load(Ordering::SeqCst))
-    }
-}
+use super::{Rig, native};
 
 fn labels(run_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -42,257 +24,177 @@ fn labels(run_id: &str) -> BTreeMap<String, String> {
     ])
 }
 
-/// A runtime of the next process over the same helper and journal, after the helper has
-/// reset already (it did not restart: the agent did).
-fn next(fake: &FakeHelper, wall: &Wall, term: u64) -> NativeRuntime {
-    fake.refuse("boot-reset", RESET_ALREADY);
-    let opened = NativeRuntime::open(fake.client(), config(fake), term).unwrap();
-    opened.with_clock(wall.clock())
+fn handle(lease: &str) -> RunHandle {
+    RunHandle(lease.to_owned())
 }
 
-/// Polls `rt` until the run `id` no longer runs.
-fn settle(rt: &mut NativeRuntime, id: &RunHandle) -> Status {
-    for _ in 0..super::POLLS {
-        let status = rt.poll(id).unwrap();
-        if status != Status::Running {
-            return status;
-        }
-        std::thread::yield_now();
-    }
-    panic!("the run did not end");
+/// Starts `program args` as the run `run_id`, with its labels, and settles it.
+fn started(rig: &mut Rig, run_id: &str, program: &str, args: &[&str]) -> RunHandle {
+    let mut spec = rig.spec(run_id, native(program, args));
+    spec.labels = labels(run_id);
+    let id = rig.rt.create_and_start(&spec).unwrap();
+    rig.settle(&id);
+    id
 }
 
-/// Starts `r1` at wall time 1000 on a runtime that is then dropped, as the agent's process
-/// ends; returns the helper, the journal's directory and the clock.
-fn started_and_dropped(name: &str) -> (FakeHelper, super::Scratch, Wall) {
-    let wall = Wall::at(1000);
-    let mut rig = Rig::new(name);
-    rig.rt = std::mem::replace(
-        &mut rig.rt,
-        NativeRuntime::open(rig.fake.client(), config(&rig.fake), TERM + 9).unwrap(),
-    )
-    .with_clock(wall.clock());
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
-    spec.labels = labels("r1");
-    rig.rt.create_and_start(&spec).unwrap();
-    let Rig { fake, rt, dir } = rig;
-    drop(rt);
-    (fake, dir, wall)
-}
-
-/// Asserts the adoption: the next runtime's reclaim leaves the run alone, its listing holds
-/// the run with the labels its start had and the time it has run on the wall clock, the run
-/// then reports the exit the helper sees, and its removal ends the user and the lease. It
-/// catches an agent restart that kills running work, a run that outlives a dead agent with
-/// nobody owning it, and an adopted run whose wall time starts again from zero.
+/// Asserts the restart of several runs: the next runtime's reclaim leaves the runs' leases
+/// alone (they have records), its listing holds each run with the labels its start had and the
+/// time it has run on the wall clock, once, the accounts of the earlier runs are retired by
+/// the pool's open, each run polls `Gone`, the output its job wrote is still its log, and
+/// the removal of each ends its lease.
+///
+/// Catches: a restart that forgets the runs it left (the lifecycle would never report them),
+/// an earlier run whose account is left lent, and a run whose wall time starts again from
+/// zero.
 #[test]
-fn a_restarted_runtime_adopts_a_live_run_and_reports_its_exit() {
-    let (fake, dir, wall) = started_and_dropped("adopt");
-    wall.set(61_000);
-    let mut rt = next(&fake, &wall, TERM + 1);
-    assert!(rt.reclaim().is_empty());
-    let found = rt.list_labelled().unwrap();
-    let want = Found {
-        id: RunHandle("7.0".to_owned()),
-        labels: labels("r1"),
-        running_ms: 60_000,
-        never_started: false,
-    };
-    assert_eq!(found, [want]);
-    assert_eq!(rt.list_labelled().unwrap().len(), 1, "listed once");
-    let id = RunHandle("7.0".to_owned());
-    assert_eq!(rt.poll(&id).unwrap(), Status::Running);
-    fake.exit("7.0", 3);
-    let exit = Exit {
-        code: 3,
-        oom_killed: false,
-    };
-    assert_eq!(settle(&mut rt, &id), Status::Exited(exit));
-    rt.remove(&id).unwrap();
-    let verbs = fake.verbs();
-    assert!(verbs.contains(&"watch 7.0".to_owned()), "{verbs:?}");
-    assert_eq!(
-        verbs[verbs.len() - 2..],
-        ["kill-uid 7.0", "user-delete 7.0"]
-    );
+fn a_restart_lists_every_run_of_the_earlier_process_ended_and_removes_them() {
+    let mut rig = Rig::in_dir("adopt-many", 3, |_, _| {});
+    let first = started(&mut rig, "r1", "/bin/echo", &["from the earlier process"]);
+    let second = started(&mut rig, "r2", "/usr/bin/true", &[]);
+    assert_eq!((&first, &second), (&handle("7.0"), &handle("7.1")));
+    let earlier: Vec<String> = rig
+        .launcher
+        .launched()
+        .iter()
+        .map(|launched| launched.var("USER").unwrap().to_owned())
+        .collect();
+    let journal = Journal::new(&rig.dir.path("native-leases"));
+    let records = journal.runs().unwrap();
+    let (one, two) = (records["7.0"].started_ms, records["7.1"].started_ms);
+    let now = one.max(two) + 60_000;
+
+    let mut next = rig.reopened().with_clock(Arc::new(move || now));
+    for name in &earlier {
+        assert!(!rig.accounts.records().contains(name), "{name} retired");
+    }
     assert!(
-        Journal::new(&dir.path("native-leases"))
-            .live()
-            .unwrap()
-            .is_empty()
+        next.reclaim().is_empty(),
+        "runs with records are not dropped"
     );
-}
-
-/// Asserts that a run whose process the helper no longer has (it restarted, or its user is
-/// gone) is listed ended and removed, which ends its lease; and that a helper from before
-/// `watch` gives the same. It catches a journal entry leaked for good, and a listing that
-/// fails for one run that cannot be found.
-#[test]
-fn a_run_the_helper_no_longer_has_is_listed_ended() {
-    for old in [false, true] {
-        let (fake, dir, wall) = started_and_dropped(&format!("adopt-gone-{old}"));
-        match old {
-            true => fake.be_old(),
-            false => fake.forget_runs(),
-        }
-        let mut rt = next(&fake, &wall, TERM + 1);
-        let found = rt.list_labelled().unwrap();
-        assert_eq!(found.len(), 1, "{old}");
-        let id = found[0].id.clone();
-        assert_eq!(rt.poll(&id).unwrap(), Status::Gone, "{old}");
-        rt.remove(&id).unwrap();
-        let journal = Journal::new(&dir.path("native-leases"));
-        assert!(journal.live().unwrap().is_empty(), "{old}");
+    let want = [
+        Found {
+            id: first.clone(),
+            labels: labels("r1"),
+            running_ms: now - one,
+            never_started: false,
+        },
+        Found {
+            id: second.clone(),
+            labels: labels("r2"),
+            running_ms: now - two,
+            never_started: false,
+        },
+    ];
+    assert_eq!(next.list_labelled().unwrap(), want);
+    assert_eq!(next.list_labelled().unwrap().len(), 2, "listed once each");
+    for id in [&first, &second] {
+        assert_eq!(next.poll(id).unwrap(), Status::Gone);
     }
+    let tail = next.log_tail(&first).unwrap().unwrap();
+    assert_eq!(tail.stdout, "from the earlier process\n");
+    for id in [&first, &second] {
+        next.remove(id).unwrap();
+    }
+    assert!(journal.live().unwrap().is_empty());
+    assert!(next.list_labelled().unwrap().is_empty());
+    assert_eq!(next.poll(&first).unwrap(), Status::Gone);
 }
 
-/// Asserts that a helper that cannot be reached fails the listing (the agent cannot say what
-/// it holds, and must not say it holds nothing), and that a journal that cannot be read
-/// fails it too. It catches an agent that registers with an empty list while runs go on.
+/// Asserts that `reclaim` drops exactly the leases that have no run record (a start that
+/// died before its job started, which the pool's open has already retired the account of),
+/// names each, and leaves the lease of a run that has a record for the listing.
+///
+/// Catches: a lease of a start that never ran kept for ever, and the lease of a run the
+/// lifecycle has still to report dropped.
 #[test]
-fn a_listing_that_cannot_ask_the_helper_or_read_the_journal_fails() {
-    let (fake, dir, wall) = started_and_dropped("adopt-lost");
-    let mut rt = next(&fake, &wall, TERM + 1);
-    drop(fake);
-    let error = rt.list_labelled().unwrap_err();
-    assert!(error.0.starts_with("watch: "), "{}", error.0);
-    let journal = dir.path("native-leases");
-    std::fs::remove_file(&journal).unwrap();
-    std::fs::create_dir(&journal).unwrap();
-    let error = rt.list_labelled().unwrap_err();
-    assert!(error.0.starts_with("the lease journal: "), "{}", error.0);
-}
-
-/// Asserts what the journal keeps of a run and how it reads back: the record of a live lease
-/// is listed, the record of a lease marked done is not, a retirement keeps the record of a
-/// lease it keeps, and a torn record line is skipped. It catches a retirement that drops the
-/// records of the runs it keeps (they would then be killed at the next start), and a torn
-/// line that stops the whole journal from being read.
-#[test]
-fn the_journal_keeps_run_records_of_live_leases() {
-    let (_fake, dir, _wall) = started_and_dropped("adopt-journal");
-    let path = dir.path("native-leases");
-    let journal = Journal::new(&path);
-    let runs = journal.runs().unwrap();
-    let record = runs["7.0"].clone();
-    assert_eq!((record.pid, record.started_ms), (4242, 1000));
-    assert_eq!(record.labels, labels("r1"));
-    journal.add("7.5").unwrap();
-    journal.started("7.5", &record).unwrap();
-    journal.done("7.5").unwrap();
-    journal.add("7.6").unwrap();
-    std::fs::OpenOptions::new()
+fn a_reclaim_drops_the_leases_of_starts_that_never_ran_and_keeps_the_runs() {
+    let mut rig = Rig::new("adopt-reclaim");
+    let id = started(&mut rig, "r1", "/usr/bin/true", &[]);
+    let path = rig.dir.path("native-leases");
+    fs::OpenOptions::new()
         .append(true)
         .open(&path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, b"= 7.6 {\"pid\":"))
+        .and_then(|mut file| file.write_all(b"+ 7.9\n"))
         .unwrap();
-    assert_eq!(journal.runs().unwrap().keys().collect::<Vec<_>>(), ["7.0"]);
-    journal.retire(&["7.6".to_owned()]).unwrap();
+    let journal = Journal::new(&path);
+    assert_eq!(journal.live().unwrap(), ["7.0", "7.9"]);
+    let mut next = rig.reopened();
+    assert_eq!(
+        next.reclaim(),
+        ["dropped the lease 7.9 an earlier process left before its job started"]
+    );
     assert_eq!(journal.live().unwrap(), ["7.0"]);
-    assert_eq!(journal.runs().unwrap()["7.0"], record);
+    assert!(next.reclaim().is_empty(), "a second look finds nothing");
+    let found = next.list_labelled().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id);
+    next.remove(&id).unwrap();
+    assert!(journal.live().unwrap().is_empty());
 }
 
-/// The lifecycle configuration of `dir` again, over the directories an earlier lifecycle of
-/// the same test made (`crate::lifecycle::config_in` makes them).
-fn reopened(dir: &super::Scratch) -> js_agent::lifecycle::Config {
-    use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
-    Config {
-        capacity: Capacity {
-            cpu_millis: 4000,
-            memory_bytes: 8 << 30,
-            disk_bytes: 10 << 30,
-            gpus: std::collections::BTreeSet::from([0, 1]),
-        },
-        allow_host_jobs: false,
-        allow_fuse_jobs: false,
-        mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
-        scratch: ScratchRoot::open(&dir.path("scratch")).unwrap(),
-        files: Some(FilesRoot::open(&dir.path("files")).unwrap()),
-        state: StateRoot::open(&dir.path("state")).unwrap(),
-        stop_grace: crate::lifecycle::GRACE,
-        bundle: None,
-        quota: None,
-    }
-}
-
-/// Asserts the restart end to end: a native job's lifecycle and runtime are dropped while it
-/// runs, and the lifecycle of the next process adopts it (an `adopted` event, the job held
-/// from the first heartbeat), then reports its exit as the job's result through the normal
-/// exit path and removes its user. It catches an agent update that cuts running work.
+/// Asserts that a journal that cannot be read fails the listing (the agent cannot say what
+/// it holds, and must not say it holds nothing), and that the listing works again once the
+/// journal can be read.
+///
+/// Catches: an agent that registers with an empty list while runs of an earlier process are
+/// still in the journal.
 #[test]
-fn a_restarted_lifecycle_adopts_a_native_job_and_reports_its_result() {
-    use js_agent::lifecycle::{Event, Lifecycle};
-    use js_agent::native::NativeChecks;
-    use js_agent_wire::Outcome;
-
-    let mut h = super::lifecycle::Native::new("adopt-life");
-    assert_eq!(
-        h.start(super::lifecycle::job("r1", "/bin/sleep")),
-        ["started r1"]
-    );
-    let super::lifecycle::Native {
-        life,
-        fake,
-        clock,
-        dir,
-    } = h;
-    drop(life);
-    fake.refuse("boot-reset", RESET_ALREADY);
-    let runtime = NativeRuntime::open(fake.client(), config(&fake), TERM + 1).unwrap();
-    let (mut life, events) = Lifecycle::adopt(
-        reopened(&dir),
-        Box::new(runtime),
-        Box::new(NativeChecks::over(fake.client())),
-        Box::new(clock.clone()),
-    )
-    .unwrap();
-    let adopted = Event::Adopted {
-        run_id: "r1".to_owned(),
-    };
-    assert!(events.contains(&adopted), "{events:?}");
-    assert_eq!(life.held().len(), 1);
-    fake.exit("7.0", 0);
-    for _ in 0..super::POLLS {
-        life.step();
-        if !life.results().is_empty() {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    let result = &life.results()[0];
-    assert_eq!(
-        (result.run_id.as_str(), result.outcome),
-        ("r1", Outcome::Succeeded)
-    );
-    for _ in 0..super::POLLS {
-        life.step();
-        if fake
-            .verbs()
-            .last()
-            .is_some_and(|verb| verb == "user-delete 7.0")
-        {
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!(
-        "the adopted run's user was never removed: {:?}",
-        fake.verbs()
-    );
+fn a_listing_that_cannot_read_the_journal_fails() {
+    let mut rig = Rig::new("adopt-lost");
+    let id = started(&mut rig, "r1", "/usr/bin/true", &[]);
+    let mut next = rig.reopened();
+    let path = rig.dir.path("native-leases");
+    let kept = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let error = next.list_labelled().unwrap_err();
+    assert!(error.0.starts_with("the lease journal: "), "{}", error.0);
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, kept).unwrap();
+    let found = next.list_labelled().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id);
 }
 
 /// Asserts that a run whose record cannot be written still runs: the record costs only the
-/// adoption (the lease, written before, is ended by the next process's reclaim). It catches
-/// a started run failed, and its user left behind, because a record could not be written.
+/// listing after a restart (the lease, written before, is dropped by the next process's
+/// reclaim, and its account by the pool's open). The journal here becomes a directory when
+/// the run directory is given to the account, between the lease and the record.
+///
+/// Catches: a started run failed, and its account left lent, because a record could not be
+/// written.
 #[test]
 fn a_run_whose_record_cannot_be_written_still_runs() {
-    let mut rig = Rig::new("adopt-norecord");
+    let rig = Rig::new("adopt-norecord");
     let journal = rig.dir.path("native-leases");
-    rig.fake.break_journal_at_run(&journal);
-    let id = rig.start("r1", "/bin/true", &[]);
+    let breaks = journal.clone();
+    let mut rig = rig.handing_over(Arc::new(
+        move |_: &Path, _: u32, _: u32| -> io::Result<()> {
+            if breaks.is_file() {
+                fs::remove_file(&breaks)?;
+                fs::create_dir(&breaks)?;
+            }
+            Ok(())
+        },
+    ));
+    let lent = rig.accounts.records().remove(0);
+    let id = rig.start("r1", "/bin/sleep", &["600"]);
     assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
     assert!(
         Journal::new(&journal).runs().is_err(),
         "the journal is a directory now"
     );
+    rig.rt
+        .stop(&id, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert_eq!(
+        rig.settle(&id),
+        Status::Exited(Exit {
+            code: 128 + 15,
+            oom_killed: false
+        })
+    );
+    rig.rt.remove(&id).unwrap();
+    assert!(!rig.accounts.records().contains(&lent), "retired");
+    assert!(rig.pool.held().is_empty());
 }

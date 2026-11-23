@@ -5,6 +5,8 @@
 (deny lsopen)
 (deny user-preference-write)
 (allow file-write* (subpath (param "RUN")) (literal "/dev/null") (subpath "/dev/fd"))
+(deny process-exec* (subpath (param "MOUNT")))
+(deny file-map-executable (subpath (param "MOUNT")))
 (deny file-read* (subpath (param "MOUNT")))
 (allow file-read* (subpath (param "MT_0")))
 (allow file-read-metadata (path-ancestors (param "MT_0")))

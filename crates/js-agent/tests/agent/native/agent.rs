@@ -1,5 +1,8 @@
 //! The whole agent with native jobs: where the flags are accepted, what they require, and
-//! what the hello says. The helper is a fake on a socket and the runtime is the real one.
+//! what the hello says. The test runner holds no Full Disk Access, so the agent opens no
+//! account pool and runs no job here (the pool's runs are tested at the runtime, in the
+//! other modules); what these tests read is the agent's start: its flags, its refusals before
+//! the hello, and the hello.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -7,12 +10,15 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use js_agent::lifecycle::Local;
-use js_agent::native::{self, NativeFlags, NativeSettings, PfFlags};
+use js_agent::native::fence::PRIVACY_ONLY_PLACES;
+use js_agent::native::{NativeFlags, NativeSettings, PfFlags};
 use js_agent::{Backend, Cli, Machine, RuntimeBuild, System};
+use js_agent_wire::refusal;
+use js_caps::FULL_DISK_ACCESS;
+use js_mac_session::full_disk_access::FullDiskAccess;
 use serde_json::Value;
 use std::path::Path;
 
-use super::fake_helper::FakeHelper;
 use crate::bundle::fake::{FakeHost, digest};
 use crate::bundle::fixture::{no_registry, placer};
 use crate::jobs::fake::FakeMachine;
@@ -29,18 +35,74 @@ pub(crate) fn private(dir: &Scratch, name: &str) -> String {
     path.display().to_string()
 }
 
-/// The flags of a native agent over `fake` with its state and scratch roots in `dir`.
-pub(crate) fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
+/// The uids of the account pool of the agents made here.
+const ACCOUNT_RANGE: &str = "501-510";
+
+/// The flags of a native agent with its state and scratch roots in `dir`, and the account pool
+/// `dir/accounts` (a directory the agent makes nothing in while it holds no Full Disk Access)
+/// of ten slots.
+pub(crate) fn native_flags(dir: &Scratch) -> Vec<String> {
     vec![
-        "--native-helper-socket".to_owned(),
-        fake.socket().display().to_string(),
-        "--native-homes".to_owned(),
-        fake.homes().display().to_string(),
+        "--native-accounts".to_owned(),
+        dir.path("accounts").display().to_string(),
+        "--native-account-range".to_owned(),
+        ACCOUNT_RANGE.to_owned(),
         "--state-root".to_owned(),
         private(dir, "state"),
         "--scratch-root".to_owned(),
         private(dir, "scratch"),
     ]
+}
+
+/// `flags` without `flag` and the value that follows it.
+fn without(flags: &[String], flag: &str) -> Vec<String> {
+    let at = flags.iter().position(|given| given == flag).unwrap();
+    let mut rest = flags.to_vec();
+    rest.drain(at..=at + 1);
+    rest
+}
+
+/// The native settings of an agent with the account pool `/var/db/js-accounts` that found
+/// `held` at start.
+fn settings(held: FullDiskAccess) -> NativeSettings {
+    let flags = NativeFlags {
+        accounts: Some(Path::new("/var/db/js-accounts")),
+        account_range: Some(ACCOUNT_RANGE),
+        account_ready: None,
+        homes: None,
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+        pf: PfFlags::default(),
+    };
+    NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap()
+        .with_full_disk_access(held)
+}
+
+/// The native backend of an agent with its flags checked and its journal in `dir`, for a worker
+/// (`native/worker.rs`) or a rescue (`vm/rescue.rs`) over a machine that makes the runtime. It
+/// has not found Full Disk Access.
+pub(crate) fn backend(dir: &Scratch) -> Backend {
+    let accounts = dir.path("accounts");
+    let flags = NativeFlags {
+        accounts: Some(&accounts),
+        account_range: Some(ACCOUNT_RANGE),
+        account_ready: None,
+        homes: None,
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+        pf: PfFlags::default(),
+    };
+    let journal = dir.path("native-leases");
+    let found = NativeSettings::from_flags(&flags, &[], &journal);
+    Backend::Native(found.unwrap().unwrap())
 }
 
 /// Runs the whole agent on `host` with `extra` flags until the server's first answer
@@ -65,29 +127,33 @@ pub(crate) fn hello_on(
     (ran, hello)
 }
 
-/// Asserts that a Mac agent given the helper's socket starts its worker (the helper is
-/// asked for its boot reset first) and reports `runtime` and `exec` as `sandbox-exec`
-/// beside `os` and `arch`. It catches an agent that runs native jobs while reporting no
-/// mode (every pool with a mode would refuse it).
+/// Asserts that a Mac agent given its account pool starts its worker and reports `runtime` and
+/// `exec` as `sandbox-exec` beside `os`, and the Full Disk Access it found (the test runner
+/// holds none, so it says `not-granted` or `undetermined`, never `granted`), and that with no
+/// grant it opens no pool: nothing is made in the pool's directory. It catches an agent that
+/// runs native jobs while reporting no mode (every pool with a mode would refuse it), one that
+/// does not say what it found, and one that opens its pool without the grant that deletes an
+/// account.
 #[test]
 fn a_mac_agent_reports_sandbox_exec() {
     let dir = Scratch::new("native-agent-hello");
-    let fake = FakeHelper::start(&dir);
-    let extra = native_flags(&dir, &fake);
+    let extra = native_flags(&dir);
     let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
     assert_eq!(ran.status(), code(0), "{}", ran.err);
-    assert_eq!(fake.verbs(), ["boot-reset"]);
     assert_eq!(hello["capabilities"]["runtime"], "sandbox-exec");
     assert_eq!(hello["capabilities"]["exec"], "sandbox-exec");
     assert_eq!(hello["capabilities"]["os"], "macos");
+    let held = hello["capabilities"][FULL_DISK_ACCESS].as_str().unwrap();
+    assert!(["not-granted", "undetermined"].contains(&held), "{held}");
+    assert!(!dir.path("accounts").exists(), "no pool without the grant");
 }
 
-/// Asserts that a Mac start with neither `--native-helper-socket` nor `--no-jobs` ends with
-/// status 2, before anything is sent, naming `--native-helper-socket` and the `--no-jobs` that
+/// Asserts that a Mac start with neither `--native-accounts` nor `--no-jobs` ends with
+/// status 2, before anything is sent, naming `--native-accounts` and the `--no-jobs` that
 /// an agent running no job gives. It catches a Mac agent that registers with no way to run a
 /// job, and one that is silently a no-job agent for want of a flag.
 #[test]
-fn a_mac_start_with_no_socket_and_no_no_jobs_is_refused() {
+fn a_mac_start_with_no_accounts_and_no_no_jobs_is_refused() {
     let args = flags(&[]);
     let (script, sent) = Script::new(vec![welcome(1)]);
     let connector = ScriptConnector::of(script);
@@ -104,8 +170,8 @@ fn a_mac_start_with_no_socket_and_no_no_jobs_is_refused() {
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
         ran.err.contains(
-            "--native-helper-socket: required: this macOS build runs native jobs through the \
-             root helper (give --no-jobs for an agent that runs no job)"
+            "--native-accounts: required: this macOS build runs native jobs as accounts of its \
+             own pool (give --no-jobs for an agent that runs no job)"
         ),
         "{}",
         ran.err
@@ -113,15 +179,16 @@ fn a_mac_start_with_no_socket_and_no_no_jobs_is_refused() {
     assert!(sent.borrow().is_empty(), "something was sent");
 }
 
-/// Asserts that `--no-jobs` refuses each flag of the macOS build's runtime, the native socket
-/// first among them: through the agent's own entry point, a start with `--no-jobs` and one such
+/// Asserts that `--no-jobs` refuses each flag of the macOS build's runtime, the native
+/// accounts and their range first among them: through the agent's own entry point, a start with `--no-jobs` and one such
 /// flag ends with status 2 before anything is sent, naming the flag and `--no-jobs`. It catches
 /// an agent that runs no job yet takes a runtime flag it would ignore, so that a flags file
 /// written for a native agent starts one that silently runs nothing.
 #[test]
 fn no_jobs_refuses_every_native_flag_by_name() {
-    let rows: [(&str, &str); 5] = [
-        ("--native-helper-socket", "/var/run/js-mac-session/socket"),
+    let rows: [(&str, &str); 6] = [
+        ("--native-accounts", "/var/db/js-accounts"),
+        ("--native-account-range", "501-510"),
         ("--native-network", "on"),
         ("--native-pf-uid-start", "600"),
         ("--vm-driver", "/usr/local/bin/js-vmm"),
@@ -166,8 +233,7 @@ fn a_mac_agent_advertises_its_native_network_ceiling() {
     .enumerate()
     {
         let dir = Scratch::new(&format!("native-agent-egress{n}"));
-        let fake = FakeHelper::start(&dir);
-        let mut extra = native_flags(&dir, &fake);
+        let mut extra = native_flags(&dir);
         if let Some(value) = given {
             extra.extend(["--native-network".to_owned(), value.to_owned()]);
         }
@@ -181,19 +247,194 @@ fn a_mac_agent_advertises_its_native_network_ceiling() {
     }
 }
 
-/// Asserts that an agent whose helper does not answer ends with status 2 before it says
-/// hello, naming the flag. It catches an agent that registers as a native host with no way
-/// to run a job.
+/// Asserts the provider flags through the whole macOS agent: given `--mount-provider`,
+/// `--mount-provider-user` naming a user of the directory service (`nobody`, on every Mac) and
+/// `--mount-provider-wait`, the agent starts and its hello reports `mount-provider.tierstore`
+/// beside `layered-rootfs`; without them it reports no provider; a user the directory service
+/// does not know ends the agent with status 2 before anything is sent, naming the flag; and
+/// `--no-jobs` refuses each of the three flags, and `--native-trees-root`, by name. Catches a Mac agent that drops the
+/// flags, one never placed a provider's job, a provider's socket judged against root for a
+/// name the agent could not look up, and a no-job agent that silently ignores the flags.
 #[test]
-fn an_agent_whose_helper_is_not_there_ends_before_the_hello() {
-    let dir = Scratch::new("native-agent-nohelper");
-    let fake = FakeHelper::start(&dir);
-    let mut extra = native_flags(&dir, &fake);
-    extra[1] = "/nonexistent/js-helper".to_owned();
+fn a_mac_agent_takes_the_provider_flags_and_reports_the_provider() {
+    let dir = Scratch::new("native-agent-providers");
+    let socket = dir.path("provider").join("provider.sock");
+    fs::create_dir(dir.path("provider")).unwrap();
+    let provider = format!("tierstore={}", socket.display());
+    let with = |user: &str| {
+        let mut extra = native_flags(&dir);
+        extra.extend(
+            [
+                "--mount-provider",
+                &provider,
+                "--mount-provider-user",
+                &format!("tierstore={user}"),
+                "--mount-provider-wait",
+                "60",
+            ]
+            .map(str::to_owned),
+        );
+        extra
+    };
+    let (ran, hello) = hello_on(&mac_host(), &with("nobody"), welcome(1));
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(hello["capabilities"]["mount-provider.tierstore"], "true");
+    assert_eq!(hello["capabilities"]["layered-rootfs"], "true");
+
+    let bare = Scratch::new("native-agent-providers-none");
+    let (ran, hello) = hello_on(&mac_host(), &native_flags(&bare), welcome(1));
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    let keys = hello["capabilities"].as_object().unwrap();
+    assert!(
+        !keys.keys().any(|key| key.starts_with("mount-provider.")),
+        "{hello}"
+    );
+
+    let other = Scratch::new("native-agent-providers-unknown");
+    let mut extra = native_flags(&other);
+    extra.extend(
+        [
+            "--mount-provider",
+            &provider,
+            "--mount-provider-user",
+            "tierstore=_js-no-such-user",
+        ]
+        .map(str::to_owned),
+    );
     let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
     assert_eq!(ran.status(), code(2), "{}", ran.err);
-    assert!(ran.err.contains("--native-helper-socket"), "{}", ran.err);
+    // The harness's host has no `df`, so a warning about the disk comes first; the last line
+    // is the agent's reason for ending.
+    assert_eq!(
+        ran.err.lines().last(),
+        Some(
+            "js-agent: --mount-provider-user tierstore: no user \"_js-no-such-user\" in the \
+             directory service"
+        ),
+        "{}",
+        ran.err
+    );
     assert_eq!(hello, Value::Null);
+
+    for (flag, value) in [
+        ("--mount-provider", provider.as_str()),
+        ("--mount-provider-user", "tierstore=nobody"),
+        ("--mount-provider-wait", "60"),
+        ("--native-trees-root", "/private/var/tierstore/fs"),
+    ] {
+        let args = flags(&["--no-jobs", flag, value]);
+        let (script, sent) = Script::new(vec![welcome(1)]);
+        let connector = ScriptConnector::of(script);
+        let mut sleeper = CountingSleeper::stopping_at(1);
+        let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+        let ran = run_on_defaulted(
+            &args,
+            &mac_host(),
+            &connector,
+            &mut sleeper,
+            &mut Lowest,
+            jobs,
+        );
+        assert_eq!(ran.status(), code(2), "{flag}: {}", ran.err);
+        assert_eq!(
+            ran.err,
+            format!("js-agent: {flag}: not with --no-jobs (an agent that runs no job)\n"),
+            "{flag}"
+        );
+        assert!(sent.borrow().is_empty(), "{flag}: something was sent");
+    }
+}
+
+/// Asserts through the whole macOS agent that `--native-trees-root` is refused before the
+/// hello, with status 2 and the reason naming the flag by exact equality, when no
+/// `--mount-provider` is given and when it names a directory that is no `--mount-root-ro`;
+/// and that a trees root that is a `--mount-root-ro`, beside a provider, starts the agent,
+/// whose hello reports the provider. Catches a Mac agent that takes a trees root whose reads
+/// it would open to every run's trees, and one that refuses the shape the proof Mac runs.
+#[test]
+fn a_mac_agent_takes_a_trees_root_only_as_a_read_only_root_beside_a_provider() {
+    let dir = Scratch::new("native-agent-trees-root");
+    let base = native_flags(&dir);
+    let trees = private(&dir, "trees");
+    fs::create_dir(dir.path("provider")).unwrap();
+    let provider = format!(
+        "tierstore={}",
+        dir.path("provider").join("provider.sock").display()
+    );
+    let run = |extra: &[&str]| {
+        let mut given = base.clone();
+        given.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        hello_on(&mac_host(), &given, welcome(1))
+    };
+    let canonical = fs::canonicalize(&trees).unwrap();
+    let refused = [
+        (
+            vec!["--native-trees-root", trees.as_str()],
+            "--native-trees-root: needs --mount-provider: the trees root is where a provider \
+             serves its trees"
+                .to_owned(),
+        ),
+        (
+            vec!["--native-trees-root", &trees, "--mount-provider", &provider],
+            format!(
+                "--native-trees-root: {} is no --mount-root-ro",
+                canonical.display()
+            ),
+        ),
+    ];
+    for (extra, why) in refused {
+        let (ran, hello) = run(&extra);
+        assert_eq!(ran.status(), code(2), "{}", ran.err);
+        assert_eq!(
+            ran.err.lines().last(),
+            Some(format!("js-agent: {why}").as_str()),
+            "{}",
+            ran.err
+        );
+        assert_eq!(hello, Value::Null);
+    }
+    let root = format!("trees={trees}");
+    let (ran, hello) = run(&[
+        "--native-trees-root",
+        &trees,
+        "--mount-provider",
+        &provider,
+        "--mount-root-ro",
+        &root,
+    ]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(hello["capabilities"]["mount-provider.tierstore"], "true");
+}
+
+/// Asserts that an agent given `--native-accounts` and no `--native-account-range`, one given a
+/// range the pool refuses, and one given more ready accounts than slots end with status 2
+/// before the hello, naming the flag at fault. It catches an agent that registers as a native
+/// host with a pool it cannot open, which would refuse every job.
+#[test]
+fn an_agent_with_a_pool_it_cannot_make_ends_before_the_hello() {
+    let dir = Scratch::new("native-agent-range");
+    let extra = native_flags(&dir);
+    let mut low = without(&extra, "--native-account-range");
+    low.extend(["--native-account-range".to_owned(), "500-510".to_owned()]);
+    let mut ready = extra.clone();
+    ready.extend(["--native-account-ready".to_owned(), "11".to_owned()]);
+    let cases = [
+        (
+            without(&extra, "--native-account-range"),
+            "--native-accounts: needs --native-account-range",
+        ),
+        (low, "--native-account-range: "),
+        (
+            ready,
+            "--native-account-ready: 11 is more than the 10 slots of --native-account-range",
+        ),
+    ];
+    for (flags, said) in cases {
+        let (ran, hello) = hello_on(&mac_host(), &flags, welcome(1));
+        assert_eq!(ran.status(), code(2), "{said}: {}", ran.err);
+        assert!(ran.err.contains(said), "{said}: {}", ran.err);
+        assert_eq!(hello, Value::Null, "{said}: nothing was sent");
+    }
 }
 
 /// Asserts what the job flags require of a native agent: a state root and a scratch root
@@ -202,11 +443,14 @@ fn an_agent_whose_helper_is_not_there_ends_before_the_hello() {
 #[test]
 fn a_native_agent_needs_its_roots() {
     let dir = Scratch::new("native-agent-roots");
-    let fake = FakeHelper::start(&dir);
-    let socket = fake.socket().display().to_string();
-    let homes = fake.homes().display().to_string();
+    let accounts = dir.path("accounts").display().to_string();
     let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
-    let base = ["--native-helper-socket", &socket, "--native-homes", &homes];
+    let base = [
+        "--native-accounts",
+        &accounts,
+        "--native-account-range",
+        ACCOUNT_RANGE,
+    ];
     let cli = |extra: &[&str]| {
         let all = [&base[..], extra].concat();
         let argv = [
@@ -221,12 +465,12 @@ fn a_native_agent_needs_its_roots() {
 
     let why = Local::from_cli(&cli(&["--scratch-root", &scratch]), 0).unwrap_err();
     assert!(
-        why.starts_with("--state-root: required with --native-helper-socket"),
+        why.starts_with("--state-root: required with --native-accounts"),
         "{why}"
     );
     let why = Local::from_cli(&cli(&["--state-root", &state]), 0).unwrap_err();
     assert!(
-        why.starts_with("--scratch-root: required with --native-helper-socket"),
+        why.starts_with("--scratch-root: required with --native-accounts"),
         "{why}"
     );
     let both = ["--state-root", &state, "--scratch-root", &scratch];
@@ -237,68 +481,44 @@ fn a_native_agent_needs_its_roots() {
     assert_eq!(local.stop_grace.as_secs(), 5);
 }
 
-/// Asserts that the system machine makes the native runtime for the native backend: over a
-/// helper that answers it asks for the boot reset, and over a socket nobody listens on it
-/// fails with the flag named. It catches a native agent that falls back to an engine, and
-/// one that starts with a helper that is not there.
+/// Asserts that the system machine makes the native runtime for the native backend, with no
+/// helper to ask and no warning: an agent that has not found Full Disk Access (`not-granted` or
+/// `undetermined`) gets a runtime with no pool, which refuses every native start
+/// `no-full-disk-access` and whose self-test has nothing to run. It catches a native agent that
+/// falls back to an engine, one that opens the pool of an agent that cannot delete an account,
+/// and one that fails to start for want of a grant it reports.
 #[test]
 fn the_system_machine_opens_the_native_runtime() {
-    let dir = Scratch::new("native-agent-system");
-    let fake = FakeHelper::start(&dir);
     let platform = js_agent::Platform {
         os: "macos".to_owned(),
         arch: "aarch64".to_owned(),
     };
-    let open = |socket: &std::path::Path, sandbox: &str| {
-        let flags = NativeFlags {
-            socket: Some(socket),
-            homes: Some(fake.homes()),
-            network: None,
-            tool_roots: &[],
-            deny_read: &[],
-            max_file_mib: None,
-            max_processes: None,
-            pf: PfFlags::default(),
-        };
-        let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
-            .unwrap()
-            .unwrap();
-        let backend = Backend::Native(settings.with_sandbox_exec(Path::new(sandbox)));
+    for held in [FullDiskAccess::NotGranted, FullDiskAccess::Undetermined] {
+        let backend = Backend::Native(settings(held));
         let build = RuntimeBuild {
             backend: &backend,
             host_id: "h1",
             platform: &platform,
             stop_grace: std::time::Duration::from_secs(1),
         };
-        System::new().runtime(&build).map(|(_, warnings)| warnings)
-    };
-    assert_eq!(open(fake.socket(), "/usr/bin/true"), Ok(Vec::new()));
-    assert_eq!(fake.verbs(), ["boot-reset"]);
-    let why = open(
-        std::path::Path::new("/nonexistent/js-helper"),
-        "/usr/bin/true",
-    )
-    .unwrap_err();
-    assert!(
-        why.starts_with("--native-helper-socket: the boot reset: "),
-        "{why}"
-    );
-    let before = fake.verbs().len();
-    let why = open(fake.socket(), "/usr/bin/false").unwrap_err();
-    assert!(why.contains("the sandbox self-test failed"), "{why}");
-    assert_eq!(fake.verbs().len(), before, "the helper was not asked");
+        let (runtime, warnings) = System::new().runtime(&build).unwrap();
+        assert_eq!(warnings, Vec::<String>::new(), "{held:?}");
+        let refused = runtime
+            .check_native(&super::native("/usr/bin/true", &[]))
+            .unwrap_err();
+        assert_eq!(refused.code, refusal::NO_FULL_DISK_ACCESS, "{held:?}");
+    }
 }
 
 /// Asserts that a native agent that is not root is refused at start, naming the flag, and
-/// that the agent's token, instance and CA files, the helper's socket directory and
-/// `--native-deny-read` are read-denied beside its roots. It catches an agent that takes
-/// leases and fails every start at the first `chown`, and a secret file a run can read.
+/// that the agent's token, instance and CA files, the pool's directory (`--native-accounts`),
+/// the places only the privacy controls guard and `--native-deny-read` are read-denied beside
+/// its roots. It catches an agent that takes leases and fails every start at the first
+/// `chown`, and a secret file or the pool's ledger that a run can read.
 #[test]
 fn a_native_agent_must_be_root_and_denies_its_secret_files() {
     let dir = Scratch::new("native-agent-euid");
-    let fake = FakeHelper::start(&dir);
-    let socket = fake.socket().display().to_string();
-    let homes = fake.homes().display().to_string();
+    let accounts = dir.path("accounts").display().to_string();
     let (state, scratch) = (private(&dir, "state"), private(&dir, "scratch"));
     let files: Vec<String> = ["token", "instance", "ca.pem"]
         .iter()
@@ -316,10 +536,12 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
         &files[1],
         "--ca-cert",
         &files[2],
-        "--native-helper-socket",
-        &socket,
+        "--native-accounts",
+        &accounts,
+        "--native-account-range",
+        ACCOUNT_RANGE,
         "--native-homes",
-        &homes,
+        "/Users",
         "--state-root",
         &state,
         "--scratch-root",
@@ -328,7 +550,7 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
     let cli = Cli::try_parse_from(argv).unwrap();
     let why = Local::from_cli(&cli, 501).unwrap_err();
     assert!(
-        why.starts_with("--native-helper-socket: the agent must run as root"),
+        why.starts_with("--native-accounts: the agent must run as root"),
         "{why}"
     );
     let local = Local::from_cli(&cli, 0).unwrap();
@@ -347,54 +569,20 @@ fn a_native_agent_must_be_root_and_denies_its_secret_files() {
             "{path} is not denied: {denied:?}"
         );
     }
+    let real_accounts = fs::canonicalize(dir.path("")).unwrap().join("accounts");
+    assert!(
+        denied.contains(&real_accounts.to_str().unwrap()),
+        "the pool's directory is not denied: {denied:?}"
+    );
     assert!(denied.contains(&"/private/etc/kcpassword"));
+    for place in PRIVACY_ONLY_PLACES {
+        assert!(denied.contains(&place), "{place} is not denied: {denied:?}");
+    }
 }
 
-/// Asserts the start-up self-test of the sandbox: a program that runs and accepts the
-/// profile passes; one that refuses it fails with its status and what it said; one that
-/// cannot be run fails naming it; a configuration with no profile builder fails by name.
-/// It catches an agent that says `sandbox-exec` while every job it takes would fail.
-#[test]
-fn the_sandbox_self_test_fails_closed() {
-    let dir = Scratch::new("native-selftest");
-    let fake = FakeHelper::start(&dir);
-    let flags = NativeFlags {
-        socket: Some(fake.socket()),
-        homes: Some(fake.homes()),
-        network: None,
-        tool_roots: &[],
-        deny_read: &[],
-        max_file_mib: None,
-        max_processes: None,
-        pf: PfFlags::default(),
-    };
-    let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
-        .unwrap()
-        .unwrap();
-    let config = settings.config();
-    assert_eq!(
-        native::self_test(config, Path::new("/usr/bin/true")),
-        Ok(())
-    );
-    let refused = native::self_test(config, Path::new("/usr/bin/false")).unwrap_err();
-    assert!(
-        refused.contains("/usr/bin/false refused the profile"),
-        "{refused}"
-    );
-    let missing = native::self_test(config, Path::new("/nonexistent/sandbox-exec")).unwrap_err();
-    assert!(
-        missing.starts_with("/nonexistent/sandbox-exec: "),
-        "{missing}"
-    );
-    let mut allow = config.clone();
-    allow.read_model = js_mac_pool::seatbelt::ReadModel::Allow;
-    let unbuilt = native::self_test(&allow, Path::new("/usr/bin/true")).unwrap_err();
-    assert!(unbuilt.starts_with("the profile: "), "{unbuilt}");
-}
-
-/// The flags of a Mac agent that runs native jobs over `fake` and keeps a store of bundles.
-fn store_flags(dir: &Scratch, fake: &FakeHelper, extra: &[&str]) -> Vec<String> {
-    let mut flags = native_flags(dir, fake);
+/// The flags of a Mac agent that runs native jobs and keeps a store of bundles.
+fn store_flags(dir: &Scratch, extra: &[&str]) -> Vec<String> {
+    let mut flags = native_flags(dir);
     let own = [
         "--bundle-store",
         "/Volumes/work/bundles",
@@ -452,7 +640,6 @@ fn agent_with_store(
 #[test]
 fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
     let dir = Scratch::new("native-agent-store");
-    let fake = FakeHelper::start(&dir);
     let bundles = Scratch::new("native-agent-store-placer");
     let store = FakeHost::new();
     store.set(|s| {
@@ -460,7 +647,7 @@ fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
         s.held = Ok(vec![digest('a')]);
     });
     let machine = Arc::new(FakeMachine::new());
-    let extra = store_flags(&dir, &fake, &[]);
+    let extra = store_flags(&dir, &[]);
     let (ran, hello) = agent_with_store(&dir, &extra, store.clone(), &machine);
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(store.get(|s| s.opens), 1);
@@ -472,10 +659,9 @@ fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
     );
 
     let other = Scratch::new("native-agent-store-none");
-    let helper = FakeHelper::start(&other);
     let store = FakeHost::new();
     let machine = Arc::new(FakeMachine::new());
-    let mut flags = store_flags(&other, &helper, &[]);
+    let mut flags = store_flags(&other, &[]);
     flags.drain(
         ..flags
             .iter()
@@ -500,12 +686,11 @@ fn a_native_agent_opens_its_store_and_gives_it_to_the_runtime() {
 #[test]
 fn a_store_that_cannot_be_used_ends_the_agent_before_the_hello() {
     let dir = Scratch::new("native-agent-badstore");
-    let fake = FakeHelper::start(&dir);
     let bundles = Scratch::new("native-agent-badstore-placer");
     let store = FakeHost::new();
     store.set(|s| s.open = Err("cannot open it".to_owned()));
     let machine = Arc::new(FakeMachine::new());
-    let extra = store_flags(&dir, &fake, &[]);
+    let extra = store_flags(&dir, &[]);
     let (ran, hello) = agent_with_store(&dir, &extra, store, &machine);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(
@@ -530,38 +715,23 @@ fn a_store_that_cannot_be_used_ends_the_agent_before_the_hello() {
 }
 
 /// Asserts that the system machine hands the store of the native settings to the runtime it
-/// makes: the runtime accepts a program of a bundle with a store and refuses it
-/// (`bundle-unsupported`) without. It catches a store that is opened and never used.
+/// makes: a runtime made over settings with a store runs the image start that carries a `run`
+/// (its image is the bundle it runs from), and one made without refuses it. It catches a
+/// store that is opened and never used.
 #[test]
 fn the_system_machine_gives_the_store_to_the_native_runtime() {
-    let dir = Scratch::new("native-agent-system-store");
-    let fake = FakeHelper::start(&dir);
     let bundles = Scratch::new("native-agent-system-store-placer");
     let platform = js_agent::Platform {
         os: "macos".to_owned(),
         arch: "aarch64".to_owned(),
     };
-    let flags = NativeFlags {
-        socket: Some(fake.socket()),
-        homes: Some(fake.homes()),
-        network: None,
-        tool_roots: &[],
-        deny_read: &[],
-        max_file_mib: None,
-        max_processes: None,
-        pf: PfFlags::default(),
-    };
-    let plain = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
-        .unwrap()
-        .unwrap();
-    let plain = plain.with_sandbox_exec(Path::new("/usr/bin/true"));
+    let plain = settings(FullDiskAccess::NotGranted);
     let stored = plain
         .clone()
         .with_bundles(placer(&bundles, no_registry()))
         .unwrap();
     assert!(stored.bundles().is_some() && plain.bundles().is_none());
-    let program = super::native("@bundle/tool", &[]);
-    let codes: Vec<Option<&str>> = [plain, stored]
+    let runs_images: Vec<bool> = [plain, stored]
         .into_iter()
         .map(|settings| {
             let backend = Backend::Native(settings);
@@ -572,25 +742,21 @@ fn the_system_machine_gives_the_store_to_the_native_runtime() {
                 stop_grace: std::time::Duration::from_secs(1),
             };
             let (runtime, _) = System::new().runtime(&build).unwrap();
-            runtime
-                .check_native(&program)
-                .err()
-                .map(|refused| refused.code)
+            runtime.runs_image_runs()
         })
         .collect();
-    assert_eq!(codes, [Some("bundle-unsupported"), None]);
+    assert_eq!(runs_images, [false, true]);
 }
 
 /// Asserts that an agent whose cap is `on` ends with status 2 before the hello when it is
-/// given no pool uids (the flag named), and when the anchor is not enforced (here the
+/// given no pf uids (the flag named), and when the anchor is not enforced (here the
 /// `pfctl` it is told is not there), naming `--native-network` and the failed call; and that
 /// the pf flags are accepted by the command line of an agent that is told them. It catches
 /// an agent that says hello with the network on and nothing limiting it.
 #[test]
 fn an_agent_whose_cap_is_on_does_not_start_while_the_anchor_is_not_enforced() {
     let dir = Scratch::new("native-agent-pf");
-    let fake = FakeHelper::start(&dir);
-    let mut extra = native_flags(&dir, &fake);
+    let mut extra = native_flags(&dir);
     extra.extend(["--native-network".to_owned(), "on".to_owned()]);
     let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
     assert_eq!(ran.status(), code(2), "{}", ran.err);
@@ -636,8 +802,7 @@ fn plist(body: &str) -> String {
 #[test]
 fn a_mac_agent_mounts_the_scratch_volume_before_it_opens_its_roots() {
     let dir = Scratch::new("native-agent-scratch-volume");
-    let fake = FakeHelper::start(&dir);
-    let mut extra = native_flags(&dir, &fake);
+    let mut extra = native_flags(&dir);
     // A store beside the scratch root, which does not exist yet: it can be made and checked
     // only once the volume is mounted, so a mount that fails ends the start first.
     let bundles = dir.path("bundles").display().to_string();
