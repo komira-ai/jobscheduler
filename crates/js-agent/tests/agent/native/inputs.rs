@@ -48,6 +48,20 @@ fn unlock(dir: &Path) {
     }
 }
 
+/// The agent's hand-over (`lchown`), leaving a staged directory writable by its owner: the
+/// test's user retires the account after a start that failed once its inputs were staged,
+/// and only root (the agent) can empty a `0500` directory. For the tests that assert no
+/// staged mode.
+fn owner_writable() -> js_agent::native::HandOver {
+    std::sync::Arc::new(|path: &Path, uid: u32, gid: u32| {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+        match fs::symlink_metadata(path)?.is_dir() {
+            true => fs::set_permissions(path, fs::Permissions::from_mode(0o700)),
+            false => Ok(()),
+        }
+    })
+}
+
 /// The run directory `exec` of the account the `n`th launch (from 0) of `rig` ran as.
 fn exec_of(rig: &Rig, n: usize) -> PathBuf {
     let launched = &rig.launcher.launched()[n];
@@ -178,7 +192,7 @@ fn a_cwd_runs_in_its_directory_below_exec() {
 /// anywhere a link points.
 #[test]
 fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
-    let mut rig = Rig::new("cwd-escape");
+    let mut rig = Rig::new("cwd-escape").handing_over(owner_writable());
     for cwd in ["../x", "/etc"] {
         let mut body = native("/usr/bin/true", &[]);
         body.cwd = cwd.to_owned();
@@ -212,7 +226,7 @@ fn a_cwd_that_escapes_exec_is_refused_and_nothing_starts() {
 /// start that runs in `exec/` when its `cwd` cannot be had.
 #[test]
 fn a_cwd_that_is_not_a_directory_fails_the_start() {
-    let mut rig = Rig::new("cwd-file");
+    let mut rig = Rig::new("cwd-file").handing_over(owner_writable());
     let tree = source(&rig, "src", "file", "text");
     std::os::unix::fs::symlink("missing", tree.join("dangling")).unwrap();
     for (cwd, said) in [
@@ -236,7 +250,7 @@ fn a_cwd_that_is_not_a_directory_fails_the_start() {
 /// starts without an input it named.
 #[test]
 fn an_input_that_cannot_be_staged_fails_the_start() {
-    let mut rig = Rig::new("inputs-bad");
+    let mut rig = Rig::new("inputs-bad").handing_over(owner_writable());
     let tree = source(&rig, "src", "x", "one");
     // A character device: neither a file, a directory nor a link, on Linux and macOS.
     let device = std::path::Path::new("/dev/null");

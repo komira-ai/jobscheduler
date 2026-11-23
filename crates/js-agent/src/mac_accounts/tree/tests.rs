@@ -163,10 +163,6 @@ fn a_named_entry_goes_whole_and_an_absent_one_is_fine() {
     fs::create_dir_all(dir.join("Users/kbf-acct-2/Library/Caches")).unwrap();
     fs::write(dir.join("Users/kbf-acct-2/Library/Caches/c"), "x").unwrap();
     fs::write(dir.join("Users/kbf-acct-2/file"), "x").unwrap();
-    // A read-only directory of the account's (an input staged 0500) is emptied too.
-    fs::create_dir_all(dir.join("Users/kbf-acct-2/exec/in")).unwrap();
-    fs::write(dir.join("Users/kbf-acct-2/exec/in/f"), "x").unwrap();
-    chmod(&dir.join("Users/kbf-acct-2/exec/in"), 0o500);
     for uid in [me(), other()] {
         assert!(
             remove_named(&dir.join("Users/kbf-acct-2"), uid).unwrap(),
