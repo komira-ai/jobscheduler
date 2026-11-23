@@ -265,22 +265,23 @@ impl ProcessTable for Recording {
 }
 
 /// A shell script that ignores `SIGTERM`, writes its pid to `marker` once it does, then
-/// sleeps (an ignored signal stays ignored across `exec`).
+/// sleeps (an ignored signal stays ignored across `exec`). Only the shell's builtins run before
+/// the `exec`, so no other process is ever in the job's group.
 fn ignoring_term(marker: &Path) -> String {
-    let part = marker.with_extension("part");
     format!(
-        "trap '' TERM; echo $$ > {part}; mv {part} {marker}; exec /bin/sleep 600",
-        part = part.display(),
+        "trap '' TERM; echo $$ > {marker}; exec /bin/sleep 600",
         marker = marker.display()
     )
 }
 
-/// Waits (by polls of the file, not by time) until the job has written `marker`, and returns
-/// the pid it wrote.
+/// Waits (by polls of the file, not by time) until the job has written a whole line to
+/// `marker`, and returns the pid it wrote.
 fn pid_in(marker: &Path) -> i32 {
     for _ in 0..POLLS {
-        if let Ok(text) = fs::read_to_string(marker) {
-            return text.trim().parse().expect("a pid");
+        if let Ok(text) = fs::read_to_string(marker)
+            && let Some(line) = text.strip_suffix('\n')
+        {
+            return line.parse().expect("a pid");
         }
         std::thread::yield_now();
     }
