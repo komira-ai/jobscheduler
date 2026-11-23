@@ -493,7 +493,6 @@ pub enum Build {
     /// It builds.
     Fine,
     /// The runtime cannot be made.
-    #[cfg(target_os = "linux")]
     RuntimeFails,
     /// The runtime panics while it is made.
     #[cfg(target_os = "linux")]
@@ -515,6 +514,9 @@ pub struct FakeMachine {
     /// For each native runtime made: whether its settings carried a bundle store.
     #[cfg(target_os = "macos")]
     pub bundles_seen: Arc<Mutex<Vec<bool>>>,
+    /// For each native runtime made: the file size and process limits of its settings.
+    #[cfg(target_os = "macos")]
+    pub limits_seen: Arc<Mutex<Vec<(u64, u32)>>>,
     /// The VM driver of the VM backend; none for a machine that runs no VMs (the default
     /// driver, which runs none off macOS).
     pub vms: Option<Arc<FakeDriver>>,
@@ -624,6 +626,8 @@ impl FakeMachine {
             quota: Arc::new(FakeQuota::new()),
             #[cfg(target_os = "macos")]
             bundles_seen: Arc::default(),
+            #[cfg(target_os = "macos")]
+            limits_seen: Arc::default(),
             vms: None,
             providers: Ok(Arc::default()),
             provider_wake: Arc::default(),
@@ -673,6 +677,12 @@ impl FakeMachine {
         self.bundles_seen.lock().unwrap().clone()
     }
 
+    /// For each native runtime made: its settings' most bytes of one file and most processes.
+    #[cfg(target_os = "macos")]
+    pub fn limits_seen(&self) -> Vec<(u64, u32)> {
+        self.limits_seen.lock().unwrap().clone()
+    }
+
     /// The same machine with `quota` as its scratch quota.
     #[cfg(target_os = "linux")]
     pub fn with_quota(self, quota: FakeQuota) -> Self {
@@ -682,7 +692,6 @@ impl FakeMachine {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub fn failing(build: Build) -> Self {
         Self {
             build,
@@ -698,7 +707,6 @@ impl Machine for FakeMachine {
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         match self.build {
-            #[cfg(target_os = "linux")]
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
             #[cfg(target_os = "linux")]
             Build::Panics => panic!("the runtime panics while it is made"),
@@ -717,6 +725,11 @@ impl Machine for FakeMachine {
                         .lock()
                         .unwrap()
                         .push(native.bundles().is_some());
+                    let config = native.config();
+                    self.limits_seen
+                        .lock()
+                        .unwrap()
+                        .push((config.max_file_bytes, config.max_processes));
                     let runtime = match native.bundles() {
                         Some(store) => runtime.with_bundles(Arc::clone(store)),
                         None => runtime,

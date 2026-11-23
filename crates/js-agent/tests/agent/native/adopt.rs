@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_agent::lifecycle::{Exit, Found, RunHandle, Runtime, Status, label};
 use js_agent::native::Journal;
@@ -197,4 +198,38 @@ fn a_run_whose_record_cannot_be_written_still_runs() {
     rig.rt.remove(&id).unwrap();
     assert!(!rig.accounts.records().contains(&lent), "retired");
     assert!(rig.pool.held().is_empty());
+}
+
+/// Asserts that a run's start time is the wall clock read when its job is ready: two runs
+/// started at two clock values record those values in the journal, and after a restart a run
+/// has been running for the clock then minus its recorded start, in exact milliseconds.
+///
+/// Catches: a start time taken from another clock read, cached across runs, or left at zero,
+/// which would make a restarted run's age wrong.
+#[test]
+fn a_runs_start_time_is_the_clock_at_job_ready() {
+    let clock = Arc::new(AtomicU64::new(1_234_567));
+    let read = clock.clone();
+    let rig = Rig::in_dir("adopt-started", 3, |_, _| {});
+    let mut rig = Rig {
+        rt: rig
+            .rt
+            .with_clock(Arc::new(move || read.load(Ordering::Relaxed))),
+        ..rig
+    };
+    let first = started(&mut rig, "r1", "/usr/bin/true", &[]);
+    clock.store(2_000_000, Ordering::Relaxed);
+    let second = started(&mut rig, "r2", "/usr/bin/true", &[]);
+    let records = Journal::new(&rig.dir.path("native-leases")).runs().unwrap();
+    assert_eq!(records[&first.0].started_ms, 1_234_567);
+    assert_eq!(records[&second.0].started_ms, 2_000_000);
+
+    let mut next = rig.reopened().with_clock(Arc::new(|| 2_060_000));
+    let ages: BTreeMap<RunHandle, u64> = next
+        .list_labelled()
+        .unwrap()
+        .into_iter()
+        .map(|found| (found.id, found.running_ms))
+        .collect();
+    assert_eq!(ages, BTreeMap::from([(first, 825_433), (second, 60_000)]));
 }
