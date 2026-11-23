@@ -69,8 +69,7 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// What `usage` answers for a run, by run id.
     usages: BTreeMap<String, JobUsage>,
-    /// What the removal of a run commits, by run id, and what `outputs_report` answers for
-    /// a removed container, by its id (see [`FakeRuntime::commit_outputs`]).
+    /// What a run's removal commits, by run id, and `outputs_report` answers, by container.
     committed: BTreeMap<String, OutputsReport>,
     answers: BTreeMap<String, OutputsReport>,
     /// What `cpu_series` answers for a run, by run id.
