@@ -17,12 +17,17 @@
 //! seconds (`u16`), the run length in microseconds (`u64`), the partial flag (a byte, 0 or 1),
 //! then each point (`u16`), all big-endian: 11 bytes and two for each point, so 267 bytes for
 //! the most a series holds (128 points).
+//!
+//! Tag 65 is the job's non-file memory series as its host reported it, written and read as tag
+//! 64 is, and kept the same way by a build from before it. Its value has the same 11-byte head,
+//! then each point (`u32`, MiB), big-endian: 523 bytes for 128 points.
 
 use js_state::StoreTime;
-use js_types::CpuSeries;
+use js_types::{CpuSeries, MemorySeries};
 
 use self::job_result_tag::{
     RESULT_CPU_PEAK, RESULT_CPU_PRESSURE_SOME, RESULT_CPU_SERIES, RESULT_CPU_THROTTLE,
+    RESULT_MEMORY_SERIES,
 };
 use super::rootfs_fields::job_rootfs_tag::RESULT_INPUT_FAILURE as INPUT_FAILURE;
 use super::{
@@ -61,6 +66,10 @@ pub(crate) mod job_result_tag {
     /// microseconds as a u64 and the partial flag as a byte, then each point as a u16), written
     /// when the result has a well-formed one. Read whether or not the result has a usage.
     pub const RESULT_CPU_SERIES: u16 = 64;
+    /// The job's non-file memory series (the 11-byte head of [`RESULT_CPU_SERIES`], then each
+    /// point as a u32 of MiB), written when the result has a well-formed one. Read whether or
+    /// not the result has a usage.
+    pub const RESULT_MEMORY_SERIES: u16 = 65;
 }
 
 /// Puts the fields of `result`, when there is one, in `row`.
@@ -100,6 +109,14 @@ pub(super) fn put_result(row: &mut Writer, result: Option<&JobResult>) {
             .filter(|series| series.is_well_formed())
             .map(series),
     );
+    row.put_opt(
+        RESULT_MEMORY_SERIES,
+        result
+            .memory_series
+            .as_ref()
+            .filter(|series| series.is_well_formed())
+            .map(memory_series),
+    );
     row.put_opt(INPUT_FAILURE, result.input_failure.as_deref().map(text));
 }
 
@@ -134,6 +151,7 @@ pub(super) fn take_result(fields: &mut Fields) -> Result<Option<JobResult>, Deco
         }),
         logs: fields.opt(t::RESULT_LOGS, lengths_of)?,
         cpu_series: fields.opt(RESULT_CPU_SERIES, series_of)?,
+        memory_series: fields.opt(RESULT_MEMORY_SERIES, memory_series_of)?,
         input_failure: fields.opt(INPUT_FAILURE, text_of)?,
     }))
 }
@@ -193,6 +211,38 @@ fn series_of(tag: u16, value: Vec<u8>) -> Result<CpuSeries, DecodeError> {
     let (pairs, _) = points.as_chunks::<2>();
     let points = pairs.iter().map(|pair| u16::from_be_bytes(*pair)).collect();
     CpuSeries::new(
+        u32::from(u16::from_be_bytes([g0, g1])),
+        points,
+        u64::from_be_bytes([r0, r1, r2, r3, r4, r5, r6, r7]),
+        bool_of(tag, vec![partial])?,
+    )
+    .ok_or(DecodeError::BadValue { tag })
+}
+
+/// A memory series value: the head of a [`series`] value, then each point (`u32`), all
+/// big-endian.
+fn memory_series(series: &MemorySeries) -> Vec<u8> {
+    let mut out = u16::try_from(series.granularity_secs)
+        .unwrap_or_default()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&series.run_usec.to_be_bytes());
+    out.push(u8::from(series.partial));
+    out.extend(series.points.iter().flat_map(|point| point.to_be_bytes()));
+    out
+}
+
+fn memory_series_of(tag: u16, value: Vec<u8>) -> Result<MemorySeries, DecodeError> {
+    let (head, points) = value
+        .split_first_chunk::<SERIES_HEAD_LEN>()
+        .ok_or(DecodeError::BadLength { tag })?;
+    if points.len() % 4 != 0 {
+        return Err(DecodeError::BadLength { tag });
+    }
+    let [g0, g1, r0, r1, r2, r3, r4, r5, r6, r7, partial] = *head;
+    let (words, _) = points.as_chunks::<4>();
+    let points = words.iter().map(|word| u32::from_be_bytes(*word)).collect();
+    MemorySeries::new(
         u32::from(u16::from_be_bytes([g0, g1])),
         points,
         u64::from_be_bytes([r0, r1, r2, r3, r4, r5, r6, r7]),

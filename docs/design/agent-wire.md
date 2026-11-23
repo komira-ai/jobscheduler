@@ -58,6 +58,13 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   and is never part of a result's acceptance. A server from before the field ignores it, and a result from an agent from before it
   reads with no usage; the lease server stores it as the job's resource usage, which is what the placement history is taught from
   (`docs/design/sizing.md`, section 7.7).
+- `JobResult.memory_series` (`MemorySeries`: `granularity_secs`, `points`, `run_usec` and `partial`), the job's non-file memory over
+  its run, sent by an agent started with `--memory-series`: at most 128 points (`MEMORY_SERIES_MAX_POINTS`), each the most of
+  `memory.current - (file - shmem)` of the job's group the agent's about-once-a-second polls saw in `granularity_secs` seconds of
+  the run, in MiB rounded up (`MEMORY_SERIES_BYTES_PER_POINT`), in order from its start. Pairs are combined by their maximum when a
+  run outlasts its points, and a span with no sample holds the last sample before it. It is decoded as `cpu_series` is: only a
+  power-of-two granularity and at most 128 points decode, anything else reads as absent, and a server from before it ignores it.
+  The job service books a class's memory from its peak (`docs/design/sizing.md`, section 7.7).
 - `JobResult.cpu_series` (`CpuSeries`: `granularity_secs`, `points`, `run_usec` and `partial`; the design of
   komira-ai/jobscheduler#1033, section 3), the job's CPU over its run: at most 128 points (`CPU_SERIES_MAX_POINTS`), each the mean CPU of the job's group over
   `granularity_secs` seconds of the run in sixteenths of a core, in order from its start. The series starts at one second a point;
@@ -306,6 +313,10 @@ digits), with the comma that joins it to the message. Derived, and measured by t
 - `cpu_series` in a job's result, `,"cpu_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128 points
   of 5 digits: 14 + (1 + 19 + 10) + 11 + (128 × 5 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **871** bytes per result (measured by
   `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
+- `memory_series` in a job's result, `,"memory_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128
+  points of 10 digits: 17 + (1 + 19 + 10) + 11 + (128 × 10 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **1,514** bytes per result
+  (measured by `a_series_at_its_widest_adds_its_bytes_to_a_result` in `tests/memory_series.rs`). The agent's
+  `results_budget` counts it with the rest of the result.
 - `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the whole
   host, from `/proc/stat` and `/proc/pressure/cpu`; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
   with 16 values of 10 digits: 22 + (16 × 10 + 15) + 1 = 198, and `,"second_cpu_pressure_some_permille":[...]` with 16 values of 4 digits: 38 + (16 × 4 + 15) + 1 = 118, so **316**

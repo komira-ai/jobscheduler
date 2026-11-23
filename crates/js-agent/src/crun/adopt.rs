@@ -488,6 +488,9 @@ impl CrunRuntime {
             peak: super::peak::PeakWindow::default(),
             // Its series, if recorded, starts at its first poll too, and is partial.
             series: self.cpu_series.then(super::series::SeriesRecorder::adopted),
+            memory_series: self
+                .memory_series
+                .then(super::memory_series::MemoryRecorder::adopted),
         }
     }
 

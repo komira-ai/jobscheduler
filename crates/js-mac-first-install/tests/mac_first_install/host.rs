@@ -2,11 +2,13 @@
 //!
 //! On a Studio, hostkeeper's daemon keeps the host's facts (`/var/lib/hostkeeper/facts.json`)
 //! and its host certificate (`/var/lib/hostkeeper/identity/host.{crt,key}`), and the Mac config
-//! package puts the agent's flags file and the lease server's CA in `/etc/js-agent/`. Here the
+//! package puts the agent's flags file, its bundle allow list and the lease server's CA in
+//! `/etc/js-agent/`. Here the
 //! same files are written at the same paths, with the same owners and modes: the certificate is
 //! minted by a CA of the test's own in the shape hostkeeper issues (one DNS SAN, the host id;
 //! `clientAuth`; hostkeeper's host-role URI), and the flags are the config package's lines with a
-//! loopback lease server and documentation-range endpoints in place of the production ones.
+//! loopback lease server in place of the production one, less those that name what only a
+//! Studio has (see [`flags`]).
 //!
 //! The lease server is the one the agent's end-to-end tests start in their process (js-lease-server
 //! `start`), over TLS with the certificate the flags file's `--ca-cert` names, trusting the test's
@@ -46,6 +48,21 @@ pub const FLAGS_FILE: &str = "/etc/js-agent/flags";
 
 /// The lease server's CA, beside the flags.
 const CA_FILE: &str = "/etc/js-agent/ca.pem";
+
+/// The account pool's directory (`--native-accounts`), which the agent makes when it opens the
+/// pool, and opens it only when it holds Full Disk Access.
+pub const NATIVE_ACCOUNTS: &str = "/var/db/js-agent/accounts";
+
+/// The bundle allow list, beside the flags.
+const BUNDLE_ALLOW_FILE: &str = "/etc/js-agent/bundle-allow";
+
+/// The allow list's one digest: the manifest of the smoke bundle the release publishes
+/// (`ghcr.io/komira-ai/js/smoke:1`, `packaging/js-smoke-bundle`). The agent refuses at start a
+/// list that holds no digest; nothing here pulls it.
+const BUNDLE_ALLOW: &str = "\
+# The manifest digests a Mac of mac-build may run as a job's bundle.
+sha256:9e02a9ff48c04e969131abf064e01af65a167038ecc85764a8236a75cb1dc9a7
+";
 
 /// hostkeeper's facts of the host.
 const FACTS_FILE: &str = "/var/lib/hostkeeper/facts.json";
@@ -331,11 +348,21 @@ pub fn studio(dir: &Path) -> LeaseServer {
     put(&Path::new(IDENTITY_DIR).join("host.key"), &key, 0o640);
     let server_cert = fs::read_to_string(&server.server_cert).expect("the server's certificate");
     put(Path::new(CA_FILE), &server_cert, 0o644);
+    put(Path::new(BUNDLE_ALLOW_FILE), BUNDLE_ALLOW, 0o644);
     put(Path::new(FLAGS_FILE), &flags(server.url()), 0o644);
     server
 }
 
-/// The Mac config package's flags file, with the lease server at `server`.
+/// The Mac config package's flags file, with the lease server at `server`: the lines of the
+/// mac-build host group's, which a native macOS agent needs to start (the account pool of
+/// `--native-accounts`, without which it refuses to), with a loopback lease server and the
+/// bundle allow list of [`BUNDLE_ALLOW_FILE`]. What names a program a Studio has and this runner
+/// does not is left out: tierstore's mount provider, its trees root and its put root (the
+/// socket, the mount and the user `_tierstore` its package makes), and the tool root of the
+/// Xcode command-line tools hostkeeper's prerequisite installs. `--native-deny-read` of the
+/// account pool is left out too: the agent denies every run a read of `--native-accounts` by
+/// itself, and the flag needs the directory to be there at start, which on a first install it
+/// is not (the pool makes it only once the agent holds Full Disk Access).
 fn flags(server: &str) -> String {
     [
         "# js-agent flags of the HostGroup mac-build, as the Mac config package installs them.",
@@ -345,12 +372,23 @@ fn flags(server: &str) -> String {
         "--ca-cert=/etc/js-agent/ca.pem",
         "--host-cert=/var/lib/hostkeeper/identity/host.crt",
         "--host-key=/var/lib/hostkeeper/identity/host.key",
-        "# The native runtime's network.",
-        "--native-network=on",
-        "--native-pf-uid-start=600",
-        "--native-pf-uid-count=100",
-        "--native-pf-endpoint=192.0.2.1:9300",
-        "--native-pf-endpoint=192.0.2.2:9300",
+        "# The native runtime's account pool.",
+        &format!("--native-accounts={NATIVE_ACCOUNTS}"),
+        "--native-account-range=700-799",
+        "--native-account-ready=1",
+        "# No network for a job: no pf anchor and no --native-pf-* flag.",
+        "--native-network=off",
+        "--native-tool-root=/usr/bin",
+        "--native-tool-root=/bin",
+        "--native-tool-root=/usr/sbin",
+        "--native-tool-root=/sbin",
+        "# The bundle store, on the scratch volume beside the scratch root.",
+        "--bundle-store=/var/db/js-agent/scratch/bundles",
+        "--bundle-budget-gib=50",
+        "--bundle-pull=missing",
+        "--bundle-trust=list",
+        &format!("--bundle-allow-file={BUNDLE_ALLOW_FILE}"),
+        "--image-allow=ghcr.io/komira-ai/js/smoke",
         "",
     ]
     .join("\n")

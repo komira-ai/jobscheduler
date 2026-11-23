@@ -82,13 +82,17 @@
 //!   and a stop for memory (an agent from before the booking stopped being a limit, which held
 //!   a job at its booking) a kill at its booking, which raises the class's floor to twice the
 //!   booking it died at;
-//! - its peak memory and CPU time are what its host reported in the job's result (`usage`, read
-//!   from the job's control group); a job with none has no peak, and a success with no peak teaches
-//!   the memory nothing; its wall time is from its start to its end;
+//! - its peak memory is the peak of the non-file memory series its host reported in the job's
+//!   result (`memory_series`: what the job held that the kernel cannot drop, sampled about once
+//!   a second, so no page cache of the files it read), and, for a run with no whole series, the
+//!   group's `memory.peak` of its `usage`; its CPU time is its `usage`'s; a job with neither has
+//!   no peak, and a success with no peak teaches the memory nothing; its wall time is from its
+//!   start to its end;
 //! - a success's peak is a measurement whatever its booking: the booking is no limit, so a peak
 //!   at or above it is what the run used, and a peak above it raises the class's next booking
 //!   at once (with the margin);
-//! - a run under a second gives its peak (the group's `memory.peak` is exact) and no CPU sample;
+//! - a run under a second gives its peak (its series' when a poll sampled it, else the group's
+//!   `memory.peak`, which is exact) and no CPU sample;
 //! - its CPU contention is its own: how long some task of its group waited for a CPU per unit
 //!   of wall time (`cpu.pressure`, as its host reported it). Below a tenth, the sample is a
 //!   measurement; at or above it the run's CPU may only raise its class's CPU, since a run that
@@ -452,6 +456,22 @@ impl JobSizes {
     }
 }
 
+/// The memory a run of `result` teaches its class: the peak of its non-file memory series (the
+/// most the job held that the kernel cannot drop, sampled about once a second) when its host
+/// reported a whole one with a point; else the group's `memory.peak`, which counts the page
+/// cache of the files the job read too (an agent without `--memory-series`, a runtime that
+/// records no series, a run adopted after a restart of its agent, whose series misses its
+/// start, and a run so short no poll sampled it).
+fn peak_of(result: &js_jobs::JobResult) -> Option<u64> {
+    let whole = result
+        .memory_series
+        .as_ref()
+        .filter(|series| !series.partial);
+    whole
+        .and_then(js_types::MemorySeries::peak_bytes)
+        .or_else(|| result.usage.map(|usage| usage.peak_memory_bytes))
+}
+
 /// The run of `job`, booked as `booked`, as the estimator takes it (the module docs), with the
 /// day it ended; `None` for a job that teaches nothing.
 fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
@@ -472,13 +492,14 @@ fn run_of(job: &JobRecord, booked: Booked) -> Option<(Run, Day)> {
         ResultReason::Cancelled => Outcome::Cancelled,
     };
     let killed = outcome == Outcome::OwnLimitKill;
-    let peak = result.usage.map(|usage| usage.peak_memory_bytes);
+    let peak = peak_of(result);
     let cpu = result.usage.map_or(0, |usage| micros(usage.cpu_time));
     let wall = micros(ended.since(started));
-    // A successful run under a second gives its peak (the group's `memory.peak` is exact
-    // whatever the run's length) and no CPU sample (its mean over so short a wall is no
-    // measure): the estimator takes a memory sample from a run of at least a second, and a CPU
-    // sample only from a run that used CPU time. No other outcome is a sample of either.
+    // A successful run under a second gives its peak (its series' if a poll sampled it, else
+    // the group's `memory.peak`, exact whatever the run's length) and no CPU sample (its mean
+    // over so short a wall is no measure): the estimator takes a memory sample from a run of
+    // at least a second, and a CPU sample only from a run that used CPU time. No other outcome
+    // is a sample of either.
     let (wall_us, cpu_us) = if wall < MIN_WALL_US {
         (MIN_WALL_US, 0)
     } else {

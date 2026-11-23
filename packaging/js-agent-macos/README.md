@@ -59,6 +59,9 @@ An example, with documentation addresses:
 --pool=mac
 --ca-cert=/etc/js-agent/ca.pem
 --host-id-from-facts=/var/lib/hostkeeper/facts.json
+--native-accounts=/var/db/js-agent/accounts
+--native-account-range=700-799
+--native-account-ready=1
 --native-network=on
 --native-pf-uid-start=600
 --native-pf-uid-count=100
@@ -66,7 +69,8 @@ An example, with documentation addresses:
 --native-pf-endpoint=192.0.2.11:443
 ```
 
-Without the file the agent does not start.
+Without the file the agent does not start, nor without `--native-accounts` (or `--no-jobs`, for
+an agent that runs no job).
 The file must be a regular file owned by root, not writable by group or others.
 `--host-id-from-facts` makes the host's id the `host_id` of hostkeeper's facts file, the name the
 coordinator enrolled the Mac under, so one file serves every Mac of the group.

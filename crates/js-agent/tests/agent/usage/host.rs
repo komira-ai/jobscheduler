@@ -1,7 +1,10 @@
 //! The whole host's CPU counters: the busy time of `/proc/stat` and the `some` total of
 //! `/proc/pressure/cpu`, which the per-second series reads.
 
-use js_agent::usage::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
+use js_agent::usage::{
+    HostCpu, PROC_CPU_PRESSURE, PROC_MEMINFO, PROC_STAT, host_cpu, host_nonfile,
+    parse_meminfo_nonfile_bytes, parse_proc_stat_busy_usec,
+};
 
 use crate::support::FakeFiles;
 
@@ -76,4 +79,64 @@ fn the_hosts_counters_are_its_busy_time_and_its_pressure() {
         (PROC_STAT, PROC_CPU_PRESSURE),
         ("/proc/stat", "/proc/pressure/cpu")
     );
+}
+
+/// A typical `/proc/meminfo` of a host: 16 GiB total, 4 GiB free, 1 GiB of buffers, 6 GiB cached
+/// of which 2 GiB is shared memory. Cache that is not shared is 5 GiB, so the non-file memory is
+/// 16 - 4 - 5 = 7 GiB.
+const MEMINFO: &str = "MemTotal:       16777216 kB\n\
+                       MemFree:         4194304 kB\n\
+                       MemAvailable:    9000000 kB\n\
+                       Buffers:         1048576 kB\n\
+                       Cached:          6291456 kB\n\
+                       SwapCached:            0 kB\n\
+                       Shmem:           2097152 kB\n";
+
+/// Asserts the non-file memory read from `/proc/meminfo`: total less free less the cache that
+/// is not shared memory, in bytes, in any line order; shared memory counted back in; never
+/// below 0; a missing line or a non-number refused; and an overflow saturating. Catches shared
+/// memory counted as droppable cache, `SwapCached` read as `Cached`, a negative result wrapped
+/// round, and a missing line read as 0.
+#[test]
+fn meminfo_nonfile_table() {
+    let gib = 1024_u64 * 1024 * 1024;
+    assert_eq!(parse_meminfo_nonfile_bytes(MEMINFO), Some(7 * gib));
+    let reversed = MEMINFO.lines().rev().collect::<Vec<_>>().join("\n");
+    assert_eq!(parse_meminfo_nonfile_bytes(&reversed), Some(7 * gib));
+    // No shared memory: all 7 GiB of cache is droppable.
+    let no_shmem = MEMINFO.replace("2097152 kB", "0 kB");
+    assert_eq!(parse_meminfo_nonfile_bytes(&no_shmem), Some(5 * gib));
+    // More cache than total less free: nothing is left, and it is not negative.
+    let cache_heavy = "MemTotal: 10 kB\nMemFree: 4 kB\nBuffers: 5 kB\nCached: 5 kB\nShmem: 0 kB\n";
+    assert_eq!(parse_meminfo_nonfile_bytes(cache_heavy), Some(0));
+    // Shmem larger than the cache cannot make the cache negative.
+    let shmem_heavy = "MemTotal: 10 kB\nMemFree: 4 kB\nBuffers: 1 kB\nCached: 1 kB\nShmem: 9 kB\n";
+    assert_eq!(parse_meminfo_nonfile_bytes(shmem_heavy), Some(6 * 1024));
+    for key in ["MemTotal:", "MemFree:", "Buffers:", "Cached:", "Shmem:"] {
+        let without = MEMINFO
+            .lines()
+            .filter(|line| !line.starts_with(key))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(parse_meminfo_nonfile_bytes(&without), None, "{key}");
+        let garbled = MEMINFO.replace(key, &format!("{key} x"));
+        assert_eq!(parse_meminfo_nonfile_bytes(&garbled), None, "{key}");
+    }
+    assert_eq!(parse_meminfo_nonfile_bytes(""), None);
+    let huge = "MemTotal: 18446744073709551615 kB\nMemFree: 0 kB\nBuffers: 0 kB\n\
+                Cached: 0 kB\nShmem: 0 kB\n";
+    assert_eq!(parse_meminfo_nonfile_bytes(huge), Some(u64::MAX));
+}
+
+/// Asserts the host's non-file memory from its files: the number when `/proc/meminfo` reads,
+/// and none when it cannot be read or lacks a line, never a zero. Catches an unreadable file
+/// that reads as an idle host, and a wrong path.
+#[test]
+fn the_hosts_nonfile_memory_is_read_from_proc_meminfo() {
+    let files = FakeFiles::default().with(PROC_MEMINFO, MEMINFO);
+    assert_eq!(host_nonfile(&files), Some(7 * 1024 * 1024 * 1024));
+    assert_eq!(host_nonfile(&FakeFiles::default()), None);
+    let short = FakeFiles::default().with(PROC_MEMINFO, "MemTotal: 1 kB\n");
+    assert_eq!(host_nonfile(&short), None);
+    assert_eq!(PROC_MEMINFO, "/proc/meminfo");
 }

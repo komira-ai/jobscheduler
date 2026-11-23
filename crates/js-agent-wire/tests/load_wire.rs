@@ -32,6 +32,7 @@ fn minimal() -> NodeLoad {
         host_cpu_usec: None,
         working_set_bytes: 4,
         active_file_bytes: 0,
+        host_nonfile_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),

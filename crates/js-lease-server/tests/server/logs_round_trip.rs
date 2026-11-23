@@ -399,6 +399,7 @@ impl Cell {
             input_failure: None,
             usage: None,
             cpu_series: None,
+            memory_series: None,
         };
         let ended = vec![HeldJob {
             job_id: job.start.job_id.clone(),

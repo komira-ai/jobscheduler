@@ -173,6 +173,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         fs: None,
         cpu_ceiling: None,
         cpu_series: false,
+        memory_series: false,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));

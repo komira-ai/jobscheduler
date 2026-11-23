@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     CpuSeries, HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, JobUsage, Limits,
-    LogReport, RunResult, StartKind, StartSizing, limits,
+    LogReport, MemorySeries, RunResult, StartKind, StartSizing, limits,
 };
 
 use super::Lifecycle;
@@ -72,13 +72,13 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
 /// The result of a job keyed by job id, as its listing carries it, with what the capture saw
 /// of its streams (`logs`) when the runtime uploaded them, and the code of the host's input
 /// that failed (`input_failure`), when one did, what its control group used (`usage`), and its
-/// CPU second by second (`cpu_series`).
+/// CPU and non-file memory second by second (`series`).
 pub(super) fn job_result(
     result: &RunResult,
     logs: Option<LogReport>,
     input_failure: Option<String>,
     usage: Option<JobUsage>,
-    cpu_series: Option<CpuSeries>,
+    (cpu_series, memory_series): (Option<CpuSeries>, Option<MemorySeries>),
 ) -> JobResult {
     JobResult {
         job_id: result.run_id.clone(),
@@ -91,6 +91,7 @@ pub(super) fn job_result(
         input_failure,
         usage,
         cpu_series,
+        memory_series,
     }
 }
 
@@ -189,7 +190,8 @@ impl Lifecycle {
                 state: job.held_state(),
                 result: job.result.as_ref().map(|result| {
                     let failure = job.input_failure.clone();
-                    job_result(result, job.logs, failure, job.usage, job.cpu_series.clone())
+                    let series = (job.cpu_series.clone(), job.memory_series.clone());
+                    job_result(result, job.logs, failure, job.usage, series)
                 }),
             })
             .collect()

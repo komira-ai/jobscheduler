@@ -249,6 +249,12 @@ pub struct CrunPlan {
     ///
     /// [`CrunSettings::cpu_series`]: crate::crun::CrunSettings::cpu_series
     pub cpu_series: bool,
+    /// Whether each run's non-file memory is recorded second by second
+    /// ([`CrunSettings::memory_series`]), set by [`Settings::with_memory_series`]: off by
+    /// default.
+    ///
+    /// [`CrunSettings::memory_series`]: crate::crun::CrunSettings::memory_series
+    pub memory_series: bool,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -382,6 +388,7 @@ impl Settings {
                 layered: false,
                 cpu_ceiling: None,
                 cpu_series: false,
+                memory_series: false,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -449,6 +456,16 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.cpu_series = on);
+        self
+    }
+
+    /// These settings with `on` as whether the crun runtime records each run's non-file memory
+    /// second by second (`--memory-series`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_memory_series(mut self, on: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.memory_series = on);
         self
     }
 

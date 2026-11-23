@@ -364,6 +364,7 @@ fn a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes()
             input_failure: None,
             usage: None,
             cpu_series: None,
+            memory_series: None,
         }),
     };
     let len = |beat: &Heartbeat| serde_json::to_string(beat).unwrap().len();
@@ -404,6 +405,7 @@ fn beat_at_every_cap() -> (NodeLoad, Heartbeat) {
         host_cpu_usec: Some(u64::MAX),
         working_set_bytes: MAX_MEMORY_BYTES,
         active_file_bytes: MAX_MEMORY_BYTES,
+        host_nonfile_bytes: None,
         actions_cpu_limited: true,
         covered: (0..MAX_LOAD_LEASES as u64).map(worst_id).collect(),
         clocks: (0..MAX_LOAD_LEASES as u64)
