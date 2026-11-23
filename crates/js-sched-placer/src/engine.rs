@@ -17,8 +17,11 @@
 //! The engine is given no learned curves: each allocation is charged what it books, and each
 //! host by its load readings when it has fresh ones. The leases a reading covers are the
 //! engine's own: the job allocations it held on the host at the previous reading the scheduler
-//! accepted and holds still, which ran through the whole window between the two; every other
-//! allocation is charged in full beside the measurement.
+//! accepted and holds still, which ran through the whole window between the two. An allocation
+//! the engine took before the newest reading but after the one before it ran for part of the
+//! window at most: the reading has seen it, and it is charged in full on top of the window
+//! before the newest, which holds none of its use, and not on top of the measurement. Only an
+//! allocation taken after the newest reading is charged in full beside the measurement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -608,6 +611,59 @@ mod tests {
         let view = engine.load_of("b").unwrap();
         assert_eq!(view.uncovered_cpu_millis, 300);
         assert_eq!(view.left_cpu_millis, 8800);
+    }
+
+    /// Behaviour, at the figures a host of 88 cores logged: four jobs of 2.5 cores held
+    /// through two readings (measured 9 cores), then a burst of 77.75 cores placed after
+    /// the second. The third reading measures 38.457 cores, part of which the burst used:
+    /// the burst is added to the held jobs' 10 cores (above the 9 of the window before
+    /// it), 87.75 cores, and that is raised to the measurement; not the measurement plus
+    /// the burst (116.207 cores, over the 96.8 cores allowed, which refused every job). A
+    /// job placed after that reading is added on top, and when a reading measures more
+    /// than the host books, the measurement plus the jobs placed after it counts.
+    /// Catches the jobs a reading has seen charged again beside its measurement.
+    #[test]
+    fn jobs_placed_before_a_reading_are_not_charged_again_beside_its_measurement() {
+        let mut engine = Engine::build(Settings::default(), at(0));
+        let b = host("b");
+        let caps = std::iter::once(("arch".to_owned(), "x86_64".to_owned())).collect();
+        let shape = Shape::new(Resources::new(88_000, 256 * GIB, 0, None).unwrap(), caps);
+        engine.host_up(&b, &shape, at(0));
+        for i in 0..4 {
+            let job = js_jobs::JobId::parse(&format!("held-{i}")).unwrap();
+            let booked = js_jobs::Booked::Shape {
+                cpu_millis: 2_500,
+                memory_bytes: 64 * MIB,
+                disk_bytes: 0,
+                accelerators: 0,
+            };
+            engine.take_job(&job, &b, booked, Vec::new());
+        }
+        engine.heard(&b, Some(&measured(1, 0, GIB)), at(5_000));
+        engine.heard(&b, Some(&measured(2, 9_000, GIB)), at(10_000));
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 10_000);
+        for i in 0..31 {
+            assert!(place(
+                &mut engine,
+                &b,
+                &format!("burst-{i}"),
+                (2_500, 64 * MIB)
+            ));
+        }
+        assert!(place(&mut engine, &b, "burst-last", (250, 64 * MIB)));
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 87_750);
+        engine.heard(&b, Some(&measured(3, 9_000 + 38_457, GIB)), at(15_000));
+        let view = engine.load_of("b").unwrap();
+        assert_eq!(view.uncovered_cpu_millis, 77_750);
+        assert_eq!(view.left_cpu_millis, 87_750);
+        assert!(place(&mut engine, &b, "after", (250, 64 * MIB)));
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 88_000);
+        engine.heard(&b, Some(&measured(4, 47_457 + 95_000, GIB)), at(20_000));
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 95_000);
+        assert!(place(&mut engine, &b, "fits", (1_500, 64 * MIB)));
+        assert_eq!(engine.load_of("b").unwrap().left_cpu_millis, 96_500);
+        assert!(!place(&mut engine, &b, "over", (500, 64 * MIB)));
+        assert!(place(&mut engine, &b, "edge", (300, 64 * MIB)));
     }
 
     /// A reading the scheduler drops (its sequence goes back) leaves nothing covered: the
