@@ -127,13 +127,11 @@ jobs:
       # `#[ignore]` by name in the run above): a real account pool over the Mac's directory and
       # processes, the real supervisor, the run directories given to the slot account, a stop
       # signalling the job's group, the account retired. They run after the cache is saved, as
-      # they leave root-owned files in target. The VM test needs a signed js-vmm and a base image.
-      - name: Make the native root tests' directory, root-owned and searchable
-        if: ${{ !cancelled() }}
-        run: sudo install -d -o root -g wheel -m 0755 /private/var/js-native-priv
+      # they leave root-owned files in target. They make their own directory below /private/var.
+      # The VM test needs a signed js-vmm and a base image.
       - name: Run the native runtime's root tests as root
         if: ${{ !cancelled() }}
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" JS_NATIVE_PRIV_ROOT=/private/var/js-native-priv cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test native_privileged --locked -- --ignored --nocapture --test-threads=1 --skip a_command_runs_in_a_fresh_vm
       # The sweep's privileged calls (crates/js-agent/src/mac_sweep/macos/root_tests.rs, each
       # `#[ignore]` by name in the run above): every user's processes listed with their real and
       # effective uid and their audit session, and SIGKILL to other users' processes, as root.
