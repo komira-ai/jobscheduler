@@ -47,6 +47,7 @@ const GRACE: Duration = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS);
 const NEVER: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(365 * 24 * 3600),
     start_timeout: Duration::from_secs(365 * 24 * 3600),
+    ..JobLimits::DEFAULT
 };
 
 /// The job service over the rig's tables and clock, reading host silence from its registry.
@@ -909,6 +910,7 @@ fn a_failed_feed_trim_does_not_fail_the_pass_and_the_next_tick_trims() {
     let limits = JobLimits {
         max_queue_wait: MINUTE,
         start_timeout: HOUR,
+        ..JobLimits::DEFAULT
     };
     let rig = clocked_rig("pass_feed_fail", false, limits);
     let feed = FeedTrim::new(rig.store.clone(), FeedRetention::new(1).unwrap());

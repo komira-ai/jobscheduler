@@ -101,6 +101,8 @@ fn two_elastic(scratch: &Scratch) -> String {
     let gpu = on(&["east"], scratch)
         .set("max_queue_wait", &quote("30m"))
         .set("start_timeout", &quote("90s"))
+        .set("capacity_requeues", "3")
+        .set("capacity_refusal_bar", &quote("2m"))
         .set("path_grace", &quote("250ms"))
         .set(
             "provider_limits",
@@ -333,7 +335,7 @@ fn hostless_only_pools_reject_shape_and_max_machines() {
     let described = both.describe();
     let lines = [
         "platform run: kind test-hostless; hosts no; machine_providers -",
-        "pool jobs: platforms run; max_machines -; max_queue_wait 1h; start_timeout 15m; path_grace 5s",
+        "pool jobs: platforms run; max_machines -; max_queue_wait 1h; start_timeout 15m; capacity_requeues 8; capacity_refusal_bar 1m; path_grace 5s",
     ];
     for line in lines {
         assert!(described.contains(line), "{described}");
@@ -601,8 +603,10 @@ fn a_table_nothing_names_is_refused() {
 }
 
 /// Asserts the queue settings: with none given they are the defaults (`max_queue_wait`
-/// 1h, `start_timeout` 15m, `path_grace` 15s); given they are read as written; and a zero
-/// or a word is refused naming the key. On a joined pool each is refused as a field it does
+/// 1h, `start_timeout` 15m, `capacity_requeues` 8, `capacity_refusal_bar` 60s, `path_grace`
+/// 15s); given they are read as written; and a zero or a word is refused naming the key (a
+/// `capacity_requeues` of 0 is allowed, a negative one, a word, a float or one above 1000 is
+/// refused). On a joined pool each is refused as a field it does
 /// not know. It catches a default that drifts and a setting read as zero.
 #[test]
 fn pool_settings_default_and_parse() {
@@ -615,9 +619,13 @@ fn pool_settings_default_and_parse() {
     assert_eq!(settings.max_queue_wait, Duration::from_secs(3600));
     assert_eq!(settings.start_timeout, Duration::from_secs(900));
     assert_eq!(settings.path_grace, Duration::from_secs(15));
+    assert_eq!(settings.capacity_requeues, 8);
+    assert_eq!(settings.capacity_refusal_bar, Duration::from_secs(60));
     let given = PoolText::elastic(&scratch)
         .set("max_queue_wait", &quote("30m"))
         .set("start_timeout", &quote("90s"))
+        .set("capacity_requeues", "1")
+        .set("capacity_refusal_bar", &quote("5m"))
         .set("path_grace", &quote("5s"));
     let settings = resolved(&scratch, &doc(&scratch, &[], &[&given]))
         .pool("gpu")
@@ -626,7 +634,38 @@ fn pool_settings_default_and_parse() {
     assert_eq!(settings.max_queue_wait, Duration::from_secs(1800));
     assert_eq!(settings.start_timeout, Duration::from_secs(90));
     assert_eq!(settings.path_grace, Duration::from_secs(5));
-    for key in ["max_queue_wait", "start_timeout", "path_grace"] {
+    assert_eq!(settings.capacity_requeues, 1);
+    assert_eq!(settings.capacity_refusal_bar, Duration::from_secs(300));
+    let none = PoolText::elastic(&scratch).set("capacity_requeues", "0");
+    let settings = resolved(&scratch, &doc(&scratch, &[], &[&none]))
+        .pool("gpu")
+        .unwrap()
+        .settings;
+    assert_eq!(settings.capacity_requeues, 0);
+    for (bad, said) in [
+        ("-1", "must not be negative"),
+        ("1001", "must be from 0 to 1000"),
+        ("\"3\"", "must be an integer"),
+        ("1.5", "must be an integer"),
+    ] {
+        let pool = PoolText::elastic(&scratch).set("capacity_requeues", bad);
+        assert_eq!(
+            refused(&scratch, &doc(&scratch, &[], &[&pool])),
+            format!("pool \"gpu\": capacity_requeues: {said}")
+        );
+    }
+    let hosts = PoolText::joined("hosts").set("capacity_requeues", "2");
+    let said = refused(&scratch, &doc(&scratch, &[], &[&hosts]));
+    assert!(
+        said.starts_with("pool \"hosts\": capacity_requeues: unknown field; known: "),
+        "{said}"
+    );
+    for key in [
+        "max_queue_wait",
+        "start_timeout",
+        "capacity_refusal_bar",
+        "path_grace",
+    ] {
         for bad in ["0s", "soon"] {
             let pool = PoolText::elastic(&scratch).set(key, &quote(bad));
             assert_eq!(

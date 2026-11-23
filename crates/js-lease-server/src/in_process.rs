@@ -4,11 +4,12 @@
 //!
 //! [`InProcess::start`] builds what [`crate::start_with_checks`] builds, from the same
 //! [`Config`] and [`SharedClock`], by the same code, and stops before anything a listener
-//! needs. It binds no socket and spawns no task: no serve loop, no tick loop, no scaler loop
-//! and no check loop. Requests are answered by the routers it hands out, called as
-//! `tower::Service`s ([`InProcess::client_router`], [`InProcess::agent_router`]), and time acts
-//! only when the caller says [`InProcess::tick`]. It reads no environment and no clock but the
-//! [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
+//! needs. It binds no socket and spawns no task: no serve loop, no tick loop, no scaler loop,
+//! no placement poller and no check loop. Requests are answered by the routers it hands out,
+//! called as `tower::Service`s ([`InProcess::client_router`], [`InProcess::agent_router`]), time
+//! acts only when the caller says [`InProcess::tick`], and the placement a submit or a heartbeat
+//! pokes for runs when the caller says [`InProcess::poll`] (or at the next tick). It reads no
+//! environment and no clock but the [`SharedClock`] it is given. What only a listener reads (the listen addresses, the TLS
 //! acceptor, the connection limits, `--drain-timeout`) is not used.
 //!
 //! The metrics time what they measure on the configuration's monotonic clock, which is the
@@ -151,6 +152,15 @@ impl InProcess {
         if let Some(scaler) = &self.scaler {
             scaler.tick().await;
         }
+    }
+
+    /// The placement poller's turn, which the server runs on a task of its own and this seam
+    /// leaves to its caller: when a submit or a heartbeat has poked the poller since the last
+    /// turn, one pass over the queued jobs (the forced one after a submit, the heartbeat's
+    /// skip-if-unchanged one otherwise), and `true`; otherwise nothing, and `false`. A caller
+    /// that never calls it has its jobs placed by the next tick.
+    pub async fn poll(&self) -> bool {
+        crate::poller::poked_pass(self.shared.agents()).await
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use);

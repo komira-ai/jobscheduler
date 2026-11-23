@@ -94,8 +94,8 @@ fn quarter_core(sized: bool) -> crate::lifecycle::JobBooking {
 }
 
 /// Asserts the whole line of a job's result, word for word: the booking, the size class and
-/// the sources of the CPU and the memory, what the group used, and its throttle counts with
-/// the throttled share in thousandths. It catches a result line without the booking or the
+/// the sources of the CPU and the memory, what the group used (its swap peak among it), and its
+/// throttle counts with the throttled share in thousandths. It catches a result line without the booking or the
 /// sizing beside the usage (the roll-out compares them per class), a share that is not the
 /// throttled periods over all periods, and words out of their fixed order.
 #[test]
@@ -112,6 +112,7 @@ fn a_result_is_one_line_of_its_booking_its_sizing_its_usage_and_its_throttled_sh
             millicores: 20_000,
             window_usec: 5_000_000,
         }),
+        peak_swap_bytes: Some(1 << 29),
     };
     let event = Event::ResultReady {
         run_id: "k1-344439-0".to_owned(),
@@ -125,7 +126,7 @@ fn a_result_is_one_line_of_its_booking_its_sizing_its_usage_and_its_throttled_sh
              class=root.crates.js-sched.js-sched cpu_from=class memory_from=cold \
              cpu_usage_usec=12300000 peak_memory_bytes=3221225472 cpu_periods=5597 \
              cpu_throttled_periods=5585 throttled_permille=997 cpu_pressure_some_usec=9000000 \
-             cpu_peak_millicores=20000"
+             cpu_peak_millicores=20000 peak_swap_bytes=536870912"
         ]
     );
 }
@@ -150,6 +151,7 @@ fn what_a_result_does_not_know_is_a_dash() {
             cpu_throttle: None,
             cpu_pressure_some_usec: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         }),
     };
     assert_eq!(
@@ -157,10 +159,12 @@ fn what_a_result_does_not_know_is_a_dash() {
         [
             "job: result run=r1 cpu_millis=250 memory_bytes=17179869184 class=- cpu_from=- \
              memory_from=- cpu_usage_usec=- peak_memory_bytes=- cpu_periods=- \
-             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=-",
+             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=- \
+             peak_swap_bytes=-",
             "job: result run=r2 cpu_millis=250 memory_bytes=17179869184 class=- cpu_from=- \
              memory_from=- cpu_usage_usec=2 peak_memory_bytes=1 cpu_periods=- \
-             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=-",
+             cpu_throttled_periods=- throttled_permille=- cpu_pressure_some_usec=- cpu_peak_millicores=- \
+             peak_swap_bytes=-",
         ]
     );
 }
