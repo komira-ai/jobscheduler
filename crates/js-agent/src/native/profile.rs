@@ -34,12 +34,12 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
 }
 
 /// The profile of `native` under the policy of `config`, run as an account whose home is
-/// `home`: writes are granted to the run directory (`<home>/exec`) and nowhere else, the
-/// account's per-user folder (`/var/folders`) is never granted (macOS's own daemons put
-/// items there that root may not remove), `read_only` (the run's files directory, the `dest`
+/// `home`: writes are granted to the run directory (`<home>/exec`) and to the grants in
+/// `mounts` (the run's job mounts and its account's own per-user temporary and cache folders),
+/// and nowhere else, `read_only` (the run's files directory, the `dest`
 /// of each input below `exec/` and the link of each read-only mount, each named for an error)
-/// is denied writes, `mounts` are the run's job mounts, granted after the read denies (every
-/// mount root is one), and `trees` are the shared trees of the run, if any.
+/// is denied writes, `mounts` are granted after the read denies (every mount root is one),
+/// and `trees` are the shared trees of the run, if any.
 ///
 /// The read denies are the agent's (`config.read_denies`), the places only the privacy
 /// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of

@@ -306,6 +306,38 @@ fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
         .unwrap_or_else(|why| panic!("the self-test: {why}"));
 }
 
+/// Asserts, as root with the real supervisor and the account's folders asked of the system as
+/// the account (`mac_accounts::own_folders`), that a job may write in its account's own
+/// per-user temporary and cache folders (what `getconf` gives it as `DARWIN_USER_TEMP_DIR` and
+/// `DARWIN_USER_CACHE_DIR`) and in no other part of that per-user folder (its `0`), and that
+/// the retirement empties what it wrote. Catches `xcrun` refused its cache (a compiler that
+/// fails under the profile) and a grant that reaches beyond the two folders.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_job_writes_its_accounts_own_temporary_and_cache_folders_and_nothing_else_there() {
+    let fixture = fixture();
+    let own: js_agent::native::OwnFolders = Arc::new(js_agent::mac_accounts::own_folders);
+    let mut rt = runtime(fixture).with_own_folders(own);
+    let script = "t=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR) \
+        && c=$(/usr/bin/getconf DARWIN_USER_CACHE_DIR) \
+        && : > \"$t/js-own\" && : > \"$c/js-own\" \
+        && echo \"$t\" \
+        && if : > \"$t/../0/js-own\" 2>/dev/null; then exit 3; fi";
+    let id = rt
+        .create_and_start(&spec(fixture, "own-folders", "/bin/sh", &["-c", script]))
+        .unwrap();
+    let status = settle(&mut rt, &id);
+    let tail = rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(status, exited(0), "{tail:?}");
+    let temp = PathBuf::from(tail.stdout.trim());
+    assert!(temp.join("js-own").is_file(), "{tail:?}");
+    rt.remove(&id).unwrap();
+    assert!(
+        !temp.join("js-own").exists(),
+        "the retirement did not empty the folder"
+    );
+}
+
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_program_runs_as_a_slot_account_under_the_profile() {
