@@ -166,6 +166,9 @@ impl Supervised for Supervision {
 
     fn try_exit(&mut self) -> io::Result<Option<ExitRecord>> {
         if let Some(record) = self.read_exit() {
+            // Reaps the supervisor once it has ended, without waiting, so it is not left a
+            // zombie of the agent; one that is still on its way out is reaped at a later call.
+            let _ = self.child.try_wait();
             return Ok(Some(record));
         }
         Ok(self.child.try_wait()?.map(|status| self.ended(status)))

@@ -84,11 +84,16 @@ impl NativeRuntime {
         }
         run.collect(&id.0, max_file_bytes);
         logs::close(&mut run.logs, &run.scratch);
-        if let Some(job) = run.job.take() {
+        if let Some(mut job) = run.job.take() {
             // A job exists only on a runtime whose pool is open.
             if let Some(pool) = &self.pool {
                 match accounts::retire(pool, job.account.clone()) {
-                    Ok(retired) => self.last_retired = Some((job.account.name.clone(), retired)),
+                    Ok(retired) => {
+                        // Every process of the account is gone, the supervisor's too: one
+                        // more look reaps it, so the agent keeps no zombie of the run.
+                        let _ = job.supervised.try_exit();
+                        self.last_retired = Some((job.account.name.clone(), retired));
+                    }
                     Err(why) => {
                         run.job = Some(job);
                         return Err(why);
