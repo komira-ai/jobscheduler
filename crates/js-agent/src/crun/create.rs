@@ -117,6 +117,9 @@ pub(super) struct Maker {
     pub(super) logs: Option<LiveLogs>,
     /// The operator's CPU ceiling ([`CrunSettings::cpu_ceiling`](super::CrunSettings::cpu_ceiling)).
     pub(super) cpu_ceiling: Option<js_contain::CpuCeiling>,
+    /// Whether a run's CPU is recorded second by second
+    /// ([`CrunSettings::cpu_series`](super::CrunSettings::cpu_series)).
+    pub(super) cpu_series: bool,
 }
 
 /// What the worker settles of a start before its lease is made.
@@ -152,6 +155,7 @@ impl CrunRuntime {
             ledger: self.ledger.clone(),
             logs: self.logs.clone(),
             cpu_ceiling: self.cpu_ceiling,
+            cpu_series: self.cpu_series,
         }
     }
 
@@ -398,7 +402,6 @@ impl Maker {
             labels,
             lease,
             cgroup,
-            cap: js_contain::hard_memory_max(spec.memory_bytes),
             backstop: None,
             state: State::Created,
             net,
@@ -407,6 +410,8 @@ impl Maker {
             fs: assembled.map(|made| rootfs::RunFs::new(made.sources)),
             marks,
             peak: super::peak::PeakWindow::default(),
+            // Started with the container (`start`).
+            series: None,
         })
     }
 
@@ -417,7 +422,11 @@ impl Maker {
         let _entered = self.rt.enter();
         let now = (self.hooks.now_ms)();
         // The lease's group is new: its CPU is 0 when its container starts.
-        run.peak.observe((self.hooks.mono_us)(), 0);
+        let mono = (self.hooks.mono_us)();
+        run.peak.observe(mono, 0);
+        run.series = self
+            .cpu_series
+            .then(|| super::series::SeriesRecorder::starting(mono, 0));
         let started = self
             .oci
             .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))

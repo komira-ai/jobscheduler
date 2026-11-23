@@ -95,13 +95,23 @@ ureq.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 js-contain = { path = "../js-contain" }
 
-# The Linux VM prototype's owner (src/linux_vm/vm/, `js-agent __linux-vm run`): Apple's
-# Virtualization framework through objc2, on the VM's dispatch queue.
+# The macOS-only code: OpenDirectory's local node, where the accounts of native Mac jobs are
+# made and deleted (src/mac_accounts/macos); and the Linux VM prototype's owner
+# (src/linux_vm/vm/, `js-agent __linux-vm run`), Apple's Virtualization framework through
+# objc2 on the VM's dispatch queue.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError", "NSArray", "NSData", "NSObject", "NSEnumerator"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL"] }
+objc2-open-directory = { workspace = true, features = [
+    "CFOpenDirectory",
+    "CFOpenDirectoryConstants",
+    "ODNode",
+    "ODQuery",
+    "ODRecord",
+    "ODSession",
+] }
 objc2-virtualization.workspace = true
 
 [dev-dependencies]

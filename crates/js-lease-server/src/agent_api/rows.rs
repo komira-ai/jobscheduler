@@ -296,7 +296,7 @@ fn reading(load: &NodeLoad) -> LoadReading {
     LoadReading {
         seq: load.seq,
         mono_usec: load.mono_usec,
-        cpu_usage_usec: load.cpu_usage_usec,
+        cpu_usage_usec: load.node_cpu_usec(),
         working_set_bytes: load.working_set_bytes,
         active_file_bytes: load.active_file_bytes,
         actions_cpu_limited: load.actions_cpu_limited,

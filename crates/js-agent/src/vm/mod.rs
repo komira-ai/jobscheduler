@@ -5,7 +5,7 @@
 //! The backend is off unless the agent is given `--vm-driver` (the signed `js-vmm` binary,
 //! which the agent starts as `js-vmm lease` for each VM: [`HelperDriver`]) and `--vm-store` (the directory of the base image, `base`, and the
 //! clones, `runs/`); both are flags, never environment. It runs on a Mac only, beside the
-//! native jobs (`--native-helper-socket`). With it off the hello says nothing of VMs and a
+//! native jobs (`--native-accounts`). With it off the hello says nothing of VMs and a
 //! VM start is refused [`js_agent_wire::refusal::VM_UNAVAILABLE`]; with it on the hello
 //! reports `vm.slots` ([`VM_SLOTS`]), `vm.max_cpus` and `vm.max_mem_gib` ([`report`]).
 //!

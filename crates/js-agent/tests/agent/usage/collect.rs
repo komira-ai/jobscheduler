@@ -16,12 +16,14 @@ use js_agent_wire::{LeaseMinute, NodeLoad};
 
 use crate::support::FakeFiles;
 
-const ACTIONS: &str = "/sys/fs/cgroup/jobs.slice";
+pub(super) const ACTIONS: &str = "/sys/fs/cgroup/jobs.slice";
 const SECOND: u64 = 1_000_000;
+/// A `/proc/stat` of a host that has not been busy since boot.
+const HOST_IDLE: &str = "cpu  0 0 0 500 0 0 0 0 0 0\n";
 
 /// The files the collector reads, which the test goes on writing.
 #[derive(Clone, Default)]
-struct Shared(Rc<RefCell<FakeFiles>>);
+pub(super) struct Shared(pub(super) Rc<RefCell<FakeFiles>>);
 
 impl FileReader for Shared {
     fn read(&self, path: &str) -> Result<String, String> {
@@ -51,7 +53,7 @@ impl FileReader for Shared {
 
 /// A clock the test sets.
 #[derive(Clone, Default)]
-struct SetClock(Rc<Cell<u64>>);
+pub(super) struct SetClock(pub(super) Rc<Cell<u64>>);
 
 impl UsageClock for SetClock {
     fn now_usec(&self) -> u64 {
@@ -70,6 +72,10 @@ struct Rig {
 impl Rig {
     fn new() -> Self {
         let (files, clock) = (Shared::default(), SetClock::default());
+        {
+            let mut held = files.0.borrow_mut();
+            *held = held.clone().with("/proc/stat", HOST_IDLE);
+        }
         let outbox = Arc::new(Outbox::new());
         let collector = Collector::new(
             Box::new(files.clone()),
@@ -524,4 +530,52 @@ fn the_window_follows_the_session_that_is_welcomed_last() {
         "20 seconds is four windows of 5: a gap"
     );
     assert_eq!(at(&mut rig, 55), ["a"], "one window of 5 again");
+}
+
+/// Asserts that the load counts the whole host's CPU, not only the actions cgroup's: over a
+/// 30 s window the jobs in the actions cgroup use one core while the host's `/proc/stat` says
+/// its CPUs were busy for ten (the agent, the storage service, the kernel and the jobs). The
+/// load carries both counters, and the one a receiver reads for the host
+/// (`node_cpu_usec`) gives the ten cores. It catches a heartbeat whose load is the jobs'
+/// alone, which shows a host kept busy by other work as idle.
+#[test]
+fn the_load_counts_the_hosts_cpu_besides_the_jobs() {
+    let mut rig = Rig::windowed();
+    rig.node(0, 100);
+    assert!(rig.run_at(0, &[]).is_empty());
+    let first = rig.load().unwrap();
+    rig.node(30 * SECOND, 100);
+    // 300 s of CPU in clock ticks of 10 ms: user 20000, system 9000, irq 400, softirq 600.
+    rig.put("/proc/stat", "cpu  20000 0 9000 500 70 400 600 0 0 0\n");
+    assert!(rig.run_at(30, &[]).is_empty());
+    let second = rig.load().unwrap();
+    let cores = |used: u64| used * 1000 / (30 * SECOND);
+    assert_eq!(cores(second.cpu_usage_usec - first.cpu_usage_usec), 1000);
+    assert_eq!(
+        (first.host_cpu_usec, second.host_cpu_usec),
+        (Some(0), Some(300 * SECOND))
+    );
+    assert_eq!(
+        cores(second.node_cpu_usec() - first.node_cpu_usec()),
+        10_000
+    );
+}
+
+/// Asserts that a host whose `/proc/stat` cannot be read (no `cpu` line) sends no load and
+/// says so once, and sends one again once the file is read. It catches a host counter
+/// invented as 0, and a load whose host counter is missing in one reading and present in the
+/// next, which a receiver would compare with the actions cgroup's.
+#[test]
+fn an_unreadable_proc_stat_gives_no_load_and_one_line() {
+    let mut rig = Rig::windowed();
+    rig.node(0, 100);
+    rig.put("/proc/stat", "intr 1 0\nctxt 2\n");
+    assert_eq!(
+        rig.run_at(0, &[]),
+        ["usage: no load while the host /proc/stat cannot be read"]
+    );
+    assert!(rig.load().is_none());
+    rig.put("/proc/stat", HOST_IDLE);
+    assert!(rig.run_at(30, &[]).is_empty());
+    assert_eq!(rig.load().unwrap().host_cpu_usec, Some(0));
 }

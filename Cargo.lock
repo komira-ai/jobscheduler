@@ -1164,6 +1164,7 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-foundation",
+ "objc2-open-directory",
  "objc2-virtualization",
  "plist",
  "prost",
@@ -1379,6 +1380,22 @@ name = "js-coverage"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "thiserror",
+]
+
+[[package]]
+name = "js-cpu-replay"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "flate2",
+ "js-jobs",
+ "js-sched-placer",
+ "js-sizing",
+ "js-state",
+ "js-types",
+ "serde_json",
  "thiserror",
 ]
 

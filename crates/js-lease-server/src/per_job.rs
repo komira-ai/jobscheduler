@@ -51,10 +51,11 @@ use js_jobs::{
     JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage,
     StartFailure,
 };
-use js_types::{HostId, Resources};
+use js_types::{CpuSeries, HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
+use crate::job_expiry::JobLimits;
 use crate::job_held;
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
@@ -129,6 +130,9 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) polls_dispatch: bool,
     /// Where a start failure the host reports is counted.
     pub(crate) metrics: &'a dyn MetricsSink,
+    /// The pool's limits, of which a start refused for capacity reads its requeue count and bar
+    /// ([`job_held::held_or_end`]).
+    pub(crate) limits: JobLimits,
 }
 
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
@@ -364,7 +368,7 @@ fn commit_result(
         let code = result.detail.as_deref().unwrap_or("none");
         context.metrics.start_refused(context.host, code);
     };
-    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end)? else {
+    let Some(end) = job_held::held_or_end(jobs, context.host, &job, end, &context.limits)? else {
         tell_refused();
         return Ok(Some(Ack::Accepted));
     };
@@ -430,7 +434,9 @@ fn advance(
 /// without it, so that a reader of the job's live logs knows where each stream ends. The
 /// result's `usage`, what the job's control group counted, is kept as the output's resource
 /// usage, with the CPU periods, the throttled periods, the CPU pressure and the CPU peak it reports; a
-/// result with none records none, never a zero, and a counter it does not report is `None`.
+/// result with none records none, never a zero, and a counter it does not report is `None`. The
+/// result's `cpu_series` is kept as reported, beside the usage and whether or not the result has
+/// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped.
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
 /// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
@@ -459,12 +465,23 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             window_usec: peak.window_usec,
         }),
     });
+    // The wire type reads only a series with a power-of-two granularity and at most 128
+    // points; the store also keeps no granularity past 16 bits, and drops such a series.
+    let cpu_series = result.cpu_series.as_ref().and_then(|series| {
+        CpuSeries::new(
+            series.granularity_secs,
+            series.points.clone(),
+            series.run_usec,
+            series.partial,
+        )
+    });
     let output = Output {
         stdout: tail.stdout,
         stderr: tail.stderr,
         truncated: tail.truncated,
         usage,
         logs,
+        cpu_series,
     };
     let code = result.exit_code;
     let failed = code.filter(|code| *code != 0).unwrap_or(NO_EXIT_CODE);

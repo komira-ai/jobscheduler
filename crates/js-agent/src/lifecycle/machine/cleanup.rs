@@ -137,6 +137,7 @@ impl Lifecycle {
                         }
                         job.logs = runtime.logs_report(&id);
                         job.usage = runtime.usage(&id);
+                        job.cpu_series = runtime.cpu_series(&id);
                     }
                     job.result = Some(result);
                     job.input_failure = input_failure(job.cause, how, runtime.input_failure(&id));

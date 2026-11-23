@@ -14,7 +14,7 @@ use crate::cli_runtime::{CliRuntime, Flags as EngineFlags, Settings, system_runn
 use crate::contract::ToolkitHook;
 use crate::integrity::Integrity;
 use crate::lifecycle::CheckHook;
-use crate::lifecycle::{Local, MountProviders, Runtime};
+use crate::lifecycle::{Local, MountProviders, Runtime, UserNames};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
 use crate::{Failure, Services, crun, crun_host, disk};
@@ -150,6 +150,13 @@ pub struct Flags {
     /// job is held to its booking.
     #[arg(long, value_name = "MULTIPLE")]
     pub cpu_ceiling: Option<js_contain::CpuCeiling>,
+    /// Record each job's CPU second by second and send it with the job's result
+    /// (`cpu_series`): at most 128 points of a sixteenth of a core, a granularity that
+    /// doubles when a run outlasts them, and the agent's own run length. Read from the same
+    /// samples of each job's cgroup as the job's CPU peak. Off by default. Taken by the crun
+    /// runtime only: a job of the container engine records none.
+    #[arg(long)]
+    pub cpu_series: bool,
     /// The dedicated non-root user every `crun` command of the crun runtime runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a
@@ -301,6 +308,16 @@ pub struct Flags {
     /// `--container-bin`.
     #[arg(long, value_name = "PATH")]
     pub actions_cgroup: Option<PathBuf>,
+    /// Sends, in each heartbeat, the busy CPU and the CPU pressure of the whole host for each
+    /// second of the beat's window (at most 16 values of each, newest last): the agent reads
+    /// `/proc/stat` and `/proc/pressure/cpu` every second and the heartbeat carries the rates
+    /// between those readings. Telemetry only; the lease server lists it on `GET /v1/hosts`
+    /// and nothing places or sizes by it. The readings ride with the load, so without an
+    /// actions control group (no `--actions-cgroup` for the container engine, none delegated
+    /// for crun) there is no load and the flag does nothing; a host with no
+    /// `/proc/pressure/cpu` sends the busy values alone. Off by default.
+    #[arg(long)]
+    pub host_second_samples: bool,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
@@ -335,30 +352,6 @@ pub struct Flags {
     /// with `--no-jobs`.
     #[arg(long, value_name = "MILLISECONDS")]
     pub taint_recheck_ms: Option<u64>,
-    /// A node-local mount provider, `NAME=SOCKET`: a process on this host that makes the tree
-    /// a job's layer or mount names as `{provider, ref}` (`docs/design/mount-providers.md`),
-    /// serving the protocol `jobscheduler.provider.v1.MountProvider` on the Unix socket
-    /// `SOCKET`. The name is 1 to 32 bytes of `a-z`, `0-9` and `-`, the first a letter, and
-    /// is given once; the directory of the socket must exist (the agent does not wait for the
-    /// provider to start). The socket must be as `--mount-provider-user` says: the agent
-    /// looks before each connect. The hello reports
-    /// `mount-provider.NAME` where it reports `layered-rootfs`. The directory a provider
-    /// mounts trees in is listed as a `--mount-root-ro` (a `--mount-root` for a provider whose
-    /// trees a job may write). Repeatable. Needs the crun runtime.
-    #[arg(long = "mount-provider", value_name = "NAME=SOCKET", value_parser = crate::cli::named_path)]
-    pub mount_providers: Vec<(String, PathBuf)>,
-    /// The user a `--mount-provider` runs as, as `NAME=USER` (a user name or a uid; root when
-    /// not given); repeatable, once for each provider. Before each connect the agent checks
-    /// that the provider's socket belongs to that user or root and that no other user can
-    /// write it (its group may: the agent reaches it through the socket's group), and that its
-    /// directory belongs to root or that user and that no one else can write it.
-    #[arg(long = "mount-provider-user", value_name = "NAME=USER", value_parser = crate::cli::key_value)]
-    pub mount_provider_users: Vec<(String, String)>,
-    /// How many seconds a start may wait on its mount providers, from its admission (every
-    /// call to prepare and mount a source is inside it); one that has waited this long
-    /// fails `input-unavailable`. From 1 to 900; by default 120. Needs `--mount-provider`.
-    #[arg(long, value_name = "SECS")]
-    pub mount_provider_wait: Option<u64>,
 }
 
 impl Flags {
@@ -377,7 +370,7 @@ impl Flags {
     /// the container engine refuses them all (`--allow-host-jobs` and `--egress` above none
     /// are refused where the jobs are made, [`HOST_JOBS_NEED_CRUN`]).
     #[must_use]
-    pub fn crun_flags(&self) -> [(&'static str, bool); 11] {
+    pub fn crun_flags(&self) -> [(&'static str, bool); 8] {
         let [device, mount, env] = self.gpu_flags();
         [
             ("--crun-bin", self.crun_bin.is_some()),
@@ -391,12 +384,6 @@ impl Flags {
                 "--image-allow-loopback",
                 !self.image_allow_loopback.is_empty(),
             ),
-            ("--mount-provider", !self.mount_providers.is_empty()),
-            (
-                "--mount-provider-user",
-                !self.mount_provider_users.is_empty(),
-            ),
-            ("--mount-provider-wait", self.mount_provider_wait.is_some()),
         ]
     }
 
@@ -427,9 +414,11 @@ impl Flags {
             ("--allow-host-jobs", self.allow_host_jobs),
             ("--allow-fuse-jobs", self.allow_fuse_jobs),
             ("--cpu-ceiling", self.cpu_ceiling.is_some()),
+            ("--cpu-series", self.cpu_series),
             ("--watch-dir", !self.watch_dirs.is_empty()),
             ("--settle-ms", self.settle_ms.is_some()),
             ("--taint-recheck-ms", self.taint_recheck_ms.is_some()),
+            ("--host-second-samples", self.host_second_samples),
             ("--egress", self.egress.is_some()),
             ("--egress-allow", !self.egress_allow.is_empty()),
             ("--egress-dns", !self.egress_dns.is_empty()),
@@ -580,7 +569,7 @@ pub(crate) fn check(
     let usage = |text: String| Failure::Usage(text);
     if cli.no_jobs {
         // An agent that runs no job takes no flag of a runtime that would run them.
-        return match first(os.given()) {
+        return match first(os.given().into_iter().chain(cli.providers.given())) {
             Some(flag) => Err(usage(format!(
                 "{flag}: not with --no-jobs (an agent that runs no job)"
             ))),
@@ -598,7 +587,7 @@ pub(crate) fn check(
         }
         // Only crun gives a job GPU nodes (the engine takes its own from the toolkit), host
         // ports, a network, a host job or an image store of its own.
-        if let Some(flag) = first(os.crun_flags()) {
+        if let Some(flag) = first(os.crun_flags().into_iter().chain(cli.providers.given())) {
             return Err(usage(format!(
                 "{flag}: not with --allow-container-engine (a flag of the crun runtime)"
             )));
@@ -643,6 +632,8 @@ pub(crate) struct Jobs {
     pub(crate) settle: Duration,
     /// `--taint-recheck-ms`, or its default.
     pub(crate) taint_recheck: Duration,
+    /// `--host-second-samples`.
+    pub(crate) host_second_samples: bool,
     /// `--allow-host-jobs`.
     pub(crate) allow_host_jobs: bool,
     /// `--allow-fuse-jobs`.
@@ -754,20 +745,23 @@ pub(crate) fn jobs(
     );
     let from_flags = Settings::from_flags(&os.engine(), agent).map_err(|why| why.to_string())?;
     Ok(Jobs {
-        container: crun
-            .or(from_flags)
-            .map(|settings| settings.with_cpu_ceiling(os.cpu_ceiling)),
+        container: crun.or(from_flags).map(|settings| {
+            settings
+                .with_cpu_ceiling(os.cpu_ceiling)
+                .with_cpu_series(os.cpu_series)
+        }),
         layout,
         egress,
         settle: crate::lifecycle::settle(os.settle_ms)?,
         taint_recheck: taint::recheck_every(os.taint_recheck_ms)?,
+        host_second_samples: os.host_second_samples,
         allow_host_jobs: os.allow_host_jobs,
         allow_fuse_jobs: os.allow_fuse_jobs,
         providers: MountProviders::from_flags(
-            &os.mount_providers,
-            &os.mount_provider_users,
-            os.mount_provider_wait,
-            Path::new(crate::cli_runtime::PASSWD_FILE),
+            &cli.providers.mount_providers,
+            &cli.providers.mount_provider_users,
+            cli.providers.mount_provider_wait,
+            UserNames::Passwd(Path::new(crate::cli_runtime::PASSWD_FILE)),
         )?,
     })
 }
@@ -812,7 +806,12 @@ fn egress_of(os: &Flags, crun: bool) -> Result<crate::egress::Config, String> {
 /// # Errors
 ///
 /// None; the signature is the macOS build's.
-pub(crate) fn complete(_local: &mut Local, _cli: &Cli, _start: &Start) -> Result<(), String> {
+pub(crate) fn complete(
+    _local: &mut Local,
+    _cli: &Cli,
+    _start: &Start,
+    _files: &dyn crate::FileReader,
+) -> Result<(), String> {
     Ok(())
 }
 

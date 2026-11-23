@@ -27,7 +27,7 @@
 						<key>CodeRequirement</key>
 						<string>identifier "com.komira.js-agent" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = U7RTX4XD3X</string>
 						<key>Comment</key>
-						<string>js-agent lists the privacy database's directory to learn whether it holds this grant, which it holds to delete the accounts native jobs run as. Every program it starts, and every process of a job, is started with the responsibility disclaimed, so the grant never reaches a job.</string>
+						<string>js-agent lists the privacy database's directory to learn whether it holds this grant, which it holds to delete the accounts native jobs run as, and so that a native job it starts through a supervisor, as its own slot user under a sandbox profile, can read the build trees tierstore mounts: that supervisor and that job are to answer for js-agent. Every other program js-agent starts is started with the responsibility disclaimed.</string>
 						<key>Identifier</key>
 						<string>/Library/Application Support/js-agent/bin/js-agent</string>
 						<key>IdentifierType</key>

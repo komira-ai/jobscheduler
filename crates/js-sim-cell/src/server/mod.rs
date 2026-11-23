@@ -360,7 +360,11 @@ impl ServerNode {
             return down();
         };
         let router = up.router_for(request.uri().path());
-        self.runtime.block_on(call(router, request))
+        let answer = self.runtime.block_on(call(router, request));
+        // The server's placement poller runs on a task of its own right after a submit pokes
+        // it; in process it runs here, after the call it was poked by, at the same virtual time.
+        self.runtime.block_on(up.server.poll());
+        answer
     }
 
     /// Every cloud of the server, first to last: the elastic pool's, for a server of
@@ -493,6 +497,9 @@ impl ServerNode {
             .body(Body::from(body))
             .unwrap_or_default();
         let answer = self.runtime.block_on(call(up.agent.clone(), request));
+        // A heartbeat pokes the placement poller, which the server runs on a task of its own
+        // right after the call; in process it runs here, at the same virtual time.
+        self.runtime.block_on(up.server.poll());
         let status = answer.status().as_u16();
         let header = answer.headers().get(RETRY_AFTER);
         let seconds = header.and_then(|value| value.to_str().ok()?.parse::<u64>().ok());

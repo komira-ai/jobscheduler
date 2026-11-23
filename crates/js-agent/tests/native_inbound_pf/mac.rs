@@ -1,20 +1,24 @@
-//! The macOS part of the inbound test: the helper this process serves, the runtime, the
-//! anchor, the listener run and the three probes.
+//! The macOS part of the inbound test: the account pool, the runtime, the anchor, the
+//! listener run and the three probes.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
+use js_agent::mac_accounts::{MacHost, Places, Pool, Settings, Slots};
+use js_agent::mac_supervisor::SystemLauncher;
+use js_agent::native::{Accounts, Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_provision::counters::{self, Which};
 use js_mac_provision::pfctl::SystemPfctl;
 use js_mac_provision::provision::Provisioner;
 use js_mac_provision::{AnchorName, UidRange};
-use js_mac_session::client::Client;
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::ROLE;
@@ -22,7 +26,7 @@ use crate::verdict::{self, CaseA, Probe, Ready, Rise, Verdict};
 
 /// The variable naming the directory the test works in.
 const ROOT: &str = "JS_NATIVE_INBOUND_ROOT";
-/// The variable naming the one uid of the helper's range.
+/// The variable naming the one uid of the pool's slots.
 const UID: &str = "JS_NATIVE_INBOUND_UID";
 const NEEDS_ROOT: &str =
     "needs root: run the test binary as root (see the header of tests/native_inbound_pf/main.rs)";
@@ -37,12 +41,11 @@ const CONNECT_BOUND: Duration = Duration::from_millis(2000);
 /// The run's name, and so its scratch directory.
 const RUN: &str = "listener";
 
-/// The helper this process serves, and where it keeps things.
+/// The account pool of the agent and where it keeps things.
 struct Fixture {
     root: PathBuf,
-    socket: PathBuf,
+    accounts: PathBuf,
     homes: PathBuf,
-    state: PathBuf,
     pf_state: PathBuf,
     uid: u32,
 }
@@ -60,86 +63,59 @@ fn fixture() -> Fixture {
         "{UID} must be a uid from 500 to 60000, got {uid}"
     );
     let fixture = Fixture {
-        socket: root.join("sock").join("socket"),
+        accounts: root.join("accounts"),
         homes: root.join("homes"),
-        state: root.join("state"),
         pf_state: root.join("pf-state"),
         root,
         uid,
     };
     fs::create_dir(&fixture.homes).unwrap();
+    fs::create_dir(&fixture.accounts).unwrap();
+    // The pool wants its state directory owned by root and writable by no one else.
+    fs::set_permissions(&fixture.accounts, fs::Permissions::from_mode(0o755)).unwrap();
     fs::create_dir(fixture.root.join("scratch")).unwrap();
-    serve(&fixture);
+    for sub in ["folders", "at/tabs", "at/jobs", "Shared", "tmp", "launchd"] {
+        fs::create_dir_all(fixture.root.join("places").join(sub)).unwrap();
+    }
     fixture
 }
 
-/// Serves the real helper on the fixture's socket, with a range of the one uid, for as
-/// long as the process lives.
-fn serve(fixture: &Fixture) {
-    use std::os::unix::net::UnixStream;
-    use std::sync::Arc;
+/// The pool's slots: the one uid of the fixture.
+fn slots(fixture: &Fixture) -> Slots {
+    Slots::new(fixture.uid, 1).unwrap_or_else(|why| panic!("{UID}: {why}"))
+}
 
-    use clap::Parser as _;
-    use js_mac_session::macos::MacHost;
-    use js_mac_session::scan::ScanFolder;
-    use js_mac_session::server::{self, Caller, CallerCheck};
-    use js_mac_session::start::{self, Args};
-    use js_mac_session::sweep::SweepPlan;
+/// The pool's settings: the Mac's, with the one slot, no account kept ready (so a removal
+/// leaves no user behind), the homes under the fixture and every place a sweep covers under
+/// the fixture too, so the test touches nothing of the Mac's own.
+fn settings(fixture: &Fixture) -> Settings {
+    let places = fixture.root.join("places");
+    let mut settings = Settings::macos(slots(fixture), 0);
+    settings.homes = fixture.homes.clone();
+    settings.user_folders = places.join("folders");
+    settings.schedules = Places {
+        named: vec![format!("{}/{{name}}", places.join("at/tabs").display())],
+        owned: vec![places.join("at/jobs")],
+    };
+    settings.shared = Places {
+        named: vec![format!(
+            "{}/disabled.{{uid}}.plist",
+            places.join("launchd").display()
+        )],
+        owned: vec![places.join("Shared"), places.join("tmp")],
+    };
+    settings
+}
 
-    /// The caller check of a helper this very process serves: everyone who reaches the
-    /// socket is the test.
-    struct Anyone;
-
-    impl CallerCheck for Anyone {
-        fn identify(&self, _: &UnixStream) -> Result<Caller, String> {
-            Ok(Caller {
-                token: Vec::new(),
-                pid: 0,
-                version: 0,
-            })
-        }
-
-        fn check(&self, _: &Caller) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    let path = |path: &Path| path.display().to_string();
-    let args = Args::parse_from([
-        "js-mac-session".to_owned(),
-        "--socket".to_owned(),
-        path(&fixture.socket),
-        "--socket-group".to_owned(),
-        "wheel".to_owned(),
-        "--state-dir".to_owned(),
-        path(&fixture.state),
-        "--uid-range".to_owned(),
-        format!("{0}-{0}", fixture.uid),
-        // The pool is the one user of the one uid: a pool larger than the range is
-        // refused at the helper's start.
-        "--pool-size".to_owned(),
-        "1".to_owned(),
-        "--homes".to_owned(),
-        path(&fixture.homes),
-        // The boot reset clears the auto-login of the Mac the helper serves; the files it
-        // clears are the test's own, so a real login setting is not touched.
-        "--kcpassword".to_owned(),
-        path(&fixture.root.join("kcpassword")),
-        "--loginwindow".to_owned(),
-        path(&fixture.root.join("loginwindow")),
-        "--daemon-requirement".to_owned(),
-        "unused: the check is replaced".to_owned(),
-    ]);
-    let ready = start::prepare(
-        &args,
-        Box::new(MacHost),
-        SweepPlan::macos_schedules(),
-        SweepPlan::macos(),
-        ScanFolder::macos(),
-    )
-    .unwrap();
-    let check: Arc<dyn CallerCheck> = Arc::new(Anyone);
-    std::thread::spawn(move || server::serve(&ready.listener, &ready.helper, &check));
+/// The real pool over the real operating system.
+fn pool(fixture: &Fixture) -> Arc<Pool> {
+    let pool = Pool::with_settings(
+        &fixture.accounts,
+        settings(fixture),
+        &BTreeSet::new(),
+        Arc::new(MacHost),
+    );
+    Arc::new(pool.unwrap_or_else(|why| panic!("the pool: {why}")))
 }
 
 /// The production layout of the runtime with a network cap that lets a run listen, plus the
@@ -148,6 +124,11 @@ fn serve(fixture: &Fixture) {
 fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
     let denied = |path: &Path| AbsPath::new(path).unwrap();
     let config = NativeConfig {
+        accounts: Accounts {
+            state: fixture.accounts.clone(),
+            slots: slots(fixture),
+            ready: 0,
+        },
         homes: fs::canonicalize(&fixture.homes).unwrap(),
         network: Ceiling::On,
         tool_roots: vec![
@@ -156,7 +137,7 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
             exe.parent().unwrap().to_owned(),
         ],
         read_denies: vec![
-            denied(&fixture.state),
+            denied(&fixture.accounts),
             denied(&fixture.root.join("scratch")),
         ],
         mount_roots: Vec::new(),
@@ -167,7 +148,8 @@ fn runtime(fixture: &Fixture, exe: &Path) -> NativeRuntime {
         egress: None,
         full_disk_access: FullDiskAccess::Granted,
     };
-    NativeRuntime::open_ungated(Client::new(&fixture.socket), config, 1).unwrap()
+    let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
+    NativeRuntime::open_ungated(Some(pool(fixture)), launcher, config, 1).unwrap()
 }
 
 /// The run of this binary's `child_of_the_runs` in the role `listen`; its scratch directory
@@ -211,15 +193,15 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
 }
 
 /// The runtime and the listener run; dropping it ends the run, so a panic anywhere leaves no
-/// user and no process behind.
+/// account and no process behind.
 struct Trial {
     rt: NativeRuntime,
     run: Option<RunHandle>,
 }
 
 impl Trial {
-    /// Ends the run (the helper's `kill-uid`, then `user-delete`); nothing is done when it
-    /// was ended already.
+    /// Ends the run (the job's group is stopped, the account's processes are killed and the
+    /// account is deleted); nothing is done when it was ended already.
     fn end(&mut self) -> Result<(), String> {
         match self.run.take() {
             Some(id) => self
@@ -359,4 +341,14 @@ pub fn run() -> Verdict {
     println!("{}", verdict::final_line(&outcome));
     trial.end().unwrap_or_else(|why| panic!("{why}"));
     outcome
+}
+
+/// The supervisor's program: the `js-agent` beside this test binary when there is one (an
+/// operator copies both from the workflow's artifact), else the one cargo built for the test.
+fn supervisor_binary() -> PathBuf {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("js-agent")))
+        .filter(|path| path.is_file());
+    beside.unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_js-agent")))
 }

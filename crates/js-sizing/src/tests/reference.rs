@@ -104,8 +104,8 @@ impl Reference {
         }
         let mut last: Vec<u32> = self.cpu.iter().rev().take(32).copied().collect();
         last.sort_unstable();
-        let p90 = last[(last.len() * 9).div_ceil(10) - 1];
-        p90.div_ceil(250)
+        let p50 = last[last.len().div_ceil(2) - 1];
+        p50.div_ceil(250)
             .saturating_mul(250)
             .clamp(250.min(b.node_cpu_millis), b.node_cpu_millis)
     }

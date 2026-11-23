@@ -468,13 +468,13 @@ answer from what the commit returned; neither holds anything of its own outside 
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
    the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
    nothing was recorded.
-5. **Place now, when nothing is ahead.** When no queued job had the new job's priority or a
-   higher one, the call runs the placement pass itself before it answers, and the answer is
-   the job as it then stands: `placed` with its host when a host had room, `queued` when none
-   had. The placement wakes the host's held heartbeat, whose reply carries the start
-   ([`design/held-beat.md`](design/held-beat.md)). A job with a queued job of its priority or
-   above ahead of it, and a retry of a job already recorded, is answered as recorded and
-   placed by the next pass.
+5. **Poke the placement poller.** The call pokes the server's placement poller and answers:
+   a new job is answered `queued`, with no host, always, and the call never places it itself.
+   The poller's pass places it, on its own task right after the answer, when a host has room;
+   the placement wakes the host's held heartbeat, whose reply carries the start
+   ([`design/held-beat.md`](design/held-beat.md)). A client that wants the host and the start
+   reads the job (`GET /v1/jobs/{id}`) until it has left `queued`. A retry of a job already
+   recorded is answered with the job as it now is.
 
 **`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
 cancelled at once (it has no allocation), with a result of reason cancelled and its retention
@@ -541,7 +541,12 @@ generated paragraph above.
 - `GetUsage` reads the ended bookings of leases in the usage store and of jobs in the job
   store (see `usage-store.md`) as one listing, oldest end first (then by id, a lease's record
   before a job's with the same end and id), from `from_ms` included to `to_ms` excluded, of one
-  host or one job when asked; a job's record carries the job id in `job_id`. A page holds
+  host or one job when asked; a job's record carries the job id in `job_id`. A job's record
+  carries `cpu_series` (`cpuSeries` over the gateway) when its host's agent reported the job's CPU
+  second by second with its result: `granularity_secs` (the seconds each point covers: 1, 2, 4,
+  and so on), `points` (the mean CPU of each span in sixteenths of a core, at most 128), `run_usec`
+  (the run as the agent measured it) and `partial` (the series misses the start of the run), kept
+  as reported; it is absent for a job whose agent reported none, and for a lease's record. A page holds
   `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
   `next_page_token` names the page's last record, its key and which store it came from: the
   next page starts right after it, so no record is read twice or skipped while records are

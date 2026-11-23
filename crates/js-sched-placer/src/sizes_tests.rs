@@ -71,8 +71,8 @@ fn of_class(class: &str, needs: Needs) -> JobSpec {
 
 /// What the host of a new agent reported: `peak` bytes at most and `cpu` of CPU time, no CPU
 /// pressure and no throttled period, and a CPU peak equal to the run's mean over the ten
-/// seconds [`ran`] gives each run (so the run's CPU is a measurement, and a class books what
-/// its runs used).
+/// seconds [`ran`] gives each run (the run's CPU is a measurement, and a class books the mean
+/// its runs used, their CPU time over their wall time; the peak is reported, not booked).
 fn output(peak: u64, cpu: Duration) -> Output {
     Output {
         usage: Some(ResourceUsage {
@@ -512,20 +512,37 @@ fn a_job_that_never_ran_had_the_whole_host_or_no_result_teaches_nothing() {
     assert!(!sizes.observe(&unstarted, booked(1, GIB)), "never started");
 }
 
-/// Asserts that a success whose peak came within 5% of its booking holds its class at the
-/// booking (a contained job's booking is its limit, so it may have been held there), while one
-/// at 90% of it raises the class past the booking. Catches a run at its limit taken as an
-/// honest peak, which would size the class at the limit that held it.
+/// Asserts that a success's peak sizes its class whatever its booking, since a booking is no
+/// limit (a contained job has no `memory.max`): five runs at 4 GiB less 100 MiB under a 4 GiB
+/// booking book the next job their peak with the margin (5 GiB), one run that used 6 GiB under
+/// a 4 GiB booking raises the next booking to 7.5 GiB at once and nothing kills it (it is a
+/// success, which teaches no floor), and runs at 90% of the booking book theirs. Catches a run
+/// at or above its booking taken as held at a limit, which keeps the class at a booking its
+/// jobs outgrow.
 #[test]
-fn a_success_at_its_booking_holds_the_class_at_the_booking() {
+fn a_success_at_or_above_its_booking_books_its_peak_and_raises_the_next_at_once() {
     let tables = Tables::new();
     let near = || exited(0, 4 * GIB - 100 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "near", 5, "build", booked(2000, 4 * GIB), near);
     let next = queued("next", of_class("build", needs(0, 0)));
     assert_eq!(
         size(&taught(&jobs, booked(2000, 4 * GIB)), &next).1,
-        4 * GIB
+        5 * GIB
     );
+    let over = || exited(0, 6 * GIB, Duration::from_secs(10));
+    let mut jobs = jobs;
+    jobs.extend(runs(
+        &tables,
+        "over",
+        1,
+        "build",
+        booked(2000, 4 * GIB),
+        over,
+    ));
+    let sizes = taught(&jobs, booked(2000, 4 * GIB));
+    assert_eq!(size(&sizes, &next).1, 30 * 256 * MIB, "raised at once");
+    let class = sizes.summaries.get(&JobSizes::key_of(&next)).unwrap();
+    assert_eq!(class.oom_floor(), 0, "a success raises no floor");
     let below = || exited(0, 4 * GIB - 400 * MIB, Duration::from_secs(10));
     let jobs = runs(&tables, "below", 5, "build", booked(2000, 4 * GIB), below);
     assert_eq!(
@@ -919,3 +936,6 @@ mod client;
 
 #[path = "sizes_farm_tests.rs"]
 mod farm;
+
+#[path = "sizes_follows_use_tests.rs"]
+mod follows_use;

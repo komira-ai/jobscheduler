@@ -42,21 +42,29 @@ use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 
 /// How long a pool's jobs may wait (design section 4.2): its `max_queue_wait` and its
-/// `start_timeout`.
+/// `start_timeout`; and how a start a host refused for capacity is answered: its
+/// `capacity_requeues` and `capacity_refusal_bar`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct JobLimits {
     /// How long a queued job waits for a host before it ends as `no-capacity`.
     pub(crate) max_queue_wait: Duration,
     /// How long a placed or starting job has to start before it ends as `start-timeout`.
     pub(crate) start_timeout: Duration,
+    /// How many times a start a host refused for capacity sends a job back to the queue; the
+    /// refusal after that ends it.
+    pub(crate) capacity_requeues: usize,
+    /// How long a job is kept off a host that refused its start for capacity.
+    pub(crate) capacity_refusal_bar: Duration,
 }
 
 impl JobLimits {
-    /// The limits of a pool that sets neither: a queue wait of one hour and a start timeout
-    /// of fifteen minutes.
+    /// The limits of a pool that sets none: a queue wait of one hour, a start timeout of
+    /// fifteen minutes, eight capacity requeues and a capacity bar of sixty seconds.
     pub(crate) const DEFAULT: JobLimits = JobLimits {
         max_queue_wait: Duration::from_secs(3600),
         start_timeout: Duration::from_secs(900),
+        capacity_requeues: 8,
+        capacity_refusal_bar: Duration::from_secs(60),
     };
 
     /// The limits the pool's `settings` give.
@@ -64,6 +72,8 @@ impl JobLimits {
         JobLimits {
             max_queue_wait: settings.max_queue_wait,
             start_timeout: settings.start_timeout,
+            capacity_requeues: settings.capacity_requeues,
+            capacity_refusal_bar: settings.capacity_refusal_bar,
         }
     }
 }

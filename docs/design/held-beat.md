@@ -1,7 +1,12 @@
-# Place on submit, start on the held heartbeat
+# Poke the poller on submit, start on the held heartbeat
 
 Design issue: komira-ai/jobscheduler#903. Goal: a job submitted while a host has room starts on that
 host without waiting for a server tick or a heartbeat interval.
+
+The first version of this design placed the job inside the submit call (item 1 below, as it was). It now
+commits the job, pokes a placement poller and answers `queued`, always: the submit has one answer, the
+placement has one place where an event asks for it, and a start an agent refuses is a job that is still
+queued, never a submit that answered `placed` for a job that then did not start.
 
 ## Before
 
@@ -12,13 +17,31 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
 
 ## After
 
-1. **Place in the call.** `SubmitJob` reads the queue before it commits. When no queued job has the new
-   job's priority or a higher one, the call runs the server's pass over the queued jobs after the commit
-   and answers the job as it then stands: `placed` with its host, or `queued` when no host had room. The
-   pass is the one the tick runs: it claims the host's room in the store's own transaction
-   (`place_claimed`), so it stays right with several servers, and one pass of a server runs at a time
-   (`Agents::placing`). A job with a queued job of its priority or above ahead of it, and a retry of a job
-   already recorded, is only committed; the next pass places it, as before.
+1. **Poke the poller.** `SubmitJob` commits the job as queued, pokes the server's placement poller
+   (`poller::Poller::poke`) and answers the job as committed: `queued`, with no host, always. It reads
+   no queue and runs no pass. The poller is a task the server starts with its tick loop and ends with
+   it (`server::poll_loop`): it waits for a poke and runs the server's pass over the queued jobs
+   (`poller::pass`, `Agents::place_jobs`). The pass is the one the tick runs: it claims the host's room
+   in the store's own transaction (`place_claimed`), so it stays right with several servers, and one
+   pass of a server runs at a time (`Agents::placing`), whoever runs it. A poke is one permit
+   (`tokio::sync::Notify`): pokes that come while a pass runs, or before the poller first waits, are
+   kept as one, and the pass after the last poke reads every commit made before it. Before the poke
+   the submit tells the placer of its commit (`Agents::note_inserted`), so when nothing else wrote the
+   job store since the last pass, the poked pass adds the job to the tables it read then instead of
+   reading the four tables again. A retry of a job already recorded is answered with the job as it now
+   is, in whatever state, and pokes too; its pass finds nothing new. The server in process
+   (`in_process`, the simulation and test seam) spawns no task: its caller runs the poller's turn
+   (`InProcess::poll`) after each request, and a poke it leaves waits for the next tick.
+
+   A heartbeat that lists its jobs pokes the poller too (`Poller::poke_after_beat`), after the
+   listing's commit, and runs no pass itself. The pass that poke brings, when no submit poked, is the
+   heartbeat's (`Agents::place_jobs_after_beat`): skipped when nothing it depends on changed since the
+   last pass, so a quiet fleet's beats cost no pass. So placement has one place where an event asks for
+   it, the poller. The tick keeps its own forced pass (`Agents::place_jobs`) beside it: it is the only
+   thing that notices what the clock alone changes (a refusal bar or a whole-host mark that ends, the
+   regain grace) and it covers a poller task that died. A placement a heartbeat made room for no longer
+   rides on that heartbeat's own reply: it wakes the host's held heartbeat, or, for a host without
+   held heartbeats, rides on its next one.
 2. **Hold the heartbeat.** An agent that reports the hello capability `held-beat` is one whose session
    sends its next heartbeat at once after a reply that says `beat_now`. The server watches such a host's
    heartbeat from before it reads the store for the reply (`held_beat::Wakes::watch`), when the heartbeat's
@@ -39,8 +62,12 @@ interval: up to 10 s with the defaults (`--tick 5s`, interval 5 s), up to 2 s at
    for a job that books the whole host, with the allocation to prepare for). A wake that comes between the
    store read and the hold is kept, so none is lost. A wake that brings nothing to send holds on.
 
-Submit to start on an idle host is then one pass, one store read and one reply, with no tick and no
-interval in it. The agent beats again as soon as a reply without a command reaches it, so while the host is
+Submit to start on an idle host is then one poke, one pass, one store read and one reply, with no tick
+and no interval in it. What the poke adds to the time from the submit's commit to the placement is the
+poller's wake: the poke, the poller task's turn on the runtime and its hop to the pool for blocking calls
+(measured in the pull request that made the change, on a development machine, with the pass itself
+unchanged). The submit's answer comes sooner, since the call no longer waits for a pass; a client that
+wants to know where and when its job starts reads the job (`GetJob`) until it has left `queued`. The agent beats again as soon as a reply without a command reaches it, so while the host is
 idle a heartbeat of it is waiting at the server nearly all the time. After a start (a reply with a command)
 it waits the interval, so a job submitted to the same host within one interval of the last start waits for
 that beat; an agent whose worker rings its bell ends that wait when the worker has taken the start
@@ -49,6 +76,14 @@ heartbeat lists the start `starting`, is held for the short bound above, and a p
 answered on it at once. The start's `running` rides on the heartbeat after it.
 
 ## Compatibility
+
+- The submit's answer is `queued` for every new job. A client that read `placed` and the host from the
+  answer now reads the job afterwards. `SubmitJob`'s message is unchanged (`job`), and `queued` was
+  already one of its answers (a job with another ahead of it, or no host with room), so a client of any
+  release reads it; the clients in this repository and kbf's executor read the job after the submit
+  whatever the answer said. A cancel that comes while the poller places the job is decided again on the
+  placed row (`job_api::cancel::until_landed`), so a cancel right after a submit is never answered
+  `state-write-failed` for that race.
 
 - `beat_now` is an optional reply field, absent when false; an agent from before it ignores it. A server
   sends it, and holds a reply, only to an agent that reported `held-beat`, so an older agent, which waits

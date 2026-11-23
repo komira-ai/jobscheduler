@@ -426,6 +426,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
                 logs: None,
                 input_failure: None,
                 usage: None,
+                cpu_series: None,
             }),
         }],
         retired_jobs: vec!["job-2".into()],
@@ -539,6 +540,7 @@ fn an_old_agent_ignores_log_sink() {
                 }),
                 input_failure: None,
                 usage: None,
+                cpu_series: None,
             }),
         }],
         log_grant_state: Some(LogGrantState {
@@ -590,6 +592,7 @@ fn an_old_server_ignores_input_failure() {
                 logs: None,
                 input_failure: Some(js_agent_wire::refusal::TREE_STALLED.into()),
                 usage: None,
+                cpu_series: None,
             }),
         }],
         ..heartbeat()
@@ -832,5 +835,49 @@ fn a_malformed_sizing_reads_as_absent_and_the_start_runs() {
             cpu: js_agent_wire::BookedFrom::Unknown,
             memory: js_agent_wire::BookedFrom::Named,
         })
+    );
+}
+
+/// Asserts that a container start carrying `os` and `arch` (as the job service now sends every
+/// start of a job that names its system and architecture) decodes with the previous release's
+/// reply type as one without them does: its ids, command and wall limit intact and the stop
+/// beside it kept, never a decode error; and that the start with them passes this version's
+/// checks and a start without them serializes neither. Catches a container start that costs
+/// an older Linux agent the reply, or one this version refuses.
+#[test]
+fn an_old_agent_ignores_the_os_and_arch_of_a_container_start() {
+    let Command::JobStart(mut spec) = job_start("build-43") else {
+        unreachable!("job_start makes a job start");
+    };
+    let plain = serde_json::to_value(&*spec).unwrap();
+    assert_eq!((plain.get("os"), plain.get("arch")), (None, None));
+    spec.os = Some(js_types::Os::Linux);
+    spec.arch = Some(js_types::Arch::X86_64);
+    assert_eq!(spec.validate().and_then(|()| spec.require_pinned()), Ok(()));
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "build-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+        (&wire["commands"][0]["os"], &wire["commands"][0]["arch"]),
+        (&json!("linux"), &json!("x86_64"))
+    );
+    assert_eq!(wire["commands"][0].get("run"), None);
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("build-43", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "build-41")
     );
 }

@@ -1,14 +1,16 @@
-//! Live logs of the native runtime over the fake helper: a run whose start carries a sink has
-//! its two log files uploaded to an in-memory store by an uploader the test steps (its wake is
-//! manual and its clock a manual one), output past the file cap goes up as `crun`'s capture
-//! would send it, a restarted agent finishes an upload from its progress record, and a run
-//! without a sink uploads nothing. The test writes the job's output into the files the
-//! runtime gave the job, as the job would.
+//! Live logs of the native runtime over the account pool of a fake host and the fake launcher:
+//! a run whose start carries a sink has its two log files uploaded to an in-memory store by an
+//! uploader the test steps (its wake is manual and its clock a manual one), output past the
+//! file cap goes up as `crun`'s capture would send it, a restarted agent lists the earlier run
+//! ended and finishes its upload from its progress record, and a run without a sink uploads
+//! nothing. The test writes the job's output into the files the runtime gave the job, as the
+//! job would; the job itself is a shell that waits for a gate file the test makes, so that
+//! it ends when the test says (and with exit code 0).
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -19,11 +21,10 @@ use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_agent_wire::{LogGrant, LogReport, LogTail};
 use js_logstore::fake::{Action, FakeStore, Op, Policy};
 use js_logstore::{Endpoint, JobPrefix, ManualClock, Stream};
-use js_mac_session::helper::RESET_ALREADY;
 use serde_json::{Value, json};
 
 use super::agent::{hello_on, native_flags};
-use super::{Rig, TERM, config, native};
+use super::{Rig, TERM, config, native, open_pool};
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Scratch, Script, ScriptConnector, code, flags, mac_host, reply,
     run_on, welcome,
@@ -161,13 +162,36 @@ fn chunks(objects: &BTreeMap<String, Vec<u8>>, run_id: &str, stream: Stream) -> 
         .collect()
 }
 
-/// A rig whose runtime uploads with `live`, and a run of it whose start carries a sink, started.
-fn started(name: &str, live: &Live, run_id: &str) -> (Rig, RunHandle, std::path::PathBuf) {
+/// The gate of the run `run_id` of `rig`: the file the job waits for.
+fn gate_of(rig: &Rig, run_id: &str) -> PathBuf {
+    rig.dir.path(&format!("gate-{run_id}"))
+}
+
+/// A job that prints nothing and ends with exit code 0 once the file `gate` is there.
+fn waiting(gate: &Path) -> js_agent_wire::NativeSpec {
+    // From `/`: the run directory goes with the account when a later runtime's pool retires
+    // it, and a shell whose working directory is gone writes errors into the log under test.
+    let script = format!(
+        "cd / && until [ -e '{}' ]; do /bin/sleep 0.01; done",
+        gate.display()
+    );
+    native("/bin/sh", &["-c", &script])
+}
+
+/// Lets the job that waits at `gate` end.
+fn open(gate: &Path) {
+    std::fs::write(gate, b"").unwrap();
+}
+
+/// A rig whose runtime uploads with `live`, and a run of it whose start carries a sink, started:
+/// the rig, the run, its scratch directory (where its log files are) and its gate.
+fn started(name: &str, live: &Live, run_id: &str) -> (Rig, RunHandle, PathBuf, PathBuf) {
     let mut rig = Rig::new(name).living(live.logs.clone());
-    let mut spec = rig.spec(run_id, native("/bin/echo", &[]));
+    let gate = gate_of(&rig, run_id);
+    let mut spec = rig.spec(run_id, waiting(&gate));
     spec.log_sink = Some(sink(run_id));
     let id = rig.rt.create_and_start(&spec).unwrap();
-    (rig, id, spec.scratch)
+    (rig, id, spec.scratch, gate)
 }
 
 /// Proves the live upload of a native run that writes its two streams in turns: while the
@@ -180,7 +204,7 @@ fn started(name: &str, live: &Live, run_id: &str) -> (Rig, RunHandle, std::path:
 #[test]
 fn a_native_run_with_a_sink_uploads_both_streams_while_it_runs() {
     let live = Live::new(64 * 1024 * 1024);
-    let (mut rig, id, dir) = started("logs-live", &live, "j1");
+    let (mut rig, id, dir, gate) = started("logs-live", &live, "j1");
     let wake = live.wake(0);
     assert_eq!(wake.settled(), Settled::Asleep, "the uploader's first step");
     assert!(
@@ -210,7 +234,7 @@ fn a_native_run_with_a_sink_uploads_both_streams_while_it_runs() {
     assert_eq!(chunks(&objects, "j1", Stream::Stdout), b"out-1\nout-2\n");
     assert_eq!(chunks(&objects, "j1", Stream::Stderr), b"err-1\nerr-2\n");
 
-    rig.fake.exit("7.0", 0);
+    open(&gate);
     assert_eq!(rig.settle(&id), exited(0));
     let report = LogReport {
         stdout_bytes: 12,
@@ -254,7 +278,7 @@ fn a_native_run_with_a_sink_uploads_both_streams_while_it_runs() {
 fn output_past_the_cap_is_uploaded_as_the_crun_capture_uploads_it() {
     const CAP: u64 = 100;
     let live = Live::new(CAP);
-    let (mut rig, id, dir) = started("logs-cap", &live, "j2");
+    let (mut rig, id, dir, gate) = started("logs-cap", &live, "j2");
     let wake = live.wake(0);
     assert_eq!(wake.settled(), Settled::Asleep);
     let out: Vec<u8> = (0..20_000u32)
@@ -273,7 +297,7 @@ fn output_past_the_cap_is_uploaded_as_the_crun_capture_uploads_it() {
         objects.keys()
     );
 
-    rig.fake.exit("7.0", 0);
+    open(&gate);
     assert_eq!(rig.settle(&id), exited(0));
     let report = LogReport {
         stdout_bytes: 20_000,
@@ -305,16 +329,19 @@ fn output_past_the_cap_is_uploaded_as_the_crun_capture_uploads_it() {
 /// Proves that an agent restart loses and repeats nothing of a native run's upload: the first
 /// runtime puts a chunk, sees more output and is dropped with the job running (its uploader
 /// stops, its record stays). The job writes on while no agent runs. The next runtime over the
-/// same helper and journal adopts the run, and its upload goes on from the record: the bytes
-/// seen but not put and those written meanwhile go out as the next chunk, and the exit ends it
-/// with the finals. Each chunk offset was put once and no gap marker was put. Catches an
-/// adoption that re-sends from the start, skips what was written while no agent ran, or
-/// leaves an adopted run's upload undone.
+/// same state lists the earlier run ended (`Gone`: a restart ends every run, and nothing
+/// watches a job this process did not start), and its upload goes on from the record: the
+/// bytes seen but not put and those written meanwhile go out as the next chunk, and the
+/// removal of the run, which tells the uploader the run's end with the files' lengths, ends
+/// it with the finals. Each chunk offset was put once and no gap marker was put. Catches an
+/// earlier run's upload that re-sends from the start, skips what was written while no agent
+/// ran, or is left undone.
 #[test]
-fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
+fn an_earlier_run_listed_ended_goes_on_from_the_record_without_a_gap_or_a_repeat() {
     let live = Live::new(64 * 1024 * 1024);
     let mut rig = Rig::new("logs-restart").living(live.logs.clone());
-    let mut spec = rig.spec("j3", native("/bin/echo", &[]));
+    let gate = gate_of(&rig, "j3");
+    let mut spec = rig.spec("j3", waiting(&gate));
     spec.log_sink = Some(sink("j3"));
     spec.labels = BTreeMap::from([(label::RUN.to_owned(), "j3".to_owned())]);
     rig.rt.create_and_start(&spec).unwrap();
@@ -329,9 +356,12 @@ fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
 
     // The agent goes: its uploader stops at its next step and leaves the record.
     let Rig {
-        fake,
+        accounts,
+        launcher,
+        pool: _held,
+        settings,
         rt,
-        dir: _kept,
+        dir: kept,
     } = rig;
     drop(rt);
     run_out(&first);
@@ -339,33 +369,29 @@ fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
     // The job writes on while no agent runs.
     print(&dir, "stdout", b"FGH");
 
-    fake.refuse("boot-reset", RESET_ALREADY);
-    let mut again = NativeRuntime::open(fake.client(), config(&fake), TERM + 1)
+    let pool = open_pool(&kept, &settings, &accounts);
+    let mut again = NativeRuntime::over(Some(pool), launcher, config(&kept, &settings), TERM + 1)
         .unwrap()
         .with_live_logs(live.logs.clone());
-    assert!(again.reclaim().is_empty(), "the run is adopted, not ended");
+    assert!(
+        again.reclaim().is_empty(),
+        "the run has a record: listed, not dropped"
+    );
     assert_eq!(again.list_labelled().unwrap().len(), 1);
-    assert_eq!(live.made(), 2, "the adopted run has an uploader again");
+    assert_eq!(live.made(), 2, "the earlier run has an uploader again");
     let resumed = live.wake(1);
     assert_eq!(resumed.settled(), Settled::Asleep);
     flush(&live, &resumed);
     let id = RunHandle("7.0".to_owned());
-    fake.exit("7.0", 0);
-    for _ in 0..super::POLLS {
-        if again.poll(&id).unwrap() != Status::Running {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    let report = LogReport {
-        stdout_bytes: 18,
-        stderr_bytes: 5,
-        stdout_dropped: 0,
-        stderr_dropped: 0,
-    };
-    assert_eq!(again.logs_report(&id), Some(report));
-    run_out(&resumed);
+    assert_eq!(again.poll(&id).unwrap(), Status::Gone);
+    assert_eq!(
+        again.logs_report(&id),
+        None,
+        "no exit was read to tell the end"
+    );
     again.remove(&id).unwrap();
+    run_out(&resumed);
+    open(&gate);
 
     let p = prefix("j3");
     assert_eq!(
@@ -394,9 +420,7 @@ fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
 fn a_native_run_without_a_sink_uploads_nothing() {
     let live = Live::new(64 * 1024 * 1024);
     let mut rig = Rig::new("logs-none").living(live.logs.clone());
-    rig.fake.print(b"plain\n", b"");
-    let id = rig.start("j4", "/bin/echo", &[]);
-    rig.fake.exit("7.0", 0);
+    let id = rig.start("j4", "/bin/echo", &["plain"]);
     assert_eq!(rig.settle(&id), exited(0));
     assert_eq!(rig.rt.logs_report(&id), None);
     let tail = LogTail {
@@ -419,15 +443,13 @@ fn a_native_run_without_a_sink_uploads_nothing() {
 #[test]
 fn a_mac_agent_reports_log_upload_and_asks_for_the_credential() {
     let dir = Scratch::new("native-logs-hello");
-    let fake = super::fake_helper::FakeHelper::start(&dir);
-    let extra = native_flags(&dir, &fake);
+    let extra = native_flags(&dir);
     let (ran, hello) = hello_on(&mac_host(), &extra, welcome(1));
     assert_eq!(ran.status(), code(0), "{}", ran.err);
     assert_eq!(hello["capabilities"]["log-upload"], "true");
 
     let again = Scratch::new("native-logs-beat");
-    let other = super::fake_helper::FakeHelper::start(&again);
-    let extra = native_flags(&again, &other);
+    let extra = native_flags(&again);
     let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
     let beat = json!({"commands": [], "result_acks": [], "taint_ack": false});
     let (script, sent) = Script::new(vec![welcome(1), reply(200, beat)]);
@@ -460,12 +482,12 @@ fn a_mac_agent_reports_log_upload_and_asks_for_the_credential() {
 fn a_stream_of_exactly_the_cap_is_whole_and_one_byte_more_is_cut() {
     const CAP: u64 = 10;
     let live = Live::new(CAP);
-    let (mut rig, id, dir) = started("logs-edge", &live, "j5");
+    let (mut rig, id, dir, gate) = started("logs-edge", &live, "j5");
     let wake = live.wake(0);
     assert_eq!(wake.settled(), Settled::Asleep);
     print(&dir, "stdout", b"0123456789");
     print(&dir, "stderr", b"0123456789X");
-    rig.fake.exit("7.0", 0);
+    open(&gate);
     assert_eq!(rig.settle(&id), exited(0));
     let report = LogReport {
         stdout_bytes: 10,
@@ -489,13 +511,13 @@ fn a_stream_of_exactly_the_cap_is_whole_and_one_byte_more_is_cut() {
 }
 
 /// Proves the end of a run whose exit was never read: removed while it runs (the lifecycle's
-/// stop and removal, or a helper that lost track of it), it is killed, then told its end with
+/// stop and removal, or a supervisor that lost track of it), it is killed, then told its end with
 /// what its files hold, so its finals hold every byte and its record is gone. Catches an
 /// upload a removal cuts short with neither final nor gap, and totals taken before the kill.
 #[test]
 fn a_run_removed_before_its_exit_was_read_is_finished_after_the_kill() {
     let live = Live::new(64 * 1024 * 1024);
-    let (mut rig, id, dir) = started("logs-removed", &live, "j6");
+    let (mut rig, id, dir, _gate) = started("logs-removed", &live, "j6");
     let wake = live.wake(0);
     assert_eq!(wake.settled(), Settled::Asleep);
     print(&dir, "stdout", b"half-");

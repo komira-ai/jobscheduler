@@ -169,8 +169,10 @@ fn config(job: (u32, u32)) -> OciConfig {
 pub struct Shape {
     /// The limits written into the bundle.
     pub limits: ContainerLimits,
-    /// The lease's memory booking, which is its `memory.max` (the agent's policy), in bytes.
+    /// The lease's memory booking, in bytes: no limit under the agent's policy.
     pub memory: u64,
+    /// How the lease's cgroup follows the booking: the agent's policy unless a test says.
+    pub policy: LeasePolicy,
     /// The lease's CPU booking, in thousandths of a core: its `cpu.weight`, never a ceiling.
     pub cpu_millis: u64,
     /// Host directories bound into the container.
@@ -182,6 +184,7 @@ impl Default for Shape {
         Self {
             limits: ContainerLimits::DEFAULT,
             memory: 512 << 20,
+            policy: LeasePolicy::TrackedMemory,
             cpu_millis: 1000,
             mounts: Vec::new(),
         }
@@ -192,10 +195,10 @@ impl Default for Shape {
 pub struct Lease {
     /// What `Oci` runs.
     pub spec: ContainerSpec,
-    /// The lease's cgroup, with the booking's `memory.max`.
+    /// The lease's cgroup, made under the shape's policy.
     pub cgroup: LeaseCgroup,
-    /// The lease's `memory.max`.
-    pub cap: u64,
+    /// The lease's `memory.max`; `None` under the agent's policy, which writes none.
+    pub cap: Option<u64>,
 }
 
 /// How a container ended and what it wrote.
@@ -358,7 +361,7 @@ impl Cell {
         let cgroup = LeaseCgroup::at(Path::new(MOUNT), &self.cgroup, name);
         let booking = Resources::new(shape.cpu_millis, shape.memory, 0, None).expect("a booking");
         cgroup
-            .create_with(&booking, None, LeasePolicy::HardMemory)
+            .create_with(&booking, None, shape.policy)
             .unwrap_or_else(|e| panic!("create the lease cgroup: {e}"));
         give_cgroup(cgroup.dir(), &OWNED_FILES, uid, gid);
         let spec = ContainerSpec {
@@ -386,7 +389,10 @@ impl Cell {
         Lease {
             spec,
             cgroup,
-            cap: shape.memory,
+            cap: match shape.policy {
+                LeasePolicy::BuildHost => js_contain::memory_max(shape.memory),
+                LeasePolicy::TrackedMemory => None,
+            },
         }
     }
 

@@ -2,8 +2,9 @@
 //! 5.3, steps 5 and 6, 5.4, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
 //!
 //! With the job tables, the server runs a **pass** over the
-//! queue on each tick (the server's `Agents::place_jobs`) and after each heartbeat of a host
-//! that speaks the per-job messages (`Agents::place_jobs_after_beat`): a job end, a cancel, a
+//! queue on each tick (the server's `Agents::place_jobs`) and on its placement poller: the same
+//! pass when a submit pokes it, and `Agents::place_jobs_after_beat` when a heartbeat of a host
+//! that speaks the per-job messages pokes it: a job end, a cancel, a
 //! confirmed container, a host that joins and a heartbeat that changes a host's load all come to
 //! the server as one of those. The tick's pass always runs; a heartbeat's runs only when
 //! something it depends on changed since the last pass ([`SchedPlacer::place_jobs_if_changed`],
@@ -464,8 +465,16 @@ impl Engine {
             .recover(JOB_TERM, operation, operation.0, Vec::new());
         let free = room.iter().filter(|host| capable.contains(host));
         let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
-        let free = free.filter(|host| self.room.fits(host, walker.booked));
-        let only: BTreeSet<_> = free.map(map::worker).collect();
+        let (free, full): (Vec<_>, Vec<_>) =
+            free.partition(|host| self.room.fits(host, walker.booked));
+        // A host the bookings fill by memory is refused here, before the scheduler sees it:
+        // say so, as the scheduler's refusals are said.
+        for host in full {
+            if let Some(refusal) = self.room.memory_refusal(host, walker.booked) {
+                self.book_refusal(&walker.job, map::worker(host), refusal);
+            }
+        }
+        let only: BTreeSet<_> = free.into_iter().map(map::worker).collect();
         if only.is_empty() {
             let next = OperationId(operation.0.saturating_add(1));
             self.sched.recover(JOB_TERM, next, operation.0, Vec::new());

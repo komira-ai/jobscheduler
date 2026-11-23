@@ -16,11 +16,14 @@ pub struct LeaseSample {
 /// One reading of the node and of its leases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
-    /// The clock reading taken right after the node's `cpu.stat`.
+    /// The clock reading taken right after the CPU counters.
     pub mono_usec: u64,
     /// The actions cgroup's `usage_usec`. It is the cgroup's own counter, never a sum of
     /// the leases', because a removed descendant's usage stays in its parent's counter.
     pub cpu_usage_usec: u64,
+    /// The whole host's CPU busy time since boot, in microseconds, from `/proc/stat`: every
+    /// process of the host counts, the jobs and everything else. A counter that only grows.
+    pub host_cpu_usec: u64,
     /// The actions cgroup's `memory.current` less its `inactive_file`.
     pub working_set_bytes: u64,
     /// The actions cgroup's `active_file`.
