@@ -20,6 +20,8 @@
 //! | `--native-pf-endpoint <ip:port>` | (macOS build only) an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | (macOS build only) the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
 //! | `--native-trees-root <path>` | (macOS build only) the mount point under which the `--mount-provider` serves every job's trees (tierstore's one NFS mount of the Mac); must be a `--mount-root-ro` that no `--mount-root` names, with no other mount root above or below it, and needs `--mount-provider`; it is the one mount root that is not a read deny of every run: a run's profile denies reads below it and grants back the run's own trees; a job's mount below it must be read-only and `no_exec` (`input-not-allowed`) |
+//! | `--native-put-root <path>` | (macOS build only) the put ingest's directory (tierstore's put root): a read-write mount of `<this>/cas/b/<build>/<nonce>` at `/work/<rest>` is a run's put target, never linked into its folder nor granted in its profile; after the run the agent commits the run's `<rest>/pack` there as it is (`pack.part`, `pack.sha256-<hex>.part`, `pack`) and notes the key, digest and size as the finding `outputs-committed`; any other mount beneath it is refused (`input-not-allowed`); it is no `--mount-root` and every run's profile denies reads below it; needs `--native-put-user` and `--native-accounts` |
+//! | `--native-put-user <user>` | (macOS build only) the user the tierstore node runs as, by name or number (a number is its uid and its group): the folders of each key become its and each run's put directory its group's (mode 0770); needs `--native-put-root` |
 //! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS build only; needs `--vm-store` and `--native-accounts` |
 //! | `--vm-store <dir>` | (macOS build only) the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | (macOS build only) a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-accounts` |
@@ -45,7 +47,7 @@ use crate::lifecycle::{
 };
 use crate::mac_supervisor::{Launcher, SystemLauncher};
 use crate::native::Ceiling;
-use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags};
+use crate::native::{self, NativeFlags, NativeRuntime, NativeSettings, PfFlags, PutFlags};
 use crate::registry_credentials::RegistryCredentials;
 use crate::system::{Machine, RuntimeBuild, System};
 use crate::{Failure, Services};
@@ -169,6 +171,17 @@ pub struct Flags {
     /// start is refused (`input-not-allowed`).
     #[arg(long, value_name = "PATH")]
     pub native_trees_root: Option<PathBuf>,
+    /// The put ingest's directory (tierstore's `local_cache.put_ingest` put root): a run's
+    /// read-write mount of `<this>/cas/b/<build>/<nonce>` is where its output is committed
+    /// after it (`native/put.rs`), and is never given to the job; no run may read below it.
+    /// Needs `--native-put-user` and `--native-accounts`.
+    #[arg(long, value_name = "PATH")]
+    pub native_put_root: Option<PathBuf>,
+    /// The user the tierstore node runs as, by name or by number (a number is its uid and
+    /// its group): the folders of each key become its, and each job's put directory its
+    /// group's. Needs `--native-put-root`.
+    #[arg(long, value_name = "USER")]
+    pub native_put_user: Option<String>,
     /// Turns the VM backend on (macOS build only, beside `--native-accounts`): the
     /// absolute path of the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A
     /// VM start then runs in a fresh VM cloned from the base image and destroyed when it
@@ -187,7 +200,7 @@ impl Flags {
     /// (`--no-jobs`) refuses them all. A test walks the flags clap knows and fails when one is
     /// missing here.
     #[must_use]
-    pub fn given(&self) -> [(&'static str, bool); 18] {
+    pub fn given(&self) -> [(&'static str, bool); 20] {
         [
             ("--native-accounts", self.native_accounts.is_some()),
             (
@@ -214,6 +227,8 @@ impl Flags {
             ("--native-pf-state-dir", self.native_pf_state_dir.is_some()),
             ("--native-pfctl", self.native_pfctl.is_some()),
             ("--native-trees-root", self.native_trees_root.is_some()),
+            ("--native-put-root", self.native_put_root.is_some()),
+            ("--native-put-user", self.native_put_user.is_some()),
             ("--vm-driver", self.vm_driver.is_some()),
             ("--vm-store", self.vm_store.is_some()),
         ]
@@ -467,6 +482,17 @@ pub(crate) fn jobs(
     })
 }
 
+/// The uid and the primary group of the user `name` in the directory service, as
+/// [`uid_of_name`] looks it up: the put ingest's node (`--native-put-user`).
+fn node_of_name(name: &str) -> std::io::Result<Option<crate::mac_put::Node>> {
+    use js_mac_session::helper::Host as _;
+    let account = js_mac_session::macos::MacHost.account(name)?;
+    Ok(account.map(|account| crate::mac_put::Node {
+        uid: account.uid,
+        gid: account.gid,
+    }))
+}
+
 /// The uid of the user `name` in the directory service (`getpwnam_r`): a Mac's service
 /// accounts, such as a provider's, are not in `/etc/passwd`, and their uids differ from Mac to
 /// Mac.
@@ -500,6 +526,20 @@ impl Jobs {
         let native = NativeSettings::from_flags(&cli.os.native(), denied, &journal)?
             .map(|native| native.with_mount_roots(self.mounts.clone()))
             .transpose()?;
+        let put = &PutFlags {
+            native_put_root: cli.os.native_put_root.clone(),
+            native_put_user: cli.os.native_put_user.clone(),
+        };
+        let native = match native {
+            Some(native) => {
+                let put = native::put_of(put, &node_of_name)?;
+                Some(native.with_put(put))
+            }
+            None if put.native_put_root.is_some() || put.native_put_user.is_some() => {
+                return Err("--native-put-root: needs --native-accounts".to_owned());
+            }
+            None => None,
+        };
         if native.is_some() && euid != 0 {
             return Err(
                 "--native-accounts: the agent must run as root: it gives each run's \
@@ -687,7 +727,8 @@ pub(crate) fn runtime(
     };
     let runtime = runtime
         .with_xcodes(native.xcodes().to_vec())
-        .with_live_logs(native.logs().live());
+        .with_live_logs(native.logs().live())
+        .with_put(native.put().cloned());
     self_tested(runtime)
 }
 
