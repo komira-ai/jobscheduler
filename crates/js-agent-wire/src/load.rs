@@ -51,6 +51,14 @@ pub struct NodeLoad {
     /// Active file cache, in bytes. At most [`limits::MAX_MEMORY_BYTES`].
     #[serde(default)]
     pub active_file_bytes: u64,
+    /// The whole host's non-file memory, in bytes: `MemTotal - MemFree - (Buffers + Cached -
+    /// Shmem)` of `/proc/meminfo`, every process's anonymous and kernel memory and the host's
+    /// shared memory and tmpfs, and none of its page cache, which the kernel can drop. At most
+    /// [`limits::MAX_MEMORY_BYTES`]. Optional: an agent of an earlier release does not send it,
+    /// nor one that could not read the file, and a receiver then reads the host's memory from
+    /// `working_set_bytes` ([`NodeLoad::node_memory_bytes`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_nonfile_bytes: Option<u64>,
     /// Whether the actions cgroup has a CPU limit.
     #[serde(default)]
     pub actions_cpu_limited: bool,
@@ -192,9 +200,22 @@ impl NodeLoad {
         self.host_cpu_usec.unwrap_or(self.cpu_usage_usec)
     }
 
+    /// The memory a receiver reads as the host's in use, and the active file pages in it:
+    /// `host_nonfile_bytes` and none when the agent sends it (the whole host's non-file
+    /// memory, which holds no page cache), else `working_set_bytes` and `active_file_bytes`
+    /// (an agent of an earlier release, whose only figure is its actions cgroup's).
+    #[must_use]
+    pub fn node_memory_bytes(&self) -> (u64, u64) {
+        self.host_nonfile_bytes
+            .map_or((self.working_set_bytes, self.active_file_bytes), |held| {
+                (held, 0)
+            })
+    }
+
     /// Drops the records that break a rule and counts them in [`NodeLoad::dropped`].
     ///
-    /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`);
+    /// Fails only for a scalar out of range (`working_set_bytes`, `active_file_bytes`,
+    /// `host_nonfile_bytes`);
     /// the receiver then discards the load and keeps the heartbeat. Counters (`seq`,
     /// `mono_usec`, `cpu_usage_usec`, `host_cpu_usec`) are unbounded here: whether one goes
     /// backwards is
@@ -214,6 +235,9 @@ impl NodeLoad {
             0,
             max,
         )?;
+        if let Some(held) = self.host_nonfile_bytes {
+            check::range(at.field("heartbeat.load.host_nonfile_bytes"), held, 0, max)?;
+        }
         let mono = self.mono_usec;
         sweep(
             &mut self.second_cpu_millis,
@@ -344,6 +368,7 @@ impl NodeLoad {
             host_cpu_usec: number(object, "host_cpu_usec"),
             working_set_bytes,
             active_file_bytes: number(object, "active_file_bytes").unwrap_or_default(),
+            host_nonfile_bytes: number(object, "host_nonfile_bytes"),
             actions_cpu_limited: object
                 .get("actions_cpu_limited")
                 .and_then(Value::as_bool)

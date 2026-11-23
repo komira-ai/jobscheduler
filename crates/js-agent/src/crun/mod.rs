@@ -210,6 +210,7 @@ mod ledger;
 #[cfg(test)]
 mod ledger_tests;
 mod make;
+mod memory_series;
 mod net;
 #[cfg(test)]
 mod net_tests;
@@ -251,7 +252,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{CpuSeries, JobUsage, LogReport, LogTail, NetworkCeiling, PortRange};
+use js_agent_wire::{
+    CpuSeries, JobUsage, LogReport, LogTail, MemorySeries, NetworkCeiling, PortRange,
+};
 use js_contain::cgroup::{LeaseCgroup, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::ImageSource;
@@ -328,6 +331,9 @@ struct Run {
     /// Its CPU second by second, from the same samples as the peak
     /// ([`series::SeriesRecorder`]); none without `--cpu-series`.
     series: Option<series::SeriesRecorder>,
+    /// Its non-file memory second by second, sampled at the same polls
+    /// ([`memory_series::MemoryRecorder`]); none without `--memory-series`.
+    memory_series: Option<memory_series::MemoryRecorder>,
 }
 
 /// A container runtime over `crun`. Dropping it leaves its runs as they are, their network
@@ -348,6 +354,9 @@ pub struct CrunRuntime {
     cpu_ceiling: Option<js_contain::CpuCeiling>,
     /// Whether each run's CPU is recorded second by second ([`CrunSettings::cpu_series`]).
     cpu_series: bool,
+    /// Whether each run's non-file memory is recorded second by second
+    /// ([`CrunSettings::memory_series`]).
+    memory_series: bool,
     /// Whether host jobs are launched ([`CrunSettings::host_jobs`]).
     host_jobs: bool,
     /// Whether the leases' directories are made beside the runs' own
@@ -479,6 +488,7 @@ impl CrunRuntime {
             host_jobs: settings.host_jobs,
             cpu_ceiling: settings.cpu_ceiling,
             cpu_series: settings.cpu_series,
+            memory_series: settings.memory_series,
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,
@@ -597,13 +607,18 @@ impl CrunRuntime {
             State::Ended(exit, _) => return Status::Exited(*exit),
             State::Running { run: running, .. } => match running.try_end() {
                 None => {
+                    // One reading of the clock for every sample of the poll.
+                    let now = (self.hooks.mono_us)();
                     if let Some(used) = cpu_usec_of(&run.cgroup) {
-                        // One reading of the clock for both: they take the same sample.
-                        let now = (self.hooks.mono_us)();
                         run.peak.observe(now, used);
                         run.series
                             .iter_mut()
                             .for_each(|series| series.observe(now, used));
+                    }
+                    if let Some(series) = run.memory_series.as_mut()
+                        && let Some(held) = memory_series::nonfile_of(run.cgroup.dir())
+                    {
+                        series.observe(now, held);
                     }
                     return Status::Running;
                 }
@@ -611,9 +626,11 @@ impl CrunRuntime {
                 // what it kept is all the run wrote. Its series ends at this poll, which saw
                 // the end, not at the later moment its usage is read.
                 Some(end) => {
-                    run.series
+                    let seen = (self.hooks.mono_us)();
+                    run.series.iter_mut().for_each(|series| series.end_at(seen));
+                    run.memory_series
                         .iter_mut()
-                        .for_each(|series| series.end_at((self.hooks.mono_us)()));
+                        .for_each(|series| series.end_at(seen));
                     (rt.block_on(oci.ended_as(&run.spec, end)), running.tail())
                 }
             },
@@ -855,6 +872,13 @@ impl Runtime for CrunRuntime {
         let series = run.series.clone()?;
         let usage = cpu_usec_of(&run.cgroup)?;
         series.finish((self.hooks.mono_us)(), usage)
+    }
+
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        // The polls' samples alone: once its processes have ended the group holds little, so
+        // a reading now would say nothing of what the run held.
+        let run = self.runs.get(&id.0)?;
+        run.memory_series.clone()?.finish((self.hooks.mono_us)())
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

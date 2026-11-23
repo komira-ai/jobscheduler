@@ -51,7 +51,7 @@ use js_jobs::{
     JobEnd, JobId, JobRecord, JobState, JobStoreError, LogLengths, Output, ResourceUsage,
     StartFailure,
 };
-use js_types::{CpuSeries, HostId, Resources};
+use js_types::{CpuSeries, HostId, MemorySeries, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
@@ -436,7 +436,8 @@ fn advance(
 /// usage, with the CPU periods, the throttled periods, the CPU pressure and the CPU peak it reports; a
 /// result with none records none, never a zero, and a counter it does not report is `None`. The
 /// result's `cpu_series` is kept as reported, beside the usage and whether or not the result has
-/// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped.
+/// one, when it is well formed ([`CpuSeries::new`]); a series that is not is dropped. Its
+/// `memory_series` is kept the same way ([`MemorySeries::new`]).
 ///
 /// A start the agent refused keeps the agent's code (`detail`) as the job's start failure
 /// detail: [`StartFailure::InputUnavailable`] for `input-unavailable`, and
@@ -475,6 +476,14 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
             series.partial,
         )
     });
+    let memory_series = result.memory_series.as_ref().and_then(|series| {
+        MemorySeries::new(
+            series.granularity_secs,
+            series.points.clone(),
+            series.run_usec,
+            series.partial,
+        )
+    });
     let output = Output {
         stdout: tail.stdout,
         stderr: tail.stderr,
@@ -482,6 +491,7 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
         usage,
         logs,
         cpu_series,
+        memory_series,
     };
     let code = result.exit_code;
     let failed = code.filter(|code| *code != 0).unwrap_or(NO_EXIT_CODE);

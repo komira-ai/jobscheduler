@@ -427,6 +427,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
                 input_failure: None,
                 usage: None,
                 cpu_series: None,
+                memory_series: None,
             }),
         }],
         retired_jobs: vec!["job-2".into()],
@@ -541,6 +542,7 @@ fn an_old_agent_ignores_log_sink() {
                 input_failure: None,
                 usage: None,
                 cpu_series: None,
+                memory_series: None,
             }),
         }],
         log_grant_state: Some(LogGrantState {
@@ -593,6 +595,7 @@ fn an_old_server_ignores_input_failure() {
                 input_failure: Some(js_agent_wire::refusal::TREE_STALLED.into()),
                 usage: None,
                 cpu_series: None,
+                memory_series: None,
             }),
         }],
         ..heartbeat()

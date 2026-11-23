@@ -29,6 +29,7 @@ mod layout;
 mod lease_dir;
 mod live_logs;
 mod logs;
+mod memory_series;
 mod mounts;
 mod native_bodies;
 mod network;

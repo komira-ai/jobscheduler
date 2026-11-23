@@ -16,6 +16,7 @@ fn wire(seq: u64, millis: Vec<u32>, pressure: Vec<u16>) -> Wire {
         host_cpu_usec: None,
         working_set_bytes: 1 << 20,
         active_file_bytes: 0,
+        host_nonfile_bytes: None,
         actions_cpu_limited: false,
         covered: Vec::new(),
         clocks: Vec::new(),
