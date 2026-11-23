@@ -99,12 +99,18 @@ fn a_run_may_write_below_its_run_directory_alone() {
     assert_eq!(writes, [rule]);
     let params = profile.params();
     assert!(params.contains(&("RUN".to_owned(), "/srv/homes/kbf-acct-4/exec".to_owned())));
+    // The home is named once, by the own-home read grant, which no write rule refers to.
     assert!(
-        !params
-            .iter()
-            .any(|(_, value)| value == "/srv/homes/kbf-acct-4"
-                || value.starts_with("/private/var/folders")),
+        !params.iter().any(
+            |(name, value)| (value == "/srv/homes/kbf-acct-4" && name != "OWN")
+                || value.starts_with("/private/var/folders")
+        ),
         "{params:?}"
+    );
+    assert!(params.contains(&("OWN".to_owned(), "/srv/homes/kbf-acct-4".to_owned())));
+    assert!(
+        !writes.iter().any(|line| line.contains("OWN")),
+        "{writes:?}"
     );
 }
 
@@ -196,6 +202,109 @@ fn a_mount_beside_a_privacy_only_place_is_built() {
         )
         .is_ok()
     );
+}
+
+/// Asserts the homes roots of a pool whose homes are `/Users`, by the exact list: the homes
+/// and root's home, each as given and below the data volume.
+///
+/// Catches root's home left out, and a root denied under one spelling only.
+#[test]
+fn the_homes_roots_are_the_homes_and_roots_home_under_both_spellings() {
+    assert_eq!(
+        home_roots(Path::new("/Users")),
+        [
+            "/Users",
+            "/System/Volumes/Data/Users",
+            "/private/var/root",
+            "/System/Volumes/Data/private/var/root",
+        ]
+        .map(PathBuf::from)
+    );
+}
+
+/// Asserts that each homes root is denied reads by a rule of the built profile, that after
+/// those denies no rule grants a path that holds another account's home (a file in it, mode
+/// `0755` or not), root's home, or the account's own home under its other spelling, and that
+/// the account's own home is granted back, with a mount granted elsewhere in the profile.
+/// This is what the isolation probe's `read:other-home` asks of a Mac.
+///
+/// Catches a homes root left out of the profile, a grant that reopens another home, and an
+/// own home left unreadable by the deny of the homes above it.
+#[test]
+fn other_homes_and_roots_home_are_denied_reads_and_the_own_home_is_granted_back() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    let grants = [mount("/srv/mounts/work")];
+    let profile = build(
+        &config(),
+        &body("/bin/echo", &[]),
+        home,
+        (&[], &grants),
+        None,
+    )
+    .unwrap();
+    let params = profile.params();
+    let lines: Vec<&str> = profile.text().lines().collect();
+    let roots = home_roots(Path::new("/srv/homes"));
+    let home_text = "/srv/homes/kbf-acct-4";
+    let denies: Vec<usize> = roots
+        .iter()
+        .map(|root| {
+            let root = root.to_str().unwrap();
+            lines
+                .iter()
+                .position(|line| {
+                    line.starts_with("(deny file-read*") && param_of(line, params) == Some(root)
+                })
+                .unwrap_or_else(|| panic!("{root} is not denied reads"))
+        })
+        .collect();
+    let last = *denies.iter().max().unwrap();
+    for place in [
+        "/srv/homes/kbf-acct-9/f",
+        "/srv/homes/kbf-acct-40/f",
+        "/private/var/root/f",
+        "/System/Volumes/Data/srv/homes/kbf-acct-4/exec/f",
+    ] {
+        for line in &lines[last + 1..] {
+            if line.starts_with("(allow file-read*") {
+                let reopened = param_of(line, params).is_some_and(|granted| covers(granted, place));
+                assert!(!reopened, "{line} follows the deny of {place}");
+            }
+        }
+    }
+    let own_read = lines[last + 1..].iter().find(|line| {
+        line.starts_with("(allow file-read*") && param_of(line, params) == Some(home_text)
+    });
+    assert!(own_read.is_some(), "{}", profile.text());
+}
+
+/// Asserts that a mount at a homes root or above one fails the build, as the policy's refusal:
+/// its grant would follow the homes' denies and reopen every home.
+///
+/// Catches a mount of the homes that hands a job every other account's home.
+#[test]
+fn a_mount_over_a_homes_root_is_refused() {
+    let home = Path::new("/srv/homes/kbf-acct-4");
+    for place in [
+        "/srv/homes",
+        "/srv",
+        "/private/var/root",
+        "/System/Volumes/Data/srv",
+    ] {
+        let grants = [mount(place)];
+        let why = build(
+            &config(),
+            &body("/bin/echo", &[]),
+            home,
+            (&[], &grants),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            why.0, "the policy: a mount grant holds a read-denied path",
+            "{place}"
+        );
+    }
 }
 
 /// Asserts that the trees given to `build` are granted by the profile: the mount root is a
