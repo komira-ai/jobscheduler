@@ -36,6 +36,7 @@ impl Proof {
         let open = move |mut config: NativeConfig| -> Result<NativeRuntime, String> {
             config.homes = settings.homes.clone();
             NativeRuntime::over(Some(pool.clone()), launcher.clone(), config, TERM)
+                .map(|rt| rt.with_hand_over(owner_writable()))
                 .map_err(|why| why.0)
         };
         self.run_over(words, &open)
@@ -70,6 +71,22 @@ impl Proof {
         words.extend(rest.iter().map(|word| (*word).to_owned()));
         words
     }
+}
+
+/// The agent's hand-over (`lchown`), leaving a staged directory writable by its owner, so the
+/// test's user can retire an account whose run staged an input (only root can empty a `0500`
+/// directory).
+fn owner_writable() -> js_agent::native::HandOver {
+    std::sync::Arc::new(|path: &std::path::Path, uid: u32, gid: u32| {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+        match fs::symlink_metadata(path)?.is_dir() {
+            true => {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            }
+            false => Ok(()),
+        }
+    })
 }
 
 fn words(owned: &[String]) -> Vec<&str> {
