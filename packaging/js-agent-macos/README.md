@@ -227,7 +227,13 @@ rollback_timeout_secs = 420
 
 `unit` is the daemon's launchd label. The restart is `bootout` (which returns when the agent has
 exited, up to its 120 s `ExitTimeOut`) and `bootstrap`, held back like the update hook's while
-`/etc/js-agent/flags` is absent. The unit port has run against a fake of `launchctl` only.
+`/etc/js-agent/flags` is absent. The hook works whichever came first, the agent's package or the
+config package: a label that is not loaded is bootstrapped, one that is loaded is booted out
+first. When `bootstrap` or `kickstart -k` fails, the start reads `launchctl print` again and
+makes the other command once if launchd now calls for it (a `bootstrap` refused with exit 5
+because the label was loaded meanwhile becomes a `kickstart -k` of an idle service, or nothing
+for a running one), as the update hook's start does (`crates/js-update-hook/src/launch_units.rs`,
+"When launchd refuses the start"). The unit port has run against a fake of `launchctl` only.
 
 ## Privacy grants (TCC)
 

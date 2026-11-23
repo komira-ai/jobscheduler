@@ -235,6 +235,9 @@ pub struct Launchctl {
     pub settle: Cell<u32>,
     /// What the next start of a service comes to.
     pub next_start: Cell<Then>,
+    /// Services launchd loads for another client just before the next `bootstrap` of their
+    /// label, after the `print` that found the label absent.
+    pub loaded_behind: RefCell<BTreeMap<String, Service>>,
     broken: Cell<bool>,
     ran: RefCell<Vec<String>>,
 }
@@ -349,6 +352,9 @@ impl CommandRunner for Launchctl {
                     .ok_or_else(|| format!("{LAUNCHCTL}: bad plist path {plist}"))?;
                 let known = self.plists.borrow().contains(&label);
                 let mut loaded = self.loaded.borrow_mut();
+                if let Some(service) = self.loaded_behind.borrow_mut().remove(&label) {
+                    loaded.insert(label.clone(), service);
+                }
                 if !known || loaded.contains_key(&label) {
                     return exit(5);
                 }

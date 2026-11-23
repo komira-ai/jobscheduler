@@ -12,6 +12,8 @@ use js_update_hook::{
     Clock, CommandRunner, LAUNCHCTL, LaunchUnits, PortError, SETTLE_READS, UnitState, Units,
 };
 
+mod start_refused;
+
 const LABEL: &str = "js-agent";
 const GONE: &str = "/bin/launchctl: exit status: 113";
 
@@ -591,7 +593,9 @@ fn a_start_of_a_service_whose_state_cannot_be_read_changes_nothing() {
     assert_eq!(tool.calls(), [print_line(LABEL)]);
 }
 
-/// A failing bootstrap or kickstart is the error of the start and is not followed by reads.
+/// A failing bootstrap or kickstart, after which launchd still holds the service as before
+/// (not loaded, or loaded and idle), is the error of the start: the start reads the service
+/// once more, makes the same command no second time, and does not wait for it.
 #[test]
 fn a_bootstrap_or_kickstart_that_fails_is_the_error_of_the_start() {
     let tool = Script::default()
@@ -606,7 +610,10 @@ fn a_bootstrap_or_kickstart_that_fails_is_the_error_of_the_start() {
             "/bin/launchctl: exit status: 5".to_owned()
         ))
     );
-    assert_eq!(tool.calls(), [print_line(LABEL), bootstrap_line()]);
+    assert_eq!(
+        tool.calls(),
+        [print_line(LABEL), bootstrap_line(), print_line(LABEL)]
+    );
     let tool = Script::default()
         .prints(&[&print_with("not running", "")])
         .on(
@@ -619,7 +626,10 @@ fn a_bootstrap_or_kickstart_that_fails_is_the_error_of_the_start() {
             "/bin/launchctl: exit status: 3".to_owned()
         ))
     );
-    assert_eq!(tool.calls(), [print_line(LABEL), kick_line()]);
+    assert_eq!(
+        tool.calls(),
+        [print_line(LABEL), kick_line(), print_line(LABEL)]
+    );
 }
 
 /// `is_active` is true only for a running service; an unreadable, missing or stateless one
