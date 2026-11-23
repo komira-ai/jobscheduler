@@ -187,7 +187,6 @@ fn a_run_becomes_the_container_it_asked_for() {
         spec.limits,
         ContainerLimits {
             pids: 77,
-            memory_bytes: Some(1 << 30),
             ..ContainerLimits::DEFAULT
         }
     );
@@ -223,8 +222,13 @@ fn a_run_becomes_the_container_it_asked_for() {
         (&lease(), Some(Path::new(TMP))),
         "/c",
     );
-    assert_eq!(plain.limits.pids, DEFAULT_PIDS);
-    assert_eq!(plain.limits.memory_bytes, Some(1 << 30));
+    assert_eq!(
+        plain.limits,
+        ContainerLimits {
+            pids: DEFAULT_PIDS,
+            ..ContainerLimits::DEFAULT
+        }
+    );
     // `/scratch`, `/tmp`, `/var/tmp` and the run's two mounts.
     assert_eq!(plain.mounts.len(), 5);
     assert!(
@@ -336,8 +340,10 @@ impl Drop for Fixture {
 }
 
 /// Proves, from the files the kernel writes and not from timing, that a kill is flagged
-/// `oom_killed` only when the job's own memory limit made the OOM killer run: its
-/// `memory.events` counts `oom` and `max` as well as `oom_kill`. Catches a runtime that
+/// `oom_killed` only when a memory limit inside the lease made the OOM killer run: its
+/// `memory.events` counts `oom` and `max` as well as `oom_kill` (the agent writes no limit, so
+/// that is a lease an earlier release made with its booking as `memory.max`, adopted after an
+/// update, or one whose job set a limit of its own). Catches a runtime that
 /// blames the job for a kill by the node: a parent cgroup's limit (the lease's `oom` is 0,
 /// the actions cgroup's `memory.events.local` counts one) or the host (nothing counted
 /// above), which would make the server retry with more memory for a job that did not
@@ -351,37 +357,28 @@ fn only_the_jobs_own_memory_limit_flags_a_kill_from_the_cgroups_files() {
 
     let own = Fixture::new("own");
     own.events(4, 1, 2, Some(0));
-    assert_eq!(
-        end_of(ok(1), &own.lease(), Some(1 << 30), Some(0)),
-        flagged(137, true)
-    );
+    assert_eq!(end_of(ok(1), &own.lease(), Some(0)), flagged(137, true));
 
     let parent = Fixture::new("parent");
     parent.events(0, 0, 3, Some(1));
     assert_eq!(
-        end_of(ok(137), &parent.lease(), Some(1 << 30), Some(0)),
+        end_of(ok(137), &parent.lease(), Some(0)),
         flagged(137, false)
     );
 
     let host = Fixture::new("host");
     host.events(0, 0, 3, Some(0));
-    assert_eq!(
-        end_of(ok(137), &host.lease(), Some(1 << 30), Some(0)),
-        flagged(137, false)
-    );
+    assert_eq!(end_of(ok(137), &host.lease(), Some(0)), flagged(137, false));
 
     let reclaimed = Fixture::new("reclaimed");
     reclaimed.events(9, 0, 0, Some(0));
     assert_eq!(
-        end_of(ok(0), &reclaimed.lease(), Some(1 << 30), Some(0)),
+        end_of(ok(0), &reclaimed.lease(), Some(0)),
         flagged(0, false)
     );
 
     let unread = Fixture::new("unread");
-    assert_eq!(
-        end_of(ok(5), &unread.lease(), Some(1 << 30), None),
-        flagged(5, false)
-    );
+    assert_eq!(end_of(ok(5), &unread.lease(), None), flagged(5, false));
 }
 
 /// Log lines written by the test's subscriber on this thread.
@@ -412,12 +409,7 @@ fn a_lease_whose_memory_events_cannot_be_read_ends_unflagged_and_is_logged() {
     let broken = Fixture::new("unreadable");
     fs::create_dir(broken.mount.join("actions/js-x-r1/memory.events")).expect("unreadable file");
     assert_eq!(
-        end_of(
-            Ok(Ended::Exited(137)),
-            &broken.lease(),
-            Some(1 << 30),
-            Some(0)
-        ),
+        end_of(Ok(Ended::Exited(137)), &broken.lease(), Some(0)),
         Exit {
             code: 137,
             oom_killed: false
@@ -829,12 +821,40 @@ fn a_leases_usage_is_both_counters_or_none() {
             cpu_throttle: None,
             cpu_pressure_some_usec: None,
             cpu_peak: None,
+            peak_swap_bytes: None,
         })
     );
     fs::write(dir.join("memory.peak"), "max\n").expect("peak");
     assert_eq!(usage_of(&fixture.lease()), None);
     fs::remove_dir_all(&dir).expect("remove the group");
     assert_eq!(usage_of(&fixture.lease()), None);
+}
+
+/// Proves a lease's usage carries its `memory.swap.peak` and its `memory.peak` as the kernel
+/// counted them, with nothing held at the booking: a job booked 1 GiB (the fixture's run) that
+/// peaked at 3 GiB of memory and put 512 MiB in swap reports both numbers whole; a group with no
+/// `memory.swap.peak` (a kernel before 6.5, or one without swap accounting) reports the rest with
+/// no swap peak, and one that does not parse is no swap peak either, never a zero. Catches a peak
+/// clipped at the booking, a swap peak left out (a job the host's swap absorbed would read as
+/// smaller than it is), and an unknown swap peak sent as 0.
+#[test]
+fn a_leases_usage_carries_its_whole_peak_and_its_swap_peak() {
+    let fixture = Fixture::new("usage-swap");
+    let dir = fixture.mount.join("actions/js-x-r1");
+    fs::write(dir.join("memory.peak"), "3221225472\n").expect("peak");
+    fs::write(dir.join("cpu.stat"), "usage_usec 9\n").expect("stat");
+    let usage = || usage_of(&fixture.lease()).expect("a usage");
+    assert_eq!(
+        (usage().peak_memory_bytes, usage().peak_swap_bytes),
+        (3 << 30, None)
+    );
+    fs::write(dir.join("memory.swap.peak"), "536870912\n").expect("swap peak");
+    assert_eq!(
+        (usage().peak_memory_bytes, usage().peak_swap_bytes),
+        (3 << 30, Some(512 << 20))
+    );
+    fs::write(dir.join("memory.swap.peak"), "max\n").expect("swap peak");
+    assert_eq!(usage().peak_swap_bytes, None);
 }
 
 /// Proves a lease's usage carries the throttle counts of its `cpu.stat` when it holds both, and

@@ -461,8 +461,8 @@ pub struct JobResult {
 /// What one job used while it ran, as its host read it from the job's control group once it
 /// ended. The first two numbers are measured; an agent that cannot read one of them sends no
 /// [`JobUsage`] at all, so a zero is a measured zero and never an unknown. The two that
-/// follow and the CPU peak are optional: each is absent for an agent from before it and when
-/// the agent could not read that counter.
+/// follow, the CPU peak and the swap peak are optional: each is absent for an agent from
+/// before it and when the agent could not read that counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobUsage {
     /// The most memory the job's group held at once, in bytes (`memory.peak`).
@@ -498,6 +498,17 @@ pub struct JobUsage {
         deserialize_with = "log_sink::lenient"
     )]
     pub cpu_peak: Option<CpuPeak>,
+    /// The most swap the job's group held at once, in bytes (`memory.swap.peak`): what
+    /// `peak_memory_bytes`, which counts memory alone, leaves out of a job that the host's swap
+    /// absorbed. Absent for an agent from before the field and when the counter could not be
+    /// read (a kernel before 6.5, or one without swap accounting); a value that does not decode
+    /// reads as absent and leaves the rest of the usage intact.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub peak_swap_bytes: Option<u64>,
 }
 
 /// The most CPU a job's group used over any window of `window_usec` of its run, in

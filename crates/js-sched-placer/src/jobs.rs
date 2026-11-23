@@ -2,8 +2,9 @@
 //! 5.3, steps 5 and 6, 5.4, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
 //!
 //! With the job tables, the server runs a **pass** over the
-//! queue on each tick (the server's `Agents::place_jobs`) and after each heartbeat of a host
-//! that speaks the per-job messages (`Agents::place_jobs_after_beat`): a job end, a cancel, a
+//! queue on each tick (the server's `Agents::place_jobs`) and on its placement poller: the same
+//! pass when a submit pokes it, and `Agents::place_jobs_after_beat` when a heartbeat of a host
+//! that speaks the per-job messages pokes it: a job end, a cancel, a
 //! confirmed container, a host that joins and a heartbeat that changes a host's load all come to
 //! the server as one of those. The tick's pass always runs; a heartbeat's runs only when
 //! something it depends on changed since the last pass ([`SchedPlacer::place_jobs_if_changed`],

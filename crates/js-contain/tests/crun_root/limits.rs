@@ -5,15 +5,18 @@ use std::path::PathBuf;
 
 use tokio::io::AsyncReadExt as _;
 
-use js_contain::cgroup::OomOutcome;
+use js_contain::cgroup::{LeasePolicy, OomOutcome};
 use js_contain::container::ContainerLimits;
 
 use crate::cell::{Cell, Lease, Outcome, Shape};
 
 /// Catches an out-of-memory kill that is not reported as the lease's own: a job that
-/// allocates until the lease's `memory.max` is killed by the kernel (the run ends when the
-/// kill does; nothing is timed), it does not exit 0, and the lease cgroup's counters say
-/// `OwnLimit` with the lease's limit, the answer a caller retries with more memory on.
+/// allocates until the `memory.max` of a lease made under the build-host policy (192 MiB
+/// booked, an 800 MiB cap, no swap) is killed by the kernel (the run ends when the kill does; nothing
+/// is timed), it does not exit 0, and the lease cgroup's counters say `OwnLimit` with the
+/// lease's limit, the answer a caller retries with more memory on. The agent's policy writes
+/// no limit, so its leases are never killed at one of their own (the agent's own suite shows
+/// what a job that grows without bound does there).
 #[tokio::test]
 #[ignore = "real crun, root and a job user: run through cargo xtask crun-tests --job-user"]
 async fn an_out_of_memory_kill_is_reported_as_the_leases_own_limit() {
@@ -24,18 +27,24 @@ async fn an_out_of_memory_kill_is_reported_as_the_leases_own_limit() {
         &["/bin/tail", "/dev/zero"],
         Shape {
             memory: 192 << 20,
+            policy: LeasePolicy::BuildHost,
             ..Shape::default()
         },
     );
+    let cap = lease.cap.expect("the build-host policy caps the lease");
+    // No swap for this lease, so that the kill comes at the cap and not once a runner's swap
+    // is full.
+    std::fs::write(lease.cgroup.dir().join("memory.swap.max"), "0")
+        .unwrap_or_else(|e| panic!("write memory.swap.max: {e}"));
     let running = cell.start(&lease).await;
     let run = cell.finish(&lease, running).await;
     assert!(!run.succeeded(), "{}", run.said);
     let outcome = lease
         .cgroup
-        .oom_outcome(Some(lease.cap), None)
+        .oom_outcome(Some(cap), None)
         .unwrap_or_else(|e| panic!("read the lease's memory.events: {e}"));
     match outcome {
-        Some(OomOutcome::OwnLimit { limit, .. }) => assert_eq!(limit, lease.cap, "{}", run.said),
+        Some(OomOutcome::OwnLimit { limit, .. }) => assert_eq!(limit, cap, "{}", run.said),
         other => panic!("not the lease's own limit: {other:?}\n{}", run.said),
     }
 }

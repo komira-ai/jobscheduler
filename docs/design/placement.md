@@ -6,7 +6,7 @@ Companion to [docs/design.md](../design.md), sections 6.3, 6.4, 6.6 and 6.7. Sec
 The generic core must not assume memory gates admission. The `Book(Dims)` form carries kbf's rule as data: dimensions not listed in
 `Dims` are not compared with free capacity; they are checked once against the pool's total (a request whose memory equals the pool's is
 exclusive and runs alone; a request above it does not fit that pool), yet they are still added to the booked total and still count in
-`Rank`. Their protection is the agent's job (a hard limit per lease, the pressure backstop, and a rerun on another node on a busy-node kill, which never raises the
+`Rank`. Their protection is the agent's job (the pressure backstop and a rerun on another node on a busy-node kill, which never raises the
 booking). A class that must have a whole free host to itself uses `BookAll` (no reservation; no ucdk Job class will, D56, step 59: they book their declared
 size and share a host, 6.6); a class that needs the host exclusive and quiet is whole-node (`Whole`, 5.17).
 

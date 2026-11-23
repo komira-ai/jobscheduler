@@ -258,7 +258,7 @@ fn a_start_placed_before_the_cordon_is_refused_host_held_and_requeued_without_a_
     let job = held.server.submit(1000);
     assert_eq!(job.status, 201, "{}", job.body);
     let job = job.body["job"]["id"].as_str().unwrap().to_owned();
-    assert_eq!(held.server.job_state(&job), "JOB_STATE_PLACED");
+    assert_eq!(held.server.left_the_queue(&job), "JOB_STATE_PLACED");
 
     held.beat(&agent, &worker);
     assert!(machine.world.created().is_empty());

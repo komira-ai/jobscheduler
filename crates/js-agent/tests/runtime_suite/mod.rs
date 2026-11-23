@@ -260,14 +260,14 @@ pub fn begin(s: &mut dyn Subject, run_id: &str, program: Program) -> RunHandle {
 }
 
 /// Defines, in the module that calls it, one `#[test]` for each case of the suite, over
-/// the subject `new(name)` builds. `ignored` is `all()` to mark them `#[ignore]` (the tests
+/// the subject `new(name)` builds. The kill at a run's own memory booking is not among them:
+/// the crun runtime writes no memory limit, so only the fake's binary has that case. `ignored` is `all()` to mark them `#[ignore]` (the tests
 /// of a real `crun`, run by `cargo xtask crun-tests`) or `any()` to run them everywhere.
 macro_rules! conformance {
     ($new:expr, $ignored:meta) => {
         conformance! { @each $new, $ignored;
             a_container_goes_through_create_start_poll_stop_remove,
             an_exit_code_is_reported,
-            a_kill_at_the_runs_own_memory_limit_is_flagged,
             a_kill_by_a_node_short_of_memory_is_not_flagged,
             sigterm_reaches_a_stopped_job_before_any_kill,
             a_job_that_ignores_sigterm_is_killed_when_the_grace_is_spent,
