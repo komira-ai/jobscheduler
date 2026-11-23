@@ -109,10 +109,13 @@ pub fn read(text: &str, scratch: &Path) -> Result<BTreeMap<String, Facts>, RowsE
         let txn = batch.iter().fold(Txn::new(), |txn, (key, value)| {
             txn.put(key.clone(), value.clone(), Cond::Any)
         });
-        let written = opened.txn(txn).map_err(|e| store(&e))?;
-        written.map_err(|_| store(&"a write conflicted"))?;
+        let refused = RowsError::Store("the scratch store did not take the rows".to_owned());
+        opened.txn(txn).ok().and_then(Result::ok).ok_or(refused)?;
     }
-    let jobs = JobStore::new(Arc::new(opened), RandomIds).map_err(|e| store(&e))?;
+    let unopened = RowsError::Store("the job store did not open on the scratch store".to_owned());
+    let jobs = JobStore::new(Arc::new(opened), RandomIds)
+        .ok()
+        .ok_or(unopened)?;
     let mut facts = BTreeMap::new();
     for (key, _) in &rows {
         let id = &key[js_jobs::keys::JOB.len()..];

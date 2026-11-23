@@ -29,6 +29,9 @@ pub const WINDOW_MS: u64 = 5000;
 /// the figure (the tightest fit first).
 type Rank = (u64, bool, Reverse<u64>);
 
+/// The rank of a job taken alone onto an empty host: any, as none ranks.
+const ALONE: Rank = (0, false, Reverse(0));
+
 /// The runs of a class its spread is learned from: the last 32, as its CPU.
 const RING: usize = 32;
 
@@ -592,27 +595,26 @@ impl<'a> World<'a> {
                     best = Some((key, at));
                 }
             }
-            let at = match best {
-                Some((_, at)) => at,
-                // No host would take it even idle: once the farm is empty it takes an empty
-                // host alone, as a booking of a whole host waits for one, rather than holding
-                // the walk for ever.
-                None if self.never(&new, limit) && self.hosts.iter().all(|h| h.runs.is_empty()) => {
-                    self.outcome.alone += 1;
-                    0
-                }
-                None => return,
+            // No host would take it even idle: once the farm is empty it takes an empty host
+            // alone, as a booking of a whole host waits for one, rather than holding the walk
+            // for ever.
+            let alone = best.is_none() && self.stuck(&new, limit);
+            self.outcome.alone += usize::from(alone);
+            let Some((_, at)) = best.or(alone.then_some((ALONE, 0))) else {
+                return;
             };
             self.queue.pop_front();
             self.start(at, new, now);
         }
     }
 
-    /// Whether no host would take `new` even idle and unread: its memory is more than a
-    /// host's, or the rule refuses it on an empty host.
-    fn never(&self, new: &Running, limit: u64) -> bool {
-        new.booking.bytes > self.setup.farm.bytes
-            || Host::default().figure(self.arm.rule, new, limit).is_none()
+    /// Whether the farm is empty and still no host would take `new`: its memory is more than
+    /// a host's, or the rule refuses it on an empty, unread host.
+    fn stuck(&self, new: &Running, limit: u64) -> bool {
+        let empty = self.hosts.iter().all(|host| host.runs.is_empty());
+        let too_big = new.booking.bytes > self.setup.farm.bytes;
+        let refused = Host::default().figure(self.arm.rule, new, limit).is_none();
+        empty & (too_big | refused)
     }
 
     /// Starts every queued job on the host it ran on.

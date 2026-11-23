@@ -321,14 +321,14 @@ fn learned_bookings_start_cold_and_follow_the_class() {
 }
 
 #[test]
-fn a_class_spread_is_learned_from_its_last_32_good_runs() {
-    let mut jobs: Vec<Job> = (0..33).map(|at| job(at * 10_000, 2000, 2000, 3)).collect();
+fn a_class_spread_is_learned_from_its_last_32_good_runs_and_its_history_from_64() {
+    let mut jobs: Vec<Job> = (0..65).map(|at| job(at * 10_000, 2000, 2000, 3)).collect();
     // A failed run and a run under a second teach nothing.
     jobs.push(Job {
         end: End::Failed,
-        ..job(400_000, 2000, 2000, 3)
+        ..job(700_000, 2000, 2000, 3)
     });
-    jobs.push(job(410_000, 500, 500, 3));
+    jobs.push(job(710_000, 500, 500, 3));
     let mut world = World::new(&jobs, BOOKED, flat(one(4000)));
     let order: Vec<(u64, usize)> = jobs
         .iter()
@@ -340,6 +340,9 @@ fn a_class_spread_is_learned_from_its_last_32_good_runs() {
     assert_eq!(world.spreads[&3].runs.len(), RING);
     assert_eq!(world.spreads[&0].runs.len(), RING);
     assert_eq!(world.spreads[&3].var(), 0);
+    // The decayed estimates keep 64, the newest last.
+    assert_eq!(world.histories[&3].len(), HISTORY);
+    assert_eq!(world.histories[&3].back().map(|run| run.end), Some(642_000));
     // Runs of one core and four, and of three and three: a variance of 2.5 square cores.
     let spread = Spread {
         runs: VecDeque::from([(1000, 4000), (3000, 3000)]),
