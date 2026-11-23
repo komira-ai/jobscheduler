@@ -109,3 +109,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # The supervisor's privileged calls (crates/js-agent/tests/mac_supervisor_root.rs, every
+      # test `#[ignore]`, so the step above lists them as ignored and runs none): the real audit
+      # session, drop to the slot user and limits, each read back from the system, as root.
+      # It runs after the cache is saved, so no file root writes into `target` is cached, and
+      # also when a test of the step above failed, so a red run still says how these went.
+      - name: Run the supervisor's root tests as root
+        if: ${{ !cancelled() }}
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test mac_supervisor_root --locked -- --ignored --nocapture --test-threads=1
