@@ -57,6 +57,10 @@ pub enum PolicyError {
     /// intended way to open part of it.)
     #[error("a mount grant holds a read-denied path")]
     MountOverReadDeny,
+    /// A homes root is the run directory or lies below it: the run directory's read grant,
+    /// emitted after the homes' denies, would reopen it.
+    #[error("a homes root lies in the run directory")]
+    HomesInRun,
 }
 
 /// One host directory a run may use, granted by its canonical path (Seatbelt matches the
@@ -110,6 +114,7 @@ pub struct Policy {
     uid_entry: Option<AbsPath>,
     inputs: BTreeSet<AbsPath>,
     read_denies: BTreeSet<AbsPath>,
+    homes: BTreeSet<AbsPath>,
     mounts: BTreeSet<MountGrant>,
     trees: Option<MountTrees>,
     net: Net,
@@ -187,6 +192,7 @@ impl Policy {
             uid_entry: layout.uid_entry,
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
+            homes: BTreeSet::new(),
             mounts: layout.mounts.into_iter().collect(),
             trees: layout.trees,
             net: caps.net,
@@ -247,9 +253,10 @@ impl Policy {
     /// This policy with `narrowing` applied. No narrowing widens anything.
     ///
     /// # Errors
-    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`], and
-    /// [`PolicyError::MountOverReadDeny`] for a read deny added at or below a mount grant
-    /// (the grant would reopen it).
+    /// [`PolicyError::TooMany`] for a list that grows over [`MAX_LISTED`],
+    /// [`PolicyError::MountOverReadDeny`] for a read deny or a homes root added at or below
+    /// a mount grant (the grant would reopen it), and [`PolicyError::HomesInRun`] for a
+    /// homes root at or below the run directory.
     pub fn narrowed(mut self, narrowing: Narrowing) -> Result<Self, PolicyError> {
         if let Some(net) = narrowing.net {
             self.net = self.net.narrow(net);
@@ -259,6 +266,7 @@ impl Policy {
         }
         self.inputs.extend(narrowing.protect);
         self.read_denies.extend(narrowing.deny_read);
+        self.homes.extend(narrowing.deny_homes);
         self.check()?;
         Ok(self)
     }
@@ -278,14 +286,19 @@ impl Policy {
     fn check(&self) -> Result<(), PolicyError> {
         bounded(self.inputs.len(), "inputs")?;
         bounded(self.read_denies.len(), "read denies")?;
+        bounded(self.homes.len(), "homes")?;
         bounded(self.mounts.len(), "mounts")?;
         let over = |mount: &MountGrant| {
             self.read_denies
                 .iter()
+                .chain(&self.homes)
                 .any(|deny| deny.starts_with(&mount.path))
         };
         if self.mounts.iter().any(over) {
             return Err(PolicyError::MountOverReadDeny);
+        }
+        if self.homes.iter().any(|home| home.starts_with(&self.run)) {
+            return Err(PolicyError::HomesInRun);
         }
         Ok(())
     }
@@ -310,6 +323,10 @@ impl Policy {
         &self.read_denies
     }
 
+    pub(super) fn homes(&self) -> &BTreeSet<AbsPath> {
+        &self.homes
+    }
+
     pub(super) fn mounts(&self) -> &BTreeSet<MountGrant> {
         &self.mounts
     }
@@ -329,7 +346,8 @@ fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
 /// A request to narrow a policy. Every field can only take something away or add a
 /// deny: a level is met with the policy's level (the lower wins), the user-folder grant
 /// can be dropped, and paths can be added to the denies. There is no field
-/// that adds a grant or raises a level.
+/// that adds a grant or raises a level (the run directory's read grant that follows the
+/// homes' denies gives back only what they took).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Narrowing {
     /// A level to meet with the policy's.
@@ -340,4 +358,11 @@ pub struct Narrowing {
     pub protect: Vec<AbsPath>,
     /// More paths to read-deny.
     pub deny_read: Vec<AbsPath>,
+    /// Roots of users' homes to read-deny, the run directory below one excepted: their
+    /// denies come before every read grant of the profile, so the run directory (granted
+    /// back right after them, with the names of its ancestors), the trees and the mount
+    /// grants still open what they name, and the read denies still close what they name.
+    /// A root at or below the run directory is refused ([`PolicyError::HomesInRun`]), and
+    /// so is a mount grant at or above a root ([`PolicyError::MountOverReadDeny`]).
+    pub deny_homes: Vec<AbsPath>,
 }

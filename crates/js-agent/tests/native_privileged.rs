@@ -534,6 +534,65 @@ fn a_read_deny_is_refused_to_a_real_account_the_modes_would_let_in() {
     rt.remove(&id).unwrap();
 }
 
+/// Asserts what the isolation probe's `read:other-home` asks of a Mac, as a real slot account:
+/// a home of another user, made by the test below the pool's homes with mode `0755` and a file
+/// of mode `0644` in it (root's, so its modes let every user list and read it), can be neither
+/// listed nor read by the run, and the refusal is the profile's (`Operation not permitted`,
+/// where the modes would answer `Permission denied`); the same run writes, reads and lists
+/// its own run directory, which lies below the same homes. It prints the probe's answer,
+/// `read:other-home = denied`, once both refusals are shown.
+///
+/// Catches a profile that leaves another user's home to its modes, and a homes deny that
+/// also takes the run's own directory.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_slot_account_can_neither_list_nor_read_another_home_its_modes_leave_open() {
+    let fixture = fixture();
+    let other = fixture.homes.join("js-other-home");
+    fs::create_dir_all(&other).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(other.join("f"), "x").unwrap();
+    fs::set_permissions(other.join("f"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut rt = runtime(fixture);
+    let own = rt
+        .create_and_start(&spec(
+            fixture,
+            "own-home",
+            "/bin/sh",
+            &["-c", "echo mine > own && /bin/cat own && /bin/ls"],
+        ))
+        .unwrap();
+    assert_eq!(
+        settle(&mut rt, &own),
+        exited(0),
+        "the run directory is the run's"
+    );
+    let tail = rt.log_tail(&own).unwrap().unwrap();
+    assert!(tail.stdout.starts_with("mine\n"), "{tail:?}");
+    assert!(tail.stdout.lines().any(|line| line == "own"), "{tail:?}");
+    rt.remove(&own).unwrap();
+    let file = other.join("f").display().to_string();
+    let other = other.display().to_string();
+    for (run, program, arg) in [
+        ("other-list", "/bin/ls", other.as_str()),
+        ("other-read", "/bin/cat", file.as_str()),
+    ] {
+        let id = rt
+            .create_and_start(&spec(fixture, run, program, &[arg]))
+            .unwrap();
+        assert_eq!(settle(&mut rt, &id), exited(1), "{program} {arg}");
+        let tail = rt.log_tail(&id).unwrap().unwrap();
+        assert_eq!(tail.stdout, "", "{program} {arg}");
+        assert!(
+            tail.stderr.contains("Operation not permitted"),
+            "{program} {arg}: {}",
+            tail.stderr
+        );
+        rt.remove(&id).unwrap();
+    }
+    println!("read:other-home = denied");
+}
+
 /// Whether anything below `dir` (links not followed) belongs to `uid`.
 fn owned_by(uid: u32, dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {

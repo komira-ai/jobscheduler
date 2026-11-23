@@ -8,6 +8,7 @@
 //! (`NativeRuntime::without_new_session`).
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -198,6 +199,56 @@ fn a_read_deny_is_the_profiles_not_the_file_modes() {
         tail.stderr
     );
     rig.rt.remove(&id).unwrap();
+}
+
+/// Asserts what the isolation probe's `read:other-home` asks of a Mac, with the user running
+/// the tests as the account: a home of another account, made by the test beside the run's own
+/// below the pool's homes with mode `0755` and a file of mode `0644` in it (the test's user
+/// owns both, so its modes let the job in), can be neither listed nor read, and the refusal
+/// is the profile's (`Operation not permitted`); the same job writes, reads and lists its own
+/// run directory, which lies below the same homes.
+///
+/// Catches a profile that leaves other homes to their modes, and a homes deny that also
+/// takes the job's own run directory.
+#[test]
+fn a_job_can_neither_list_nor_read_another_home_its_modes_leave_open() {
+    let mut rig = MacRig::new("other-home");
+    let other = rig.settings.homes.join("js-other-home");
+    fs::create_dir(&other).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(other.join("f"), "x").unwrap();
+    fs::set_permissions(other.join("f"), fs::Permissions::from_mode(0o644)).unwrap();
+    let own = rig.start(
+        "r1",
+        "/bin/sh",
+        &["-c", "echo mine > own && /bin/cat own && /bin/ls"],
+    );
+    assert_eq!(
+        rig.settle(&own),
+        exited(0),
+        "the run directory is the job's"
+    );
+    let tail = rig.rt.log_tail(&own).unwrap().unwrap();
+    assert!(tail.stdout.starts_with("mine\n"), "{tail:?}");
+    assert!(tail.stdout.lines().any(|line| line == "own"), "{tail:?}");
+    rig.rt.remove(&own).unwrap();
+    let file = other.join("f").display().to_string();
+    let other = other.display().to_string();
+    for (run, program, arg) in [
+        ("r2", "/bin/ls", other.as_str()),
+        ("r3", "/bin/cat", file.as_str()),
+    ] {
+        let id = rig.start(run, program, &[arg]);
+        assert_eq!(rig.settle(&id), exited(1), "{program} {arg}");
+        let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+        assert_eq!(tail.stdout, "", "{program} {arg}");
+        assert!(
+            tail.stderr.contains("Operation not permitted"),
+            "{program} {arg}: {}",
+            tail.stderr
+        );
+        rig.rt.remove(&id).unwrap();
+    }
 }
 
 const CONNECT: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]) ? 0 : 1)"#;

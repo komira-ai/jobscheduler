@@ -102,7 +102,11 @@ pub struct Profile {
 impl Profile {
     /// The profile of `policy`, in a fixed order: version and `(allow default)`; the
     /// write denies; the write grants (the run directory, the user's folder entry,
-    /// `/dev/null` and `/dev/fd`); the trees on a mount (an exec deny, an executable-mapping
+    /// `/dev/null` and `/dev/fd`); when the policy has homes roots
+    /// ([`Narrowing::deny_homes`](super::Narrowing::deny_homes)), a read deny of each root,
+    /// then a read grant of the run directory and a metadata grant on it and its ancestors
+    /// (so the run's own place below a root stays readable and a path walk reaches it); the
+    /// trees on a mount (an exec deny, an executable-mapping
     /// deny and a read deny of the mount's root, then for each tree a read grant and a
     /// metadata grant on the tree and its ancestors, so a path walk reaches it); the read
     /// denies, each with a write deny of the same
@@ -116,8 +120,8 @@ impl Profile {
     ///
     /// A later rule wins, so the floor beats everything before it.
     ///
-    /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants come
-    /// the default read deny, the names of the ancestors of every granted place, the base
+    /// Under [`ReadModel::Allow`] the reads are an allow-list: after the write grants (and
+    /// the homes' rules) come the default read deny, the names of the ancestors of every granted place, the base
     /// set of the macOS version, the run's places, the pinned trees, the Xcode and the
     /// kinds, then a deny of each setuid file; the read denies and everything after
     /// them are as in the open model.
@@ -147,6 +151,7 @@ impl Profile {
         }
         grant.push_str(" (literal \"/dev/null\") (subpath \"/dev/fd\"))");
         lines.push(grant);
+        home_rules(policy, &mut lines, &mut params);
         if let Some(allow) = policy.allow() {
             allow::reads(allow, policy.uid_entry(), &mut lines, &mut params);
         }
@@ -225,6 +230,21 @@ fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     for rule in rules {
         lines.push((*rule).to_owned());
     }
+}
+
+/// The homes' read denies, then the run directory's reads and the metadata of its ancestors,
+/// granted back: they precede every other read rule, so each later grant opens what it names
+/// and each read deny closes what it names. Nothing for a policy without homes roots.
+fn home_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
+    if policy.homes().is_empty() {
+        return;
+    }
+    for (i, home) in policy.homes().iter().enumerate() {
+        params.push((format!("HM_{i}"), home.as_str().to_owned()));
+        lines.push(format!("(deny file-read* (subpath (param \"HM_{i}\")))"));
+    }
+    lines.push("(allow file-read* (subpath (param \"RUN\")))".to_owned());
+    lines.push("(allow file-read-metadata (path-ancestors (param \"RUN\")))".to_owned());
 }
 
 /// The trees on the shared mount: nothing below the root is run or mapped executable (a
