@@ -374,7 +374,9 @@ The owner answered yes to all five questions of section 8:
 - **Checks.** A Mac agent runs no post-job leak scan (`NoChecks`): the helper's scan needs the helper's recorded baseline, which nothing records now; the retirement's proof covers everything of the run's uid.
 - **The self-test.** With the pool open, the agent runs `/usr/bin/true` through every step, its end and its removal before it says hello, and does not start when that fails.
 
-Not built yet: trees from a provider on a shared mount, outputs committed to a put ingest, the sweep by audit session, adoption across an agent update, the retirement of `js-mac-session`'s pool and the helper program.
+- **Trees.** A provider's tree reaches the job as a read-only link `exec/<rest>` to the directory the provider answered below `--native-trees-root` (tierstore's one NFS mount of the Mac). The profile denies reads, execution and executable mapping below that root and grants back the reads of the run's own trees only (js-mac-pool `MountTrees`), so the trees root is the one mount root that is not a read deny. A mount below the root must be the run's own tree, read-only and `no_exec`, or the start is refused (`native_fs::tree_rules`). The agent never unmounts the root; the lifecycle releases the trees after the run.
+
+Not built yet: outputs committed to a put ingest, the sweep by audit session, adoption across an agent update, the retirement of `js-mac-session`'s pool and the helper program.
 
 ## Decisions
 
