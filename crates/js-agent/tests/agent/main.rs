@@ -22,6 +22,8 @@ mod container;
 mod cordon;
 #[cfg(target_os = "linux")]
 mod cpu_ceiling;
+#[cfg(target_os = "linux")]
+mod cpu_series;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]
@@ -51,6 +53,7 @@ mod integrity;
 mod jobs;
 mod join_round_trip;
 mod lifecycle;
+mod mac_supervisor;
 #[cfg(target_os = "macos")]
 mod native;
 mod provider_client;

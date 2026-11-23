@@ -564,6 +564,7 @@ fn ended(id: &str, end: u64) -> EndedRow {
         actual_end: end,
         error_ms: None,
         used: None,
+        cpu_series: None,
     }
 }
 

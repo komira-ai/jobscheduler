@@ -514,6 +514,7 @@ mod answers {
                 whole_host: WholeHostOutcome::Drained.into(),
                 mark_give_ups: 1,
                 estimated_run_ms: Some(55_000),
+                cpu_series: None,
             }],
             next_page_token: "usage-page-3".to_owned(),
         }

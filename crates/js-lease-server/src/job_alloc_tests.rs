@@ -11,7 +11,7 @@ use js_jobs::{
 };
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Store, Txn};
-use js_types::HostId;
+use js_types::{CpuSeries, HostId};
 use js_usage::{
     AllocationId, Booked as UsageBooked, DrainOutcome, EndedHistory, EndedReason, EndedRow,
     ProfileKey, Used,
@@ -324,6 +324,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
             actual_end: ended,
             error_ms: None,
             used: None,
+            cpu_series: None,
         };
         assert_eq!(history_rows(&store), [row], "{freed:?}");
         assert_eq!(usage_keys(), 2, "{freed:?}: the row and its index entry");
@@ -586,4 +587,58 @@ fn a_build_targets_class_names_its_history_row() {
         let name = ProfileKey::parse(class.as_str()).unwrap();
         assert_eq!(profile_of(&job), Some(name), "{target}");
     }
+}
+
+/// Asserts that the history row of a freed job carries the CPU series its result holds, as
+/// stored and whatever else the result reports: with a usage, without one (the series is not
+/// tied to it), and that a job whose result holds no series, and one that was lost and has no
+/// result at all, are recorded with none. It catches a series lost between the job's result
+/// and its usage row, one dropped for lack of a usage, and one made up for a job without.
+#[test]
+fn the_history_row_of_a_free_carries_the_jobs_cpu_series() {
+    let series = CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true).unwrap();
+    let usage = ResourceUsage {
+        cpu_time: Duration::from_secs(10),
+        peak_memory_bytes: 1 << 20,
+        cpu_throttle: None,
+        cpu_pressure_some: None,
+        cpu_peak: None,
+    };
+    let cases = [
+        ("with-usage", Some(usage), Some(series.clone())),
+        ("no-usage", None, Some(series.clone())),
+        ("no-series", Some(usage), None),
+    ];
+    let (time, store, jobs) = timed();
+    for (name, usage, cpu_series) in cases {
+        let (job, _) = placed(&jobs, name, "host-a", spec(), BOOKED);
+        jobs.transition(&job.id, JobState::Placed, JobState::Starting)
+            .unwrap();
+        jobs.transition(&job.id, JobState::Starting, JobState::Running)
+            .unwrap();
+        time.advance(Duration::from_secs(5));
+        let output = Output {
+            usage,
+            cpu_series,
+            ..Output::default()
+        };
+        let exited = JobEnd::Exited {
+            exit_code: 0,
+            output,
+        };
+        jobs.end_job(&job.id, exited).unwrap();
+        free_allocation(&jobs, &job.id, Freed::HostConfirmed).unwrap();
+    }
+    let (lost, _) = placed(&jobs, "lost", "host-a", spec(), BOOKED);
+    jobs.end_job(&lost.id, JobEnd::Lost).unwrap();
+    free_allocation(&jobs, &lost.id, Freed::ProviderAbsent).unwrap();
+
+    let rows = history_rows(&store);
+    let by_name = |name: &str| rows.iter().find(|row| row.id.as_str() == name).unwrap();
+    assert_eq!(by_name("with-usage").cpu_series, Some(series.clone()));
+    assert!(by_name("with-usage").used.is_some());
+    assert_eq!(by_name("no-usage").cpu_series, Some(series));
+    assert_eq!(by_name("no-usage").used, None);
+    assert_eq!(by_name("no-series").cpu_series, None);
+    assert_eq!(by_name("lost").cpu_series, None);
 }

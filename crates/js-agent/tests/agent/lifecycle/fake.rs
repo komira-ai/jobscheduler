@@ -1,57 +1,28 @@
 //! A container runtime that lives in memory, and a clock a test moves. Nothing here
 //! starts a process or waits.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Clock, Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
+    Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
-    HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
 };
 
 #[path = "fake_checks.rs"]
 mod checks;
+#[path = "fake_clock.rs"]
+mod clock;
 #[path = "fake_fs.rs"]
 mod fs;
 pub use checks::ScriptedChecks;
-
-/// A clock that moves only when a test says so. Clones share one reading.
-#[derive(Clone, Default)]
-pub struct ManualClock(Rc<Cell<u64>>);
-
-impl ManualClock {
-    pub fn advance(&self, ms: u64) {
-        self.0.set(self.0.get() + ms);
-    }
-}
-
-/// The Unix time in milliseconds at which a [`ManualClock`] reads zero.
-pub const UNIX_ORIGIN_MS: u64 = 1_800_000_000_000;
-
-impl Clock for ManualClock {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
-    }
-
-    fn unix_ms(&self) -> Option<u64> {
-        Some(UNIX_ORIGIN_MS + self.0.get())
-    }
-}
-
-/// A [`ManualClock`] that has no Unix time.
-pub struct NoUnixClock(pub ManualClock);
-
-impl Clock for NoUnixClock {
-    fn now_ms(&self) -> u64 {
-        self.0.now_ms()
-    }
-}
+pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
 /// The agent label of every container the fake makes.
 const AGENT: &str = "fake-host";
@@ -96,6 +67,8 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// What `usage` answers for a run, by run id.
     usages: BTreeMap<String, JobUsage>,
+    /// What `cpu_series` answers for a run, by run id.
+    series: BTreeMap<String, CpuSeries>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// The control group the first process of the container of a run runs in, outside the
@@ -331,6 +304,12 @@ impl FakeRuntime {
             .borrow_mut()
             .usages
             .insert(run_id.to_owned(), usage);
+    }
+
+    /// The runtime recorded `series` for `run_id`: `cpu_series` answers it.
+    pub fn report_cpu_series(&self, run_id: &str, series: CpuSeries) {
+        let mut state = self.state.borrow_mut();
+        state.series.insert(run_id.to_owned(), series);
     }
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
@@ -860,6 +839,14 @@ impl Runtime for FakeRuntime {
         let state = self.state.borrow();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
         run.and_then(|run| state.usages.get(&run).copied())
+    }
+
+    fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
+        let state = self.state.borrow();
+        state
+            .series
+            .get(&state.containers.get(&id.0)?.run_id)
+            .cloned()
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {

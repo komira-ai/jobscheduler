@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use js_agent::usage::{ClosedMinute, MAX_UNSENT_AGE_USEC, Outbox, Reading, Sample};
+use js_agent::usage::{ClosedMinute, MAX_UNSENT_AGE_USEC, Outbox, Reading, Sample, SecondRates};
 use serde_json::json;
 
 /// One closed minute of `lease` with a mean of `mean` thousandths of a core.
@@ -34,6 +34,7 @@ pub fn reading(seq: u64, at: u64, minutes: Vec<ClosedMinute>) -> Reading {
         covered: vec!["1-1".to_owned()],
         clocks: vec![("1-1".to_owned(), 10), ("1-2".to_owned(), 20)],
         minutes,
+        seconds: SecondRates::default(),
     }
 }
 

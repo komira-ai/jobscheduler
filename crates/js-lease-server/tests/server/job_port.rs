@@ -20,8 +20,8 @@ use js_proto::v1::{
     ClearHostTaintRequest, CordonHostRequest, GetJobRequest, GetUsageRequest, Host,
     ListHostsRequest, ListPoolsRequest, ListProvidersRequest, UncordonHostRequest,
 };
-use js_types::HostId;
 use js_types::Timestamp;
+use js_types::{CpuSeries, HostId};
 use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
@@ -441,6 +441,7 @@ fn ended_row() -> EndedRow {
         actual_end: 1_000_000,
         error_ms: None,
         used: None,
+        cpu_series: CpuSeries::new(2, vec![0, 16, 40], 5_500_000, true),
     }
 }
 
@@ -529,7 +530,7 @@ async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
 /// cordon (each one made over one transport and read back over both), `ClearHostTaint` of
 /// the untainted host answers it with `cleared` false over both, `ListPools` and
 /// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
-/// host, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
+/// host with its CPU series, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
 /// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
 /// service without the fleet group's context, whose every fleet call answers `UNIMPLEMENTED`
 /// (`501`).
@@ -628,10 +629,29 @@ async fn the_fleet_calls_are_served_on_the_job_port() {
     assert_eq!(usage.records.len(), 1);
     assert_eq!(usage.records[0].job_id, ENDED_JOB);
     assert_eq!(usage.records[0].host_id, ENDED_HOST);
+    let series = usage.records[0].cpu_series.clone().expect("a series");
+    assert_eq!(
+        (
+            series.granularity_secs,
+            series.points,
+            series.run_usec,
+            series.partial
+        ),
+        (2, vec![0, 16, 40], 5_500_000, true)
+    );
     assert_eq!(usage.next_page_token, "");
     let reply = request(job, "GET", "/v1/usage", Some(TOKEN), None).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.json()["records"].as_array().map(Vec::len), Some(1));
     assert_eq!(reply.json()["records"][0]["jobId"], ENDED_JOB);
     assert_eq!(reply.json()["records"][0]["hostId"], ENDED_HOST);
+    assert_eq!(
+        reply.json()["records"][0]["cpuSeries"],
+        json!({
+            "granularitySecs": 2,
+            "points": [0, 16, 40],
+            "runUsec": "5500000",
+            "partial": true
+        })
+    );
 }

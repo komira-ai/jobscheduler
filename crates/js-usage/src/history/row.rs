@@ -6,7 +6,11 @@
 //! (each an optional varint); the ended reason and the drain outcome (each its name as text);
 //! the give-ups, the estimated end (each an optional varint); the actual end (a varint); the
 //! estimate error (an optional zigzag varint); what was used (optional: the highest CPU, the
-//! highest memory and the mean CPU as varints).
+//! highest memory and the mean CPU as varints); then, only when the row has one, the CPU
+//! series: a byte 1, the granularity in seconds, the run length in microseconds (each a varint),
+//! the partial flag (a byte, 0 or 1), the number of points (a varint) and each point (a
+//! varint). A row without a series ends after `used`, the bytes it was before the field; a
+//! reader that finds bytes after `used` reads a series, and a byte 0 there is an absent one.
 //!
 //! A text is a varint length and that many bytes of UTF-8. An optional field is a byte 0
 //! (absent) or 1 followed by the field. A varint is little-endian base 128, 7 bits a byte, high
@@ -17,7 +21,7 @@
 //! field already written changes meaning, and a row of a version this build does not read is
 //! refused with [`EndedRowError::Version`].
 
-use js_types::HostId;
+use js_types::{CpuSeries, HostId};
 
 use super::{AllocationId, Booked, DrainOutcome, EndedReason, EndedRow, Used};
 use crate::codec::put_varint;
@@ -95,6 +99,20 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
         put_varint(out, used.memory_bytes);
         put_varint(out, used.cpu_mean_milli);
     });
+    if let Some(series) = row
+        .cpu_series
+        .as_ref()
+        .filter(|series| series.is_well_formed())
+    {
+        out.push(1);
+        put_varint(&mut out, u64::from(series.granularity_secs));
+        put_varint(&mut out, series.run_usec);
+        out.push(u8::from(series.partial));
+        put_varint(&mut out, series.points.len() as u64);
+        for point in &series.points {
+            put_varint(&mut out, u64::from(*point));
+        }
+    }
     out
 }
 
@@ -199,7 +217,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
             cpu_mean_milli: r.varint()?,
         })
     })?;
-    // Bytes after the last field this build knows are fields a later build added.
+    // A row from before the series ends here; bytes after the series are fields a later build
+    // added.
+    let cpu_series = if r.rest.is_empty() {
+        None
+    } else {
+        r.opt("cpu_series", series)?
+    };
     Ok(EndedRow {
         id,
         profile,
@@ -214,5 +238,22 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
         actual_end,
         error_ms,
         used,
+        cpu_series,
     })
+}
+
+/// The series at the reader: granularity, run length, partial flag, then the points.
+fn series(r: &mut Reader) -> Result<CpuSeries, EndedRowError> {
+    let granularity = u32::try_from(r.varint()?).map_err(|_| EndedRowError::Range)?;
+    let run_usec = r.varint()?;
+    let partial = match r.byte()? {
+        0 => false,
+        1 => true,
+        _ => return Err(EndedRowError::Field("cpu_series")),
+    };
+    let count = r.varint()?;
+    let points = (0..count)
+        .map(|_| u16::try_from(r.varint()?).map_err(|_| EndedRowError::Range))
+        .collect::<Result<Vec<_>, _>>()?;
+    CpuSeries::new(granularity, points, run_usec, partial).ok_or(EndedRowError::Field("cpu_series"))
 }
