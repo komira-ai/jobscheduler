@@ -287,10 +287,17 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
     );
     // This agent sends no beat sequence, so the host is free once two applied heartbeats in a
     // row no longer list the first job: the first omission only counts.
-    for _ in 0..2 {
-        let freed = beat_with(&h, &agent, &[]).await;
-        assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
-    }
+    let counted = beat_with(&h, &agent, &[]).await;
+    assert_eq!(commands(&counted), (vec![], vec![]), "{counted}");
+    // The second omission frees the host inside its own beat, and the placement poller runs
+    // on a task of its own, poked by the beats before: its pass may place `held-2` between
+    // the free and the reply, which then carries that start. The reply carries no stop and no
+    // other start; the start is sent again on the next beat either way.
+    let freed = beat_with(&h, &agent, &[]).await;
+    let (starts, stops) = commands(&freed);
+    let started: Vec<&str> = starts.iter().map(|(job, _)| job.as_str()).collect();
+    assert!(matches!(started[..], [] | ["held-2"]), "{freed}");
+    assert!(stops.is_empty(), "{freed}");
     h.ticks.step().await;
     let (started, _) = one_start(&beat_with(&h, &agent, &[]).await);
     assert_eq!(started, "held-2");
