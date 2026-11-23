@@ -529,3 +529,60 @@ fn the_put_flags_go_through_the_mac_agents_start() {
         assert!(sent.borrow().is_empty(), "{flag}: something was sent");
     }
 }
+
+/// Asserts that the native settings keep the put ingest they are given and hand it to the
+/// runtime the agent builds from them: settings made from the flags have none; `with_put`
+/// keeps the one given and `put` returns it, and `with_put(None)` takes it away; and the
+/// runtime the system machine builds from settings with a put ingest takes the mount sources
+/// below its root as its own (`owns_host_path`), where one built from settings without takes
+/// none. Catches settings that lose the put ingest, and a start that builds the runtime
+/// without it, which would hold every put mount to the mount roots and refuse it.
+#[test]
+fn the_settings_keep_the_put_ingest_and_the_runtime_gets_it() {
+    use js_agent::native::{NativeFlags, NativeSettings, PfFlags};
+    use js_agent::{Backend, Machine, RuntimeBuild, System};
+    use js_mac_session::full_disk_access::FullDiskAccess;
+
+    let flags = NativeFlags {
+        accounts: Some(Path::new("/var/db/js-accounts")),
+        account_range: Some("501-510"),
+        account_ready: None,
+        homes: None,
+        network: None,
+        tool_roots: &[],
+        deny_read: &[],
+        max_file_mib: None,
+        max_processes: None,
+        pf: PfFlags::default(),
+    };
+    let settings = NativeSettings::from_flags(&flags, &[], Path::new("/srv/journal"))
+        .unwrap()
+        .unwrap()
+        .with_full_disk_access(FullDiskAccess::NotGranted);
+    assert_eq!(settings.put(), None, "the flags alone give none");
+    let put = PutConfig {
+        root: PathBuf::from("/srv/put"),
+        node: Node { uid: 7, gid: 8 },
+    };
+    let given = settings.clone().with_put(Some(put.clone()));
+    assert_eq!(given.put(), Some(&put));
+    assert_eq!(given.clone().with_put(None).put(), None);
+
+    let platform = js_agent::Platform {
+        os: "macos".to_owned(),
+        arch: "aarch64".to_owned(),
+    };
+    let target = "/srv/put/cas/b/b1/n1";
+    for (settings, owned) in [(given, true), (settings, false)] {
+        let backend = Backend::Native(settings);
+        let build = RuntimeBuild {
+            backend: &backend,
+            host_id: "h1",
+            platform: &platform,
+            stop_grace: std::time::Duration::from_secs(1),
+        };
+        let (runtime, _) = System::new().runtime(&build).unwrap();
+        assert_eq!(runtime.owns_host_path(target), owned, "put given: {owned}");
+        assert!(!runtime.owns_host_path("/srv/elsewhere/x"));
+    }
+}
