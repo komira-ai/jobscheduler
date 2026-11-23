@@ -6,9 +6,10 @@
 //! the values this server draws afresh (session, job and allocation ids) are put in their
 //! place ([`Minted`]).
 //!
-//! One answer differs by design: this server places a job in the submit call, so the first
-//! heartbeat after it already carries the job's start, where the previous server's carried
-//! none and its next one the start. The previous agent starts a job from any reply, so the
+//! One answer differs by design: this server's placement poller, which a submit pokes, places
+//! the job at once (the replay waits for that placement before its next post), so the first
+//! heartbeat after the submit already carries the job's start, where the previous server's
+//! carried none and its next one the start. The previous agent starts a job from any reply, so the
 //! replay accepts that start ([`take_early_start`]) when it is the only command, the previous
 //! server sent none, and the transcript has the start at a later step; it is compared there
 //! field by field with the start the transcript has, and this server sends it again at that
@@ -35,7 +36,11 @@ pub fn replay(name: &str, transcript: &Value) -> Vec<String> {
     super::welcome_interval_as(&mut flow, 5000);
     for (index, step) in flow.iter().chain([&transcript["refusal"]]).enumerate() {
         if let Some(job) = step.get("submitted") {
-            minted.learn(job.clone(), Value::String(cell.submit()));
+            let id = cell.submit();
+            // The placement this server's poller makes for the submit lands before the next
+            // post, so the start rides on the heartbeat after the submit, at once.
+            cell.left_the_queue(&id);
+            minted.learn(job.clone(), Value::String(id));
             continue;
         }
         if let Some(job) = step.get("cancelled") {

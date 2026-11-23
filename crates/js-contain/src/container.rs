@@ -45,13 +45,6 @@ pub struct ContainerLimits {
     /// The size of the container's `/run` tmpfs, in MiB. Its `/tmp` and `/var/tmp` are the
     /// caller's host mounts ([`ContainerSpec::mounts`]), on disk.
     pub run_mib: u64,
-    /// The memory the lease booked, in bytes, written on the container's own cgroup as
-    /// `memory.max` ([`hard_memory_max`](crate::cgroup::hard_memory_max), the lease's own
-    /// under [`LeasePolicy::HardMemory`](crate::cgroup::LeasePolicy::HardMemory)). The job's
-    /// cgroup namespace makes that cgroup its `/sys/fs/cgroup`, so a tool that sizes itself
-    /// from `memory.max` reads the booking there rather than `max`; the lease's own stays the
-    /// bound. `None`, or `Some(0)`, writes none.
-    pub memory_bytes: Option<u64>,
     /// The operator's CPU ceiling of the lease ([`CpuCeiling`](crate::CpuCeiling)), in
     /// thousandths of a core, written on the container's own cgroup as `cpu.max`
     /// ([`cpu_max`](crate::cpu_ceiling::cpu_max)) so that a tool that sizes itself from it
@@ -79,7 +72,6 @@ impl ContainerLimits {
         nofile: 65_536,
         nproc: NPROC_HIGH,
         run_mib: 64,
-        memory_bytes: None,
         cpu_ceiling_millis: None,
     };
 
@@ -299,7 +291,6 @@ pub(crate) mod tests {
                 nofile: 103,
                 nproc: 104,
                 run_mib: 106,
-                memory_bytes: None,
                 cpu_ceiling_millis: None,
             },
             shared: Vec::new(),

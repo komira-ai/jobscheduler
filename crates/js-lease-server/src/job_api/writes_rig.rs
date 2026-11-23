@@ -315,6 +315,7 @@ pub(super) fn wire(id: &str) -> v1::JobSpec {
 pub(super) const NEVER: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(365 * 24 * 3600),
     start_timeout: Duration::from_secs(365 * 24 * 3600),
+    ..JobLimits::DEFAULT
 };
 
 /// The service over the agent rig's tables and clock, admitting over its registry's hosts

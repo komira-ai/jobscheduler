@@ -79,12 +79,13 @@ fn name(behaviour: &str, kind: Kind, via: Option<Via>) -> String {
     format!("{behaviour}-{}{via}", kind.name())
 }
 
-/// Asserts the path of one job that exits 0, through `via`: submitted, it is answered placed on
-/// the agent's host (the submit places it, with no tick), started through `crun run` of the
+/// Asserts the path of one job that exits 0, through `via`: submitted, it is answered queued
+/// with no host, then placed on the agent's host by the server's placement poller (no tick, no
+/// heartbeat), started through `crun run` of the
 /// stand-in, and ends succeeded with exit code 0, reason exit, and the line it printed in both
 /// tails of `GetResult` and in the tails of `GetLogs`. The stand-in started it exactly once,
-/// and it is not started again in the heartbeats after it ended. It catches a submit that
-/// leaves a job queued over a host with room, a server that never hands a placed job to the
+/// and it is not started again in the heartbeats after it ended. It catches a poller
+/// that leaves a job queued over a host with room, a server that never hands a placed job to the
 /// agent, an agent that never reaches `crun`, a result lost on the way back, output dropped,
 /// and a job handed out twice.
 fn a_job_runs_once_and_succeeds_with_its_output(kind: Kind, via: Via) {
@@ -93,8 +94,11 @@ fn a_job_runs_once_and_succeeds_with_its_output(kind: Kind, via: Via) {
     let spec = Spec::new("j1");
     let made = rig.submit(via, &spec);
     assert_eq!(made["id"], "j1");
-    assert_eq!(made["state"], "JOB_STATE_PLACED");
-    assert_eq!(made["hostId"], "h1", "{made}");
+    assert_eq!(made["state"], "JOB_STATE_QUEUED");
+    assert!(made["hostId"].is_null() || made["hostId"] == "", "{made}");
+    let placed = rig.left_the_queue("j1");
+    assert_eq!(placed["state"], "JOB_STATE_PLACED");
+    assert_eq!(placed["hostId"], "h1", "{placed}");
     rig.until_state("j1", "JOB_STATE_SUCCEEDED");
     let job = jobs.job("j1");
     assert_eq!(job["hostId"], "h1", "{job}");

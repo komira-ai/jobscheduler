@@ -118,6 +118,39 @@ async fn a_cancel_of_a_queued_job_is_immediate() {
     assert_eq!(rig.job(&id("job-g")).state, JobState::Cancelled);
 }
 
+/// Asserts that a cancel whose job is placed between its read and its commit (the placement
+/// poller placing a job just submitted, here run in the store's hook just before the cancel's
+/// commit) is decided again on the placed row, over each transport: answered `placed` with
+/// the intent, which the row holds, never `state-write-failed`. It catches a cancel answered as
+/// a failed write because another writer moved the row first, the race a submit answered
+/// `queued` and placed by the poller makes common.
+#[tokio::test]
+async fn a_cancel_whose_job_is_placed_before_its_commit_lands_on_the_placed_job() {
+    let mut rig = clocked_rig("cancel_racing_place", true, NEVER);
+    rig.register("host-a", true);
+    let writes = served(&rig).await;
+    for (via, named) in [(Via::Grpc, "job-g"), (Via::Json, "job-j")] {
+        writes.submit(via, &wire(named)).await.unwrap();
+        let agents = std::sync::Arc::clone(&rig.agents);
+        rig.store.before_next(move || drop(agents.place_jobs()));
+        let asked = writes.cancel(via, named).await.unwrap();
+        assert_eq!(
+            (
+                asked.state(),
+                asked.cancel_requested,
+                asked.host_id.as_str()
+            ),
+            (v1::JobState::Placed, true, "host-a"),
+            "{via:?}"
+        );
+        let stored = rig.job(&id(named));
+        assert_eq!(
+            (stored.state, stored.cancel_requested),
+            (JobState::Placed, true)
+        );
+    }
+}
+
 /// Asserts that a second cancel answers what the first did and commits nothing, for a queued
 /// job and for a placed one, by the store's count of commits. It catches a second cancel that
 /// writes again (moving its time) or answers otherwise.
