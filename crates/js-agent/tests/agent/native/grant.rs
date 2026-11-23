@@ -237,7 +237,10 @@ fn a_runtime_without_the_grant_refuses_every_native_body_first() {
         }
     }
     let granted = Rig::new("grant-check-granted");
-    assert_eq!(granted.rt.check_native(&native("/usr/bin/true", &[])), Ok(()));
+    assert_eq!(
+        granted.rt.check_native(&native("/usr/bin/true", &[])),
+        Ok(())
+    );
     let refused = granted.rt.check_native(&native("/opt/tool/run", &[]));
     assert_eq!(refused.unwrap_err().code, refusal::INVALID_PROGRAM);
 }
