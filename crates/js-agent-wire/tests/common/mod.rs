@@ -138,6 +138,7 @@ pub fn load() -> NodeLoad {
         seq: 7,
         mono_usec: 9_000_000,
         cpu_usage_usec: 4_500_000,
+        host_cpu_usec: Some(40_500_000),
         working_set_bytes: 3 << 30,
         active_file_bytes: 1 << 20,
         actions_cpu_limited: true,

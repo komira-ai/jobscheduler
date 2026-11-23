@@ -13,15 +13,18 @@
 //! memory: max(sum m(all), working_set + sum m(uncovered)) + V_mem + m_new       <=  C_mem * (1 + s_mem)
 //! ```
 //!
-//! - `measured` is the cores busy over the last two windows of the worker's readings, the
-//!   larger, so a rise counts at once and a fall after two windows.
+//! - `measured` is the cores the whole host was busy over the last two windows of the
+//!   worker's readings, the larger, so a rise counts at once and a fall after two windows.
+//!   Every process of the host counts, not only the leases: work besides them takes the
+//!   same cores. Covered leases' use is inside it; uncovered leases are charged beside it.
 //! - A lease is *covered* once a reading lists it as running for the whole window since
 //!   the previous reading; until then it is *uncovered* and carries its full cost.
 //! - Predicted memory is held to the lease's end and never decays.
 //! - `f` ([`LoadConfig::cpu_floor_permille`]) keeps a covered lease in an idle phase
 //!   from handing its room back to the next batch.
-//! - `V` is the booked cost of the worker's VM leases, which run outside the measured
-//!   cgroup.
+//! - `V` is the booked cost of the worker's VM leases, which run outside the actions
+//!   cgroup whose working set is measured. A running VM's CPU is in the host's measured CPU
+//!   too, so `V_cpu` counts it again: an over-count that can only refuse work.
 //! - A worker with no usable measurement is admitted by the same predicate on the sum of
 //!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule. Each lease
 //!   on a worker that never sent an accepted reading (a Mac, a native or VM node) is

@@ -75,7 +75,7 @@ fn a_covered_lease_without_a_clock_is_charged_flat() {
 /// Catches: the measurement entering at later minutes (the covered lease idles by its
 /// curve at 15 cores while the node measures 70): it raises the figure at minute 0 only,
 /// and a lease that fits the curves at every later minute is refused at minute 0 by it
-/// and by nothing else.
+/// and by nothing else, the refusal carrying that measurement.
 #[test]
 fn the_measurement_enters_at_minute_zero_only() {
     let (mut r, curves) = cluster(LoadConfig::default());
@@ -87,7 +87,15 @@ fn the_measurement_enters_at_minute_zero_only() {
     assert_eq!(ahead(&r, 31).0, 15_000);
     // 70 + 45 = 115 > 110 at minute 0; 15 + 45 = 60 everywhere else.
     r.keyed("big", 1_000, 8 * GIB, warm(45_000, GIB));
+    let _ = r.s.take_refusals();
     assert!(r.tick().is_empty(), "refused by the measurement");
+    // The refusal over the horizon carries the measurement it used.
+    let refused = r.s.take_refusals().kept.pop().expect("a refusal");
+    let figures = &refused.refusal;
+    assert_eq!(
+        (figures.counted, figures.new, figures.measured_cpu_millis),
+        (70_000, 45_000, Some(70_000))
+    );
     r.window_clocked("a", 40_000, 3 * GIB, &[q.lease], &[(q.lease, 0)], &[]);
     r.window_clocked("a", 40_000, 3 * GIB, &[q.lease], &[(q.lease, 0)], &[]);
     assert_eq!(
