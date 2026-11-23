@@ -270,3 +270,49 @@ fn a_whole_host_reading_covers_the_leases_that_ran_through_it() {
     assert_eq!(collector.run(&now), Vec::<String>::new());
     assert_eq!(outbox.take().expect("a load").covered, ["1-1", "1-2"]);
 }
+
+/// A node sampler of control groups that read none: a fixed node, and no lease.
+struct NoLeases;
+
+impl NodeSampler for NoLeases {
+    fn sample(
+        &mut self,
+        clock: &dyn UsageClock,
+        leases: &[LeaseCgroup],
+    ) -> Result<Sample, SampleError> {
+        Ok(Sample {
+            mono_usec: clock.now_usec(),
+            cpu_usage_usec: 0,
+            host_cpu_usec: 0,
+            working_set_bytes: 0,
+            host_nonfile_bytes: None,
+            active_file_bytes: 0,
+            cpu_limited: false,
+            leases: Vec::new(),
+            unreadable_leases: u32::try_from(leases.len()).unwrap_or(u32::MAX),
+        })
+    }
+
+    fn host_counters(&mut self) -> Option<HostCpu> {
+        None
+    }
+}
+
+/// Asserts that a reading that is not the whole host's covers only the leases it read: a
+/// lease that ran through two readings of a sampler that read none of its group is not
+/// covered. Catches a cgroup host that names covered a lease whose use no reading held, which
+/// the server would then charge at nothing.
+#[test]
+fn a_reading_of_groups_covers_only_the_leases_it_read() {
+    let clock = Shared::default();
+    let outbox = Arc::new(Outbox::new());
+    outbox.set_window(Duration::from_secs(5));
+    let mut collector =
+        Collector::with_sampler(Box::new(NoLeases), Box::new(clock.clone()), outbox.clone());
+    for at in [5_000_000, 10_000_000] {
+        clock.0.set(at);
+        assert_eq!(collector.run(&[running("1-1")]), Vec::<String>::new());
+        assert_eq!(outbox.take().expect("a load").covered, Vec::<String>::new());
+        outbox.delivered();
+    }
+}

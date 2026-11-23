@@ -24,6 +24,7 @@ mod binary;
 mod brake_reset;
 mod catalog_cache;
 mod catalog_config;
+mod cold_memory_on;
 mod config_brake;
 mod config_budget;
 mod config_file;
