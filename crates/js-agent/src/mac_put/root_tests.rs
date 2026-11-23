@@ -61,8 +61,8 @@ fn as_root_the_put_directory_is_the_nodes_and_the_pack_its_groups() {
 }
 
 /// Proves, as root, that a link in the job directory's place gives the node nothing outside
-/// the put root: the directory the link names keeps its owner, group and mode (root's, 0755),
-/// and the hand-over fails. Catches a hand-over by `chown` or `chmod` of a path, which follows
+/// the put root: the directory the link names keeps the owner, group and mode it had before
+/// (never the node's group), and the hand-over fails. Catches a hand-over by `chown` or `chmod` of a path, which follows
 /// the link and hands the node's user a directory the agent never made.
 #[test]
 #[ignore = "needs root: the macOS beta stage's root step runs it (beta.yml)"]
@@ -79,12 +79,18 @@ fn as_root_a_link_in_the_job_directorys_place_is_not_followed() {
         key_prefix: "cas/b/r1/n1".to_owned(),
     };
     std::os::unix::fs::symlink(&outside, &to.dir).unwrap();
+    let owners = |meta: &fs::Metadata| {
+        let mode = meta.permissions().mode() & 0o7777;
+        (meta.uid(), meta.gid(), mode)
+    };
+    let before = owners(&fs::metadata(&outside).unwrap());
     assert!(hand_over(&root, &to, 0, NODE).is_err());
-    let meta = fs::metadata(&outside).unwrap();
+    let after = fs::metadata(&outside).unwrap();
+    // A new directory takes its parent's group on a Mac: the test compares with what it was.
     assert_eq!(
-        (meta.uid(), meta.gid()),
-        (0, 0),
-        "the outside directory's owners"
+        owners(&after),
+        before,
+        "the outside directory's owners and mode"
     );
-    assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+    assert_ne!(after.gid(), NODE.gid, "the node's group");
 }
