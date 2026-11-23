@@ -21,9 +21,11 @@
 //!    `cwd` that leaves `exec/` (absolute, `..`, or a link that resolves outside) fails the
 //!    start (`native/cwd.rs`).
 //! 4. The profile is built by [`js_mac_pool::seatbelt`] from a policy that grants writes to
-//!    the run directory `exec/` and nothing else: the account's home itself is not writable
-//!    to the job (macOS guards what a job would make in `~/Library` even against root), and
-//!    neither is its per-user folder in `/var/folders`. The agent's roots, its secret files,
+//!    the run directory `exec/` and to the account's own per-user temporary and cache folders
+//!    (what macOS gives it as `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR`, asked of the
+//!    system as the account at the start), and nothing else: the account's home itself is not
+//!    writable to the job (macOS guards what a job would make in `~/Library` even against
+//!    root), and no other part of `/var/folders` is. The agent's roots, its secret files,
 //!    `--native-accounts` and the places only the privacy controls guard
 //!    (`native/fence.rs`) are denied reads (`native/profile.rs`).
 //! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
@@ -98,9 +100,9 @@
 //!
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
-//! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
-//! grant the account's `/var/folders` entry (toolchains that need it get their temporary files
-//! from `TMPDIR` and `xcrun` its cache from `xcrun_db`, both inside the run directory).
+//! start that declares any is refused `ports-not-supported`, see `native/network.rs`).
+//! Toolchains get their temporary files from `TMPDIR` (inside the run directory) and may also
+//! write the account's own per-user temporary and cache folders.
 //!
 //! The runtime is built in the macOS build only; the decisions it makes that need no Mac
 //! (the account pool, the supervisor's steps) live in modules every build tests.
@@ -251,10 +253,18 @@ pub struct NativeRuntime {
     /// The last sweeps of runs' processes, each with its run's lease, oldest first, at most
     /// [`SWEEPS_KEPT`].
     sweeps: VecDeque<(String, Tally)>,
+    /// What finds the lent account's own per-user temporary and cache folders, which its
+    /// run may write; none grants nothing there.
+    own_folders: Option<OwnFolders>,
 }
 
 /// How many of the last sweeps the runtime keeps for [`NativeRuntime::sweeps`].
 const SWEEPS_KEPT: usize = 16;
+
+/// Finds an account's own per-user temporary and cache folders (its uid's, below
+/// `/private/var/folders`), given the account and its home.
+pub type OwnFolders =
+    Arc<dyn Fn(&crate::mac_accounts::Account, &Path) -> io::Result<Vec<PathBuf>> + Send + Sync>;
 
 /// A wall clock: milliseconds since the Unix epoch.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -286,7 +296,8 @@ impl NativeRuntime {
     ) -> Result<Self, RuntimeError> {
         gate(&config)?;
         let pool = accounts::open(&config.accounts, config.full_disk_access)?;
-        Self::open_ungated(pool, launcher, config, term)
+        let own: OwnFolders = Arc::new(crate::mac_accounts::own_folders);
+        Ok(Self::open_ungated(pool, launcher, config, term)?.with_own_folders(own))
     }
 
     /// As [`NativeRuntime::open`], over `pool` (opened by the caller, over a host of its
@@ -342,6 +353,7 @@ impl NativeRuntime {
             puts: BTreeMap::new(),
             committed: BTreeMap::new(),
             sweeps: VecDeque::new(),
+            own_folders: None,
         })
     }
 
@@ -373,6 +385,17 @@ impl NativeRuntime {
     #[must_use]
     pub fn with_clock(self, now_ms: Clock) -> Self {
         Self { now_ms, ..self }
+    }
+
+    /// The same runtime, finding each lent account's own per-user temporary and cache folders
+    /// with `find`, which the run may then write (as [`NativeRuntime::open`] does with the
+    /// system's answer, asked as the account). A runtime made otherwise grants none.
+    #[must_use]
+    pub fn with_own_folders(self, find: OwnFolders) -> Self {
+        Self {
+            own_folders: Some(find),
+            ..self
+        }
     }
 
     /// The same runtime, its supervisors opening no audit session of their own, which only root

@@ -15,8 +15,8 @@ use std::path::Path;
 use crate::lifecycle::RuntimeError;
 
 /// The variable `xcrun` keeps its cache file at: with it the cache is made at the path it
-/// names, inside the run directory, rather than in the account's per-user folder, which the
-/// profile never lets a job write.
+/// names, inside the run directory, rather than in the account's per-user temporary folder
+/// (which the profile grants too).
 pub(super) const XCRUN_DB: &str = "xcrun_db";
 
 /// The names the native runtime sets from the run's account, last, beside the names every
