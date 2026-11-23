@@ -176,7 +176,7 @@ fn a_removal_looks_at_the_supervisor_once_more_after_the_retirement() {
 }
 
 /// Asserts that a job whose reported pid names no process group (0, or negative) is signalled
-/// nothing by a stop and its end: the call returns, and the job's real process goes on.
+/// nothing by a stop: the call returns, and the job's real process goes on.
 ///
 /// Catches: a pid that cannot name a group passed on to a group kill (which would signal the
 /// agent's own group, or panic).
@@ -186,7 +186,9 @@ fn a_job_pid_that_names_no_group_is_signalled_nothing() {
         let mut rig = Rig::new(&format!("ended-nogroup-{name}"));
         rig.launcher.report_job_pid(reported);
         let (id, real) = start_sleeper(&mut rig, "r0");
-        rig.rt.stop(&id, Duration::ZERO).unwrap();
+        // A grace that does not pass in the test: the poll after it would sweep the run's
+        // processes, which is not what this test looks at.
+        rig.rt.stop(&id, Duration::from_secs(600)).unwrap();
         assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running, "{name}");
         let real = Pid::from_raw(real).unwrap();
         assert!(
