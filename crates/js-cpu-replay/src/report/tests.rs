@@ -153,7 +153,7 @@ fn a_row_says_each_figure_of_an_outcome() {
     let mut text = String::new();
     row(
         &mut text,
-        ARMS[1],
+        ARMS[2],
         Shape::Blip,
         &outcome,
         (farm, 20_000_000),
@@ -166,7 +166,7 @@ fn a_row_says_each_figure_of_an_outcome() {
     let mut text = String::new();
     row(
         &mut text,
-        ARMS[1],
+        ARMS[2],
         Shape::Blip,
         &outcome,
         (farm, 20_000_000),

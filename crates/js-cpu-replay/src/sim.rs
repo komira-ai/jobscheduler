@@ -137,7 +137,15 @@ pub enum Rule {
     /// job's life, known exactly (an oracle: the best any learned curve could do), within the
     /// limit at every moment.
     Curve,
+    /// The placer as it ran before its hosts' readings reached it (komira-ai/jobscheduler#1036):
+    /// no reading, so every job is charged the larger of its booking and one core
+    /// (`UNMEASURED_CPU_FLOOR_MILLIS` in `js-sched`), and no host is ranked behind another
+    /// for its reading.
+    Unread,
 }
+
+/// What a job is charged on a host that has never been read: at least a core.
+const UNREAD_FLOOR_MILLI: u64 = 1000;
 
 /// One way of packing: a rule, its bookings and its limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,6 +320,11 @@ impl Host {
             Rule::Measured => self.measured() + self.split().1,
             Rule::Reserve { z_tenths } => self.reserved(z_tenths, 0, 0),
             Rule::Curve => self.runs.iter().map(Running::demand).sum(),
+            Rule::Unread => self
+                .runs
+                .iter()
+                .map(|run| run.booking.milli.max(UNREAD_FLOOR_MILLI))
+                .sum(),
         }
     }
 
@@ -319,6 +332,7 @@ impl Host {
     fn figure(&self, rule: Rule, new: &Running, limit: u64) -> Option<u64> {
         let figure = match rule {
             Rule::Booked | Rule::Measured => self.planned(rule) + new.booking.milli,
+            Rule::Unread => self.planned(rule) + new.booking.milli.max(UNREAD_FLOOR_MILLI),
             Rule::Reserve { z_tenths } => self.reserved(z_tenths, new.booking.milli, new.var),
             Rule::Curve => self.peak_with(&new.phases),
         };
@@ -588,7 +602,7 @@ impl<'a> World<'a> {
                 };
                 let key = (
                     figure.saturating_sub(tolerance),
-                    host.distrusted(),
+                    self.arm.rule != Rule::Unread && host.distrusted(),
                     Reverse(figure),
                 );
                 if best.as_ref().is_none_or(|(least, _)| key < *least) {

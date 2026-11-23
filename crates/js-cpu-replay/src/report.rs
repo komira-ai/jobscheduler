@@ -9,11 +9,17 @@ use crate::sim::{Arm, Bookings, Farm, Outcome, Rule, Setup, as_placed, replay};
 use crate::trace::{End, Job};
 
 /// The ways of packing the report compares, in its order.
-pub const ARMS: [Arm; 12] = [
+pub const ARMS: [Arm; 13] = [
     Arm {
         name: "recorded bookings",
         bookings: Bookings::Recorded,
         rule: Rule::Booked,
+        limit_permille: 1100,
+    },
+    Arm {
+        name: "A as deployed, no readings, 1.1",
+        bookings: Bookings::Learned,
+        rule: Rule::Unread,
         limit_permille: 1100,
     },
     Arm {

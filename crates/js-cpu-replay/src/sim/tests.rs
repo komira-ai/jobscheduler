@@ -505,3 +505,34 @@ fn decayed_bookings_start_cold_then_follow_the_class() {
     let outcome = replay(&jobs, arm(decayed, Rule::Booked, 1100), flat(Farm::OURS));
     assert_eq!(outcome.booked, (22_000 + 2000 + 2000) * 10_000);
 }
+
+#[test]
+fn a_host_never_read_charges_each_job_at_least_a_core_and_trusts_every_host() {
+    // A quarter-core job counts a core, a two-core job two.
+    let host = Host {
+        runs: vec![
+            run(250, 0, vec![phase(1000, 0)], 0),
+            run(2000, 0, vec![phase(1000, 0)], 0),
+        ],
+        readings: [9000, 9000],
+        read_at: 5000,
+        ..Host::default()
+    };
+    assert_eq!(host.planned(Rule::Unread), 3000);
+    let new = run(250, 0, vec![phase(1000, 0)], 0);
+    assert_eq!(host.figure(Rule::Unread, &new, 4000), Some(4000));
+    assert_eq!(host.figure(Rule::Unread, &new, 3999), None);
+    // Its reading (above its bookings) would make it distrusted; without readings it is
+    // ranked by its fit alone, so the fuller host takes the job.
+    let unread = arm(Bookings::Recorded, Rule::Unread, 1100);
+    let jobs = vec![booked(job(0, 10_000, 0, 0), 1000)];
+    let farm = Farm {
+        hosts: 2,
+        ..one(8000)
+    };
+    let mut world = World::new(&jobs, unread, flat(farm));
+    world.hosts = vec![holding(2000, 3000), holding(1000, 0)];
+    world.queue.push_back(0);
+    world.place(0);
+    assert_eq!(world.hosts[0].runs.len(), 2);
+}
