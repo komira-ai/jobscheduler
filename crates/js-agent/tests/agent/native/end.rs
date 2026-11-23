@@ -97,9 +97,8 @@ fn fake(pid: i32, name: &str) -> Proc {
     }
 }
 
-/// The process groups of the programs a [`FakeLauncher`] started, each process shown as of
-/// the uid its launch named (so one run's sweep by uid never takes another run's
-/// processes, as on a Mac where each run has an account of its own), and the sweeper. Its kill is a real `SIGKILL`, sent only to a process in one of
+/// The process groups of the programs a [`FakeLauncher`] started, as the account's
+/// processes, and the sweeper. Its kill is a real `SIGKILL`, sent only to a process in one of
 /// those groups.
 pub struct GroupTable {
     launcher: Arc<FakeLauncher>,
@@ -120,18 +119,18 @@ impl GroupTable {
         self.ended.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Every live pid of the launcher's groups, with the uid of the launch that started it.
-    fn pids(&self) -> Vec<(i32, u32)> {
+    /// Every live pid of the launcher's groups.
+    fn pids(&self) -> Vec<i32> {
         let ended = self.ended().clone();
-        let mut pids: Vec<(i32, u32)> = self
+        let mut pids: Vec<i32> = self
             .launcher
-            .owned_groups()
+            .groups()
             .into_iter()
-            .flat_map(|(group, uid)| members(group).into_iter().map(move |pid| (pid, uid)))
-            .filter(|(pid, _)| !ended.contains(pid))
+            .flat_map(members)
+            .filter(|pid| !ended.contains(pid))
             .collect();
         pids.sort_unstable();
-        pids.dedup_by_key(|(pid, _)| *pid);
+        pids.dedup();
         pids
     }
 }
@@ -139,16 +138,12 @@ impl GroupTable {
 impl ProcessTable for GroupTable {
     fn list(&self, _with_asid: bool) -> io::Result<Vec<Proc>> {
         let mut procs = vec![sweeper()];
-        procs.extend(self.pids().into_iter().map(|(pid, uid)| Proc {
-            uid,
-            ruid: uid,
-            ..fake(pid, "job")
-        }));
+        procs.extend(self.pids().into_iter().map(|pid| fake(pid, "job")));
         Ok(procs)
     }
 
     fn kill(&self, pid: i32) {
-        if !self.pids().iter().any(|(live, _)| *live == pid) {
+        if !self.pids().contains(&pid) {
             return;
         }
         if let Some(target) = Pid::from_raw(pid) {
