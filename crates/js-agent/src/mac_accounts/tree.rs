@@ -39,6 +39,10 @@ use rustix::io::Errno;
 
 use super::settings::Places;
 
+mod kept;
+
+use kept::kept_in;
+
 #[cfg(target_os = "linux")]
 pub(super) type Dev = u64;
 #[cfg(not(target_os = "linux"))]
@@ -222,56 +226,6 @@ pub(super) trait Os {
     fn pinned(&self, dir: &OwnedFd, name: &OsStr) -> bool;
 }
 
-/// What macOS's own per-user daemons make in a slot's per-user folder, as (top-level
-/// directory, name), that root may not remove: Launch Services' data vault (`lsd`), which root
-/// may not even examine ([`Os::sealed`]), and the trust daemon's folder (`trustd`, made when a
-/// job checks a TLS certificate), which carries the system's no-unlink flag ([`Os::pinned`]),
-/// as the folder's own directories do. A sealed one is kept whole: no job can open it, only
-/// the daemon. A pinned one is kept and emptied, as a top-level directory is. One of these that
-/// is neither is removed like anything else, and any other item root is refused holds the
-/// account.
-pub(super) const SYSTEM_KEPT: [(&str, &str); 2] = [
-    ("0", "com.apple.LaunchServices.dv"),
-    ("T", "com.apple.trustd"),
-];
-
-/// The entries of [`SYSTEM_KEPT`] in a top-level directory of a per-user folder that stay.
-#[derive(Default)]
-struct Kept {
-    /// Sealed: kept whole, never looked into.
-    whole: Vec<OsString>,
-    /// Pinned: kept, and what is in them goes.
-    emptied: Vec<OsString>,
-}
-
-impl Kept {
-    /// Whether the entry `name` stays.
-    fn holds(&self, name: &OsStr) -> bool {
-        self.whole
-            .iter()
-            .chain(&self.emptied)
-            .any(|kept| kept == name)
-    }
-}
-
-/// The entries of the top-level directory `top` (named `top_name`) of a per-user folder that
-/// stay: those of [`SYSTEM_KEPT`] for it that are there and sealed or pinned.
-fn kept_in(top: &OwnedFd, top_name: &OsStr, os: &dyn Os) -> Kept {
-    let mut kept = Kept::default();
-    for (_, name) in SYSTEM_KEPT
-        .iter()
-        .filter(|(dir, _)| OsStr::new(dir) == top_name)
-    {
-        let name = OsString::from(name);
-        if os.sealed(top, &name) {
-            kept.whole.push(name);
-        } else if os.pinned(top, &name) {
-            kept.emptied.push(name);
-        }
-    }
-    kept
-}
-
 /// The operating system itself. Off macOS there are no user flags to clear and no ACL to
 /// strip (the calls do nothing).
 pub(super) struct System;
@@ -303,8 +257,10 @@ impl Os for System {
 
     fn sealed(&self, dir: &OwnedFd, name: &OsStr) -> bool {
         let refused = |result: Result<(), Errno>| result == Err(Errno::PERM);
-        refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop))
-            || refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop))
+        // Both are asked, whatever the first answers: either refusal is a seal.
+        let examined = refused(rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map(drop));
+        let opened = refused(rustix::fs::openat(dir, name, DIRECTORY, Mode::empty()).map(drop));
+        examined | opened
     }
 
     #[cfg(target_os = "macos")]
@@ -422,11 +378,16 @@ impl<'a> Park<'a> {
     /// lifts and the system refuses (`EPERM`, `EACCES`: an ACL that denies the removal),
     /// the ACL is stripped and the removal tried once more.
     fn unlink(&self, dir: &OwnedFd, name: &OsStr, flags: AtFlags) -> io::Result<()> {
-        let refused = match self.os.unlink(dir, name, flags) {
+        let why = match self.os.unlink(dir, name, flags) {
             Ok(()) => return Ok(()),
-            Err(why @ (Errno::PERM | Errno::ACCESS)) if self.lift => io::Error::from(why),
-            Err(why) => return Err(why.into()),
+            Err(why) => why,
         };
+        // Only a refusal of the system (`EPERM`, `EACCES`) is got past, and only here.
+        let liftable = [Errno::PERM, Errno::ACCESS].contains(&why) & self.lift;
+        if !liftable {
+            return Err(why.into());
+        }
+        let refused = io::Error::from(why);
         self.os.strip_acl(dir, name).map_err(|why| {
             io::Error::new(
                 refused.kind(),
@@ -961,7 +922,7 @@ fn empty_top(
 
 /// What the per-user folder at `path` holds that an emptied one does not: each non-directory
 /// at its top level and each entry directly below its top-level directories (the entry
-/// itself, not what is in it), except an item of [`SYSTEM_KEPT`] that stays: a sealed one is
+/// itself, not what is in it), except an item of [`kept::SYSTEM_KEPT`] that stays: a sealed one is
 /// not counted, and of a pinned one what is directly in it is; nothing for a `path` that does
 /// not exist.
 ///

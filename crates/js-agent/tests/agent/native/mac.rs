@@ -350,3 +350,48 @@ fn the_self_test_passes_with_the_real_supervisor() {
         "the self-test left an account"
     );
 }
+
+/// The real launcher, keeping the pid of each supervisor it starts.
+struct Recording {
+    inner: SystemLauncher,
+    pids: std::sync::Mutex<Vec<u32>>,
+}
+
+impl js_agent::mac_supervisor::Launcher for Recording {
+    fn launch(
+        &self,
+        request: js_agent::mac_supervisor::LaunchRequest<'_>,
+    ) -> std::io::Result<Box<dyn js_agent::mac_supervisor::Supervised>> {
+        let supervised = self.inner.launch(request)?;
+        self.pids.lock().unwrap().push(supervised.pid());
+        Ok(supervised)
+    }
+}
+
+/// Asserts that a run's supervisor is reaped by its removal: after the self-test (a start,
+/// its end and its removal through the real supervisor) the supervisor's pid names no
+/// process, where a zombie the agent never waited for would still take a signal 0.
+///
+/// Catches one zombie of a retired slot uid left under the agent at every start.
+#[test]
+fn the_supervisor_of_a_removed_run_is_reaped() {
+    let dir = Scratch::new("native-mac-reaped");
+    let accounts = FakeAccounts::new();
+    let settings = pool_settings(&dir, 1);
+    let pool = open_pool(&dir, &settings, &accounts);
+    let launcher = Arc::new(Recording {
+        inner: SystemLauncher::at(env!("CARGO_BIN_EXE_js-agent")),
+        pids: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut rt = NativeRuntime::over(Some(pool), launcher.clone(), config(&dir, &settings), TERM)
+        .unwrap()
+        .without_new_session();
+    assert_eq!(rt.self_test(), Ok(()));
+    let pids = launcher.pids.lock().unwrap().clone();
+    assert_eq!(pids.len(), 1);
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pids[0]).unwrap()).unwrap();
+    assert!(
+        rustix::process::test_kill_process(pid).is_err(),
+        "the supervisor {pid:?} is still there, a zombie of the agent"
+    );
+}

@@ -7,9 +7,9 @@
 //! the real supervisor ([`SystemLauncher`]) and runs one start through `create_and_start`,
 //! `poll` (with a `stop` after `--stop-after` seconds, with `--grace`, when asked) and
 //! `remove`. It prints the start's steps, how the job ended, the tails of its output and
-//! error, the outcome of the removal and each sweep of the run's processes (`sweep: <lease>
-//! <tally as JSON>`); the retirement's proof is logged on the error
-//! stream. Real seconds are fine here: it is not the agent.
+//! error, the outcome of the removal with the retirement's proof, and each sweep of the run's
+//! processes (`sweep: <lease> <tally as JSON>`). Real seconds are fine here: it is not the
+//! agent.
 //!
 //! ```text
 //! js-agent __native-proof --accounts <dir> --range <first>-<last> --state <dir>
@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel, OutputKind, OutputSpec};
 
-use super::{NativeFlags, NativeRuntime, NativeSettings, PfFlags, grant};
+use super::{NativeConfig, NativeFlags, NativeRuntime, NativeSettings, PfFlags, grant};
 use crate::lifecycle::{Body, ResolvedMount, RunSpec, Runtime, Status};
 use crate::mac_supervisor::SystemLauncher;
 
@@ -40,7 +40,7 @@ pub const VERB: &str = "__native-proof";
 const PAUSE: Duration = Duration::from_millis(100);
 
 /// The exit statuses.
-mod status {
+pub mod status {
     /// The job exited 0 and its removal retired its account.
     pub const OK: u8 = 0;
     /// The job failed, or the removal did.
@@ -121,24 +121,48 @@ fn level(name: &str) -> NetworkLevel {
     }
 }
 
-/// Runs the verb on `args` (the program name first, the verb second).
+/// What opens the runtime of the verb from the configuration its flags made.
+pub type Opener<'a> = &'a dyn Fn(NativeConfig) -> Result<NativeRuntime, String>;
+
+/// Runs the verb on `args` (the program name first, the verb second), over the production
+/// runtime: [`NativeRuntime::open`] with the real supervisor.
 pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
-    let parsed = match parse(args.get(2..).unwrap_or_default()) {
-        Ok(parsed) => parsed,
-        Err(why) => {
-            let _ = writeln!(err, "js-agent: {VERB}: {why}");
-            return ExitCode::from(status::USAGE);
-        }
-    };
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();
-    ExitCode::from(prove(&parsed, out, err))
+    run_with(args, out, err, &open_production)
 }
 
-/// Opens the runtime and runs the job of `args`; the exit status.
-fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+/// [`run`] with `open` making the runtime from the configuration the flags gave: how a test
+/// runs the verb over a pool of its own. The flags, the steps, the report and the exit status
+/// are the verb's.
+#[doc(hidden)]
+pub fn run_with(
+    args: &[OsString],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    open: Opener<'_>,
+) -> ExitCode {
+    match parse(args.get(2..).unwrap_or_default()) {
+        Ok(parsed) => ExitCode::from(prove(&parsed, open, out, err)),
+        Err(why) => {
+            let _ = writeln!(err, "js-agent: {VERB}: {why}");
+            ExitCode::from(status::USAGE)
+        }
+    }
+}
+
+/// The production runtime over `config`: the real supervisor (this program) and the pool of
+/// `--accounts` on this Mac.
+fn open_production(config: NativeConfig) -> Result<NativeRuntime, String> {
+    let launcher =
+        SystemLauncher::current().map_err(|why| format!("the agent's own path: {why}"))?;
+    NativeRuntime::open(Arc::new(launcher), config, 1).map_err(|why| format!("open: {}", why.0))
+}
+
+/// Opens the runtime with `open` and runs the job of `args`; the exit status.
+fn prove(args: &Args, open: Opener<'_>, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let Some(state) = &args.state else {
         let _ = writeln!(err, "js-agent: {VERB}: --state is required");
         return status::USAGE;
@@ -170,17 +194,10 @@ fn prove(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let held = grant::ask(grant::list(Path::new(grant::PRIVACY_DIR)));
     let _ = writeln!(out, "full disk access: {}", held.as_str());
     let config = settings.with_full_disk_access(held).config().clone();
-    let launcher = match SystemLauncher::current() {
-        Ok(launcher) => Arc::new(launcher),
-        Err(why) => {
-            let _ = writeln!(out, "the agent's own path: {why}");
-            return status::REFUSED;
-        }
-    };
-    let mut runtime = match NativeRuntime::open(launcher, config, 1) {
+    let mut runtime = match open(config) {
         Ok(runtime) => runtime,
         Err(why) => {
-            let _ = writeln!(out, "open: {}", why.0);
+            let _ = writeln!(out, "{why}");
             return status::REFUSED;
         }
     };

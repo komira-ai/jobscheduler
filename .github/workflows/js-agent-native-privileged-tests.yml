@@ -69,12 +69,7 @@ jobs:
           esac
           # The supervisor the test starts: the js-agent binary cargo built for the test, shipped
           # beside it (the test takes the js-agent next to itself).
-          agent="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == false and .target.name == "js-agent" and (.target.kind | index("bin")) != null and .executable != null) | .executable' build.json)"
-          if [ "$(printf '%s\n' "$agent" | grep -c .)" != 1 ]; then
-            echo "::error::expected exactly one js-agent executable, got: $agent"
-            exit 1
-          fi
-          cp "$agent" dist/js-agent
+          cp "target/$TARGET/debug/js-agent" dist/js-agent
           (cd dist && shasum -a 256 native_privileged js-agent > SHA256SUMS)
           sha="$(head -n 1 dist/SHA256SUMS | cut -d ' ' -f 1)"
           {

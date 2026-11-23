@@ -686,7 +686,10 @@ fn the_lookups_after_the_retirement_are_printed_round_by_round() {
          processes=[]"
             .to_owned(),
     ] {
-        assert!(out.lines().any(|said| said == line), "{line}\n{out}");
+        assert!(
+            out.lines().any(|said| said == line),
+            "a line the test expects is not in the output"
+        );
     }
     assert_eq!(rig.fake.state().pauses, 1);
     assert_eq!(

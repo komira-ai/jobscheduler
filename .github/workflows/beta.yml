@@ -94,6 +94,11 @@ jobs:
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job, but with js-sim-cell's feature `slow-families` on, which that job leaves off.
       - run: cargo test --workspace --locked --no-fail-fast --features js-sim-cell/slow-families --exclude js-contain --exclude js-host-step --exclude js-mac-first-install --exclude js-mdm
+      # The account module's privileged calls run for real, as root (crates/js-agent/src/mac_accounts/macos/root_tests.rs):
+      # a directory record made and deleted, every process of a uid killed, a program run as an account.
+      # The run above skips them by name (#[ignore], with the reason); this step runs exactly them.
+      - name: Run the account module's root tests
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --lib --locked -- --ignored --test-threads=1 mac_accounts::macos::root_tests
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -102,6 +107,12 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      # The supervisor's privileged calls (crates/js-agent/tests/mac_supervisor_root.rs, every
+      # test `#[ignore]`, so the step above lists them as ignored and runs none): the real audit
+      # session, drop to the slot user and limits, each read back from the system, as root.
+      # It runs after the cache is saved, so no file root writes into `target` is cached.
+      - name: Run the supervisor's root tests as root
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test mac_supervisor_root --locked -- --ignored --nocapture --test-threads=1
       # The native runtime's root tests (crates/js-agent/tests/native_privileged.rs, each
       # `#[ignore]` by name in the run above): a real account pool over the Mac's directory and
       # processes, the real supervisor, the run directories given to the slot account, a stop

@@ -208,6 +208,22 @@ fn try_exit_answers_at_once() {
     assert_eq!(run.try_exit().unwrap_err().to_string(), "gone");
 }
 
+/// Asserts that a `try_exit` that answers with the exit record also looks at the supervisor's
+/// process, so a supervisor that has ended is reaped: the fake reports its end (and marks that
+/// it was asked) at that look. Catches a supervisor left a zombie of the agent after its run.
+#[test]
+fn try_exit_with_the_record_reaps_the_supervisor() {
+    let dir = records("reaped");
+    let (record, text) = profile_refused();
+    fs::write(dir.join(EXIT), &text).unwrap();
+    let mut child = FakeChild::new([Ok(Some(exited(0)))]);
+    let asked = dir.join("asked");
+    child.at_end = Some((asked.clone(), "reaped".to_owned()));
+    let (mut run, _) = watched(&dir, child, None);
+    assert_eq!(run.try_exit().unwrap(), Some(record));
+    assert_eq!(fs::read_to_string(&asked).unwrap(), "reaped");
+}
+
 /// The program the real launcher starts, standing in for the agent's own: a shell given the
 /// verb's command line reads its first word as a script in the working directory, which here
 /// records what it was started with and exits 3 with no record.

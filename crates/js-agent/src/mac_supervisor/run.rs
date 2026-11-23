@@ -124,12 +124,15 @@ pub fn supervise(host: &dyn SuperviseHost, spec: &SuperviseSpec, err: &mut dyn W
     status_of(&record)
 }
 
-/// A started job and the audit session it runs in.
+/// The job, started, and the audit session it runs in.
 type Started = (Box<dyn JobChild>, Option<i32>);
+
+/// The step that failed, and why.
+type Failed = (Step, io::Error);
 
 /// The steps up to the job's start: the job and the audit session it runs in, or the step that
 /// failed and why.
-fn start(host: &dyn SuperviseHost, spec: &SuperviseSpec) -> Result<Started, (Step, io::Error)> {
+fn start(host: &dyn SuperviseHost, spec: &SuperviseSpec) -> Result<Started, Failed> {
     let asid = if spec.new_session {
         Some(
             host.audit_session(spec.uid)
@@ -152,7 +155,7 @@ fn start(host: &dyn SuperviseHost, spec: &SuperviseSpec) -> Result<Started, (Ste
 }
 
 /// The error of `step`, with the step.
-fn at(step: Step) -> impl Fn(io::Error) -> (Step, io::Error) {
+fn at(step: Step) -> impl Fn(io::Error) -> Failed {
     move |why| (step, why)
 }
 
