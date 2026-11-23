@@ -28,3 +28,11 @@ js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but
+# does not run its tests: src/net.rs's tests bind a Unix socket below TMPDIR, which on the farm is
+# too deep for a socket's path (komira-ai/buildrules#170). They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]
