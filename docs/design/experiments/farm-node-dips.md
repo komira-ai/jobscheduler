@@ -1,4 +1,4 @@
-# Why the Linux farm nodes dip to 5-30% CPU while builds run (2026-11-23, 01h-13h UTC)
+# Why the Linux farm nodes dip to 1-35% CPU while builds run (2026-11-23, 01h-13h UTC)
 
 Status: investigation record. It states what was measured and what it shows. It changes nothing on the farm and decides nothing; the follow-ups are in section 6.
 
@@ -6,8 +6,8 @@ Status: investigation record. It states what was measured and what it shows. It 
 
 The six Linux nodes (88 cores, 251 GiB each) averaged 65-73% CPU over 01h-13h UTC. sysstat's 10-minute samples show each node falling to 1-35% busy for one or two samples at a time, which read as an hourly sawtooth. Two separate things cause the idle CPU, and neither is on the nodes:
 
-1. **The deep dips are gaps in demand, and all six nodes dip together.** In every deep dip the job service's queue held no Linux job: each job submitted was placed within about a second. The farm's only demand is komira's CI, and during each dip every build in flight was in a critical-path tail: one to three long Mojo compile or link actions (`komira_bench_runner_main`, `copy_runner`, `bench_q6_phases`), with nothing behind them to run in parallel. Several merge-queue builds share these tails and end together. The dips are not periodic; they come every 45 to 140 minutes, whenever the builds in flight reach their tails at the same time.
-2. **When work does wait, memory bookings refuse it, not CPU.** In 552 of 720 minutes Linux jobs waited in the queue, and those minutes hold 59% of the fleet's idle CPU. In 323 of them every node was booked at 220 GiB or more, against about 250 GiB that the pool books, while only 15-45 of its 88 cores were booked. Jobs book 3.2 times the memory they actually reach. Physical memory was never short (sysstat's lowest MemAvailable was 97 GiB).
+1. **The deep dips are gaps in demand, and all six nodes dip together.** In the nine deep-dip windows the job service's queue of Linux jobs was empty, or held a short burst for at most a few minutes (section 2), and each job submitted was otherwise placed within about a second. The farm's only demand is komira's CI, and during each dip every build in flight was in a critical-path tail: one to three long Mojo compile or link actions (`komira_bench_runner_main`, `copy_runner`, `bench_q6_phases`), with nothing behind them to run in parallel. Several merge-queue builds share these tails and end together. The dips are not periodic; they come every 45 to 140 minutes, whenever the builds in flight reach their tails at the same time.
+2. **When work does wait, memory bookings refuse it, not CPU.** In 552 of 720 minutes Linux jobs waited in the queue, and those minutes hold 59% of the fleet's idle CPU. In 323 of them every node was booked at 220 GiB or more, against about 250 GiB that the pool books, while only 14-45 of its 88 cores were booked. A job books on average 3.2 times its own measured peak (2.0 times when weighted by how long each job runs). Physical memory was never short (sysstat's lowest MemAvailable was 97 GiB).
 
 No node-local source lines up with the dips: no timer, cron job, OOM kill, tierstore sweep, hostkeeper update or js-agent restart falls in all of them (section 4).
 
@@ -18,7 +18,7 @@ All times are UTC on 2026-11-23. Everything was read, nothing changed.
 | source | what was read | grain |
 |---|---|---|
 | sysstat on each node | `sadf -d -U sa23 -- -u` and `-q` | 10 min (the collector's interval, its finest) |
-| the job store | every job row (submitted, placed, ended, host, labels) and allocation row (host, booking, created, freed), decoded with `js_jobs::rows` | the store's clock (Unix time; checked against the agents' `placed_at_ms`, which agree to 1 ms) |
+| the job store | every job row (submitted, placed, ended, host, labels) and allocation row (host, booking, created, freed), decoded with `js_jobs::rows` (behind the crate's `test-support` feature) | the store's clock (Unix time; checked against the agents' `placed_at_ms`, which agree to 1 ms) |
 | js-agent on each node | `job: Started` (booking) and `job: result` (booked, measured peak, CPU time), restarts and handovers | 1 s |
 | kbf's frontend | the service log | per event |
 | komira CI | each run's jobs and steps, and buck2's `Waiting on ...` lines in the build logs | 7 s |
@@ -78,18 +78,18 @@ A job that names no size is booked what its class's history says (`docs/design/s
 | `komira.src.optimizer.optimizer.build` | `run.gate` | 322 | 0.0 GiB | 0.1 GiB | 14.0 GiB |
 | `komira_decimal_compare_conformance` | `run.gate` | 856 | 0.1 GiB | 0.1 GiB | 15.5 GiB |
 
-Over the day, the 70,712 runs with both figures booked 15.0k GiB-hours against 7.5k GiB-hours of their own peaks. Gate actions booked 25 times their peak and coverage runs 32 times. `mojo_compile` holds 97% of the booked memory-time at 2.0 times its peak, because one target's compiles differ: the median is a quarter of the largest.
+Over the day, the 70,712 runs with both figures booked 15.0k GiB-hours against 7.5k GiB-hours of their own peaks, 2.0 times. Counted per job instead (each job's booking against its own peak, not weighted by run time), the bookings sum to 3.2 times the peaks, because short jobs are the most over-booked. Gate actions booked 25 times their peak and coverage runs 32 times. `mojo_compile` holds 97% of the booked memory-time at 2.0 times its peak, because one target's compiles differ: the median is a quarter of the largest.
 
 The other 229 queued minutes, where some node had memory room, were not studied here.
 
 ## 4. Node-local sources: none lines up
 
-Checked on all six nodes against all the deep dips:
+Checked on all six nodes against the nine windows of section 2:
 
 - **Timers and cron.** No unit or cron job starts on all six nodes inside the dips. `apt-daily`, `apt-daily-upgrade`, `man-db` and `motd-news` start at different times per node. The hourly `cron.hourly` runs at :17 and sysstat at every 10 minutes, in every hour alike.
-- **OOM.** No `systemd-oomd` lines. The kernel's memory-cgroup OOM kills of job processes fall only at 04:14-04:21, plus one node at 04:39, after the 03:23-04:09 dip ended.
+- **OOM.** No `systemd-oomd` lines. The kernel's memory-cgroup OOM kills of job processes fall only at 04:14-04:21, plus one node at 04:39, after the 03:50-04:08 window ended.
 - **tierstore.** The put-directory sweep logs once a minute, every minute, on every node, at the same rate in and out of the dips. No eviction, GC or reconciler bursts. Its only burst ("the fill socket is not answering") came with its update restart at 04:46-04:59.
-- **hostkeeper.** Its hourly `maintenance: looked` lines come at about :19 and do not match. It restarted on all six nodes at 07:44-07:46, at the start of one of the eight dips; nothing was cordoned and the agents' job counts did not change around it.
+- **hostkeeper.** Its hourly `maintenance: looked` lines come at about :19 and do not match. It restarted on all six nodes at 07:44-07:46, at the start of one of the nine windows (07:45-07:54); nothing was cordoned and the agents' job counts did not change around it.
 - **js-agent.** It restarted in place on all six nodes at 04:37, 05:29, 07:18, 08:10, 08:59, 12:03 and 12:41 (the update hook hands its jobs over without a drain). Only 08:59 falls inside a dip, and that dip started at 08:54.
 
 ## 5. Decisions taken in reading the data
