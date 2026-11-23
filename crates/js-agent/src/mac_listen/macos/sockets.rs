@@ -139,22 +139,44 @@ pub(super) fn list() -> io::Result<Vec<Listener>> {
     Ok(found)
 }
 
-/// Whether an errno says the process or the descriptor is gone.
-fn gone(why: &io::Error) -> bool {
-    matches!(why.raw_os_error(), Some(libc::ESRCH | libc::EBADF))
+/// What a `libproc` call that answered no bytes left in `errno`, which is cleared before each
+/// call: the wrappers return 0 both for a failed call and for an empty answer.
+enum Empty {
+    /// No error: the answer was empty.
+    Nothing,
+    /// The process or the descriptor is gone.
+    Gone,
+}
+
+/// Clears `errno`, so that an answer of no bytes can be told from a failed call.
+fn clear_errno() {
+    // SAFETY: `__error` gives the calling thread's own errno slot, valid while the thread
+    // lives; writing an int there is what every C caller does.
+    unsafe { *libc::__error() = 0 };
+}
+
+/// What `errno` says of a call that answered no bytes; `what` names it for an error.
+fn empty(what: &dyn Fn() -> String) -> io::Result<Empty> {
+    let why = io::Error::last_os_error();
+    match why.raw_os_error() {
+        Some(0) => Ok(Empty::Nothing),
+        Some(libc::ESRCH | libc::EBADF) => Ok(Empty::Gone),
+        _ => Err(io::Error::new(why.kind(), format!("{}: {why}", what()))),
+    }
 }
 
 /// The descriptors of `pid`, or `None` when it is gone.
 fn descriptors(pid: libc::pid_t) -> io::Result<Option<Vec<libc::proc_fdinfo>>> {
+    let what = || format!("process {pid}");
+    clear_errno();
     // SAFETY: a null buffer of size 0 asks only for the room the descriptors need; nothing
     // is written.
     let room =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     if room <= 0 {
-        let why = io::Error::last_os_error();
-        return match gone(&why) {
-            true => Ok(None),
-            false => Err(io::Error::new(why.kind(), format!("process {pid}: {why}"))),
+        return match empty(&what)? {
+            Empty::Nothing => Ok(Some(Vec::new())),
+            Empty::Gone => Ok(None),
         };
     }
     let entry = size_of::<libc::proc_fdinfo>();
@@ -162,6 +184,7 @@ fn descriptors(pid: libc::pid_t) -> io::Result<Option<Vec<libc::proc_fdinfo>>> {
     let count = room.unsigned_abs() as usize / entry + 64;
     let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
     let bytes = i32::try_from(count * entry).map_err(io::Error::other)?;
+    clear_errno();
     // SAFETY: `fds` owns room for `count` entries, `bytes` bytes, and outlives the call,
     // which writes at most `bytes` bytes of `proc_fdinfo` records and returns how many.
     let wrote = unsafe {
@@ -174,10 +197,9 @@ fn descriptors(pid: libc::pid_t) -> io::Result<Option<Vec<libc::proc_fdinfo>>> {
         )
     };
     if wrote <= 0 {
-        let why = io::Error::last_os_error();
-        return match gone(&why) {
-            true => Ok(None),
-            false => Err(io::Error::new(why.kind(), format!("process {pid}: {why}"))),
+        return match empty(&what)? {
+            Empty::Nothing => Ok(Some(Vec::new())),
+            Empty::Gone => Ok(None),
         };
     }
     let got = wrote.unsigned_abs() as usize / entry;
@@ -192,6 +214,7 @@ fn descriptors(pid: libc::pid_t) -> io::Result<Option<Vec<libc::proc_fdinfo>>> {
 fn listening(pid: libc::pid_t, fd: i32) -> io::Result<Option<(IpAddr, u16)>> {
     let mut answer = std::mem::MaybeUninit::<Answer>::zeroed();
     let size = i32::try_from(size_of::<Answer>()).map_err(io::Error::other)?;
+    clear_errno();
     // SAFETY: `answer` is a writable buffer of `size` bytes, ours for the call, which writes
     // at most that many bytes.
     let wrote = unsafe {
@@ -204,13 +227,11 @@ fn listening(pid: libc::pid_t, fd: i32) -> io::Result<Option<(IpAddr, u16)>> {
         )
     };
     if wrote <= 0 {
-        let why = io::Error::last_os_error();
-        return match gone(&why) {
-            true => Ok(None),
-            false => Err(io::Error::new(
-                why.kind(),
-                format!("process {pid}, descriptor {fd}: {why}"),
-            )),
+        let what = || format!("process {pid}, descriptor {fd}");
+        // An empty answer for a socket is no answer the kernel gives: refused, not skipped.
+        return match empty(&what)? {
+            Empty::Gone => Ok(None),
+            Empty::Nothing => Err(io::Error::other(format!("{}: an empty answer", what()))),
         };
     }
     if (wrote.unsigned_abs() as usize) < size_of::<SocketFdInfo>() {

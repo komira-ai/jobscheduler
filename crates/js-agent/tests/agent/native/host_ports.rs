@@ -41,7 +41,7 @@ fn denies(port: u16) -> [String; 2] {
 }
 
 /// A rig at `ceiling`, its host ports `12049`, its host's listeners `found`.
-fn rig(name: &str, ceiling: Ceiling, table: Arc<dyn ListenerTable>) -> Rig {
+fn rig_at(name: &str, ceiling: Ceiling, table: Arc<dyn ListenerTable>) -> Rig {
     let mut rig = Rig::with(name, |config| {
         config.network = ceiling;
         config.host_ports = [12049].into();
@@ -65,7 +65,7 @@ fn a_runs_profile_denies_the_host_ports_and_the_hosts_listeners() {
         listener("127.0.0.1", 3000, me()),
         listener("10.0.0.1", 2222, 0),
     ];
-    let mut rig = rig(
+    let mut rig = rig_at(
         "ports-denied",
         Ceiling::Loopback,
         Arc::new(Listening(found)),
@@ -93,7 +93,7 @@ fn a_runs_profile_denies_the_host_ports_and_the_hosts_listeners() {
 /// listing taken as "no listener", which would start a run with the host's services reachable.
 #[test]
 fn an_unreadable_host_fails_a_loopback_start_and_not_an_off_one() {
-    let mut rig = rig("ports-unreadable", Ceiling::Loopback, Arc::new(Unreadable));
+    let mut rig = rig_at("ports-unreadable", Ceiling::Loopback, Arc::new(Unreadable));
     let spec = rig.spec("r1", native("/usr/bin/true", &[]));
     let why = rig.rt.create_and_start(&spec).unwrap_err().to_string();
     assert!(
@@ -102,7 +102,7 @@ fn an_unreadable_host_fails_a_loopback_start_and_not_an_off_one() {
     );
     assert!(rig.launcher.launched().is_empty(), "nothing was started");
 
-    let mut off = rig("ports-off", Ceiling::Off, Arc::new(Unreadable));
+    let mut off = rig_at("ports-off", Ceiling::Off, Arc::new(Unreadable));
     let spec = off.spec("r1", native("/usr/bin/true", &[]));
     off.rt.create_and_start(&spec).unwrap();
     assert!(off.launcher.last().profile.contains("(deny network*)"));
@@ -116,7 +116,7 @@ fn an_unreadable_host_fails_a_loopback_start_and_not_an_off_one() {
 #[test]
 fn the_agents_start_needs_the_listeners_only_when_a_job_reaches_loopback() {
     for ceiling in [Ceiling::Loopback, Ceiling::Open] {
-        let rig = rig("ports-start", ceiling, Arc::new(Unreadable));
+        let rig = rig_at("ports-start", ceiling, Arc::new(Unreadable));
         let why = rig.rt.check_egress().unwrap_err().to_string();
         assert_eq!(
             why,
@@ -125,9 +125,31 @@ fn the_agents_start_needs_the_listeners_only_when_a_job_reaches_loopback() {
             "{ceiling}"
         );
         let found = Arc::new(Listening(vec![listener("127.0.0.1", 8021, 0)]));
-        let readable = rig("ports-start-ok", ceiling, found);
+        let readable = rig_at("ports-start-ok", ceiling, found);
         assert!(readable.rt.check_egress().is_ok(), "{ceiling}");
     }
-    let off = rig("ports-start-off", Ceiling::Off, Arc::new(Unreadable));
+    let off = rig_at("ports-start-off", Ceiling::Off, Arc::new(Unreadable));
     assert!(off.rt.check_egress().is_ok());
+}
+
+/// Asserts that an agent whose host ports and host listeners together name more ports than a
+/// profile holds (256) does not start, naming `--native-host-port` and the count, and that one
+/// at the bound starts. Catches an agent that starts and then fails every run at its profile.
+#[test]
+fn the_agent_does_not_start_with_more_ports_to_deny_than_a_profile_holds() {
+    let many = |count: u16| -> Arc<dyn ListenerTable> {
+        let found = (20_000..20_000 + count)
+            .map(|port| listener("127.0.0.1", port, 0))
+            .collect();
+        Arc::new(Listening(found))
+    };
+    let over = rig_at("ports-many", Ceiling::Loopback, many(256));
+    let why = over.rt.check_egress().unwrap_err().to_string();
+    assert_eq!(
+        why,
+        "--native-host-port: 257 ports to deny (these and the host's listeners), more than \
+         the 256 a profile holds"
+    );
+    let at = rig_at("ports-at-bound", Ceiling::Loopback, many(255));
+    assert!(at.rt.check_egress().is_ok());
 }

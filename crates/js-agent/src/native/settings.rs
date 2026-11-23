@@ -349,9 +349,6 @@ impl NativeSettings {
     }
 }
 
-/// The account pool of `--native-accounts` (`state`): its slots, which
-/// `--native-account-range` must give, and how many accounts it keeps ready (by default one, at
-/// most one per slot).
 /// The ports of `--native-host-port`, each once.
 fn host_ports_of(given: &[u16]) -> Result<BTreeSet<u16>, String> {
     if given.contains(&0) {
@@ -367,6 +364,9 @@ fn host_ports_of(given: &[u16]) -> Result<BTreeSet<u16>, String> {
     Ok(ports)
 }
 
+/// The account pool of `--native-accounts` (`state`): its slots, which
+/// `--native-account-range` must give, and how many accounts it keeps ready (by default one, at
+/// most one per slot).
 fn accounts_of(
     state: &Path,
     range: Option<&str>,

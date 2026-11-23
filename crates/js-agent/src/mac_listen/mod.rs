@@ -9,6 +9,9 @@
 //! service restarts), and the port of every such listener the listing finds when the run
 //! starts (so a service no flag names is denied too, whatever its port).
 //!
+//! Only TCP listeners are listed: a host service that answers on UDP alone is denied only when
+//! its port is a `--native-host-port` (whose deny covers every protocol).
+//!
 //! A listener of a job account (a uid of the pool's slots, effective or real) is not denied:
 //! two jobs of one Mac can reach each other's loopback listeners, which two Linux jobs, each
 //! in its own network namespace, cannot.
@@ -101,12 +104,18 @@ pub fn denied_ports(
     jobs: Slots,
 ) -> io::Result<Vec<u16>> {
     let found = host_listeners(table.listeners()?, jobs);
-    let ports: BTreeSet<u16> = configured
+    Ok(ports(configured, &found))
+}
+
+/// Every port of `configured` and of the host listeners `found`, each once, lowest first.
+#[must_use]
+pub fn ports(configured: &BTreeSet<u16>, found: &[Listener]) -> Vec<u16> {
+    let all: BTreeSet<u16> = configured
         .iter()
         .copied()
         .chain(found.iter().map(|listener| listener.port))
         .collect();
-    Ok(ports.into_iter().collect())
+    all.into_iter().collect()
 }
 
 /// What the log says of a host listener: `name (pid P, uid U) on ADDR:PORT`, with the

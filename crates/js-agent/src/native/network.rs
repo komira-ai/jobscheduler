@@ -219,9 +219,9 @@ mod tests {
 
     const JOB_LEVELS: [JobNetwork; 3] = [JobNetwork::None, JobNetwork::AllowList, JobNetwork::Open];
 
-    /// Asserts that a job that asks for no network gets the sandbox with the network denied,
-    /// which needs no anchor. Catches `none` mapped to loopback or to a level that opens the
-    /// network.
+    /// Asserts that a job of the level `none` is `NativeNet::Off` (whose profile is loopback
+    /// alone, or no network under the ceiling `off`: `profile::level`), which needs no anchor.
+    /// Catches `none` mapped to a level that opens the network or asks for the pf anchor.
     #[test]
     fn none_maps_to_off() {
         assert_eq!(wanted(JobNetwork::None), NativeNet::Off);

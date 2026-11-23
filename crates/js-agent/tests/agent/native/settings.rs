@@ -777,7 +777,6 @@ fn the_check_the_flags_make_asks_the_pfctl_they_name() {
     ));
 }
 
-/// The settings of `network` with the pf flags `pf`.
 /// Asserts that `--native-host-port` reaches the configuration as its ports, each once and
 /// lowest first, that no flag gives none, and that port 0 and more than 64 ports are refused
 /// naming the flag, by exact text. Catches a host port dropped between the flag and the
@@ -810,6 +809,7 @@ fn the_host_ports_are_checked_and_handed_on() {
     assert_eq!(with(&most).unwrap().config().host_ports.len(), 64);
 }
 
+/// The settings of `network` with the pf flags `pf`.
 fn with_network(network: &str, pf: PfFlags<'_>) -> Result<NativeSettings, String> {
     let mut given = flags(Some(network), &[]);
     given.pf = pf;

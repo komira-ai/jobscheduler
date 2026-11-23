@@ -118,10 +118,9 @@ pub struct Flags {
     /// as `egress` (`none` for `off` and `loopback`). Needs `--native-accounts`.
     #[arg(long, value_name = "off|loopback|on|open")]
     pub native_network: Option<String>,
-    /// A port the host's own services hold on loopback; repeatable, from 1 to 65535, at most
-    /// 64. Every run whose profile reaches loopback is denied listening on it and connecting
-    /// to it, whether or not the service listens then, beside the port of every listener of
-    /// the host found at the run's start. Needs `--native-accounts`.
+    /// A port the host's own services hold on loopback (repeatable, 1 to 65535, at most 64),
+    /// denied to every run that reaches loopback whether or not it is listened on, beside the
+    /// ports of the host's listeners found at the run's start. Needs `--native-accounts`.
     #[arg(long = "native-host-port", value_name = "PORT")]
     pub native_host_ports: Vec<u16>,
     /// A path no native run may read, in addition to the agent's own roots, its token,

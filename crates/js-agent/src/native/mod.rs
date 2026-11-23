@@ -111,7 +111,8 @@
 //! not) and the port of every listener on loopback or a wildcard address that no job account
 //! holds, listed when the run starts ([`crate::mac_listen`]). A listing that fails fails the
 //! start. The agent lists the host's listeners once at its own start too, and does not start
-//! when it cannot read them. Two jobs of one Mac can reach each other's listeners.
+//! when it cannot read them. Only TCP listeners are listed; a UDP-only service is denied when
+//! its port is a `--native-host-port`. Two jobs of one Mac can reach each other's listeners.
 //!
 //! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
 //! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
@@ -157,7 +158,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::{
     BUNDLE_PROGRAM_PREFIX, HostPort, InputRef, LogReport, LogTail, NativeSpec, refusal,
 };
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, MAX_DENIED_PORTS, Net, ReadModel};
 use js_mac_session::full_disk_access::FullDiskAccess;
 
 use crate::bundle::Placer;
@@ -476,8 +477,9 @@ impl NativeRuntime {
     }
 
     /// At the agent's start, when a job can reach loopback (a ceiling above `off`): the
-    /// host's listeners are read once, so an agent that could not deny them does not start,
-    /// and each one a run will be denied is logged.
+    /// host's listeners are read once, so an agent that could not deny them does not start
+    /// (nor one with more ports to deny than a profile holds), and each one a run will be
+    /// denied is logged.
     fn host_listeners_readable(&self) -> Result<(), RuntimeError> {
         if self.config.network == Ceiling::Off {
             return Ok(());
@@ -488,11 +490,22 @@ impl NativeRuntime {
                 &format!("a job reaches loopback, and the host's listeners cannot be read: {why}"),
             )
         })?;
-        let slots = self.config.accounts.slots;
-        for listener in crate::mac_listen::host_listeners(found, slots) {
+        let host = crate::mac_listen::host_listeners(found, self.config.accounts.slots);
+        let ports = crate::mac_listen::ports(&self.config.host_ports, &host);
+        if ports.len() > MAX_DENIED_PORTS {
+            return Err(fail(
+                &"--native-host-port",
+                &format!(
+                    "{} ports to deny (these and the host's listeners), more than the \
+                     {MAX_DENIED_PORTS} a profile holds",
+                    ports.len()
+                ),
+            ));
+        }
+        for listener in &host {
             tracing::info!(
                 "the host's listener {} is denied to every run",
-                crate::mac_listen::describe(&listener)
+                crate::mac_listen::describe(listener)
             );
         }
         Ok(())
