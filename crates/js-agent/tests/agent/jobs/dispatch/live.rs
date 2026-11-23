@@ -232,9 +232,10 @@ fn a_placed_job_reaches_a_polling_agent_through_the_route_and_runs_to_its_end() 
     assert!(first.get("acks").is_none(), "{first}");
     assert!(queue(&jobs, "h1").is_empty());
 
-    // The first job is placed at once and its start is handed out by the route, claimed.
+    // The first job is placed by the server's placement poller, which the submit pokes, and
+    // its start is handed out by the route, claimed.
     let a = submit(&server, 1000);
-    assert_eq!(server.job_state(&a), "JOB_STATE_PLACED");
+    assert_eq!(server.left_the_queue(&a), "JOB_STATE_PLACED");
     let handing = poller.handed(&mut polls);
     assert_eq!(
         handed_out(std::slice::from_ref(&handing)),

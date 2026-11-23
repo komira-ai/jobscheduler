@@ -85,7 +85,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          memory_schedulable_percent, max_instances, max_machines, max_spend_per_hour, max_spend_per_day, \
          idle, max_age, min_host_lifetime, boot_timeout, boot_fail_cooldown_max, \
          boot_fail_trip_after, boot_fail_reset_after, launch, live_until, agent, join_token_file, provider, \
-         platforms, provider_limits, max_queue_wait, start_timeout, path_grace, network"
+         platforms, provider_limits, max_queue_wait, start_timeout, capacity_requeues, capacity_refusal_bar, path_grace, network"
     );
 }
 

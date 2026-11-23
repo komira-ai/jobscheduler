@@ -9,7 +9,11 @@
 //! never cancelled for the wrong client. Any other job is cancelled by one call of the tables,
 //! [`js_jobs::JobStore::request_cancel`], in one transaction (a job that has not ended is
 //! never swept, so it is still the job read), and the answer is the job as that call leaves
-//! it:
+//! it. When another writer moved the job's row between that call's read and its commit
+//! ([`JobStoreError::Stale`]: most often the placement poller placing a job just submitted,
+//! [`crate::poller`]), the call is made again on the row as it now stands, until a commit
+//! lands on the row it read: each such failure is another writer's commit to the job, so the
+//! cancel is decided on the job's newest state and never answered as a failed write for it:
 //!
 //! | the job | what is committed | the answer |
 //! |---|---|---|
@@ -29,7 +33,7 @@
 //! although the read found it, which only a store that lost the row can do: a job that has
 //! not ended is never swept. A `job_id` that is not a job id is `INVALID_ARGUMENT`, `field: jobId` (400).
 
-use js_jobs::JobId;
+use js_jobs::{JobId, JobRecord, JobStoreError};
 use js_proto::v1::{CancelJobRequest, CancelJobResponse};
 use tonic::{Request, Response, Status};
 
@@ -78,13 +82,26 @@ pub(super) async fn cancel_job(
     let job = match read.state.is_ended() {
         true => read,
         false => api
-            .on_tables(move |jobs| jobs.request_cancel(&id))
+            .on_tables(move |jobs| until_landed(|| jobs.request_cancel(&id)))
             .await
             .map_err(not_written())?,
     };
     Ok(Response::new(CancelJobResponse {
         job: Some(view::job(&job)),
     }))
+}
+
+/// `cancel` made again for as long as it fails [`JobStoreError::Stale`] (the row it read moved
+/// before its commit), and then what it returns.
+fn until_landed(
+    cancel: impl Fn() -> Result<JobRecord, JobStoreError>,
+) -> Result<JobRecord, JobStoreError> {
+    loop {
+        match cancel() {
+            Err(JobStoreError::Stale { .. }) => continue,
+            landed => return landed,
+        }
+    }
 }
 
 #[cfg(test)]

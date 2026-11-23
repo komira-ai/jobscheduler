@@ -28,6 +28,7 @@ const DAY: Duration = Duration::from_secs(24 * 3600);
 const LIMITS: JobLimits = JobLimits {
     max_queue_wait: Duration::from_secs(30 * 60),
     start_timeout: Duration::from_secs(365 * 24 * 3600),
+    ..JobLimits::DEFAULT
 };
 
 /// The error a stopped database answers.

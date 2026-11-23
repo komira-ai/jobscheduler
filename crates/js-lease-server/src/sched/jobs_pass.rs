@@ -1,6 +1,7 @@
-//! The server's pass over the queued jobs ([`Agents::place_jobs`], which the tick runs, and
-//! [`Agents::place_jobs_after_beat`], which a heartbeat runs and which is skipped when nothing
-//! the pass depends on changed since the last one): it reads the hosts it offers from the job
+//! The server's pass over the queued jobs ([`Agents::place_jobs`], which the tick runs and the
+//! placement poller runs for a submit's poke, and [`Agents::place_jobs_after_beat`], which the
+//! poller runs for a heartbeat's poke and which is skipped when nothing the pass depends on
+//! changed since the last one, [`crate::poller`]): it reads the hosts it offers from the job
 //! store before each pass ([`super::jobs_rows`]: every host whose `node/` row is live, whichever
 //! server took its hello, each with the network ceiling its hello advertises, whether it
 //! reported that it runs host jobs and the machine provider its binding names, with its position
@@ -111,14 +112,14 @@ impl Agents {
     /// the pass of the server that holds it takes the taint on. The taint rows such a pass took
     /// on are returned too.
     ///
-    /// The tick runs this pass whatever changed; a heartbeat runs
-    /// [`Agents::place_jobs_after_beat`].
+    /// The tick, and the placement poller after a submit's poke, run this pass whatever
+    /// changed; after a heartbeat's poke the poller runs [`Agents::place_jobs_after_beat`].
     pub(crate) fn place_jobs(&self) -> Vec<(HostId, JobId)> {
         self.pass_over_queue(Pass::Always)
     }
 
-    /// The pass a heartbeat runs: [`Agents::place_jobs`], skipped when nothing it depends on
-    /// changed since the last pass that ran
+    /// The pass the placement poller runs for a heartbeat's poke: [`Agents::place_jobs`],
+    /// skipped when nothing it depends on changed since the last pass that ran
     /// ([`SchedPlacer::place_jobs_if_changed`](super::place::SchedPlacer::place_jobs_if_changed)):
     /// the job tables, the engine's picture of the hosts, the hosts offered with what each
     /// offers, the hosts heard from and what pass 2 told. The hosts are read from the rows and

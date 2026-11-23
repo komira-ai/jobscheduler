@@ -294,6 +294,8 @@ max_spend_per_hour = "12.00"
 max_spend_per_day = "96.00"
 max_queue_wait = "30m"                  # default 1h
 start_timeout = "15m"                   # default 15m
+capacity_requeues = 8                   # default 8; 0 ends a job at the first refusal for capacity
+capacity_refusal_bar = "60s"            # default 60s; how long a host that refused for capacity is kept off the job
 path_grace = "15s"                      # default 15s
 
 [pool.provider_limits.lambda]
@@ -329,7 +331,10 @@ keeps its place once no host could serve it, after which it is refused `no-capab
 pool). The job pass of the tick (design 6.1, step 1) ends a job of the server's job tables that waits past `max_queue_wait` (counted
 from when it was queued) as `no-capacity`, and a placed or starting one that has not started within `start_timeout` (counted from its
 placement) as `start-timeout`; each deadline is held to at least the server's boot plus 120 s, so an outage fails no job at the first
-tick. A joined pool has neither key and takes the defaults. Nothing acts on the limits yet: the pick of an offer when a pool acquires a
+tick. `capacity_requeues` (0 to 1000, default 8) is how many times a start a host refused for capacity (`no-capacity`) sends a job back to
+the queue; the refusal after that ends the job as failed to start, with a detail naming the hosts that refused it, and 0 ends it at the
+first. `capacity_refusal_bar` (a positive duration, default 60s) is how long the refusing host is kept off that job. A joined pool has none of
+these keys and takes the defaults. Nothing acts on the limits yet: the pick of an offer when a pool acquires a
 machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the provider's cached catalog is used before the tick fetches
 it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
 next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance

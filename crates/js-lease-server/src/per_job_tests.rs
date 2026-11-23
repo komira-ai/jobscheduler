@@ -55,6 +55,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         std::slice::from_ref(&long),
@@ -93,6 +94,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &listing,
         &[],
@@ -139,6 +141,7 @@ fn a_failed_end_commit_is_an_error() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &listing,
         &[],
@@ -186,6 +189,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         &[],
@@ -215,6 +219,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             layered_rootfs: false,
             mount_providers: &[],
             xcodes: &[],
+            limits: crate::job_expiry::JobLimits::DEFAULT,
         },
         &[],
         &[],
@@ -262,6 +267,7 @@ fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8, None).unwrap();
 
@@ -465,6 +471,7 @@ fn listed_end(
         layered_rootfs: false,
         mount_providers: &[],
         xcodes: &[],
+        limits: crate::job_expiry::JobLimits::DEFAULT,
     };
     let listing = [listed("job-a", HeldState::ExitedUnacked, Some(result))];
     let reply = serve(jobs, &context, &listing, &[], 8, None).unwrap();
@@ -563,6 +570,7 @@ fn the_usage_of_a_result_is_stored_with_the_jobs_output() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     };
     let stored = ResourceUsage {
         cpu_time: Duration::new(4, 500_001_000),
@@ -615,6 +623,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
         }),
         cpu_pressure_some_usec: Some(1_250_001),
         cpu_peak: None,
+        peak_swap_bytes: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &reported) else {
         panic!("a clean exit ends exited");
@@ -639,6 +648,7 @@ fn the_cpu_counters_of_a_usage_are_stored_when_reported_and_none_when_not() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak: None,
+        peak_swap_bytes: None,
     });
     let Some(JobEnd::Exited { output, .. }) = end_of(&job, &older) else {
         panic!("a clean exit ends exited");
@@ -668,6 +678,7 @@ fn the_cpu_peak_of_a_usage_is_stored_when_reported_and_none_when_not() {
         cpu_throttle: None,
         cpu_pressure_some_usec: None,
         cpu_peak,
+        peak_swap_bytes: None,
     };
     let stored = |reported: JobUsage| {
         let mut result = ended(Outcome::Succeeded, Some(0));
