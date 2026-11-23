@@ -1,7 +1,8 @@
 //! A start a held host or a host with no room refused, served through the per-job half of a
 //! heartbeat on the job tables alone: the job goes back to the queue with no failure counted,
 //! the bound on such requeues of each code ends it naming every host, the two bounds are kept
-//! apart, and a cancelled or running job, or another code, ends as before.
+//! apart, and a cancelled or running job, or another code, ends as before. A start refused
+//! while its host fetches the job's bundle is in [`bundle`].
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -20,6 +21,9 @@ use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 use crate::per_job::{BeatContext, JobReply, serve};
+
+#[path = "job_held_bundle_tests.rs"]
+mod bundle;
 
 /// The capacity requeue count and bar a pool that sets none has.
 const MAX_CAPACITY_REQUEUES: usize = JobLimits::DEFAULT.capacity_requeues;

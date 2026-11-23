@@ -316,7 +316,9 @@ pub const INVALID_CAPS: &str = "invalid-caps";
 /// `bundle` capability). The placement should not have sent it there; the agent refuses
 /// rather than run the program with the host's tools.
 pub const BUNDLE_UNSUPPORTED: &str = "bundle-unsupported";
-/// A start whose bundle the agent has begun to fetch and does not hold yet; ask again.
+/// A start whose bundle the agent has begun to fetch and does not hold yet; ask again. The job
+/// service sends such a job back to the queue, keeps it off the host for a short bar and places
+/// it again, on another host or on this one once the bar lapses; it is not the job's failure.
 pub const BUNDLE_PENDING: &str = "bundle-pending";
 /// A start whose bundle the agent does not hold, on an agent that fetches nothing
 /// (`--bundle-pull never`): the bundle was not prefetched before the job was placed.
