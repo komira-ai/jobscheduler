@@ -233,7 +233,7 @@ pub(crate) struct Left {
     /// it through [`Left::charged_cpu`].
     pub(crate) floor_cpu: u64,
     /// The measured cores, in millicores, the left side holds (0 when it is charged by
-    /// prediction alone).
+    /// prediction alone: `fallback` tells that from a host measured idle).
     pub(crate) measured: u64,
     /// The working set that counts against memory (0 when charged by prediction alone).
     pub(crate) working_set: u64,
@@ -632,7 +632,7 @@ impl WorkerLoad {
             let (new, limit) = (left.charged_cpu(cost), cfg.cpu_limit(capacity));
             if left.cpu.saturating_add(new) > limit {
                 let refusal = Refusal::new(RefusalKind::Cpu, left.cpu, new, limit);
-                return Err(refusal.measured(left.measured));
+                return Err(refusal.measured((!left.fallback).then_some(left.measured)));
             }
             let limit = cfg.mem_limit(capacity);
             if left.mem.saturating_add(cost.memory_bytes) > limit {

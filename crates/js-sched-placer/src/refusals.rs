@@ -146,7 +146,8 @@ impl Refused {
     }
 }
 
-/// The figures of a refusal: `counted + new > limit`, with the unit of its kind.
+/// The figures of a refusal: `counted + new > limit`, with the unit of its kind; for CPU, the
+/// load the host's fresh reading measured, or that it had none and was charged by bookings.
 fn figures(refusal: &Refusal) -> String {
     let (unit, scale) = match refusal.kind {
         RefusalKind::Cpu => ("m", 1),
@@ -159,8 +160,12 @@ fn figures(refusal: &Refusal) -> String {
         refusal.limit / scale,
     );
     let mut text = format!("counted {counted}{unit} + new {new}{unit} > limit {limit}{unit}");
-    if refusal.kind == RefusalKind::Cpu {
-        let _ = write!(text, " (measured {}m)", refusal.measured_cpu_millis);
+    match (refusal.kind, refusal.measured_cpu_millis) {
+        (RefusalKind::Cpu, Some(measured)) => {
+            let _ = write!(text, " (measured {measured}m)");
+        }
+        (RefusalKind::Cpu, None) => text.push_str(" (no fresh load reading: charged by bookings)"),
+        _ => {}
     }
     text
 }

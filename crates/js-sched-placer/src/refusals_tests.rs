@@ -62,7 +62,7 @@ fn a_host_full_of_cpu_books_a_cpu_refusal_with_its_figures() {
             counted: 8_000,
             new: 2_000,
             limit: 8_800,
-            measured_cpu_millis: 0,
+            measured_cpu_millis: None,
         }
     );
     assert_eq!(refused.count(&host("a"), RefusalKind::PredictedMemory), 0);
@@ -215,7 +215,7 @@ fn a_pass_logs_one_line_per_host_and_counts_each_refusal() {
         assert!(summary[0].contains("host=a"), "{}", summary[0]);
         assert!(
             summary[0].contains(
-                "cpu x1 (latest job j2: counted 8000m + new 2000m > limit 8800m (measured 0m))"
+                "cpu x1 (latest job j2: counted 8000m + new 2000m > limit 8800m (no fresh load reading: charged by bookings))"
             ),
             "{}",
             summary[0]
@@ -283,7 +283,7 @@ fn a_host_refused_for_two_kinds_says_both_on_one_line() {
         counted,
         new,
         limit,
-        measured_cpu_millis: 0,
+        measured_cpu_millis: None,
     };
     let job = JobId::parse("j9").unwrap();
     let kinds = BTreeMap::from([
@@ -325,4 +325,44 @@ fn a_host_refused_for_two_kinds_says_both_on_one_line() {
         "{logged}"
     );
     assert_eq!(told.0.lock().unwrap().len(), 3);
+}
+
+/// Behaviour: on a host whose fresh readings measure 9000 m while its one job books 4000 m,
+/// a job of 200 m is refused for CPU, and the info line of the pass carries the figures the
+/// predicate used: the measurement counted (9000 m) and the measurement itself, where a host
+/// with no fresh reading says it was charged by its bookings (see
+/// [`a_pass_logs_one_line_per_host_and_counts_each_refusal`]). Catches a refusal line that
+/// prints a measurement of 0 m for a host whose load was measured.
+#[test]
+fn a_measured_hosts_refusal_line_carries_the_measurement_it_used() {
+    process_sink();
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(lines.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (mut e, tables) = (engine(LoadConfig::default()), Tables::new());
+    assert!(walk(&mut e, &tables, "j1", need(4_000, GIB)));
+    let reading = |seq: u64| js_types::sched::usage::NodeLoad {
+        seq,
+        mono_usec: seq * 5_000_000,
+        cpu_usage_usec: seq * 45_000_000,
+        memory_working_set_bytes: GIB,
+        ..Default::default()
+    };
+    e.heard(&host("a"), Some(&reading(1)), at(0));
+    e.heard(&host("a"), Some(&reading(2)), at(0));
+    assert!(!walk(&mut e, &tables, "j2", need(200, GIB)));
+    e.take_refused().announce(&Told::default());
+    let logged = lines.take();
+    assert!(
+        logged.contains(
+            "refusals=cpu x1 (latest job j2: counted 9000m + new 200m > limit 8800m \
+             (measured 9000m))"
+        ),
+        "{logged}"
+    );
 }
