@@ -11,7 +11,7 @@ use crate::job_held::BUNDLE_PENDING_BAR;
 /// not one the host may run, or the host cannot run a bundle at all. Each is a refusal a later
 /// start of the job on the same host is refused again, or one the agent answers once for a
 /// fetch that ended.
-const HARD_BUNDLE_CODES: [&str; 11] = [
+const HARD_BUNDLE_CODES: [&str; 12] = [
     "bundle-fetch-failed",
     "bundle-not-allowed",
     "bundle-denied",
@@ -19,6 +19,7 @@ const HARD_BUNDLE_CODES: [&str; 11] = [
     "bundle-not-held",
     "bundle-no-space",
     "bundle-os-too-old",
+    "bundle-xcode-mismatch",
     "bundle-unsupported",
     "bundle-index",
     "invalid-bundle",
