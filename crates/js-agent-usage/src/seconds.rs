@@ -1,17 +1,18 @@
-//! The node's CPU second by second: busy cores and CPU pressure, as rates between two
-//! readings of the actions group's counters.
+//! The whole host's CPU second by second: busy cores and CPU pressure, as rates between two
+//! readings of the host's counters (`/proc/stat` and `/proc/pressure/cpu`, which the agent
+//! reads).
 //!
 //! [`Seconds`] takes [`SecondSample`]s as values with the times they were taken at, and
 //! reads no file and no clock, like the rest of the crate. Each sample after the first
-//! gives one value for the interval since the one before: the group's busy CPU in
+//! gives one value for the interval since the one before: the host's busy CPU in
 //! thousandths of a core (`usage_usec * 1000 / interval`), and the share of the interval
-//! in which some task of the group waited for a CPU, in thousandths (`pressure_usec * 1000
+//! in which some task of the host waited for a CPU, in thousandths (`pressure_usec * 1000
 //! / interval`, at most 1000). The values are kept, the newest `cap` of each, until
 //! [`Seconds::take`] hands them over.
 //!
 //! - An interval is whatever the two samples are apart: a step that came late gives one
 //!   value for the longer interval, not several.
-//! - A counter that went down (a group that was recreated) gives 0 for that interval: a
+//! - A counter that went down gives 0 for that interval: a
 //!   rate is never invented from a negative difference.
 //! - A sample whose time is not after the one before gives no value (it still becomes the
 //!   baseline).
@@ -22,14 +23,14 @@
 /// One second in microseconds: the least gap [`Seconds::due`] asks for between samples.
 pub const SECOND_USEC: u64 = 1_000_000;
 
-/// One reading of the actions group's counters.
+/// One reading of the host's CPU counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecondSample {
     /// When the reading was taken, in microseconds on the monotonic clock.
     pub mono_usec: u64,
-    /// The group's `usage_usec`: a counter that only grows.
+    /// The busy time of every CPU of the host, in microseconds: a counter that only grows.
     pub cpu_usage_usec: u64,
-    /// The `some` total of the group's `cpu.pressure`, in microseconds, when it could be
+    /// The `some` total of the host's `/proc/pressure/cpu`, in microseconds, when it could be
     /// read.
     pub pressure_some_usec: Option<u64>,
 }

@@ -308,14 +308,14 @@ pub struct Flags {
     /// `--container-bin`.
     #[arg(long, value_name = "PATH")]
     pub actions_cgroup: Option<PathBuf>,
-    /// Sends, in each heartbeat, the busy CPU and the CPU pressure of the actions control
-    /// group for each second of the beat's window (at most 16 values of each, newest last):
-    /// the agent reads the group's `cpu.stat` and `cpu.pressure` every second and the
-    /// heartbeat carries the rates between those readings. Telemetry only; the lease
-    /// server lists it on `GET /v1/hosts` and nothing places or sizes by it. Without an
-    /// actions control group (no `--actions-cgroup` for the container engine, none
-    /// delegated for crun) nothing is read and the flag does nothing; a group with no
-    /// `cpu.pressure` sends the busy values alone. Off by default.
+    /// Sends, in each heartbeat, the busy CPU and the CPU pressure of the whole host for each
+    /// second of the beat's window (at most 16 values of each, newest last): the agent reads
+    /// `/proc/stat` and `/proc/pressure/cpu` every second and the heartbeat carries the rates
+    /// between those readings. Telemetry only; the lease server lists it on `GET /v1/hosts`
+    /// and nothing places or sizes by it. The readings ride with the load, so without an
+    /// actions control group (no `--actions-cgroup` for the container engine, none delegated
+    /// for crun) there is no load and the flag does nothing; a host with no
+    /// `/proc/pressure/cpu` sends the busy values alone. Off by default.
     #[arg(long)]
     pub host_second_samples: bool,
     /// The absolute path of a program that checks the host's GPU container toolkit, run

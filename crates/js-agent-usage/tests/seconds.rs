@@ -57,7 +57,7 @@ fn an_interval_longer_than_a_second_gives_one_value_over_its_length() {
     );
 }
 
-/// Asserts that a counter that fell (the group was recreated) gives 0 for that interval, for
+/// Asserts that a counter that fell gives 0 for that interval, for
 /// busy and for pressure, and that the interval after it is measured from the lower value.
 /// Catches a wrapped subtraction, which would be a huge rate.
 #[test]

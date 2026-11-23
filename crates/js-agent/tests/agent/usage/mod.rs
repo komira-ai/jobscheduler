@@ -4,6 +4,7 @@
 
 mod cgroup;
 mod collect;
+mod host;
 mod outbox;
 mod sampler;
 mod seconds;

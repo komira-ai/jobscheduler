@@ -19,11 +19,12 @@
 //! - **`seq`** counts the samples of this process from 1; a new process starts again at 1,
 //!   which the server reads as a new series.
 //! - **The seconds** (with `--host-second-samples`): [`Collector::step`], which the worker calls
-//!   after every step in place of `due`, reads the actions group's `cpu.stat` and `cpu.pressure`
+//!   after every step in place of `due`, reads the whole host's `/proc/stat` and `/proc/pressure/cpu`
+//!   (through [`super::host_cpu`], not the actions group's files)
 //!   when at least a second has passed since the last such read, and keeps the busy CPU and the
 //!   CPU pressure of each interval (`js_agent_usage::Seconds`), the newest 16 of each. A run
 //!   publishes them in its reading and starts again; they are sent once, so a beat that fails
-//!   loses them. A group without a readable `cpu.pressure` gives busy values alone.
+//!   loses them. A host without a readable `/proc/pressure/cpu` gives busy values alone.
 //! - **A node that cannot be read** gives no load for that window. The reason is returned
 //!   once for as long as it lasts.
 
@@ -52,7 +53,7 @@ pub struct Collector {
     unreadable: Option<SampleError>,
     /// How many dropped minutes the operator has been told of.
     told_dropped: u64,
-    /// The per-second series of the actions group, when the outbox says
+    /// The per-second series of the whole host, when the outbox says
     /// ([`Outbox::host_seconds`]).
     seconds: Option<Seconds>,
 }
@@ -91,9 +92,10 @@ impl Collector {
         self.due()
     }
 
-    /// One per-second sample, when the series is on and a second has passed. A group whose
-    /// `cpu.stat` cannot be read gives none (nothing is invented) and is tried again at the
-    /// next step; one without a readable `cpu.pressure` gives busy values alone.
+    /// One per-second sample of the whole host, when the series is on and a second has passed.
+    /// A host whose `/proc/stat` cannot be read gives none (nothing is invented) and is tried
+    /// again at the next step; one without a readable `/proc/pressure/cpu` gives busy values
+    /// alone.
     fn second(&mut self) {
         let Some(seconds) = self.seconds.as_mut() else {
             return;
@@ -102,13 +104,13 @@ impl Collector {
         if !seconds.due(now) {
             return;
         }
-        let Some((cpu_usage_usec, pressure_some_usec)) = self.sampler.host_counters() else {
+        let Some(host) = self.sampler.host_counters() else {
             return;
         };
         seconds.observe(SecondSample {
             mono_usec: now,
-            cpu_usage_usec,
-            pressure_some_usec,
+            cpu_usage_usec: host.busy_usec,
+            pressure_some_usec: host.pressure_some_usec,
         });
     }
 

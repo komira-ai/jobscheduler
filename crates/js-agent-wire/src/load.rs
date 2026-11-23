@@ -58,14 +58,14 @@ pub struct NodeLoad {
     /// Closed lease-minutes. At most [`limits::MAX_LOAD_MINUTES`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub minutes: Vec<LeaseMinute>,
-    /// Busy CPU of the cgroup that holds every action over each interval between two of the
-    /// agent's one-second samples, in thousandths of a core (`usage_usec * 1000 / time`),
-    /// oldest first. At most [`limits::MAX_LOAD_SECONDS`]. Telemetry only: nothing in
+    /// Busy CPU of the whole host (every CPU's busy time in `/proc/stat`, not the actions
+    /// cgroup's) over each interval between two of the agent's one-second samples, in
+    /// thousandths of a core (`busy_usec * 1000 / time`), oldest first. At most [`limits::MAX_LOAD_SECONDS`]. Telemetry only: nothing in
     /// placement or sizing reads it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub second_cpu_millis: Vec<u32>,
-    /// The share of each of those intervals in which some task of the same cgroup waited
-    /// for a CPU (the `some` line of its `cpu.pressure`), in thousandths, at most 1000,
+    /// The share of each of those intervals in which some task of the host waited for a CPU
+    /// (the `some` line of `/proc/pressure/cpu`), in thousandths, at most 1000,
     /// oldest first. At most [`limits::MAX_LOAD_SECONDS`]. Empty when the host has no
     /// pressure files, while `second_cpu_millis` is not. The two lists pair by position
     /// only when they have the same length.

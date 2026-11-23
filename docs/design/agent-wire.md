@@ -306,8 +306,8 @@ digits), with the comma that joins it to the message. Derived, and measured by t
 - `cpu_series` in a job's result, `,"cpu_series":{"granularity_secs":N,"points":[...],"run_usec":N,"partial":true}` with 128 points
   of 5 digits: 14 + (1 + 19 + 10) + 11 + (128 × 5 + 127) + 1 + (1 + 11 + 20) + 15 + 1 = **871** bytes per result (measured by
   `a_series_at_its_widest_adds_its_documented_bytes_to_a_result`). The agent's `results_budget` counts it with the rest of the result.
-- `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the actions
-  group, the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
+- `second_cpu_millis` and `second_cpu_pressure_some_permille` in a heartbeat's load (the per-second busy CPU and CPU pressure of the whole
+  host, from `/proc/stat` and `/proc/pressure/cpu`; the design of komira-ai/jobscheduler#1033, section 3; sent by an agent started with `--host-second-samples`), `,"second_cpu_millis":[...]`
   with 16 values of 10 digits: 22 + (16 × 10 + 15) + 1 = 198, and `,"second_cpu_pressure_some_permille":[...]` with 16 values of 4 digits: 38 + (16 × 4 + 15) + 1 = 118, so **316**
   bytes per heartbeat at the widest (measured by `the_lists_at_their_widest_add_their_documented_bytes_to_a_load`; the maximal load of
   `a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget` carries both at their widest and stays inside `MAX_LOAD_BYTES`).

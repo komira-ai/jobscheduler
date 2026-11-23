@@ -161,12 +161,12 @@ struct LoadView {
     lease_clocks: Vec<LeaseClockView>,
     /// Closed lease-minutes.
     minutes: Vec<LeaseMinuteView>,
-    /// Busy CPU of the actions group for each second the agent sampled, in thousandths of a
+    /// Busy CPU of the whole host for each second the agent sampled, in thousandths of a
     /// core, oldest first; left out when the agent sent none (`--host-second-samples` is not
     /// given). Telemetry: nothing places or sizes by it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     second_cpu_millis: Vec<u32>,
-    /// The share of each of those seconds in which some task of the group waited for a CPU,
+    /// The share of each of those seconds in which some task of the host waited for a CPU,
     /// in thousandths, oldest first; left out when the host has no pressure files or the
     /// agent sent none. It pairs with `second_cpu_millis` by position only when the two lists
     /// have the same length.

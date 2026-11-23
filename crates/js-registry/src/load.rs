@@ -92,7 +92,7 @@ pub fn node_load(wire: &WireLoad) -> Result<NodeLoad, BadLease> {
 }
 
 /// The per-second lists of a host's latest load, as the wire sent them: busy CPU of the
-/// actions group in thousandths of a core and the share of each interval with a task waiting
+/// whole host in thousandths of a core and the share of each interval with a task waiting
 /// for a CPU in thousandths, oldest first. They sit beside [`NodeLoad`], not in it: they are
 /// for the hosts listing and nothing in placement or sizing reads them. Empty when the
 /// agent sent none (it was not asked to, or the host has no pressure files).

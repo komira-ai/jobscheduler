@@ -52,6 +52,7 @@ mod binner;
 mod cgroup;
 mod clock;
 mod collect;
+mod host;
 mod outbox;
 mod sampler;
 mod wire;
@@ -66,6 +67,7 @@ pub use cgroup::{
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;
+pub use host::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
 pub use js_agent_usage::SecondRates;
 pub use outbox::{Outbox, Reading};
 pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};

@@ -1,16 +1,24 @@
-//! The node's CPU per second (`--host-second-samples`) over fake cgroup files and a clock the
-//! test sets: what the worker's step reads, what a reading carries to the heartbeat, and what
-//! is lost with a beat that fails.
+//! The whole host's CPU per second (`--host-second-samples`) over fake `/proc` and cgroup files
+//! and a clock the test sets: what the worker's step reads, what a reading carries to the
+//! heartbeat, and what is lost with a beat that fails.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::usage::{Collector, Outbox};
+use js_agent::usage::{Collector, Outbox, PROC_CPU_PRESSURE, PROC_STAT};
 use js_agent_wire::NodeLoad;
 
 use super::collect::{ACTIONS, SetClock, Shared};
 
 const SECOND: u64 = 1_000_000;
+
+/// The text of a `cpu.pressure` whose `some` total is `total`.
+fn pressure_text(total: u64) -> String {
+    format!(
+        "some avg10=0.00 avg60=0.00 avg300=0.00 total={total}\n\
+         full avg10=0.00 avg60=0.00 avg300=0.00 total=9\n"
+    )
+}
 
 /// A collector with a 5 second window over files and a clock the test sets.
 struct Rig {
@@ -39,24 +47,33 @@ impl Rig {
         }
     }
 
-    fn put(&self, name: &str, text: &str) {
+    fn put_at(&self, path: &str, text: &str) {
         let mut files = self.files.0.borrow_mut();
-        *files = files.clone().with(&format!("{ACTIONS}/{name}"), text);
+        *files = files.clone().with(path, text);
     }
 
-    /// The node's files with `usage` microseconds of CPU and, when given, `pressure`
-    /// microseconds of `some` pressure.
+    fn put(&self, name: &str, text: &str) {
+        self.put_at(&format!("{ACTIONS}/{name}"), text);
+    }
+
+    /// The host's files with `usage` microseconds of busy CPU (whole ticks of 10 ms) and, when
+    /// given, `pressure` microseconds of `some` pressure. The actions group's own files hold a
+    /// tenth of each, so a value read from the group rather than the host shows.
     fn node(&self, usage: u64, pressure: Option<u64>) {
-        self.put("cpu.stat", &format!("usage_usec {usage}\n"));
+        let ticks = usage / 10_000;
+        // user and system share the busy ticks; idle, iowait and guest are not added to them.
+        let (user, system) = (ticks - ticks / 2, ticks / 2);
+        self.put_at(
+            PROC_STAT,
+            &format!("cpu  {user} 0 {system} 777 55 0 0 0 33 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n"),
+        );
+        self.put("cpu.stat", &format!("usage_usec {}\n", usage / 10));
         self.put("memory.current", "100\n");
         self.put("memory.stat", "inactive_file 0\nactive_file 5\n");
         self.put("cpu.max", "max 100000\n");
         if let Some(total) = pressure {
-            let text = format!(
-                "some avg10=0.00 avg60=0.00 avg300=0.00 total={total}\n\
-                 full avg10=0.00 avg60=0.00 avg300=0.00 total=9\n"
-            );
-            self.put("cpu.pressure", &text);
+            self.put_at(PROC_CPU_PRESSURE, &pressure_text(total));
+            self.put("cpu.pressure", &pressure_text(total / 10));
         }
     }
 
@@ -73,8 +90,8 @@ impl Rig {
     }
 }
 
-/// Asserts the whole path: with the flag on, a step each second reads the node's `cpu.stat`
-/// and `cpu.pressure`, and the load that the next window's run publishes carries one busy
+/// Asserts the whole path: with the flag on, a step each second reads the host's `/proc/stat`
+/// and `/proc/pressure/cpu` (not the actions group's files, which hold a tenth), and the load that the next window's run publishes carries one busy
 /// value and one pressure value for each second between the readings, in order. It catches
 /// a series that is not carried to the wire, rates against the wrong baseline, and a
 /// pressure total read from the `full` line.
@@ -111,11 +128,11 @@ fn a_step_sooner_than_a_second_after_the_last_sample_takes_none() {
     assert_eq!(load.second_cpu_pressure_some_permille, vec![100]);
 }
 
-/// Asserts that a host without a readable `cpu.pressure` sends the busy values and no
+/// Asserts that a host without a readable `/proc/pressure/cpu` sends the busy values and no
 /// pressure list, and that pressure appears as soon as it can be read. Catches a pressure of
 /// 0 sent for "not measured" and a missing pressure file that costs the busy values.
 #[test]
-fn a_group_without_pressure_sends_busy_values_alone() {
+fn a_host_without_pressure_sends_busy_values_alone() {
     let mut rig = Rig::new(true);
     rig.node(0, None);
     rig.step_at(0);
@@ -136,11 +153,11 @@ fn a_group_without_pressure_sends_busy_values_alone() {
     assert_eq!(load.second_cpu_pressure_some_permille, vec![500]);
 }
 
-/// Asserts that a node whose `cpu.stat` cannot be read at a step gives no value for it and is
+/// Asserts that a host whose `/proc/stat` cannot be read at a step gives no value for it and is
 /// tried again at the next step, and that the first readable step is the baseline. Catches a
 /// zero invented for an unreadable counter.
 #[test]
-fn an_unreadable_cpu_stat_gives_no_value() {
+fn an_unreadable_proc_stat_gives_no_value() {
     let mut rig = Rig::new(true);
     rig.step_at(0);
     rig.node(5_000_000, Some(0));
@@ -209,4 +226,22 @@ fn without_the_flag_no_seconds_are_taken() {
         "a window has not passed since the run"
     );
     assert!(!Outbox::new().host_seconds());
+}
+
+/// Asserts that the seconds are the whole host's even where the actions group says otherwise:
+/// a group whose `cpu.pressure` can be read on a host whose `/proc/pressure/cpu` cannot gives
+/// no pressure, and a busy value follows `/proc/stat` alone. Catches a sample read from the
+/// actions group, which leaves out every task of the host outside it.
+#[test]
+fn the_seconds_are_the_whole_hosts_not_the_actions_groups() {
+    let mut rig = Rig::new(true);
+    rig.node(0, None);
+    rig.put("cpu.pressure", &pressure_text(0));
+    rig.step_at(0);
+    rig.node(2_000_000, None);
+    rig.put("cpu.pressure", &pressure_text(900_000));
+    rig.step_at(SECOND);
+    let load = rig.run();
+    assert_eq!(load.second_cpu_millis, vec![2000]);
+    assert!(load.second_cpu_pressure_some_permille.is_empty());
 }
