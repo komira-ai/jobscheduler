@@ -1,9 +1,9 @@
 //! The places on a Mac that only the privacy controls (TCC) guard from a native job.
 //!
 //! A native job keeps the agent's responsibility (it is started without the disclaim), so
-//! the privacy controls count it as the agent, which holds Full Disk Access. Every user's
-//! home and root's home are read-denied by the profile itself, whatever their modes
-//! (`native/profile.rs`, `home_roots`); of the other places, what Unix modes do not guard
+//! the privacy controls count it as the agent, which holds Full Disk Access. Every other
+//! user's home and root's home are read-denied by the profile itself, whatever their modes
+//! (`native/profile.rs`, `home_roots`; the job's own account's home stays readable); of the other places, what Unix modes do not guard
 //! from the job's account, and only the privacy controls did, is listed here, measured on
 //! the proof Mac with a profile whose reads are open (`docs/design/spawn-disclaim.md`, "The
 //! fence, measured"). Each is a read deny of every run's profile, under both spellings,

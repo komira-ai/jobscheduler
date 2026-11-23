@@ -99,12 +99,18 @@ fn a_run_may_write_below_its_run_directory_alone() {
     assert_eq!(writes, [rule]);
     let params = profile.params();
     assert!(params.contains(&("RUN".to_owned(), "/srv/homes/kbf-acct-4/exec".to_owned())));
+    // The home is named once, by the own-home read grant, which no write rule refers to.
     assert!(
-        !params
-            .iter()
-            .any(|(_, value)| value == "/srv/homes/kbf-acct-4"
-                || value.starts_with("/private/var/folders")),
+        !params.iter().any(
+            |(name, value)| (value == "/srv/homes/kbf-acct-4" && name != "OWN")
+                || value.starts_with("/private/var/folders")
+        ),
         "{params:?}"
+    );
+    assert!(params.contains(&("OWN".to_owned(), "/srv/homes/kbf-acct-4".to_owned())));
+    assert!(
+        !writes.iter().any(|line| line.contains("OWN")),
+        "{writes:?}"
     );
 }
 
@@ -218,14 +224,14 @@ fn the_homes_roots_are_the_homes_and_roots_home_under_both_spellings() {
 
 /// Asserts that each homes root is denied reads by a rule of the built profile, that after
 /// those denies no rule grants a path that holds another account's home (a file in it, mode
-/// `0755` or not), the account's own home outside its run directory, or root's home, and that
-/// the run directory is granted back, with a mount granted elsewhere in the profile. This is
-/// what the isolation probe's `read:other-home` asks of a Mac.
+/// `0755` or not), root's home, or the account's own home under its other spelling, and that
+/// the account's own home is granted back, with a mount granted elsewhere in the profile.
+/// This is what the isolation probe's `read:other-home` asks of a Mac.
 ///
-/// Catches a homes root left out of the profile, a grant that reopens another home, and a
-/// run directory left unreadable by the deny of the homes above it.
+/// Catches a homes root left out of the profile, a grant that reopens another home, and an
+/// own home left unreadable by the deny of the homes above it.
 #[test]
-fn other_homes_and_roots_home_are_denied_reads_and_the_run_directory_is_granted_back() {
+fn other_homes_and_roots_home_are_denied_reads_and_the_own_home_is_granted_back() {
     let home = Path::new("/srv/homes/kbf-acct-4");
     let grants = [mount("/srv/mounts/work")];
     let profile = build(
@@ -239,6 +245,7 @@ fn other_homes_and_roots_home_are_denied_reads_and_the_run_directory_is_granted_
     let params = profile.params();
     let lines: Vec<&str> = profile.text().lines().collect();
     let roots = home_roots(Path::new("/srv/homes"));
+    let home_text = "/srv/homes/kbf-acct-4";
     let denies: Vec<usize> = roots
         .iter()
         .map(|root| {
@@ -254,7 +261,7 @@ fn other_homes_and_roots_home_are_denied_reads_and_the_run_directory_is_granted_
     let last = *denies.iter().max().unwrap();
     for place in [
         "/srv/homes/kbf-acct-9/f",
-        "/srv/homes/kbf-acct-4/f",
+        "/srv/homes/kbf-acct-40/f",
         "/private/var/root/f",
         "/System/Volumes/Data/srv/homes/kbf-acct-4/exec/f",
     ] {
@@ -265,11 +272,10 @@ fn other_homes_and_roots_home_are_denied_reads_and_the_run_directory_is_granted_
             }
         }
     }
-    let run_read = lines[last + 1..].iter().find(|line| {
-        line.starts_with("(allow file-read*")
-            && param_of(line, params) == Some("/srv/homes/kbf-acct-4/exec")
+    let own_read = lines[last + 1..].iter().find(|line| {
+        line.starts_with("(allow file-read*") && param_of(line, params) == Some(home_text)
     });
-    assert!(run_read.is_some(), "{}", profile.text());
+    assert!(own_read.is_some(), "{}", profile.text());
 }
 
 /// Asserts that a mount at a homes root or above one fails the build, as the policy's refusal:

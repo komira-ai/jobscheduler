@@ -1,5 +1,6 @@
 //! The homes' read denies of a narrowing: every read below a homes root is denied but the
-//! run directory's, which lies below one, in every job shape and both read models; what a
+//! run's own home's (the account's home, which holds the run directory), in every job shape
+//! and both read models; what a
 //! later grant names stays open and what a read deny names stays closed; and what refuses
 //! a homes root.
 
@@ -12,6 +13,8 @@ use js_mac_pool::seatbelt::{
 };
 
 const RUN: &str = "/Users/kbf-acct-1/exec";
+/// The run's own home: the directory just below the homes root that holds the run directory.
+const OWN: &str = "/Users/kbf-acct-1";
 const HOMES: [&str; 4] = [
     "/Users",
     "/System/Volumes/Data/Users",
@@ -25,9 +28,9 @@ const MOUNTED: &str = "/Users/Shared/cache";
 /// A read deny inside the run directory.
 const SECRET: &str = "/Users/kbf-acct-1/exec/.state";
 
-/// The run's own grant back, in the order it follows the homes' denies.
-const RUN_READ: &str = "(allow file-read* (subpath (param \"RUN\")))";
-const RUN_WALK: &str = "(allow file-read-metadata (path-ancestors (param \"RUN\")))";
+/// The own home's grant back, in the order it follows the homes' denies.
+const OWN_READ: &str = "(allow file-read* (subpath (param \"OWN\")))";
+const OWN_WALK: &str = "(allow file-read-metadata (path-ancestors (param \"OWN\")))";
 
 fn path(text: &str) -> AbsPath {
     AbsPath::parse(text).expect("a good path")
@@ -92,10 +95,11 @@ fn at(lines: &[&str], line: &str) -> usize {
 }
 
 /// The whole text of a job with homes roots, a tree, a mount below a homes root and a read
-/// deny in its run directory, and its parameters: each root after `RUN`, in path order.
+/// deny in its run directory, and its parameters: each root after `RUN`, in path order, then
+/// the own home.
 ///
-/// Catches a homes root spelled into the text, a lost run-directory grant, and a section
-/// out of its place.
+/// Catches a homes root spelled into the text, a lost own-home grant, and a section out of
+/// its place.
 #[test]
 fn a_job_with_homes_roots_matches_its_golden() {
     let profile = profile(job(Some(trees()), vec![mount(MOUNTED)]), Net::Off);
@@ -113,6 +117,7 @@ fn a_job_with_homes_roots_matches_its_golden() {
             ("HM_1", "/System/Volumes/Data/private/var/root"),
             ("HM_2", "/Users"),
             ("HM_3", "/private/var/root"),
+            ("OWN", OWN),
             ("MOUNT", ROOT),
             ("MT_0", TREE),
             ("RD_0", SECRET),
@@ -123,15 +128,15 @@ fn a_job_with_homes_roots_matches_its_golden() {
 }
 
 /// In every job shape the homes' denies come before every read grant and every read deny,
-/// and the run directory's read and walk grants follow the last of them at once: a later
-/// grant (a tree, a mount) opens what it names, the read deny in the run directory still
-/// closes it, and nothing between the denies and the run's grant opens anything.
+/// and the own home's read and walk grants follow the last of them at once: a later grant (a
+/// tree, a mount) opens what it names, the read deny in the run directory still closes it,
+/// and nothing between the denies and the own home's grant opens anything.
 ///
 /// Catches a homes deny after a grant it would hide (a mount below `/Users` closed), a deny
-/// after the run's grant (the job cannot read its own directory), and a read deny inside the
-/// run directory that the run's grant reopens.
+/// after the own home's grant (the job cannot read its own home), and a read deny inside the
+/// run directory that the own home's grant reopens.
 #[test]
-fn the_homes_denies_precede_every_read_rule_and_the_run_is_granted_back_next() {
+fn the_homes_denies_precede_every_read_rule_and_the_own_home_is_granted_back_next() {
     let nets = [
         Net::Off,
         Net::Ports(ports(&[1])),
@@ -154,8 +159,8 @@ fn the_homes_denies_precede_every_read_rule_and_the_run_is_granted_back_next() {
                     .collect();
                 let last = *denies.iter().max().expect("four denies");
                 assert_eq!(denies, (last + 1 - HOMES.len()..=last).collect::<Vec<_>>());
-                assert_eq!(at(&lines, RUN_READ), last + 1);
-                assert_eq!(at(&lines, RUN_WALK), last + 2);
+                assert_eq!(at(&lines, OWN_READ), last + 1);
+                assert_eq!(at(&lines, OWN_WALK), last + 2);
                 let first_read = lines
                     .iter()
                     .position(|line| {
@@ -170,10 +175,10 @@ fn the_homes_denies_precede_every_read_rule_and_the_run_is_granted_back_next() {
     }
 }
 
-/// A job without homes roots has neither the denies nor the run directory's read grant, so
+/// A job without homes roots has neither the denies nor the own home's read grant, so
 /// its profile is the one it had before homes roots existed (the other goldens hold it).
 ///
-/// Catches a run read grant emitted for every policy, and a deny left over from an empty
+/// Catches an own-home read grant emitted for every policy, and a deny left over from an empty
 /// list.
 #[test]
 fn a_job_without_homes_roots_has_no_homes_rules() {
@@ -182,8 +187,8 @@ fn a_job_without_homes_roots_has_no_homes_rules() {
         .expect("a policy");
     let profile = Profile::for_policy(&policy).expect("a profile");
     assert!(!profile.text().contains("HM_"), "{}", profile.text());
-    assert!(!profile.text().contains(RUN_READ), "{}", profile.text());
-    assert!(!profile.text().contains(RUN_WALK), "{}", profile.text());
+    assert!(!profile.text().contains(OWN_READ), "{}", profile.text());
+    assert!(!profile.text().contains(OWN_WALK), "{}", profile.text());
 }
 
 /// Under the allow read model the homes' rules come before its default read deny and its
@@ -206,7 +211,7 @@ fn under_the_allow_model_the_homes_rules_precede_its_default_deny() {
         .text()
         .to_owned();
     let lines: Vec<&str> = text.lines().collect();
-    let walk = at(&lines, RUN_WALK);
+    let walk = at(&lines, OWN_WALK);
     let default = at(&lines, "(deny file-read*)");
     assert_eq!(default, walk + 1, "{text}");
     assert_eq!(
@@ -215,32 +220,73 @@ fn under_the_allow_model_the_homes_rules_precede_its_default_deny() {
     );
 }
 
-/// A homes root at the run directory or below it is refused, given at once or by a second
-/// narrowing; a root beside the run directory that only begins like it is not.
+/// The own home is the directory just below the deepest homes root that holds the run
+/// directory, and the run directory itself when no root holds it.
 ///
-/// Catches a homes deny that the run directory's grant, which follows it, silently undoes.
+/// Catches an own home taken from the shallowest root (the account's home would be
+/// granted although a deeper root denies it), and a grant of a whole homes root.
 #[test]
-fn a_homes_root_in_the_run_directory_is_refused() {
+fn the_own_home_is_below_the_deepest_root_that_holds_the_run() {
+    let own = |roots: &[&str]| {
+        let policy = Policy::base(job(None, vec![]), caps(Net::Off, ReadModel::Open))
+            .and_then(|policy| {
+                policy.narrowed(with_homes(roots.iter().map(|root| path(root)).collect()))
+            })
+            .expect("a policy");
+        let profile = Profile::for_policy(&policy).expect("a profile");
+        profile
+            .params()
+            .iter()
+            .find(|(name, _)| name == "OWN")
+            .map(|(_, value)| value.clone())
+            .expect("an own home")
+    };
+    assert_eq!(own(&["/Users"]), OWN);
+    assert_eq!(own(&["/Users", "/Users/kbf-acct-1"]), RUN);
+    assert_eq!(own(&["/private/var/root"]), RUN);
+    let deeper = SlotLayout {
+        run: path("/Users/kbf-acct-1/exec/deep/run"),
+        ..job(None, vec![])
+    };
+    let policy = Policy::base(deeper, caps(Net::Off, ReadModel::Open))
+        .and_then(|policy| policy.narrowed(with_homes(homes())))
+        .expect("a policy");
+    let profile = Profile::for_policy(&policy).expect("a profile");
+    assert!(
+        profile
+            .params()
+            .contains(&("OWN".to_owned(), OWN.to_owned()))
+    );
+}
+
+/// A homes root at the run's own home or below it is refused, given at once or by a second
+/// narrowing; a root beside the own home that only begins like it is not.
+///
+/// Catches a homes deny that the own home's grant, which follows it, silently undoes.
+#[test]
+fn a_homes_root_in_the_own_home_is_refused() {
     let base = || Policy::base(job(None, vec![]), caps(Net::Off, ReadModel::Open));
     for root in [RUN, "/Users/kbf-acct-1/exec/.home"] {
         assert_eq!(
             base().and_then(|policy| policy.narrowed(with_homes(vec![path(root)]))),
-            Err(PolicyError::HomesInRun),
+            Err(PolicyError::HomesInOwnHome),
             "{root}"
         );
+    }
+    for root in [RUN, "/Users/kbf-acct-1/.ssh"] {
         assert_eq!(
             base()
                 .and_then(|policy| policy.narrowed(with_homes(homes())))
                 .and_then(|policy| policy.narrowed(with_homes(vec![path(root)]))),
-            Err(PolicyError::HomesInRun),
+            Err(PolicyError::HomesInOwnHome),
             "{root}"
         );
     }
-    let beside = with_homes(vec![path("/Users/kbf-acct-1/execx")]);
+    let beside = with_homes(vec![path("/Users"), path("/Users/kbf-acct-1x")]);
     assert!(base().and_then(|policy| policy.narrowed(beside)).is_ok());
     assert_eq!(
-        PolicyError::HomesInRun.to_string(),
-        "a homes root lies in the run directory"
+        PolicyError::HomesInOwnHome.to_string(),
+        "a homes root lies in the run's own home"
     );
 }
 

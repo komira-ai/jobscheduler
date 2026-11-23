@@ -104,8 +104,9 @@ impl Profile {
     /// write denies; the write grants (the run directory, the user's folder entry,
     /// `/dev/null` and `/dev/fd`); when the policy has homes roots
     /// ([`Narrowing::deny_homes`](super::Narrowing::deny_homes)), a read deny of each root,
-    /// then a read grant of the run directory and a metadata grant on it and its ancestors
-    /// (so the run's own place below a root stays readable and a path walk reaches it); the
+    /// then a read grant of the run's own home (the directory just below the deepest root
+    /// that holds the run directory) and a metadata grant on it and its ancestors (so the
+    /// run's own home stays readable and a path walk reaches it); the
     /// trees on a mount (an exec deny, an executable-mapping
     /// deny and a read deny of the mount's root, then for each tree a read grant and a
     /// metadata grant on the tree and its ancestors, so a path walk reaches it); the read
@@ -232,8 +233,8 @@ fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
     }
 }
 
-/// The homes' read denies, then the run directory's reads and the metadata of its ancestors,
-/// granted back: they precede every other read rule, so each later grant opens what it names
+/// The homes' read denies, then the reads of the run's own home and the metadata of its
+/// ancestors, granted back (the own home is a parameter, `OWN`): they precede every other read rule, so each later grant opens what it names
 /// and each read deny closes what it names. Nothing for a policy without homes roots.
 fn home_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String, String)>) {
     if policy.homes().is_empty() {
@@ -243,8 +244,9 @@ fn home_rules(policy: &Policy, lines: &mut Vec<String>, params: &mut Vec<(String
         params.push((format!("HM_{i}"), home.as_str().to_owned()));
         lines.push(format!("(deny file-read* (subpath (param \"HM_{i}\")))"));
     }
-    lines.push("(allow file-read* (subpath (param \"RUN\")))".to_owned());
-    lines.push("(allow file-read-metadata (path-ancestors (param \"RUN\")))".to_owned());
+    params.push(("OWN".to_owned(), policy.own_home().to_owned()));
+    lines.push("(allow file-read* (subpath (param \"OWN\")))".to_owned());
+    lines.push("(allow file-read-metadata (path-ancestors (param \"OWN\")))".to_owned());
 }
 
 /// The trees on the shared mount: nothing below the root is run or mapped executable (a

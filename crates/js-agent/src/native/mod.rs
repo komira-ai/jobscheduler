@@ -28,8 +28,8 @@
 //!    root), and no other part of `/var/folders` is. The agent's roots, its secret files,
 //!    `--native-accounts` and the places only the privacy controls guard
 //!    (`native/fence.rs`) are denied reads (`native/profile.rs`), and so is everything
-//!    below the homes (`<homes>`, every other account's home and the account's own outside
-//!    `exec/`) and below root's home, whatever their modes.
+//!    below the homes (`<homes>`: every other account's home) and below root's home,
+//!    whatever their modes; the account's own home stays readable.
 //! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
 //!    run's environment and nothing else, the working directory, and the job's three standard
 //!    streams as files in the run's scratch directory, which only the agent can enter: an

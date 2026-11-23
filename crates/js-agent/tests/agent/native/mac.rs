@@ -251,6 +251,26 @@ fn a_job_can_neither_list_nor_read_another_home_its_modes_leave_open() {
     }
 }
 
+/// Asserts that a job reads its own home, the account's home that holds its run directory,
+/// though the profile denies reads below the pool's homes: it lists the home (its `exec` is
+/// there) and the home's own metadata, and it still cannot write there.
+///
+/// Catches a homes deny that takes the job's own home, and an own-home grant that also
+/// grants writes.
+#[test]
+fn a_job_can_read_its_own_home() {
+    let mut rig = MacRig::new("own-home");
+    let script = "/bin/ls .. && /bin/ls -d .. && if : > ../made 2>/dev/null; then exit 3; fi";
+    let id = rig.start("r1", "/bin/sh", &["-c", script]);
+    assert_eq!(rig.settle(&id), exited(0), "the own home is readable");
+    let home = rig.exec().parent().unwrap().to_path_buf();
+    let tail = rig.rt.log_tail(&id).unwrap().unwrap();
+    let lines: Vec<&str> = tail.stdout.lines().collect();
+    assert!(lines.contains(&"exec") && lines.contains(&".."), "{tail:?}");
+    assert!(!home.join("made").exists(), "the own home was written");
+    rig.rt.remove(&id).unwrap();
+}
+
 const CONNECT: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]) ? 0 : 1)"#;
 
 /// Asserts the network of the profile for real: a loopback connect succeeds when the start

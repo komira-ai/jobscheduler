@@ -498,10 +498,10 @@ fn a_stop_sends_term_to_the_whole_job_group() {
 
 /// Asserts that one run cannot read another run's files: the first writes a file in its
 /// run directory and is not removed, the second (another account) is refused it, and root
-/// reads it, which shows the path is right. The first account's home lies below the homes,
-/// which the second run's profile denies but for its own run directory, so the profile
-/// refuses the walk into it (`Operation not permitted`) before the home's `0700` mode is
-/// asked. It catches homes that other slot accounts can enter.
+/// reads it, which shows the path is right and the refusal is the uid's: the first account's
+/// home is `0700`, and the kernel answers its mode (`Permission denied`) before the second
+/// run's profile, which denies it too, is asked (measured on the beta Mac). It catches homes
+/// that other slot accounts can enter.
 #[test]
 #[ignore = "needs root and creates users"]
 fn one_runs_files_are_closed_to_another_run() {
@@ -522,11 +522,7 @@ fn one_runs_files_are_closed_to_another_run() {
     assert_eq!(settle(&mut rt, &second), exited(1));
     let tail = rt.log_tail(&second).unwrap().unwrap();
     assert_eq!(tail.stdout, "", "the second run read the first's file");
-    assert!(
-        tail.stderr.contains("Operation not permitted"),
-        "{}",
-        tail.stderr
-    );
+    assert!(tail.stderr.contains("Permission denied"), "{}", tail.stderr);
     rt.remove(&first).unwrap();
     rt.remove(&second).unwrap();
 }
@@ -625,6 +621,37 @@ fn a_slot_account_can_neither_list_nor_read_another_home_its_modes_leave_open() 
         rt.remove(&id).unwrap();
     }
     println!("read:other-home = denied");
+}
+
+/// Asserts that a run reads its own home as a real slot account, though the profile denies
+/// reads below the pool's homes: it lists the home (its `exec` is there) and a file root put
+/// in it (`0644`, the account's) once the home was made, and it cannot write there. The
+/// run waits for the file by looking for it, not by a clock.
+///
+/// Catches a homes deny that takes the account's own home, and an own-home grant that also
+/// grants writes.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_slot_account_can_read_its_own_home() {
+    let fixture = fixture();
+    let mut rt = runtime(fixture);
+    let script = "while [ ! -e ../note ]; do :; done; /bin/ls .. && /bin/cat ../note \
+        && if : > ../made 2>/dev/null; then exit 3; fi";
+    let id = rt
+        .create_and_start(&spec(fixture, "own-home-read", "/bin/sh", &["-c", script]))
+        .unwrap();
+    let home = home_of(fixture);
+    let uid = fs::metadata(&home).unwrap().uid();
+    let note = home.join("note");
+    fs::write(&note, "mine").unwrap();
+    std::os::unix::fs::chown(&note, Some(uid), None).unwrap();
+    fs::set_permissions(&note, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(settle(&mut rt, &id), exited(0), "the own home is readable");
+    let tail = rt.log_tail(&id).unwrap().unwrap();
+    assert!(tail.stdout.lines().any(|line| line == "exec"), "{tail:?}");
+    assert!(tail.stdout.ends_with("mine"), "{tail:?}");
+    assert!(!home.join("made").exists(), "the own home was written");
+    rt.remove(&id).unwrap();
 }
 
 /// Whether anything below `dir` (links not followed) belongs to `uid`.

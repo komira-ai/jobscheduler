@@ -37,7 +37,8 @@ pub(super) const ROOT_HOME: &str = "/private/var/root";
 /// fence's places are (`native/fence.rs`).
 pub(super) const DATA_VOLUME: &str = "/System/Volumes/Data";
 
-/// The roots below which every run's profile denies reads but for the run's own directory:
+/// The roots below which every run's profile denies reads but for the run's own home (the
+/// account's home, which holds its run directory):
 /// `homes`, where the pool makes its accounts' homes (`/Users` on a host, the one value
 /// `--native-homes` takes), and root's home, each spelled as given and below
 /// [`DATA_VOLUME`]. A home of another user is readable to everyone when its modes say so
@@ -68,8 +69,8 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
 /// The read denies are the agent's (`config.read_denies`), the places only the privacy
 /// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of
 /// those is refused, since its grant would follow the deny and reopen it. Reads below the
-/// homes roots ([`home_roots`] of `config.homes`) are denied too, but for the run directory,
-/// which lies below one; the account's own home outside it is denied with the others.
+/// homes roots ([`home_roots`] of `config.homes`) are denied too, but for the account's own
+/// home `home`, which the profile grants back for reading (it writes only below `exec/`).
 ///
 /// # Errors
 ///
