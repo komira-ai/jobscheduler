@@ -445,6 +445,21 @@ fn an_earlier_run_listed_ended_goes_on_from_the_record_without_a_gap_or_a_repeat
     );
 }
 
+/// Proves that the job the tests here wait on does not outlive its test: with its gate never
+/// made, the job ends with exit code 0 once the file it made when it was up is gone, as it is
+/// when the test's directory is removed at the test's end. Catches a job that loops on after
+/// its test, whose gate went with the test's directory before the job looked for it (looped,
+/// such jobs fill the user's process limit and later starts fail to fork).
+#[test]
+fn a_waiting_job_ends_once_its_tests_directory_is_gone() {
+    let live = Live::new(64 * 1024 * 1024);
+    let (mut rig, id, _dir, gate) = started("logs-orphan", &live, "j7");
+    std::fs::remove_file(up_of(&gate)).unwrap();
+    assert_eq!(rig.settle(&id), exited(0));
+    assert!(!gate.exists(), "the gate was never made");
+    rig.rt.remove(&id).unwrap();
+}
+
 /// Proves that a run without a sink, on a runtime that uploads, is what it was: no uploader
 /// (no wake, no request, no record), no `logs` in the report, and the tail of its files.
 /// Catches an upload or a report where no live logs were asked for.
