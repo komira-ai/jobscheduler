@@ -66,7 +66,13 @@ fn history(tables: &Tables, fillers: usize) -> Vec<(JobRecord, Booked)> {
     ended.push((job, booked(2000, 6 * GIB)));
     let spec = of_class("test", needs(0, 0));
     let failed = exited(1, GIB, Duration::from_secs(5));
-    let job = ran(tables, ("failed", None), spec, booked(2000, 4 * GIB), failed);
+    let job = ran(
+        tables,
+        ("failed", None),
+        spec,
+        booked(2000, 4 * GIB),
+        failed,
+    );
     ended.push((job, booked(2000, 4 * GIB)));
     let mut spec = of_class("target", needs(0, 0));
     let labels = BTreeMap::from([
@@ -75,7 +81,13 @@ fn history(tables: &Tables, fillers: usize) -> Vec<(JobRecord, Booked)> {
     ]);
     spec.labels = Labels::from_caller(&labels).unwrap();
     let end = exited(0, 3 * GIB, Duration::from_secs(40));
-    let job = ran(tables, ("ci-0", Some("ci")), spec, booked(2000, 4 * GIB), end);
+    let job = ran(
+        tables,
+        ("ci-0", Some("ci")),
+        spec,
+        booked(2000, 4 * GIB),
+        end,
+    );
     ended.push((job, booked(2000, 4 * GIB)));
     cancelled(tables, fillers);
     ended
