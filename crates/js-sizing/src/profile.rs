@@ -97,7 +97,8 @@ pub struct Checked {
     pub actual_mean: u32,
     /// The run's largest 2 s slot value (start) or point (tail).
     pub actual_peak: u32,
-    /// The level before learning; `None` for an empty profile.
+    /// The level before learning; `None` for an empty profile, or when every kept run is too
+    /// old to weigh.
     pub predicted_level: Option<u32>,
     /// The largest `slot_p90` over the start slots the run reached, before learning;
     /// `None` when the run was not scored.
@@ -253,13 +254,14 @@ impl Profile {
         self.runs.len()
     }
 
-    /// The decayed mean of the per-second samples at `at_ms`; `None` with no run.
+    /// The decayed mean of the per-second samples at `at_ms`; `None` with no run, or when every run is
+    /// too old to weigh.
     pub fn level(&self, at_ms: u64) -> Option<u32> {
         self.level_with(&self.weights(at_ms))
     }
 
-    /// The decayed mean of start slot `slot` at `at_ms`; `None` when no run reached it
-    /// or `slot` is not a start slot.
+    /// The decayed mean of start slot `slot` at `at_ms`; `None` when no run reached it,
+    /// every run is too old to weigh, or `slot` is not a start slot.
     pub fn slot_mean(&self, slot: usize, at_ms: u64) -> Option<u32> {
         self.mean_with(&self.weights(at_ms), slot)
     }
@@ -277,7 +279,8 @@ impl Profile {
         self.runs.iter().filter(|r| r.slots.len() > slot).count()
     }
 
-    /// The decayed mean after 128 s at `at_ms`; `None` when no run lasted past 128 s.
+    /// The decayed mean after 128 s at `at_ms`; `None` when no run lasted past
+    /// 128 s, or every such run is too old to weigh.
     pub fn tail(&self, at_ms: u64) -> Option<u32> {
         self.tail_with(&self.weights(at_ms))
     }
