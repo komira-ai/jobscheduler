@@ -9,6 +9,7 @@
 
 mod adopt;
 pub(crate) mod agent;
+mod agent_start;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
