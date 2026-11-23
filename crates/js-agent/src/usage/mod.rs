@@ -54,6 +54,7 @@ mod clock;
 mod collect;
 mod host;
 mod outbox;
+mod proc_stat;
 mod sampler;
 mod wire;
 
@@ -67,8 +68,9 @@ pub use cgroup::{
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
 pub use collect::Collector;
-pub use host::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
+pub use host::{HostCpu, PROC_CPU_PRESSURE, host_cpu};
 pub use js_agent_usage::SecondRates;
 pub use outbox::{Outbox, Reading};
+pub use proc_stat::{PROC_STAT, USEC_PER_TICK, parse_host_busy_usec};
 pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};
 pub use wire::to_wire;

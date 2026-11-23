@@ -1,37 +1,10 @@
-//! The whole host's CPU counters: the busy time of `/proc/stat` and the `some` total of
-//! `/proc/pressure/cpu`, which the per-second series reads.
+//! The whole host's CPU counters: the busy time of `/proc/stat` (read by the load's own reader,
+//! whose cases are in `proc_stat.rs`) and the `some` total of `/proc/pressure/cpu`, which the
+//! per-second series reads.
 
-use js_agent::usage::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu, parse_proc_stat_busy_usec};
+use js_agent::usage::{HostCpu, PROC_CPU_PRESSURE, PROC_STAT, host_cpu};
 
 use crate::support::FakeFiles;
-
-/// Asserts the busy time read from `/proc/stat`: user, nice, system, irq, softirq and steal
-/// ticks of the first line, at 10 ms a tick; idle, iowait, guest and guest_nice left out; and
-/// every malformed form refused. Catches idle or iowait counted as busy, guest counted twice,
-/// a per-CPU line read for the host, and a short line read with missing fields as zero.
-#[test]
-fn proc_stat_busy_table() {
-    let cases: [(&str, Option<u64>); 9] = [
-        // user 1, nice 2, system 3, idle 400, iowait 50, irq 6, softirq 7, steal 8, guest 90,
-        // guest_nice 100: busy 27 ticks.
-        (
-            "cpu  1 2 3 400 50 6 7 8 90 100\ncpu0 1 1 1 1 1 1 1 1 1 1\n",
-            Some(270_000),
-        ),
-        // A kernel that prints only the first eight fields.
-        ("cpu 1 2 3 400 50 6 7 8\n", Some(270_000)),
-        ("cpu 1 2 3 400 50 6 7\n", None),
-        ("cpu 1 2 3 400 x 6 7 8\n", None),
-        ("cpu0 1 2 3 400 50 6 7 8\n", None),
-        ("intr 1 2 3 4 5 6 7 8\n", None),
-        ("\ncpu 1 2 3 4 5 6 7 8\n", None),
-        ("", None),
-        ("cpu 18446744073709551615 1 0 0 0 0 0 0\n", Some(u64::MAX)),
-    ];
-    for (text, want) in cases {
-        assert_eq!(parse_proc_stat_busy_usec(text), want, "{text:?}");
-    }
-}
 
 /// Asserts the host's counters from its files: both when both can be read, busy time alone
 /// when `/proc/pressure/cpu` cannot be read or has no `some` total, and none when
