@@ -126,6 +126,8 @@ struct Open {
 
 impl Open {
     fn new(name: &str, groups: impl IntoIterator<Item = u32>) -> Self {
+        // Not below CARGO_TARGET_TMPDIR: that is in the runner's home, which `nobody` may not
+        // search, and the job must reach the copy of this binary and the group files.
         let dir = TestDir::under("/private/tmp", name);
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let act = dir.join(js_testkit::act::NAME);
@@ -287,16 +289,16 @@ fn ready(folders: &Folders, supervisor: &mut Child) -> Ready {
     }
 }
 
-/// As root, with a new audit session, the supervisor drops to the slot user and sets the
-/// limits: the job runs as `nobody`, effective, real and saved, with that user's group as its
-/// only group (its kernel list, read inside the job); the supervisor itself runs as `nobody`
-/// too, all three ids (it dropped for good: root cannot be regained); the job and the
-/// supervisor are in one new audit session, which is not this test's, and `asid_of` (the kernel's answer by pid, `auditon`) gives the id the
-/// supervisor read back from its own session when it opened it (`getaudit_addr`, in the ready
-/// record); the process and file-size limits are set soft and hard; and a write past the
-/// file-size limit stops at exactly the limit. Catches a drop that keeps root's groups or
-/// its real uid, a session that is not opened (the job would stay in the agent's), and limits
-/// that are not set.
+/// As root, with a new audit session, the supervisor drops to the slot user and sets the limits:
+/// the job runs as `nobody`, effective, real and saved, with that user's group as its only group
+/// (its kernel list, read inside the job); the supervisor itself runs as `nobody` too, all three
+/// ids (it dropped for good: root cannot be regained); the job and the supervisor are in one new
+/// audit session, which is not this test's, and `asid_of` (the kernel's answer by pid, `auditon`)
+/// gives the id the supervisor read back from its own session when it opened it (`getaudit_addr`,
+/// in the ready record); the process and file-size limits are set soft and hard; and a write past
+/// the file-size limit stops at exactly the limit. Catches a drop that keeps root's groups or its
+/// real uid, a session that is not opened (the job would stay in the agent's), and limits that are
+/// not set.
 #[test]
 #[ignore = "needs root on macOS: run by beta.yml's root step"]
 fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
