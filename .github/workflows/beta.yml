@@ -50,6 +50,17 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
+      - name: DIAGNOSTIC (temporary) the groups the directory lists for nobody
+        run: |
+          id nobody; id -G nobody
+          for g in $(id -G nobody); do
+            name="$(dscl . -search /Groups PrimaryGroupID "$g" | awk 'NR==1{print $1}')"
+            echo "== $g $name"
+            dscl . -read "/Groups/$name" RecordName PrimaryGroupID GroupMembership NestedGroups GeneratedUID 2>&1 || true
+            dsmemberutil checkmembership -U nobody -G "$name" || true
+          done
+          dscl . -read /Groups/everyone GeneratedUID || true
+          dscl . -list /Groups PrimaryGroupID | awk '$2 >= 500'
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cargo-cache
         with:
