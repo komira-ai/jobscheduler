@@ -465,8 +465,16 @@ impl Engine {
             .recover(JOB_TERM, operation, operation.0, Vec::new());
         let free = room.iter().filter(|host| capable.contains(host));
         let free = free.filter(|host| !self.port_held_on(host, &walker.host_ports));
-        let free = free.filter(|host| self.room.fits(host, walker.booked));
-        let only: BTreeSet<_> = free.map(map::worker).collect();
+        let (free, full): (Vec<_>, Vec<_>) =
+            free.partition(|host| self.room.fits(host, walker.booked));
+        // A host the bookings fill by memory is refused here, before the scheduler sees it:
+        // say so, as the scheduler's refusals are said.
+        for host in full {
+            if let Some(refusal) = self.room.memory_refusal(host, walker.booked) {
+                self.book_refusal(&walker.job, map::worker(host), refusal);
+            }
+        }
+        let only: BTreeSet<_> = free.into_iter().map(map::worker).collect();
         if only.is_empty() {
             let next = OperationId(operation.0.saturating_add(1));
             self.sched.recover(JOB_TERM, next, operation.0, Vec::new());

@@ -16,7 +16,7 @@ use std::time::Duration;
 use js_agent_wire::{HostPort, JobMount, Layer, MountMode, MountSource, PortProtocol, Propagation};
 use js_state::conformance::Backend;
 use js_state::{CommitStats, Cond, ManualClock, Store, Txn, Versioned};
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
+use js_types::{CpuSeries, ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources};
 
 use crate::interfere::Interfere;
 use crate::{
@@ -737,7 +737,8 @@ pub(crate) fn whole_host_spec() -> JobSpec {
     }
 }
 
-/// What a host reports of a job that stopped: short tails and the resources it used.
+/// What a host reports of a job that stopped: short tails, the resources it used and its CPU
+/// series.
 pub(crate) fn output() -> Output {
     Output {
         stdout: "done\n".to_owned(),
@@ -751,7 +752,13 @@ pub(crate) fn output() -> Output {
             cpu_peak: None,
         }),
         logs: None,
+        cpu_series: Some(series()),
     }
+}
+
+/// The CPU series [`output`] carries: two points at 2 s a point.
+pub(crate) fn series() -> CpuSeries {
+    CpuSeries::new(2, vec![16, 40], 3_000_000, false).expect("a well-formed series")
 }
 
 /// An exit with `exit_code` and [`output`].

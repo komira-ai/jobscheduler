@@ -82,3 +82,61 @@ async fn the_hosts_listing_shows_the_latest_load_of_each_host() {
     })
     .await;
 }
+
+/// Asserts the listing of the per-second lists of a host's latest load: both lists in the
+/// units their names state, oldest first; busy values alone (no pressure key) for a host
+/// whose agent sent none of the other; a pressure list with a value above 1000 left out whole
+/// while the busy list stays; and neither key once the host's latest beat has none, whether
+/// that beat carries a load without them or no load. It catches a list printed in another
+/// unit or order, a key printed empty, and seconds left on a host after its load changed.
+#[tokio::test]
+async fn the_hosts_listing_shows_the_seconds_of_the_latest_load() {
+    let h = start_agents("agents_load_seconds").await;
+    guard(async {
+        let a = join(&h, "a").await;
+        let mut with = load(1);
+        with["second_cpu_millis"] = json!([1500, 0, 4000]);
+        with["second_cpu_pressure_some_permille"] = json!([10, 0, 1000]);
+        beat_load(&h, &a, Some(with)).await;
+        let listed = entry(&hosts(&h).await, "a");
+        assert_eq!(listed["load"]["second_cpu_millis"], json!([1500, 0, 4000]));
+        assert_eq!(
+            listed["load"]["second_cpu_pressure_some_permille"],
+            json!([10, 0, 1000])
+        );
+
+        let mut busy = load(2);
+        busy["second_cpu_millis"] = json!([250]);
+        beat_load(&h, &a, Some(busy)).await;
+        let listed = entry(&hosts(&h).await, "a");
+        assert_eq!(listed["load"]["second_cpu_millis"], json!([250]));
+        assert!(
+            listed["load"]
+                .get("second_cpu_pressure_some_permille")
+                .is_none()
+        );
+
+        let mut broken = load(3);
+        broken["second_cpu_millis"] = json!([7]);
+        broken["second_cpu_pressure_some_permille"] = json!([5, 1001]);
+        beat_load(&h, &a, Some(broken)).await;
+        let listed = entry(&hosts(&h).await, "a");
+        assert_eq!(listed["load"]["second_cpu_millis"], json!([7]));
+        assert!(
+            listed["load"]
+                .get("second_cpu_pressure_some_permille")
+                .is_none()
+        );
+
+        beat_load(&h, &a, Some(load(4))).await;
+        let listed = entry(&hosts(&h).await, "a");
+        assert_eq!(listed["load"]["seq"], 4);
+        assert!(listed["load"].get("second_cpu_millis").is_none());
+        let mut again = load(5);
+        again["second_cpu_millis"] = json!([9]);
+        beat_load(&h, &a, Some(again)).await;
+        assert_eq!(beat(&h, &a).await.status, 200);
+        assert!(entry(&hosts(&h).await, "a").get("load").is_none());
+    })
+    .await;
+}

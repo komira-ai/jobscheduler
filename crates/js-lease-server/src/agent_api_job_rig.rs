@@ -863,6 +863,12 @@ impl FakeAgent {
         held.result.as_mut().unwrap().usage = Some(usage);
     }
 
+    /// The result the held job `id` ended with reports the CPU series `series`.
+    pub(crate) fn report_series(&mut self, id: &str, series: js_agent_wire::CpuSeries) {
+        let held = self.held.get_mut(id).unwrap();
+        held.result.as_mut().unwrap().cpu_series = Some(series);
+    }
+
     /// The held job `id` ends with a clean exit whose result reports `logs`.
     pub(crate) fn end_with_logs(&mut self, id: &str, logs: js_agent_wire::LogReport) {
         let held = self.held.get_mut(id).unwrap();
@@ -894,5 +900,6 @@ pub(crate) fn result(
         logs: None,
         input_failure: None,
         usage: None,
+        cpu_series: None,
     }
 }

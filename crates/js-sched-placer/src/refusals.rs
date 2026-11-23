@@ -9,6 +9,10 @@
 //! ([`crate::engine::jobs::PassMetrics::refused`]). The book holds a few entries per host,
 //! whatever the number of jobs.
 //!
+//! A host the walk's own ledger ([`crate::room::Room`]) finds full by the memory its
+//! allocations book is refused before the scheduler sees it, and is booked the same way as a
+//! `booked-memory` refusal with the ledger's figures ([`crate::room::Room::memory_refusal`]).
+//!
 //! A host that fails the scheduler's other checks (a lease cap, a request larger than the
 //! host, a host that must be empty) is refused with no kind: the scheduler does not say which
 //! of those held, so it is not counted here.
@@ -56,23 +60,28 @@ impl Engine {
         let taken = self.sched.take_refusals();
         self.refused.dropped = self.refused.dropped.saturating_add(taken.dropped);
         for HostRefusal { worker, refusal } in taken.kept {
-            debug!(
-                job = %job,
-                host = %worker,
-                reason = refusal.kind.as_str(),
-                detail = %figures(&refusal),
-                "a host refused a queued job"
-            );
-            let tallies = self.refused.hosts.entry(worker).or_default();
-            let tally = tallies.entry(refusal.kind).or_insert_with(|| Tally {
-                count: 0,
-                job: job.clone(),
-                latest: refusal,
-            });
-            tally.count = tally.count.saturating_add(1);
-            tally.job = job.clone();
-            tally.latest = refusal;
+            self.book_refusal(job, worker, refusal);
         }
+    }
+
+    /// Logs that `worker` refused `job` for `refusal` and adds it to the book.
+    pub(super) fn book_refusal(&mut self, job: &JobId, worker: WorkerId, refusal: Refusal) {
+        debug!(
+            job = %job,
+            host = %worker,
+            reason = refusal.kind.as_str(),
+            detail = %figures(&refusal),
+            "a host refused a queued job"
+        );
+        let tallies = self.refused.hosts.entry(worker).or_default();
+        let tally = tallies.entry(refusal.kind).or_insert_with(|| Tally {
+            count: 0,
+            job: job.clone(),
+            latest: refusal,
+        });
+        tally.count = tally.count.saturating_add(1);
+        tally.job = job.clone();
+        tally.latest = refusal;
     }
 
     /// The refusals the walks since the last call booked, emptying the book.

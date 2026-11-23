@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, Request as HttpRequest, StatusCode};
 use js_api_gateway::router;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
-    Availability, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory, Pool,
-    Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
+    Availability, CpuSeries, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory,
+    Pool, Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
 };
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, ClearHostTaintRequest, ClearHostTaintResponse,
@@ -313,6 +313,12 @@ impl JobService for Stub {
                     whole_host: WholeHostOutcome::Drained.into(),
                     mark_give_ups: 1,
                     estimated_run_ms: Some(0),
+                    cpu_series: Some(CpuSeries {
+                        granularity_secs: 2,
+                        points: vec![0, 16, 40],
+                        run_usec: 5_500_000,
+                        partial: true,
+                    }),
                 }],
                 next_page_token: "usage-page-2".to_owned(),
             },
