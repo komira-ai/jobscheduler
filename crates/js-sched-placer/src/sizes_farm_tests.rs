@@ -173,14 +173,14 @@ fn capped_history(tables: &Tables) -> Vec<(JobRecord, Booked)> {
 }
 
 /// Asserts, over the farm-shaped history above, what every target is booked next: at least
-/// the largest peak it ever had (no target is booked below a peak of its own), from its kind's
-/// peaks and not the cold size, at most twice the real peaks in sum (here 1.78 times),
-/// and so 97 of its jobs fit a farm host by memory where 15 did at 16 GiB. Catches a young
-/// target booked the cold memory (the 16 GiB that filled the farm's hosts at 15 jobs), a
-/// fallback that drops a target's own larger peak, and a kind's estimate thrown away for
-/// being spread (its largest peak over four times its median).
+/// the largest peak it ever had (no target is booked below a peak of its own), from its own
+/// peaks and not its kind's largest or the cold size, so the bookings sum to 1.37 times the
+/// real peaks (1.78 when each young target booked its kind's largest) and 126 of its jobs fit a
+/// farm host by memory (97 then, and 15 at 16 GiB). Catches a young target booked the cold
+/// memory (the 16 GiB that filled the farm's hosts at 15 jobs) or held at its kind's largest
+/// peak, and a target booked below a peak of its own.
 #[test]
-fn the_farms_targets_book_their_kinds_peaks_not_the_cold_size_and_never_below_their_own() {
+fn the_farms_targets_book_their_own_peaks_not_their_kinds_or_the_cold_size() {
     let tables = Tables::new();
     let history = capped_history(&tables);
     let sizes = farm_taught(&history);
@@ -203,10 +203,10 @@ fn the_farms_targets_book_their_kinds_peaks_not_the_cold_size_and_never_below_th
         }
     }
     let factor_hundredths = booked_sum * 100 / peak_sum;
-    assert_eq!(factor_hundredths, 178, "booked over peaks, in hundredths");
+    assert_eq!(factor_hundredths, 137, "booked over peaks, in hundredths");
     assert_eq!(
         HOST.1 / (booked_sum / jobs),
-        97,
+        126,
         "jobs a host fits by memory"
     );
     assert_eq!(
@@ -575,13 +575,13 @@ fn a_compile_that_peaks_at_20_cores_books_its_mean_and_a_host_with_measured_room
 /// Asserts the source and size of a young target when its kind gives no figure: a kind (and so
 /// the client's whole history) whose runs reach the host is no fallback, so a target of it
 /// whose own runs peaked at 6 GiB books its own peak with the margin (`class`, 7.5 GiB), one
-/// whose runs peaked at 1 GiB books the cold memory (`cold`, 4 GiB), and the target with five
+/// whose runs peaked at 1 GiB books its own too (`class`, 1.5 GiB), and the target with five
 /// runs of 220 GiB on a 251 GiB host, whose estimate with the margin reaches the host, books
 /// the whole host (`over-cap`). Under another client, a target of a kind that gives a figure
 /// books the kind's (`fallback`). Catches a target booked below a peak of its own, and a settled
 /// target past the host given a share.
 #[test]
-fn a_young_target_books_the_larger_of_its_own_peak_and_its_fallback_and_a_large_one_the_host() {
+fn a_young_target_books_its_own_peak_whatever_its_kind_and_a_large_one_the_host() {
     let tables = Tables::new();
     let mut history = Vec::new();
     let mut run = |(id, client): (&str, Option<&str>), class: &str, peak: u64| {
@@ -602,7 +602,7 @@ fn a_young_target_books_the_larger_of_its_own_peak_and_its_fallback_and_a_large_
     let big = sized(&sizes, &next("kind.mix.big"));
     assert_eq!((big.1, big.2), (30 * 256 * (1 << 20), SizedFrom::Class));
     let small = sized(&sizes, &next("kind.mix.small"));
-    assert_eq!((small.1, small.2), (4 * GIB, SizedFrom::Cold));
+    assert_eq!((small.1, small.2), (6 * 256 * (1 << 20), SizedFrom::Class));
     let huge = sized(&sizes, &next("kind.mix.huge"));
     assert_eq!((huge.1, huge.2), (HOST.1, SizedFrom::OverCap));
     let other = queued_for("other", "kind.mix.fresh");
