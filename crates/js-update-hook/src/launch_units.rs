@@ -6,7 +6,7 @@
 //! |------------------|---------------------------------------------------------------------|
 //! | `show`           | `print system/<label>`: its `state`, `last exit code` and `last terminating signal` |
 //! | `stop_no_block`  | `bootout system/<label>`, when `print` finds the service loaded      |
-//! | `start`          | `bootstrap system <plist>` when nothing is loaded; nothing when it is `running`, `spawning` or `xpcproxy`; `kickstart -k` otherwise; then reads `print` until the service has begun |
+//! | `start`          | `bootstrap system <plist>` when nothing is loaded; nothing when it is `running`, `spawning` or `xpcproxy`; `kickstart -k` otherwise; the other one of the two once when the first fails and `print` then calls for it; then reads `print` until the service has begun |
 //! | `is_active`      | `print system/<label>`: loaded and `state = running`                |
 //!
 //! # What `show` says
@@ -61,6 +61,27 @@
 //! it does not wait for the program to be healthy (the steps do). A service that is still idle
 //! after the reads is left to the steps to judge: it reads `inactive`, or `failed` if it has
 //! ended badly.
+//!
+//! # When launchd refuses the start
+//!
+//! `start` chooses between `bootstrap` and `kickstart` from a `print` made just before, and
+//! what launchd holds can differ by the time the command runs: `bootstrap` of a label the
+//! domain already holds fails with exit 5 ("Bootstrap failed: 5: Input/output error"), and a
+//! `kickstart` of a label that has left the domain fails too. So the exit status of the command
+//! is not the verdict: when it fails, `start` reads `print` again, and
+//!
+//! - a service that has begun (`running`, `spawning`, `xpcproxy`) needs nothing: the start
+//!   succeeds;
+//! - a service that now calls for the other command (loaded where it was not: `kickstart -k`;
+//!   gone where it was loaded: `bootstrap`) gets that command, once, and its outcome is the
+//!   start's;
+//! - otherwise (the same command again, or a `print` that fails or prints no state) the first
+//!   command's error is the start's error.
+//!
+//! A `kickstart -k` made this way is held back by the gate file like any other (below): with the
+//! file absent, the start fails with the gate's error. A kick here has the window every kick
+//! has: a service another client has just loaded and launchd has not yet begun reads idle, and
+//! the kick restarts it; the steps' wait for the unit to come up judges the outcome.
 //!
 //! # `kickstart -k` and the gate file
 //!
@@ -290,6 +311,28 @@ fn still_idle(text: &str, runs_before: u64) -> bool {
     )
 }
 
+/// How `start` starts the service, from what `launchctl print` printed of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartBy {
+    /// The domain does not hold the label: `bootstrap` its plist.
+    Bootstrap,
+    /// Loaded and idle: `kickstart -k`.
+    Kick,
+    /// Running, or launchd has begun its start: a `kickstart -k` now would kill the instance
+    /// launchd just started, and launchd would then hold the next start for its throttle.
+    Nothing,
+}
+
+/// What `start` does for a service that `launchctl print` printed as `printed` (`None`: the
+/// domain does not hold it).
+fn how_to_start(printed: Option<&str>) -> Result<StartBy, PortError> {
+    Ok(match printed {
+        None => StartBy::Bootstrap,
+        Some(text) if is_begun(printed_state(text)?) => StartBy::Nothing,
+        Some(_) => StartBy::Kick,
+    })
+}
+
 impl LaunchUnits<'_> {
     /// Reads the service again, at most [`SETTLE_READS`] times, until it has begun the start
     /// that was made (see the module documentation). A service that cannot be read ends the
@@ -303,6 +346,36 @@ impl LaunchUnits<'_> {
                 _ => return,
             }
         }
+    }
+
+    /// Starts the service by `how`, `printed` being what `launchctl print` printed of it just
+    /// before, and waits for it to begin (see [`LaunchUnits::settle`]). The inner error is
+    /// launchd's refusal of the command, which `start` looks at again; the outer one is the
+    /// port's own refusal (the gate file is absent), which it does not.
+    fn start_by(
+        &self,
+        unit: &str,
+        how: StartBy,
+        printed: Option<&str>,
+    ) -> Result<Result<(), String>, PortError> {
+        let (ran, runs_before) = match how {
+            StartBy::Nothing => return Ok(Ok(())),
+            StartBy::Bootstrap => {
+                let plist = format!("{LAUNCH_DAEMONS_DIR}/{unit}.plist");
+                (self.launchctl(&["bootstrap", "system", &plist]), 0)
+            }
+            StartBy::Kick => {
+                self.allow_kick(unit)?;
+                let target = format!("system/{unit}");
+                let kick = self.stopper().run(LAUNCHCTL, &["kickstart", "-k", &target]);
+                (kick, runs_of(printed.unwrap_or_default()))
+            }
+        };
+        if let Err(why) = ran {
+            return Ok(Err(why));
+        }
+        self.settle(unit, runs_before);
+        Ok(Ok(()))
     }
 
     /// `kickstart` ignores the `KeepAlive` condition on the gate file: refuse it while the
@@ -345,25 +418,23 @@ impl Units for LaunchUnits<'_> {
 
     fn start(&self, unit: &str) -> Result<(), PortError> {
         check_label(unit)?;
-        let (result, runs_before) = match self.print(unit)? {
-            None => {
-                let plist = format!("{LAUNCH_DAEMONS_DIR}/{unit}.plist");
-                (self.launchctl(&["bootstrap", "system", &plist]), 0)
-            }
-            // Running, or launchd has begun its start (a bootstrap of a daemon whose launch
-            // condition holds spawns it at once): a `kickstart -k` now would kill the instance
-            // launchd just started, and launchd would then hold the next start for its throttle.
-            Some(text) if is_begun(printed_state(&text)?) => return Ok(()),
-            Some(text) => {
-                self.allow_kick(unit)?;
-                let target = format!("system/{unit}");
-                let kick = self.stopper().run(LAUNCHCTL, &["kickstart", "-k", &target]);
-                (kick, runs_of(&text))
-            }
+        let before = self.print(unit)?;
+        let first = how_to_start(before.as_deref())?;
+        let Err(why) = self.start_by(unit, first, before.as_deref())? else {
+            return Ok(());
         };
-        result.map_err(PortError::Command)?;
-        self.settle(unit, runs_before);
-        Ok(())
+        // launchd's exit status is not the verdict: read what it holds now, and make the other
+        // command once when the service no longer calls for the one that was made.
+        let next = self.print(unit).map(|now| {
+            let next = how_to_start(now.as_deref());
+            (now, next)
+        });
+        match next {
+            Ok((now, Ok(next))) if next != first => self
+                .start_by(unit, next, now.as_deref())?
+                .map_err(PortError::Command),
+            _ => Err(PortError::Command(why)),
+        }
     }
 
     fn is_active(&self, unit: &str) -> Result<bool, PortError> {
