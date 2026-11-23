@@ -355,7 +355,7 @@ fn patch() -> Result<(Vec<u8>, Vec<String>), FarmError> {
 }
 
 /// Writes `bytes` to `path`, after what it holds when `append`, making its directory.
-fn write(path: &Path, bytes: &[u8], append: bool) -> Result<(), FarmError> {
+pub(super) fn write(path: &Path, bytes: &[u8], append: bool) -> Result<(), FarmError> {
     let written = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)

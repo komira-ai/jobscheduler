@@ -1,0 +1,45 @@
+[2026-11-22T05:37:41.912+00:00] Build ID: 00000000-0000-0000-0000-000000000000
+[2026-11-22T05:37:42.808+00:00] RE Session: GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_5ffa66c10a (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_5ffa66c10a)
+[2026-11-22T05:39:28.227+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.227+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.227+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.227+00:00] Stderr: <empty>
+
+[2026-11-22T05:39:28.227+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_e60f1419d1 (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_e60f1419d1)
+[2026-11-22T05:39:28.227+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.227+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.227+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.227+00:00] Stderr: <empty>
+
+[2026-11-22T05:39:28.227+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_891a50c9be (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_891a50c9be)
+[2026-11-22T05:39:28.227+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.227+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.227+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.227+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.227+00:00] Stderr: <empty>
+
+[2026-11-22T05:39:28.240+00:00] Cache hits: 98%
+[2026-11-22T05:39:28.240+00:00] Commands: 2085 (cached: 2050, remote: 35, local: 0)
+[2026-11-22T05:39:28.240+00:00] Network: up 732KiB  down 45MiB  session GRPC-SESSION-ID
+[2026-11-22T05:39:28.241+00:00]
+[2026-11-22T05:39:28.241+00:00] BUILD ERRORS (35)
+[2026-11-22T05:39:28.241+00:00] The following actions failed during the execution of this command:
+[2026-11-22T05:39:28.241+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_5ffa66c10a (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_5ffa66c10a)
+[2026-11-22T05:39:28.241+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.241+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.241+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.241+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.241+00:00] Stderr: <empty>
+
+[2026-11-22T05:39:28.241+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_e60f1419d1 (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_e60f1419d1)
+[2026-11-22T05:39:28.241+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:39:28.241+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:39:28.241+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:39:28.241+00:00] Stdout: <empty>
+[2026-11-22T05:39:28.241+00:00] Stderr: <empty>
+
+BUILD FAILED
+Failed to build 'jobscheduler//crates/js-pool-fake:js-pool-fake-0.1.0_c4127c1f79 (buildrules//platforms:linux_x86_64#27db57317ae2fec7)'

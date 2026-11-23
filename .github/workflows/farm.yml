@@ -109,8 +109,12 @@ jobs:
       # runs `buildrules sync`, writes what it changed as a patch, puts the stale inputs, the
       # changed files and the command that applies the patch in this job's summary, and fails
       # without building (crates/xtask/src/farm/table.rs); builds //:ci with buck2's progress in
-      # this log, fails unless the summary line says `local: 0` (every action ran on the farm or
-      # came from its cache), and stops buck2's daemon however the build ended.
+      # this log, and when every failure of that build is a cut connection to the farm (and
+      # nothing else failed) runs it once more and says so in the log and the job summary; a
+      # second cut, or any real failure, fails the job (crates/xtask/src/farm/cuts.rs,
+      # docs/farm.md). It fails unless the summary line of the last run says `local: 0` (every
+      # action ran on the farm or came from its cache), and stops buck2's daemon however the
+      # build ended.
       - name: buck2 build //:ci on the build farm, local 0
         run: cargo xtask farm-build --buck2 "$RUNNER_TEMP/bin/buck2" --target //:ci --patch "$RUNNER_TEMP/buildrules-sync/buildrules-sync.patch" --summary "$GITHUB_STEP_SUMMARY" --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID"
       # A stale table's fix, for the contributor to read and `git apply` (docs/farm.md). The file

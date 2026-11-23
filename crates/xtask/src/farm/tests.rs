@@ -85,6 +85,15 @@ fn every_error_says_what_is_wrong() {
             "`buck2 build //:ci` failed (exit status: 3)",
         ),
         (
+            Error::CutTwice {
+                target: "//:ci".to_owned(),
+                status: "exit status: 3".to_owned(),
+            },
+            "`buck2 build //:ci` failed (exit status: 3) on its second run too, every failure \
+             again a cut connection to the farm: the farm or the network to it is down; run the \
+             job again once the farm answers",
+        ),
+        (
             Error::NoSummary,
             "the build printed no summary line (`Commands: N (cached: N, remote: N, local: N)`)",
         ),
@@ -144,4 +153,25 @@ fn a_read_that_fails_ends_the_log_with_what_came_before() {
     let mut log = Vec::new();
     assert_eq!(tee(Broken(false), &mut log), b"[t] Waiting\n");
     assert_eq!(log, b"[t] Waiting\n");
+}
+
+#[test]
+fn the_rerun_line_names_the_target_and_the_cuts() {
+    // Catches: a line in the log and the job summary that does not say what ran again or why.
+    assert_eq!(
+        rerun_line("//:ci", 39),
+        "xtask: every failure of `buck2 build //:ci` was a cut connection to the farm (39 \
+         cut messages); running it once more\n"
+    );
+}
+
+#[test]
+fn only_a_buck2_that_ended_with_a_status_of_its_own_may_run_again() {
+    // Catches: a buck2 ended by a signal (killed by the runner, or out of memory) run again
+    // because what it printed before it died reads as a cut.
+    use std::os::unix::process::ExitStatusExt as _;
+    let cut_log = include_str!("cuts/build_cut.log");
+    assert_eq!(cut(ExitStatus::from_raw(3 << 8), cut_log), Some(2));
+    assert_eq!(cut(ExitStatus::from_raw(6), cut_log), None);
+    assert_eq!(cut(ExitStatus::from_raw(3 << 8), "BUILD FAILED\n"), None);
 }

@@ -11,7 +11,8 @@
 //!   (`.github/workflows/farm.yml`): refused unless buck2 has a worker property set; refused when
 //!   the generated build table is stale, with what `buildrules sync` changed written as a patch to
 //!   `--patch` and the command that applies it to the job summary `--summary`; then
-//!   `buck2 build <label>` with its progress in the log, failed unless its summary says `local: 0`
+//!   `buck2 build <label>` with its progress in the log, run once more when every failure of it is
+//!   a cut connection to the farm, failed unless the summary of the last run says `local: 0`
 //!   (every action ran on the build farm or came from its cache), and buck2's daemon stopped after.
 //! - `debs --pins <file> --dir <dir>` ([`debs`]): the Debian packages a CI job installs with
 //!   `dpkg`, pinned by version and SHA-256 in a file of `.github/debs/`: the files the actions

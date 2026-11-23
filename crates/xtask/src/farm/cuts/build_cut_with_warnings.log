@@ -1,0 +1,43 @@
+[2026-11-22T03:59:31.608+00:00] Build ID: 00000000-0000-0000-0000-000000000000
+[2026-11-22T03:59:32.431+00:00] RE Session: GRPC-SESSION-ID
+[2026-11-22T05:30:23.844+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_2730d9b695_lint (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rustc js-scaler-0.1.0_2730d9b695_lint)
+[2026-11-22T05:30:23.844+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:30:23.844+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:30:23.844+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:30:23.844+00:00] Stdout: <empty>
+[2026-11-22T05:30:23.844+00:00] Stderr: <empty>
+
+[2026-11-22T05:30:23.844+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_7e156219a4__bin (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rustc js-scaler-0.1.0_7e156219a4__bin)
+[2026-11-22T05:30:23.844+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:30:23.844+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:30:23.844+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:30:23.844+00:00] Stdout: <empty>
+[2026-11-22T05:30:23.844+00:00] Stderr: <empty>
+
+[2026-11-22T05:30:24.008+00:00] [2m2026-11-22T05:30:23.843293Z[0m [33m WARN[0m [2mremote_execution::client[0m[2m:[0m Transient error (attempt 1/5), retrying in 123ms: code: 'The service is currently unavailable', message: "http2 error", source: tonic::transport::Error(Transport, hyper::Error(Http2, KeepAliveTimedOut)): transport error: http2 error: keep-alive timed out: operation timed out
+[2026-11-22T05:30:26.808+00:00] [2m2026-11-22T05:30:26.736056Z[0m [33m WARN[0m [2mremote_execution::client[0m[2m:[0m Transient error (attempt 2/5), retrying in 213ms: code: 'The service is currently unavailable', message: "http2 error", source: tonic::transport::Error(Transport, hyper::Error(Http2, KeepAliveTimedOut)): transport error: http2 error: keep-alive timed out: operation timed out
+[2026-11-22T05:30:28.407+00:00] [2m2026-11-22T05:30:28.221348Z[0m [33m WARN[0m [2mremote_execution::client[0m[2m:[0m Transient error (attempt 1/5), retrying in 134ms: code: 'The service is currently unavailable', message: "http2 error", source: tonic::transport::Error(Transport, hyper::Error(Http2, KeepAliveTimedOut)): transport error: http2 error: keep-alive timed out: operation timed out
+[2026-11-22T05:32:42.807+00:00] [2m2026-11-22T05:32:42.757123Z[0m [33m WARN[0m [2mremote_execution::client[0m[2m:[0m Transient error (attempt 2/5), retrying in 220ms: code: 'The service is currently unavailable', message: "tcp connect error", source: tonic::transport::Error(Transport, ConnectError(ConnectError("tcp connect error", 192.0.2.1:1, Os { code: 110, kind: TimedOut, message: "Connection timed out" }))): transport error: tcp connect error: tcp connect error: Connection timed out (os error 110)
+[2026-11-22T05:32:42.807+00:00] [2m2026-11-22T05:32:42.757124Z[0m [33m WARN[0m [2mremote_execution::client[0m[2m:[0m Transient error (attempt 3/5), retrying in 424ms: code: 'The service is currently unavailable', message: "tcp connect error", source: tonic::transport::Error(Transport, ConnectError(ConnectError("tcp connect error", 192.0.2.1:1, Os { code: 110, kind: TimedOut, message: "Connection timed out" }))): transport error: tcp connect error: tcp connect error: Connection timed out (os error 110)
+[2026-11-22T05:38:58.226+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_316e399fb7 (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rust_test js-scaler-0.1.0_316e399fb7)
+[2026-11-22T05:38:58.226+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:38:58.226+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:38:58.226+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:38:58.226+00:00] Stdout: <empty>
+[2026-11-22T05:38:58.226+00:00] Stderr: <empty>
+
+[2026-11-22T05:38:58.233+00:00] Cache hits: 65%
+[2026-11-22T05:38:58.233+00:00] Commands: 2044 (cached: 1335, remote: 709, local: 0)
+[2026-11-22T05:38:58.233+00:00] Network: up 7.6MiB  down 50MiB  session GRPC-SESSION-ID
+[2026-11-22T05:38:58.234+00:00]
+[2026-11-22T05:38:58.234+00:00] BUILD ERRORS (57)
+[2026-11-22T05:38:58.234+00:00] The following actions failed during the execution of this command:
+[2026-11-22T05:38:58.234+00:00] Action failed: jobscheduler//crates/js-scaler:js-scaler-0.1.0_2730d9b695_lint (buildrules//platforms:linux_x86_64#27db57317ae2fec7) (rustc js-scaler-0.1.0_2730d9b695_lint)
+[2026-11-22T05:38:58.234+00:00] Internal error (stage: remote_call_error): Remote Execution Error on Execute with digest 0000000000000000000000000000000000000000000000000000000000000000:142 for ReSession GRPC-SESSION-ID
+[2026-11-22T05:38:58.234+00:00] Error: (Error was returned on the stream by RE: RE channel error: code: 'Unknown error', message: "h2 protocol error: error reading a body from connection", source: hyper::Error(Body, Error { kind: Io(Custom { kind: BrokenPipe, error: "stream closed because of a broken pipe" }) }): error reading a body from connection: stream closed because of a broken pipe)
+[2026-11-22T05:38:58.234+00:00] Remote action digest: '0000000000000000000000000000000000000000000000000000000000000000:142'
+[2026-11-22T05:38:58.234+00:00] Stdout: <empty>
+[2026-11-22T05:38:58.234+00:00] Stderr: <empty>
+
+BUILD FAILED
+Failed to build 'jobscheduler//crates/js-pool-fake:js-pool-fake-0.1.0_c4127c1f79 (buildrules//platforms:linux_x86_64#27db57317ae2fec7)'
