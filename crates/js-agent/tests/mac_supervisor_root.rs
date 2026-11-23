@@ -7,11 +7,21 @@
 //! root (`sudo ... cargo test -p js-agent --test mac_supervisor_root -- --ignored`). A test run
 //! without root fails at its first line, saying so: it never passes without having run.
 //!
-//! The slot user is `nobody`, which every Mac has; the job is `/bin/sh` and reports what the
-//! system says of it. Waits are for events (a line the job prints, its end), never for a time.
+//! The slot user is `nobody`, which every Mac has; the job is `/bin/sh` or js-testkit's
+//! `kbf-act` and reports what the system says of it. Waits are for events (a line the job
+//! prints, its end), never for a time.
+//!
+//! The job's groups are read from its own kernel credential, never from the directory: the
+//! `groups` step of `kbf-act` prints the list `getgroups(2)` returns inside the job, and a
+//! `try-read` of a file a group alone may read shows whether the kernel lets the job act as a
+//! member. `id -G` is not used for this: on macOS it prints what the directory lists for the
+//! user (`getgrouplist`), which a process that `setgroups` set does not hold; for `nobody`
+//! that is `everyone` (12), `localaccounts` (61), `_lpoperator` (100) and, on a hosted
+//! runner, 701, and not the group the spec gave.
 
 #![cfg(target_os = "macos")]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -23,8 +33,22 @@ use js_agent::mac_supervisor::record::{parse_exit, parse_ready};
 use js_agent::mac_supervisor::{Ended, Ready, SuperviseSpec, VERB};
 use js_testkit::dir::TestDir;
 
+// This test binary answers as js-testkit's `kbf-act` when it is run through a copy of that
+// name: the job that reads its own groups back.
+js_testkit::act_test_hook!();
+
 /// The binary under test.
 const AGENT: &str = env!("CARGO_BIN_EXE_js-agent");
+
+/// The mode of a file that its group alone may read: no bit for its owner (root, who reads
+/// anything anyway) or for others.
+const GROUP_READ_ONLY: u32 = 0o040;
+
+/// `everyone`, a group the directory lists for every user, and the job must still not hold.
+const EVERYONE: u32 = 12;
+
+/// A group the directory lists for `nobody` on a hosted runner, which a job must not hold.
+const RUNNER_GROUP: u32 = 701;
 
 /// The largest file the job may write.
 const FILE_BYTES: u64 = 64 * 1024;
@@ -32,17 +56,25 @@ const FILE_BYTES: u64 = 64 * 1024;
 /// The most processes the slot user may have.
 const PROCESSES: u32 = 300;
 
-/// What the job does: prints its ids, its process limits and its file-size limits (`sh` is
-/// bash in POSIX mode, whose `ulimit -f` counts 512-byte blocks), waits for a line on its input
-/// (the test looks at its audit session meanwhile), then writes twice the file limit and
-/// prints how `dd` ended.
-const JOB: &str = r#"echo "ids $(/usr/bin/id -u) $(/usr/bin/id -g) $(/usr/bin/id -G)"
+/// The unit of `ulimit -f` in macOS's `/bin/sh`, which is bash 3.2: 1024 bytes, in POSIX mode
+/// too (512-byte units in POSIX mode came with a later bash).
+const SH_BLOCK: u64 = 1024;
+
+/// What the job does: prints its ids (its group list from the kernel, through `act`), its
+/// process limits and its file-size limits in [`SH_BLOCK`]s, waits for a line on its input (the
+/// test looks at its audit session meanwhile), then writes twice the file limit and prints how
+/// `dd` ended.
+fn job(act: &str) -> String {
+    format!(
+        r#"echo "ids $(/usr/bin/id -u) $(/usr/bin/id -g) $('{act}' groups)"
 echo "processes $(ulimit -S -u) $(ulimit -H -u)"
 echo "file blocks $(ulimit -S -f) $(ulimit -H -f)"
 read line
 /bin/dd if=/dev/zero of=./big bs=1024 count=128 2>/dev/null
 echo "dd $?"
-"#;
+"#
+    )
+}
 
 /// Fails the test unless it runs as root: a privileged test never passes without running.
 fn require_root() {
@@ -69,6 +101,106 @@ fn nobody(flag: &str) -> (String, u32) {
     let text = String::from_utf8(out.stdout).unwrap().trim().to_owned();
     let id = id32(&text);
     (text, id)
+}
+
+/// The groups the directory lists for `nobody` (`id -G nobody`): what a credential that
+/// resolved the user's groups from the directory would hold.
+fn nobody_s_directory_groups() -> BTreeSet<u32> {
+    let out = Command::new("/usr/bin/id")
+        .args(["-G", "nobody"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(id32)
+        .collect()
+}
+
+/// What every slot user may reach: a root-owned folder, mode 0755, outside the runner's
+/// home (which `nobody` may not search), holding a copy of this test binary named
+/// `kbf-act` and, for each group to check, a file `group-<gid>` owned by root and that group,
+/// [`GROUP_READ_ONLY`].
+struct Open {
+    dir: TestDir,
+    act: String,
+    groups: Vec<u32>,
+}
+
+impl Open {
+    fn new(name: &str, groups: impl IntoIterator<Item = u32>) -> Self {
+        // Not below CARGO_TARGET_TMPDIR: that is in the runner's home, which `nobody` may not
+        // search, and the job must reach the copy of this binary and the group files.
+        let dir = TestDir::under("/private/tmp", name);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let act = dir.join(js_testkit::act::NAME);
+        fs::copy(std::env::current_exe().unwrap(), &act).unwrap();
+        fs::set_permissions(&act, fs::Permissions::from_mode(0o755)).unwrap();
+        let groups: Vec<u32> = groups
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let open = Self {
+            act: act.display().to_string(),
+            dir,
+            groups,
+        };
+        for gid in &open.groups {
+            let file = open.file(*gid);
+            fs::write(&file, format!("only group {gid} may read this\n")).unwrap();
+            std::os::unix::fs::chown(&file, Some(0), Some(*gid)).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(GROUP_READ_ONLY)).unwrap();
+        }
+        open
+    }
+
+    fn file(&self, gid: u32) -> String {
+        self.dir.join(format!("group-{gid}")).display().to_string()
+    }
+
+    /// The `kbf-act` steps that print the job's group list and then try to read each group's
+    /// file, in [`Self::groups`]' order.
+    fn steps(&self) -> Vec<String> {
+        let mut steps = vec!["groups".to_owned()];
+        for gid in &self.groups {
+            steps.extend([";".to_owned(), "try-read".to_owned(), self.file(*gid)]);
+        }
+        steps
+    }
+
+    /// What the job's output of [`Self::steps`] says: the groups its credential holds, and
+    /// the groups whose file it read. A read refused for any reason but the permission bits
+    /// fails the test, as does a line missing or out of place.
+    fn held(&self, stdout: &str) -> Held {
+        let mut lines = stdout.lines();
+        let listed = lines
+            .next()
+            .unwrap_or_else(|| panic!("no group list: {stdout:?}"));
+        let groups = listed.split_whitespace().map(id32).collect();
+        let mut readable = BTreeSet::new();
+        for gid in &self.groups {
+            match lines.next() {
+                Some("PROBE try-read ok") => {
+                    readable.insert(*gid);
+                }
+                Some(line) if line == format!("PROBE try-read errno={}", libc::EACCES) => {}
+                other => panic!("group {gid}'s file: {other:?} in {stdout:?}"),
+            }
+        }
+        assert_eq!(lines.next(), None, "{stdout:?}");
+        Held { groups, readable }
+    }
+}
+
+/// What a job holds, by both measures.
+#[derive(Debug, PartialEq, Eq)]
+struct Held {
+    /// Its kernel group list (`getgroups(2)` inside the job).
+    groups: BTreeSet<u32>,
+    /// The groups whose group-only file it could read.
+    readable: BTreeSet<u32>,
 }
 
 /// The user ids `ps` reports for `pid`: effective, real and saved. With all three the slot
@@ -161,22 +293,23 @@ fn ready(folders: &Folders, supervisor: &mut Child) -> Ready {
     }
 }
 
-/// As root, with a new audit session, the supervisor drops to the slot user and sets the
-/// limits: the job runs as `nobody`, effective, real and saved, with that user's group as its
-/// only group; the supervisor itself runs as `nobody` too, all three ids (it dropped for good:
-/// root cannot be regained); the job and the supervisor are in one new audit session, which is
-/// not this test's, and `asid_of` (the kernel's answer by pid, `auditon`) gives the id the
-/// supervisor read back from its own session when it opened it (`getaudit_addr`, in the ready
-/// record); the process and file-size limits are set soft and hard; and a write past the
-/// file-size limit stops at exactly the limit. Catches a drop that keeps root's groups or
-/// its real uid, a session that is not opened (the job would stay in the agent's), and limits
-/// that are not set.
+/// As root, with a new audit session, the supervisor drops to the slot user and sets the limits:
+/// the job runs as `nobody`, effective, real and saved, with that user's group as its only group
+/// (its kernel list, read inside the job); the supervisor itself runs as `nobody` too, all three
+/// ids (it dropped for good: root cannot be regained); the job and the supervisor are in one new
+/// audit session, which is not this test's, and `asid_of` (the kernel's answer by pid, `auditon`)
+/// gives the id the supervisor read back from its own session when it opened it (`getaudit_addr`,
+/// in the ready record); the process and file-size limits are set soft and hard; and a write past
+/// the file-size limit stops at exactly the limit. Catches a drop that keeps root's groups or its
+/// real uid, a session that is not opened (the job would stay in the agent's), and limits that are
+/// not set.
 #[test]
 #[ignore = "needs root on macOS: run by beta.yml's root step"]
 fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
     require_root();
     let ((uid_text, uid), (gid_text, gid)) = (nobody("-u"), nobody("-g"));
     let folders = Folders::new("supervisor-root", uid, gid);
+    let open = Open::new("supervisor-root-act", []);
     let spec = SuperviseSpec {
         uid,
         gid,
@@ -184,7 +317,7 @@ fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
         profile: "(version 1)\n(allow default)\n".to_owned(),
         params: vec![],
         program: "/bin/sh".to_owned(),
-        args: vec!["-c".to_owned(), JOB.to_owned()],
+        args: vec!["-c".to_owned(), job(&open.act)],
         max_file_bytes: FILE_BYTES,
         max_processes: PROCESSES,
         record_dir: folders.records.display().to_string(),
@@ -196,9 +329,9 @@ fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
         out.read_line(&mut text).unwrap();
         text.trim_end().to_owned()
     };
-    assert_eq!(line(), format!("ids {uid_text} {gid_text} {gid_text}"));
+    assert_eq!(line(), format!("ids {uid_text} {gid_text} {gid}"));
     assert_eq!(line(), format!("processes {PROCESSES} {PROCESSES}"));
-    let blocks = FILE_BYTES / 512;
+    let blocks = FILE_BYTES / SH_BLOCK;
     assert_eq!(line(), format!("file blocks {blocks} {blocks}"));
 
     let ready = ready(&folders, &mut supervisor);
@@ -229,29 +362,32 @@ fn as_root_the_supervisor_drops_opens_a_session_and_sets_the_limits() {
     assert!(!folders.records.join("spec.json").exists());
 }
 
-/// As root, the job's group list is exactly the spec's group, with no supplementary group of
-/// root's, even when that group is not the user's own primary group (`staff`, 20, for
-/// `nobody`). Catches a drop that takes the groups from the user
-/// database (`initgroups`) instead of the spec, which would hand the job groups of the slot
-/// user's that the agent did not choose.
+/// As root, the job holds exactly the spec's group, even when that group is not the user's
+/// own primary group (`staff`, 20, for `nobody`): the kernel list read inside the job is that
+/// group alone, and of files that one group alone may read, the job reads the spec's group's
+/// and none of `everyone` (12), 701 or any other group the directory lists
+/// for `nobody`. Catches a drop that takes the groups from the user database
+/// (`initgroups`) instead of the spec, or keeps a supplementary group of root's, which would
+/// hand the job groups the agent did not choose; and a credential whose list is right but that
+/// the kernel still lets act as a member of the directory's groups.
 #[test]
 #[ignore = "needs root on macOS: run by beta.yml's root step"]
 fn as_root_the_job_holds_exactly_the_spec_s_group() {
     require_root();
-    let (uid_text, uid) = nobody("-u");
+    let (_, uid) = nobody("-u");
     let gid = 20;
     let folders = Folders::new("supervisor-root-group", uid, gid);
+    let mut groups = nobody_s_directory_groups();
+    groups.extend([gid, EVERYONE, RUNNER_GROUP]);
+    let open = Open::new("supervisor-root-group-act", groups);
     let spec = SuperviseSpec {
         uid,
         gid,
         new_session: false,
         profile: "(version 1)\n(allow default)\n".to_owned(),
         params: vec![],
-        program: "/bin/sh".to_owned(),
-        args: vec![
-            "-c".to_owned(),
-            "echo \"$(/usr/bin/id -u) $(/usr/bin/id -g) $(/usr/bin/id -G)\"".to_owned(),
-        ],
+        program: open.act.clone(),
+        args: open.steps(),
         max_file_bytes: FILE_BYTES,
         max_processes: PROCESSES,
         record_dir: folders.records.display().to_string(),
@@ -260,9 +396,39 @@ fn as_root_the_job_holds_exactly_the_spec_s_group() {
     let output = supervisor.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("{uid_text} {gid} {gid}\n")
+        open.held(&String::from_utf8_lossy(&output.stdout)),
+        Held {
+            groups: BTreeSet::from([gid]),
+            readable: BTreeSet::from([gid]),
+        }
     );
     let ready = parse_ready(&folders.record("ready.json")).expect("a ready record");
     assert_eq!(ready.asid, None, "no session was asked for");
+}
+
+/// As root, a job started as `nobody` by `sudo`, which gives it the groups the directory lists
+/// for the user, is caught by both measures of the test above: its kernel list holds
+/// `everyone` (12) and every other group the directory lists for `nobody`, and it reads each
+/// of those groups' files and no other. Catches a measure that cannot see a group the job
+/// does hold (the test above would pass whatever the drop did).
+#[test]
+#[ignore = "needs root on macOS: run by beta.yml's root step"]
+fn as_root_a_job_given_the_directory_s_groups_is_caught_by_both_measures() {
+    require_root();
+    let directory = nobody_s_directory_groups();
+    assert!(directory.contains(&EVERYONE), "{directory:?}");
+    let mut groups = directory.clone();
+    groups.extend([EVERYONE, RUNNER_GROUP, 20]);
+    let open = Open::new("supervisor-root-control-act", groups);
+    let output = Command::new("/usr/bin/sudo")
+        .args(["-n", "-u", "nobody", &open.act])
+        .args(open.steps())
+        .current_dir(open.dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let held = open.held(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(held.groups, directory);
+    assert_eq!(held.readable, directory);
 }

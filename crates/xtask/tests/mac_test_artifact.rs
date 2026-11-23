@@ -234,7 +234,8 @@ fn the_test_binary_and_its_supervisor_are_staged_with_their_sums() {
 
 /// Asserts each failure of a staging, by its text: build messages that are not there, an
 /// output directory that exists, a test binary that is not an arm64 executable, a supervisor
-/// that is not there, and a summary file that cannot be written.
+/// that is not an arm64 executable, a supervisor that is not there, and a summary file that
+/// cannot be written.
 ///
 /// Catches a staging that uploads what it could not check.
 #[test]
@@ -264,6 +265,17 @@ fn a_staging_that_cannot_be_done_says_why() {
         format!(
             "{} is not an arm64 Mach-O executable",
             args.out.join("native_privileged").display()
+        )
+    );
+    fs::remove_dir_all(&args.out).unwrap();
+
+    let args = rig.built(&arm64(b"test"), b"#!/bin/sh\n");
+    let why = run(&args).unwrap_err().to_string();
+    assert_eq!(
+        why,
+        format!(
+            "{} is not an arm64 Mach-O executable",
+            args.out.join("js-agent").display()
         )
     );
     fs::remove_dir_all(&args.out).unwrap();
@@ -324,4 +336,41 @@ fn the_verb_runs_through_the_program() {
     assert!(!again.status.success());
     let err = String::from_utf8_lossy(&again.stderr);
     assert!(err.contains("mac-test-artifact: "), "{err}");
+}
+
+/// Asserts that without `--target-dir` the supervisor is taken from `target` under the working
+/// directory, and not from a decoy tree beside it.
+///
+/// Catches a default target directory other than `target`, or a required `--target-dir`.
+#[test]
+fn the_target_directory_defaults_to_target_under_the_working_directory() {
+    let rig = Rig::new("default_target_dir");
+    let args = rig.built(&arm64(b"test"), &arm64(b"agent"));
+    let decoy = rig.dir.join("other/aarch64-apple-darwin/debug");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(decoy.join("js-agent"), arm64(b"decoy")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("mac-test-artifact")
+        .args(["--test", &args.test, "--target", &args.target])
+        .arg("--build-json")
+        .arg(&args.build_json)
+        .arg("--out")
+        .arg(&args.out)
+        .args(["--commit", &args.commit])
+        .arg("--summary")
+        .arg(&args.summary)
+        .arg("--github-env")
+        .arg(&args.github_env)
+        .current_dir(&rig.dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(args.out.join("js-agent")).unwrap(),
+        arm64(b"agent")
+    );
 }

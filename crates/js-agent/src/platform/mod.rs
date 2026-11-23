@@ -66,7 +66,7 @@ pub const LINUX_ONLY: [&str; 34] = [
 /// The flags only a macOS build has (its [`Flags`] there), without the leading `--`. A Linux
 /// build refuses each by name; a test of the macOS build holds the list to the flags clap
 /// knows there.
-pub const MACOS_ONLY: [&str; 18] = [
+pub const MACOS_ONLY: [&str; 20] = [
     "native-accounts",
     "native-account-range",
     "native-account-ready",
@@ -83,6 +83,8 @@ pub const MACOS_ONLY: [&str; 18] = [
     "native-pf-state-dir",
     "native-pfctl",
     "native-trees-root",
+    "native-put-root",
+    "native-put-user",
     "vm-driver",
     "vm-store",
 ];

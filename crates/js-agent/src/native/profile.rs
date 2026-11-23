@@ -28,6 +28,31 @@ pub(super) const JOB_TMP_DIR: &str = ".tmp";
 /// The directory of a bundle's writable tree clones, below the run directory.
 pub(super) const JOB_TREES_DIR: &str = ".trees";
 
+/// Root's home, spelled as the kernel resolves it (`/var` is a link to `/private/var`).
+pub(super) const ROOT_HOME: &str = "/private/var/root";
+
+/// Where the data volume is mounted. Every path of the data volume also has a spelling
+/// below it (`/Users` is a firmlink to `/System/Volumes/Data/Users`), and which spelling
+/// Seatbelt matches was not measured, so a homes root is denied under both, as the privacy
+/// fence's places are (`native/fence.rs`).
+pub(super) const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// The roots below which every run's profile denies reads but for the run's own home (the
+/// account's home, which holds its run directory):
+/// `homes`, where the pool makes its accounts' homes (`/Users` on a host, the one value
+/// `--native-homes` takes), and root's home, each spelled as given and below
+/// [`DATA_VOLUME`]. A home of another user is readable to everyone when its modes say so
+/// (`0755` is a common mode of a home), so its modes alone do not keep a job out.
+pub(super) fn home_roots(homes: &Path) -> Vec<PathBuf> {
+    [homes, Path::new(ROOT_HOME)]
+        .iter()
+        .flat_map(|root| {
+            let data = format!("{DATA_VOLUME}{}", root.display());
+            [root.to_path_buf(), PathBuf::from(data)]
+        })
+        .collect()
+}
+
 /// The run directory of the account whose home is `home`.
 pub(super) fn run_dir(home: &Path) -> PathBuf {
     home.join(RUN_DIR)
@@ -43,7 +68,9 @@ pub(super) fn run_dir(home: &Path) -> PathBuf {
 ///
 /// The read denies are the agent's (`config.read_denies`), the places only the privacy
 /// controls guard among them ([`fence::PRIVACY_ONLY_PLACES`]); a mount at or below one of
-/// those is refused, since its grant would follow the deny and reopen it.
+/// those is refused, since its grant would follow the deny and reopen it. Reads below the
+/// homes roots ([`home_roots`] of `config.homes`) are denied too, but for the account's own
+/// home `home`, which the profile grants back for reading (it writes only below `exec/`).
 ///
 /// # Errors
 ///
@@ -90,8 +117,13 @@ pub(super) fn build(
         net: config.network.net(),
         read_model: config.read_model,
     };
+    let deny_homes = home_roots(&config.homes)
+        .iter()
+        .map(|root| AbsPath::new(root).map_err(|why| fail(&root.display(), &why)))
+        .collect::<Result<Vec<AbsPath>, RuntimeError>>()?;
     let narrowing = Narrowing {
         net: Some(net_of(native.network)),
+        deny_homes,
         ..Narrowing::default()
     };
     let policy = Policy::base(layout, caps)

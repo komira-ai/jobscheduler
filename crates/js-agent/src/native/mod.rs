@@ -27,7 +27,9 @@
 //!    writable to the job (macOS guards what a job would make in `~/Library` even against
 //!    root), and no other part of `/var/folders` is. The agent's roots, its secret files,
 //!    `--native-accounts` and the places only the privacy controls guard
-//!    (`native/fence.rs`) are denied reads (`native/profile.rs`).
+//!    (`native/fence.rs`) are denied reads (`native/profile.rs`), and so is everything
+//!    below the homes (`<homes>`: every other account's home) and below root's home,
+//!    whatever their modes; the account's own home stays readable.
 //! 5. The agent starts `js-agent __supervise-native` ([`crate::mac_supervisor`]) with the
 //!    run's environment and nothing else, the working directory, and the job's three standard
 //!    streams as files in the run's scratch directory, which only the agent can enter: an
@@ -123,6 +125,7 @@ mod network;
 mod outputs;
 mod pf;
 mod profile;
+mod put;
 mod remove;
 mod run;
 mod settings;
@@ -147,7 +150,8 @@ use js_mac_session::full_disk_access::FullDiskAccess;
 use crate::bundle::Placer;
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
-    Found, FsPrepared, JobFs, NativeRefusal, RunHandle, RunSpec, Runtime, RuntimeError, Status,
+    Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, RunHandle, RunSpec, Runtime,
+    RuntimeError, Status,
 };
 use crate::logs::LiveLogs;
 use crate::mac_accounts::{Pool, Retired};
@@ -160,6 +164,7 @@ pub use journal::{Journal, RunRecord};
 pub use mounts::{MountRoot, roots_of};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
+pub use put::{PutConfig, PutFlags, put_of};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS,
     MIN_MAX_FILE_MIB, NativeFlags, NativeSettings,
@@ -238,9 +243,19 @@ pub struct NativeRuntime {
     table: Arc<dyn ProcessTable + Send + Sync>,
     /// The account the last removal retired, and what its retirement showed.
     last_retired: Option<(String, Retired)>,
+    /// The put ingest runs' outputs are committed to, when the agent was given one
+    /// (`native/put.rs`).
+    put: Option<PutConfig>,
+    /// The put of each run that has a put target, by lease, until its removal is done.
+    puts: BTreeMap<String, put::PutRun>,
+    /// What each removed run committed, by lease, until the lifecycle asks.
+    committed: BTreeMap<String, OutputsReport>,
     /// What finds the lent account's own per-user temporary and cache folders, which its
     /// run may write; none grants nothing there.
     own_folders: Option<OwnFolders>,
+    /// How many polls the self-test makes for its run to end; none is the default
+    /// ([`NativeRuntime::with_self_test_polls`] sets it for tests).
+    self_test_polls: Option<u32>,
 }
 
 /// Finds an account's own per-user temporary and cache folders (its uid's, below
@@ -331,7 +346,11 @@ impl NativeRuntime {
             new_session: true,
             table: Arc::new(MacTable),
             last_retired: None,
+            put: None,
+            puts: BTreeMap::new(),
+            committed: BTreeMap::new(),
             own_folders: None,
+            self_test_polls: None,
         })
     }
 
@@ -364,6 +383,27 @@ impl NativeRuntime {
     pub fn with_own_folders(self, find: OwnFolders) -> Self {
         Self {
             own_folders: Some(find),
+            ..self
+        }
+    }
+
+    /// Whether the runtime finds the lent account's own per-user folders
+    /// ([`NativeRuntime::with_own_folders`]): [`NativeRuntime::open`] sets it, the other
+    /// constructors do not. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_own_folders(&self) -> bool {
+        self.own_folders.is_some()
+    }
+
+    /// The same runtime, its self-test making at most `polls` polls for its run to end (the
+    /// default when never called): with none, the run is still going when the count is
+    /// reached, so the self-test stops and removes it. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_self_test_polls(self, polls: u32) -> Self {
+        Self {
+            self_test_polls: Some(polls),
             ..self
         }
     }
@@ -404,6 +444,18 @@ impl NativeRuntime {
             bundles: Some(placer),
             ..self
         }
+    }
+
+    /// The same runtime, committing the output of each run with a put target to the put
+    /// ingest `put` (`native/put.rs`), whose root becomes a read deny of every run; `None`
+    /// commits nothing.
+    #[must_use]
+    pub fn with_put(mut self, put: Option<PutConfig>) -> Self {
+        let denied = put.as_ref().and_then(|put| AbsPath::new(&put.root).ok());
+        if let Some(denied) = denied.filter(|root| !self.config.read_denies.contains(root)) {
+            self.config.read_denies.push(denied);
+        }
+        Self { put, ..self }
     }
 
     /// The same runtime, uploading with `logs` the output of each run whose start carries a
@@ -527,6 +579,11 @@ impl Runtime for NativeRuntime {
         self.runs.get(&id.0).and_then(|run| run.logs.report())
     }
 
+    /// What the removal of `id` committed to the put ingest (`native/put.rs`), once.
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.committed.remove(&id.0)
+    }
+
     fn supports_gpus(&self) -> bool {
         false
     }
@@ -567,12 +624,22 @@ impl Runtime for NativeRuntime {
         true
     }
 
+    /// A mount source beneath `--native-put-root`: the run's put target, or a mount the
+    /// lookup refuses (`native/mounts.rs`), never one held to the mount roots.
+    fn owns_host_path(&self, path: &str) -> bool {
+        self.put
+            .as_ref()
+            .is_some_and(|put| Path::new(path).starts_with(&put.root))
+    }
+
     fn check_job_fs(&self, fs: &JobFs, host_ports: &[HostPort]) -> Result<(), NativeRefusal> {
         mounts::check(fs, host_ports)
     }
 
     fn resolve_fs(&mut self, run_id: &str, _image: &str, fs: &JobFs, _now_ms: u64) -> FsPrepared {
-        mounts::resolve(&self.config.mount_roots, &mut self.plans, run_id, fs)
+        let put_root = self.put.as_ref().map(|put| put.root.as_path());
+        let roots = (self.config.mount_roots.as_slice(), put_root);
+        mounts::resolve(roots, &mut self.plans, run_id, fs)
     }
 
     fn discard_fs(&mut self, run_id: &str) -> Result<(), RuntimeError> {

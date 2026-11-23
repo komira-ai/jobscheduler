@@ -53,6 +53,10 @@ use serde_json::json;
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
 
+/// A run's output committed to the put ingest for real.
+#[cfg(target_os = "macos")]
+#[path = "native_privileged/put.rs"]
+mod put;
 /// The VM runtime for real; macOS only, as it boots a VM.
 #[cfg(target_os = "macos")]
 #[path = "native_privileged/vm.rs"]
@@ -322,17 +326,44 @@ fn the_production_open_makes_the_pools_directory_and_passes_the_self_test() {
 }
 
 /// Asserts, as root with the real supervisor and the account's folders asked of the system as
-/// the account (`mac_accounts::own_folders`), that a job may write in its account's own
-/// per-user temporary and cache folders (what `getconf` gives it as `DARWIN_USER_TEMP_DIR` and
-/// `DARWIN_USER_CACHE_DIR`) and in no other part of that per-user folder (its `0`), and that
+/// the account (`mac_accounts::own_folders`, attached by the production `NativeRuntime::open`,
+/// not by the test), that a job may write in its account's own per-user temporary and cache
+/// folders (what `getconf` gives it as `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR`) and
+/// in no other part of that per-user folder (its `0`), and that
 /// the retirement empties what it wrote. Catches `xcrun` refused its cache (a compiler that
-/// fails under the profile) and a grant that reaches beyond the two folders.
+/// fails under the profile), a grant that reaches beyond the two folders, and an open that
+/// no longer attaches the folder finder.
 #[test]
 #[ignore = "needs root and creates users"]
 fn a_job_writes_its_accounts_own_temporary_and_cache_folders_and_nothing_else_there() {
     let fixture = fixture();
-    let own: js_agent::native::OwnFolders = Arc::new(js_agent::mac_accounts::own_folders);
-    let mut rt = runtime(fixture).with_own_folders(own);
+    let state = fixture.root.join("own-folders-accounts");
+    let config = NativeConfig {
+        accounts: Accounts {
+            state: state.clone(),
+            slots: slots(),
+            ready: 0,
+        },
+        homes: PathBuf::from("/Users"),
+        network: Ceiling::Off,
+        tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+        read_denies: vec![
+            AbsPath::new(&state).unwrap(),
+            AbsPath::new(&fixture.root.join("scratch")).unwrap(),
+        ],
+        mount_roots: Vec::new(),
+        read_model: ReadModel::Open,
+        journal: fixture.root.join("own-folders-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
+        egress: None,
+        full_disk_access: FullDiskAccess::Granted,
+    };
+    let launcher = Arc::new(SystemLauncher::at(supervisor_binary()));
+    let term = TERMS.fetch_add(1, Ordering::SeqCst);
+    // The production open, which attaches the folder finder itself: the test does not.
+    let mut rt = NativeRuntime::open(launcher, config, term)
+        .unwrap_or_else(|why| panic!("the production open: {why}"));
     let script = "t=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR) \
         && c=$(/usr/bin/getconf DARWIN_USER_CACHE_DIR) \
         && : > \"$t/js-own\" && : > \"$c/js-own\" \
@@ -471,7 +502,10 @@ fn a_stop_sends_term_to_the_whole_job_group() {
 
 /// Asserts that one run cannot read another run's files: the first writes a file in its
 /// run directory and is not removed, the second (another account) is refused it, and root
-/// reads it, which shows the path is right and the refusal is the uid's. It catches homes that other slot accounts can enter.
+/// reads it, which shows the path is right and the refusal is the uid's: the first account's
+/// home is `0700`, and the kernel answers its mode (`Permission denied`) before the second
+/// run's profile, which denies it too, is asked (measured on the beta Mac). It catches homes
+/// that other slot accounts can enter.
 #[test]
 #[ignore = "needs root and creates users"]
 fn one_runs_files_are_closed_to_another_run() {
@@ -531,6 +565,96 @@ fn a_read_deny_is_refused_to_a_real_account_the_modes_would_let_in() {
         "{}",
         tail.stderr
     );
+    rt.remove(&id).unwrap();
+}
+
+/// Asserts what the isolation probe's `read:other-home` asks of a Mac, as a real slot account:
+/// a home of another user, made by the test below the pool's homes with mode `0755` and a file
+/// of mode `0644` in it (root's, so its modes let every user list and read it), can be neither
+/// listed nor read by the run, and the refusal is the profile's (`Operation not permitted`:
+/// the modes let every user in, so nothing else refuses); the same run writes, reads and lists
+/// its own run directory, which lies below the same homes. It prints the probe's answer,
+/// `read:other-home = denied`, once both refusals are shown.
+///
+/// Catches a profile that leaves another user's home to its modes, and a homes deny that
+/// also takes the run's own directory.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_slot_account_can_neither_list_nor_read_another_home_its_modes_leave_open() {
+    let fixture = fixture();
+    let other = fixture.homes.join("js-other-home");
+    fs::create_dir_all(&other).unwrap();
+    fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(other.join("f"), "x").unwrap();
+    fs::set_permissions(other.join("f"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut rt = runtime(fixture);
+    let own = rt
+        .create_and_start(&spec(
+            fixture,
+            "own-home",
+            "/bin/sh",
+            &["-c", "echo mine > own && /bin/cat own && /bin/ls"],
+        ))
+        .unwrap();
+    assert_eq!(
+        settle(&mut rt, &own),
+        exited(0),
+        "the run directory is the run's"
+    );
+    let tail = rt.log_tail(&own).unwrap().unwrap();
+    assert!(tail.stdout.starts_with("mine\n"), "{tail:?}");
+    assert!(tail.stdout.lines().any(|line| line == "own"), "{tail:?}");
+    rt.remove(&own).unwrap();
+    let file = other.join("f").display().to_string();
+    let other = other.display().to_string();
+    for (run, program, arg) in [
+        ("other-list", "/bin/ls", other.as_str()),
+        ("other-read", "/bin/cat", file.as_str()),
+    ] {
+        let id = rt
+            .create_and_start(&spec(fixture, run, program, &[arg]))
+            .unwrap();
+        assert_eq!(settle(&mut rt, &id), exited(1), "{program} {arg}");
+        let tail = rt.log_tail(&id).unwrap().unwrap();
+        assert_eq!(tail.stdout, "", "{program} {arg}");
+        assert!(
+            tail.stderr.contains("Operation not permitted"),
+            "{program} {arg}: {}",
+            tail.stderr
+        );
+        rt.remove(&id).unwrap();
+    }
+    println!("read:other-home = denied");
+}
+
+/// Asserts that a run reads its own home as a real slot account, though the profile denies
+/// reads below the pool's homes: it lists the home (its `exec` is there) and a file root put
+/// in it (`0644`, the account's) once the home was made, and it cannot write there. The
+/// run waits for the file by looking for it, not by a clock.
+///
+/// Catches a homes deny that takes the account's own home, and an own-home grant that also
+/// grants writes.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_slot_account_can_read_its_own_home() {
+    let fixture = fixture();
+    let mut rt = runtime(fixture);
+    let script = "while [ ! -e ../note ]; do :; done; /bin/ls .. && /bin/cat ../note \
+        && if : > ../made 2>/dev/null; then exit 3; fi";
+    let id = rt
+        .create_and_start(&spec(fixture, "own-home-read", "/bin/sh", &["-c", script]))
+        .unwrap();
+    let home = home_of(fixture);
+    let uid = fs::metadata(&home).unwrap().uid();
+    let note = home.join("note");
+    fs::write(&note, "mine").unwrap();
+    std::os::unix::fs::chown(&note, Some(uid), None).unwrap();
+    fs::set_permissions(&note, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(settle(&mut rt, &id), exited(0), "the own home is readable");
+    let tail = rt.log_tail(&id).unwrap().unwrap();
+    assert!(tail.stdout.lines().any(|line| line == "exec"), "{tail:?}");
+    assert!(tail.stdout.ends_with("mine"), "{tail:?}");
+    assert!(!home.join("made").exists(), "the own home was written");
     rt.remove(&id).unwrap();
 }
 

@@ -1453,6 +1453,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-isolation-probe"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-testkit",
+ "libc",
+ "rustix",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "js-jobs"
 version = "0.1.0"
 dependencies = [

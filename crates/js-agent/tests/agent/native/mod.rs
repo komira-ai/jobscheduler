@@ -9,10 +9,12 @@
 
 mod adopt;
 pub(crate) mod agent;
+mod agent_start;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 pub(crate) mod end;
+mod ended;
 mod env;
 pub(crate) mod fake_accounts;
 pub(crate) mod fake_launcher;
@@ -31,6 +33,7 @@ mod mounts;
 mod network;
 mod outputs;
 mod pf_gate;
+mod put;
 mod runtime;
 mod settings;
 mod silence;

@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Exit, Found, FsPrepared, JobFs, NativeRefusal, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, Wake, Whereabouts, label,
+    Exit, Found, FsPrepared, JobFs, NativeRefusal, OutputsReport, Prepared, RunHandle, RunSpec,
+    Runtime, RuntimeError, Status, Ticket, Wake, Whereabouts, label,
 };
 use js_agent_wire::{
     CpuSeries, HostPort, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
@@ -21,6 +21,8 @@ mod checks;
 mod clock;
 #[path = "fake_fs.rs"]
 mod fs;
+#[path = "fake_outputs.rs"]
+mod outputs;
 pub use checks::ScriptedChecks;
 pub use clock::{ManualClock, NoUnixClock, UNIX_ORIGIN_MS};
 
@@ -67,6 +69,9 @@ struct State {
     reports: BTreeMap<String, LogReport>,
     /// What `usage` answers for a run, by run id.
     usages: BTreeMap<String, JobUsage>,
+    /// What a run's removal commits, by run id, and `outputs_report` answers, by container.
+    committed: BTreeMap<String, OutputsReport>,
+    answers: BTreeMap<String, OutputsReport>,
     /// What `cpu_series` answers for a run, by run id.
     series: BTreeMap<String, CpuSeries>,
     /// The control group directory of the container of each run.
@@ -160,6 +165,8 @@ struct FsScript {
     unreadable: Vec<String>,
     /// The directory the runs' mounts are under (`mounts_of`).
     mounts: Option<PathBuf>,
+    /// The host paths below which the runtime takes a mount source itself (`owns_host_path`).
+    owned: Option<PathBuf>,
 }
 
 /// Where a scripted pull stands.
@@ -314,6 +321,8 @@ impl FakeRuntime {
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
     /// `list` or `egress`, the egress check) fail; `u32::MAX` for as long as the test wants.
+    /// `outputs` makes a removal remove the container and fail as its outputs not copied
+    /// (`RuntimeError::outputs`).
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
     }
@@ -607,6 +616,12 @@ impl Runtime for FakeRuntime {
         self.state.borrow().fs.is_some()
     }
 
+    fn owns_host_path(&self, path: &str) -> bool {
+        let state = self.state.borrow();
+        let owned = state.fs.as_ref().and_then(|fs| fs.owned.as_deref());
+        owned.is_some_and(|below| Path::new(path).starts_with(below))
+    }
+
     fn check_layer_image(&self, image: &str) -> Result<(), String> {
         let state = self.state.borrow();
         let refused = state
@@ -835,6 +850,10 @@ impl Runtime for FakeRuntime {
         run.and_then(|run| state.reports.get(&run).copied())
     }
 
+    fn outputs_report(&mut self, id: &RunHandle) -> Option<OutputsReport> {
+        self.state.borrow_mut().answers.remove(&id.0)
+    }
+
     fn usage(&mut self, id: &RunHandle) -> Option<JobUsage> {
         let state = self.state.borrow();
         let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
@@ -882,8 +901,7 @@ impl Runtime for FakeRuntime {
         if self.fails("remove") {
             return Err(err("remove"));
         }
-        self.state.borrow_mut().containers.remove(&id.0);
-        Ok(())
+        self.removed(id)
     }
 
     fn places_in_cgroup(&self) -> bool {

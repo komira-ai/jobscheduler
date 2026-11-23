@@ -13,6 +13,7 @@ use super::fence::PRIVACY_ONLY_PLACES;
 use super::mounts::MountRoot;
 use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
+use super::put::PutConfig;
 use crate::bundle::Placer;
 use crate::logs::{DEFAULT_FILE_CAP, LogPlan};
 use crate::mac_accounts::Slots;
@@ -74,6 +75,8 @@ pub struct NativeSettings {
     xcodes: Vec<Xcode>,
     /// Live logs: the file cap of a run with a sink and the host's credential.
     logs: LogPlan,
+    /// The put ingest runs' outputs are committed to (`native/put.rs`).
+    put: Option<PutConfig>,
 }
 
 impl NativeSettings {
@@ -213,6 +216,7 @@ impl NativeSettings {
             bundles: None,
             xcodes: Vec::new(),
             logs: LogPlan::new(DEFAULT_FILE_CAP),
+            put: None,
         }))
     }
 
@@ -267,6 +271,19 @@ impl NativeSettings {
         }
         self.config.mount_roots = roots;
         Ok(self)
+    }
+
+    /// The same settings with `put` (`--native-put-root`, `--native-put-user`, checked by
+    /// [`super::put_of`]) as the put ingest of the runtime they make.
+    #[must_use]
+    pub fn with_put(self, put: Option<PutConfig>) -> Self {
+        Self { put, ..self }
+    }
+
+    /// The put ingest of the runtime these settings make, if any.
+    #[must_use]
+    pub fn put(&self) -> Option<&PutConfig> {
+        self.put.as_ref()
     }
 
     /// The same settings with `file_cap` (`--log-file-cap`) as the most bytes of each log file
