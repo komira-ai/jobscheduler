@@ -253,8 +253,8 @@ impl Lifecycle {
         loop {
             let stage = job.stage.clone();
             // The checks are owed from before the first step of the cleanup until they have
-            // run: an agent that stops in between leaves the record, and the next start
-            // taints the host. Without the record nothing could be removed. It is written on
+            // run: an agent that stops in between leaves the record, and the next start runs
+            // the check itself, or taints the host when it cannot (see `owed`). Without the record nothing could be removed. It is written on
             // the worker, before any removal is asked of a thread.
             if stage.cleaning() && !job.owed {
                 match config.state.owe(&run_id) {
