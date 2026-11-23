@@ -44,16 +44,18 @@ fn exited_not_reaped(child: &Child) {
     assert_eq!(rc, 0, "waitid: {}", std::io::Error::last_os_error());
 }
 
-/// The test process is listed with its own effective and real uid, its name, and a
-/// readable audit session; without `with_asid` no session is read. Catches a listing that
-/// reads the wrong struct fields or leaves out a live process.
+/// The test process is listed with its own effective and real uid; its audit session is read
+/// when the test runs as root (as the agent does) and is `None` otherwise (the kernel answers
+/// `auditon` to root alone); without `with_asid` no session is read, and pids 0 and 1 are
+/// never listed. Catches a listing that reads the wrong struct fields, leaves out a live
+/// process, or reads a session it was not asked for.
 #[test]
 fn the_test_process_is_listed_with_its_uids_and_its_audit_session() {
     let me = listed(std::process::id()).expect("the test process is listed");
     let uid = rustix::process::getuid().as_raw();
     let euid = rustix::process::geteuid().as_raw();
     assert_eq!((me.uid, me.ruid), (euid, uid));
-    assert!(me.asid.is_some(), "no audit session read for {me:?}");
+    assert_eq!(me.asid.is_some(), euid == 0, "{me:?}");
     let pid = i32::try_from(std::process::id()).expect("a pid fits in i32");
     let plain = MacTable.list(false).expect("the process table reads");
     let me = plain.iter().find(|p| p.pid == pid).expect("listed");
