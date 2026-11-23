@@ -201,6 +201,8 @@ fn load(seq: u64, minutes: &[(&str, u16, u32, u64)]) -> NodeLoad {
                 ws_max_bytes: *ws,
             })
             .collect(),
+        second_cpu_millis: Vec::new(),
+        second_cpu_pressure_some_permille: Vec::new(),
         dropped: LoadDrops::default(),
     }
 }

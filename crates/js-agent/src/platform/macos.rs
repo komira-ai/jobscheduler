@@ -415,6 +415,8 @@ pub(crate) struct Jobs {
     pub(crate) settle: Duration,
     /// The default taint re-check.
     pub(crate) taint_recheck: Duration,
+    /// No per-second samples: the flag is Linux's.
+    pub(crate) host_second_samples: bool,
     /// No host jobs.
     pub(crate) allow_host_jobs: bool,
     /// No FUSE device: only the crun runtime gives it.
@@ -458,6 +460,7 @@ pub(crate) fn jobs(
         egress: crate::egress::Config::default(),
         settle: crate::lifecycle::DEFAULT_SETTLE,
         taint_recheck: crate::lifecycle::taint::DEFAULT_TAINT_RECHECK,
+        host_second_samples: false,
         allow_host_jobs: false,
         allow_fuse_jobs: false,
         providers,

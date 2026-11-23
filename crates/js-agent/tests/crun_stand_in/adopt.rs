@@ -102,7 +102,7 @@ fn started(node: &Node, runtime: &mut CrunRuntime, spec: &RunSpec) -> RunHandle 
 }
 
 /// [`started`] for the job `run`, with its init in its cgroup: a run a restart can adopt.
-fn held(node: &Node, runtime: &mut CrunRuntime, run: &str) -> RunHandle {
+pub(crate) fn held(node: &Node, runtime: &mut CrunRuntime, run: &str) -> RunHandle {
     let id = started(node, runtime, &node.job(run, 600_000));
     node.place(&id.0, PID);
     id

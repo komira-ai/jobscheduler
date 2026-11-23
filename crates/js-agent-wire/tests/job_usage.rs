@@ -121,6 +121,7 @@ fn result(usage: Option<JobUsage>) -> JobResult {
         logs: None,
         input_failure: None,
         usage,
+        cpu_series: None,
     }
 }
 

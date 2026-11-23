@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use js_agent::usage::{
-    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file, parse_single_u64,
-    parse_stat_key, parse_usage_usec, working_set,
+    Layout, cpu_limited, layout_of, parse_active_file, parse_inactive_file,
+    parse_pressure_some_total, parse_single_u64, parse_stat_key, parse_usage_usec, working_set,
 };
 
 const CPU_STAT: &str = "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\nnr_periods 0\n";
@@ -147,4 +147,31 @@ fn layout_table() {
         None,
         "a relative actions group"
     );
+}
+
+/// Asserts the total of the `some` line of a `cpu.pressure` over the kernel's own text and
+/// the malformed forms: no `some` line, a `full` line alone, no `total=`, a total that is not
+/// digits or past `u64`, and an empty text; the `full` line's total is never taken for the
+/// `some` one. It catches a read of the first `total=` of the file whatever its line, and a
+/// lenient number.
+#[test]
+fn pressure_some_total_table() {
+    let both = "some avg10=1.50 avg60=0.20 avg300=0.05 total=1250000\n\
+                full avg10=0.00 avg60=0.00 avg300=0.00 total=9\n";
+    let cases: [(&str, Option<u64>); 8] = [
+        (both, Some(1_250_000)),
+        ("full avg10=0.00 total=9\n", None),
+        (
+            "full avg10=0.00 total=9\nsome avg10=0.00 total=4\n",
+            Some(4),
+        ),
+        ("some avg10=0.00 avg60=0.00 avg300=0.00\n", None),
+        ("some avg10=0.00 total=abc\n", None),
+        ("some avg10=0.00 total=18446744073709551616\n", None),
+        ("some total=-1\n", None),
+        ("", None),
+    ];
+    for (text, want) in cases {
+        assert_eq!(parse_pressure_some_total(text), want, "{text:?}");
+    }
 }

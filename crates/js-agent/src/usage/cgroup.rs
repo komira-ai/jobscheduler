@@ -69,6 +69,20 @@ pub fn parse_usage_usec(text: &str) -> Option<u64> {
     parse_stat_key(text, "usage_usec")
 }
 
+/// The `total=` of the `some` line of a `cpu.pressure` (or of the host's
+/// `/proc/pressure/cpu`, which has the same form): how long some task of the group (or host)
+/// waited for a CPU, in microseconds, in all. `None` for text without that line or total,
+/// or whose total is not digits.
+pub fn parse_pressure_some_total(text: &str) -> Option<u64> {
+    let line = text
+        .lines()
+        .find(|line| line.split(' ').next() == Some("some"))?;
+    let total = line
+        .split(' ')
+        .find_map(|token| token.strip_prefix("total="))?;
+    parse_digits(total)
+}
+
 /// `inactive_file` of a `memory.stat`: page cache that is cheap to reclaim.
 pub fn parse_inactive_file(text: &str) -> Option<u64> {
     parse_stat_key(text, "inactive_file")
