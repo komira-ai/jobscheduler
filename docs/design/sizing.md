@@ -123,7 +123,13 @@ its journal at the job's start and at its result.
 **Where a run's usage comes from.** Each run's peak memory and CPU time are what its host reported: when a contained job ends, its
 agent reads `memory.peak` and the `usage_usec` of `cpu.stat` of the job's lease control group, before the group is removed, and sends
 them as the `usage` of the job's result (`docs/design/agent-wire.md`), with the `nr_periods` and `nr_throttled` of the same
-`cpu.stat` (`cpu_throttle`); the server stores them with the job's output. A job whose
+`cpu.stat` (`cpu_throttle`); the server stores them with the job's output. An agent started with `--memory-series` also samples
+the group's non-file memory about once a second while the job runs, `memory.current` less `file - shmem` of its `memory.stat`
+(anonymous and kernel memory, shared memory and tmpfs; no page cache of the files the job read, through a mount of the tree store or
+anywhere else, which the kernel can drop), and sends the most of each span as the result's `memory_series`. The peak a run teaches
+its class is that series' largest point when the result has a whole one (not a `partial` series of a run adopted after an agent
+restart); otherwise it is `memory.peak`, which counts page cache as well. On the farm, page cache was about a tenth of running jobs'
+`memory.peak` (a read of every running job's group on six hosts: 31.7 of 325.8 GiB of peaks, 8% for the median build job). A job whose
 result carries none (an agent from before the field, cgroup version 1, a result read back after an agent restart) has no usage, and
 a success with no peak is not a memory sample, so a class whose jobs all lack it books from its fallback or its client (7.8),
 else the cold size. The count a server logs at
@@ -135,8 +141,8 @@ the job's own limit, which raises the class's floor to twice the booking it died
 booking reports it). A success's peak is a measurement whatever its booking: the agent writes no `memory.max`, so the placer no longer
 counts a success whose peak came within 5% of its booking as having hit its limit and gives the estimator no limit for a run that
 was not killed. A peak at or above the booking is taken as it is, and a run that used more than its booking raises the class's next
-booking at once, with the margin. A run under a second gives a memory sample (the group's `memory.peak` is exact whatever the run's
-length) and no CPU sample: the placer hands the estimator a one-second wall and no CPU time for it. A run's CPU sample is its mean: its CPU time over its wall time, which every run
+booking at once, with the margin. A run under a second gives a memory sample (its series' peak when a poll sampled it, else the
+group's `memory.peak`, exact whatever the run's length) and no CPU sample: the placer hands the estimator a one-second wall and no CPU time for it. A run's CPU sample is its mean: its CPU time over its wall time, which every run
 reports. The most cores its group used over any five seconds of the run, which the agent measures from the group's `cpu.stat` every
 second and reports beside the CPU time (`cpu_peak`), is kept in the job's usage and is not the sample: it is not booked (7.9). A run's sample is a measurement only when its own contention is low and nothing held it: its
 contention is how long some task of its group waited for a CPU (the `some` total of the group's `cpu.pressure`, which the agent
@@ -246,7 +252,7 @@ or not, no longer depends on the peak.
 **Run time.** The estimator keeps the minutes each run lasted as it did. The job walk charges each job flat for its life, and the
 whole-host path waits on a job's wall limit, as before.
 
-**Memory.** A class books its own runs' memory peaks with a margin from its first run, a class with no run its kind's or client's, not the cold size (7.7, 7.8); memory is bounded by the
+**Memory.** A class books its own runs' memory peaks (of their non-file memory series, 7.7) with a margin from its first run, a class with no run its kind's or client's, not the cold size (7.7, 7.8); memory is bounded by the
 pool's `memory_schedulable_percent` per host (a job's booking is no limit of its own), and the kill floor stays the safety net.
 
 **Proof on runs shaped like the farm's** (`crates/js-sched-placer/src/sizes_farm_tests.rs`, measured by the tests):

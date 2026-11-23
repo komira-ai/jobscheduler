@@ -753,6 +753,7 @@ pub(crate) fn output() -> Output {
         }),
         logs: None,
         cpu_series: Some(series()),
+        memory_series: None,
     }
 }
 

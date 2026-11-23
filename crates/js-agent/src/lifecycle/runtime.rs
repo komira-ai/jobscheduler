@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    CpuSeries, HostPort, Isolation, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling,
-    NetworkLevel, PortRange, refusal,
+    CpuSeries, HostPort, Isolation, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec,
+    NetworkCeiling, NetworkLevel, PortRange, refusal,
 };
 use js_types::{JobNetwork, PortMap};
 
@@ -594,6 +594,13 @@ pub trait Runtime {
     /// to, or it has no per-job CPU source: a macOS native job, a VM and a container-engine
     /// job record nothing yet), and when the run had no time to record. The default has none.
     fn cpu_series(&mut self, _id: &RunHandle) -> Option<CpuSeries> {
+        None
+    }
+
+    /// The non-file memory second by second of the exited container `id` over its run, read
+    /// beside [`Runtime::cpu_series`]; a job keyed by job lists it in its result. `None` when
+    /// the runtime does not record it, and when the run had no sample. The default has none.
+    fn memory_series(&mut self, _id: &RunHandle) -> Option<MemorySeries> {
         None
     }
 

@@ -579,3 +579,25 @@ fn an_unreadable_proc_stat_gives_no_load_and_one_line() {
     assert!(rig.run_at(30, &[]).is_empty());
     assert_eq!(rig.load().unwrap().host_cpu_usec, Some(0));
 }
+
+/// Asserts the heartbeat's load carries the host's non-file memory when `/proc/meminfo` reads,
+/// in bytes as the sender's reading and on the wire, and carries none, with the load still
+/// sent, when it does not (and then the node's memory is the actions group's). Catches a load
+/// held back for an unreadable meminfo, a zero invented for it, and a reading dropped on its way
+/// to the wire.
+#[test]
+fn the_load_carries_the_hosts_nonfile_memory_when_meminfo_reads() {
+    let mut rig = Rig::windowed();
+    rig.node(0, 100);
+    assert!(rig.run_at(0, &[]).is_empty());
+    let absent = rig.load().expect("a load without meminfo");
+    assert_eq!(absent.host_nonfile_bytes, None);
+    rig.put(
+        "/proc/meminfo",
+        "MemTotal: 1000 kB\nMemFree: 400 kB\nBuffers: 100 kB\nCached: 300 kB\nShmem: 50 kB\n",
+    );
+    assert!(rig.run_at(30, &[]).is_empty());
+    let present = rig.load().expect("a load with meminfo");
+    // 1000 - 400 - (100 + 300 - 50) = 250 kB.
+    assert_eq!(present.host_nonfile_bytes, Some(250 * 1024));
+}

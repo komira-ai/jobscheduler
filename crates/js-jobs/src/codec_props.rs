@@ -342,6 +342,7 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                     cpu_series: series.and_then(|(shift, points, run_usec, partial)| {
                         CpuSeries::new(1 << shift, points, run_usec, partial)
                     }),
+                    memory_series: None,
                     input_failure,
                 }
             },

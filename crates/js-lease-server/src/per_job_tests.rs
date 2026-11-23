@@ -7,14 +7,15 @@ use std::time::Duration;
 
 use js_agent_wire::{
     CpuPeak as WirePeak, CpuSeries as WireSeries, CpuThrottle as WireThrottle, HeartbeatReply,
-    HeldJob, HeldState, JobResult, JobUsage, NetworkCeiling, Outcome,
+    HeldJob, HeldState, JobResult, JobUsage, MemorySeries as WireMemorySeries, NetworkCeiling,
+    Outcome,
 };
 use js_jobs::{
     Booked, CpuPeak, CpuThrottle, JobEnd, JobSpec, JobState, JobStoreError, Needs, Output,
     ResourceUsage, ResultReason, StartFailure,
 };
 use js_state::StoreError;
-use js_types::{CpuSeries, HostId, Resources};
+use js_types::{CpuSeries, HostId, MemorySeries, Resources};
 
 use js_state::Store;
 
@@ -323,6 +324,7 @@ fn done() -> Output {
         usage: None,
         logs: None,
         cpu_series: None,
+        memory_series: None,
     }
 }
 
@@ -764,4 +766,59 @@ fn the_cpu_series_of_a_result_is_stored_as_reported_and_none_when_not() {
         (output.cpu_series, output.stdout),
         (None, "done\n".to_owned())
     );
+}
+
+/// A result that carries a memory series ends the job with it stored in its output as reported
+/// (its granularity, points, run length and partial flag), beside a usage and with none; a
+/// result without one stores none; and a series whose granularity does not fit 16 bits (which
+/// the job rows cannot hold) or is not a power of two is dropped, the rest of the result still
+/// stored. It catches a series dropped on the way to the stored result, one tied to the usage,
+/// and one the store cannot keep stored.
+#[test]
+fn the_memory_series_of_a_result_is_stored_as_reported_and_none_when_not() {
+    let (_store, jobs) = tables();
+    let (job, _) = placed(&jobs, "job-a", "host-a", spec(), BOOKED);
+    let wire = WireMemorySeries {
+        granularity_secs: 4,
+        points: vec![0, 300, 70_000],
+        run_usec: 9_000_000,
+        partial: true,
+    };
+    let stored = MemorySeries::new(4, vec![0, 300, 70_000], 9_000_000, true);
+    let output_of = |result: &JobResult| match end_of(&job, result) {
+        Some(JobEnd::Exited { output, .. }) => output,
+        other => panic!("an exit, not {other:?}"),
+    };
+    let mut reported = ended(Outcome::Succeeded, Some(0));
+    reported.memory_series = Some(wire.clone());
+    assert_eq!(output_of(&reported).memory_series, stored);
+    assert_eq!(output_of(&reported).usage, None);
+
+    reported.usage = Some(JobUsage {
+        peak_memory_bytes: 1 << 20,
+        cpu_usage_usec: 1,
+        cpu_throttle: None,
+        cpu_pressure_some_usec: None,
+        cpu_peak: None,
+        peak_swap_bytes: None,
+    });
+    assert_eq!(output_of(&reported).memory_series, stored);
+    assert!(output_of(&reported).usage.is_some());
+    assert_eq!(
+        output_of(&ended(Outcome::Succeeded, Some(0))).memory_series,
+        None
+    );
+
+    for granularity_secs in [1 << 20, 3] {
+        let mut bad = ended(Outcome::Succeeded, Some(0));
+        bad.memory_series = Some(WireMemorySeries {
+            granularity_secs,
+            ..wire.clone()
+        });
+        let output = output_of(&bad);
+        assert_eq!(
+            (output.memory_series, output.stdout),
+            (None, "done\n".to_owned())
+        );
+    }
 }

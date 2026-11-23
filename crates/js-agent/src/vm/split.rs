@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent_wire::{
-    CpuSeries, JobUsage, LogReport, LogTail, NativeSpec, NetworkCeiling, PortRange,
+    CpuSeries, JobUsage, LogReport, LogTail, MemorySeries, NativeSpec, NetworkCeiling, PortRange,
 };
 
 use super::VmRuntime;
@@ -121,6 +121,10 @@ impl Runtime for WithVms {
 
     fn cpu_series(&mut self, id: &RunHandle) -> Option<CpuSeries> {
         self.owner(id).cpu_series(id)
+    }
+
+    fn memory_series(&mut self, id: &RunHandle) -> Option<MemorySeries> {
+        self.owner(id).memory_series(id)
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
