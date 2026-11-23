@@ -220,13 +220,12 @@ pub fn is_runs_tree(root: &Path, run_id: &str, dir: &Path) -> bool {
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
+    // A path's components are never empty, so `all` alone says it.
     let hex = |text: &str| {
-        !text.is_empty()
-            && text
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        text.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     };
-    let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let number = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
     matches!(parts.as_slice(), [dir, provider, named, index]
         if *dir == PROVIDER_DIR && hex(provider) && *named == run && number(index))
 }
