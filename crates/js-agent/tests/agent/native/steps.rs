@@ -418,7 +418,8 @@ fn without_full_disk_access_there_is_no_pool_and_every_start_is_refused() {
 }
 
 /// Asserts that the self-test runs `/usr/bin/true` through a lent account and retires it,
-/// leaving no lease, and that a self-test whose supervisor fails its setup fails.
+/// leaving no lease, that a self-test whose supervisor fails its setup fails, and that one
+/// whose job exits other than 0 fails naming how it ended and leaves no lease.
 ///
 /// Catches: an agent that says hello while its supervisor or its pool cannot run a job.
 #[test]
@@ -443,6 +444,16 @@ fn the_self_test_runs_true_through_an_account_and_retires_it() {
         why.0
     );
     assert_eq!(live(&rig), Vec::<String>::new());
+
+    let mut rig = Rig::new("self-test-exit");
+    rig.launcher.fail(Failing::ExitOnce);
+    let why = rig.rt.self_test().unwrap_err();
+    assert_eq!(
+        why.0,
+        "/usr/bin/true ended as Exited(Exit { code: 7, oom_killed: false })"
+    );
+    assert_eq!(live(&rig), Vec::<String>::new());
+    assert!(rig.pool.held().is_empty());
 }
 
 /// Asserts that a stop sends `SIGTERM` to the job's group (a job that ends on it exits

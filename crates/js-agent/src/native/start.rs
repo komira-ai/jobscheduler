@@ -240,7 +240,8 @@ impl NativeRuntime {
                 });
             }
         }
-        let trees = None; // TRE
+        // A run is given no shared trees yet: their store is another change's.
+        let trees = None;
         let built = profile::build(&self.config, &native, &home, (&read_only, &grants), trees)?;
         self.mark(marks, STEPS[5]);
         // The job start's environment over the agent's (its values win), then the account's
