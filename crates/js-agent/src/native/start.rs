@@ -368,7 +368,7 @@ impl NativeRuntime {
         let spec = probe(scratch);
         let id = self.create_and_start(&spec)?;
         let mut status = Status::Running;
-        for _ in 0..SELF_TEST_POLLS {
+        for _ in 0..self.self_test_polls.unwrap_or(SELF_TEST_POLLS) {
             status = self.poll(&id)?;
             if status != Status::Running {
                 break;

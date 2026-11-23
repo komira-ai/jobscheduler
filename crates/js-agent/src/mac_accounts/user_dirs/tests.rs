@@ -6,6 +6,26 @@ use js_testkit::dir::TestDir;
 
 use super::*;
 
+/// The account the fake runner is asked for.
+fn slot() -> Account {
+    Account {
+        name: "js-slot-3".to_owned(),
+        uid: me(),
+        gid: 20,
+        generated_uid: String::new(),
+    }
+}
+
+/// What a run of `getconf` ended with.
+fn ran(code: Option<i32>, stdout: &str, stderr: &str) -> Ran {
+    Ran {
+        code,
+        signal: code.is_none().then_some(9),
+        stdout: stdout.to_owned(),
+        stderr: stderr.to_owned(),
+    }
+}
+
 /// This process's own uid: the owner of every directory a test makes.
 fn me() -> u32 {
     rustix::process::geteuid().as_raw()
@@ -80,5 +100,64 @@ fn what_is_not_the_accounts_own_folder_is_refused() {
     assert_eq!(
         checked(&temp, &root, other).unwrap_err().to_string(),
         format!("{temp}: owned by uid {}, not uid {other}", me())
+    );
+}
+
+/// Asserts that a `getconf` that exits non-zero, or is ended by a signal, fails the lookup
+/// with the exact text naming the variable asked first, the account and the trimmed error
+/// output, and that the runner is not asked again; the signalled run printed a valid folder,
+/// which must not be taken.
+///
+/// Catches a lookup that takes the printed folder of a failed `getconf`, an error text that
+/// drops the variable, the account or the trim, and a loop that goes on after a failure.
+#[test]
+fn a_getconf_that_fails_fails_the_lookup_with_its_error_text() {
+    let (_dir, root) = folders("fails");
+    let valid = format!("{}\n", root.join("ab/slot/T").display());
+    for (code, stdout) in [(Some(1), ""), (None, valid.as_str())] {
+        let mut asked = 0;
+        let why = folders_via(&slot(), &root, &mut |_| {
+            asked += 1;
+            Ok(ran(code, stdout, " no slot\n"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            why.to_string(),
+            "getconf DARWIN_USER_TEMP_DIR as js-slot-3: no slot"
+        );
+        assert_eq!(asked, 1);
+    }
+}
+
+/// Asserts that a runner that cannot run the program fails the lookup with its own error,
+/// and that a good run of both variables returns the two folders in order, having been
+/// asked `getconf DARWIN_USER_TEMP_DIR` and then `getconf DARWIN_USER_CACHE_DIR`.
+///
+/// Catches a lookup that swallows the runner's error, and one that asks the wrong names or
+/// in the wrong order.
+#[test]
+fn the_folders_are_asked_of_getconf_in_order_and_returned() {
+    let (_dir, root) = folders("asked");
+    let why = folders_via(&slot(), &root, &mut |_| Err(io::Error::other("no spawn"))).unwrap_err();
+    assert_eq!(why.to_string(), "no spawn");
+    let mut commands = Vec::new();
+    let got = folders_via(&slot(), &root, &mut |command| {
+        commands.push(command.to_vec());
+        let folder = if command[1] == "DARWIN_USER_TEMP_DIR" {
+            "T"
+        } else {
+            "C"
+        };
+        let printed = format!("{}\n", root.join("ab/slot").join(folder).display());
+        Ok(ran(Some(0), &printed, ""))
+    })
+    .unwrap();
+    assert_eq!(got, [root.join("ab/slot/T"), root.join("ab/slot/C")]);
+    assert_eq!(
+        commands,
+        [
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+            ["/usr/bin/getconf", "DARWIN_USER_CACHE_DIR"]
+        ]
     );
 }

@@ -36,3 +36,38 @@ pub fn is_fenced(path: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with('/'))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PRIVACY_ONLY_PLACES, is_fenced};
+
+    /// Asserts the six privacy-only places, spelled out, and that each is fenced while a
+    /// path that only begins like one, and its parent directory, are not.
+    ///
+    /// Catches: a place dropped, added or misspelled in the list every run's profile
+    /// read-denies, and a fence test by text prefix.
+    #[test]
+    fn the_privacy_only_places_are_these_six_paths() {
+        assert_eq!(
+            PRIVACY_ONLY_PLACES,
+            [
+                "/Library/Application Support/com.apple.TCC",
+                "/Library/Application Support/com.apple.TCC/TCC.db",
+                "/Library/Preferences/com.apple.TimeMachine.plist",
+                "/System/Volumes/Data/Library/Application Support/com.apple.TCC",
+                "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db",
+                "/System/Volumes/Data/Library/Preferences/com.apple.TimeMachine.plist",
+            ]
+        );
+        assert!(is_fenced(
+            "/Library/Preferences/com.apple.TimeMachine.plist"
+        ));
+        assert!(is_fenced(
+            "/System/Volumes/Data/Library/Application Support/com.apple.TCC/TCC.db"
+        ));
+        assert!(!is_fenced(
+            "/Library/Preferences/com.apple.TimeMachine.plist2"
+        ));
+        assert!(!is_fenced("/Library/Preferences"));
+    }
+}

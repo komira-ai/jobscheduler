@@ -52,9 +52,14 @@ fn named(swept: &[Swept]) -> String {
         .join(", ")
 }
 
-/// Sends `signal` to the process group of `job`'s program, if its pid can name one.
+/// Sends `signal` to the process group of `job`'s program, if its pid can name one: a pid of
+/// 0 or below names no group (`kill` would take it for the caller's own group, or every
+/// process), so nothing is sent.
 pub(super) fn signal_group(job: &Job, signal: Signal) {
-    let Some(group) = Pid::from_raw(job.ready.job_pid) else {
+    let Some(group) = (job.ready.job_pid > 0)
+        .then_some(job.ready.job_pid)
+        .and_then(Pid::from_raw)
+    else {
         return;
     };
     if let Err(why) = kill_process_group(group, signal) {
